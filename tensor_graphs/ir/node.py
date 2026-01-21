@@ -1,21 +1,22 @@
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 import uuid
+from .dtypes import DType, TensorSignature
 
 @dataclass
 class TensorNode:
-    op_type: str                  # e.g., "Add", "Mul", "Dot", "Input"
-    shape: Tuple[int, ...]        # e.g., (32, 128)
-    parents: List['TensorNode']   # Dependency edges
+    op_type: str
+    shape: Tuple[int, ...]
+    dtype: DType  # Strict Typing
+    parents: List['TensorNode']
     name: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    
-    # Metadata for the future LLM compiler
-    dtype: str = "float32"
+
+    @property
+    def signature(self) -> TensorSignature:
+        return TensorSignature(self.dtype, self.shape)
     
     def __repr__(self):
-        parent_names = [p.name for p in self.parents]
-        return f"Node({self.name}, op={self.op_type}, parents={parent_names})"
-
+        return f"[{self.dtype.value}|{self.shape}] {self.op_type}"
+    
     def __hash__(self):
-        # Use object identity for hashing in DAGs
         return id(self)

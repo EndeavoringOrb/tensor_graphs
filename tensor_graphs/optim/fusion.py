@@ -5,8 +5,6 @@ def fuse_graph(node: TensorNode, memo=None) -> TensorNode:
     """
     Recursively fuses operations.
     Target: Add(Mul(A, B), C) -> FusedMulAdd(A, B, C)
-    
-    Uses memoization to preserve DAG structure and avoid infinite recursion.
     """
     if memo is None:
         memo = {}
@@ -26,21 +24,18 @@ def fuse_graph(node: TensorNode, memo=None) -> TensorNode:
             fused_node = TensorNode(
                 op_type=OpType.FUSED_MUL_ADD,
                 shape=node.shape,
-                parents=[*lhs.parents, rhs], # Flatten parents: A, B, C
+                dtype=node.dtype,  # Preserve Type
+                parents=[*lhs.parents, rhs],
                 name=f"fused_{node.name}"
             )
             memo[node] = fused_node
             return fused_node
-
-        # (Optional) Check for Mul on Right side: C + (A * B)
-        # Note: Add is commutative, so we might flip edges or support FusedAddMul
     
-    # 3. No match? Return reconstruction with optimized parents
-    # Check if parents actually changed. If not, return original to save memory.
+    # 3. No match? Return reconstruction if parents changed
     if new_parents == node.parents:
         memo[node] = node
         return node
 
-    new_node = TensorNode(node.op_type, node.shape, new_parents, name=node.name)
+    new_node = TensorNode(node.op_type, node.shape, node.dtype, new_parents, name=node.name)
     memo[node] = new_node
     return new_node
