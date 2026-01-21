@@ -1,0 +1,1 @@
+from .fusion import fuse_graph
