@@ -1,4 +1,3 @@
-# File: tensor_graphs/backend/registry.py
 from typing import Dict, List, Callable, Optional, Tuple, Any
 from tensor_graphs.ir.dtypes import DType, TensorSignature
 

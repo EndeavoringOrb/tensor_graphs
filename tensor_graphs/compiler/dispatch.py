@@ -1,4 +1,3 @@
-# File: tensor_graphs/compiler/dispatch.py
 from typing import List
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType, TensorSignature
