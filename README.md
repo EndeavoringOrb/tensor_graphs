@@ -1,14 +1,3 @@
 # tensor_graphs
 
-**A modular Intermediate Representation (IR) for decomposing, analyzing, and optimizing mathematical models.**
-
-`tensor_graphs` is a lightweight framework designed to represent complex neural networks (LLMs, Diffusion Models) as a directed acyclic graph (DAG) of atomic operations. By decomposing models into primitives (Add, Mul, Dot Product), we enable powerful graph rewrites, symbolic analysis, and automatic kernel fusion.
-
----
-
-## What does this do?
-
-1.  **Decomposition**: Break models down into atomic mathematical units.
-2.  **Explicit Typing**: Strictly typed IR (`FP32`, `FP8E4M3`) to handle quantization and mixed-precision explicitly.
-3.  **Kernel Dispatch**: A registry-based backend that matches specific hardware implementations (kernels) to operations.
-4.  **Optimization**: Automatically fuse operations (e.g., `Mul` + `Add` → `FusedMulAdd`).
+I want to make a language that can be used to describe mathematic functions (like LLMs or diffusion models). The idea being that if I can decompose LLMs and diffusion models down into basic operations like addition, multiplication, dot products, then I can make a system for automatic optimization. Like I can write an optimized addition+multiplication CUDA kernel and then that can be applied to every LLM and diffusion model that uses that combination. I also want to be able to symbolically rearrange stuff so I can test out different dependancy graphs to see if I can increase parallelism and in turn increase speed. Then this can also be combined with LLMs to automatically generate new fused kernels because we have reference implementations for the atomic operations (add, mul, dot, etc).
