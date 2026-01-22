@@ -3,23 +3,27 @@ from ...backend.registry import KernelRegistry
 from ...ir.dtypes import DType, TensorSignature
 from ...ops.atomic import OpType
 
-@KernelRegistry.register(OpType.MUL, [
-    TensorSignature(DType.FP32, (None,)), 
-    TensorSignature(DType.FP32, (None,))
-])
+
+@KernelRegistry.register(
+    OpType.MUL,
+    [TensorSignature(DType.FP32, (None,)), TensorSignature(DType.FP32, (None,))],
+)
 def mul_generic_vector(inputs):
     return inputs[0] * inputs[1]
 
-@KernelRegistry.register(OpType.MUL, [
-    TensorSignature(DType.FP32, (1,)), 
-    TensorSignature(DType.FP32, (1,))
-])
-def mul_scalar(inputs):
+
+@KernelRegistry.register(
+    OpType.MUL,
+    [TensorSignature(DType.FP32, shape=None), TensorSignature(DType.FP32, shape=(1,))],
+)
+def mul_tensor_generic_scalar(inputs):
     return inputs[0] * inputs[1]
 
-@KernelRegistry.register(OpType.MUL, [
-    TensorSignature(DType.FP32, (32,)), 
-    TensorSignature(DType.FP32, (32,))
-])
-def mul_vec32(inputs):
+
+# Generic Tensor (Any Rank)
+@KernelRegistry.register(
+    OpType.MUL,
+    [TensorSignature(DType.FP32, shape=None), TensorSignature(DType.FP32, shape=None)],
+)
+def mul_generic_tensor(inputs):
     return inputs[0] * inputs[1]

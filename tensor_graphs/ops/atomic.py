@@ -4,7 +4,6 @@ class OpType:
     MUL = "Mul"
     DIVIDE = "Divide"
     DOT = "Dot"
-    SILU = "Silu"
     SQRT = "Sqrt"
     SIN = "Sin"
     COS = "Cos"

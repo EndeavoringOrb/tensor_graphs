@@ -1,8 +1,8 @@
 import unittest
-from ..ir.node import TensorNode
-from ..ir.dtypes import DType
-from ..ir.graph import topological_sort, get_inputs
-from ..ops.atomic import OpType
+from tensor_graphs.ir.node import TensorNode
+from tensor_graphs.ir.dtypes import DType
+from tensor_graphs.ir.graph import topological_sort, get_inputs
+from tensor_graphs.ops.atomic import OpType
 
 
 class TestGraphBuild(unittest.TestCase):

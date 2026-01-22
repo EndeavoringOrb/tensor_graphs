@@ -2,3 +2,8 @@
 *__pycache__
 repomix-output.txt
 .coverage
+commands.txt
+*.egg-info
+resources/*.safetensors
+resources/*.html
+resources/*.json

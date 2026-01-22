@@ -1,9 +1,9 @@
 import pytest
 import numpy as np
-from ...ir.node import TensorNode
-from ...ir.dtypes import DType
-from ...ops.atomic import OpType
-from ...backend.reference import evaluate_graph
+from tensor_graphs.ir.node import TensorNode
+from tensor_graphs.ir.dtypes import DType
+from tensor_graphs.ops.atomic import OpType
+from tensor_graphs.backend.reference import evaluate_graph
 
 
 def test_concat_vectors():
