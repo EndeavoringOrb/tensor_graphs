@@ -5,6 +5,7 @@ class OpType:
     DIVIDE = "Divide"
     DOT = "Dot"  # Matrix Multiplication
     SILU = "Silu"
+    SQRT = "Sqrt"
     
     # Reductions
     SUM = "Sum"

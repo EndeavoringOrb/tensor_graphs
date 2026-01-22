@@ -9,3 +9,4 @@ from . import reshape
 from . import permute
 from . import slice
 from . import concat
+from . import sqrt

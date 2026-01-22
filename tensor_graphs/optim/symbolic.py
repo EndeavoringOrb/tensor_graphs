@@ -23,5 +23,7 @@ def to_sympy(node: TensorNode):
     elif node.op_type == OpType.DOT:
         # Sympy MatrixSymbol support would go here, using generic MUL for now
         return args[0] * args[1] 
+    elif node.op_type == OpType.SQRT:
+        return sympy.sqrt(args[0])
         
     return sympy.Symbol(f"Unknown({node.name})")
