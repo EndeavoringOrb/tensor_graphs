@@ -11,6 +11,7 @@ class OpType:
     # Structural
     RESHAPE = "Reshape"
     PERMUTE = "Permute"
+    SLICE = "Slice"
     
     # Fused Operations (Created by Optimizer)
     FUSED_MUL_ADD = "FusedMulAdd"
