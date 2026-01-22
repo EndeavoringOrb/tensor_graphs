@@ -17,6 +17,6 @@ Remove "demo-only" hardcoded logic from the reference kernels.
 
 ## 3. Example Model Cleanup (Gemma-3)
 - [ ] **Optimize Generation Loop:** Refactor `examples/gemma-3-270m.py` to build the model graph **once** and reuse it across tokens. Currently, it rebuilds the entire graph for every new token.
-- [ ] **Graph-Based Masking:** Move the causal mask generation entirely into the graph builder so it doesn't require a separate `evaluate_graph` call for every sequence length change.
+- [x] **Graph-Based Masking:** Move the causal mask generation entirely into the graph builder so it doesn't require a separate `evaluate_graph` call for every sequence length change.
 - [ ] **KV Caching:** Add support for KV cache nodes in the IR to avoid recomputing the entire prefix for every token.
     - Files: `examples/gemma-3-270m.py`

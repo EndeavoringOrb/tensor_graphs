@@ -123,6 +123,15 @@ class GraphBuilder:
     def sin(self, x):
         return TensorNode(OpType.SIN, x.shape, DType.FP32, [x], "sin")
 
+    def fill(self, value_node, shape_node, target_shape):
+        return TensorNode(
+            OpType.FILL,
+            target_shape,
+            value_node.dtype,
+            [value_node, shape_node],
+            "fill",
+        )
+
     # --- Fused / Composite Wrappers (Using Library Ops) ---
     def embedding(self, indices, weights):
         out_shape = indices.shape + (weights.shape[-1],)
@@ -209,6 +218,9 @@ class Gemma3Model:
         cfg = self.cfg
         B, S = input_ids_node.shape
 
+        # 1. Causal Mask
+        mask = self._build_causal_mask(S)
+
         # Embedding
         w_emb = self._get_param(
             "model.embed_tokens.weight", (cfg["vocab_size"], cfg["emb_dim"])
@@ -221,7 +233,7 @@ class Gemma3Model:
 
         # Layers
         for i in range(cfg["n_layers"]):
-            x = self._transformer_block(x, i, cos, sin, B, S)
+            x = self._transformer_block(x, i, cos, sin, mask, B, S)
 
         # Final Norm
         w_norm = self._get_param("model.norm.weight", (cfg["emb_dim"],))
@@ -242,7 +254,26 @@ class Gemma3Model:
 
         return logits
 
-    def _transformer_block(self, x, layer_idx, cos, sin, B, S):
+    def _build_causal_mask(self, S):
+        # 1. Ones Matrix (S, S) using Fill
+        one_val = self._const([1.0], "mask_one_val", DType.FP32)
+        shape_ss = self._const([S, S], f"shape_ss_{S}")
+        ones_node = self.builder.fill(one_val, shape_ss, (S, S))
+
+        # 2. Triu(ones, k=1) -> Upper triangle (strictly upper) are 1s
+        k_node = self._const([1], "k_triu_mask")
+        mask_tri = self.builder.triu(ones_node, k_node)
+
+        # 3. Mask * -1e9
+        neg_inf = self._const([-1e9], "neg_inf_mask", DType.FP32)
+        mask_scaled = self.builder.mul(mask_tri, neg_inf)
+
+        # 4. Reshape to (1, 1, S, S)
+        shape_final = self._const([1, 1, S, S], f"shape_mask_final_{S}")
+        mask_out = self.builder.reshape(mask_scaled, (1, 1, S, S), shape_final)
+        return mask_out
+
+    def _transformer_block(self, x, layer_idx, cos, sin, mask, B, S):
         cfg = self.cfg
         prefix = f"model.layers.{layer_idx}"
         residual = x
@@ -253,7 +284,7 @@ class Gemma3Model:
         x_norm = self.builder.rms_norm(x, w_ln, eps_ln)
 
         # Attention
-        x_attn = self._attention(x_norm, layer_idx, cos, sin, B, S)
+        x_attn = self._attention(x_norm, layer_idx, cos, sin, mask, B, S)
 
         # Post Attn Norm
         w_post = self._get_param(
@@ -282,7 +313,7 @@ class Gemma3Model:
 
         return self.builder.add(residual, x_ff)
 
-    def _attention(self, x, layer_idx, cos, sin, B, S):
+    def _attention(self, x, layer_idx, cos, sin, mask, B, S):
         cfg = self.cfg
         prefix = f"model.layers.{layer_idx}.self_attn"
         head_dim = cfg["head_dim"]
@@ -353,8 +384,7 @@ class Gemma3Model:
         scores = self.builder.matmul(q, k_t)
 
         # Mask
-        mask_node = self.builder.input("causal_mask", (1, 1, S, S), DType.FP32)
-        scores = self.builder.add(scores, mask_node)
+        scores = self.builder.add(scores, mask)
         probs = self.builder.softmax(scores)
 
         # Context
@@ -470,40 +500,6 @@ def compute_rope_params_graph(head_dim, theta_base=10000.0, context_length=4096)
     return cos_val, sin_val
 
 
-def create_causal_mask_graph(seq_len):
-    """
-    Constructs and evaluates a graph to create a causal mask.
-    Replaces purely numpy implementation.
-    """
-    b = GraphBuilder()
-    feed_dict = {}
-
-    def _c(val, name, dtype=DType.INT32):
-        node, arr = b.constant(val, name, dtype)
-        feed_dict[name] = arr
-        return node
-
-    # 1. Ones Matrix (S, S)
-    # Since we don't have a "Fill" op, we pass the ones matrix as a constant input
-    ones_data = np.ones((seq_len, seq_len), dtype=np.float32)
-    ones_node = b.input("ones_mat", (seq_len, seq_len), DType.FP32)
-    feed_dict["ones_mat"] = ones_data
-
-    # 2. Triu(ones, k=1) -> Upper triangle (strictly upper) are 1s
-    k_node = _c(1, "k_triu")
-    mask_tri = b.triu(ones_node, k_node)
-
-    # 3. Mask * -1e9
-    neg_inf = _c(-1e9, "neg_inf", DType.FP32)
-    mask_scaled = b.mul(mask_tri, neg_inf)
-
-    # 4. Reshape to (1, 1, S, S)
-    shape_final = _c([1, 1, seq_len, seq_len], "shape_mask_final")
-    mask_out = b.reshape(mask_scaled, (1, 1, seq_len, seq_len), shape_final)
-
-    return evaluate_graph(mask_out, feed_dict)
-
-
 GEMMA3_CONFIG_270M = {
     "vocab_size": 262_144,
     "context_length": 32_768,
@@ -566,9 +562,6 @@ def main():
         cos_cur = full_cos[:, :, :seq_len, :]
         sin_cur = full_sin[:, :, :seq_len, :]
 
-        # Causal Mask (Computed using GRAPH OPS for current seq_len)
-        mask_cur = create_causal_mask_graph(seq_len)
-
         # 3b. Build Graph
         model = Gemma3Model(GEMMA3_CONFIG_270M, weights_np)
 
@@ -580,9 +573,6 @@ def main():
         sin_node = model.builder.input(
             "sin", (1, 1, seq_len, GEMMA3_CONFIG_270M["head_dim"]), DType.FP32
         )
-        mask_node = model.builder.input(
-            "causal_mask", (1, 1, seq_len, seq_len), DType.FP32
-        )
 
         # Build Forward Pass
         logits_node = model.forward(in_node, cos_node, sin_node)
@@ -592,7 +582,6 @@ def main():
             "input_ids": input_ids_np,
             "cos": cos_cur,
             "sin": sin_cur,
-            "causal_mask": mask_cur,
             **model.weights,  # Bind weights
             **model.constant_inputs,  # Bind generated constants
         }
