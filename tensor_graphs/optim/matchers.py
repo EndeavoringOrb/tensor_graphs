@@ -1,10 +1,12 @@
 from ..ir.node import TensorNode
 
 
-def match_pattern(node: TensorNode, pattern_op: str, parent_ops: list = []) -> bool:
+def match_pattern(node: TensorNode, pattern_op: str, parent_ops: list = None) -> bool:
     """
     Simple helper to check if a node matches an OpType and specific parent OpTypes.
     """
+    if parent_ops is None:
+        parent_ops = []
     if node.op_type != pattern_op:
         return False
 
