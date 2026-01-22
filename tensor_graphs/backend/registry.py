@@ -70,7 +70,12 @@ class KernelRegistry:
             if pat.dtype != con.dtype:
                 return -1
 
-            # 2. Check Rank (Strict Match Required for now)
+            # NEW: Check for Any-Rank Wildcard
+            if pat.shape is None:
+                total_score += 1  # Low score, but matches any rank
+                continue
+
+            # 2. Check Rank (Strict Match Required otherwise)
             if len(pat.shape) != len(con.shape):
                 return -1
 

@@ -4,3 +4,4 @@ from . import mul
 from . import dot
 from . import fused_mul_add
 from . import cast
+from . import reshape

@@ -8,5 +8,8 @@ class OpType:
     # Reductions
     SUM = "Sum"
     
+    # Structural
+    RESHAPE = "Reshape"
+    
     # Fused Operations (Created by Optimizer)
     FUSED_MUL_ADD = "FusedMulAdd"
