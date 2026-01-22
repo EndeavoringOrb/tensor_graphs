@@ -12,7 +12,6 @@ class OpType:
     COS = "Cos"
     EXP = "Exp"
     NEGATE = "Negate"
-    TANH = "Tanh"
 
     # --- Reduction ---
     SUM = "Sum"

@@ -31,7 +31,7 @@ class GELU(CompositeOp):
         inner = TensorNode(OpType.MUL, x.shape, x.dtype, [term2, c_sqrt], "inner")
 
         # tanh
-        tanh_node = TensorNode(OpType.TANH, x.shape, x.dtype, [inner], "tanh")
+        tanh_node = Tanh().decompose([inner])
 
         # outer
         one_plus = TensorNode(
@@ -71,4 +71,42 @@ class Softmax(CompositeOp):
         # Div
         return TensorNode(
             OpType.DIVIDE, x.shape, x.dtype, [exps, sum_exps], "softmax_out"
+        )
+
+
+@register_composite
+class Tanh(CompositeOp):
+    op_type = "Tanh"
+
+    def decompose(self, inputs: List[TensorNode]) -> TensorNode:
+        x = inputs[0]
+        # e^x
+        exp_x = TensorNode(OpType.EXP, x.shape, x.dtype, [x], "exp_x")
+        # e^(-x)
+        neg_x = TensorNode(OpType.NEGATE, x.shape, x.dtype, [x], "neg_x")
+        exp_neg_x = TensorNode(OpType.EXP, x.shape, x.dtype, [neg_x], "exp_neg_x")
+        # e^x - e^(-x)
+        numerator = TensorNode(
+            OpType.ADD,
+            x.shape,
+            x.dtype,
+            [
+                exp_x,
+                TensorNode(
+                    OpType.NEGATE,
+                    exp_neg_x.shape,
+                    exp_neg_x.dtype,
+                    [exp_neg_x],
+                    "neg_exp_neg_x",
+                ),
+            ],
+            "numerator",
+        )
+        # e^x + e^(-x)
+        denominator = TensorNode(
+            OpType.ADD, x.shape, x.dtype, [exp_x, exp_neg_x], "denominator"
+        )
+        # (e^x - e^(-x)) / (e^x + e^(-x))
+        return TensorNode(
+            OpType.DIVIDE, x.shape, x.dtype, [numerator, denominator], "tanh_out"
         )

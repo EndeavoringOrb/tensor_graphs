@@ -14,7 +14,6 @@ from . import (
     exp,
     negate,
     sum,
-    tanh,
     max,
     repeat,
 )
