@@ -27,3 +27,4 @@ class OpType:
     REPEAT = "Repeat"
     ARANGE = "Arange"
     TRIU = "Triu"
+    GATHER = "Gather"

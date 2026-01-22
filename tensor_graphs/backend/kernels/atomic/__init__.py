@@ -19,4 +19,5 @@ from . import (
     arange,
     power,
     triu,
+    gather,
 )
