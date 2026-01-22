@@ -1,10 +1,8 @@
 import numpy as np
-from typing import Dict, List
+from typing import Dict
 from tensor_graphs.ops.atomic import OpType
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.backend.registry import KernelRegistry
-# Ensure implementations are registered
-import tensor_graphs.backend.ops.implementations
 
 def evaluate_graph(root: TensorNode, inputs: Dict[str, np.ndarray]) -> np.ndarray:
     """

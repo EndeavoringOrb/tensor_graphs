@@ -2,8 +2,6 @@ from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic import OpType
 from tensor_graphs.compiler.dispatch import resolve_dispatch
-# Import implementations to register them
-import tensor_graphs.backend.ops.implementations 
 
 print("=== Setting up Graph ===")
 # Scenario: 

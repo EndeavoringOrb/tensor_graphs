@@ -5,6 +5,7 @@ from tensor_graphs.ir.dtypes import DType, TensorSignature
 KernelKey = Tuple[str, Tuple[TensorSignature, ...]]
 KernelImpl = Callable[[List[Any]], Any]
 
+
 class KernelRegistry:
     _kernels: Dict[KernelKey, KernelImpl] = {}
     _converters: Dict[Tuple[DType, DType], Callable] = {}
@@ -12,18 +13,22 @@ class KernelRegistry:
     @classmethod
     def register(cls, op_type: str, input_sigs: List[TensorSignature]):
         """Decorator to register a specific hardware implementation."""
+
         def decorator(func):
             key = (op_type, tuple(input_sigs))
             cls._kernels[key] = func
             return func
+
         return decorator
 
     @classmethod
     def register_cast(cls, src: DType, dst: DType):
         """Register a caster (conversion) function."""
+
         def decorator(func):
             cls._converters[(src, dst)] = func
             return func
+
         return decorator
 
     @classmethod
