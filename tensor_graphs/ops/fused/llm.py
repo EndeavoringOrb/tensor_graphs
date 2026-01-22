@@ -26,48 +26,62 @@ class RoPE(CompositeOp):
         # rotated = cat(-x2, x1)
         # out = x*cos + rotated*sin
 
-        # We need explicit Slice nodes.
-        # Since 'x' shape might be symbolic or known, we assume we can infer D.
-        # This requires the shape to be known at graph build time for this decomposition to be concrete.
-        if x.shape is None or x.shape[-1] is None:
-            raise ValueError("RoPE decomposition requires known Head Dimension")
-
         D = x.shape[-1]
-        half_d = D // 2
+        half_d = D // 2 if D is not None else None
 
-        # Constants for Slice
-        # Start/End/Step must be inputs
+        # x1 = x[..., :half_d]
+        x1_node = x[..., :half_d]
+        x1_node.name = f"{x.name}_x1"
 
-        # Helper to create const input
-        def _const(val, name):
-            # Simplified for demo: In real graph these need to be registered inputs
-            return TensorNode(OpType.INPUT, (1,), DType.INT32, [], name)
+        # x2 = x[..., half_d:]
+        x2_node = x[..., half_d:]
+        x2_node.name = f"{x.name}_x2"
 
-        # x1 slice: [..., 0:half_d]
-        # Atomic slice takes [starts], [ends], [steps] per dimension?
-        # Or flattened. Let's assume the atomic kernel supports standard python slice logic via index tensors.
-        # For this refactor, we stick to the mathematical structure.
+        # rotated = cat(-x2, x1)
+        neg_x2_node = TensorNode(
+            op_type=OpType.NEGATE,
+            shape=x2_node.shape,
+            dtype=x2_node.dtype,
+            parents=[x2_node],
+            name=f"{x.name}_neg_x2",
+        )
 
-        # Note: Implementing robust Slice decomposition is complex.
-        # We rely on the generic structure for now.
+        rotated_shape = x.shape
+        rotated_node = TensorNode(
+            op_type=OpType.CONCAT,
+            shape=rotated_shape,
+            dtype=x.dtype,
+            parents=[neg_x2_node, x1_node],
+            name=f"{x.name}_rotated",
+            attrs={"axis": -1},
+        )
 
-        neg_node = TensorNode(OpType.NEGATE, x.shape, x.dtype, [x], "neg_x")
+        # out = x*cos + rotated*sin
+        term1_node = TensorNode(
+            op_type=OpType.MUL,
+            shape=x.shape,
+            dtype=x.dtype,
+            parents=[x, cos],
+            name=f"{x.name}_term1_mul_cos",
+        )
 
-        # Placeholder for complex slice/concat logic
-        # In a real system, we would generate the exact Slice nodes here.
-        # For the purpose of the 'compare' test, we might mock this or skip complex slicing.
+        term2_node = TensorNode(
+            op_type=OpType.MUL,
+            shape=x.shape,
+            dtype=x.dtype,
+            parents=[rotated_node, sin],
+            name=f"{x.name}_term2_mul_sin",
+        )
 
-        # We return the high-level math structure assuming rotated exists:
-        # rotated = (pseudo)
+        output_node = TensorNode(
+            op_type=OpType.ADD,
+            shape=x.shape,
+            dtype=x.dtype,
+            parents=[term1_node, term2_node],
+            name=f"{x.name}_rope_out",
+        )
 
-        # Since decomposing RoPE fully requires generating 6+ CONSTANT nodes for slice indices,
-        # we will skip the exact Slicing implementation in this snippet
-        # and assume the Optimized Kernel is the primary path.
-
-        term1 = TensorNode(OpType.MUL, x.shape, x.dtype, [x, cos], "rope_cos")
-        term2 = TensorNode(OpType.MUL, x.shape, x.dtype, [x, sin], "rope_sin")
-
-        return TensorNode(OpType.ADD, x.shape, x.dtype, [term1, term2], "rope_out")
+        return output_node
 
 
 @register_composite
