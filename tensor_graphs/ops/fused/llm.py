@@ -3,7 +3,7 @@ File: tensor_graphs/ops/fused/llm.py
 """
 
 from typing import List, Dict, Any, Optional
-from ...ir.node import TensorNode
+from ...ir.node import TensorNode, ConstantNode
 from ..atomic import OpType
 from ..interface import CompositeOp
 from ..registry import register_composite
@@ -47,13 +47,15 @@ class RoPE(CompositeOp):
         )
 
         rotated_shape = x.shape
+        axis_node = ConstantNode(
+            OpType.CONSTANT, (1,), DType.INT32, [], f"{x.name}_axis", value=[-1]
+        )
         rotated_node = TensorNode(
             op_type=OpType.CONCAT,
             shape=rotated_shape,
             dtype=x.dtype,
-            parents=[neg_x2_node, x1_node],
+            parents=[neg_x2_node, x1_node, axis_node],
             name=f"{x.name}_rotated",
-            attrs={"axis": -1},
         )
 
         # out = x*cos + rotated*sin
