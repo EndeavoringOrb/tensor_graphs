@@ -12,7 +12,7 @@ Remove "demo-only" hardcoded logic from the reference kernels.
     - Files: `tensor_graphs/compiler/dispatch.py`
 - [ ] **SymPy Matrix Support:** Update `to_sympy` to use `sympy.MatrixSymbol` for `DOT` operations to allow for better symbolic algebraic simplification of transformer blocks.
     - Files: `tensor_graphs/optim/symbolic.py`
-- [ ] **Automated Fusion Pass:** Expand `fusion.py` to recognize `RMSNorm` or `GELU` patterns from atomic sequences and "lift" them back into Fused Ops.
+- [x] **Automated Fusion Pass:** Expand `fusion.py` to recognize `RMSNorm` or `GELU` patterns from atomic sequences and "lift" them back into Fused Ops.
     - Files: `tensor_graphs/optim/fusion.py`
 
 ## 3. Example Model Cleanup (Gemma-3)
