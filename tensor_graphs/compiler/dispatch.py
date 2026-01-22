@@ -1,6 +1,7 @@
 from ..ir.node import TensorNode
 from ..ir.dtypes import DType, TensorSignature
 from ..backend.registry import KernelRegistry
+from ..ops.registry import get_composite_op
 
 # Ensure kernels are registered
 import tensor_graphs.backend.kernels
@@ -12,20 +13,28 @@ def resolve_dispatch(node: TensorNode) -> TensorNode:
     If not, attempts to inject Cast nodes to find a valid kernel.
     """
 
-    # 1. Check if an kernel exists
     input_sigs = [p.signature for p in node.parents]
-    # Changed from get_kernel to select_best_kernel
-    kernel = KernelRegistry.select_best_kernel(node.op_type, input_sigs)
 
-    if kernel:
-        # print(f"[Dispatch] Found match for {node.op_type} {input_sigs}")
+    # 1. Try Optimized Kernel
+    if KernelRegistry.select_best_kernel(node.op_type, input_sigs):
         return node
+
+    # 2. Try Decomposition
+    composite = get_composite_op(node.op_type)
+    if composite:
+        print(f"[Dispatch] No kernel for {node.op_type}, decomposing...")
+        # Expand the node into a subgraph of atomic ops
+        decomp_root = composite.decompose(node.parents)
+        # Recursively resolve the new graph
+        # In a real compiler we would replace 'node' in the graph.
+        # Here we return the new root.
+        return resolve_dispatch(decomp_root)
 
     print(
         f"[Dispatch] MISSING KERNEL: {node.op_type} {input_sigs}. searching for conversions..."
     )
 
-    # 2. Heuristic: Try to convert everything to FP32
+    # 3. Heuristic: Try to convert everything to FP32
     new_parents = []
     for p in node.parents:
         if p.dtype != DType.FP32:

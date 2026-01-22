@@ -1,7 +1,7 @@
 import numpy as np
-from ...backend.registry import KernelRegistry
-from ...ir.dtypes import DType, TensorSignature
-from ...ops.atomic import OpType
+from ....backend.registry import KernelRegistry
+from ....ir.dtypes import DType, TensorSignature
+from ....ops.atomic import OpType
 
 @KernelRegistry.register(OpType.CONCAT, [
     TensorSignature(DType.FP32, shape=None),     # Input A (Any Rank)

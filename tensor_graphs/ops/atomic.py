@@ -1,5 +1,8 @@
 class OpType:
+    # --- Input ---
     INPUT = "Input"
+
+    # --- Math ---
     ADD = "Add"
     MUL = "Mul"
     DIVIDE = "Divide"
@@ -9,15 +12,16 @@ class OpType:
     COS = "Cos"
     EXP = "Exp"
     NEGATE = "Negate"
-    
-    # Reductions
+    TANH = "Tanh"
+
+    # --- Reduction ---
     SUM = "Sum"
-    
-    # Structural
+    MAX = "Max"
+
+    # --- Manipulation ---
     RESHAPE = "Reshape"
     PERMUTE = "Permute"
     SLICE = "Slice"
     CONCAT = "Concat"
-    
-    # Fused Operations (Created by Optimizer)
-    FUSED_MUL_ADD = "FusedMulAdd"
+    CAST = "Cast"
+    REPEAT = "Repeat"  # New Atomic Op for GQA

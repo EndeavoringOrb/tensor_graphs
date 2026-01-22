@@ -1,16 +1,7 @@
-# Auto-import submodules to trigger registration decorators
-from . import add
-from . import mul
-from . import divide
-from . import dot
-from . import fused_mul_add
-from . import cast
-from . import reshape
-from . import permute
-from . import slice
-from . import concat
-from . import sqrt
-from . import sin
-from . import cos
-from . import exp
-from . import negate
+"""
+File: tensor_graphs/backend/kernels/__init__.py
+"""
+# Import atomic first
+from .atomic import *
+# Import fused (overrides or adds high level ops)
+from .fused import *

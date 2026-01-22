@@ -1,17 +1,17 @@
+"""
+File: tensor_graphs/backend/reference.py
+"""
+
 import numpy as np
 from typing import Dict
 from ..ops.atomic import OpType
 from ..ir.node import TensorNode
 from ..backend.registry import KernelRegistry
-
-# Ensure kernels are registered before we try to look them up
+from ..ops.registry import get_composite_op
 import tensor_graphs.backend.kernels
 
 
 def evaluate_graph(root: TensorNode, inputs: Dict[str, np.ndarray]) -> np.ndarray:
-    """
-    Evaluates the graph using the Kernel Registry with score-based dispatch.
-    """
     cache: Dict[TensorNode, np.ndarray] = {}
 
     def _eval(node: TensorNode):
@@ -21,24 +21,30 @@ def evaluate_graph(root: TensorNode, inputs: Dict[str, np.ndarray]) -> np.ndarra
         if node.op_type == OpType.INPUT:
             if node.name not in inputs:
                 raise ValueError(f"Missing input data for node: {node.name}")
-            val = inputs[node.name]
-            val = np.asarray(val)
+            val = np.asarray(inputs[node.name])
         else:
-            # Recursively evaluate parents
+            # 1. Evaluate Parents
             parent_vals = [_eval(p) for p in node.parents]
-
-            # Dispatch: Look up kernel based on PARENT signatures
             input_sigs = [p.signature for p in node.parents]
 
+            # 2. Try Kernel
             kernel = KernelRegistry.select_best_kernel(node.op_type, input_sigs)
 
-            if not kernel:
-                raise NotImplementedError(
-                    f"No valid kernel found for op '{node.op_type}' "
-                    f"with input signatures {input_sigs}"
-                )
-
-            val = kernel(parent_vals)
+            if kernel:
+                val = kernel(parent_vals)
+            else:
+                # 3. Try Decomposition
+                composite = get_composite_op(node.op_type)
+                if composite:
+                    # Decompose using the PARENT NODES (not values)
+                    # We need to construct the decomposition graph on the fly
+                    decomp_root = composite.decompose(node.parents)
+                    # Evaluate the decomposition
+                    val = _eval(decomp_root)
+                else:
+                    raise NotImplementedError(
+                        f"No valid kernel or decomposition for '{node.op_type}'"
+                    )
 
         cache[node] = val
         return val

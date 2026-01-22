@@ -75,6 +75,10 @@ class KernelRegistry:
                 total_score += 1  # Low score, but matches any rank
                 continue
 
+            # Check if concrete shape is None (cannot match specific pattern)
+            if con.shape is None:
+                return -1
+
             # 2. Check Rank (Strict Match Required otherwise)
             if len(pat.shape) != len(con.shape):
                 return -1

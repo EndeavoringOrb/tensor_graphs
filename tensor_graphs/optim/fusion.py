@@ -1,41 +1,39 @@
+"""
+File: tensor_graphs/optim/fusion.py
+"""
+
 from ..ir.node import TensorNode
 from ..ops.atomic import OpType
+from ..ops.fused.math import FusedMulAdd
+
 
 def fuse_graph(node: TensorNode, memo=None) -> TensorNode:
-    """
-    Recursively fuses operations.
-    Target: Add(Mul(A, B), C) -> FusedMulAdd(A, B, C)
-    """
     if memo is None:
         memo = {}
-        
     if node in memo:
         return memo[node]
 
-    # 1. Optimize parents first (Post-order traversal)
     new_parents = [fuse_graph(p, memo) for p in node.parents]
-    
-    # 2. Pattern Match: ADD
+
     if node.op_type == OpType.ADD:
         lhs, rhs = new_parents
-        
-        # Check for Mul on Left side: (A * B) + C
         if lhs.op_type == OpType.MUL:
             fused_node = TensorNode(
-                op_type=OpType.FUSED_MUL_ADD,
+                op_type=FusedMulAdd.op_type,  # Use the fused op type definition
                 shape=node.shape,
-                dtype=node.dtype,  # Preserve Type
+                dtype=node.dtype,
                 parents=[*lhs.parents, rhs],
-                name=f"fused_{node.name}"
+                name=f"fused_{node.name}",
             )
             memo[node] = fused_node
             return fused_node
-    
-    # 3. No match? Return reconstruction if parents changed
+
     if new_parents == node.parents:
         memo[node] = node
         return node
 
-    new_node = TensorNode(node.op_type, node.shape, node.dtype, new_parents, name=node.name)
+    new_node = TensorNode(
+        node.op_type, node.shape, node.dtype, new_parents, name=node.name
+    )
     memo[node] = new_node
     return new_node
