@@ -12,6 +12,7 @@ class OpType:
     COS = "Cos"
     EXP = "Exp"
     NEGATE = "Negate"
+    POWER = "Power"
 
     # --- Reduction ---
     SUM = "Sum"
@@ -23,4 +24,6 @@ class OpType:
     SLICE = "Slice"
     CONCAT = "Concat"
     CAST = "Cast"
-    REPEAT = "Repeat"  # New Atomic Op for GQA
+    REPEAT = "Repeat"
+    ARANGE = "Arange"
+    TRIU = "Triu"

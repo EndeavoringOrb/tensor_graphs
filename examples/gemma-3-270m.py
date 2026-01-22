@@ -37,6 +37,18 @@ class GraphBuilder:
         self.inputs[name] = node
         return node
 
+    def constant(self, value, name, dtype=DType.INT32):
+        """Creates a constant input node and returns the node and the value."""
+        val_arr = np.array(
+            value, dtype=np.int32 if dtype == DType.INT32 else np.float32
+        )
+        # Handle scalar reshaping for (1,) if needed, or keep generic
+        if val_arr.ndim == 0:
+            val_arr = val_arr.reshape(1)
+
+        node = TensorNode(OpType.INPUT, val_arr.shape, dtype, [], name)
+        return node, val_arr
+
     def param(self, name, shape, dtype=DType.FP32):
         node = TensorNode(OpType.INPUT, shape, dtype, [], name)
         self.params[name] = node
@@ -48,6 +60,9 @@ class GraphBuilder:
 
     def mul(self, a, b):
         return TensorNode(OpType.MUL, a.shape, DType.FP32, [a, b], f"mul_{a.name}")
+
+    def divide(self, a, b):
+        return TensorNode(OpType.DIVIDE, a.shape, DType.FP32, [a, b], f"div_{a.name}")
 
     def matmul(self, a, b):
         out_shape = list(a.shape[:-1]) + [b.shape[-1]]
@@ -69,6 +84,38 @@ class GraphBuilder:
         return TensorNode(
             OpType.PERMUTE, new_shape, DType.FP32, [x, perm_node], f"permute_{x.name}"
         )
+
+    def concat(self, inputs, axis_node, axis_idx, output_shape):
+        return TensorNode(
+            OpType.CONCAT, output_shape, DType.FP32, [*inputs, axis_node], "concat"
+        )
+
+    def arange(self, start_node, stop_node, step_node):
+        # Arange output shape is roughly (stop-start)/step.
+        # For symbolic graphs this is tricky, but here we know exact shapes usually.
+        # We'll assign a placeholder shape or (None,)
+        return TensorNode(
+            OpType.ARANGE,
+            (None,),
+            DType.INT32,
+            [start_node, stop_node, step_node],
+            "arange",
+        )
+
+    def power(self, base, exp):
+        return TensorNode(OpType.POWER, base.shape, DType.FP32, [base, exp], "power")
+
+    def triu(self, x, k_node):
+        return TensorNode(OpType.TRIU, x.shape, DType.FP32, [x, k_node], "triu")
+
+    def cast(self, x, target_dtype):
+        return TensorNode(OpType.CAST, x.shape, target_dtype, [x], f"cast_{x.name}")
+
+    def cos(self, x):
+        return TensorNode(OpType.COS, x.shape, DType.FP32, [x], "cos")
+
+    def sin(self, x):
+        return TensorNode(OpType.SIN, x.shape, DType.FP32, [x], "sin")
 
     # --- Fused / Composite Wrappers (Using Library Ops) ---
     def embedding(self, indices, weights):
@@ -126,10 +173,7 @@ class Gemma3Model:
         return self.builder.param(name, shape)
 
     def _const(self, value, name, dtype=DType.INT32):
-        val_arr = np.array(
-            value, dtype=np.int32 if dtype == DType.INT32 else np.float32
-        )
-        node = self.builder.input(name, val_arr.shape, dtype)
+        node, val_arr = self.builder.constant(value, name, dtype)
         self.constant_inputs[name] = val_arr
         return node
 
@@ -321,27 +365,116 @@ class Gemma3Model:
 
 
 # ==============================================================================
-# 4. Utilities
+# 4. Utilities (Now using Graph Operators)
 # ==============================================================================
 
 
-def compute_rope_params_numpy(head_dim, theta_base=10000.0, context_length=4096):
-    inv_freq = 1.0 / (
-        theta_base ** (np.arange(0, head_dim, 2).astype(np.float32) / head_dim)
+def compute_rope_params_graph(head_dim, theta_base=10000.0, context_length=4096):
+    """
+    Constructs and evaluates a graph to compute RoPE cos/sin tables.
+    Replaces purely numpy implementation.
+    """
+    b = GraphBuilder()
+    feed_dict = {}
+
+    def _c(val, name, dtype=DType.INT32):
+        node, arr = b.constant(val, name, dtype)
+        feed_dict[name] = arr
+        return node
+
+    # 1. arange(0, head_dim, 2)
+    start, stop, step = _c(0, "r_start"), _c(head_dim, "r_stop"), _c(2, "r_step")
+    indices_int = b.arange(start, stop, step)
+    indices = b.cast(indices_int, DType.FP32)
+
+    # 2. theta_base ** (indices / head_dim)
+    h_dim_node = _c(head_dim, "h_dim", DType.FP32)
+    exponent = b.divide(indices, h_dim_node)
+
+    base_node = _c(theta_base, "theta_base", DType.FP32)
+    denom = b.power(base_node, exponent)
+
+    # 3. inv_freq = 1.0 / denom
+    one_node = _c(1.0, "one", DType.FP32)
+    inv_freq = b.divide(one_node, denom)
+
+    # 4. pos = arange(context_length)
+    p_start, p_stop, p_step = (
+        _c(0, "p_start"),
+        _c(context_length, "p_stop"),
+        _c(1, "p_step"),
     )
-    positions = np.arange(context_length, dtype=np.float32)
-    angles = np.outer(positions, inv_freq)
-    angles = np.concatenate([angles, angles], axis=1)  # [S, D]
-    cos = np.cos(angles)
-    sin = np.sin(angles)
-    # Shape for broadcasting: [1, 1, S, D]
-    return cos[None, None, :, :], sin[None, None, :, :]
+    pos_int = b.arange(p_start, p_stop, p_step)
+    pos = b.cast(pos_int, DType.FP32)
+
+    # 5. Outer Product: pos (S, 1) * inv_freq (1, D/2)
+    # Reshape pos to (S, 1)
+    shape_pos = _c([context_length, 1], "shape_pos_col")
+    pos_col = b.reshape(pos, (context_length, 1), shape_pos)
+
+    # Reshape inv_freq to (1, D/2)
+    half_dim = head_dim // 2
+    shape_freq = _c([1, half_dim], "shape_freq_row")
+    freq_row = b.reshape(inv_freq, (1, half_dim), shape_freq)
+
+    angles = b.mul(pos_col, freq_row)  # Broadcasting (S, D/2)
+
+    # 6. Concat [angles, angles] -> (S, D)
+    axis_c = _c([1], "axis_concat")
+    angles = b.concat([angles, angles], axis_c, 1, (context_length, head_dim))
+
+    # 7. Cos, Sin
+    cos_t = b.cos(angles)
+    sin_t = b.sin(angles)
+
+    # 8. Final Reshape to (1, 1, S, D) for broadcasting
+    shape_final = _c([1, 1, context_length, head_dim], "shape_final_rope")
+    cos_out = b.reshape(cos_t, (1, 1, context_length, head_dim), shape_final)
+    sin_out = b.reshape(sin_t, (1, 1, context_length, head_dim), shape_final)
+
+    # Evaluate immediately
+    # We construct a dummy root node that depends on both to ensure execution if we had a single-root evaluator,
+    # but evaluate_graph takes a root. We need to evaluate both.
+    # We can just evaluate cos_out and sin_out separately sharing the feed_dict.
+
+    cos_val = evaluate_graph(cos_out, feed_dict)
+    sin_val = evaluate_graph(sin_out, feed_dict)
+
+    return cos_val, sin_val
 
 
-def create_causal_mask(seq_len):
-    # 0 for keep, -1e9 for mask
-    mask = np.triu(np.ones((seq_len, seq_len)), k=1)
-    return mask[None, None, :, :] * -1e9
+def create_causal_mask_graph(seq_len):
+    """
+    Constructs and evaluates a graph to create a causal mask.
+    Replaces purely numpy implementation.
+    """
+    b = GraphBuilder()
+    feed_dict = {}
+
+    def _c(val, name, dtype=DType.INT32):
+        node, arr = b.constant(val, name, dtype)
+        feed_dict[name] = arr
+        return node
+
+    # 1. Ones Matrix (S, S)
+    # Since we don't have a "Fill" op, we pass the ones matrix as a constant input
+    ones_data = np.ones((seq_len, seq_len), dtype=np.float32)
+    ones_node = b.input("ones_mat", (seq_len, seq_len), DType.FP32)
+    feed_dict["ones_mat"] = ones_data
+
+    # 2. Triu(ones, k=1) -> Upper triangle (strictly upper) are 1s
+    k_node = _c(1, "k_triu")
+    mask_tri = b.triu(ones_node, k_node)
+
+    # 3. Mask * -1e9
+    neg_inf = _c(-1e9, "neg_inf", DType.FP32)
+    mask_scaled = b.mul(mask_tri, neg_inf)
+
+    # 4. Reshape to (1, 1, S, S)
+    shape_final = _c([1, 1, seq_len, seq_len], "shape_mask_final")
+    mask_out = b.reshape(mask_scaled, (1, 1, seq_len, seq_len), shape_final)
+
+    return evaluate_graph(mask_out, feed_dict)
 
 
 GEMMA3_CONFIG_270M = {
@@ -389,32 +522,27 @@ def main():
     print(f"\nPrompt: {prompt}")
     print("Generating...", end="", flush=True)
 
-    # Precompute RoPE cache (Full Context)
-    full_cos, full_sin = compute_rope_params_numpy(
+    # Precompute RoPE cache (Full Context) using GRAPH OPS
+    full_cos, full_sin = compute_rope_params_graph(
         GEMMA3_CONFIG_270M["head_dim"],
-        theta_base=10000.0,  # Approximate for demo
+        theta_base=10000.0,
         context_length=4096,
     )
 
     for _ in range(max_new_tokens):
         seq_len = len(input_ids)
 
-        # Create Graph for current sequence length
-        # In a compiled backend, we would use symbolic shapes.
-        # Here we rebuild inputs specific to the current iteration.
-
         # 3a. Prepare Inputs
         input_ids_np = np.array([input_ids], dtype=np.int32)  # [1, S]
 
-        # Slice RoPE to current length
+        # Slice RoPE to current length (Using numpy slicing on precomputed graph result)
         cos_cur = full_cos[:, :, :seq_len, :]
         sin_cur = full_sin[:, :, :seq_len, :]
 
-        # Causal Mask
-        mask_cur = create_causal_mask(seq_len).astype(np.float32)
+        # Causal Mask (Computed using GRAPH OPS for current seq_len)
+        mask_cur = create_causal_mask_graph(seq_len)
 
         # 3b. Build Graph
-        # We instantiate a new builder/model wrapper to create a fresh graph structure
         model = Gemma3Model(GEMMA3_CONFIG_270M, weights_np)
 
         # Define Input Nodes
@@ -430,7 +558,6 @@ def main():
         )
 
         # Build Forward Pass
-        # Pass required auxiliary nodes
         logits_node = model.forward(in_node, cos_node, sin_node)
 
         # 3c. Prepare Feed Dict
@@ -444,7 +571,6 @@ def main():
         }
 
         # 3d. Execute
-        # evaluate_graph returns numpy array
         logits_out = evaluate_graph(logits_node, feed_dict)
 
         # 3e. Next Token Strategy (Greedy)

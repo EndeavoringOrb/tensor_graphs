@@ -16,4 +16,7 @@ from . import (
     sum,
     max,
     repeat,
+    arange,
+    power,
+    triu,
 )
