@@ -20,4 +20,5 @@ from . import (
     power,
     triu,
     gather,
+    fill,
 )

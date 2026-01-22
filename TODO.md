@@ -6,7 +6,7 @@ This `TODO.md` is organized by functional area and prioritized for a coding agen
 These are required to complete decompositions for high-level LLM operations.
 - [x] **Implement `Gather` Atomic Op:** Needed for `Embedding` decomposition.
     - Files: `tensor_graphs/ops/atomic.py`, `tensor_graphs/backend/kernels/atomic/gather.py`
-- [ ] **Implement `Fill/Full` Atomic Op:** Replace the current workaround of passing "ones" as a manual input.
+- [x] **Implement `Fill/Full` Atomic Op:** Replace the current workaround of passing "ones" as a manual input.
     - Files: `tensor_graphs/ops/atomic.py`, `tensor_graphs/backend/kernels/atomic/fill.py`
 - [ ] **Add `Where/Select` Op:** Needed for more robust masking logic.
     - Files: `tensor_graphs/ops/atomic.py`

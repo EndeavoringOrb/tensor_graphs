@@ -28,3 +28,4 @@ class OpType:
     ARANGE = "Arange"
     TRIU = "Triu"
     GATHER = "Gather"
+    FILL = "Fill"
