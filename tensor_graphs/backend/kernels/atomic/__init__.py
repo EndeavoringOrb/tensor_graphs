@@ -21,4 +21,5 @@ from . import (
     triu,
     gather,
     fill,
+    where,
 )

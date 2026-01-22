@@ -29,3 +29,4 @@ class OpType:
     TRIU = "Triu"
     GATHER = "Gather"
     FILL = "Fill"
+    WHERE = "Where"

@@ -7,6 +7,7 @@ class DType(Enum):
     FP16 = "float16"
     FP8E4M3 = "fp8e4m3"
     INT32 = "int32"
+    BOOL = "bool"
 
 @dataclass(frozen=True)
 class TensorSignature:
