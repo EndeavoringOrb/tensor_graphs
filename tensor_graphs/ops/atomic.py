@@ -3,11 +3,12 @@ class OpType:
     ADD = "Add"
     MUL = "Mul"
     DIVIDE = "Divide"
-    DOT = "Dot"  # Matrix Multiplication
+    DOT = "Dot"
     SILU = "Silu"
     SQRT = "Sqrt"
     SIN = "Sin"
     COS = "Cos"
+    EXP = "Exp"
     NEGATE = "Negate"
     
     # Reductions

@@ -12,4 +12,5 @@ from . import concat
 from . import sqrt
 from . import sin
 from . import cos
+from . import exp
 from . import negate

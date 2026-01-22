@@ -29,6 +29,8 @@ def to_sympy(node: TensorNode):
         return sympy.sin(args[0])
     elif node.op_type == OpType.COS:
         return sympy.cos(args[0])
+    elif node.op_type == OpType.EXP:  # <--- Added
+        return sympy.exp(args[0])
     elif node.op_type == OpType.NEGATE:
         return -args[0]
         
