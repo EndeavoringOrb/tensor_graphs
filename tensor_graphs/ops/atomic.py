@@ -6,6 +6,9 @@ class OpType:
     DOT = "Dot"  # Matrix Multiplication
     SILU = "Silu"
     SQRT = "Sqrt"
+    SIN = "Sin"
+    COS = "Cos"
+    NEGATE = "Negate"
     
     # Reductions
     SUM = "Sum"

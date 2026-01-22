@@ -25,5 +25,11 @@ def to_sympy(node: TensorNode):
         return args[0] * args[1] 
     elif node.op_type == OpType.SQRT:
         return sympy.sqrt(args[0])
+    elif node.op_type == OpType.SIN:
+        return sympy.sin(args[0])
+    elif node.op_type == OpType.COS:
+        return sympy.cos(args[0])
+    elif node.op_type == OpType.NEGATE:
+        return -args[0]
         
     return sympy.Symbol(f"Unknown({node.name})")

@@ -10,3 +10,6 @@ from . import permute
 from . import slice
 from . import concat
 from . import sqrt
+from . import sin
+from . import cos
+from . import negate
