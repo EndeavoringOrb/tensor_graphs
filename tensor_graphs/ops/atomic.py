@@ -2,6 +2,7 @@ class OpType:
     INPUT = "Input"
     ADD = "Add"
     MUL = "Mul"
+    DIVIDE = "Divide"
     DOT = "Dot"  # Matrix Multiplication
     SILU = "Silu"
     

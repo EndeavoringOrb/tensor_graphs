@@ -1,6 +1,7 @@
 # Auto-import submodules to trigger registration decorators
 from . import add
 from . import mul
+from . import divide
 from . import dot
 from . import fused_mul_add
 from . import cast
