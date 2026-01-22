@@ -17,7 +17,7 @@ Improve the robustness of the Graph Representation.
     - Files: `tensor_graphs/ir/node.py`
 - [x] **Formalize Constants:** Create a proper `ConstantNode` or a dedicated `OpType.CONSTANT` that stores values internally rather than relying on the `inputs` dictionary for fixed scalars.
     - Files: `tensor_graphs/ir/node.py`, `tensor_graphs/backend/reference.py`
-- [ ] **Proper Slice Representation:** Refactor `Slice` to handle standard Python slicing logic (start, stop, step) more gracefully within the IR.
+- [x] **Proper Slice Representation:** Refactor `Slice` to handle standard Python slicing logic (start, stop, step) more gracefully within the IR.
     - Files: `tensor_graphs/ops/atomic.py`, `tensor_graphs/backend/kernels/atomic/slice.py`
 
 ## 3. Fused Op Decompositions
