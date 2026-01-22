@@ -1,6 +1,6 @@
 from enum import Enum
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Optional
 
 class DType(Enum):
     FP32 = "float32"
@@ -10,12 +10,16 @@ class DType(Enum):
 
 @dataclass(frozen=True)
 class TensorSignature:
-    """Represents the Type and Shape state of a tensor for kernel matching."""
+    """
+    Represents the Type and Shape state of a tensor for kernel matching.
+    'shape' entries can be None to indicate a wildcard (generic size).
+    """
     dtype: DType
-    shape: Tuple[int, ...]
+    shape: Tuple[Optional[int], ...]
     
     def __repr__(self):
-        return f"<{self.dtype.value} {self.shape}>"
+        shape_str = ",".join(str(d) if d is not None else "*" for d in self.shape)
+        return f"<{self.dtype.value} ({shape_str})>"
 
     def is_scalar(self):
         return len(self.shape) == 0 or (len(self.shape) == 1 and self.shape[0] == 1)

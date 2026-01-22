@@ -1,6 +1,6 @@
 import sympy
-from tensor_graphs.ir.node import TensorNode
-from tensor_graphs.ops.atomic import OpType
+from ..ir.node import TensorNode
+from ..ops.atomic import OpType
 
 def to_sympy(node: TensorNode):
     """

@@ -1,13 +1,16 @@
 import numpy as np
 from typing import Dict
-from tensor_graphs.ops.atomic import OpType
-from tensor_graphs.ir.node import TensorNode
-from tensor_graphs.backend.registry import KernelRegistry
+from ..ops.atomic import OpType
+from ..ir.node import TensorNode
+from ..backend.registry import KernelRegistry
+
+# Ensure kernels are registered before we try to look them up
+import tensor_graphs.backend.kernels
+
 
 def evaluate_graph(root: TensorNode, inputs: Dict[str, np.ndarray]) -> np.ndarray:
     """
-    Evaluates the graph using the Kernel Registry.
-    Dispatches based on the static signatures of the nodes.
+    Evaluates the graph using the Kernel Registry with score-based dispatch.
     """
     cache: Dict[TensorNode, np.ndarray] = {}
 
@@ -20,22 +23,21 @@ def evaluate_graph(root: TensorNode, inputs: Dict[str, np.ndarray]) -> np.ndarra
                 raise ValueError(f"Missing input data for node: {node.name}")
             val = inputs[node.name]
             val = np.asarray(val)
-            # In a real strict backend, we would verify val.dtype/shape match node.signature here
         else:
             # Recursively evaluate parents
             parent_vals = [_eval(p) for p in node.parents]
-            
+
             # Dispatch: Look up kernel based on PARENT signatures
-            # The kernel consumes parents and produces this node
             input_sigs = [p.signature for p in node.parents]
-            
-            kernel = KernelRegistry.get_kernel(node.op_type, input_sigs)
+
+            kernel = KernelRegistry.select_best_kernel(node.op_type, input_sigs)
+
             if not kernel:
                 raise NotImplementedError(
-                    f"No kernel implementation found for op '{node.op_type}' "
+                    f"No valid kernel found for op '{node.op_type}' "
                     f"with input signatures {input_sigs}"
                 )
-            
+
             val = kernel(parent_vals)
 
         cache[node] = val

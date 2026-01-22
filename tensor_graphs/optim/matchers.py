@@ -1,4 +1,4 @@
-from tensor_graphs.ir.node import TensorNode
+from ..ir.node import TensorNode
 
 def match_pattern(node: TensorNode, pattern_op: str, parent_ops: list = []) -> bool:
     """
