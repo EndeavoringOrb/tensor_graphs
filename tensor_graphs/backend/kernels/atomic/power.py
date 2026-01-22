@@ -8,5 +8,5 @@ from ....ops.atomic import OpType
     OpType.POWER,
     [TensorSignature(DType.FP32, shape=None), TensorSignature(DType.FP32, shape=None)],
 )
-def power_generic(inputs):
+def power_generic(inputs, attrs=None):
     return np.power(inputs[0], inputs[1])

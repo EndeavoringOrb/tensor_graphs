@@ -1,6 +1,6 @@
-from typing import List
+from typing import List, Dict, Any, Optional
 import numpy as np
-from ...ir.node import TensorNode
+from ...ir.node import TensorNode, ConstantNode
 from ...ir.dtypes import DType
 from ..atomic import OpType
 from ..interface import CompositeOp
@@ -11,15 +11,21 @@ from ..registry import register_composite
 class GELU(CompositeOp):
     op_type = "GELU"
 
-    def decompose(self, inputs: List[TensorNode]) -> TensorNode:
+    def decompose(
+        self, inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
+    ) -> TensorNode:
         # 0.5 * x * (1 + Tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
         x = inputs[0]
 
-        # Constants would be Input nodes in a real graph, simplified here
-        c_cube = TensorNode(OpType.INPUT, (1,), x.dtype, [], "c_0.044")
-        c_sqrt = TensorNode(OpType.INPUT, (1,), x.dtype, [], "c_sqrt_2_pi")
-        c_half = TensorNode(OpType.INPUT, (1,), x.dtype, [], "c_0.5")
-        c_one = TensorNode(OpType.INPUT, (1,), x.dtype, [], "c_1.0")
+        # Use ConstantNode for mathematical constants
+        c_cube = ConstantNode(
+            OpType.CONSTANT, (1,), x.dtype, [], "c_0.044", value=0.044715
+        )
+        c_sqrt = ConstantNode(
+            OpType.CONSTANT, (1,), x.dtype, [], "c_sqrt_2_pi", value=np.sqrt(2 / np.pi)
+        )
+        c_half = ConstantNode(OpType.CONSTANT, (1,), x.dtype, [], "c_0.5", value=0.5)
+        c_one = ConstantNode(OpType.CONSTANT, (1,), x.dtype, [], "c_1.0", value=1.0)
 
         # x^3
         x2 = TensorNode(OpType.MUL, x.shape, x.dtype, [x, x], "x2")
@@ -31,7 +37,7 @@ class GELU(CompositeOp):
         inner = TensorNode(OpType.MUL, x.shape, x.dtype, [term2, c_sqrt], "inner")
 
         # tanh
-        tanh_node = Tanh().decompose([inner])
+        tanh_node = Tanh().decompose([inner], attrs)
 
         # outer
         one_plus = TensorNode(
@@ -46,13 +52,26 @@ class GELU(CompositeOp):
 class Softmax(CompositeOp):
     op_type = "Softmax"
 
-    def decompose(self, inputs: List[TensorNode]) -> TensorNode:
+    def decompose(
+        self, inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
+    ) -> TensorNode:
         x = inputs[0]
         # Max
-        # We need an axis. Assuming last axis (-1)
-        axis = TensorNode(OpType.INPUT, (1,), DType.INT32, [], "axis")
+        # Use axis from attributes if provided, default to -1
+        axis = attrs.get("axis", -1) if attrs else -1
 
-        x_max = TensorNode(OpType.MAX, x.shape, x.dtype, [x, axis], "max")
+        # Calculate shape for reduction (keepdims=True)
+        reduced_shape = list(x.shape)
+        reduced_shape[axis] = 1
+
+        x_max = TensorNode(
+            OpType.MAX,
+            tuple(reduced_shape),
+            x.dtype,
+            [x],
+            "max",
+            attrs={"axis": axis, "keepdims": True},
+        )
         # Sub
         shifted = TensorNode(
             OpType.ADD,
@@ -66,7 +85,14 @@ class Softmax(CompositeOp):
         exps = TensorNode(OpType.EXP, x.shape, x.dtype, [shifted], "exps")
 
         # Sum
-        sum_exps = TensorNode(OpType.SUM, x.shape, x.dtype, [exps, axis], "sum_exps")
+        sum_exps = TensorNode(
+            OpType.SUM,
+            tuple(reduced_shape),
+            x.dtype,
+            [exps],
+            "sum_exps",
+            attrs={"axis": axis, "keepdims": True},
+        )
 
         # Div
         return TensorNode(
@@ -78,7 +104,9 @@ class Softmax(CompositeOp):
 class Tanh(CompositeOp):
     op_type = "Tanh"
 
-    def decompose(self, inputs: List[TensorNode]) -> TensorNode:
+    def decompose(
+        self, inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
+    ) -> TensorNode:
         x = inputs[0]
         # e^x
         exp_x = TensorNode(OpType.EXP, x.shape, x.dtype, [x], "exp_x")

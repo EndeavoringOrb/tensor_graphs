@@ -12,7 +12,7 @@ from ....ops.atomic import OpType
         TensorSignature(DType.INT32, shape=(1,)),  # Step
     ],
 )
-def arange_int32(inputs):
+def arange_int32(inputs, attrs=None):
     start = int(inputs[0][0])
     stop = int(inputs[1][0])
     step = int(inputs[2][0])

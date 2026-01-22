@@ -12,7 +12,7 @@ from ....ops.atomic import OpType
         TensorSignature(DType.FP32, (None, None)),
     ],
 )
-def dot_generic(inputs):
+def dot_generic(inputs, attrs=None):
     return np.matmul(inputs[0], inputs[1])
 
 
@@ -21,7 +21,7 @@ def dot_generic(inputs):
     OpType.DOT,
     [TensorSignature(DType.FP32, (2, 2)), TensorSignature(DType.FP32, (2, 2))],
 )
-def dot_2x2_optimized(inputs):
+def dot_2x2_optimized(inputs, attrs=None):
     return np.matmul(inputs[0], inputs[1])
 
 
@@ -30,5 +30,5 @@ def dot_2x2_optimized(inputs):
     OpType.DOT,
     [TensorSignature(DType.FP32, shape=None), TensorSignature(DType.FP32, shape=None)],
 )
-def dot_broadcast(inputs):
+def dot_broadcast(inputs, attrs=None):
     return np.matmul(inputs[0], inputs[1])

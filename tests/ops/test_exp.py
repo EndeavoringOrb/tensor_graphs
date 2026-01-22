@@ -15,8 +15,9 @@ def test_exp_basic():
 
     res = evaluate_graph(exp_node, {"a": val_a})
     expected = np.exp(val_a)
-    
+
     np.testing.assert_allclose(res, expected, atol=1e-6)
+
 
 def test_exp_matrix():
     """Test exponential on a matrix."""
@@ -27,5 +28,5 @@ def test_exp_matrix():
 
     res = evaluate_graph(exp_node, {"a": val_a})
     expected = np.exp(val_a)
-    
+
     np.testing.assert_allclose(res, expected, atol=1e-6)

@@ -9,7 +9,7 @@ from ....ops.atomic import OpType
     OpType.DIVIDE,
     [TensorSignature(DType.FP32, (None,)), TensorSignature(DType.FP32, (None,))],
 )
-def div_generic_vector(inputs):
+def div_generic_vector(inputs, attrs=None):
     return inputs[0] / inputs[1]
 
 
@@ -21,7 +21,7 @@ def div_generic_vector(inputs):
         TensorSignature(DType.FP32, (None, None)),
     ],
 )
-def div_generic_matrix(inputs):
+def div_generic_matrix(inputs, attrs=None):
     return inputs[0] / inputs[1]
 
 
@@ -30,7 +30,7 @@ def div_generic_matrix(inputs):
     OpType.DIVIDE,
     [TensorSignature(DType.FP32, (1,)), TensorSignature(DType.FP32, (None, None))],
 )
-def div_scalar_broadcast(inputs):
+def div_scalar_broadcast(inputs, attrs=None):
     # Scalar / Matrix
     return inputs[0] / inputs[1]
 
@@ -40,7 +40,7 @@ def div_scalar_broadcast(inputs):
     OpType.DIVIDE,
     [TensorSignature(DType.FP32, (None, None)), TensorSignature(DType.FP32, (1,))],
 )
-def div_matrix_scalar(inputs):
+def div_matrix_scalar(inputs, attrs=None):
     # Matrix / Scalar
     return inputs[0] / inputs[1]
 
@@ -50,5 +50,5 @@ def div_matrix_scalar(inputs):
     OpType.DIVIDE,
     [TensorSignature(DType.FP32, shape=None), TensorSignature(DType.FP32, shape=None)],
 )
-def div_generic_tensor(inputs):
+def div_generic_tensor(inputs, attrs=None):
     return inputs[0] / inputs[1]

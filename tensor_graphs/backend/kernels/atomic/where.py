@@ -12,7 +12,7 @@ from ....ops.atomic import OpType
         TensorSignature(DType.FP32, shape=None),  # Y
     ],
 )
-def where_bool_fp32(inputs):
+def where_bool_fp32(inputs, attrs=None):
     return np.where(inputs[0], inputs[1], inputs[2])
 
 
@@ -24,8 +24,9 @@ def where_bool_fp32(inputs):
         TensorSignature(DType.FP32, shape=None),  # Y
     ],
 )
-def where_int32_fp32(inputs):
+def where_int32_fp32(inputs, attrs=None):
     return np.where(inputs[0], inputs[1], inputs[2])
+
 
 @KernelRegistry.register(
     OpType.WHERE,
@@ -35,5 +36,5 @@ def where_int32_fp32(inputs):
         TensorSignature(DType.FP32, shape=None),  # Y
     ],
 )
-def where_fp32_fp32(inputs):
+def where_fp32_fp32(inputs, attrs=None):
     return np.where(inputs[0], inputs[1], inputs[2])

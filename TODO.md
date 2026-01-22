@@ -13,9 +13,9 @@ These are required to complete decompositions for high-level LLM operations.
 
 ## 2. Infrastructure & IR Enhancements
 Improve the robustness of the Graph Representation.
-- [ ] **Add Attribute Support to `TensorNode`:** Ops like `Sum` and `Repeat` shouldn't hardcode axes. Add an `attrs: Dict[str, Any]` field to `TensorNode`.
+- [x] **Add Attribute Support to `TensorNode`:** Ops like `Sum` and `Repeat` shouldn't hardcode axes. Add an `attrs: Dict[str, Any]` field to `TensorNode`.
     - Files: `tensor_graphs/ir/node.py`
-- [ ] **Formalize Constants:** Create a proper `ConstantNode` or a dedicated `OpType.CONSTANT` that stores values internally rather than relying on the `inputs` dictionary for fixed scalars.
+- [x] **Formalize Constants:** Create a proper `ConstantNode` or a dedicated `OpType.CONSTANT` that stores values internally rather than relying on the `inputs` dictionary for fixed scalars.
     - Files: `tensor_graphs/ir/node.py`, `tensor_graphs/backend/reference.py`
 - [ ] **Proper Slice Representation:** Refactor `Slice` to handle standard Python slicing logic (start, stop, step) more gracefully within the IR.
     - Files: `tensor_graphs/ops/atomic.py`, `tensor_graphs/backend/kernels/atomic/slice.py`
@@ -26,14 +26,14 @@ Complete the mathematical "lowering" of high-level ops to atomic ops.
     - Files: `tensor_graphs/ops/fused/llm.py`
 - [ ] **Implement `Embedding.decompose`:** Once `Gather` is implemented, lower `Embedding` to a `Gather` operation.
     - Files: `tensor_graphs/ops/fused/llm.py`
-- [ ] **Make `Softmax` Axis-Aware:** Use the new `attrs` field (from Step 2) to allow Softmax on any dimension, not just `-1`.
+- [x] **Make `Softmax` Axis-Aware:** Use the new `attrs` field (from Step 2) to allow Softmax on any dimension, not just `-1`.
     - Files: `tensor_graphs/ops/fused/activation.py`
 
 ## 4. Kernel & Backend Generalization
 Remove "demo-only" hardcoded logic from the reference kernels.
-- [ ] **Generalize `repeat.py`:** Use an axis attribute instead of hardcoding `axis=1`.
+- [x] **Generalize `repeat.py`:** Use an axis attribute instead of hardcoding `axis=1`.
     - Files: `tensor_graphs/backend/kernels/atomic/repeat.py`
-- [ ] **Generalize `sum.py`:** Support `keepdims=False` via node attributes.
+- [x] **Generalize `sum.py`:** Support `keepdims=False` via node attributes.
     - Files: `tensor_graphs/backend/kernels/atomic/sum.py`
 - [ ] **Improve Kernel Scoring:** Enhance `KernelRegistry._score_candidate` to handle broadcasting rules more explicitly (e.g., matching a dimension of `1` against a dimension of `N`).
     - Files: `tensor_graphs/backend/registry.py`

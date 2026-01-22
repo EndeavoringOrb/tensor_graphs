@@ -8,7 +8,7 @@ from safetensors.torch import load_file
 from tokenizers import Tokenizer
 
 # --- Tensor Graphs Imports ---
-from tensor_graphs.ir.node import TensorNode
+from tensor_graphs.ir.node import TensorNode, ConstantNode
 from tensor_graphs.ir.dtypes import DType, TensorSignature
 from tensor_graphs.ops.atomic import OpType
 from tensor_graphs.backend.reference import evaluate_graph
@@ -20,7 +20,6 @@ from tensor_graphs.ops.fused.activation import GELU, Softmax
 
 # Ensure Kernels are Registered
 import tensor_graphs.backend.kernels
-
 
 # ==============================================================================
 # 1. Graph Construction Helpers
@@ -38,7 +37,7 @@ class GraphBuilder:
         return node
 
     def constant(self, value, name, dtype=DType.INT32):
-        """Creates a constant input node and returns the node and the value."""
+        """Creates a constant node and returns it."""
         val_arr = np.array(
             value, dtype=np.int32 if dtype == DType.INT32 else np.float32
         )
@@ -46,7 +45,14 @@ class GraphBuilder:
         if val_arr.ndim == 0:
             val_arr = val_arr.reshape(1)
 
-        node = TensorNode(OpType.INPUT, val_arr.shape, dtype, [], name)
+        node = ConstantNode(
+            op_type=OpType.CONSTANT,
+            shape=val_arr.shape,
+            dtype=dtype,
+            parents=[],
+            name=name,
+            value=val_arr,
+        )
         return node, val_arr
 
     def param(self, name, shape, dtype=DType.FP32):
@@ -142,15 +148,37 @@ class GraphBuilder:
     def rope(self, x, cos, sin):
         return TensorNode(RoPE.op_type, x.shape, DType.FP32, [x, cos, sin], "rope")
 
-    def repeat(self, x, times, rep_node):
+    def repeat(self, x, repeats, axis=1):
+        """Repeats the input tensor along the specified axis."""
         new_shape = list(x.shape)
-        new_shape[1] *= times  # Specific to GQA logic
+        new_shape[axis] *= repeats
         return TensorNode(
             OpType.REPEAT,
             tuple(new_shape),
-            DType.FP32,
-            [x, rep_node],
-            f"repeat_{x.name}",
+            x.dtype,
+            [x],
+            "repeat",
+            attrs={"repeats": repeats, "axis": axis},
+        )
+
+    def sum(self, x, axis=1, keepdims=True):
+        """Sums the input tensor along the specified axis."""
+        new_shape = list(x.shape)
+        if axis is not None:
+            if keepdims:
+                new_shape[axis] = 1
+            else:
+                new_shape.pop(axis)
+        else:
+            new_shape = [1] if keepdims else []
+
+        return TensorNode(
+            OpType.SUM,
+            tuple(new_shape),
+            x.dtype,
+            [x],
+            "sum",
+            attrs={"axis": axis, "keepdims": keepdims},
         )
 
 
@@ -310,9 +338,8 @@ class Gemma3Model:
 
         # GQA Repeat
         if n_heads != n_kv:
-            rep_node = self._const([n_heads // n_kv], f"rep_{layer_idx}")
-            k = self.builder.repeat(k, n_heads // n_kv, rep_node)
-            v = self.builder.repeat(v, n_heads // n_kv, rep_node)
+            k = self.builder.repeat(k, n_heads // n_kv, axis=1)
+            v = self.builder.repeat(v, n_heads // n_kv, axis=1)
 
         # Scale
         scale_node = self._const(

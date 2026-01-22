@@ -1,6 +1,7 @@
 class OpType:
     # --- Input ---
     INPUT = "Input"
+    CONSTANT = "Constant"
 
     # --- Math ---
     ADD = "Add"

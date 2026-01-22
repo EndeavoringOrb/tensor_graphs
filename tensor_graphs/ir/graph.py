@@ -1,6 +1,7 @@
 from typing import List, Set
 from .node import TensorNode
 
+
 def topological_sort(root: TensorNode) -> List[TensorNode]:
     """
     Returns a linear execution order for the graph ending at 'root'.
@@ -18,6 +19,7 @@ def topological_sort(root: TensorNode) -> List[TensorNode]:
 
     _visit(root)
     return order
+
 
 def get_inputs(root: TensorNode) -> List[TensorNode]:
     """Returns all leaf nodes (OpType.INPUT) required for this graph."""

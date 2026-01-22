@@ -40,12 +40,8 @@ def test_concat_matrices_axis_0():
 
     res = evaluate_graph(concat_node, {"a": val_a, "b": val_b, "axis": val_axis})
 
-    expected = np.array([
-        [0, 0, 0],
-        [0, 0, 0],
-        [1, 1, 1]
-    ], dtype=np.float32)
-    
+    expected = np.array([[0, 0, 0], [0, 0, 0], [1, 1, 1]], dtype=np.float32)
+
     np.testing.assert_array_equal(res, expected)
     assert res.shape == (3, 3)
 
@@ -65,9 +61,6 @@ def test_concat_matrices_axis_1():
 
     res = evaluate_graph(concat_node, {"a": val_a, "b": val_b, "axis": val_axis})
 
-    expected = np.array([
-        [1, 1, 2],
-        [1, 1, 2]
-    ], dtype=np.float32)
+    expected = np.array([[1, 1, 2], [1, 1, 2]], dtype=np.float32)
 
     np.testing.assert_array_equal(res, expected)

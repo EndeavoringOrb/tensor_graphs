@@ -15,5 +15,5 @@ def test_negate_basic():
 
     res = evaluate_graph(neg_node, {"a": val_a})
     expected = np.array([-1.0, 2.0, -0.0, -4.5], dtype=np.float32)
-    
+
     np.testing.assert_array_equal(res, expected)

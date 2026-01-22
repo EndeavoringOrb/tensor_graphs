@@ -15,8 +15,9 @@ def test_sqrt_basic():
 
     res = evaluate_graph(sqrt_node, {"a": val_a})
     expected = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-    
+
     np.testing.assert_array_equal(res, expected)
+
 
 def test_sqrt_matrix():
     """Test square root on a matrix."""
@@ -27,5 +28,5 @@ def test_sqrt_matrix():
 
     res = evaluate_graph(sqrt_node, {"a": val_a})
     expected = np.array([[0.5, 10], [0, 1]], dtype=np.float32)
-    
+
     np.testing.assert_array_equal(res, expected)

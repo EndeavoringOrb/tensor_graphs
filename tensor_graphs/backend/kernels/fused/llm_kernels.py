@@ -15,7 +15,7 @@ from ....ops.fused.llm import RoPE, Embedding
         TensorSignature(DType.FP32, (1,)),
     ],
 )
-def rms_norm_kernel(inputs):
+def rms_norm_kernel(inputs, attrs=None):
     x, scale, eps = inputs
     eps_val = eps[0]
     var = np.mean(x**2, axis=-1, keepdims=True)
@@ -26,7 +26,7 @@ def rms_norm_kernel(inputs):
 
 # --- GELU ---
 @KernelRegistry.register(GELU.op_type, [TensorSignature(DType.FP32, shape=None)])
-def gelu_kernel(inputs):
+def gelu_kernel(inputs, attrs=None):
     x = inputs[0]
     c1 = np.sqrt(2.0 / np.pi)
     c2 = 0.044715
@@ -36,7 +36,7 @@ def gelu_kernel(inputs):
 
 # --- Softmax ---
 @KernelRegistry.register(Softmax.op_type, [TensorSignature(DType.FP32, shape=None)])
-def softmax_kernel(inputs):
+def softmax_kernel(inputs, attrs=None):
     x = inputs[0]
     x_max = np.max(x, axis=-1, keepdims=True)
     exp_x = np.exp(x - x_max)
@@ -52,7 +52,7 @@ def softmax_kernel(inputs):
         TensorSignature(DType.FP32, shape=None),
     ],
 )
-def rope_kernel(inputs):
+def rope_kernel(inputs, attrs=None):
     x, cos, sin = inputs
     head_dim = x.shape[-1]
     x1 = x[..., : head_dim // 2]
@@ -69,6 +69,6 @@ def rope_kernel(inputs):
         TensorSignature(DType.FP32, (None, None)),
     ],
 )
-def embedding_kernel(inputs):
+def embedding_kernel(inputs, attrs=None):
     indices, weights = inputs
     return weights[indices.astype(int)]

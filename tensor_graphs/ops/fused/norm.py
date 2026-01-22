@@ -2,8 +2,8 @@
 File: tensor_graphs/ops/fused/norm.py
 """
 
-from typing import List
-from ...ir.node import TensorNode
+from typing import List, Dict, Any, Optional
+from ...ir.node import TensorNode, ConstantNode
 from ...ir.dtypes import DType
 from ..atomic import OpType
 from ..interface import CompositeOp
@@ -14,7 +14,9 @@ from ..registry import register_composite
 class RMSNorm(CompositeOp):
     op_type = "RMSNorm"
 
-    def decompose(self, inputs: List[TensorNode]) -> TensorNode:
+    def decompose(
+        self, inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
+    ) -> TensorNode:
         # Inputs: x, scale, eps
         x, scale, eps = inputs
 
@@ -22,9 +24,27 @@ class RMSNorm(CompositeOp):
         sq = TensorNode(OpType.MUL, x.shape, x.dtype, [x, x], "rmsnorm_sq")
 
         # 2. Mean = Sum(sq) / N
-        axis_val = TensorNode(OpType.INPUT, (1,), DType.INT32, [], "axis_last")
-        sum_sq = TensorNode(OpType.SUM, (1,), x.dtype, [sq, axis_val], "rmsnorm_sum")
-        n_elements = TensorNode(OpType.INPUT, (1,), x.dtype, [], "n_elements")
+        # Use attributes for axis instead of input node
+        axis = attrs.get("axis", -1) if attrs else -1
+        sum_shape = list(x.shape)
+        sum_shape[axis] = 1
+        sum_sq = TensorNode(
+            OpType.SUM,
+            tuple(sum_shape),
+            x.dtype,
+            [sq],
+            "rmsnorm_sum",
+            attrs={"axis": axis, "keepdims": True},
+        )
+
+        n = x.shape[axis]
+        if n is None:
+            raise ValueError(
+                f"RMSNorm requires static shape on normalization axis {axis}"
+            )
+        n_elements = ConstantNode(
+            OpType.CONSTANT, (1,), x.dtype, [], "n_elements", value=float(n)
+        )
         mean_sq = TensorNode(
             OpType.DIVIDE, sum_sq.shape, x.dtype, [sum_sq, n_elements], "rmsnorm_mean"
         )
@@ -36,7 +56,7 @@ class RMSNorm(CompositeOp):
 
         # 4. Rsqrt
         rsqrt = TensorNode(OpType.SQRT, add_eps.shape, x.dtype, [add_eps], "sqrt")
-        one = TensorNode(OpType.INPUT, (1,), x.dtype, [], "one_const")
+        one = ConstantNode(OpType.CONSTANT, (1,), x.dtype, [], "one_const", value=1.0)
         inv_sqrt = TensorNode(
             OpType.DIVIDE, rsqrt.shape, x.dtype, [one, rsqrt], "inv_sqrt"
         )

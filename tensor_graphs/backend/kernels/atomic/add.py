@@ -10,7 +10,7 @@ from ....ops.atomic import OpType
     OpType.ADD,
     [TensorSignature(DType.FP32, (None,)), TensorSignature(DType.FP32, (None,))],
 )
-def add_generic_vector(inputs):
+def add_generic_vector(inputs, attrs=None):
     # print("DEBUG: Using Generic ADD Kernel")
     return inputs[0] + inputs[1]
 
@@ -23,7 +23,7 @@ def add_generic_vector(inputs):
         TensorSignature(DType.FP32, (None, None)),
     ],
 )
-def add_generic_matrix(inputs):
+def add_generic_matrix(inputs, attrs=None):
     return inputs[0] + inputs[1]
 
 
@@ -32,7 +32,7 @@ def add_generic_matrix(inputs):
 @KernelRegistry.register(
     OpType.ADD, [TensorSignature(DType.FP32, (32,)), TensorSignature(DType.FP32, (32,))]
 )
-def add_vec32_optimized(inputs):
+def add_vec32_optimized(inputs, attrs=None):
     # print("DEBUG: Using Optimized Vec32 ADD Kernel")
     return inputs[0] + inputs[1]
 
@@ -43,7 +43,7 @@ def add_vec32_optimized(inputs):
     OpType.ADD,
     [TensorSignature(DType.FP32, (1,)), TensorSignature(DType.FP32, (None, None))],
 )
-def add_scalar_broadcast(inputs):
+def add_scalar_broadcast(inputs, attrs=None):
     return inputs[0] + inputs[1]
 
 
@@ -52,5 +52,5 @@ def add_scalar_broadcast(inputs):
     OpType.ADD,
     [TensorSignature(DType.FP32, shape=None), TensorSignature(DType.FP32, shape=None)],
 )
-def add_generic_tensor(inputs):
+def add_generic_tensor(inputs, attrs=None):
     return inputs[0] + inputs[1]

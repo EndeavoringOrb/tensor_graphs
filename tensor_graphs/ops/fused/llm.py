@@ -2,7 +2,7 @@
 File: tensor_graphs/ops/fused/llm.py
 """
 
-from typing import List
+from typing import List, Dict, Any, Optional
 from ...ir.node import TensorNode
 from ..atomic import OpType
 from ..interface import CompositeOp
@@ -14,7 +14,9 @@ from ...ir.dtypes import DType
 class RoPE(CompositeOp):
     op_type = "RoPE"
 
-    def decompose(self, inputs: List[TensorNode]) -> TensorNode:
+    def decompose(
+        self, inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
+    ) -> TensorNode:
         # inputs: x, cos, sin
         x, cos, sin = inputs
 
@@ -72,6 +74,17 @@ class RoPE(CompositeOp):
 class Embedding(CompositeOp):
     op_type = "Embedding"
 
-    def decompose(self, inputs: List[TensorNode]) -> TensorNode:
-        # Embedding is effectively a Gather.
-        raise NotImplementedError("Embedding decomposition requires atomic Gather op")
+    def decompose(
+        self, inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
+    ) -> TensorNode:
+        # Lowering Embedding to Gather
+        # inputs: indices, weights
+        indices, weights = inputs
+        # Gather(weights, indices)
+        return TensorNode(
+            OpType.GATHER,
+            (None, None),  # Shape will be determined by indices and weights
+            weights.dtype,
+            [weights, indices],
+            "embedding_gather",
+        )

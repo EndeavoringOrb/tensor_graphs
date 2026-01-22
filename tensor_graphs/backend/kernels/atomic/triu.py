@@ -11,7 +11,7 @@ from ....ops.atomic import OpType
         TensorSignature(DType.INT32, shape=(1,)),  # k
     ],
 )
-def triu_generic(inputs):
+def triu_generic(inputs, attrs=None):
     data = inputs[0]
     k = int(inputs[1][0])
     return np.triu(data, k=k)
