@@ -204,9 +204,6 @@ class Gemma3Model:
         self.constant_inputs = {}
 
     def _get_param(self, name, shape):
-        if name not in self.weights:
-            # Fallback for tied weights if not present under specific name
-            return self.builder.param(name, shape)
         return self.builder.param(name, shape)
 
     def _const(self, value, name, dtype=DType.INT32):
@@ -214,12 +211,8 @@ class Gemma3Model:
         self.constant_inputs[name] = val_arr
         return node
 
-    def forward(self, input_ids_node, cos, sin):
+    def forward(self, input_ids_node, cos, sin, mask, shapes: Dict[str, TensorNode]):
         cfg = self.cfg
-        B, S = input_ids_node.shape
-
-        # 1. Causal Mask
-        mask = self._build_causal_mask(S)
 
         # Embedding
         w_emb = self._get_param(
@@ -233,7 +226,7 @@ class Gemma3Model:
 
         # Layers
         for i in range(cfg["n_layers"]):
-            x = self._transformer_block(x, i, cos, sin, mask, B, S)
+            x = self._transformer_block(x, i, cos, sin, mask, shapes)
 
         # Final Norm
         w_norm = self._get_param("model.norm.weight", (cfg["emb_dim"],))
@@ -254,26 +247,7 @@ class Gemma3Model:
 
         return logits
 
-    def _build_causal_mask(self, S):
-        # 1. Ones Matrix (S, S) using Fill
-        one_val = self._const([1.0], "mask_one_val", DType.FP32)
-        shape_ss = self._const([S, S], f"shape_ss_{S}")
-        ones_node = self.builder.fill(one_val, shape_ss, (S, S))
-
-        # 2. Triu(ones, k=1) -> Upper triangle (strictly upper) are 1s
-        k_node = self._const([1], "k_triu_mask")
-        mask_tri = self.builder.triu(ones_node, k_node)
-
-        # 3. Mask * -1e9
-        neg_inf = self._const([-1e9], "neg_inf_mask", DType.FP32)
-        mask_scaled = self.builder.mul(mask_tri, neg_inf)
-
-        # 4. Reshape to (1, 1, S, S)
-        shape_final = self._const([1, 1, S, S], f"shape_mask_final_{S}")
-        mask_out = self.builder.reshape(mask_scaled, (1, 1, S, S), shape_final)
-        return mask_out
-
-    def _transformer_block(self, x, layer_idx, cos, sin, mask, B, S):
+    def _transformer_block(self, x, layer_idx, cos, sin, mask, shapes):
         cfg = self.cfg
         prefix = f"model.layers.{layer_idx}"
         residual = x
@@ -284,7 +258,7 @@ class Gemma3Model:
         x_norm = self.builder.rms_norm(x, w_ln, eps_ln)
 
         # Attention
-        x_attn = self._attention(x_norm, layer_idx, cos, sin, mask, B, S)
+        x_attn = self._attention(x_norm, layer_idx, cos, sin, mask, shapes)
 
         # Post Attn Norm
         w_post = self._get_param(
@@ -313,7 +287,7 @@ class Gemma3Model:
 
         return self.builder.add(residual, x_ff)
 
-    def _attention(self, x, layer_idx, cos, sin, mask, B, S):
+    def _attention(self, x, layer_idx, cos, sin, mask, shapes):
         cfg = self.cfg
         prefix = f"model.layers.{layer_idx}.self_attn"
         head_dim = cfg["head_dim"]
@@ -336,22 +310,20 @@ class Gemma3Model:
         v = self.builder.matmul(x, wv_t)
 
         # Reshape & Permute
-        shape_q = self._const([B, S, n_heads, head_dim], f"shape_q_{B}_{S}")
-        shape_kv = self._const([B, S, n_kv, head_dim], f"shape_kv_{B}_{S}")
         perm_attn = self._const([0, 2, 1, 3], f"perm_attn_{layer_idx}")
 
         q = self.builder.permute(
-            self.builder.reshape(q, (B, S, n_heads, head_dim), shape_q),
+            self.builder.reshape(q, (None, None, n_heads, head_dim), shapes["q_shape"]),
             [0, 2, 1, 3],
             perm_attn,
         )
         k = self.builder.permute(
-            self.builder.reshape(k, (B, S, n_kv, head_dim), shape_kv),
+            self.builder.reshape(k, (None, None, n_kv, head_dim), shapes["kv_shape"]),
             [0, 2, 1, 3],
             perm_attn,
         )
         v = self.builder.permute(
-            self.builder.reshape(v, (B, S, n_kv, head_dim), shape_kv),
+            self.builder.reshape(v, (None, None, n_kv, head_dim), shapes["kv_shape"]),
             [0, 2, 1, 3],
             perm_attn,
         )
@@ -392,8 +364,9 @@ class Gemma3Model:
         perm_back = self._const([0, 2, 1, 3], f"perm_back_{layer_idx}")
         context = self.builder.permute(context, [0, 2, 1, 3], perm_back)
 
-        shape_flat = self._const([B, S, n_heads * head_dim], f"shape_flat_{B}_{S}")
-        context = self.builder.reshape(context, (B, S, n_heads * head_dim), shape_flat)
+        context = self.builder.reshape(
+            context, (None, None, n_heads * head_dim), shapes["flat_shape"]
+        )
 
         # Output Proj
         wo = self._get_param(f"{prefix}.o_proj.weight", (d_model, n_heads * head_dim))
@@ -424,6 +397,12 @@ class Gemma3Model:
 # ==============================================================================
 # 4. Utilities (Now using Graph Operators)
 # ==============================================================================
+
+
+def compute_causal_mask_np(S):
+    mask = np.triu(np.ones((S, S), dtype=np.float32), k=1)
+    mask = mask * -1e9
+    return mask.reshape(1, 1, S, S)
 
 
 def compute_rope_params_graph(head_dim, theta_base=10000.0, context_length=4096):
@@ -552,38 +531,66 @@ def main():
         context_length=4096,
     )
 
+    # --- BUILD GRAPH ONCE ---
+    cfg = GEMMA3_CONFIG_270M
+    model = Gemma3Model(cfg, weights_np)
+
+    # Define Dynamic Input Nodes
+    in_node = model.builder.input("input_ids", (1, None), DType.INT32)
+    cos_node = model.builder.input("cos", (1, 1, None, cfg["head_dim"]), DType.FP32)
+    sin_node = model.builder.input("sin", (1, 1, None, cfg["head_dim"]), DType.FP32)
+    mask_node = model.builder.input("mask", (1, 1, None, None), DType.FP32)
+
+    # Dynamic Shape Inputs for Reshape
+    q_shape_node = model.builder.input("q_shape", (4,), DType.INT32)
+    kv_shape_node = model.builder.input("kv_shape", (4,), DType.INT32)
+    flat_shape_node = model.builder.input("flat_shape", (3,), DType.INT32)
+
+    shapes = {
+        "q_shape": q_shape_node,
+        "kv_shape": kv_shape_node,
+        "flat_shape": flat_shape_node,
+    }
+
+    # Build Forward Pass
+    logits_node = model.forward(in_node, cos_node, sin_node, mask_node, shapes)
+
+    # Weights and Constants are fixed for the graph
+    base_feed_dict = {
+        **model.weights,
+        **model.constant_inputs,
+    }
+
     for _ in range(max_new_tokens):
         seq_len = len(input_ids)
 
-        # 3a. Prepare Inputs
-        input_ids_np = np.array([input_ids], dtype=np.int32)  # [1, S]
-
-        # Slice RoPE to current length (Using numpy slicing on precomputed graph result)
+        # 3a. Prepare Dynamic Inputs
+        input_ids_np = np.array([input_ids], dtype=np.int32)
         cos_cur = full_cos[:, :, :seq_len, :]
         sin_cur = full_sin[:, :, :seq_len, :]
+        mask_cur = compute_causal_mask_np(seq_len)
 
-        # 3b. Build Graph
-        model = Gemma3Model(GEMMA3_CONFIG_270M, weights_np)
-
-        # Define Input Nodes
-        in_node = model.builder.input("input_ids", (1, seq_len), DType.INT32)
-        cos_node = model.builder.input(
-            "cos", (1, 1, seq_len, GEMMA3_CONFIG_270M["head_dim"]), DType.FP32
+        # 3b. Prepare Dynamic Shapes
+        q_shape = np.array(
+            [1, seq_len, cfg["n_heads"], cfg["head_dim"]], dtype=np.int32
         )
-        sin_node = model.builder.input(
-            "sin", (1, 1, seq_len, GEMMA3_CONFIG_270M["head_dim"]), DType.FP32
+        kv_shape = np.array(
+            [1, seq_len, cfg["n_kv_groups"], cfg["head_dim"]], dtype=np.int32
+        )
+        flat_shape = np.array(
+            [1, seq_len, cfg["n_heads"] * cfg["head_dim"]], dtype=np.int32
         )
 
-        # Build Forward Pass
-        logits_node = model.forward(in_node, cos_node, sin_node)
-
-        # 3c. Prepare Feed Dict
+        # 3c. Final Feed Dict
         feed_dict = {
+            **base_feed_dict,
             "input_ids": input_ids_np,
             "cos": cos_cur,
             "sin": sin_cur,
-            **model.weights,  # Bind weights
-            **model.constant_inputs,  # Bind generated constants
+            "mask": mask_cur,
+            "q_shape": q_shape,
+            "kv_shape": kv_shape,
+            "flat_shape": flat_shape,
         }
 
         # 3d. Execute
