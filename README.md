@@ -9,6 +9,8 @@ Please help me figure out the best way to integrate the tensor_graphs framework 
 - Need to build graph comparison tool for checking if two graphs are equal
 - Need to build graph profiler
 - Need to figure out exact SQL schema for benchmarkDB
+- ask at gpu mode for tips on profiling
+- remove infinite cpu->cuda->cpu loops and stuff like that
 
 ## Example Graph Execution Workflow
 1. User builds gemma-3-270m graph (example)
