@@ -19,16 +19,30 @@ Please help me figure out the best way to integrate the tensor_graphs framework 
 4. Execute chosen option (repeat from step 2)
 
 ## benchmark DB schema
+When adding a new benchmark to the DB, it searches to find any atomic graph matches (for each resolved root node, turn it into its atomic form then see if it can be reformatted to be equal to new atomic graph)
 ### TODO:
-- split up hardware envs into devices, drivers, misc_attrs and have junction tables
+- split resolved nodes table into kernels table and execution plan table. execution plan table maps atomic graph to kernels
+- maybe split software table into more tables?
 - somewhere need to record tolerance, like using fp8 kernel for fp32 operation
 - figure out how to choose from list of resolved graphs based on benchmark DB (including interpolation for unprofiled cases)
 
-Table: hardware_environments (must work for various gpus+cpus nvidia, amd, intel, mac cpus, snapdragon)
+Table: devices
 - id: UUID
-- device_name: VARCHAR (e.g., "NVIDIA GeForce RTX 4090")
-- memory_capacity: # bytes memory
-- attributes: (json, driver versions, cuda version)
+- name: VARCHAR (e.g., "NVIDIA GeForce RTX 4090", intel something cpu)
+- memory_bytes
+
+Table: software
+- id: UUID
+- os_info: JSON (linux, windows, macos, kernel version, linux distro)
+- drivers: JSON ({"cuda": "12.1", "nvidia_driver": "535.1"})
+- framework_version: VARCHAR (tensor_graphs version/git hash)
+
+Table: env_dev_junction
+
+Table: env_software_junction
+
+Table: execution_environments (serves as anchor for devices,software junction tables)
+- id: UUID
 
 Table: atomic node axes
 - id: UUID
@@ -62,6 +76,7 @@ Table: resolved nodes (the resolved graph that was used for computation. want th
 
 Table: benchmark_runs
 - id: UUID
+- environment id
 - resolved root node id: UUID (FK -> resolved nodes)
 - peak memory bytes
 
