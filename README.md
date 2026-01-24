@@ -46,12 +46,6 @@ Table: env_software_junction
 Table: execution_environments (serves as anchor for devices,software junction tables)
 - id: UUID
 
-Table: atomic node axes
-- id: UUID
-- atomic_node_id: FK -> atomic nodes
-- name: "batch_size" or "hidden_size"
-- value: INT
-
 Table: hashes
 - id: UUID
 - hash
@@ -62,11 +56,11 @@ Table: atomic nodes (atomic graph that was requested, ex: gemma-3-270m or sdxl i
 - inputs list
   - name
   - dtype (fp32, bfloat16, int4, bool, etc.)
-  - shape: list of atomic node axes
+  - shape: list of uint
 - outputs list
   - name
   - dtype
-  - shape: list of atomic node axes
+  - shape: list of uint
 - name (unique, will be used to find reference implementation file)
 - reference implementation source file hashes.id
 
