@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
 import uuid
-from .dtypes import DType, TensorSignature
+from .dtypes import DType, TensorSignature, Backend
 
 
 @dataclass(eq=False)
@@ -12,6 +12,7 @@ class TensorNode:
     parents: List["TensorNode"]
     name: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     attrs: Dict[str, Any] = field(default_factory=dict)
+    backend: Backend = Backend.CPU_NUMPY
 
     def get_attr(self, key: str, default: Any = None) -> Any:
         return self.attrs.get(key, default)
@@ -89,6 +90,7 @@ class TensorNode:
             [self],
             f"{self.name}_slice",
             attrs={"starts": starts, "ends": ends, "steps": steps},
+            backend=self.backend,
         )
 
     def __repr__(self):

@@ -1,24 +1,33 @@
 from typing import Dict, List, Callable, Optional, Tuple, Any
-from ..ir.dtypes import DType, TensorSignature
+from ..ir.dtypes import DType, TensorSignature, Backend
 
-# A Kernel is identified by its OpType and the list of input signatures it accepts.
-# We store: (Signatures, ImplementationFunction)
-KernelEntry = Tuple[Tuple[TensorSignature, ...], Callable]
+# A Kernel is identified by its OpType, Backend, and the list of input signatures it accepts.
+# We store: (Backend, Signatures, ImplementationFunction)
+KernelEntry = Tuple[Backend, Tuple[TensorSignature, ...], Callable]
 
 
 class KernelRegistry:
-    # OpType -> List of Candidate Kernels
-    _kernels: Dict[str, List[KernelEntry]] = {}
+    # OpType -> Backend -> List of Candidate Kernels
+    _kernels: Dict[str, Dict[Backend, List[KernelEntry]]] = {}
     _converters: Dict[Tuple[DType, DType], Callable] = {}
 
     @classmethod
-    def register(cls, op_type: str, input_sigs: List[TensorSignature]):
+    def register(
+        cls,
+        op_type: str,
+        input_sigs: List[TensorSignature],
+        backend: Backend = Backend.CPU_NUMPY,
+    ):
         """Decorator to register a hardware implementation."""
 
         def decorator(func):
             if op_type not in cls._kernels:
-                cls._kernels[op_type] = []
-            cls._kernels[op_type].append((tuple(input_sigs), func))
+                cls._kernels[op_type] = {}
+
+            if backend not in cls._kernels[op_type]:
+                cls._kernels[op_type][backend] = []
+
+            cls._kernels[op_type][backend].append((backend, tuple(input_sigs), func))
             return func
 
         return decorator
@@ -35,20 +44,27 @@ class KernelRegistry:
 
     @classmethod
     def select_best_kernel(
-        cls, op_type: str, concrete_inputs: List[TensorSignature]
+        cls,
+        op_type: str,
+        concrete_inputs: List[TensorSignature],
+        backend: Backend = Backend.CPU_NUMPY,
     ) -> Optional[Callable]:
         """
-        Finds the best matching kernel for the given concrete input signatures.
+        Finds the best matching kernel for the given concrete input signatures and backend.
         Uses a scoring system:
         - Exact dimension match: +10 points
         - Wildcard (None) match: +1 point
         - Mismatch: -1 (Disqualified)
         """
-        candidates = cls._kernels.get(op_type, [])
+        candidates = cls._kernels.get(op_type, {}).get(backend, [])
         best_score = -1
         best_kernel = None
 
-        for pattern_sigs, kernel_func in candidates:
+        for cand_backend, pattern_sigs, kernel_func in candidates:
+            # Sanity check
+            if cand_backend != backend:
+                continue
+
             score = cls._score_candidate(pattern_sigs, concrete_inputs)
             if score > best_score:
                 best_score = score

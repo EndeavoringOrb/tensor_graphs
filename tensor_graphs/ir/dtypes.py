@@ -11,6 +11,12 @@ class DType(Enum):
     BOOL = "bool"
 
 
+class Backend(Enum):
+    CPU_NUMPY = "cpu_numpy"
+    CPU_TORCH = "cpu_torch"
+    GPU_TORCH = "gpu_torch"
+
+
 @dataclass(frozen=True)
 class TensorSignature:
     """

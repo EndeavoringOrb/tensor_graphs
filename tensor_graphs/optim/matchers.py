@@ -1,7 +1,10 @@
+from typing import Optional, List
 from ..ir.node import TensorNode
 
 
-def match_pattern(node: TensorNode, pattern_op: str, parent_ops: list = None) -> bool:
+def match_pattern(
+    node: TensorNode, pattern_op: str, parent_ops: Optional[List[str]] = None
+) -> bool:
     """
     Simple helper to check if a node matches an OpType and specific parent OpTypes.
     """

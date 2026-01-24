@@ -31,3 +31,4 @@ class OpType:
     GATHER = "Gather"
     FILL = "Fill"
     WHERE = "Where"
+    COPY_TO = "CopyTo"

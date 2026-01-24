@@ -41,7 +41,7 @@ def resolve_dispatch(
     input_sigs = [p.signature for p in node.parents]
 
     # 3. Try Optimized Kernel
-    if KernelRegistry.select_best_kernel(node.op_type, input_sigs):
+    if KernelRegistry.select_best_kernel(node.op_type, input_sigs, node.backend):
         return node
 
     # 4. Special Case: Cast (if no direct kernel, check converters)
@@ -96,7 +96,7 @@ def resolve_dispatch(
 
     # 6. Final Verification
     new_sigs = [p.signature for p in node.parents]
-    if not KernelRegistry.select_best_kernel(node.op_type, new_sigs):
+    if not KernelRegistry.select_best_kernel(node.op_type, new_sigs, node.backend):
         raise RuntimeError(
             f"Even after casting to FP32, no kernel found for {new_sigs}"
         )
