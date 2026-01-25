@@ -4,7 +4,7 @@ File: tensor_graphs/optim/fusion.py
 
 from typing import Optional
 from ..ir.node import TensorNode
-from ..ops.atomic import OpType
+from ..ops.atomic_types import OpType
 from ..ops.fused.math import FusedMulAdd
 from ..ops.fused.norm import RMSNorm
 from ..ops.fused.activation import GELU

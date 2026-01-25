@@ -1,0 +1,15 @@
+import numpy as np
+from ...registry import KernelRegistry
+from ....ir.dtypes import DType, TensorSignature
+from ....ops.fused.softmax import softmax_ref
+
+
+# --- Softmax ---
+@KernelRegistry.register(
+    "Softmax", [TensorSignature(DType.FP32, shape=None)], reference_factory=softmax_ref
+)
+def softmax_kernel(inputs, attrs=None):
+    x = inputs[0]
+    x_max = np.max(x, axis=-1, keepdims=True)
+    exp_x = np.exp(x - x_max)
+    return exp_x / np.sum(exp_x, axis=-1, keepdims=True)

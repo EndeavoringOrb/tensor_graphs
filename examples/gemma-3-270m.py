@@ -9,14 +9,18 @@ from tokenizers import Tokenizer
 
 # --- Tensor Graphs Imports ---
 from tensor_graphs.ir.node import TensorNode
-from tensor_graphs.ir.dtypes import DType, TensorSignature
-from tensor_graphs.ops.atomic import OpType
+from tensor_graphs.ir.dtypes import DType
+from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.backend.reference import evaluate_graph
 
 # Import Fused Ops Definitions
-from tensor_graphs.ops.fused.llm import RoPE, Embedding
-from tensor_graphs.ops.fused.norm import RMSNorm
-from tensor_graphs.ops.fused.activation import GELU, Softmax
+from tensor_graphs.ops.fused import (
+    rope_ref,
+    gelu_ref,
+    rms_norm_ref,
+    embedding_ref,
+    softmax_ref,
+)
 
 # Ensure Kernels are Registered
 import tensor_graphs.backend.kernels
@@ -107,7 +111,14 @@ class GraphBuilder:
         return TensorNode(OpType.TRIU, x.shape, DType.FP32, [x, k_node], "triu")
 
     def cast(self, x, target_dtype):
-        return TensorNode(OpType.CAST, x.shape, target_dtype, [x], f"cast_{x.name}")
+        return TensorNode(
+            OpType.CAST,
+            x.shape,
+            target_dtype,
+            [x],
+            f"cast_{x.name}",
+            attrs={"to": target_dtype},
+        )
 
     def cos(self, x):
         return TensorNode(OpType.COS, x.shape, DType.FP32, [x], "cos")

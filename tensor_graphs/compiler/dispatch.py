@@ -2,7 +2,7 @@ from typing import Optional, Dict
 from ..ir.node import TensorNode
 from ..ir.dtypes import DType, TensorSignature
 from ..backend.registry import KernelRegistry
-from ..ops.registry import get_composite_op
+from ..ops.registry import get_reference_factory
 
 # Ensure kernels are registered
 from ..backend.kernels import *
@@ -52,12 +52,10 @@ def resolve_dispatch(
             return node
 
     # 5. Try Decomposition
-    composite = get_composite_op(node.op_type)
-    if composite:
+    ref_factory = get_reference_factory(node.op_type)
+    if ref_factory:
         print(f"[Dispatch] No kernel for {node.op_type}, decomposing...")
-        # Expand the node into a subgraph of atomic ops
-        decomp_root = composite.decompose(node.parents, node.attrs)
-        # Recursively resolve the new graph
+        decomp_root = ref_factory(node.parents, node.attrs)
         resolved_root = resolve_dispatch(decomp_root, memo)
         _replace_node_content(node, resolved_root)
         return node
@@ -66,7 +64,7 @@ def resolve_dispatch(
         f"[Dispatch] MISSING KERNEL: {node.op_type} {input_sigs}. searching for conversions..."
     )
 
-    # 5. Heuristic: Try to convert everything to FP32
+    # 6. Heuristic: Try to convert everything to FP32
     new_parents = []
     for p in node.parents:
         if p.dtype not in [DType.FP32, DType.INT32, DType.BOOL]:
@@ -80,6 +78,7 @@ def resolve_dispatch(
                     dtype=DType.FP32,
                     parents=[p],
                     name=f"auto_cast_{p.name}",
+                    attrs={"to": DType.FP32},
                 )
                 # Ensure the new cast node is also resolved
                 new_parents.append(resolve_dispatch(cast_node, memo))
@@ -94,7 +93,7 @@ def resolve_dispatch(
     node.dtype = DType.FP32
     node.parents = new_parents
 
-    # 6. Final Verification
+    # 7. Final Verification
     new_sigs = [p.signature for p in node.parents]
     if not KernelRegistry.select_best_kernel(node.op_type, new_sigs, node.backend):
         raise RuntimeError(

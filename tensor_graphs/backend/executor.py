@@ -2,7 +2,7 @@ import numpy as np
 from typing import Dict, Any
 from ..ir.node import TensorNode
 from ..ir.dtypes import Backend
-from ..ops.atomic import OpType
+from ..ops.atomic_types import OpType
 from ..backend.registry import KernelRegistry
 from ..compiler.planner import ExecutionRecipe
 

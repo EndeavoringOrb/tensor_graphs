@@ -2,7 +2,7 @@ import hashlib
 import json
 from typing import Dict, Any, List
 from .node import TensorNode
-from ..ops.atomic import OpType
+from ..ops.atomic_types import OpType
 
 
 class GraphHasher:

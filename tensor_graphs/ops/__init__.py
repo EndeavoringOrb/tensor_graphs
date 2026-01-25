@@ -1,1 +1,1 @@
-from .atomic import OpType
+from .atomic_types import OpType

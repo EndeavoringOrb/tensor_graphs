@@ -5,7 +5,13 @@ I want to make a language that can be used to describe mathematic functions (lik
 My vision is the user says "run this graph" and the framework uses the best kernels. But how do we define "best"? Best is fastest at a given accuracy/tolerance. So lets say the graph calls for tanh on (tensor, cuda, shape(4,16), fp32). We could use the dedicated cuda kernel, or we could replace it with cuda2numpy+numpytanh+numpy2cuda or we could decompose it into lower level cuda kernels. My point is there are many "paths" we can use to execute a graph. I want to integrate a database of records "I ran this graph on this hardware this many times and here are all the timings" so that when deciding which path to take, you can use actual profiling to decide and if there isn't anything in the database then you profile and add to the database. I realize that there are going to be many many paths for valid execution, but I want to have the framework be able to generate a list (or an iterator) over all paths so that eventually we can profile them all. If someone just wants the fastest then it will use the database (+best guess where no data). But there should also be a program that iterates over possible paths and profiles them. Do not write any code, just brainstorm.
 
 ## General TODO:
+- MAKE TENSORNODE PAIR WITH KERNEL WHEN REGISTERED
+- collapse tensor_graphs/backend/reference/atomic -> tensor_graphs/backend/reference (we only need reference for atomic kernels, all other kernels can be decomposed down to atomic kernels)
 - make interface.py sample_inputs automatically generate input requirements based on nodes
+- clean up redundant tests
+- update cast to be able to take in a dst dtype
+- remove cast as a special operation, it should just be used through OpType.CAST like any other op.
+- ops should have their own file (not activation.py, llm.py, math.py, norm.py)
 - Need to update registry to store backend as well (numpy/cuda, prefer backend as opposed to device because there is no guarantee that two cpu backends will use the same format)
 - Need to build graph comparison tool for checking if two graphs are equal
 - Need to build graph profiler

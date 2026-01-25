@@ -1,6 +1,6 @@
 import sympy
 from ..ir.node import TensorNode
-from ..ops.atomic import OpType
+from ..ops.atomic_types import OpType
 
 
 def to_sympy(node: TensorNode):

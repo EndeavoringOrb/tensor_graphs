@@ -4,7 +4,7 @@ import json
 from typing import Dict, Any, List, Set
 from ..ir.node import TensorNode
 from ..ir.dtypes import DType, Backend
-from ..ops.atomic import OpType
+from ..ops.atomic_types import OpType
 from ..backend.executor import Executor
 from .db import BenchmarkDB
 from .env import EnvironmentSniffer

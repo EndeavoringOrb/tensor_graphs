@@ -1,9 +1,3 @@
-"""
-File: tensor_graphs/backend/kernels/__init__.py
-"""
-
-# Import reference atomic kernels
-from ..reference.atomic import *
-
-# Import other kernels
-from .other import *
+# Import kernels
+from .cpu_numpy import *
+from .reference import *

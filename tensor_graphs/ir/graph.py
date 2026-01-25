@@ -33,7 +33,7 @@ def normalize_graph(root: TensorNode):
     based on their structural hashes.
     """
     from .hashing import compute_structural_hash
-    from ..ops.atomic import OpType
+    from ..ops.atomic_types import OpType
 
     visited = set()
 

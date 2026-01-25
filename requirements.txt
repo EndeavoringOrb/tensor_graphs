@@ -4,7 +4,7 @@ sympy
 pytest
 pytest-cov
 tqdm
-
+ninja
 tokenizers
 huggingface_hub
 torch

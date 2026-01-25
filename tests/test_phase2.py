@@ -11,7 +11,7 @@ Tests:
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ir.hashing import compute_structural_hash, GraphHasher
-from tensor_graphs.ops.atomic import OpType
+from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.optim.symbolic import are_equivalent
 from tensor_graphs.ir.graph import find_subgraph, normalize_graph
 

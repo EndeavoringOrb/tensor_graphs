@@ -2,7 +2,7 @@ import unittest
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ir.graph import topological_sort, get_inputs
-from tensor_graphs.ops.atomic import OpType
+from tensor_graphs.ops.atomic_types import OpType
 
 
 class TestGraphBuild(unittest.TestCase):
