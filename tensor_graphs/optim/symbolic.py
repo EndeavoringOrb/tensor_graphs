@@ -36,3 +36,25 @@ def to_sympy(node: TensorNode):
         return -args[0]
 
     return sympy.Symbol(f"Unknown({node.name})")
+
+
+def are_equivalent(node_a: TensorNode, node_b: TensorNode) -> bool:
+    """
+    Checks if two graphs are mathematically equivalent using SymPy.
+    Note: This is limited to operations supported by to_sympy.
+    """
+    try:
+        expr_a = to_sympy(node_a)
+        expr_b = to_sympy(node_b)
+
+        # Simple check first
+        if expr_a == expr_b:
+            return True
+
+        # Algebraic simplification check
+        return sympy.simplify(expr_a - expr_b) == 0
+    except Exception:
+        # Fallback to structural hash if sympy fails or ops are unsupported
+        from ..ir.hashing import compute_structural_hash
+
+        return compute_structural_hash(node_a) == compute_structural_hash(node_b)
