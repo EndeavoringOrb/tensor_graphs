@@ -4,11 +4,11 @@ File: tensor_graphs/backend/reference.py
 
 import numpy as np
 from typing import Dict
-from ..ops.atomic import OpType
-from ..ir.node import TensorNode
-from ..backend.registry import KernelRegistry
-from ..ops.registry import get_composite_op
-import tensor_graphs.backend.kernels
+from ...ops.atomic import OpType
+from ...ir.node import TensorNode
+from ...backend.registry import KernelRegistry
+from ...ops.registry import get_composite_op
+from ..kernels import *
 
 
 def evaluate_graph(root: TensorNode, inputs: Dict[str, np.ndarray]) -> np.ndarray:

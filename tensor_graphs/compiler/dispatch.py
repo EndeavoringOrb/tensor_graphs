@@ -5,7 +5,7 @@ from ..backend.registry import KernelRegistry
 from ..ops.registry import get_composite_op
 
 # Ensure kernels are registered
-import tensor_graphs.backend.kernels
+from ..backend.kernels import *
 
 
 def _replace_node_content(dest: TensorNode, src: TensorNode):

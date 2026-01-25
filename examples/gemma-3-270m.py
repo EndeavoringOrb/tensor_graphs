@@ -396,7 +396,7 @@ def compute_causal_mask_np(S):
     ones_node = GraphBuilder().fill(
         GraphBuilder().constant(1.0, (1,), DType.FP32, "ones_val"),
         GraphBuilder().input("ones_shape", (S, S), DType.INT32),
-        (S, S)
+        (S, S),
     )
 
     # Apply triu
