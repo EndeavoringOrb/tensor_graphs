@@ -392,7 +392,24 @@ class Gemma3Model:
 
 
 def compute_causal_mask_np(S):
-    mask = np.triu(np.ones((S, S), dtype=np.float32), k=1)
+    # Create ones matrix using Fill node
+    ones_node = GraphBuilder().fill(
+        GraphBuilder().constant(1.0, (1,), DType.FP32, "ones_val"),
+        GraphBuilder().input("ones_shape", (S, S), DType.INT32),
+        (S, S)
+    )
+
+    # Apply triu
+    k_node = GraphBuilder().constant(1, (1,), DType.INT32, "k_triu")
+    mask_node = GraphBuilder().triu(ones_node, k_node)
+
+    # Evaluate with feed_dict
+    feed_dict = {
+        "ones_val": np.array([1.0], dtype=np.float32),
+        "ones_shape": np.array([S, S], dtype=np.int32),
+        "k_triu": np.array([1], dtype=np.int32),
+    }
+    mask = evaluate_graph(mask_node, feed_dict)
     mask = mask * -1e9
     return mask.reshape(1, 1, S, S)
 
