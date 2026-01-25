@@ -2,7 +2,8 @@
 File: tensor_graphs/ops/fused/math.py
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+import numpy as np
 from ...ir.node import TensorNode
 from ...ir.dtypes import DType
 from ..atomic import OpType
@@ -29,3 +30,10 @@ class FusedMulAdd(CompositeOp):
             OpType.ADD, a.shape, a.dtype, [mul_node, c], f"decomp_fma_{a.name}"
         )
         return add_node
+
+    def sample_inputs(self) -> List[Tuple[List[np.ndarray], Dict[str, Any]]]:
+        # Case 1: Simple 1D vectors
+        a = np.array([1, 2, 3], dtype=np.float32)
+        b = np.array([4, 5, 6], dtype=np.float32)
+        c = np.array([10, 10, 10], dtype=np.float32)
+        return [([a, b, c], {})]

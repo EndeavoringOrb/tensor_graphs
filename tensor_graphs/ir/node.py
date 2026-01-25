@@ -8,7 +8,7 @@ from .dtypes import DType, TensorSignature, Backend
 class TensorNode:
     op_type: str
     shape: Tuple[Optional[int], ...]
-    dtype: DType  # Strict Typing
+    dtype: DType
     parents: List["TensorNode"]
     name: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     attrs: Dict[str, Any] = field(default_factory=dict)
@@ -21,6 +21,39 @@ class TensorNode:
     def signature(self) -> TensorSignature:
         return TensorSignature(self.dtype, self.shape)
 
+    def get_details(self) -> str:
+        """
+        Prints a structured representation of the node, including output signature,
+        backend, specific attributes, and the signatures of all parent nodes.
+        """
+        # Format the output signature string
+        out_sig = f"{self.dtype.name if hasattr(self.dtype, 'name') else self.dtype} | {self.shape}"
+
+        lines = []
+        header = f"Node: {self.name} [{self.op_type}]"
+        lines.append(header)
+        lines.append("-" * len(header))
+        lines.append(f"Output Signature : {out_sig}")
+        lines.append(f"Backend          : {self.backend}")
+
+        # Format Parents with their signatures
+        lines.append("Parents          :")
+        if not self.parents:
+            lines.append("  (None - Leaf Node)")
+        else:
+            for idx, parent in enumerate(self.parents):
+                # Get parent signature
+                p_sig = f"{parent.dtype.name if hasattr(parent.dtype, 'name') else parent.dtype} | {parent.shape}"
+                lines.append(f"  [{idx}] {parent.name:<10} -> {p_sig}")
+
+        # Format Attributes
+        if self.attrs:
+            lines.append("Attributes       :")
+            for k, v in self.attrs.items():
+                lines.append(f"  {k:<14} : {v}")
+
+        return "\n".join(lines)
+
     def __getitem__(self, key) -> "TensorNode":
         """
         Syntactic sugar for OpType.SLICE.
@@ -29,7 +62,6 @@ class TensorNode:
         if not isinstance(key, tuple):
             key = (key,)
 
-        # 1. Resolve Ellipsis and handle missing dimensions
         if Ellipsis in key:
             idx = key.index(Ellipsis)
             num_missing = len(self.shape) - (len(key) - 1)
@@ -49,7 +81,6 @@ class TensorNode:
             if isinstance(k, int):
                 # Treat int as slice(k, k+1) to preserve rank for now
                 start = k if k >= 0 or dim_size is None else k + dim_size
-
                 if start == -1 and dim_size is None:
                     stop = None
                 else:
@@ -69,8 +100,6 @@ class TensorNode:
                         start += dim_size
                     if stop is not None and stop < 0:
                         stop += dim_size
-
-                    # Compute output dim size
                     e = stop if stop is not None else dim_size
                     out_dim = (e - start + step - (1 if step > 0 else -1)) // step
                     new_shape.append(max(0, out_dim))
@@ -95,4 +124,4 @@ class TensorNode:
 
     def __repr__(self):
         attr_str = f" | {self.attrs}" if self.attrs else ""
-        return f"[{self.dtype.value}|{self.shape}{attr_str}] {self.op_type}"
+        return f"[{self.dtype}|{self.shape}{attr_str}] {self.op_type}"

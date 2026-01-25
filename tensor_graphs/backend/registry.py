@@ -43,6 +43,11 @@ class KernelRegistry:
         return decorator
 
     @classmethod
+    def get_all_kernels(cls) -> Dict[str, Dict[Backend, List[KernelEntry]]]:
+        """Returns the entire kernel registry."""
+        return cls._kernels
+
+    @classmethod
     def select_best_kernel(
         cls,
         op_type: str,

@@ -32,3 +32,13 @@ class OpType:
     FILL = "Fill"
     WHERE = "Where"
     COPY_TO = "CopyTo"
+
+    @classmethod
+    def is_atomic(cls, op_type: str) -> bool:
+        """Returns True if the op_type is a fundamental atomic operation."""
+        # We filter out internal methods and properties
+        return op_type in [
+            v
+            for k, v in cls.__dict__.items()
+            if not k.startswith("_") and isinstance(v, str)
+        ]

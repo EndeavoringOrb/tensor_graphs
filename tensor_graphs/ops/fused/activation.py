@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from ...ir.node import TensorNode
 from ...ir.dtypes import DType
@@ -59,6 +59,11 @@ class GELU(CompositeOp):
 
         return TensorNode(OpType.MUL, x.shape, x.dtype, [half_x, one_plus], "gelu_out")
 
+    def sample_inputs(self) -> List[Tuple[List[np.ndarray], Dict[str, Any]]]:
+        # Case 1: Simple random
+        x = np.random.randn(4, 4).astype(np.float32)
+        return [([x], {})]
+
 
 @register_composite
 class Softmax(CompositeOp):
@@ -111,6 +116,10 @@ class Softmax(CompositeOp):
             OpType.DIVIDE, x.shape, x.dtype, [exps, sum_exps], "softmax_out"
         )
 
+    def sample_inputs(self) -> List[Tuple[List[np.ndarray], Dict[str, Any]]]:
+        x = np.random.randn(2, 5).astype(np.float32)
+        return [([x], {"axis": -1})]
+
 
 @register_composite
 class Tanh(CompositeOp):
@@ -150,3 +159,7 @@ class Tanh(CompositeOp):
         return TensorNode(
             OpType.DIVIDE, x.shape, x.dtype, [numerator, denominator], "tanh_out"
         )
+
+    def sample_inputs(self) -> List[Tuple[List[np.ndarray], Dict[str, Any]]]:
+        x = np.random.randn(10).astype(np.float32)
+        return [([x], {})]

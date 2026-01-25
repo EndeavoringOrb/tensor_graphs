@@ -45,7 +45,7 @@ def evaluate_graph(root: TensorNode, inputs: Dict[str, np.ndarray]) -> np.ndarra
                     val = _eval(decomp_root)
                 else:
                     raise NotImplementedError(
-                        f"No valid kernel or decomposition for '{node.op_type}'"
+                        f"No valid kernel or decomposition for '{node.op_type}'\n{node.get_details()}"
                     )
 
         cache[node] = val

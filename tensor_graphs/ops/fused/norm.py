@@ -2,7 +2,8 @@
 File: tensor_graphs/ops/fused/norm.py
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+import numpy as np
 from ...ir.node import TensorNode
 from ...ir.dtypes import DType
 from ..atomic import OpType
@@ -68,3 +69,10 @@ class RMSNorm(CompositeOp):
         out = TensorNode(OpType.MUL, x.shape, x.dtype, [norm, one_scale], "rmsnorm_out")
 
         return out
+
+    def sample_inputs(self) -> List[Tuple[List[np.ndarray], Dict[str, Any]]]:
+        # Case 1: 2D Input, last dim matches scale
+        x = np.random.randn(2, 4).astype(np.float32)
+        scale = np.random.randn(4).astype(np.float32)
+        eps = np.array([1e-6], dtype=np.float32)
+        return [([x, scale, eps], {"axis": -1})]

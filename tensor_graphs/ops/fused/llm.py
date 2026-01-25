@@ -2,7 +2,8 @@
 File: tensor_graphs/ops/fused/llm.py
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+import numpy as np
 from ...ir.node import TensorNode
 from ..atomic import OpType
 from ..interface import CompositeOp
@@ -90,6 +91,13 @@ class RoPE(CompositeOp):
 
         return output_node
 
+    def sample_inputs(self) -> List[Tuple[List[np.ndarray], Dict[str, Any]]]:
+        # Head Dim = 4
+        x = np.random.randn(2, 4).astype(np.float32)
+        cos = np.random.randn(2, 4).astype(np.float32)
+        sin = np.random.randn(2, 4).astype(np.float32)
+        return [([x, cos, sin], {})]
+
 
 @register_composite
 class Embedding(CompositeOp):
@@ -109,3 +117,11 @@ class Embedding(CompositeOp):
             [weights, indices],
             "embedding_gather",
         )
+
+    def sample_inputs(self) -> List[Tuple[List[np.ndarray], Dict[str, Any]]]:
+        vocab = 10
+        dim = 4
+        weights = np.random.randn(vocab, dim).astype(np.float32)
+        indices = np.array([0, 2, 9, 1], dtype=np.int32)
+        # Note order: inputs are [indices, weights]
+        return [([indices, weights], {})]

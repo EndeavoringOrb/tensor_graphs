@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, ClassVar
+from typing import List, Dict, Any, Optional, ClassVar, Tuple
 from ..ir.node import TensorNode
+import numpy as np
 
 
 class CompositeOp(ABC):
@@ -20,3 +21,11 @@ class CompositeOp(ABC):
         of Atomic ops (or other Composite ops).
         """
         pass
+
+    def sample_inputs(self) -> List[Tuple[List[np.ndarray], Dict[str, Any]]]:
+        """
+        Optional: Returns a list of (inputs_list, attrs_dict) tuples for verification.
+        Used to verify that kernels matching this OpType produce results
+        consistent with the decomposed graph.
+        """
+        return []
