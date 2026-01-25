@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from tensor_graphs.ir.node import TensorNode, ConstantNode
+from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic import OpType
 from tensor_graphs.ops.fused.norm import RMSNorm
@@ -13,8 +13,9 @@ class TestOpFusion(unittest.TestCase):
         # Create a graph that matches RMSNorm.decompose
         x = TensorNode(OpType.INPUT, (1, 10), DType.FP32, [], "x")
         scale = TensorNode(OpType.INPUT, (10,), DType.FP32, [], "scale")
-        eps = ConstantNode(OpType.CONSTANT, (1,), DType.FP32, [], "eps", value=1e-6)
-
+        eps = TensorNode(
+            OpType.CONSTANT, (1,), DType.FP32, [], "eps", attrs={"value": 1e-6}
+        )
         # Decompose RMSNorm to get the atomic graph
         rmsnorm = RMSNorm()
         decomposed = rmsnorm.decompose([x, scale, eps], attrs={"axis": -1})

@@ -8,7 +8,7 @@ from safetensors.torch import load_file
 from tokenizers import Tokenizer
 
 # --- Tensor Graphs Imports ---
-from tensor_graphs.ir.node import TensorNode, ConstantNode
+from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType, TensorSignature
 from tensor_graphs.ops.atomic import OpType
 from tensor_graphs.backend.reference import evaluate_graph
@@ -36,24 +36,16 @@ class GraphBuilder:
         self.inputs[name] = node
         return node
 
-    def constant(self, value, name, dtype=DType.INT32):
-        """Creates a constant node and returns it."""
-        val_arr = np.array(
-            value, dtype=np.int32 if dtype == DType.INT32 else np.float32
-        )
-        # Handle scalar reshaping for (1,) if needed, or keep generic
-        if val_arr.ndim == 0:
-            val_arr = val_arr.reshape(1)
-
-        node = ConstantNode(
+    def constant(self, value, shape, dtype, name):
+        node = TensorNode(
             op_type=OpType.CONSTANT,
-            shape=val_arr.shape,
+            shape=shape,
             dtype=dtype,
             parents=[],
             name=name,
-            value=val_arr,
+            attrs={"value": value},
         )
-        return node, val_arr
+        return node
 
     def param(self, name, shape, dtype=DType.FP32):
         node = TensorNode(OpType.INPUT, shape, dtype, [], name)
@@ -207,7 +199,7 @@ class Gemma3Model:
         return self.builder.param(name, shape)
 
     def _const(self, value, name, dtype=DType.INT32):
-        node, val_arr = self.builder.constant(value, name, dtype)
+        node, val_arr = self.builder.constant(value, (1,), name, dtype)
         self.constant_inputs[name] = val_arr
         return node
 
@@ -408,13 +400,12 @@ def compute_causal_mask_np(S):
 def compute_rope_params_graph(head_dim, theta_base=10000.0, context_length=4096):
     """
     Constructs and evaluates a graph to compute RoPE cos/sin tables.
-    Replaces purely numpy implementation.
     """
     b = GraphBuilder()
     feed_dict = {}
 
     def _c(val, name, dtype=DType.INT32):
-        node, arr = b.constant(val, name, dtype)
+        node, arr = b.constant(val, (1,), name, dtype)
         feed_dict[name] = arr
         return node
 

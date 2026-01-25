@@ -23,13 +23,7 @@ def evaluate_graph(root: TensorNode, inputs: Dict[str, np.ndarray]) -> np.ndarra
                 raise ValueError(f"Missing input data for node: {node.name}")
             val = np.asarray(inputs[node.name])
         elif node.op_type == OpType.CONSTANT:
-            from ..ir.node import ConstantNode
-
-            if isinstance(node, ConstantNode):
-                val = np.asarray(node.value)
-            else:
-                # Fallback if someone just used a regular TensorNode with OpType.CONSTANT
-                val = np.asarray(node.attrs.get("value"))
+            val = np.asarray(node.attrs.get("value"))
         else:
             # 1. Evaluate Parents
             parent_vals = [_eval(p) for p in node.parents]

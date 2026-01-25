@@ -25,12 +25,7 @@ class Executor:
                 raise ValueError(f"Missing input data for node: {node.name}")
             val = inputs[node.name]
         elif node.op_type == OpType.CONSTANT:
-            from ..ir.node import ConstantNode
-
-            if isinstance(node, ConstantNode):
-                val = node.value
-            else:
-                val = node.attrs.get("value")
+            val = node.attrs.get("value")
         else:
             # 1. Evaluate Parents
             parent_vals = [self._eval(p, inputs) for p in node.parents]

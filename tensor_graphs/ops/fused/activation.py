@@ -1,6 +1,6 @@
 from typing import List, Dict, Any, Optional
 import numpy as np
-from ...ir.node import TensorNode, ConstantNode
+from ...ir.node import TensorNode
 from ...ir.dtypes import DType
 from ..atomic import OpType
 from ..interface import CompositeOp
@@ -14,18 +14,30 @@ class GELU(CompositeOp):
     def decompose(
         self, inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
     ) -> TensorNode:
-        # 0.5 * x * (1 + Tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        # GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
         x = inputs[0]
-
-        # Use ConstantNode for mathematical constants
-        c_cube = ConstantNode(
-            OpType.CONSTANT, (1,), x.dtype, [], "c_0.044", value=0.044715
+        c_cube = TensorNode(
+            OpType.CONSTANT,
+            (1,),
+            x.dtype,
+            [],
+            "c_0.044",
+            attrs={"value": 0.044715},
         )
-        c_sqrt = ConstantNode(
-            OpType.CONSTANT, (1,), x.dtype, [], "c_sqrt_2_pi", value=np.sqrt(2 / np.pi)
+        c_sqrt = TensorNode(
+            OpType.CONSTANT,
+            (1,),
+            x.dtype,
+            [],
+            "c_sqrt_2_pi",
+            attrs={"value": np.sqrt(2 / np.pi)},
         )
-        c_half = ConstantNode(OpType.CONSTANT, (1,), x.dtype, [], "c_0.5", value=0.5)
-        c_one = ConstantNode(OpType.CONSTANT, (1,), x.dtype, [], "c_1.0", value=1.0)
+        c_half = TensorNode(
+            OpType.CONSTANT, (1,), x.dtype, [], "c_0.5", attrs={"value": 0.5}
+        )
+        c_one = TensorNode(
+            OpType.CONSTANT, (1,), x.dtype, [], "c_1.0", attrs={"value": 1.0}
+        )
 
         # x^3
         x2 = TensorNode(OpType.MUL, x.shape, x.dtype, [x, x], "x2")

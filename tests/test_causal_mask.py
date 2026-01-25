@@ -2,7 +2,7 @@ import unittest
 import numpy as np
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic import OpType
-from tensor_graphs.ir.node import TensorNode, ConstantNode
+from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.backend.reference import evaluate_graph
 
 
@@ -17,13 +17,13 @@ class SimpleGraphBuilder:
         )
         if val_arr.ndim == 0:
             val_arr = val_arr.reshape(1)
-        node = ConstantNode(
+        node = TensorNode(
             op_type=OpType.CONSTANT,
             shape=val_arr.shape,
             dtype=dtype,
             parents=[],
             name=name,
-            value=val_arr,
+            attrs={"value": val_arr},
         )
         self.constant_inputs[name] = val_arr
         return node

@@ -96,13 +96,3 @@ class TensorNode:
     def __repr__(self):
         attr_str = f" | {self.attrs}" if self.attrs else ""
         return f"[{self.dtype.value}|{self.shape}{attr_str}] {self.op_type}"
-
-
-@dataclass(eq=False)
-class ConstantNode(TensorNode):
-    """A node representing a constant value stored within the graph."""
-
-    value: Any = None
-
-    def __repr__(self):
-        return f"[CONST|{self.dtype.value}|{self.shape}] = {self.value}"

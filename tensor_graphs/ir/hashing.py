@@ -1,7 +1,7 @@
 import hashlib
 import json
 from typing import Dict, Any, List
-from .node import TensorNode, ConstantNode
+from .node import TensorNode
 from ..ops.atomic import OpType
 
 
@@ -37,10 +37,11 @@ class GraphHasher:
             return node_hash
 
         # Base case: Constant
-        if isinstance(node, ConstantNode):
+        if node.op_type == OpType.CONSTANT:
             # For constants, the value matters.
             # We round floats to avoid precision jitter if needed, but for now str() is okay.
-            val_str = str(node.value)
+            val = node.attrs.get("value")
+            val_str = str(val)
             node_hash = self._hash_value(
                 f"Const_{node.dtype.value}_{node.shape}_{val_str}"
             )

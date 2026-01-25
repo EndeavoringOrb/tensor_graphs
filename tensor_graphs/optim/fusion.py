@@ -3,7 +3,7 @@ File: tensor_graphs/optim/fusion.py
 """
 
 from typing import Optional
-from ..ir.node import TensorNode, ConstantNode
+from ..ir.node import TensorNode
 from ..ops.atomic import OpType
 from ..ops.fused.math import FusedMulAdd
 from ..ops.fused.norm import RMSNorm
@@ -32,9 +32,9 @@ def try_fuse_rmsnorm(node: TensorNode) -> Optional[TensorNode]:
 
     s_p1, s_p2 = one_scale.parents
     scale = None
-    if isinstance(s_p1, ConstantNode) and s_p1.value == 1.0:
+    if s_p1.op_type == OpType.CONSTANT and s_p1.attrs.get("value") == 1.0:
         scale = s_p2
-    elif isinstance(s_p2, ConstantNode) and s_p2.value == 1.0:
+    elif s_p2.op_type == OpType.CONSTANT and s_p2.attrs.get("value") == 1.0:
         scale = s_p1
 
     if scale is None:
@@ -54,7 +54,7 @@ def try_fuse_rmsnorm(node: TensorNode) -> Optional[TensorNode]:
 
     # Match inv_sqrt = 1 / rsqrt
     i_p1, i_p2 = inv_sqrt.parents
-    if not (isinstance(i_p1, ConstantNode) and i_p1.value == 1.0):
+    if not (i_p1.op_type == OpType.CONSTANT and i_p1.attrs.get("value") == 1.0):
         return None
     rsqrt = i_p2
 
@@ -118,9 +118,9 @@ def try_fuse_gelu(node: TensorNode) -> Optional[TensorNode]:
 
     o_p1, o_p2 = one_plus.parents
     tanh_node = None
-    if isinstance(o_p1, ConstantNode) and o_p1.value == 1.0:
+    if o_p1.op_type == OpType.CONSTANT and o_p1.attrs.get("value") == 1.0:
         tanh_node = o_p2
-    elif isinstance(o_p2, ConstantNode) and o_p2.value == 1.0:
+    elif o_p2.op_type == OpType.CONSTANT and o_p2.attrs.get("value") == 1.0:
         tanh_node = o_p1
 
     if tanh_node is None or tanh_node.op_type != OpType.DIVIDE:
@@ -132,9 +132,9 @@ def try_fuse_gelu(node: TensorNode) -> Optional[TensorNode]:
         return None
     h_p1, h_p2 = half_x.parents
     x = None
-    if isinstance(h_p1, ConstantNode) and h_p1.value == 0.5:
+    if h_p1.op_type == OpType.CONSTANT and h_p1.attrs.get("value") == 0.5:
         x = h_p2
-    elif isinstance(h_p2, ConstantNode) and h_p2.value == 0.5:
+    elif h_p2.op_type == OpType.CONSTANT and h_p2.attrs.get("value") == 0.5:
         x = h_p1
 
     if x is None:

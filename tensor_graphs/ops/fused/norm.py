@@ -3,7 +3,7 @@ File: tensor_graphs/ops/fused/norm.py
 """
 
 from typing import List, Dict, Any, Optional
-from ...ir.node import TensorNode, ConstantNode
+from ...ir.node import TensorNode
 from ...ir.dtypes import DType
 from ..atomic import OpType
 from ..interface import CompositeOp
@@ -37,26 +37,23 @@ class RMSNorm(CompositeOp):
             attrs={"axis": axis, "keepdims": True},
         )
 
-        n = x.shape[axis]
-        if n is None:
-            raise ValueError(
-                f"RMSNorm requires static shape on normalization axis {axis}"
-            )
-        n_elements = ConstantNode(
-            OpType.CONSTANT, (1,), x.dtype, [], "n_elements", value=float(n)
+        # Scale mean by 1/N
+        n = x.shape[axis] or 1
+        n_elements = TensorNode(
+            OpType.CONSTANT, (1,), x.dtype, [], "n_elements", attrs={"value": float(n)}
         )
         mean_sq = TensorNode(
             OpType.DIVIDE, sum_sq.shape, x.dtype, [sum_sq, n_elements], "rmsnorm_mean"
         )
 
-        # 3. Add Epsilon
+        # inv_sqrt = 1 / sqrt(mean + eps)
         add_eps = TensorNode(
             OpType.ADD, mean_sq.shape, x.dtype, [mean_sq, eps], "add_eps"
         )
-
-        # 4. Rsqrt
         rsqrt = TensorNode(OpType.SQRT, add_eps.shape, x.dtype, [add_eps], "sqrt")
-        one = ConstantNode(OpType.CONSTANT, (1,), x.dtype, [], "one_const", value=1.0)
+        one = TensorNode(
+            OpType.CONSTANT, (1,), x.dtype, [], "one_const", attrs={"value": 1.0}
+        )
         inv_sqrt = TensorNode(
             OpType.DIVIDE, rsqrt.shape, x.dtype, [one, rsqrt], "inv_sqrt"
         )
