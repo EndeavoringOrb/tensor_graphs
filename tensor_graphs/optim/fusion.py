@@ -5,9 +5,9 @@ File: tensor_graphs/optim/fusion.py
 from typing import Optional
 from ..ir.node import TensorNode
 from ..ops.atomic_types import OpType
-from ..ops.fused.math import FusedMulAdd
-from ..ops.fused.norm import RMSNorm
-from ..ops.fused.activation import GELU
+from ..ops.fused.fma import fused_mul_add_ref
+from ..ops.fused.rms_norm import rms_norm_ref
+from ..ops.fused.gelu import gelu_ref
 
 
 def try_fuse_rmsnorm(node: TensorNode) -> Optional[TensorNode]:

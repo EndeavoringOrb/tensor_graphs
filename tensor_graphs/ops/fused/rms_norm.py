@@ -4,7 +4,7 @@ from ..atomic_types import OpType
 
 
 def rms_norm_ref(
-    inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
+    inputs: List[TensorNode], name="rmsnorm_out", attrs: Optional[Dict[str, Any]] = None
 ) -> TensorNode:
     """
     Reference graph for RMSNorm.
@@ -52,6 +52,6 @@ def rms_norm_ref(
     one_scale = TensorNode(
         OpType.ADD, scale.shape, scale.dtype, [one, scale], "1_plus_scale"
     )
-    out = TensorNode(OpType.MUL, x.shape, x.dtype, [norm, one_scale], "rmsnorm_out")
+    out = TensorNode(OpType.MUL, x.shape, x.dtype, [norm, one_scale], name)
 
     return out

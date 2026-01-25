@@ -1,7 +1,7 @@
 from typing import List, Dict, Any, Optional, Iterator, Set, Tuple
 from ..ir.node import TensorNode
 from ..ir.dtypes import Backend
-from ..ops.registry import get_composite_op
+from ..ops.registry import get_reference_factory
 from ..ops.atomic_types import OpType
 from ..backend.registry import KernelRegistry
 import copy
@@ -50,13 +50,13 @@ class PathGenerator:
             memo = {}
 
         # This is recursive. For each node, we can either keep it or decompose it (if composite).
-        composite = get_composite_op(node.op_type)
+        factory = get_reference_factory(node.op_type)
 
         # Option 1: Keep as-is (but recursively generate variants for parents)
         # For simplicity, let's just do two extremes: fully monolithic and fully decomposed.
         yield node
 
-        if composite:
+        if factory:
             yield self._fully_decompose(node)
 
     def _fully_decompose(self, node: TensorNode, memo=None) -> TensorNode:
@@ -66,10 +66,10 @@ class PathGenerator:
             return memo[node]
 
         new_parents = [self._fully_decompose(p, memo) for p in node.parents]
-        composite = get_composite_op(node.op_type)
+        factory = get_reference_factory(node.op_type)
 
-        if composite:
-            decomposed_node = composite.decompose(new_parents, node.attrs)
+        if factory:
+            decomposed_node = factory(new_parents, node.attrs)
             memo[node] = decomposed_node
             return decomposed_node
 

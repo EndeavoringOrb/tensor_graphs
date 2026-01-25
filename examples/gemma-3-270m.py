@@ -18,7 +18,6 @@ from tensor_graphs.ops.fused import (
     rope_ref,
     gelu_ref,
     rms_norm_ref,
-    embedding_ref,
     softmax_ref,
 )
 
@@ -139,26 +138,21 @@ class GraphBuilder:
     def embedding(self, indices, weights):
         out_shape = indices.shape + (weights.shape[-1],)
         return TensorNode(
-            Embedding.op_type, out_shape, DType.FP32, [indices, weights], "embed"
+            OpType.GATHER, out_shape, DType.FP32, [weights, indices], "embed"
         )
 
     def rms_norm(self, x, scale, eps_node):
-        return TensorNode(
-            RMSNorm.op_type,
-            x.shape,
-            DType.FP32,
-            [x, scale, eps_node],
-            f"rmsnorm_{x.name}",
-        )
+        node = rms_norm_ref([x, scale, eps_node], name=f"rmsnorm_{x.name}")
+        return node
 
     def gelu(self, x):
-        return TensorNode(GELU.op_type, x.shape, DType.FP32, [x], "gelu")
+        return gelu_ref([x])
 
     def softmax(self, x):
-        return TensorNode(Softmax.op_type, x.shape, DType.FP32, [x], "softmax")
+        return softmax_ref([x])
 
     def rope(self, x, cos, sin):
-        return TensorNode(RoPE.op_type, x.shape, DType.FP32, [x, cos, sin], "rope")
+        return rope_ref([x, cos, sin])
 
     def repeat(self, x, repeats, axis=1):
         """Repeats the input tensor along the specified axis."""
