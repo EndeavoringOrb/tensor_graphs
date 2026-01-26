@@ -134,7 +134,6 @@ class GraphBuilder:
             "fill",
         )
 
-    # --- Fused / Composite Wrappers (Using Library Ops) ---
     def embedding(self, indices, weights):
         out_shape = indices.shape + (weights.shape[-1],)
         return TensorNode(
