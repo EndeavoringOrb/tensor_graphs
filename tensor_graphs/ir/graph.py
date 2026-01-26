@@ -2,6 +2,7 @@ from typing import List, Set, Dict, Any
 from .node import TensorNode
 from .dtypes import DType, Backend
 import json
+import numpy as np
 
 
 def topological_sort(root: TensorNode) -> List[TensorNode]:
@@ -81,6 +82,19 @@ def find_subgraph(large_graph: TensorNode, subgraph: TensorNode) -> List[TensorN
 # --- Serialization Helpers ---
 
 
+class GraphEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.float32, np.float64)):
+            return float(obj)
+        if isinstance(obj, (np.int32, np.int64)):
+            return int(obj)
+        if isinstance(obj, TensorNode):
+            return str(obj)
+        return super().default(obj)
+
+
 def graph_to_json(root: TensorNode) -> str:
     """
     Serializes a graph to a JSON string representation.
@@ -106,7 +120,7 @@ def graph_to_json(root: TensorNode) -> str:
             }
         )
 
-    return json.dumps(serialized_nodes)
+    return json.dumps(serialized_nodes, cls=GraphEncoder)
 
 
 def graph_from_json(json_str: str) -> TensorNode:

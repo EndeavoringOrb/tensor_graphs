@@ -40,6 +40,10 @@ class GraphBuilder:
         return node
 
     def constant(self, value, shape, dtype, name):
+        # Convert to numpy array for consistency with backend expectations
+        if not isinstance(value, np.ndarray):
+            value = np.array(value)
+
         node = TensorNode(
             op_type=OpType.CONSTANT,
             shape=shape,

@@ -7,7 +7,6 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 
 def test_add_generic_vector():
-    """Should trigger add_generic_vector (Score: Low but match)"""
     # Shape (10,) matches (None,)
     a = TensorNode(OpType.INPUT, (10,), DType.FP32, [], "a")
     b = TensorNode(OpType.INPUT, (10,), DType.FP32, [], "b")
@@ -21,7 +20,6 @@ def test_add_generic_vector():
 
 
 def test_add_vec32_optimized():
-    """Should trigger add_vec32_optimized (Score: High)"""
     # Shape (32,) matches (32,)
     a = TensorNode(OpType.INPUT, (32,), DType.FP32, [], "a")
     b = TensorNode(OpType.INPUT, (32,), DType.FP32, [], "b")
@@ -35,7 +33,6 @@ def test_add_vec32_optimized():
 
 
 def test_add_broadcast():
-    """Should trigger add_scalar_broadcast"""
     s = TensorNode(OpType.INPUT, (1,), DType.FP32, [], "s")
     m = TensorNode(OpType.INPUT, (4, 4), DType.FP32, [], "m")
     add_node = TensorNode(OpType.ADD, (4, 4), DType.FP32, [s, m], "add")

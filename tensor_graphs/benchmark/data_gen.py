@@ -1,12 +1,9 @@
-"""
-File: tensor_graphs/benchmark/data_gen.py
-"""
-
 import numpy as np
 import random
 from typing import List, Dict, Any, Tuple, Optional
 from ..ir.dtypes import DType, Backend, TensorSignature
 from ..ops.atomic_types import OpType
+from ..ir.node import TensorNode
 
 
 class DataGenerator:
@@ -27,6 +24,11 @@ class DataGenerator:
     @staticmethod
     def random_tensor(shape, dtype: DType):
         np_dtype = DataGenerator.get_numpy_dtype(dtype)
+
+        # Handle scalar / empty shape normalization
+        if shape is None:
+            shape = (1,)
+
         if dtype == DType.BOOL:
             return np.random.choice([True, False], size=shape)
         elif dtype == DType.INT32:
@@ -35,8 +37,27 @@ class DataGenerator:
             return np.random.randn(*shape).astype(np_dtype)
 
     @staticmethod
+    def generate_from_shapes(
+        nodes: List[TensorNode], axes_map: Dict[str, Any]
+    ) -> Dict[str, np.ndarray]:
+        """
+        Generates dummy data for a list of input nodes, using specific shapes
+        provided in axes_map (name -> shape_tuple).
+        """
+        inputs = {}
+        for node in nodes:
+            if node.name in axes_map:
+                # Use stored shape
+                shape = tuple(axes_map[node.name])
+            else:
+                # Fallback to node definition shape or default
+                shape = node.shape if node.shape is not None else (1,)
+
+            inputs[node.name] = DataGenerator.random_tensor(shape, node.dtype)
+        return inputs
+
+    @staticmethod
     def _random_shape(min_rank=1, max_rank=4, min_dim=1, max_dim=64) -> Tuple[int, ...]:
-        """Generates a random shape tuple."""
         rank = random.randint(min_rank, max_rank)
         return tuple(random.randint(min_dim, max_dim) for _ in range(rank))
 

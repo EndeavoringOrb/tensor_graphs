@@ -1,63 +1,46 @@
-from typing import List, Dict, Any, Optional
 from ...ir.node import TensorNode
 from ...ir.dtypes import DType
 from ..atomic_types import OpType
+from ..registry import register_reference_factory
 
 
-def rope_ref(
-    inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
-) -> TensorNode:
+# Register atomic decomposition logic
+def rope_decomposition(inputs, attrs=None):
     x, cos, sin = inputs
     D = x.shape[-1]
     half_d = D // 2 if D is not None else None
 
-    # x1 = x[..., :half_d]
     x1_node = x[..., :half_d]
-
-    # x2 = x[..., half_d:]
     x2_node = x[..., half_d:]
-
     neg_x2_node = TensorNode(
-        op_type=OpType.NEGATE,
-        shape=x2_node.shape,
-        dtype=x2_node.dtype,
-        parents=[x2_node],
-        name=f"{x.name}_neg_x2",
+        OpType.NEGATE, x2_node.shape, x2_node.dtype, [x2_node], f"{x.name}_neg_x2"
     )
 
-    rotated_shape = x.shape
     axis_node = TensorNode(
         OpType.CONSTANT, (1,), DType.INT32, [], f"{x.name}_axis", attrs={"value": [-1]}
     )
 
     rotated_node = TensorNode(
-        op_type=OpType.CONCAT,
-        shape=rotated_shape,
-        dtype=x.dtype,
-        parents=[neg_x2_node, x1_node, axis_node],
-        name=f"{x.name}_rotated",
+        OpType.CONCAT,
+        x.shape,
+        x.dtype,
+        [neg_x2_node, x1_node, axis_node],
+        f"{x.name}_rotated",
     )
 
-    term1_node = TensorNode(
-        op_type=OpType.MUL,
-        shape=x.shape,
-        dtype=x.dtype,
-        parents=[x, cos],
-        name=f"{x.name}_term1_mul_cos",
-    )
-
-    term2_node = TensorNode(
-        op_type=OpType.MUL,
-        shape=x.shape,
-        dtype=x.dtype,
-        parents=[rotated_node, sin],
-        name=f"{x.name}_term2_mul_sin",
+    term1 = TensorNode(OpType.MUL, x.shape, x.dtype, [x, cos], f"{x.name}_t1")
+    term2 = TensorNode(
+        OpType.MUL, x.shape, x.dtype, [rotated_node, sin], f"{x.name}_t2"
     )
 
     return TensorNode(
-        op_type=OpType.ADD,
-        shape=x.shape,
-        dtype=x.dtype,
-        parents=[term1_node, term2_node],
-        name=f"{x.name}_rope_out",
+        OpType.ADD, x.shape, x.dtype, [term1, term2], f"{x.name}_rope_out"
     )
+
+
+register_reference_factory("RoPE", rope_decomposition)
+
+
+# Main entry point returns High-Level Node
+def rope_ref(inputs, attrs=None):
+    return TensorNode("RoPE", inputs[0].shape, inputs[0].dtype, inputs, "rope")

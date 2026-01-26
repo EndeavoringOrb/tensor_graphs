@@ -1,84 +1,54 @@
 import hashlib
 import json
-from typing import Dict, Any, List
-from .node import TensorNode
 from ..ops.atomic_types import OpType
 
 
-class GraphHasher:
-    def __init__(self, root: TensorNode):
-        self.root = root
-        self.input_ids: Dict[TensorNode, int] = {}
-        self.next_input_id = 0
-        self.hashes: Dict[TensorNode, str] = {}
-
-    def _get_input_id(self, node: TensorNode) -> int:
-        if node not in self.input_ids:
-            self.input_ids[node] = self.next_input_id
-            self.next_input_id += 1
-        return self.input_ids[node]
-
-    def _hash_value(self, val: Any) -> str:
-        # Simple value hasher
-        return hashlib.sha256(str(val).encode("utf-8")).hexdigest()
-
-    def compute_hash(self, node: TensorNode) -> str:
-        if node in self.hashes:
-            return self.hashes[node]
-
-        # Base case: Input
-        if node.op_type == OpType.INPUT:
-            # We treat inputs as variables. Their identity is determined by their discovery order.
-            # This makes the hash invariant to variable names (x, y vs a, b)
-            # but preserves structure (x+x vs x+y).
-            idx = self._get_input_id(node)
-            node_hash = self._hash_value(f"Input_{idx}_{node.dtype.value}_{node.shape}")
-            self.hashes[node] = node_hash
-            return node_hash
-
-        # Base case: Constant
-        if node.op_type == OpType.CONSTANT:
-            # For constants, the value matters.
-            # We round floats to avoid precision jitter if needed, but for now str() is okay.
-            val = node.attrs.get("value")
-            val_str = str(val)
-            node_hash = self._hash_value(
-                f"Const_{node.dtype.value}_{node.shape}_{val_str}"
-            )
-            self.hashes[node] = node_hash
-            return node_hash
-
-        # Recursive case: Ops
-        parent_hashes = [self.compute_hash(p) for p in node.parents]
-
-        # Handle Commutativity
-        if node.op_type in (OpType.ADD, OpType.MUL):
-            parent_hashes.sort()
-
-        # Construct the signature string
-        # "OpType|DType|Shape|AttrHash|ParentHash1,ParentHash2,..."
-
-        # Serialize attributes (sort keys for consistency)
-        attrs_str = ""
-        if node.attrs:
-            try:
-                attrs_str = json.dumps(node.attrs, sort_keys=True, default=str)
-            except TypeError:
-                attrs_str = str(node.attrs)
-
-        raw_str = (
-            f"{node.op_type}|{node.dtype.value}|{node.shape}|{attrs_str}|"
-            + ",".join(parent_hashes)
-        )
-
-        node_hash = self._hash_value(raw_str)
-        self.hashes[node] = node_hash
-        return node_hash
+def _hash_string(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-def compute_structural_hash(root: TensorNode) -> str:
-    """
-    Computes a structural hash of the graph rooted at 'root'.
-    """
-    hasher = GraphHasher(root)
-    return hasher.compute_hash(root)
+def get_structural_hash(node, memo=None) -> str:
+    if memo is None:
+        memo = {}
+    if node in memo:
+        return memo[node]
+
+    # 1. Base Cases
+    if node.op_type == OpType.INPUT:
+        # For planning, inputs with same signature are identical
+        h = _hash_string(f"INPUT|{node.dtype.value}|{node.shape}|{node.backend.value}")
+        memo[node] = h
+        return h
+
+    if node.op_type == OpType.CONSTANT:
+        if node.shape and (
+            len(node.shape) == 0 or (len(node.shape) == 1 and node.shape[0] == 1)
+        ):
+            # Include value for scalars (often params like axis)
+            val = node.attrs.get("value", "?")
+            h = _hash_string(f"CONST|{val}")
+        else:
+            h = _hash_string(f"CONST|{node.dtype.value}|{node.shape}")
+        memo[node] = h
+        return h
+
+    # 2. Recurse
+    parent_hashes = [get_structural_hash(p, memo) for p in node.parents]
+
+    # 3. Canonicalize Commutative Ops
+    if node.op_type in (OpType.ADD, OpType.MUL):
+        parent_hashes.sort()
+
+    # 4. Attributes
+    attrs_str = json.dumps(node.attrs, sort_keys=True, default=str)
+
+    # 5. Compute
+    content = f"{node.op_type}|{node.dtype.value}|{node.shape}|{node.backend.value}|{attrs_str}|{','.join(parent_hashes)}"
+    h = _hash_string(content)
+
+    memo[node] = h
+    return h
+
+
+def compute_structural_hash(node) -> str:
+    return get_structural_hash(node)

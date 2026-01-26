@@ -1,39 +1,25 @@
-from typing import List, Dict, Any, Optional
 from ...ir.node import TensorNode
 from ..atomic_types import OpType
+from ..registry import register_reference_factory
 
 
-def tanh_ref(
-    inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
-) -> TensorNode:
+def tanh_decomposition(inputs, attrs=None):
     x = inputs[0]
-    # e^x
     exp_x = TensorNode(OpType.EXP, x.shape, x.dtype, [x], "exp_x")
-    # e^(-x)
     neg_x = TensorNode(OpType.NEGATE, x.shape, x.dtype, [x], "neg_x")
     exp_neg_x = TensorNode(OpType.EXP, x.shape, x.dtype, [neg_x], "exp_neg_x")
-    # e^x - e^(-x)
-    numerator = TensorNode(
-        OpType.ADD,
-        x.shape,
-        x.dtype,
-        [
-            exp_x,
-            TensorNode(
-                OpType.NEGATE,
-                exp_neg_x.shape,
-                exp_neg_x.dtype,
-                [exp_neg_x],
-                "neg_exp_neg_x",
-            ),
-        ],
-        "numerator",
+
+    neg_exp_neg = TensorNode(
+        OpType.NEGATE, x.shape, x.dtype, [exp_neg_x], "neg_exp_neg"
     )
-    # e^x + e^(-x)
-    denominator = TensorNode(
-        OpType.ADD, x.shape, x.dtype, [exp_x, exp_neg_x], "denominator"
-    )
-    # (e^x - e^(-x)) / (e^x + e^(-x))
-    return TensorNode(
-        OpType.DIVIDE, x.shape, x.dtype, [numerator, denominator], "tanh_out"
-    )
+    num = TensorNode(OpType.ADD, x.shape, x.dtype, [exp_x, neg_exp_neg], "num")
+    den = TensorNode(OpType.ADD, x.shape, x.dtype, [exp_x, exp_neg_x], "den")
+
+    return TensorNode(OpType.DIVIDE, x.shape, x.dtype, [num, den], "tanh_out")
+
+
+register_reference_factory("Tanh", tanh_decomposition)
+
+
+def tanh_ref(inputs, attrs=None):
+    return TensorNode("Tanh", inputs[0].shape, inputs[0].dtype, inputs, "tanh")

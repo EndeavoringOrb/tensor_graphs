@@ -1,10 +1,8 @@
 import sqlite3
 import json
+import math
 import uuid
-import os
-from datetime import datetime
-from typing import Optional, List, Dict, Any
-
+from typing import Optional, Dict, Any, List
 
 class BenchmarkDB:
     def __init__(self, db_path: str = "benchmarks.db"):
@@ -17,359 +15,102 @@ class BenchmarkDB:
     def _init_db(self):
         with self._get_connection() as conn:
             cursor = conn.cursor()
-
-            # A. The Math (Definitions)
+            # Kernel Benchmarks Table
+            # Stores raw timing for specific op/backend/shape configurations
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS canonical_graphs (
+                CREATE TABLE IF NOT EXISTS kernel_benchmarks (
                     id TEXT PRIMARY KEY,
-                    human_name TEXT,
-                    structural_hash TEXT UNIQUE,
-                    atomic_graph_json TEXT
-                )
-            """)
-
-            # B. The Code (Solutions)
-            # UPDATED: Added recipe_json column
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS implementations (
-                    id TEXT PRIMARY KEY,
-                    canonical_graph_id TEXT,
-                    type TEXT, -- KERNEL, GRAPH_RECIPE
-                    name TEXT,
+                    op_type TEXT,
                     backend TEXT,
-                    source_hash TEXT,
-                    recipe_json TEXT, -- Serialized assignments {node_name: backend}
-                    requirements TEXT, -- JSON
-                    FOREIGN KEY (canonical_graph_id) REFERENCES canonical_graphs (id)
-                )
-            """)
-
-            # C. The Context (Environment)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS environments (
-                    id TEXT PRIMARY KEY,
-                    hardware_name TEXT,
-                    memory_bytes INTEGER,
-                    platform_info TEXT, -- JSON
-                    libs_info TEXT -- JSON
-                )
-            """)
-
-            # D. The Input (Workload)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS workloads (
-                    id TEXT PRIMARY KEY,
-                    canonical_graph_id TEXT,
-                    axes_hash TEXT,
-                    axes_json TEXT, -- JSON
-                    input_descriptors TEXT, -- JSON
-                    FOREIGN KEY (canonical_graph_id) REFERENCES canonical_graphs (id)
-                )
-            """)
-
-            # E. The Stats (Trace)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS benchmark_traces (
-                    id TEXT PRIMARY KEY,
-                    implementation_id TEXT,
-                    workload_id TEXT,
-                    environment_id TEXT,
-                    status TEXT, -- PASSED, INCORRECT_NUMERICAL, RUNTIME_ERROR, etc.
+                    dtype TEXT,
+                    shape_json TEXT, -- List of ints
+                    attrs_json TEXT, -- Dict
                     latency_ms REAL,
-                    speedup_factor REAL,
-                    max_relative_error REAL,
-                    timestamp TEXT,
-                    full_log TEXT,
-                    FOREIGN KEY (implementation_id) REFERENCES implementations (id),
-                    FOREIGN KEY (workload_id) REFERENCES workloads (id),
-                    FOREIGN KEY (environment_id) REFERENCES environments (id)
+                    timestamp TEXT
                 )
             """)
-
-            # F. Offline Profiling Queue (NEW)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS profiling_queue (
-                    id TEXT PRIMARY KEY,
-                    canonical_graph_id TEXT,
-                    workload_id TEXT,
-                    priority INTEGER DEFAULT 0,
-                    added_at TEXT,
-                    FOREIGN KEY (canonical_graph_id) REFERENCES canonical_graphs (id),
-                    FOREIGN KEY (workload_id) REFERENCES workloads (id),
-                    UNIQUE(canonical_graph_id, workload_id)
-                )
-            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_op_backend ON kernel_benchmarks(op_type, backend)")
             conn.commit()
 
-    def add_canonical_graph(
-        self,
-        structural_hash: str,
-        human_name: Optional[str] = None,
-        atomic_graph_json: Optional[str] = None,
-    ) -> str:
+    def add_benchmark(self, op_type: str, backend: str, dtype: str, shape: tuple, attrs: dict, latency_ms: float):
+        import datetime
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, atomic_graph_json FROM canonical_graphs WHERE structural_hash = ?",
-                (structural_hash,),
-            )
-            row = cursor.fetchone()
-            if row:
-                # Update JSON if it wasn't there before but is provided now
-                if atomic_graph_json and not row[1]:
-                    cursor.execute(
-                        "UPDATE canonical_graphs SET atomic_graph_json = ? WHERE id = ?",
-                        (atomic_graph_json, row[0]),
-                    )
-                    conn.commit()
-                return row[0]
-
-            graph_id = str(uuid.uuid4())
-            cursor.execute(
-                "INSERT INTO canonical_graphs (id, human_name, structural_hash, atomic_graph_json) VALUES (?, ?, ?, ?)",
-                (graph_id, human_name, structural_hash, atomic_graph_json),
-            )
-            conn.commit()
-            return graph_id
-
-    def add_implementation(
-        self,
-        canonical_graph_id: str,
-        impl_type: str,
-        name: str,
-        backend: str,
-        source_hash: str,
-        requirements: Optional[Dict[str, Any]] = None,
-        recipe_json: Optional[str] = None,  # UPDATED: Accept recipe_json
-    ) -> str:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-
-            # Check for existing implementation
-            cursor.execute(
-                "SELECT id FROM implementations WHERE canonical_graph_id = ? AND type = ? AND name = ?",
-                (canonical_graph_id, impl_type, name),
-            )
-            row = cursor.fetchone()
-            if row:
-                return row[0]
-
-            impl_id = str(uuid.uuid4())
-            cursor.execute(
-                "INSERT INTO implementations (id, canonical_graph_id, type, name, backend, source_hash, requirements, recipe_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO kernel_benchmarks VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    impl_id,
-                    canonical_graph_id,
-                    impl_type,
-                    name,
+                    str(uuid.uuid4()),
+                    op_type,
                     backend,
-                    source_hash,
-                    json.dumps(requirements or {}),
-                    recipe_json,
-                ),
-            )
-            conn.commit()
-            return impl_id
-
-    def add_environment(
-        self,
-        hardware_name: str,
-        memory_bytes: int,
-        platform_info: Dict[str, Any],
-        libs_info: Dict[str, Any],
-    ) -> str:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            # Simple dedupe based on hardware name (MVP)
-            cursor.execute(
-                "SELECT id FROM environments WHERE hardware_name = ?", (hardware_name,)
-            )
-            row = cursor.fetchone()
-            if row:
-                return row[0]
-
-            env_id = str(uuid.uuid4())
-            cursor.execute(
-                "INSERT INTO environments (id, hardware_name, memory_bytes, platform_info, libs_info) VALUES (?, ?, ?, ?, ?)",
-                (
-                    env_id,
-                    hardware_name,
-                    memory_bytes,
-                    json.dumps(platform_info),
-                    json.dumps(libs_info),
-                ),
-            )
-            conn.commit()
-            return env_id
-
-    def add_workload(
-        self,
-        canonical_graph_id: str,
-        axes_hash: str,
-        axes_json: Dict[str, Any],
-        input_descriptors: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id FROM workloads WHERE canonical_graph_id = ? AND axes_hash = ?",
-                (canonical_graph_id, axes_hash),
-            )
-            row = cursor.fetchone()
-            if row:
-                return row[0]
-
-            workload_id = str(uuid.uuid4())
-            cursor.execute(
-                "INSERT INTO workloads (id, canonical_graph_id, axes_hash, axes_json, input_descriptors) VALUES (?, ?, ?, ?, ?)",
-                (
-                    workload_id,
-                    canonical_graph_id,
-                    axes_hash,
-                    json.dumps(axes_json),
-                    json.dumps(input_descriptors or {}),
-                ),
-            )
-            conn.commit()
-            return workload_id
-
-    def add_benchmark_trace(
-        self,
-        implementation_id: str,
-        workload_id: str,
-        environment_id: str,
-        status: str,
-        latency_ms: float,
-        max_relative_error: float = 0.0,
-        speedup_factor: float = 1.0,
-        full_log: str = "",
-    ) -> str:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            trace_id = str(uuid.uuid4())
-            timestamp = datetime.utcnow().isoformat()
-            cursor.execute(
-                """INSERT INTO benchmark_traces 
-                   (id, implementation_id, workload_id, environment_id, status, latency_ms, speedup_factor, max_relative_error, timestamp, full_log) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    trace_id,
-                    implementation_id,
-                    workload_id,
-                    environment_id,
-                    status,
+                    dtype,
+                    json.dumps(list(shape) if shape else []),
+                    json.dumps(attrs or {}, sort_keys=True),
                     latency_ms,
-                    speedup_factor,
-                    max_relative_error,
-                    timestamp,
-                    full_log,
-                ),
+                    datetime.datetime.utcnow().isoformat()
+                )
             )
             conn.commit()
-            return trace_id
 
-    def get_best_implementation(
-        self, structural_hash: str, workload_axes_hash: str, environment_id: str
-    ) -> Optional[Dict[str, Any]]:
+    def estimate_latency(self, op_type: str, backend: str, dtype: str, shape: tuple, attrs: dict = None) -> Optional[float]:
+        """
+        Estimates latency.
+        1. Exact Match
+        2. Nearest Neighbor (Log-Space Euclidean Distance on Shape) + Complexity Scaling
+        """
+        shape_list = list(shape) if shape else []
+        attrs_json = json.dumps(attrs or {}, sort_keys=True)
+        
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            # Join traces with implementations and workloads to find the fastest PASSED implementation
-            query = """
-                SELECT i.*, t.latency_ms, t.max_relative_error
-                FROM implementations i
-                JOIN canonical_graphs g ON i.canonical_graph_id = g.id
-                JOIN workloads w ON w.canonical_graph_id = g.id
-                JOIN benchmark_traces t ON t.implementation_id = i.id AND t.workload_id = w.id
-                WHERE g.structural_hash = ? 
-                  AND w.axes_hash = ?
-                  AND t.environment_id = ?
-                  AND t.status = 'PASSED'
-                ORDER BY t.latency_ms ASC
-                LIMIT 1
-            """
-            cursor.execute(query, (structural_hash, workload_axes_hash, environment_id))
+            
+            # 1. Exact Match
+            cursor.execute("""
+                SELECT latency_ms FROM kernel_benchmarks 
+                WHERE op_type=? AND backend=? AND dtype=? AND shape_json=? AND attrs_json=?
+                ORDER BY timestamp DESC LIMIT 1
+            """, (op_type, backend, dtype, json.dumps(shape_list), attrs_json))
             row = cursor.fetchone()
             if row:
-                return dict(row)
+                return row['latency_ms']
+            
+            # 2. Heuristic Interpolation (Fallback)
+            # Fetch all entries for this op/backend/dtype
+            cursor.execute("""
+                SELECT shape_json, latency_ms FROM kernel_benchmarks 
+                WHERE op_type=? AND backend=? AND dtype=?
+            """, (op_type, backend, dtype))
+            
+            rows = cursor.fetchall()
+            if not rows:
+                return None
+                
+            best_dist = float('inf')
+            best_ref = None
+            
+            target_vol = math.prod(x for x in shape_list if x is not None) or 1
+            target_log_dims = [math.log(x if x else 1) for x in shape_list]
+            
+            for r in rows:
+                ref_shape = json.loads(r['shape_json'])
+                ref_latency = r['latency_ms']
+                
+                # Check rank match
+                if len(ref_shape) != len(shape_list):
+                    continue
+                    
+                # Distance
+                ref_log_dims = [math.log(x if x else 1) for x in ref_shape]
+                dist = sum((a-b)**2 for a,b in zip(target_log_dims, ref_log_dims))
+                
+                if dist < best_dist:
+                    best_dist = dist
+                    best_ref = (ref_shape, ref_latency)
+            
+            if best_ref:
+                ref_shape, ref_latency = best_ref
+                ref_vol = math.prod(x for x in ref_shape if x else 1) or 1
+                # Linear scaling by volume (FLOPs/Bytes proxy)
+                return ref_latency * (target_vol / ref_vol)
+
             return None
-
-    def get_op_preference(
-        self, op_type: str, shape_str: str, env_id: str
-    ) -> Optional[str]:
-        """
-        Returns 'KERNEL' or 'GRAPH_RECIPE' (Atomic) based on what was fastest for this op_type.
-        """
-        with self._get_connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            query = """
-                SELECT i.type, t.latency_ms
-                FROM implementations i
-                JOIN canonical_graphs g ON i.canonical_graph_id = g.id
-                JOIN benchmark_traces t ON t.implementation_id = i.id
-                WHERE g.human_name = ?
-                  AND t.environment_id = ?
-                  AND t.status = 'PASSED'
-                ORDER BY t.latency_ms ASC
-                LIMIT 1
-            """
-            cursor.execute(query, (op_type, env_id))
-            row = cursor.fetchone()
-            if row:
-                return row["type"]
-            return None
-
-    # --- Profiling Queue Methods ---
-
-    def add_to_queue(
-        self, canonical_graph_id: str, workload_id: str, priority: int = 0
-    ):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    "INSERT INTO profiling_queue (id, canonical_graph_id, workload_id, priority, added_at) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        str(uuid.uuid4()),
-                        canonical_graph_id,
-                        workload_id,
-                        priority,
-                        datetime.utcnow().isoformat(),
-                    ),
-                )
-                conn.commit()
-            except sqlite3.IntegrityError:
-                # Already in queue
-                pass
-
-    def get_queue_items(self) -> List[Dict[str, Any]]:
-        """
-        Returns items in the queue joined with graph and workload data.
-        """
-        with self._get_connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            query = """
-                SELECT 
-                    q.id as queue_id,
-                    g.id as graph_id,
-                    g.structural_hash,
-                    g.atomic_graph_json,
-                    g.human_name,
-                    w.id as workload_id,
-                    w.axes_json
-                FROM profiling_queue q
-                JOIN canonical_graphs g ON q.canonical_graph_id = g.id
-                JOIN workloads w ON q.workload_id = w.id
-                ORDER BY q.priority DESC, q.added_at ASC
-            """
-            cursor.execute(query)
-            return [dict(row) for row in cursor.fetchall()]
-
-    def remove_from_queue(self, queue_id: str):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM profiling_queue WHERE id = ?", (queue_id,))
-            conn.commit()

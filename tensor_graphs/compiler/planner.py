@@ -1,160 +1,184 @@
-from typing import List, Dict, Any, Optional, Iterator, Set, Tuple
+import copy
+from typing import Dict, Any, Tuple
 from ..ir.node import TensorNode
 from ..ir.dtypes import Backend
+from ..ir.hashing import get_structural_hash
+from ..benchmark.db import BenchmarkDB
+from .cost_model import CostModel
+from ..backend.registry import KernelRegistry
 from ..ops.registry import get_reference_factory
 from ..ops.atomic_types import OpType
-from ..backend.registry import KernelRegistry
-import copy
-import json
 
 
 class ExecutionRecipe:
     def __init__(self, root: TensorNode, assignments: Dict[TensorNode, Backend]):
         self.root = root
-        self.assignments = assignments  # Node -> Backend
-
-    def to_dict(self):
-        # We need a way to identify nodes that is stable.
-        # Since this is an execution plan for a specific graph instance,
-        # we can use node names if they are unique, or just serialize the structure.
-        return {
-            "root_name": self.root.name,
-            "assignments": {
-                node.name: backend.value for node, backend in self.assignments.items()
-            },
-        }
+        self.assignments = assignments
 
 
-class PathGenerator:
-    def __init__(self, root: TensorNode):
-        self.root = root
+class Planner:
+    def __init__(self, db_path="benchmarks.db"):
+        self.db = BenchmarkDB(db_path)
+        self.cost_model = CostModel(self.db)
+        # Memoization: hash -> (cost, rewritten_node, backend_assignments)
+        self.memo = {}
 
-    def generate_all_strategies(self) -> Iterator[ExecutionRecipe]:
-        """
-        Generates different execution recipes for the graph.
-        """
-        # 1. Generate all possible graph topologies (monolithic vs decomposed)
-        for graph_variant in self._generate_graph_variants(self.root):
-            # 2. For each topology, generate backend assignments
-            for assignments in self._generate_backend_assignments(graph_variant):
-                # 3. Insert CopyTo nodes where needed
-                final_graph, final_assignments = self._insert_transfers(
-                    graph_variant, assignments
+    def plan(self, root: TensorNode) -> ExecutionRecipe:
+        _, new_root, assignments = self._min_cost(root, root.backend)
+        return ExecutionRecipe(new_root, assignments)
+
+    def _min_cost(
+        self, node: TensorNode, target_backend: Backend, depth=0
+    ) -> Tuple[float, TensorNode, Dict]:
+        # Hash including target backend because transferring logic is specific to destination
+        node_hash = get_structural_hash(node) + f"|{target_backend.value}"
+
+        if node_hash in self.memo:
+            return self.memo[node_hash]
+
+        candidates = []
+
+        # 1. Base Cases (Input/Const)
+        if node.op_type in (OpType.INPUT, OpType.CONSTANT):
+            # Input transfer cost
+            transfer_cost = self.cost_model.estimate_transfer_cost(
+                node.backend, target_backend, node.shape, node.dtype
+            )
+            # If backend differs, inject CopyTo
+            if node.backend != target_backend:
+                new_node = TensorNode(
+                    OpType.COPY_TO,
+                    node.shape,
+                    node.dtype,
+                    [node],
+                    f"copy_{node.name}",
+                    attrs={"target_backend": target_backend.value},
+                    backend=target_backend,
                 )
-                yield ExecutionRecipe(final_graph, final_assignments)
+                # Assign logic
+                assignments = {node: node.backend, new_node: target_backend}
+                res = (transfer_cost, new_node, assignments)
+                self.memo[node_hash] = res
+                return res
+            else:
+                res = (0.0, node, {node: node.backend})
+                self.memo[node_hash] = res
+                return res
 
-    def _generate_graph_variants(
-        self, node: TensorNode, memo=None
-    ) -> Iterator[TensorNode]:
-        if memo is None:
-            memo = {}
+        # 2. Strategy A: Direct Kernel on Target Backend
+        # We process parents recursively first to get their costs and rewritten forms on THIS backend
+        parent_results = [
+            self._min_cost(p, target_backend, depth + 1) for p in node.parents
+        ]
+        parent_cost = sum(r[0] for r in parent_results)
+        parent_nodes = [r[1] for r in parent_results]
+        parent_assigns = {}
+        for r in parent_results:
+            parent_assigns.update(r[2])
 
-        # This is recursive. For each node, we can either keep it or decompose it (if composite).
-        factory = get_reference_factory(node.op_type)
+        input_sigs = [p.signature for p in parent_nodes]
 
-        # Option 1: Keep as-is (but recursively generate variants for parents)
-        # For simplicity, let's just do two extremes: fully monolithic and fully decomposed.
-        yield node
+        # Check if kernel exists
+        kernel = KernelRegistry.select_best_kernel(
+            node.op_type, input_sigs, target_backend, node.dtype
+        )
+        if kernel:
+            k_cost = self.cost_model.estimate_kernel_cost(
+                node.op_type, target_backend, node.dtype, node.shape, node.attrs
+            )
+            total_cost = parent_cost + k_cost
 
-        if factory:
-            yield self._fully_decompose(node)
-
-    def _fully_decompose(self, node: TensorNode, memo=None) -> TensorNode:
-        if memo is None:
-            memo = {}
-        if node in memo:
-            return memo[node]
-
-        new_parents = [self._fully_decompose(p, memo) for p in node.parents]
-        factory = get_reference_factory(node.op_type)
-
-        if factory:
-            decomposed_node = factory(new_parents, node.attrs)
-            memo[node] = decomposed_node
-            return decomposed_node
-
-        if new_parents == node.parents:
-            memo[node] = node
-            return node
-
-        new_node = copy.copy(node)
-        new_node.parents = new_parents
-        memo[node] = new_node
-        return new_node
-
-    def _generate_backend_assignments(
-        self, graph: TensorNode
-    ) -> Iterator[Dict[TensorNode, Backend]]:
-        nodes = list(self._get_all_nodes(graph))
-
-        # Option 1: All on CPU_NUMPY
-        yield {node: Backend.CPU_NUMPY for node in nodes}
-
-        # Option 2: All on GPU_TORCH
-        yield {node: Backend.GPU_TORCH for node in nodes}
-
-        # In a real implementation, we'd do more interesting mixed assignments.
-
-    def _insert_transfers(
-        self, root: TensorNode, assignments: Dict[TensorNode, Backend]
-    ) -> Tuple[TensorNode, Dict[TensorNode, Backend]]:
-        """
-        Recursively walks the graph and inserts COPY_TO nodes where parent backend != child backend.
-        """
-        new_assignments = assignments.copy()
-        memo = {}
-
-        def walk(node: TensorNode) -> TensorNode:
-            if node in memo:
-                return memo[node]
-
-            node_backend = assignments[node]
-            new_parents = []
-            changed = False
-
-            for p in node.parents:
-                processed_p = walk(p)
-                p_backend = assignments.get(
-                    p, node_backend
-                )  # Default to node_backend for leaf inputs if not assigned
-
-                if p_backend != node_backend:
-                    # Insert CopyTo
-                    copy_node = TensorNode(
-                        op_type=OpType.COPY_TO,
-                        shape=p.shape,
-                        dtype=p.dtype,
-                        parents=[processed_p],
-                        name=f"copy_{p.name}_to_{node_backend.value}",
-                        attrs={"target_backend": node_backend.value},
-                    )
-                    new_parents.append(copy_node)
-                    new_assignments[copy_node] = node_backend
-                    changed = True
-                else:
-                    if processed_p != p:
-                        changed = True
-                    new_parents.append(processed_p)
-
-            if not changed:
-                memo[node] = node
-                return node
-
+            # Construct rewritten node using rewritten parents
             new_node = copy.copy(node)
-            new_node.parents = new_parents
-            memo[node] = new_node
-            new_assignments[new_node] = node_backend
-            return new_node
+            new_node.parents = parent_nodes
+            new_node.backend = target_backend
 
-        final_root = walk(root)
-        return final_root, new_assignments
+            assignments = parent_assigns.copy()
+            assignments[new_node] = target_backend
 
-    def _get_all_nodes(self, root: TensorNode, visited=None) -> Set[TensorNode]:
-        if visited is None:
-            visited = set()
-        if root in visited:
-            return visited
-        visited.add(root)
-        for p in root.parents:
-            self._get_all_nodes(p, visited)
-        return visited
+            candidates.append((total_cost, new_node, assignments))
+
+        # 3. Strategy B: Decomposition
+        if depth < 10:  # Prevent infinite recursion
+            ref_factory = get_reference_factory(node.op_type)
+            if ref_factory:
+                # Decompose into subgraph
+                # Important: Factory uses original parents.
+                # But we need to plan the decomposed graph.
+                # The decomposition might introduce new internal nodes.
+                subgraph_root = ref_factory(node.parents, node.attrs)
+
+                # Recursively plan the subgraph
+                decomp_cost, decomp_root, decomp_assigns = self._min_cost(
+                    subgraph_root, target_backend, depth + 1
+                )
+
+                # Add overhead to discourage decomposition if kernel exists and is fast
+                candidates.append((decomp_cost, decomp_root, decomp_assigns))
+
+        # 4. Strategy C: Fusion (Simple FusedMulAdd)
+        # Check matching Mul->Add
+        if node.op_type == OpType.ADD and len(node.parents) == 2:
+            # Try to match a*b + c
+            # We iterate parents to find Mul
+            for i, p in enumerate(node.parents):
+                if p.op_type == OpType.MUL and len(p.parents) == 2:
+                    # Found candidate: (A*B) + C
+                    mul_node = p
+                    other_node = node.parents[1 - i]
+
+                    # Construct high-level Fused Node
+                    fma_parents = mul_node.parents + [other_node]
+                    fma_node = TensorNode(
+                        "FusedMulAdd",
+                        node.shape,
+                        node.dtype,
+                        fma_parents,
+                        f"fused_{node.name}",
+                        backend=node.backend,
+                    )
+
+                    # Recursive plan for FMA
+                    fma_cost, fma_root, fma_assigns = self._min_cost(
+                        fma_node, target_backend, depth
+                    )  # No depth inc?
+                    candidates.append((fma_cost, fma_root, fma_assigns))
+                    break
+
+        if not candidates:
+            # Fallback: If no kernel and no decomposition, try to transfer to CPU_NUMPY if we are not there?
+            if target_backend != Backend.CPU_NUMPY:
+                # Try planning on CPU
+                cpu_cost, cpu_root, cpu_assigns = self._min_cost(
+                    node, Backend.CPU_NUMPY, depth + 1
+                )
+
+                # Add transfer back cost
+                transfer_back = self.cost_model.estimate_transfer_cost(
+                    Backend.CPU_NUMPY, target_backend, node.shape, node.dtype
+                )
+                copy_back = TensorNode(
+                    OpType.COPY_TO,
+                    node.shape,
+                    node.dtype,
+                    [cpu_root],
+                    f"copy_back_{node.name}",
+                    attrs={"target_backend": target_backend.value},
+                    backend=target_backend,
+                )
+
+                final_assigns = cpu_assigns.copy()
+                final_assigns[copy_back] = target_backend
+
+                res = (cpu_cost + transfer_back, copy_back, final_assigns)
+                self.memo[node_hash] = res
+                return res
+            else:
+                raise RuntimeError(
+                    f"No execution strategy found for {node.op_type} on {target_backend}"
+                )
+
+        # Pick Best
+        best = min(candidates, key=lambda x: x[0])
+        self.memo[node_hash] = best
+        return best
