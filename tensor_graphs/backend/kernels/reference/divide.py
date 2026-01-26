@@ -1,13 +1,18 @@
 import numpy as np
 from ....backend.registry import KernelRegistry
-from ....ir.dtypes import DType, TensorSignature
+from ....ir.dtypes import DType, Backend, TensorSignature
 from ....ops.atomic_types import OpType
+from ....ops.atomic.divide import divide_ref
 
 
 # --- 1. Generic Vector ---
 @KernelRegistry.register(
     OpType.DIVIDE,
-    [TensorSignature(DType.FP32, (None,)), TensorSignature(DType.FP32, (None,))],
+    [
+        TensorSignature(DType.FP32, (None,), Backend.CPU_NUMPY),
+        TensorSignature(DType.FP32, (None,), Backend.CPU_NUMPY),
+    ],
+    reference_factory=divide_ref,
 )
 def div_generic_vector(inputs, attrs=None):
     return inputs[0] / inputs[1]
@@ -20,6 +25,7 @@ def div_generic_vector(inputs, attrs=None):
         TensorSignature(DType.FP32, (None, None)),
         TensorSignature(DType.FP32, (None, None)),
     ],
+    reference_factory=divide_ref,
 )
 def div_generic_matrix(inputs, attrs=None):
     return inputs[0] / inputs[1]
@@ -29,6 +35,7 @@ def div_generic_matrix(inputs, attrs=None):
 @KernelRegistry.register(
     OpType.DIVIDE,
     [TensorSignature(DType.FP32, (1,)), TensorSignature(DType.FP32, (None, None))],
+    reference_factory=divide_ref,
 )
 def div_scalar_broadcast(inputs, attrs=None):
     # Scalar / Matrix
@@ -39,6 +46,7 @@ def div_scalar_broadcast(inputs, attrs=None):
 @KernelRegistry.register(
     OpType.DIVIDE,
     [TensorSignature(DType.FP32, (None, None)), TensorSignature(DType.FP32, (1,))],
+    reference_factory=divide_ref,
 )
 def div_matrix_scalar(inputs, attrs=None):
     # Matrix / Scalar
@@ -49,6 +57,7 @@ def div_matrix_scalar(inputs, attrs=None):
 @KernelRegistry.register(
     OpType.DIVIDE,
     [TensorSignature(DType.FP32, shape=None), TensorSignature(DType.FP32, shape=None)],
+    reference_factory=divide_ref,
 )
 def div_generic_tensor(inputs, attrs=None):
     return inputs[0] / inputs[1]

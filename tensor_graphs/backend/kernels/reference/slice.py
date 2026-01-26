@@ -1,23 +1,32 @@
 import numpy as np
 from ....backend.registry import KernelRegistry
-from ....ir.dtypes import DType, TensorSignature
+from ....ir.dtypes import DType, TensorSignature, Backend
 from ....ops.atomic_types import OpType
+from ....ops.atomic.slice import slice_ref
 
 
 @KernelRegistry.register(
     OpType.SLICE,
     [
-        TensorSignature(DType.FP32, shape=None),  # Data
-        TensorSignature(DType.INT32, shape=(None,)),  # Starts
-        TensorSignature(DType.INT32, shape=(None,)),  # Ends
-        TensorSignature(DType.INT32, shape=(None,)),  # Steps
+        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),  # Data
+        TensorSignature(
+            DType.INT32, shape=(None,), backend=Backend.CPU_NUMPY
+        ),  # Starts
+        TensorSignature(DType.INT32, shape=(None,), backend=Backend.CPU_NUMPY),  # Ends
+        TensorSignature(DType.INT32, shape=(None,), backend=Backend.CPU_NUMPY),  # Steps
     ],
+    backend=Backend.CPU_NUMPY,
+    target_dtype=DType.FP32,
+    reference_factory=slice_ref,
 )
 @KernelRegistry.register(
     OpType.SLICE,
     [
-        TensorSignature(DType.FP32, shape=None),  # Data
+        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),  # Data
     ],
+    backend=Backend.CPU_NUMPY,
+    target_dtype=DType.FP32,
+    reference_factory=slice_ref,
 )
 def slice_generic(inputs, attrs=None):
     """

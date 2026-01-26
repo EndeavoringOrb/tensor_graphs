@@ -62,14 +62,3 @@ def cast_implementation(inputs, attrs=None):
 )
 def cast_wrappers(inputs, attrs=None):
     return cast_implementation(inputs, attrs)
-
-
-# Fallback Generic (optional, if we want to support everything else loosely)
-@KernelRegistry.register(
-    OpType.CAST,
-    [TensorSignature(DType.FP32, shape=None)],
-    target_dtype=None,  # Matches any output if no specific match found above
-    reference_factory=cast_ref,
-)
-def cast_generic_fallback(inputs, attrs=None):
-    return cast_implementation(inputs, attrs)

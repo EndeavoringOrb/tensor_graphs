@@ -18,14 +18,3 @@ def test_cast_int_to_float():
     expected = np.array([1.0, 2.0, 3.0], dtype=np.float32)
     np.testing.assert_array_equal(res, expected)
     assert res.dtype == np.float32
-
-
-def test_cast_identity():
-    x = TensorNode(OpType.INPUT, (3,), DType.FP32, [], "x")
-    cast_node = TensorNode(
-        OpType.CAST, (3,), DType.FP32, [x], "cast", attrs={"to": DType.FP32}
-    )
-
-    inputs = {"x": np.array([1.1, 2.2, 3.3], dtype=np.float32)}
-    res = evaluate_graph(cast_node, inputs)
-    np.testing.assert_array_equal(res, inputs["x"])

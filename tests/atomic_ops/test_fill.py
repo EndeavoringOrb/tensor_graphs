@@ -46,3 +46,6 @@ def test_fill_int32():
 
     expected = np.full((4,), 7, dtype=np.int32)
     np.testing.assert_array_equal(res, expected)
+
+
+test_fill_int32()

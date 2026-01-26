@@ -1,11 +1,12 @@
 import numpy as np
 from ....backend.registry import KernelRegistry
-from ....ir.dtypes import DType, TensorSignature
+from ....ir.dtypes import DType, TensorSignature, Backend
 from ....ops.atomic_types import OpType
+from ....ops.atomic.negate import negate_ref
 
 
 @KernelRegistry.register(
-    OpType.NEGATE, [TensorSignature(DType.FP32, shape=None)]  # Matches any rank/shape
+    OpType.NEGATE, [TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY)]
 )
 def negate_generic(inputs, attrs=None):
     """

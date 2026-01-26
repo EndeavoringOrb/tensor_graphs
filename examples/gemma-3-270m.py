@@ -204,8 +204,16 @@ class Gemma3Model:
         return self.builder.param(name, shape)
 
     def _const(self, value, name, dtype=DType.INT32):
-        node, val_arr = self.builder.constant(value, (1,), name, dtype)
-        self.constant_inputs[name] = val_arr
+        # Ensure value is a numpy array
+        val_arr = np.array(
+            value, dtype=np.int32 if dtype == DType.INT32 else np.float32
+        )
+        if val_arr.ndim == 0:
+            val_arr = val_arr.reshape(1)
+
+        # Fix: 1. Remove unpacking. 2. Fix argument order (shape then dtype)
+        node = self.builder.constant(val_arr, (1,), dtype, name)
+
         return node
 
     def forward(self, input_ids_node, cos, sin, mask, shapes: Dict[str, TensorNode]):
@@ -400,7 +408,7 @@ def compute_causal_mask_np(S):
     # Create ones matrix using Fill node
     ones_node = GraphBuilder().fill(
         GraphBuilder().constant(1.0, (1,), DType.FP32, "ones_val"),
-        GraphBuilder().input("ones_shape", (S, S), DType.INT32),
+        GraphBuilder().input("ones_shape", (2,), DType.INT32),
         (S, S),
     )
 
@@ -427,7 +435,12 @@ def compute_rope_params_graph(head_dim, theta_base=10000.0, context_length=4096)
     feed_dict = {}
 
     def _c(val, name, dtype=DType.INT32):
-        node, arr = b.constant(val, (1,), name, dtype)
+        arr = np.array(val, dtype=np.int32 if dtype == DType.INT32 else np.float32)
+        if arr.ndim == 0:
+            arr = arr.reshape(1)
+
+        # Fix: Correct call signature and remove unpacking
+        node = b.constant(arr, (1,), dtype, name)
         feed_dict[name] = arr
         return node
 

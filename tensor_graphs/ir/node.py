@@ -123,5 +123,7 @@ class TensorNode:
         )
 
     def __repr__(self):
-        attr_str = f" | {self.attrs}" if self.attrs else ""
-        return f"[{self.dtype}|{self.shape}{attr_str}] {self.op_type}"
+        # Only print keys of attrs to avoid traversing the graph via step/shape nodes
+        attr_keys = list(self.attrs.keys()) if self.attrs else []
+        attrs_summary = f" | attrs={attr_keys}" if attr_keys else ""
+        return f"[{self.dtype.value}|{self.shape}{attrs_summary}] {self.op_type}({self.name})"

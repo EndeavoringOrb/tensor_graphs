@@ -29,8 +29,6 @@ class KernelRegistry:
                 register_reference_factory(op_type, reference_factory)
 
             # 2. Check existence of reference (Atomic or Fused)
-            # Note: We relax this check for CopyTo as it's a special infrastructure op,
-            # but ideally it uses the atomic/copy_to.py we created.
             if not get_reference_factory(op_type):
                 pass  # Warning or Error logic here
 
@@ -38,6 +36,27 @@ class KernelRegistry:
                 cls._kernels[op_type] = {}
             if backend not in cls._kernels[op_type]:
                 cls._kernels[op_type][backend] = []
+
+            # 3. Resolve Target DType
+            # Logic:
+            # - If target_dtype is explicit, use it.
+            # - If inputs are all same dtype, infer target_dtype = input_dtype.
+            # - If inputs are mixed dtypes, target_dtype MUST be specified (raise Error).
+            resolved_target_dtype = target_dtype
+
+            if resolved_target_dtype is None and input_sigs:
+                input_dtypes = {sig.dtype for sig in input_sigs}
+                if len(input_dtypes) == 1:
+                    # Constraint 1: All inputs same -> default to that dtype
+                    resolved_target_dtype = list(input_dtypes)[0]
+                elif len(input_dtypes) > 1:
+                    # Constraint 2: Mixed inputs -> must specify target
+                    dtypes_str = ", ".join([str(d.value) for d in input_dtypes])
+                    raise ValueError(
+                        f"Kernel registration error for '{op_type}' on backend '{backend.value}': "
+                        f"Input signatures have mixed dtypes ({dtypes_str}). "
+                        f"You must explicitly specify 'target_dtype' in the @register decorator."
+                    )
 
             # If input signatures didn't specify backend, default to the execution backend
             # This maintains backward compatibility with existing generic kernels
@@ -50,7 +69,7 @@ class KernelRegistry:
                     final_sigs.append(sig)
 
             cls._kernels[op_type][backend].append(
-                (backend, tuple(final_sigs), target_dtype, func)
+                (backend, tuple(final_sigs), resolved_target_dtype, func)
             )
             return func
 
@@ -145,3 +164,6 @@ class KernelRegistry:
             )
             is not None
         )
+
+
+from .kernels import *

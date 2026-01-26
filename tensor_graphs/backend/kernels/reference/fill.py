@@ -1,15 +1,21 @@
 import numpy as np
 from ....backend.registry import KernelRegistry
-from ....ir.dtypes import DType, TensorSignature
+from ....ir.dtypes import DType, TensorSignature, Backend
 from ....ops.atomic_types import OpType
+from ....ops.atomic.fill import fill_ref
 
 
 @KernelRegistry.register(
     OpType.FILL,
     [
-        TensorSignature(DType.FP32, shape=(1,)),  # Value (Scalar)
-        TensorSignature(DType.INT32, shape=(None,)),  # Shape
+        TensorSignature(
+            DType.FP32, shape=(1,), backend=Backend.CPU_NUMPY
+        ),  # Value (Scalar)
+        TensorSignature(DType.INT32, shape=(None,), backend=Backend.CPU_NUMPY),  # Shape
     ],
+    backend=Backend.CPU_NUMPY,
+    target_dtype=DType.FP32,
+    reference_factory=fill_ref,
 )
 def fill_fp32(inputs, attrs=None):
     value = inputs[0]
@@ -33,9 +39,14 @@ def fill_fp32(inputs, attrs=None):
 @KernelRegistry.register(
     OpType.FILL,
     [
-        TensorSignature(DType.INT32, shape=(1,)),  # Value (Scalar)
-        TensorSignature(DType.INT32, shape=(None,)),  # Shape
+        TensorSignature(
+            DType.INT32, shape=(1,), backend=Backend.CPU_NUMPY
+        ),  # Value (Scalar)
+        TensorSignature(DType.INT32, shape=(None,), backend=Backend.CPU_NUMPY),  # Shape
     ],
+    backend=Backend.CPU_NUMPY,
+    target_dtype=DType.INT32,
+    reference_factory=fill_ref,
 )
 def fill_int32(inputs, attrs=None):
     value = inputs[0]
