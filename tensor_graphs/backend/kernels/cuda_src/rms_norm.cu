@@ -88,8 +88,10 @@ void rms_norm_cuda(
     torch::Tensor output,
     float epsilon)
 {
-    const int rows = input.size(0) * input.size(1); // Flatten batch/seq dims
-    const int cols = input.size(2);                 // Hidden dim (last dim)
+    const int ndim = input.dim();
+    TORCH_CHECK(ndim >= 1, "Input must have at least 1 dimension");
+    const int cols = input.size(ndim - 1);
+    const long rows = input.numel() / cols;
 
     // Heuristic: Threads per block.
     // For hidden dims like 256-4096, 256 or 512 threads is usually good.
@@ -104,8 +106,7 @@ void rms_norm_cuda(
 
     // Flatten input for the grid launch
     // We treat everything before the last dim as the "batch of rows"
-    // Since input can be (Batch, Seq, Hidden) or (TotalSeq, Hidden)
-    dim3 grid(input.numel() / cols);
+    dim3 grid(rows);
     dim3 block(threads);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "rms_norm_gemma_cuda", ([&]
