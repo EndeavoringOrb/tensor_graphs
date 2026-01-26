@@ -278,32 +278,34 @@ def test_kernel_correctness(
     # 4. Execute Candidate Kernel
     actual_output = None
 
-    if backend == Backend.GPU_TORCH:
-        # Move inputs to GPU Torch
-        inputs_gpu = []
-        for x in inputs_np:
-            if isinstance(x, np.ndarray):
-                t = torch.from_numpy(x).cuda()
-                inputs_gpu.append(t)
-            else:
-                inputs_gpu.append(x)  # scalars
+    # Prepare inputs based on their individual registered signature backends
+    prepared_inputs = []
+    for i, x in enumerate(inputs_np):
+        sig_backend = signatures[i].backend
+        if sig_backend == Backend.GPU_TORCH:
+            # Ensure CUDA is available if the signature explicitly requires it
+            if not torch.cuda.is_available():
+                pytest.skip("CUDA not available for required GPU input")
+            t = torch.from_numpy(x).cuda()
+            prepared_inputs.append(t)
+        elif sig_backend == Backend.CPU_TORCH:
+            t = torch.from_numpy(x)
+            prepared_inputs.append(t)
+        else:
+            # Default to CPU_NUMPY
+            prepared_inputs.append(x)
 
-        try:
-            out_gpu = kernel_func(inputs_gpu, attrs)
-            # Move output back to CPU Numpy
-            if isinstance(out_gpu, torch.Tensor):
-                actual_output = out_gpu.detach().cpu().numpy()
-            else:
-                actual_output = out_gpu
-        except Exception as e:
-            pytest.fail(f"Kernel Execution Failed on GPU: {e}")
-
-    else:
-        # Execute on CPU (NumPy)
-        try:
-            actual_output = kernel_func(inputs_np, attrs)
-        except Exception as e:
-            pytest.fail(f"Kernel Execution Failed on CPU: {e}")
+    try:
+        # Execute the kernel with correctly placed inputs
+        out = kernel_func(prepared_inputs, attrs)
+        
+        # Move output back to CPU Numpy for comparison against reference
+        if isinstance(out, torch.Tensor):
+            actual_output = out.detach().cpu().numpy()
+        else:
+            actual_output = out
+    except Exception as e:
+        pytest.fail(f"Kernel Execution Failed ({backend.value}): {e}")
 
     # 5. Execute Reference (Golden Truth)
     # We build the graph using the reference factory and evaluate it.
