@@ -8,9 +8,9 @@
 // -------------------------------------------------------------------------
 template <typename scalar_t>
 __global__ void rms_norm_gemma_kernel(
-    const scalar_t *restrict input,
-    const scalar_t *restrict weight,
-    scalar_t *restrict output,
+    const scalar_t *__restrict__ input,
+    const scalar_t *__restrict__ weight,
+    scalar_t *__restrict__ output,
     float epsilon,
     int stride)
 {

@@ -14,7 +14,6 @@ from tensor_graphs.ops.registry import get_reference_factory
 # Ensure all kernels are loaded
 import tensor_graphs.backend.kernels
 
-
 # ==============================================================================
 # 1. Input Generation Helpers
 # ==============================================================================
