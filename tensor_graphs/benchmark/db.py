@@ -19,17 +19,21 @@ class BenchmarkDB:
             cursor = conn.cursor()
 
             # A. The Math (Definitions)
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS canonical_graphs (
                     id TEXT PRIMARY KEY,
                     human_name TEXT,
                     structural_hash TEXT UNIQUE,
                     atomic_graph_json TEXT
                 )
-            """)
+            """
+            )
 
             # B. The Code (Solutions)
-            cursor.execute("""
+            # UPDATED: Added recipe_json column
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS implementations (
                     id TEXT PRIMARY KEY,
                     canonical_graph_id TEXT,
@@ -37,13 +41,16 @@ class BenchmarkDB:
                     name TEXT,
                     backend TEXT,
                     source_hash TEXT,
+                    recipe_json TEXT, -- Serialized assignments {node_name: backend}
                     requirements TEXT, -- JSON
                     FOREIGN KEY (canonical_graph_id) REFERENCES canonical_graphs (id)
                 )
-            """)
+            """
+            )
 
             # C. The Context (Environment)
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS environments (
                     id TEXT PRIMARY KEY,
                     hardware_name TEXT,
@@ -51,10 +58,12 @@ class BenchmarkDB:
                     platform_info TEXT, -- JSON
                     libs_info TEXT -- JSON
                 )
-            """)
+            """
+            )
 
             # D. The Input (Workload)
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS workloads (
                     id TEXT PRIMARY KEY,
                     canonical_graph_id TEXT,
@@ -63,10 +72,12 @@ class BenchmarkDB:
                     input_descriptors TEXT, -- JSON
                     FOREIGN KEY (canonical_graph_id) REFERENCES canonical_graphs (id)
                 )
-            """)
+            """
+            )
 
             # E. The Stats (Trace)
-            cursor.execute("""
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS benchmark_traces (
                     id TEXT PRIMARY KEY,
                     implementation_id TEXT,
@@ -82,7 +93,8 @@ class BenchmarkDB:
                     FOREIGN KEY (workload_id) REFERENCES workloads (id),
                     FOREIGN KEY (environment_id) REFERENCES environments (id)
                 )
-            """)
+            """
+            )
             conn.commit()
 
     def add_canonical_graph(
@@ -117,6 +129,7 @@ class BenchmarkDB:
         backend: str,
         source_hash: str,
         requirements: Optional[Dict[str, Any]] = None,
+        recipe_json: Optional[str] = None,  # UPDATED: Accept recipe_json
     ) -> str:
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -132,7 +145,7 @@ class BenchmarkDB:
 
             impl_id = str(uuid.uuid4())
             cursor.execute(
-                "INSERT INTO implementations (id, canonical_graph_id, type, name, backend, source_hash, requirements) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO implementations (id, canonical_graph_id, type, name, backend, source_hash, requirements, recipe_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     impl_id,
                     canonical_graph_id,
@@ -141,6 +154,7 @@ class BenchmarkDB:
                     backend,
                     source_hash,
                     json.dumps(requirements or {}),
+                    recipe_json,
                 ),
             )
             conn.commit()
@@ -274,16 +288,10 @@ class BenchmarkDB:
     ) -> Optional[str]:
         """
         Returns 'KERNEL' or 'GRAPH_RECIPE' (Atomic) based on what was fastest for this op_type.
-        Note: This assumes human_name of canonical_graph maps to OpType.
         """
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-
-            # Simple heuristic query:
-            # Find traces for this OpType (via human_name) and Environment.
-            # We filter loosely on workload via shape if possible, but for prototype
-            # we just check what's fastest generally for this op.
 
             query = """
                 SELECT i.type, t.latency_ms
