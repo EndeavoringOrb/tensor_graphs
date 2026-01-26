@@ -1,4 +1,3 @@
-import numpy as np
 from typing import Dict, Any
 from ..ir.node import TensorNode
 from ..ir.dtypes import Backend
@@ -35,8 +34,10 @@ class Executor:
 
             # 3. Select kernel for this backend
             input_sigs = [p.signature for p in node.parents]
+
+            # Pass node.dtype as target_dtype to handle Cast specificity
             kernel = KernelRegistry.select_best_kernel(
-                node.op_type, input_sigs, backend
+                node.op_type, input_sigs, backend, target_dtype=node.dtype
             )
 
             if not kernel:

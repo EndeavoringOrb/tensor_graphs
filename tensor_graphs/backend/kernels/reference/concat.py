@@ -2,6 +2,7 @@ import numpy as np
 from ....backend.registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
 from ....ops.atomic_types import OpType
+from ....ops.atomic.concat import concat_ref
 
 
 @KernelRegistry.register(
@@ -11,6 +12,8 @@ from ....ops.atomic_types import OpType
         TensorSignature(DType.FP32, shape=None),  # Input B (Any Rank)
         TensorSignature(DType.INT32, shape=(1,)),  # Axis (Scalar)
     ],
+    target_dtype=DType.FP32,
+    reference_factory=concat_ref,
 )
 def concat_generic(inputs, attrs=None):
     """

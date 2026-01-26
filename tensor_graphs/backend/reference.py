@@ -1,3 +1,7 @@
+"""
+File: tensor_graphs/backend/reference.py
+"""
+
 import numpy as np
 from typing import Dict
 from ..ops.atomic_types import OpType
@@ -26,7 +30,9 @@ def evaluate_graph(root: TensorNode, inputs: Dict[str, np.ndarray]) -> np.ndarra
             input_sigs = [p.signature for p in node.parents]
 
             # 2. Try Kernel
-            kernel = KernelRegistry.select_best_kernel(node.op_type, input_sigs)
+            kernel = KernelRegistry.select_best_kernel(
+                node.op_type, input_sigs, target_dtype=node.dtype
+            )
 
             if kernel:
                 val = kernel(parent_vals, node.attrs)

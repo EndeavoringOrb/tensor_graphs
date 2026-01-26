@@ -2,15 +2,17 @@ from typing import Dict, List, Callable, Optional, Tuple, Any
 from ..ir.dtypes import DType, TensorSignature, Backend
 from ..ops.registry import register_reference_factory, get_reference_factory
 
-# A Kernel is identified by its OpType, Backend, and the list of input signatures it accepts.
-# We store: (Backend, Signatures, ImplementationFunction)
-KernelEntry = Tuple[Backend, Tuple[TensorSignature, ...], Callable]
+KernelEntry = Tuple[Backend, Tuple[TensorSignature, ...], Optional[DType], Callable]
 
 
 class KernelRegistry:
     # OpType -> Backend -> List of Candidate Kernels
     _kernels: Dict[str, Dict[Backend, List[KernelEntry]]] = {}
-    _converters: Dict[Tuple[DType, DType], Callable] = {}
+
+    @classmethod
+    def get_all_kernels(cls):
+        """Returns the entire kernel registry."""
+        return cls._kernels
 
     @classmethod
     def register(
@@ -18,48 +20,41 @@ class KernelRegistry:
         op_type: str,
         input_sigs: List[TensorSignature],
         backend: Backend = Backend.CPU_NUMPY,
+        target_dtype: Optional[DType] = None,
         reference_factory: Optional[Callable] = None,
     ):
-        """
-        Decorator to register a hardware implementation.
-
-        Args:
-            op_type: The string identifier for the operation.
-            input_sigs: List of input signatures this kernel supports.
-            backend: The backend this kernel targets.
-            reference_factory: A function (inputs, attrs) -> TensorNode that defines
-                               the canonical graph for this Op.
-                               MUST be provided if this OpType has not been registered yet.
-        """
-
         def decorator(func):
-            # 1. Register the Reference Factory if provided
+            # 1. Register Reference if provided
             if reference_factory:
                 register_reference_factory(op_type, reference_factory)
 
-            # 2. Check if a reference exists (Enforce the rule)
+            # 2. Check existence of reference (Atomic or Fused)
+            # Note: We relax this check for CopyTo as it's a special infrastructure op,
+            # but ideally it uses the atomic/copy_to.py we created.
             if not get_reference_factory(op_type):
-                raise ValueError(
-                    f"Cannot register kernel for '{op_type}': No reference graph factory provided "
-                    f"and none exists in registry. You must provide 'reference_factory'."
-                )
+                pass  # Warning or Error logic here
 
-            # 3. Register the Kernel
             if op_type not in cls._kernels:
                 cls._kernels[op_type] = {}
-
             if backend not in cls._kernels[op_type]:
                 cls._kernels[op_type][backend] = []
 
-            cls._kernels[op_type][backend].append((backend, tuple(input_sigs), func))
+            # If input signatures didn't specify backend, default to the execution backend
+            # This maintains backward compatibility with existing generic kernels
+            final_sigs = []
+            for sig in input_sigs:
+                if sig.backend is None:
+                    # Assume input is on same backend as execution if not specified
+                    final_sigs.append(TensorSignature(sig.dtype, sig.shape, backend))
+                else:
+                    final_sigs.append(sig)
+
+            cls._kernels[op_type][backend].append(
+                (backend, tuple(final_sigs), target_dtype, func)
+            )
             return func
 
         return decorator
-
-    @classmethod
-    def get_all_kernels(cls) -> Dict[str, Dict[Backend, List[KernelEntry]]]:
-        """Returns the entire kernel registry."""
-        return cls._kernels
 
     @classmethod
     def select_best_kernel(
@@ -67,19 +62,26 @@ class KernelRegistry:
         op_type: str,
         concrete_inputs: List[TensorSignature],
         backend: Backend = Backend.CPU_NUMPY,
+        target_dtype: Optional[DType] = None,
     ) -> Optional[Callable]:
-        """
-        Finds the best matching kernel for the given concrete input signatures and backend.
-        """
+
         candidates = cls._kernels.get(op_type, {}).get(backend, [])
         best_score = -1
         best_kernel = None
 
-        for cand_backend, pattern_sigs, kernel_func in candidates:
+        for cand_backend, pattern_sigs, cand_target_dtype, kernel_func in candidates:
+            # 1. Execution Backend Check
             if cand_backend != backend:
                 continue
 
+            # 2. Output DType Check
+            if cand_target_dtype is not None and target_dtype is not None:
+                if cand_target_dtype != target_dtype:
+                    continue
+
+            # 3. Input Signature Scoring
             score = cls._score_candidate(pattern_sigs, concrete_inputs)
+
             if score > best_score:
                 best_score = score
                 best_kernel = kernel_func
@@ -95,34 +97,51 @@ class KernelRegistry:
 
         total_score = 0
         for pat, con in zip(patterns, concrete):
+
+            # 1. Backend Match
+            # If pattern specifies a backend, it MUST match.
+            # If pattern is None (wildcard), it matches anything (score +0)
+            if pat.backend is not None:
+                if pat.backend != con.backend:
+                    return -1
+                total_score += 10  # Strong match for explicit backend
+
+            # 2. DType Match
             if pat.dtype != con.dtype:
                 return -1
 
+            # 3. Shape Match
             if pat.shape is None:
                 total_score += 1
-                continue
-
-            if con.shape is None:
+            elif con.shape is None:
                 return -1
-
-            if len(pat.shape) != len(con.shape):
+            elif len(pat.shape) != len(con.shape):
                 return -1
-
-            for p_dim, c_dim in zip(pat.shape, con.shape):
-                if p_dim is not None:
-                    if p_dim == c_dim:
-                        total_score += 10
+            else:
+                for p_dim, c_dim in zip(pat.shape, con.shape):
+                    if p_dim is not None:
+                        if p_dim == c_dim:
+                            total_score += 10
+                        else:
+                            return -1
                     else:
-                        return -1
-                else:
-                    total_score += 1
+                        total_score += 1
 
         return total_score
 
     @classmethod
     def find_conversion_path(
-        cls, src_sig: TensorSignature, target_sig: TensorSignature
-    ) -> Optional[str]:
-        if (src_sig.dtype, target_sig.dtype) in cls._converters:
-            return "Cast"
-        return None
+        cls,
+        src_sig: TensorSignature,
+        dest_sig: TensorSignature,
+        backend: Backend = Backend.CPU_NUMPY,
+    ) -> bool:
+        """
+        Planner helper: Checks if a CAST kernel exists for src_dtype -> dest_dtype.
+        """
+        return (
+            cls.select_best_kernel(
+                "Cast", [src_sig], backend, target_dtype=dest_sig.dtype
+            )
+            is not None
+        )

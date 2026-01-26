@@ -2,6 +2,7 @@ import numpy as np
 from ....backend.registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
 from ....ops.atomic_types import OpType
+from ....ops.atomic.arange import arange_ref
 
 
 @KernelRegistry.register(
@@ -11,6 +12,7 @@ from ....ops.atomic_types import OpType
         TensorSignature(DType.INT32, shape=(1,)),  # Stop
         TensorSignature(DType.INT32, shape=(1,)),  # Step
     ],
+    reference_factory=arange_ref,
 )
 def arange_int32(inputs, attrs=None):
     start = int(inputs[0][0])

@@ -21,8 +21,6 @@ def resolve_dispatch(
 ) -> TensorNode:
     """
     Analyzes a node and its parents. If a kernel implementation exists, returns the node.
-    If not, attempts to decompose or inject Cast nodes to find a valid kernel.
-    Performs in-place graph mutation.
     """
     if memo is None:
         memo = {}
@@ -41,11 +39,14 @@ def resolve_dispatch(
     input_sigs = [p.signature for p in node.parents]
 
     # 3. Try Optimized Kernel
-    if KernelRegistry.select_best_kernel(node.op_type, input_sigs, node.backend):
+    if KernelRegistry.select_best_kernel(
+        node.op_type, input_sigs, node.backend, target_dtype=node.dtype
+    ):
         return node
 
     # 4. Special Case: Cast (if no direct kernel, check converters)
     if node.op_type == "Cast" and len(node.parents) == 1:
+        # Use the Registry's new helper
         if KernelRegistry.find_conversion_path(
             node.parents[0].signature, node.signature
         ):
@@ -68,6 +69,7 @@ def resolve_dispatch(
     new_parents = []
     for p in node.parents:
         if p.dtype not in [DType.FP32, DType.INT32, DType.BOOL]:
+            # Use the Registry's new helper
             if KernelRegistry.find_conversion_path(
                 p.signature, TensorSignature(DType.FP32, p.shape)
             ):
@@ -80,7 +82,6 @@ def resolve_dispatch(
                     name=f"auto_cast_{p.name}",
                     attrs={"to": DType.FP32},
                 )
-                # Ensure the new cast node is also resolved
                 new_parents.append(resolve_dispatch(cast_node, memo))
             else:
                 raise RuntimeError(
@@ -95,9 +96,11 @@ def resolve_dispatch(
 
     # 7. Final Verification
     new_sigs = [p.signature for p in node.parents]
-    if not KernelRegistry.select_best_kernel(node.op_type, new_sigs, node.backend):
+    if not KernelRegistry.select_best_kernel(
+        node.op_type, new_sigs, node.backend, target_dtype=node.dtype
+    ):
         raise RuntimeError(
-            f"Even after casting to FP32, no kernel found for {new_sigs}"
+            f"Even after casting to FP32, no kernel found for {new_sigs} -> {node.dtype}"
         )
 
     print(f"   -> Rewrite success. New op: {node}")

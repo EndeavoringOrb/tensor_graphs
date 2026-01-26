@@ -19,7 +19,7 @@ class TensorNode:
 
     @property
     def signature(self) -> TensorSignature:
-        return TensorSignature(self.dtype, self.shape)
+        return TensorSignature(self.dtype, self.shape, self.backend)
 
     def get_details(self) -> str:
         """

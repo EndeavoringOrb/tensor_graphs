@@ -20,19 +20,23 @@ class Backend(Enum):
 @dataclass(frozen=True)
 class TensorSignature:
     """
-    Represents the Type and Shape state of a tensor for kernel matching.
-    'shape' entries can be None to indicate a wildcard (generic size).
-    If 'shape' is entirely None, it matches any rank/shape.
+    Represents the Type, Shape, and Backend state of a tensor for kernel matching.
+
+    - shape=None: Wildcard (matches any shape)
+    - backend=None: Wildcard (matches any backend)
     """
 
     dtype: DType
-    shape: Optional[Tuple[Optional[int], ...]]
+    shape: Optional[Tuple[Optional[int], ...]] = None
+    backend: Optional[Backend] = None
 
     def __repr__(self):
-        if self.shape is None:
-            return f"<{self.dtype.value} (*)>"
-        shape_str = ",".join(str(d) if d is not None else "*" for d in self.shape)
-        return f"<{self.dtype.value} ({shape_str})>"
+        shape_str = "*"
+        if self.shape is not None:
+            shape_str = ",".join(str(d) if d is not None else "*" for d in self.shape)
+
+        backend_str = self.backend.value if self.backend else "*"
+        return f"<{self.dtype.value} [{shape_str}] @ {backend_str}>"
 
     def is_scalar(self):
         if self.shape is None:

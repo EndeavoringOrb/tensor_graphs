@@ -1,7 +1,12 @@
+"""
+File: tensor_graphs/backend/kernels/reference/cast.py
+"""
+
 import numpy as np
 from ....backend.registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
 from ....ops.atomic_types import OpType
+from ....ops.atomic.cast import cast_ref
 
 
 def _dtype_to_numpy(dtype_enum):
@@ -16,12 +21,55 @@ def _dtype_to_numpy(dtype_enum):
     return np.float32
 
 
-@KernelRegistry.register(OpType.CAST, [TensorSignature(DType.INT32, shape=None)])
-@KernelRegistry.register(OpType.CAST, [TensorSignature(DType.FP32, shape=None)])
-@KernelRegistry.register(OpType.CAST, [TensorSignature(DType.BOOL, shape=None)])
-def cast_generic(inputs, attrs=None):
+# Generic function, but we will register it for specific pairings below
+def cast_implementation(inputs, attrs=None):
     if attrs is None:
         attrs = {}
-
     target_dtype = attrs.get("to", DType.FP32)
     return inputs[0].astype(_dtype_to_numpy(target_dtype))
+
+
+# --- Explicit Registrations for Planner Visibility ---
+
+
+# 1. INT32 -> FP32
+@KernelRegistry.register(
+    OpType.CAST,
+    [TensorSignature(DType.INT32, shape=None)],
+    target_dtype=DType.FP32,
+    reference_factory=cast_ref,
+)
+# 2. FP32 -> INT32
+@KernelRegistry.register(
+    OpType.CAST,
+    [TensorSignature(DType.FP32, shape=None)],
+    target_dtype=DType.INT32,
+    reference_factory=cast_ref,
+)
+# 3. BOOL -> FP32
+@KernelRegistry.register(
+    OpType.CAST,
+    [TensorSignature(DType.BOOL, shape=None)],
+    target_dtype=DType.FP32,
+    reference_factory=cast_ref,
+)
+# 4. FP32 -> FP16
+@KernelRegistry.register(
+    OpType.CAST,
+    [TensorSignature(DType.FP32, shape=None)],
+    target_dtype=DType.FP16,
+    reference_factory=cast_ref,
+)
+def cast_wrappers(inputs, attrs=None):
+    return cast_implementation(inputs, attrs)
+
+
+# Fallback Generic (optional, if we want to support everything else loosely)
+@KernelRegistry.register(
+    OpType.CAST,
+    [TensorSignature(DType.FP32, shape=None)],
+    target_dtype=None,  # Matches any output if no specific match found above
+    reference_factory=cast_ref,
+)
+def cast_generic_fallback(inputs, attrs=None):
+    return cast_implementation(inputs, attrs)
