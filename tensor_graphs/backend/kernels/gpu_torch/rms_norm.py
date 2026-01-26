@@ -1,3 +1,5 @@
+# tensor_graphs/backend/kernels/gpu_torch/rms_norm.py
+
 import os
 import torch
 from typing import Any, cast
@@ -17,8 +19,11 @@ if torch.cuda.is_available():
         _RMS_NORM_OPS = load(
             name="rms_norm_cuda_kernel", sources=[_SRC_FILE], verbose=False
         )
+        print("✅ RMSNorm CUDA kernel compiled successfully.")
     except Exception as e:
-        print(f"Warning: Failed to compile RMSNorm CUDA kernel: {e}")
+        print(f"❌ Failed to compile RMSNorm CUDA kernel: {e}")
+        # Set to None to indicate failure
+        _RMS_NORM_OPS = None
 
 
 # 2. Conditionally Register
@@ -64,3 +69,20 @@ if _RMS_NORM_OPS is not None:
         ops.rms_norm(x, weight, output, epsilon)
 
         return output
+
+else:
+    # If compilation failed, register a dummy kernel that raises an error to force CPU fallback
+    @KernelRegistry.register(
+        "RMSNorm",
+        [
+            TensorSignature(DType.FP32, shape=None, backend=Backend.GPU_TORCH),
+            TensorSignature(DType.FP32, shape=(None,), backend=Backend.GPU_TORCH),
+            TensorSignature(DType.FP32, shape=(1,), backend=Backend.GPU_TORCH),
+        ],
+        backend=Backend.GPU_TORCH,
+        reference_factory=rms_norm_ref,
+    )
+    def rms_norm_cuda_fallback(inputs, attrs=None):
+        raise RuntimeError(
+            "RMSNorm CUDA kernel is not available. Falling back to CPU execution."
+        )

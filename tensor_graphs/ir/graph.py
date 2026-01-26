@@ -1,5 +1,7 @@
-from typing import List, Set
+from typing import List, Set, Dict, Any
 from .node import TensorNode
+from .dtypes import DType, Backend
+import json
 
 
 def topological_sort(root: TensorNode) -> List[TensorNode]:
@@ -74,3 +76,72 @@ def find_subgraph(large_graph: TensorNode, subgraph: TensorNode) -> List[TensorN
             matches.append(node)
 
     return matches
+
+
+# --- Serialization Helpers ---
+
+
+def graph_to_json(root: TensorNode) -> str:
+    """
+    Serializes a graph to a JSON string representation.
+    Format: Flat list of nodes in topological order.
+    """
+    nodes = topological_sort(root)
+    # Map node instances to temporary IDs (0, 1, 2...)
+    node_to_id = {node: i for i, node in enumerate(nodes)}
+
+    serialized_nodes = []
+    for node in nodes:
+        parent_ids = [node_to_id[p] for p in node.parents]
+        serialized_nodes.append(
+            {
+                "id": node_to_id[node],
+                "op_type": node.op_type,
+                "name": node.name,
+                "shape": node.shape,
+                "dtype": node.dtype.value,
+                "backend": node.backend.value,
+                "parents": parent_ids,
+                "attrs": node.attrs,
+            }
+        )
+
+    return json.dumps(serialized_nodes)
+
+
+def graph_from_json(json_str: str) -> TensorNode:
+    """
+    Reconstructs a graph from a JSON string. Returns the root node.
+    """
+    if not json_str:
+        raise ValueError("Empty JSON string for graph reconstruction")
+
+    data = json.loads(json_str)
+    if not isinstance(data, list) or not data:
+        raise ValueError("Invalid JSON format: expected non-empty list of nodes")
+
+    id_to_node: Dict[int, TensorNode] = {}
+
+    for node_data in data:
+        parents = [id_to_node[pid] for pid in node_data["parents"]]
+
+        # Reconstruct DType and Backend Enums
+        dtype = DType(node_data["dtype"])
+        backend = Backend(node_data["backend"])
+
+        # Handle shape (convert list back to tuple)
+        shape = tuple(node_data["shape"]) if node_data["shape"] is not None else None
+
+        node = TensorNode(
+            op_type=node_data["op_type"],
+            shape=shape,
+            dtype=dtype,
+            parents=parents,
+            name=node_data["name"],
+            attrs=node_data.get("attrs", {}),
+            backend=backend,
+        )
+        id_to_node[node_data["id"]] = node
+
+    # The last node in the topological list is the root
+    return id_to_node[data[-1]["id"]]

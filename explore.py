@@ -3,8 +3,8 @@ explore.py
 
 This script explores the performance landscape of registered operations.
 It benchmarks:
-1. The monolithic Kernel implementation (if available).
-2. The Atomic Graph decomposition (if available).
+1. (Priority) Flagged graphs in the profiling queue.
+2. (Fallback) All registered operations (synthetic exploration), skipping already profiled ones.
 
 Results are saved to benchmarks.db.
 """
@@ -18,27 +18,17 @@ from typing import Dict, Any, List
 
 from tensor_graphs.benchmark.db import BenchmarkDB
 from tensor_graphs.benchmark.env import EnvironmentSniffer
-from tensor_graphs.benchmark.profiler import Profiler
+from tensor_graphs.benchmark.profiler import Profiler, DummyDataGenerator
 from tensor_graphs.benchmark.data_gen import DataGenerator
 from tensor_graphs.backend.registry import KernelRegistry
 from tensor_graphs.ops.registry import get_reference_factory
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType, Backend, TensorSignature
 from tensor_graphs.ir.hashing import compute_structural_hash
+from tensor_graphs.ir.graph import graph_from_json, get_inputs
 from tensor_graphs.backend.executor import Executor
-from tensor_graphs.compiler.planner import ExecutionRecipe
-
-
-def get_structural_hash(node: TensorNode):
-    return compute_structural_hash(node)
-
-
-def get_axes_hash(inputs: Dict[str, np.ndarray]):
-    axes_json = {k: v.shape for k, v in inputs.items()}
-    return (
-        hashlib.sha256(json.dumps(axes_json, sort_keys=True).encode()).hexdigest(),
-        axes_json,
-    )
+from tensor_graphs.compiler.planner import ExecutionRecipe, PathGenerator
+from tensor_graphs.benchmark.offline_profiler import profile_root, get_axes_hash_info
 
 
 def run_exploration():
@@ -52,60 +42,123 @@ def run_exploration():
     env_info = EnvironmentSniffer.sniff()
     print(f"Environment: {env_info['hardware_name']}")
 
-    env_id = profiler.env_id
+    # ==========================================================================
+    # PHASE 1: Process Profiling Queue (Flagged items)
+    # ==========================================================================
+    queue_items = db.get_queue_items()
 
-    # 2. Ops to Explore
+    if queue_items:
+        print(f"\n[Queue] Found {len(queue_items)} flagged graphs. Profiling now...")
+
+        for item in queue_items:
+            print(
+                f"\n--- Processing Flagged Graph: {item['human_name']} ({item['structural_hash'][:8]}) ---"
+            )
+            try:
+                # 1. Reconstruct Graph
+                if not item["atomic_graph_json"]:
+                    print(
+                        f"  [Error] No JSON definition found for graph. Removing from queue."
+                    )
+                    db.remove_from_queue(item["queue_id"])
+                    continue
+
+                root = graph_from_json(item["atomic_graph_json"])
+
+                # 2. Reconstruct Inputs (Shapes)
+                axes_json = json.loads(item["axes_json"])
+                inputs = {}
+
+                # We need to map the axes_json (name -> shape) to the input nodes of the reconstructed graph.
+                # Since graph reconstruction preserves names, this should work.
+                input_nodes = get_inputs(root)
+                valid_inputs = True
+
+                for node in input_nodes:
+                    if node.name in axes_json:
+                        # Create dummy data with the specified shape
+                        shape = axes_json[node.name]
+                        # Fix: tuple conversion from list
+                        node.shape = tuple(shape)
+                        inputs[node.name] = DummyDataGenerator.generate_for_node(node)
+                    else:
+                        print(
+                            f"  [Warning] Input '{node.name}' not found in workload stats. Generating generic dummy."
+                        )
+                        inputs[node.name] = DummyDataGenerator.generate_for_node(node)
+
+                # 3. Profile all strategies (Kernel vs Atomic vs Decomposed)
+                # We reuse the offline profiler logic which enumerates strategies
+                profile_root(root, db, profiler, inputs)
+
+                # 4. Cleanup
+                db.remove_from_queue(item["queue_id"])
+                print(f"  [Success] Removed from queue.")
+
+            except Exception as e:
+                print(f"  [Failed] Error processing queue item: {e}")
+                # We optionally remove it so we don't crash loop, or keep it for retry.
+                # For this prototype, we remove it.
+                db.remove_from_queue(item["queue_id"])
+
+        print("\n[Queue] Processing complete.")
+        # If we processed the queue, we can exit or continue to general exploration.
+        # User prompt implies "if there are no flags... profile all".
+        # So if we had flags, we might stop? Or just continue.
+        # "just want to prioritize the flagged things". We'll continue to general, but usually
+        # offline profilers might want to exit after the queue is empty.
+        # I'll continue for robustness.
+
+    # ==========================================================================
+    # PHASE 2: General Synthetic Exploration (Unprofiled)
+    # ==========================================================================
+
+    # Check if we should skip this phase (e.g. if we just did a bunch of work)
+    # For now, let's run it but skip items that already have a "PASSED" trace for this env.
+
+    print("\n--- General Exploration (Synthetic) ---")
+
     all_kernels = KernelRegistry.get_all_kernels()
-
-    # We prioritize fused ops mentioned in README, but we'll iterate over all registered ops
     ops_to_explore = list(all_kernels.keys())
-    # Sort to have a consistent order
     ops_to_explore.sort()
 
-    # 3. Iterate
+    env_id = profiler.env_id
+
     for op_type in ops_to_explore:
-        print(f"\n--- Exploring: {op_type} ---")
+        # Check if we should skip?
+        # It's hard to know if we've profiled *all* variants, so we'll do a quick check
+        # if a 'KERNEL' implementation exists for this op in the DB.
+
+        # Heuristic: If we have a preferred implementation for a generic shape, maybe skip?
+        # But exploration generates random shapes.
+        # We will modify the loop to check `db.get_op_preference` for the generated shape.
+
+        print(f"\n  Checking: {op_type}")
 
         # Get factory
         ref_factory = get_reference_factory(op_type)
         if not ref_factory:
-            print(f"  [Skip] No reference factory found for {op_type}")
             continue
 
-        # Get available kernels by backend
         kernels_by_backend = all_kernels.get(op_type, {})
-        if not kernels_by_backend:
-            print(f"  [Skip] No kernels registered for {op_type}")
-            continue
-
         for backend, entries in kernels_by_backend.items():
-            # Check if backend is available
-            if backend == Backend.GPU_TORCH:
-                if not torch.cuda.is_available():
-                    print(f"  [Skip] {backend.value} not available")
-                    continue
+            if backend == Backend.GPU_TORCH and not torch.cuda.is_available():
+                continue
 
             for entry in entries:
-                # entry is (backend, sigs, target_dtype, func)
                 _, sigs, target_dtype, kernel_func = entry
 
-                print(
-                    f"  --- Kernel: {backend.value} | Sigs: {sigs} -> {target_dtype} ---"
-                )
-
-                # Generate Input Data (Usually returns NumPy arrays)
+                # Generate Input Data to get a Concrete Shape
                 try:
                     inputs_data, attrs = DataGenerator.generate(
                         op_type, sigs, backend=backend
                     )
-                except Exception as e:
-                    print(f"    [Error] Data gen failed: {e}")
+                except Exception:
                     continue
 
-                # Create Input Nodes for Graph
+                # Create Nodes
                 input_nodes = []
                 feed_dict = {}
-
                 for i, val in enumerate(inputs_data):
                     name = f"in_{i}"
                     dt = DType.FP32
@@ -116,18 +169,12 @@ def run_exploration():
                     elif val.dtype == bool:
                         dt = DType.BOOL
 
-                    # NOTE: For the Monolithic kernel test, we want the inputs to match the backend
-                    # so we don't measure copy time.
                     node = TensorNode("Input", val.shape, dt, [], name, backend=backend)
                     input_nodes.append(node)
                     feed_dict[name] = val
 
-                # ---------------------------------------------------------
-                # Path B (Prep): Atomic Decomposition (to get ground truth shape and structural hash)
-                # ---------------------------------------------------------
+                # Build dummy root to check if we've profiled this shape
                 try:
-                    # We generate atomic nodes on CPU_NUMPY for structure analysis
-                    # (Reference factories often assume CPU parents for logic, though structure is backend-agnostic)
                     dummy_cpu_inputs = [
                         TensorNode(
                             "Input",
@@ -140,144 +187,142 @@ def run_exploration():
                         for n in input_nodes
                     ]
                     root_atomic = ref_factory(dummy_cpu_inputs, attrs)
-                    output_shape = root_atomic.shape
-                    output_dtype = root_atomic.dtype
-                except Exception as e:
-                    print(f"    [Error] Atomic decomposition failed: {e}")
-                    continue
 
+                    # CHECK DB: Have we profiled this op + shape + env?
+                    shape_str = str(root_atomic.shape)
+                    existing_pref = db.get_op_preference(op_type, shape_str, env_id)
+
+                    if existing_pref:
+                        print(
+                            f"    [Skip] Already profiled {op_type} {shape_str} (Best: {existing_pref})"
+                        )
+                        continue
+
+                except Exception:
+                    # If we can't build the check graph, just proceed to run it
+                    pass
+
+                print(f"    Benchmarking {backend.value} | Sigs: {sigs}")
+
+                # ... (Rest of the existing logic in explore.py goes here,
+                # effectively running the monolith vs atomic benchmark)
+
+                # Copying the core benchmark logic from original explore.py for continuity
                 # ---------------------------------------------------------
                 # Path A: Monolithic Kernel
                 # ---------------------------------------------------------
-                # Build a single node graph.
-                # UPDATED: We assume inputs are ALREADY on the target backend (strict mode).
-                # We do not insert CopyTo nodes here. We move data in feed_dict below.
-
-                root_kernel = TensorNode(
-                    op_type,
-                    output_shape,
-                    target_dtype or output_dtype,
-                    input_nodes,
-                    "kernel_node",
-                    attrs=attrs,
-                    backend=backend,
-                )
-
-                assignments = {n: backend for n in input_nodes}
-                assignments[root_kernel] = backend
-                recipe_kernel = ExecutionRecipe(root_kernel, assignments)
-
-                # --- PRE-MOVE DATA TO TARGET BACKEND ---
-                # This ensures benchmarking measures pure kernel time, not PCI-e transfer.
-                strict_feed_dict = {}
-                if backend == Backend.GPU_TORCH:
-                    for k, v in feed_dict.items():
-                        # Convert numpy to torch, move to GPU
-                        if isinstance(v, np.ndarray):
-                            t = torch.from_numpy(v)
-                            strict_feed_dict[k] = t.cuda()
-                        else:
-                            # Already torch/other?
-                            strict_feed_dict[k] = v
-                else:
-                    strict_feed_dict = feed_dict
-
-                print(
-                    f"    Benchmarking KERNEL implementation (Strict: Data pre-moved)..."
-                )
                 try:
+                    root_kernel = TensorNode(
+                        op_type,
+                        root_atomic.shape,
+                        target_dtype or root_atomic.dtype,
+                        input_nodes,
+                        "kernel_node",
+                        attrs=attrs,
+                        backend=backend,
+                    )
+                    assignments = {n: backend for n in input_nodes}
+                    assignments[root_kernel] = backend
+                    recipe_kernel = ExecutionRecipe(root_kernel, assignments)
+
+                    # Pre-move data
+                    strict_feed_dict = {}
+                    if backend == Backend.GPU_TORCH:
+                        for k, v in feed_dict.items():
+                            if isinstance(v, np.ndarray):
+                                strict_feed_dict[k] = torch.from_numpy(v).cuda()
+                            else:
+                                strict_feed_dict[k] = v
+                    else:
+                        strict_feed_dict = feed_dict
+
                     latency_kernel = profiler.benchmark_recipe(
                         recipe_kernel, strict_feed_dict
                     )
-                    print(f"      Latency: {latency_kernel:.4f} ms")
 
-                    # Save to DB
-                    graph_hash = get_structural_hash(root_kernel)
-                    axes_hash, axes_json = get_axes_hash(
-                        feed_dict
-                    )  # Use original numpy dict for axis stats
+                    # Save Kernel Result
+                    graph_hash = compute_structural_hash(root_kernel)
+                    axes_hash, axes_json = get_axes_hash_info(feed_dict)
 
-                    # Canonical Graph
                     graph_id = db.add_canonical_graph(graph_hash, human_name=op_type)
-
-                    # Implementation
-                    # Serialize recipe for FASTEST executor lookup
-                    recipe_json = json.dumps(recipe_kernel.to_dict())
-
                     impl_id = db.add_implementation(
                         graph_id,
                         "KERNEL",
                         f"{op_type}_Monolithic_{backend.value}",
                         backend.value,
-                        "hash_src_placeholder",
-                        recipe_json=recipe_json,
+                        "src_hash",
+                        recipe_json=json.dumps(recipe_kernel.to_dict()),
                     )
-
-                    # Workload
                     workload_id = db.add_workload(graph_id, axes_hash, axes_json)
-
-                    # Trace
                     db.add_benchmark_trace(
                         impl_id, workload_id, env_id, "PASSED", latency_kernel
                     )
 
                 except Exception as e:
-                    print(f"      Failed: {e}")
+                    print(f"      Kernel Failed: {e}")
                     latency_kernel = float("inf")
                     graph_id = None
 
                 # ---------------------------------------------------------
                 # Path B: Atomic Decomposition
                 # ---------------------------------------------------------
-                if graph_id is None:
-                    continue
+                if graph_id:
+                    try:
+                        # Get atomic nodes
+                        def get_nodes(node, s):
+                            s.add(node)
+                            for p in node.parents:
+                                get_nodes(p, s)
 
-                print(f"    Benchmarking ATOMIC implementation...")
-                try:
-                    # Helper to get all nodes
-                    def get_nodes(node, s):
-                        s.add(node)
-                        for p in node.parents:
-                            get_nodes(p, s)
+                        atomic_nodes = set()
+                        get_nodes(root_atomic, atomic_nodes)
 
-                    atomic_nodes = set()
-                    get_nodes(root_atomic, atomic_nodes)
+                        assignments_atomic = {
+                            n: Backend.CPU_NUMPY for n in atomic_nodes
+                        }
+                        recipe_atomic = ExecutionRecipe(root_atomic, assignments_atomic)
 
-                    # Assign all to CPU_NUMPY for reference decomposition
-                    assignments_atomic = {n: Backend.CPU_NUMPY for n in atomic_nodes}
-                    recipe_atomic = ExecutionRecipe(root_atomic, assignments_atomic)
+                        latency_atomic = profiler.benchmark_recipe(
+                            recipe_atomic, feed_dict
+                        )
 
-                    # Atomic decomposition runs on CPU, so use standard numpy feed_dict
-                    latency_atomic = profiler.benchmark_recipe(recipe_atomic, feed_dict)
-                    print(f"      Latency: {latency_atomic:.4f} ms")
+                        # Save Atomic Result
+                        impl_id_atomic = db.add_implementation(
+                            graph_id,
+                            "GRAPH_RECIPE",
+                            f"{op_type}_Decomposed_CPU",
+                            "cpu_numpy",
+                            "src_hash",
+                            recipe_json=json.dumps(recipe_atomic.to_dict()),
+                        )
+                        db.add_benchmark_trace(
+                            impl_id_atomic,
+                            workload_id,
+                            env_id,
+                            "PASSED",
+                            latency_atomic,
+                        )
 
-                    # Compare
-                    if latency_kernel < float("inf"):
-                        diff = latency_atomic - latency_kernel
                         winner = (
                             "KERNEL" if latency_kernel < latency_atomic else "ATOMIC"
                         )
-                        print(f"      Winner: {winner} (Diff: {abs(diff):.4f} ms)")
+                        print(
+                            f"      Result: K={latency_kernel:.3f}ms vs A={latency_atomic:.3f}ms -> Winner: {winner}"
+                        )
 
-                    # Save to DB
-                    recipe_atomic_json = json.dumps(recipe_atomic.to_dict())
-                    impl_id_atomic = db.add_implementation(
-                        graph_id,
-                        "GRAPH_RECIPE",
-                        f"{op_type}_Decomposed_CPU",
-                        "cpu_numpy",
-                        "hash_src_placeholder",
-                        recipe_json=recipe_atomic_json,
-                    )
+                    except Exception as e:
+                        print(f"      Atomic Failed: {e}")
 
-                    db.add_benchmark_trace(
-                        impl_id_atomic, workload_id, env_id, "PASSED", latency_atomic
-                    )
+    print("\nExploration Complete.")
 
-                except Exception as e:
-                    print(f"      Failed: {e}")
 
-    print("\nExploration Complete. Results saved to benchmarks.db")
+def get_axes_hash_info(inputs: Dict[str, np.ndarray]):
+    # Helper duplicated from offline_profiler to make this script standalone
+    axes_json = {k: v.shape for k, v in inputs.items()}
+    axes_hash = hashlib.sha256(
+        json.dumps(axes_json, sort_keys=True).encode()
+    ).hexdigest()
+    return axes_hash, axes_json
 
 
 if __name__ == "__main__":

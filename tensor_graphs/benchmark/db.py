@@ -19,21 +19,18 @@ class BenchmarkDB:
             cursor = conn.cursor()
 
             # A. The Math (Definitions)
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS canonical_graphs (
                     id TEXT PRIMARY KEY,
                     human_name TEXT,
                     structural_hash TEXT UNIQUE,
                     atomic_graph_json TEXT
                 )
-            """
-            )
+            """)
 
             # B. The Code (Solutions)
             # UPDATED: Added recipe_json column
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS implementations (
                     id TEXT PRIMARY KEY,
                     canonical_graph_id TEXT,
@@ -45,12 +42,10 @@ class BenchmarkDB:
                     requirements TEXT, -- JSON
                     FOREIGN KEY (canonical_graph_id) REFERENCES canonical_graphs (id)
                 )
-            """
-            )
+            """)
 
             # C. The Context (Environment)
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS environments (
                     id TEXT PRIMARY KEY,
                     hardware_name TEXT,
@@ -58,12 +53,10 @@ class BenchmarkDB:
                     platform_info TEXT, -- JSON
                     libs_info TEXT -- JSON
                 )
-            """
-            )
+            """)
 
             # D. The Input (Workload)
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS workloads (
                     id TEXT PRIMARY KEY,
                     canonical_graph_id TEXT,
@@ -72,12 +65,10 @@ class BenchmarkDB:
                     input_descriptors TEXT, -- JSON
                     FOREIGN KEY (canonical_graph_id) REFERENCES canonical_graphs (id)
                 )
-            """
-            )
+            """)
 
             # E. The Stats (Trace)
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS benchmark_traces (
                     id TEXT PRIMARY KEY,
                     implementation_id TEXT,
@@ -93,8 +84,21 @@ class BenchmarkDB:
                     FOREIGN KEY (workload_id) REFERENCES workloads (id),
                     FOREIGN KEY (environment_id) REFERENCES environments (id)
                 )
-            """
-            )
+            """)
+
+            # F. Offline Profiling Queue (NEW)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS profiling_queue (
+                    id TEXT PRIMARY KEY,
+                    canonical_graph_id TEXT,
+                    workload_id TEXT,
+                    priority INTEGER DEFAULT 0,
+                    added_at TEXT,
+                    FOREIGN KEY (canonical_graph_id) REFERENCES canonical_graphs (id),
+                    FOREIGN KEY (workload_id) REFERENCES workloads (id),
+                    UNIQUE(canonical_graph_id, workload_id)
+                )
+            """)
             conn.commit()
 
     def add_canonical_graph(
@@ -106,11 +110,18 @@ class BenchmarkDB:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id FROM canonical_graphs WHERE structural_hash = ?",
+                "SELECT id, atomic_graph_json FROM canonical_graphs WHERE structural_hash = ?",
                 (structural_hash,),
             )
             row = cursor.fetchone()
             if row:
+                # Update JSON if it wasn't there before but is provided now
+                if atomic_graph_json and not row[1]:
+                    cursor.execute(
+                        "UPDATE canonical_graphs SET atomic_graph_json = ? WHERE id = ?",
+                        (atomic_graph_json, row[0]),
+                    )
+                    conn.commit()
                 return row[0]
 
             graph_id = str(uuid.uuid4())
@@ -309,3 +320,56 @@ class BenchmarkDB:
             if row:
                 return row["type"]
             return None
+
+    # --- Profiling Queue Methods ---
+
+    def add_to_queue(
+        self, canonical_graph_id: str, workload_id: str, priority: int = 0
+    ):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "INSERT INTO profiling_queue (id, canonical_graph_id, workload_id, priority, added_at) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        str(uuid.uuid4()),
+                        canonical_graph_id,
+                        workload_id,
+                        priority,
+                        datetime.utcnow().isoformat(),
+                    ),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                # Already in queue
+                pass
+
+    def get_queue_items(self) -> List[Dict[str, Any]]:
+        """
+        Returns items in the queue joined with graph and workload data.
+        """
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            query = """
+                SELECT 
+                    q.id as queue_id,
+                    g.id as graph_id,
+                    g.structural_hash,
+                    g.atomic_graph_json,
+                    g.human_name,
+                    w.id as workload_id,
+                    w.axes_json
+                FROM profiling_queue q
+                JOIN canonical_graphs g ON q.canonical_graph_id = g.id
+                JOIN workloads w ON q.workload_id = w.id
+                ORDER BY q.priority DESC, q.added_at ASC
+            """
+            cursor.execute(query)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def remove_from_queue(self, queue_id: str):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM profiling_queue WHERE id = ?", (queue_id,))
+            conn.commit()

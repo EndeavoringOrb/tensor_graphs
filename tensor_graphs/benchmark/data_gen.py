@@ -3,6 +3,7 @@ File: tensor_graphs/benchmark/data_gen.py
 """
 
 import numpy as np
+import random
 from typing import List, Dict, Any, Tuple, Optional
 from ..ir.dtypes import DType, Backend, TensorSignature
 from ..ops.atomic_types import OpType
@@ -34,6 +35,12 @@ class DataGenerator:
             return np.random.randn(*shape).astype(np_dtype)
 
     @staticmethod
+    def _random_shape(min_rank=1, max_rank=4, min_dim=1, max_dim=64) -> Tuple[int, ...]:
+        """Generates a random shape tuple."""
+        rank = random.randint(min_rank, max_rank)
+        return tuple(random.randint(min_dim, max_dim) for _ in range(rank))
+
+    @staticmethod
     def generate(
         op_type: str,
         signatures: Tuple[TensorSignature, ...],
@@ -49,99 +56,171 @@ class DataGenerator:
 
         if op_type == OpType.DOT:
             # Matrix Multiplication: (M, K) @ (K, N)
-            m, k, n = 128, 128, 128
+            m = random.randint(32, 256)
+            k = random.randint(32, 256)
+            n = random.randint(32, 256)
             inputs.append(DataGenerator.random_tensor((m, k), DType.FP32))
             inputs.append(DataGenerator.random_tensor((k, n), DType.FP32))
             return inputs, attrs
 
         elif op_type == OpType.RESHAPE:
-            # Data: (2, 3, 4), Shape: [24] or [6, 4]
-            data = DataGenerator.random_tensor((2, 3, 4), DType.FP32)
-            # Target shape tensor
-            target_shape = np.array([6, 4], dtype=np.int32)
+            # Data: Random Shape -> Reshape to 1D or 2D preserving elements
+            in_shape = DataGenerator._random_shape()
+            data = DataGenerator.random_tensor(in_shape, DType.FP32)
+            total_elements = int(np.prod(in_shape))
+
+            # Simple factorization strategy for valid reshape
+            if random.random() < 0.5:
+                # Flatten
+                target_shape = np.array([total_elements], dtype=np.int32)
+            else:
+                # Attempt to split into 2 dims
+                dim1 = 1
+                # Find a divisor roughly near sqrt(total)
+                for i in range(int(total_elements**0.5), 0, -1):
+                    if total_elements % i == 0:
+                        dim1 = i
+                        break
+                dim2 = total_elements // dim1
+                target_shape = np.array([dim1, dim2], dtype=np.int32)
+
             inputs = [data, target_shape]
             return inputs, attrs
 
         elif op_type == OpType.PERMUTE:
-            # Data: (2, 3, 4), Perm: [2, 0, 1]
-            data = DataGenerator.random_tensor((2, 3, 4), DType.FP32)
-            perm = np.array([2, 0, 1], dtype=np.int32)
+            # Data: Random Shape, Perm: Random Shuffle of axes
+            shape = DataGenerator._random_shape(min_rank=2)
+            data = DataGenerator.random_tensor(shape, DType.FP32)
+
+            axes = list(range(len(shape)))
+            random.shuffle(axes)
+            perm = np.array(axes, dtype=np.int32)
+
             inputs = [data, perm]
             return inputs, attrs
 
         elif op_type == OpType.CONCAT:
-            # Data A: (2, 4), Data B: (2, 4), Axis: 0 or 1
-            a = DataGenerator.random_tensor((2, 4), DType.FP32)
-            b = DataGenerator.random_tensor((2, 4), DType.FP32)
-            axis = np.array([1], dtype=np.int32)
+            # Data A: Random, Data B: Same rank, matching dims except axis
+            shape_a = list(DataGenerator._random_shape(min_rank=2))
+            axis_idx = random.randint(0, len(shape_a) - 1)
+
+            shape_b = shape_a.copy()
+            shape_b[axis_idx] = random.randint(1, 64)  # Vary the concat axis size
+
+            a = DataGenerator.random_tensor(tuple(shape_a), DType.FP32)
+            b = DataGenerator.random_tensor(tuple(shape_b), DType.FP32)
+            axis = np.array([axis_idx], dtype=np.int32)
+
             inputs = [a, b, axis]
             return inputs, attrs
 
         elif op_type == OpType.SLICE:
-            data = DataGenerator.random_tensor((10, 10), DType.FP32)
+            shape = DataGenerator._random_shape()
+            data = DataGenerator.random_tensor(shape, DType.FP32)
+
+            starts, ends, steps = [], [], []
+            for dim in shape:
+                start = random.randint(0, dim - 1)
+                end = random.randint(start + 1, dim)
+                step = random.randint(1, 2)
+                starts.append(start)
+                ends.append(end)
+                steps.append(step)
+
             if len(signatures) == 4:
-                starts = np.array([0, 0], dtype=np.int32)
-                ends = np.array([5, 5], dtype=np.int32)
-                steps = np.array([1, 1], dtype=np.int32)
-                inputs = [data, starts, ends, steps]
+                inputs = [
+                    data,
+                    np.array(starts, dtype=np.int32),
+                    np.array(ends, dtype=np.int32),
+                    np.array(steps, dtype=np.int32),
+                ]
             else:
                 inputs = [data]
-                attrs = {"starts": [0, 0], "ends": [5, 5], "steps": [1, 1]}
+                attrs = {"starts": starts, "ends": ends, "steps": steps}
             return inputs, attrs
 
         elif op_type == OpType.ARANGE:
+            start = random.randint(0, 10)
+            stop = start + random.randint(10, 100)
+            step = random.choice([1, 2, 5])
+
             inputs = [
-                np.array([0], dtype=np.int32),
-                np.array([10], dtype=np.int32),
-                np.array([1], dtype=np.int32),
+                np.array([start], dtype=np.int32),
+                np.array([stop], dtype=np.int32),
+                np.array([step], dtype=np.int32),
             ]
             return inputs, attrs
 
         elif op_type == OpType.TRIU:
-            data = DataGenerator.random_tensor((32, 32), DType.FP32)
-            k = np.array([1], dtype=np.int32)
+            shape = DataGenerator._random_shape(min_rank=2)
+            data = DataGenerator.random_tensor(shape, DType.FP32)
+            k = np.array([random.randint(-2, 2)], dtype=np.int32)
             inputs = [data, k]
             return inputs, attrs
 
         elif op_type == OpType.FILL:
             target_dtype = signatures[0].dtype if signatures else DType.FP32
-            if target_dtype == DType.INT32:
-                val = np.array([7], dtype=np.int32)
-            else:
-                val = np.array([3.14], dtype=np.float32)
 
-            shape = np.array([32, 32], dtype=np.int32)
-            inputs = [val, shape]
-            attrs = {"target_shape": (32, 32)}
+            # Value
+            if target_dtype == DType.INT32:
+                val = np.array([random.randint(0, 10)], dtype=np.int32)
+            else:
+                val = np.array([random.random()], dtype=np.float32)
+
+            # Shape
+            shape_tuple = DataGenerator._random_shape()
+            shape_tensor = np.array(shape_tuple, dtype=np.int32)
+
+            inputs = [val, shape_tensor]
+            attrs = {"target_shape": shape_tuple}
             return inputs, attrs
 
         elif op_type == OpType.GATHER:
-            vocab_size = 100
-            dim = 64
+            vocab_size = random.randint(50, 200)
+            dim = random.randint(32, 128)
             data = DataGenerator.random_tensor((vocab_size, dim), DType.FP32)
-            indices = np.random.randint(0, vocab_size, size=(32,), dtype=np.int32)
+
+            indices_shape = DataGenerator._random_shape(max_rank=2)
+            indices = np.random.randint(
+                0, vocab_size, size=indices_shape, dtype=np.int32
+            )
+
             inputs = [data, indices]
             return inputs, attrs
 
         elif op_type in (OpType.MAX, OpType.SUM):
-            data = DataGenerator.random_tensor((64, 128), DType.FP32)
+            shape = DataGenerator._random_shape(min_rank=2)
+            data = DataGenerator.random_tensor(shape, DType.FP32)
             inputs.append(data)
+
+            axis_idx = random.randint(0, len(shape) - 1)
+
             if len(signatures) > 1:
-                axis_val = np.array([0], dtype=np.int32)
+                axis_val = np.array([axis_idx], dtype=np.int32)
                 inputs.append(axis_val)
+            else:
+                attrs["axis"] = axis_idx
+                attrs["keepdims"] = True
             return inputs, attrs
 
         elif op_type == OpType.REPEAT:
-            data = DataGenerator.random_tensor((32, 32), DType.FP32)
+            shape = DataGenerator._random_shape()
+            data = DataGenerator.random_tensor(shape, DType.FP32)
             inputs.append(data)
+
+            repeats = random.randint(2, 5)
+
             if len(signatures) > 1:
-                inputs.append(np.array([2], dtype=np.int32))
+                inputs.append(np.array([repeats], dtype=np.int32))
             else:
-                attrs["repeats"] = 2
+                attrs["repeats"] = repeats
+                # Pick valid axis
+                attrs["axis"] = random.randint(0, len(shape) - 1)
             return inputs, attrs
 
         elif op_type == OpType.COPY_TO:
-            data = DataGenerator.random_tensor((32, 32), signatures[0].dtype)
+            shape = DataGenerator._random_shape()
+            data = DataGenerator.random_tensor(shape, signatures[0].dtype)
             inputs = [data]
             if backend:
                 attrs["target_backend"] = backend.value
@@ -150,19 +229,23 @@ class DataGenerator:
             return inputs, attrs
 
         elif op_type == OpType.CAST:
-            data = DataGenerator.random_tensor((32, 32), signatures[0].dtype)
+            shape = DataGenerator._random_shape()
+            data = DataGenerator.random_tensor(shape, signatures[0].dtype)
             inputs = [data]
-            attrs = {"to": DType.FP32}
+            attrs = {"to": DType.FP32}  # Default target
             return inputs, attrs
 
         # --- Generic Element-wise / Broadcast / Fused ---
-        base_shape = (128, 128)
 
-        # Fused Op Handling
+        # Generate a random base shape for element-wise operations
+        base_shape = DataGenerator._random_shape()
+
+        # Fused Op Handling with random shapes
         if op_type == "RMSNorm":
             # x, weight, eps
+            dim = base_shape[-1]
             inputs.append(DataGenerator.random_tensor(base_shape, DType.FP32))
-            inputs.append(DataGenerator.random_tensor((base_shape[-1],), DType.FP32))
+            inputs.append(DataGenerator.random_tensor((dim,), DType.FP32))
             inputs.append(np.array([1e-5], dtype=np.float32))
             return inputs, attrs
 
@@ -172,11 +255,7 @@ class DataGenerator:
             inputs.append(DataGenerator.random_tensor(base_shape, DType.FP32))
             return inputs, attrs
 
-        if op_type == "GELU":
-            inputs.append(DataGenerator.random_tensor(base_shape, DType.FP32))
-            return inputs, attrs
-
-        if op_type == "Softmax":
+        if op_type == "GELU" or op_type == "Softmax":
             inputs.append(DataGenerator.random_tensor(base_shape, DType.FP32))
             return inputs, attrs
 
@@ -186,12 +265,21 @@ class DataGenerator:
             inputs.append(DataGenerator.random_tensor(base_shape, DType.FP32))
             return inputs, attrs
 
-        # Fallback for generic atomic element-wise
+        # Fallback for generic atomic element-wise based on signature
         for sig in signatures:
-            if sig.is_scalar() or (sig.shape and sig.shape == (1,)):
+            sig_shape = sig.shape
+
+            # 1. Scalar signature
+            if sig.is_scalar() or (sig_shape and sig_shape == (1,)):
                 inputs.append(DataGenerator.random_tensor((1,), sig.dtype))
-            elif sig.shape and sig.shape == (None,):
+            # 2. Vector-specific signature
+            elif sig_shape and sig_shape == (None,):
+                # Use flattened base shape dimension or random 1D
                 inputs.append(DataGenerator.random_tensor((base_shape[0],), sig.dtype))
+            # 3. Explicit shape in signature (rare for atomic ops, but possible)
+            elif sig_shape and None not in sig_shape:
+                inputs.append(DataGenerator.random_tensor(sig_shape, sig.dtype))
+            # 4. Standard Broadcastable Input
             else:
                 inputs.append(DataGenerator.random_tensor(base_shape, sig.dtype))
 

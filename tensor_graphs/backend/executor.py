@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, Union, Set
 from ..ir.node import TensorNode
 from ..ir.dtypes import Backend, DType, TensorSignature
 from ..ir.hashing import compute_structural_hash
+from ..ir.graph import graph_to_json
 from ..ops.atomic_types import OpType
 from ..ops.registry import get_reference_factory
 from ..backend.registry import KernelRegistry
@@ -202,8 +203,9 @@ class SmartExecutor:
 
         # 2. EXPLORE Policy
         if self.policy == "EXPLORE":
-            # UPDATED: Offline profiling flag logic
-            self._flag_for_offline_profiling(root, structural_hash)
+            self._flag_for_offline_profiling(
+                root, structural_hash, axes_hash, axes_json
+            )
             # Fallback to Heuristic immediately so we don't block execution
 
         # 3. HEURISTIC / Default Fallback
@@ -221,13 +223,44 @@ class SmartExecutor:
             self._get_all_nodes(p, visited)
         return visited
 
-    def _flag_for_offline_profiling(self, root: TensorNode, graph_hash: str):
+    def _flag_for_offline_profiling(
+        self,
+        root: TensorNode,
+        graph_hash: str,
+        axes_hash: str,
+        axes_json: Dict[str, Any],
+    ):
         """
-        Simulate adding this graph to a job queue for offline benchmarking.
+        Adds the graph and workload to the DB and flags it in the queue.
         """
         print(
-            f"[SmartExecutor] 🚩 Graph {graph_hash} ({root.op_type}) flagged for offline profiling."
+            f"[SmartExecutor] 🚩 Graph {graph_hash[:8]} flagged for offline profiling."
         )
+
+        # 1. Serialize Graph Structure
+        # We need to save the atomic structure to the DB so the offline profiler can reconstruct it.
+        # Note: If the user passes a graph that uses high-level kernels, we might want to decompose it first?
+        # For now, we save it as-is.
+        try:
+            atomic_json = graph_to_json(root)
+
+            # 2. Save Canonical Graph
+            graph_id = self.db.add_canonical_graph(
+                structural_hash=graph_hash,
+                human_name=root.op_type,
+                atomic_graph_json=atomic_json,
+            )
+
+            # 3. Save Workload
+            workload_id = self.db.add_workload(
+                canonical_graph_id=graph_id, axes_hash=axes_hash, axes_json=axes_json
+            )
+
+            # 4. Add to Queue
+            self.db.add_to_queue(graph_id, workload_id)
+
+        except Exception as e:
+            print(f"[SmartExecutor] Failed to flag graph: {e}")
 
 
 def evaluate_graph(
