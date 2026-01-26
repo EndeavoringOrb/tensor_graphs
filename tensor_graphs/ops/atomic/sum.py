@@ -9,22 +9,30 @@ def sum_ref(
     """
     Reference graph for Sum: sum(x) or sum(x, axis=...)
     inputs[0]: Input tensor
+    inputs[1]: Axis (optional)
     attrs["axis"]: Axis for reduction (optional)
     attrs["keepdims"]: Whether to keep reduced dimensions (optional, default: True)
     """
-    if len(inputs) != 1:
-        raise ValueError("Sum requires exactly 1 input")
-
-    x = inputs[0]
-
     if attrs is None:
         attrs = {}
 
+    if len(inputs) == 1:
+        x = inputs[0]
+        parents = [x]
+    elif len(inputs) == 2:
+        x = inputs[0]
+        axis_node = inputs[1]
+        parents = [x, axis_node]
+    else:
+        raise ValueError("Sum requires 1 or 2 inputs")
+
+    out_shape = x.shape if not ("axis" in attrs and attrs["axis"] is not None) else (1,)
+
     return TensorNode(
         OpType.SUM,
-        x.shape if not ("axis" in attrs and attrs["axis"] is not None) else (1,),
+        out_shape,
         x.dtype,
-        [x],
+        parents,
         f"sum_{x.name}",
         attrs=attrs,
         backend=x.backend,

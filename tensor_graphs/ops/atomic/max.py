@@ -9,21 +9,29 @@ def max_ref(
     """
     Reference graph for Max: max(x) or max(x, axis=...)
     inputs[0]: Input tensor
+    inputs[1]: Axis (optional)
     attrs["axis"]: Axis for reduction (optional)
     """
-    if len(inputs) != 1:
-        raise ValueError("Max requires exactly 1 input")
-
-    x = inputs[0]
-
     if attrs is None:
         attrs = {}
 
+    if len(inputs) == 1:
+        x = inputs[0]
+        parents = [x]
+    elif len(inputs) == 2:
+        x = inputs[0]
+        axis_node = inputs[1]
+        parents = [x, axis_node]
+    else:
+        raise ValueError("Max requires 1 or 2 inputs")
+
+    out_shape = x.shape if not ("axis" in attrs and attrs["axis"] is not None) else (1,)
+
     return TensorNode(
         OpType.MAX,
-        x.shape if not ("axis" in attrs and attrs["axis"] is not None) else (1,),
+        out_shape,
         x.dtype,
-        [x],
+        parents,
         f"max_{x.name}",
         attrs=attrs,
         backend=x.backend,
