@@ -120,6 +120,16 @@ class BenchmarkDB:
     ) -> str:
         with self._get_connection() as conn:
             cursor = conn.cursor()
+
+            # Check for existing implementation
+            cursor.execute(
+                "SELECT id FROM implementations WHERE canonical_graph_id = ? AND type = ? AND name = ?",
+                (canonical_graph_id, impl_type, name),
+            )
+            row = cursor.fetchone()
+            if row:
+                return row[0]
+
             impl_id = str(uuid.uuid4())
             cursor.execute(
                 "INSERT INTO implementations (id, canonical_graph_id, type, name, backend, source_hash, requirements) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -145,7 +155,14 @@ class BenchmarkDB:
     ) -> str:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # Try to find existing environment with same hardware and platform/libs
+            # Simple dedupe based on hardware name (MVP)
+            cursor.execute(
+                "SELECT id FROM environments WHERE hardware_name = ?", (hardware_name,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return row[0]
+
             env_id = str(uuid.uuid4())
             cursor.execute(
                 "INSERT INTO environments (id, hardware_name, memory_bytes, platform_info, libs_info) VALUES (?, ?, ?, ?, ?)",
@@ -250,4 +267,37 @@ class BenchmarkDB:
             row = cursor.fetchone()
             if row:
                 return dict(row)
+            return None
+
+    def get_op_preference(
+        self, op_type: str, shape_str: str, env_id: str
+    ) -> Optional[str]:
+        """
+        Returns 'KERNEL' or 'GRAPH_RECIPE' (Atomic) based on what was fastest for this op_type.
+        Note: This assumes human_name of canonical_graph maps to OpType.
+        """
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            # Simple heuristic query:
+            # Find traces for this OpType (via human_name) and Environment.
+            # We filter loosely on workload via shape if possible, but for prototype
+            # we just check what's fastest generally for this op.
+
+            query = """
+                SELECT i.type, t.latency_ms
+                FROM implementations i
+                JOIN canonical_graphs g ON i.canonical_graph_id = g.id
+                JOIN benchmark_traces t ON t.implementation_id = i.id
+                WHERE g.human_name = ?
+                  AND t.environment_id = ?
+                  AND t.status = 'PASSED'
+                ORDER BY t.latency_ms ASC
+                LIMIT 1
+            """
+            cursor.execute(query, (op_type, env_id))
+            row = cursor.fetchone()
+            if row:
+                return row["type"]
             return None
