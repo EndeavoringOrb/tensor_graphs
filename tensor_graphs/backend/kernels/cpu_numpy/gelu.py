@@ -6,7 +6,9 @@ from ....ops.fused.gelu import gelu_decomposition
 
 # --- GELU ---
 @KernelRegistry.register(
-    "GELU", [TensorSignature(DType.FP32, shape=None)], reference_factory=gelu_decomposition
+    "GELU",
+    [TensorSignature(DType.FP32, shape=None)],
+    reference_factory=gelu_decomposition,
 )
 def gelu_kernel(inputs, attrs=None):
     x = inputs[0]
