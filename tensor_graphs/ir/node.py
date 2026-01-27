@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
 import uuid
 from .dtypes import DType, TensorSignature, Backend
+from .buffer import StorageType
 
 
 @dataclass(eq=False)
@@ -13,6 +14,7 @@ class TensorNode:
     name: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     attrs: Dict[str, Any] = field(default_factory=dict)
     backend: Backend = Backend.CPU_NUMPY
+    storage_type: StorageType = StorageType.TRANSIENT
 
     def get_attr(self, key: str, default: Any = None) -> Any:
         return self.attrs.get(key, default)

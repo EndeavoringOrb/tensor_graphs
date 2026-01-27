@@ -10,8 +10,14 @@ from tokenizers import Tokenizer
 # --- Tensor Graphs Imports ---
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
+from tensor_graphs.ir.buffer import StorageType
 from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.backend.executor import evaluate_graph
+
+# Compiler Imports
+from tensor_graphs.compiler.planner import Planner
+from tensor_graphs.compiler.compiler import Compiler
+from tensor_graphs.backend.static_executor import StaticExecutor
 
 # Import Fused Ops Definitions
 from tensor_graphs.ops.fused import (
@@ -35,7 +41,8 @@ class GraphBuilder:
         self.inputs = {}
 
     def input(self, name, shape, dtype=DType.FP32):
-        node = TensorNode(OpType.INPUT, shape, dtype, [], name)
+        # Inputs are transient/fed in
+        node = TensorNode(OpType.INPUT, shape, dtype, [], name, storage_type=StorageType.TRANSIENT)
         self.inputs[name] = node
         return node
 
@@ -51,11 +58,13 @@ class GraphBuilder:
             parents=[],
             name=name,
             attrs={"value": value},
+            storage_type=StorageType.PERSISTENT # Constants are persistent
         )
         return node
 
     def param(self, name, shape, dtype=DType.FP32):
-        node = TensorNode(OpType.INPUT, shape, dtype, [], name)
+        # Params are persistent weights
+        node = TensorNode(OpType.INPUT, shape, dtype, [], name, storage_type=StorageType.PERSISTENT)
         self.params[name] = node
         return node
 
@@ -96,12 +105,9 @@ class GraphBuilder:
         )
 
     def arange(self, start_node, stop_node, step_node):
-        # Arange output shape is roughly (stop-start)/step.
-        # For symbolic graphs this is tricky, but here we know exact shapes usually.
-        # We'll assign a placeholder shape or (None,)
         return TensorNode(
             OpType.ARANGE,
-            (None,),
+            (None,), # Dynamic shape usually, but handled by kernel logic mostly
             DType.INT32,
             [start_node, stop_node, step_node],
             "arange",
@@ -207,16 +213,15 @@ class Gemma3Model:
         return self.builder.param(name, shape)
 
     def _const(self, value, name, dtype=DType.INT32):
-        # Ensure value is a numpy array
         val_arr = np.array(
             value, dtype=np.int32 if dtype == DType.INT32 else np.float32
         )
         if val_arr.ndim == 0:
             val_arr = val_arr.reshape(1)
 
-        # Fix: 1. Remove unpacking. 2. Fix argument order (shape then dtype)
         node = self.builder.constant(val_arr, (1,), dtype, name)
-
+        # Store for initialization
+        self.constant_inputs[name] = val_arr
         return node
 
     def forward(self, input_ids_node, cos, sin, mask, shapes: Dict[str, TensorNode]):
@@ -442,7 +447,6 @@ def compute_rope_params_graph(head_dim, theta_base=10000.0, context_length=4096)
         if arr.ndim == 0:
             arr = arr.reshape(1)
 
-        # Fix: Correct call signature and remove unpacking
         node = b.constant(arr, (1,), dtype, name)
         feed_dict[name] = arr
         return node
@@ -497,11 +501,6 @@ def compute_rope_params_graph(head_dim, theta_base=10000.0, context_length=4096)
     cos_out = b.reshape(cos_t, (1, 1, context_length, head_dim), shape_final)
     sin_out = b.reshape(sin_t, (1, 1, context_length, head_dim), shape_final)
 
-    # Evaluate immediately
-    # We construct a dummy root node that depends on both to ensure execution if we had a single-root evaluator,
-    # but evaluate_graph takes a root. We need to evaluate both.
-    # We can just evaluate cos_out and sin_out separately sharing the feed_dict.
-
     cos_val = evaluate_graph(cos_out, feed_dict)
     sin_val = evaluate_graph(sin_out, feed_dict)
 
@@ -550,6 +549,9 @@ def main():
 
     # Generation Loop
     max_new_tokens = 50
+    # Fixed Context Length for Compilation
+    MAX_SEQ_LEN = 128
+    
     print(f"\nPrompt: {prompt}")
     print("Generating...", end="", flush=True)
 
@@ -564,13 +566,19 @@ def main():
     cfg = GEMMA3_CONFIG_270M
     model = Gemma3Model(cfg, weights_np)
 
-    # Define Dynamic Input Nodes
-    in_node = model.builder.input("input_ids", (1, None), DType.INT32)
-    cos_node = model.builder.input("cos", (1, 1, None, cfg["head_dim"]), DType.FP32)
-    sin_node = model.builder.input("sin", (1, 1, None, cfg["head_dim"]), DType.FP32)
-    mask_node = model.builder.input("mask", (1, 1, None, None), DType.FP32)
+    # Define Fixed Inputs for Compiled Graph
+    # Using MAX_SEQ_LEN
+    in_node = model.builder.input("input_ids", (1, MAX_SEQ_LEN), DType.INT32)
+    cos_node = model.builder.input("cos", (1, 1, MAX_SEQ_LEN, cfg["head_dim"])), DType.FP32)
+    sin_node = model.builder.input("sin", (1, 1, MAX_SEQ_LEN, cfg["head_dim"])), DType.FP32)
+    mask_node = model.builder.input("mask", (1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), DType.FP32)
 
-    # Dynamic Shape Inputs for Reshape
+    # Dynamic Shape Inputs for Reshape 
+    # (Must be fixed value inputs now, effectively constants or inputs that don't change size, just values?)
+    # But for Reshape op, the `shape_node` is input.
+    # The `shape` must be consistent with memory alloc.
+    # We will pass the fixed MAX shapes.
+    
     q_shape_node = model.builder.input("q_shape", (4,), DType.INT32)
     kv_shape_node = model.builder.input("kv_shape", (4,), DType.INT32)
     flat_shape_node = model.builder.input("flat_shape", (3,), DType.INT32)
@@ -584,49 +592,91 @@ def main():
     # Build Forward Pass
     logits_node = model.forward(in_node, cos_node, sin_node, mask_node, shapes)
 
-    # Weights and Constants are fixed for the graph
-    base_feed_dict = {
-        **model.weights,
-        **model.constant_inputs,
-    }
+    # --- COMPILE ---
+    print("\nCompiling Graph...")
+    planner = Planner()
+    recipe = planner.plan(logits_node)
+    
+    compiler = Compiler()
+    compiled_graph = compiler.compile(recipe)
+    
+    print(f"Compiled! Total Memory: {compiled_graph.total_memory_bytes / 1024 / 1024:.2f} MB")
+    
+    # Initialize Executor
+    executor = StaticExecutor(compiled_graph)
+    
+    # Load Persistent Weights
+    print("Loading Weights into Static Memory...")
+    # Merge weights and constants
+    all_persistent = {**model.weights, **model.constant_inputs}
+    executor.load_weights(all_persistent)
 
+    # --- RUN LOOP ---
     for _ in range(max_new_tokens):
         seq_len = len(input_ids)
+        if seq_len > MAX_SEQ_LEN:
+            print("Max sequence length reached.")
+            break
 
-        # 3a. Prepare Dynamic Inputs
-        input_ids_np = np.array([input_ids], dtype=np.int32)
-        cos_cur = full_cos[:, :, :seq_len, :]
-        sin_cur = full_sin[:, :, :seq_len, :]
-        mask_cur = compute_causal_mask_np(seq_len)
-
-        # 3b. Prepare Dynamic Shapes
+        # 3a. Prepare Inputs (Padded)
+        input_ids_padded = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
+        input_ids_padded[0, :seq_len] = input_ids
+        
+        cos_cur = full_cos[:, :, :MAX_SEQ_LEN, :]
+        sin_cur = full_sin[:, :, :MAX_SEQ_LEN, :]
+        
+        # Mask
+        mask_cur_small = compute_causal_mask_np(seq_len)
+        mask_cur = np.zeros((1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), dtype=np.float32)
+        # We need to mask the padding too.
+        # Padding tokens should be ignored.
+        # But we are just running for correctness of the *next token*.
+        # The next token depends on the first seq_len tokens.
+        # The attention mask for the first seq_len tokens should be correct.
+        # The rest doesn't matter much if we ignore their logits.
+        
+        # Actually, simpler: Mask the attention.
+        # If we use 0 for padding in input_ids, they embed to something.
+        # We should mask attention to padding.
+        # compute_causal_mask_np returns -1e9 for future.
+        # We want to mask everything > seq_len.
+        
+        # Construct full mask:
+        # 1. Causal mask for [0..seq_len]
+        # 2. Block everything for [seq_len..MAX]
+        
+        mask_full = np.full((1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), -1e9, dtype=np.float32)
+        # Copy causal mask to top-left
+        mask_full[:, :, :seq_len, :seq_len] = mask_cur_small
+        
+        # 3b. Fixed Shapes
         q_shape = np.array(
-            [1, seq_len, cfg["n_heads"], cfg["head_dim"]], dtype=np.int32
+            [1, MAX_SEQ_LEN, cfg["n_heads"], cfg["head_dim"]], dtype=np.int32
         )
         kv_shape = np.array(
-            [1, seq_len, cfg["n_kv_groups"], cfg["head_dim"]], dtype=np.int32
+            [1, MAX_SEQ_LEN, cfg["n_kv_groups"], cfg["head_dim"]], dtype=np.int32
         )
         flat_shape = np.array(
-            [1, seq_len, cfg["n_heads"] * cfg["head_dim"]], dtype=np.int32
+            [1, MAX_SEQ_LEN, cfg["n_heads"] * cfg["head_dim"]], dtype=np.int32
         )
 
         # 3c. Final Feed Dict
         feed_dict = {
-            **base_feed_dict,
-            "input_ids": input_ids_np,
+            "input_ids": input_ids_padded,
             "cos": cos_cur,
             "sin": sin_cur,
-            "mask": mask_cur,
+            "mask": mask_full,
             "q_shape": q_shape,
             "kv_shape": kv_shape,
             "flat_shape": flat_shape,
         }
 
         # 3d. Execute
-        logits_out = evaluate_graph(logits_node, feed_dict)
+        logits_out = executor.run(feed_dict)
 
         # 3e. Next Token Strategy (Greedy)
-        next_token_logits = logits_out[0, -1, :]
+        # We need logits at index seq_len - 1
+        next_token_logits = logits_out[0, seq_len - 1, :]
         next_token_id = int(np.argmax(next_token_logits))
 
         input_ids.append(next_token_id)
