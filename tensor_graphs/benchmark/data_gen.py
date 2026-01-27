@@ -595,12 +595,9 @@ class DataGenerator:
         )
 
         # 2. Prepare inputs for the specific backends
-        if backend is not None:
-            return (
-                DataGenerator._prepare_inputs_for_backend(
-                    inputs_with_backends, backend
-                ),
-                attrs,
-            )
-
-        return inputs_with_backends, attrs
+        return (
+            DataGenerator._prepare_inputs_for_backend(
+                inputs_with_backends, backend
+            ),
+            attrs,
+        )
