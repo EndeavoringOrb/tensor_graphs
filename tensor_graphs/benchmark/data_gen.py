@@ -496,44 +496,68 @@ class DataGenerator:
             inputs_with_backends.append(
                 (
                     DataGenerator.random_tensor(base_shape, DType.FP32),
-                    Backend.CPU_NUMPY,  # Default to CPU for weights/eps usually
+                    signatures[0].backend or backend,
                 )
             )
             inputs_with_backends.append(
-                (DataGenerator.random_tensor((dim,), DType.FP32), Backend.CPU_NUMPY)
+                (
+                    DataGenerator.random_tensor((dim,), DType.FP32),
+                    signatures[1].backend or backend,
+                )
             )
             inputs_with_backends.append(
-                (np.array([1e-5], dtype=np.float32), Backend.CPU_NUMPY)
+                (np.array([1e-5], dtype=np.float32), signatures[2].backend or backend)
             )
             return inputs_with_backends, attrs
 
         if op_type == "RoPE":
             inputs_with_backends.append(
-                (DataGenerator.random_tensor(base_shape, DType.FP32), Backend.CPU_NUMPY)
+                (
+                    DataGenerator.random_tensor(base_shape, DType.FP32),
+                    signatures[0].backend or backend,
+                )
             )
             inputs_with_backends.append(
-                (DataGenerator.random_tensor(base_shape, DType.FP32), Backend.CPU_NUMPY)
+                (
+                    DataGenerator.random_tensor(base_shape, DType.FP32),
+                    signatures[1].backend or backend,
+                )
             )
             inputs_with_backends.append(
-                (DataGenerator.random_tensor(base_shape, DType.FP32), Backend.CPU_NUMPY)
+                (
+                    DataGenerator.random_tensor(base_shape, DType.FP32),
+                    signatures[2].backend or backend,
+                )
             )
             return inputs_with_backends, attrs
 
         if op_type == "GELU" or op_type == "Softmax":
             inputs_with_backends.append(
-                (DataGenerator.random_tensor(base_shape, DType.FP32), Backend.CPU_NUMPY)
+                (
+                    DataGenerator.random_tensor(base_shape, DType.FP32),
+                    signatures[0].backend or backend,
+                )
             )
             return inputs_with_backends, attrs
 
         if op_type == "FusedMulAdd":
             inputs_with_backends.append(
-                (DataGenerator.random_tensor(base_shape, DType.FP32), Backend.CPU_NUMPY)
+                (
+                    DataGenerator.random_tensor(base_shape, DType.FP32),
+                    signatures[0].backend or backend,
+                )
             )
             inputs_with_backends.append(
-                (DataGenerator.random_tensor(base_shape, DType.FP32), Backend.CPU_NUMPY)
+                (
+                    DataGenerator.random_tensor(base_shape, DType.FP32),
+                    signatures[1].backend or backend,
+                )
             )
             inputs_with_backends.append(
-                (DataGenerator.random_tensor(base_shape, DType.FP32), Backend.CPU_NUMPY)
+                (
+                    DataGenerator.random_tensor(base_shape, DType.FP32),
+                    signatures[2].backend or backend,
+                )
             )
             return inputs_with_backends, attrs
 
@@ -596,8 +620,6 @@ class DataGenerator:
 
         # 2. Prepare inputs for the specific backends
         return (
-            DataGenerator._prepare_inputs_for_backend(
-                inputs_with_backends, backend
-            ),
+            DataGenerator._prepare_inputs_for_backend(inputs_with_backends, backend),
             attrs,
         )
