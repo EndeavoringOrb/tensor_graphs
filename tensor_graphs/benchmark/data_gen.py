@@ -1,9 +1,11 @@
 import numpy as np
 import random
 from typing import List, Dict, Any, Tuple, Optional
+import torch
 from ..ir.dtypes import DType, Backend, TensorSignature
 from ..ops.atomic_types import OpType
 from ..ir.node import TensorNode
+from ..ops.atomic.copy_to import copy_to_ref
 
 
 class DataGenerator:
@@ -35,6 +37,39 @@ class DataGenerator:
             return np.random.randint(-10, 10, size=shape).astype(np_dtype)
         else:
             return np.random.randn(*shape).astype(np_dtype)
+
+    @staticmethod
+    def _prepare_inputs_for_backend(inputs, backend: Backend):
+        """Use CopyTo kernels to ensure inputs are in the correct backend format."""
+        if backend == Backend.CPU_NUMPY:
+            # Already numpy, just ensure it's contiguous
+            if isinstance(inputs[0], np.ndarray):
+                return [np.ascontiguousarray(inputs[0])]
+            else:
+                return [np.array(inputs[0], dtype=np.float32)]
+
+        elif backend == Backend.GPU_TORCH:
+            if not torch.cuda.is_available():
+                raise ValueError(f"Cannot prepare inputs for {backend.value}: CUDA is not available.")
+
+            # Convert numpy arrays to GPU tensors
+            prepared = []
+            for inp in inputs:
+                if isinstance(inp, np.ndarray):
+                    prepared.append(torch.from_numpy(inp).to(device="cuda", dtype=torch.float32))
+                elif isinstance(inp, torch.Tensor):
+                    if not inp.is_cuda:
+                        prepared.append(inp.to(device="cuda", dtype=torch.float32))
+                    else:
+                        prepared.append(inp)
+                else:
+                    # Fallback
+                    prepared.append(
+                        torch.tensor(inp, device="cuda", dtype=torch.float32)
+                    )
+            return prepared
+
+        return inputs
 
     @staticmethod
     def generate_from_shapes(
@@ -303,5 +338,9 @@ class DataGenerator:
             # 4. Standard Broadcastable Input
             else:
                 inputs.append(DataGenerator.random_tensor(base_shape, sig.dtype))
+
+        # Prepare inputs for the specified backend using CopyTo kernels
+        if backend is not None:
+            return DataGenerator._prepare_inputs_for_backend(inputs, backend), attrs
 
         return inputs, attrs
