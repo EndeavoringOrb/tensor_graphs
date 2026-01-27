@@ -83,16 +83,16 @@ def find_subgraph(large_graph: TensorNode, subgraph: TensorNode) -> List[TensorN
 
 
 class GraphEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if isinstance(obj, (np.float32, np.float64)):
-            return float(obj)
-        if isinstance(obj, (np.int32, np.int64)):
-            return int(obj)
-        if isinstance(obj, TensorNode):
-            return str(obj)
-        return super().default(obj)
+    def default(self, o):
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        if isinstance(o, np.floating) and not isinstance(o, bool):
+            return float(o)
+        if isinstance(o, np.integer) and not isinstance(o, bool):
+            return int(o)
+        if isinstance(o, TensorNode):
+            return str(o)
+        return super().default(o)
 
 
 def graph_to_json(root: TensorNode) -> str:
@@ -144,7 +144,7 @@ def graph_from_json(json_str: str) -> TensorNode:
         backend = Backend(node_data["backend"])
 
         # Handle shape (convert list back to tuple)
-        shape = tuple(node_data["shape"]) if node_data["shape"] is not None else None
+        shape = tuple(node_data["shape"]) if node_data["shape"] is not None else ()
 
         node = TensorNode(
             op_type=node_data["op_type"],

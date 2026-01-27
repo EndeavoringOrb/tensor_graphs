@@ -36,5 +36,10 @@ register_reference_factory("Softmax", softmax_decomposition)
 
 def softmax_ref(inputs, attrs=None):
     return TensorNode(
-        "Softmax", inputs[0].shape, inputs[0].dtype, inputs, "softmax", attrs=attrs
+        "Softmax",
+        inputs[0].shape,
+        inputs[0].dtype,
+        inputs,
+        "softmax",
+        attrs=attrs if attrs is not None else {},
     )

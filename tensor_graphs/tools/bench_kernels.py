@@ -1,6 +1,4 @@
 import time
-import numpy as np
-import itertools
 from tensor_graphs.backend.registry import KernelRegistry
 from tensor_graphs.benchmark.db import BenchmarkDB
 from tensor_graphs.benchmark.data_gen import DataGenerator
@@ -51,7 +49,7 @@ def bench_all(db_path="benchmarks.db"):
                         db.add_benchmark(
                             op_type, backend.value, "float32", shape, attrs, avg_ms
                         )
-                        # print(f"  Shape {shape}: {avg_ms:.4f} ms")
+                        print(f"  Shape {shape}: {avg_ms:.4f} ms")
 
                     except Exception as e:
                         # Skip invalid shapes for certain ops
