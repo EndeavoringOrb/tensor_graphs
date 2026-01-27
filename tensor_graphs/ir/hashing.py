@@ -15,8 +15,10 @@ def get_structural_hash(node, memo=None) -> str:
 
     # 1. Base Cases
     if node.op_type == OpType.INPUT:
-        # For planning, inputs with same signature are identical
-        h = _hash_string(f"INPUT|{node.dtype.value}|{node.shape}|{node.backend.value}")
+        # Include name to distinguish different input nodes
+        h = _hash_string(
+            f"INPUT|{node.name}|{node.dtype.value}|{node.shape}|{node.backend.value}"
+        )
         memo[node] = h
         return h
 

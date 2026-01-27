@@ -1,7 +1,7 @@
 import copy
-from typing import Dict, Any, Tuple
+from typing import Dict, Tuple, Optional
 from ..ir.node import TensorNode
-from ..ir.dtypes import Backend
+from ..ir.dtypes import Backend, TensorSignature
 from ..ir.hashing import get_structural_hash
 from ..benchmark.db import BenchmarkDB
 from .cost_model import CostModel
@@ -99,7 +99,9 @@ class Planner:
             candidates.append((total_cost, new_node, assignments))
 
         # 3. Strategy B: Decomposition
-        if depth < 10:  # Prevent infinite recursion
+        if (
+            depth < 10
+        ):  # Prevent infinite recursion. TODO: remove this, we shouldn't have ops calling themselves (i don't think), so this shouldn't be needed
             ref_factory = get_reference_factory(node.op_type)
             if ref_factory:
                 # Decompose into subgraph
@@ -113,7 +115,6 @@ class Planner:
                     subgraph_root, target_backend, depth + 1
                 )
 
-                # Add overhead to discourage decomposition if kernel exists and is fast
                 candidates.append((decomp_cost, decomp_root, decomp_assigns))
 
         # 4. Strategy C: Fusion (Simple FusedMulAdd)
@@ -129,6 +130,18 @@ class Planner:
 
                     # Construct high-level Fused Node
                     fma_parents = mul_node.parents + [other_node]
+
+                    # Check if a kernel actually exists for this FMA on target backend
+                    # This prevents infinite recursion/RuntimeErrors when no kernel supports the specific shapes
+                    fma_sigs = [
+                        TensorSignature(parent.dtype, parent.shape, target_backend)
+                        for parent in fma_parents
+                    ]
+                    if not KernelRegistry.select_best_kernel(
+                        "FusedMulAdd", fma_sigs, target_backend, node.dtype
+                    ):
+                        continue
+
                     fma_node = TensorNode(
                         "FusedMulAdd",
                         node.shape,
@@ -140,8 +153,8 @@ class Planner:
 
                     # Recursive plan for FMA
                     fma_cost, fma_root, fma_assigns = self._min_cost(
-                        fma_node, target_backend, depth
-                    )  # No depth inc?
+                        fma_node, target_backend, depth + 1
+                    )
                     candidates.append((fma_cost, fma_root, fma_assigns))
                     break
 
