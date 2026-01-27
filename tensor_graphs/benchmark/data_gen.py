@@ -44,9 +44,9 @@ class DataGenerator:
         if backend == Backend.CPU_NUMPY:
             # Already numpy, just ensure it's contiguous
             if isinstance(inputs[0], np.ndarray):
-                return [np.ascontiguousarray(inputs[0])]
+                return [np.ascontiguousarray(item) for item in inputs]
             else:
-                return [np.array(inputs[0], dtype=np.float32)]
+                return [np.array(item, dtype=np.float32) for item in inputs]
 
         elif backend == Backend.GPU_TORCH:
             if not torch.cuda.is_available():
