@@ -6,7 +6,19 @@ My vision is the user says "run this graph" and the framework uses the best kern
 
 ---
 
-## TODO
+Right now planner and db put the whole graph into the db. I want it to look for all "paths" and the db should only benchmark specific kernels. So for example, lets say I execute a TensorNode representing tanh. It should iterate over all kernels and check if the kernel's reference graph is equal to the input graph. Now lets say we have a GPU_TORCH tanh kernel, and a CPU_NUMPY tanh kernel, and tanh can be decomposed down further. This means we have 3 options (although there could be many more as we can have multiple tanh kernels for a given backend). So for each of the 3 options, we need to see if we can fit it into the graph, like are we able to convert our inputs to the kernel input signature and the output back (this might be a no-op). Then for each of the remaining options (the ones we can convert to/from) if they are not a kernel we need to decompose and call plan on the decomposed children. Like tanh -> (DIVIDE, (e^x - e^(-x)), (e^x + e^(-x))). Can you help me concretely plan this out? Then for kernels we need to get the runtime (call db wrapper that handles interpolation). the runtime estimation needs to take into account convert time which I think can be we could just always compute a kernel's cost as (transfer + execution) and for sequential operations on the same backend the transfer cost will be near 0 in the db (same as an op, just query db for CopyTo, no need for separate transfer cost estimation).
+
+I think this means we need to update the DB. The db shouldn't store canonical_graphs, just the kernel and its benchmark time. This way we can fetch the reference graph in python and we don't need to worry about hashing graphs because we only store kernels. This will be better because there doesn't have to be distinction between atomic and fused, it is just all kernels. tensor_graphs/benchmark/db.py should handle initializing the db and interpolating results. Like when the planner queries the DB for MatMul(100, 100) x (100, 100) and finding no exact match, it should look for the nearest shapes (e.g., 128x128) and scale the latency based on other data points. Like fit linear regression mapping input parameters -> runtime and then use that linear regression to predict runtime. This can also be cached in the python wrapper.
+
+For checking graph equality we need to normalize graphs. Always rewriting B+A to A+B (based on hash). Always rewriting Add(Add(A, B), C) to a canonical associative form (e.g., left-associative tree). Like if I have `a+(b*c)` that can be `(a*b)+(a*c)`. Also you can match `a+(b*c)` to a fused multiply-add operation. I feel this can be really powerful for decreasing runtime (maybe you can rewrite something to be more parallelizable). Hashing should have commutative sort.
+
+To avoid infinite recursion during decomposition, an operations decomposition should not be allowed to contain itself.
+
+Something else is calling the DB and running the planner for every add and mul will be very slow. Can we implement some caching mechanism so we only need to do "TransformerBlock" once? But I don't want to hardcode any blocks, it should be automatically discovered using the graph equality checker.
+
+---
+
+## High level TODO
 
 ### 1. Memory Management Architecture (The "Buffer" System)
 Instead of the `Executor` creating new arrays/tensors on the fly, it should work within a pre-calculated memory map.

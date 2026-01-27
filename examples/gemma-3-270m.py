@@ -42,7 +42,9 @@ class GraphBuilder:
 
     def input(self, name, shape, dtype=DType.FP32):
         # Inputs are transient/fed in
-        node = TensorNode(OpType.INPUT, shape, dtype, [], name, storage_type=StorageType.TRANSIENT)
+        node = TensorNode(
+            OpType.INPUT, shape, dtype, [], name, storage_type=StorageType.TRANSIENT
+        )
         self.inputs[name] = node
         return node
 
@@ -58,13 +60,15 @@ class GraphBuilder:
             parents=[],
             name=name,
             attrs={"value": value},
-            storage_type=StorageType.PERSISTENT # Constants are persistent
+            storage_type=StorageType.PERSISTENT,  # Constants are persistent
         )
         return node
 
     def param(self, name, shape, dtype=DType.FP32):
         # Params are persistent weights
-        node = TensorNode(OpType.INPUT, shape, dtype, [], name, storage_type=StorageType.PERSISTENT)
+        node = TensorNode(
+            OpType.INPUT, shape, dtype, [], name, storage_type=StorageType.PERSISTENT
+        )
         self.params[name] = node
         return node
 
@@ -107,7 +111,7 @@ class GraphBuilder:
     def arange(self, start_node, stop_node, step_node):
         return TensorNode(
             OpType.ARANGE,
-            (None,), # Dynamic shape usually, but handled by kernel logic mostly
+            (None,),  # Dynamic shape usually, but handled by kernel logic mostly
             DType.INT32,
             [start_node, stop_node, step_node],
             "arange",
@@ -551,7 +555,7 @@ def main():
     max_new_tokens = 50
     # Fixed Context Length for Compilation
     MAX_SEQ_LEN = 128
-    
+
     print(f"\nPrompt: {prompt}")
     print("Generating...", end="", flush=True)
 
@@ -569,16 +573,22 @@ def main():
     # Define Fixed Inputs for Compiled Graph
     # Using MAX_SEQ_LEN
     in_node = model.builder.input("input_ids", (1, MAX_SEQ_LEN), DType.INT32)
-    cos_node = model.builder.input("cos", (1, 1, MAX_SEQ_LEN, cfg["head_dim"])), DType.FP32)
-    sin_node = model.builder.input("sin", (1, 1, MAX_SEQ_LEN, cfg["head_dim"])), DType.FP32)
-    mask_node = model.builder.input("mask", (1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), DType.FP32)
+    cos_node = model.builder.input(
+        "cos", (1, 1, MAX_SEQ_LEN, cfg["head_dim"]), DType.FP32
+    )
+    sin_node = model.builder.input(
+        "sin", (1, 1, MAX_SEQ_LEN, cfg["head_dim"]), DType.FP32
+    )
+    mask_node = model.builder.input(
+        "mask", (1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), DType.FP32
+    )
 
-    # Dynamic Shape Inputs for Reshape 
+    # Dynamic Shape Inputs for Reshape
     # (Must be fixed value inputs now, effectively constants or inputs that don't change size, just values?)
     # But for Reshape op, the `shape_node` is input.
     # The `shape` must be consistent with memory alloc.
     # We will pass the fixed MAX shapes.
-    
+
     q_shape_node = model.builder.input("q_shape", (4,), DType.INT32)
     kv_shape_node = model.builder.input("kv_shape", (4,), DType.INT32)
     flat_shape_node = model.builder.input("flat_shape", (3,), DType.INT32)
@@ -596,15 +606,17 @@ def main():
     print("\nCompiling Graph...")
     planner = Planner()
     recipe = planner.plan(logits_node)
-    
+
     compiler = Compiler()
     compiled_graph = compiler.compile(recipe)
-    
-    print(f"Compiled! Total Memory: {compiled_graph.total_memory_bytes / 1024 / 1024:.2f} MB")
-    
+
+    print(
+        f"Compiled! Total Memory: {compiled_graph.total_memory_bytes / 1024 / 1024:.2f} MB"
+    )
+
     # Initialize Executor
     executor = StaticExecutor(compiled_graph)
-    
+
     # Load Persistent Weights
     print("Loading Weights into Static Memory...")
     # Merge weights and constants
@@ -621,10 +633,10 @@ def main():
         # 3a. Prepare Inputs (Padded)
         input_ids_padded = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
         input_ids_padded[0, :seq_len] = input_ids
-        
+
         cos_cur = full_cos[:, :, :MAX_SEQ_LEN, :]
         sin_cur = full_sin[:, :, :MAX_SEQ_LEN, :]
-        
+
         # Mask
         mask_cur_small = compute_causal_mask_np(seq_len)
         mask_cur = np.zeros((1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), dtype=np.float32)
@@ -634,21 +646,21 @@ def main():
         # The next token depends on the first seq_len tokens.
         # The attention mask for the first seq_len tokens should be correct.
         # The rest doesn't matter much if we ignore their logits.
-        
+
         # Actually, simpler: Mask the attention.
         # If we use 0 for padding in input_ids, they embed to something.
         # We should mask attention to padding.
         # compute_causal_mask_np returns -1e9 for future.
         # We want to mask everything > seq_len.
-        
+
         # Construct full mask:
         # 1. Causal mask for [0..seq_len]
         # 2. Block everything for [seq_len..MAX]
-        
+
         mask_full = np.full((1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), -1e9, dtype=np.float32)
         # Copy causal mask to top-left
         mask_full[:, :, :seq_len, :seq_len] = mask_cur_small
-        
+
         # 3b. Fixed Shapes
         q_shape = np.array(
             [1, MAX_SEQ_LEN, cfg["n_heads"], cfg["head_dim"]], dtype=np.int32

@@ -21,6 +21,7 @@ class LivenessAnalyzer:
 
         # Inputs are born at time 0 because they are loaded at the start
         from ..ops.atomic_types import OpType
+
         for node in nodes:
             if node.op_type == OpType.INPUT:
                 intervals[node][0] = 0
@@ -31,7 +32,7 @@ class LivenessAnalyzer:
             for parent in node.parents:
                 if parent in intervals:
                     intervals[parent][1] = max(intervals[parent][1], i)
-        
+
         # Ensure outputs live until the end
         # An output is a node that is not a parent of any other node
         # (Technically, the recipe root is the primary output)
@@ -40,7 +41,7 @@ class LivenessAnalyzer:
         for node in nodes:
             for parent in node.parents:
                 has_children.add(parent)
-        
+
         for node in nodes:
             if node not in has_children:
                 intervals[node][1] = last_step

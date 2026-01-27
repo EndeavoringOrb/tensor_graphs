@@ -8,11 +8,18 @@ from tensor_graphs.compiler.planner import Planner
 from tensor_graphs.compiler.compiler import Compiler
 from tensor_graphs.backend.static_executor import StaticExecutor
 
+
 def test_static_execution_basic():
     # Build a simple graph: (a * b) + c
-    a = TensorNode(OpType.INPUT, (2, 2), DType.FP32, [], "a", storage_type=StorageType.TRANSIENT)
-    b = TensorNode(OpType.INPUT, (2, 2), DType.FP32, [], "b", storage_type=StorageType.TRANSIENT)
-    c = TensorNode(OpType.INPUT, (2, 2), DType.FP32, [], "c", storage_type=StorageType.TRANSIENT)
+    a = TensorNode(
+        OpType.INPUT, (2, 2), DType.FP32, [], "a", storage_type=StorageType.TRANSIENT
+    )
+    b = TensorNode(
+        OpType.INPUT, (2, 2), DType.FP32, [], "b", storage_type=StorageType.TRANSIENT
+    )
+    c = TensorNode(
+        OpType.INPUT, (2, 2), DType.FP32, [], "c", storage_type=StorageType.TRANSIENT
+    )
 
     mul = TensorNode(OpType.MUL, (2, 2), DType.FP32, [a, b], "mul")
     add = TensorNode(OpType.ADD, (2, 2), DType.FP32, [mul, c], "add")
@@ -30,22 +37,25 @@ def test_static_execution_basic():
     b_val = np.array([[5, 6], [7, 8]], dtype=np.float32)
     c_val = np.array([[10, 10], [10, 10]], dtype=np.float32)
 
-    feed_dict = {
-        "a": a_val,
-        "b": b_val,
-        "c": c_val
-    }
+    feed_dict = {"a": a_val, "b": b_val, "c": c_val}
 
     result = executor.run(feed_dict)
 
     expected = (a_val * b_val) + c_val
     np.testing.assert_allclose(result, expected)
 
+
 def test_static_execution_persistent():
     # Build a graph with persistent weights: (x * weight) + bias
-    x = TensorNode(OpType.INPUT, (1, 4), DType.FP32, [], "x", storage_type=StorageType.TRANSIENT)
-    w = TensorNode(OpType.INPUT, (1, 4), DType.FP32, [], "w", storage_type=StorageType.PERSISTENT)
-    b = TensorNode(OpType.INPUT, (1, 4), DType.FP32, [], "b", storage_type=StorageType.PERSISTENT)
+    x = TensorNode(
+        OpType.INPUT, (1, 4), DType.FP32, [], "x", storage_type=StorageType.TRANSIENT
+    )
+    w = TensorNode(
+        OpType.INPUT, (1, 4), DType.FP32, [], "w", storage_type=StorageType.PERSISTENT
+    )
+    b = TensorNode(
+        OpType.INPUT, (1, 4), DType.FP32, [], "b", storage_type=StorageType.PERSISTENT
+    )
 
     mul = TensorNode(OpType.MUL, (1, 4), DType.FP32, [x, w], "mul")
     add = TensorNode(OpType.ADD, (1, 4), DType.FP32, [mul, b], "add")
@@ -64,10 +74,7 @@ def test_static_execution_persistent():
     b_val = np.array([[1, 1, 1, 1]], dtype=np.float32)
 
     # Load persistent weights once
-    executor.load_weights({
-        "w": w_val,
-        "b": b_val
-    })
+    executor.load_weights({"w": w_val, "b": b_val})
 
     # Run with transient input
     result = executor.run({"x": x_val})

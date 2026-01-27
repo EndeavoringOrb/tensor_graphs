@@ -16,15 +16,15 @@ class OpInstruction:
     kernel: Callable
     input_offsets: List[int]
     input_node_names: List[str]
-    output_offset: int
+    output_offsets: List[int]
     attrs: Dict[str, Any]
 
 
 @dataclass
 class CompiledGraph:
     instructions: List[OpInstruction]
-    buffer_allocations: Dict[str, BufferAllocation]  # node_name -> Allocation
+    buffer_allocations: Dict[str, BufferAllocation]
     node_metadata: Dict[str, TensorMetadata]
     total_memory_bytes: int
-    input_offsets: Dict[str, int]  # name -> offset
-    output_offsets: Dict[str, int]  # name -> offset
+    input_offsets: Dict[str, int]
+    output_offsets: Dict[str, int]
