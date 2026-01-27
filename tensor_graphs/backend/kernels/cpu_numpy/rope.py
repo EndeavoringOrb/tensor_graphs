@@ -1,7 +1,7 @@
 import numpy as np
 from ...registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
-from ....ops.fused.rope import rope_ref
+from ....ops.fused.rope import rope_decomposition
 
 
 # --- RoPE ---
@@ -12,7 +12,7 @@ from ....ops.fused.rope import rope_ref
         TensorSignature(DType.FP32, shape=None),
         TensorSignature(DType.FP32, shape=None),
     ],
-    reference_factory=rope_ref,
+    reference_factory=rope_decomposition,
 )
 def rope_kernel(inputs, attrs=None):
     x, cos, sin = inputs

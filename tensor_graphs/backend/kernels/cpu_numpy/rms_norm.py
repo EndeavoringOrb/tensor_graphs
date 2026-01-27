@@ -1,7 +1,7 @@
 import numpy as np
 from ...registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
-from ....ops.fused.rms_norm import rms_norm_ref
+from ....ops.fused.rms_norm import rms_norm_decomposition
 
 
 # --- RMSNorm ---
@@ -12,7 +12,7 @@ from ....ops.fused.rms_norm import rms_norm_ref
         TensorSignature(DType.FP32, (None,)),
         TensorSignature(DType.FP32, (1,)),
     ],
-    reference_factory=rms_norm_ref,
+    reference_factory=rms_norm_decomposition,
 )
 def rms_norm_kernel(inputs, attrs=None):
     x, scale, eps = inputs

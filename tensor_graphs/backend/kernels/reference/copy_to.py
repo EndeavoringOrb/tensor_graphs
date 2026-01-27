@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from ....backend.registry import KernelRegistry
-from ....ir.dtypes import DType, TensorSignature, Backend
+from ....ir.dtypes import DType, TensorSignature, Backend, KernelUnavailableError
 from ....ops.atomic_types import OpType
 from ....ops.atomic.copy_to import copy_to_ref
 
@@ -46,7 +46,7 @@ def copy_numpy_to_torch_gpu(inputs, attrs=None):
     data = inputs[0]
 
     if not torch.cuda.is_available():
-        raise RuntimeError("Cannot copy to GPU_TORCH: CUDA is not available.")
+        raise KernelUnavailableError("Cannot copy to GPU_TORCH: CUDA is not available.")
 
     # Ensure input is numpy
     if not isinstance(data, np.ndarray):

@@ -1,12 +1,12 @@
 import numpy as np
 from ...registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
-from ....ops.fused.gelu import gelu_ref
+from ....ops.fused.gelu import gelu_decomposition
 
 
 # --- GELU ---
 @KernelRegistry.register(
-    "GELU", [TensorSignature(DType.FP32, shape=None)], reference_factory=gelu_ref
+    "GELU", [TensorSignature(DType.FP32, shape=None)], reference_factory=gelu_decomposition
 )
 def gelu_kernel(inputs, attrs=None):
     x = inputs[0]

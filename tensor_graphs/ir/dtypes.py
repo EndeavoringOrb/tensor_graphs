@@ -3,6 +3,10 @@ from dataclasses import dataclass
 from typing import Tuple, Optional
 
 
+class KernelUnavailableError(RuntimeError):
+    """Raised when a kernel is not available for the requested backend."""
+
+
 class DType(Enum):
     FP32 = "float32"
     FP16 = "float16"

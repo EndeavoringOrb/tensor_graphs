@@ -4,6 +4,7 @@ import math
 import uuid
 from typing import Optional, Dict, Any, List
 from ..ir.dtypes import DType
+from ..ir.graph import GraphEncoder
 
 
 class BenchmarkDB:
@@ -195,12 +196,18 @@ class BenchmarkDB:
             )
             conn.commit()
 
+    def _serialize_attrs(self, attrs: Optional[Dict[str, Any]]) -> str:
+        """Standardized serialization for attributes to ensure DB consistency."""
+        if not attrs:
+            return json.dumps({}, sort_keys=True)
+        return json.dumps(attrs, cls=GraphEncoder, sort_keys=True)
+
     def add_benchmark(
         self,
         op_type: str,
         backend: str,
         dtype: str,
-        shape: tuple,
+        shape: list,
         attrs: dict,
         latency_ms: float,
     ):
@@ -215,8 +222,8 @@ class BenchmarkDB:
                     op_type,
                     backend,
                     dtype,
-                    json.dumps(list(shape) if shape else []),
-                    json.dumps(attrs or {}, sort_keys=True),
+                    json.dumps(shape),
+                    self._serialize_attrs(attrs),
                     latency_ms,
                     datetime.datetime.utcnow().isoformat(),
                 ),
@@ -237,28 +244,7 @@ class BenchmarkDB:
         2. Nearest Neighbor (Log-Space Euclidean Distance on Shape) + Complexity Scaling
         """
         shape_list = list(shape) if shape else []
-
-        # Make attrs JSON serializable - extract needed values from TensorNodes and dtypes
-        def serialize_value(v):
-            if hasattr(v, "dtype") and hasattr(v, "shape"):
-                # TensorNode - serialize as string representation
-                dtype_val = (
-                    getattr(v.dtype, "value", str(v.dtype))
-                    if hasattr(v.dtype, "value")
-                    else str(v.dtype)
-                )
-                return f"TensorNode({dtype_val}|{v.shape})"
-            elif isinstance(v, DType):
-                # DType enum
-                return v.value if hasattr(v, "value") else str(v)
-            elif isinstance(v, list):
-                return [serialize_value(item) for item in v]
-            elif isinstance(v, dict):
-                return {k: serialize_value(val) for k, val in v.items()}
-            else:
-                return v
-
-        attrs_json = json.dumps(serialize_value(attrs or {}), sort_keys=True)
+        attrs_json = self._serialize_attrs(attrs)
 
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row

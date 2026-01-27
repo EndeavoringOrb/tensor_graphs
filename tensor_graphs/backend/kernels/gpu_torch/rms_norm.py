@@ -5,7 +5,7 @@ import torch
 from typing import Any, cast
 from torch.utils.cpp_extension import load
 from ...registry import KernelRegistry
-from ....ir.dtypes import DType, TensorSignature, Backend
+from ....ir.dtypes import DType, TensorSignature, Backend, KernelUnavailableError
 from ....ops.fused.rms_norm import rms_norm_ref
 
 # 1. JIT Compile the Kernel
@@ -83,6 +83,6 @@ else:
         reference_factory=rms_norm_ref,
     )
     def rms_norm_cuda_fallback(inputs, attrs=None):
-        raise RuntimeError(
-            "RMSNorm CUDA kernel is not available. Falling back to CPU execution."
+        raise KernelUnavailableError(
+            f"RMSNorm CUDA kernel is not available. Falling back to CPU execution."
         )

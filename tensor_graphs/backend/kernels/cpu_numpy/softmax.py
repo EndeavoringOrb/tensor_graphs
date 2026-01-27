@@ -1,12 +1,12 @@
 import numpy as np
 from ...registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
-from ....ops.fused.softmax import softmax_ref
+from ....ops.fused.softmax import softmax_decomposition
 
 
 # --- Softmax ---
 @KernelRegistry.register(
-    "Softmax", [TensorSignature(DType.FP32, shape=None)], reference_factory=softmax_ref
+    "Softmax", [TensorSignature(DType.FP32, shape=None)], reference_factory=softmax_decomposition
 )
 def softmax_kernel(inputs, attrs=None):
     x = inputs[0]

@@ -3,6 +3,7 @@ from .node import TensorNode
 from .dtypes import DType, Backend
 import json
 import numpy as np
+from enum import Enum  # Add this import
 
 
 def topological_sort(root: TensorNode) -> List[TensorNode]:
@@ -90,6 +91,8 @@ class GraphEncoder(json.JSONEncoder):
             return float(o)
         if isinstance(o, np.integer) and not isinstance(o, bool):
             return int(o)
+        if isinstance(o, Enum):
+            return o.value
         if isinstance(o, TensorNode):
             return str(o)
         return super().default(o)
