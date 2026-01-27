@@ -50,13 +50,17 @@ class DataGenerator:
 
         elif backend == Backend.GPU_TORCH:
             if not torch.cuda.is_available():
-                raise ValueError(f"Cannot prepare inputs for {backend.value}: CUDA is not available.")
+                raise ValueError(
+                    f"Cannot prepare inputs for {backend.value}: CUDA is not available."
+                )
 
             # Convert numpy arrays to GPU tensors
             prepared = []
             for inp in inputs:
                 if isinstance(inp, np.ndarray):
-                    prepared.append(torch.from_numpy(inp).to(device="cuda", dtype=torch.float32))
+                    prepared.append(
+                        torch.from_numpy(inp).to(device="cuda", dtype=torch.float32)
+                    )
                 elif isinstance(inp, torch.Tensor):
                     if not inp.is_cuda:
                         prepared.append(inp.to(device="cuda", dtype=torch.float32))
@@ -97,13 +101,14 @@ class DataGenerator:
         return tuple(random.randint(min_dim, max_dim) for _ in range(rank))
 
     @staticmethod
-    def generate(
+    def _generate_internal(
         op_type: str,
         signatures: Tuple[TensorSignature, ...],
         backend: Optional[Backend] = None,
     ) -> Tuple[List[np.ndarray], Dict[str, Any]]:
         """
-        Returns (inputs_list, attributes_dict)
+        Internal method to generate inputs and attributes based on op_type.
+        Does not handle backend conversion.
         """
         attrs = {}
         inputs = []
@@ -339,7 +344,23 @@ class DataGenerator:
             else:
                 inputs.append(DataGenerator.random_tensor(base_shape, sig.dtype))
 
-        # Prepare inputs for the specified backend using CopyTo kernels
+        return inputs, attrs
+
+    @staticmethod
+    def generate(
+        op_type: str,
+        signatures: Tuple[TensorSignature, ...],
+        backend: Optional[Backend] = None,
+    ) -> Tuple[List[np.ndarray], Dict[str, Any]]:
+        """
+        Returns (inputs_list, attributes_dict)
+        For GPU_TORCH backend, inputs will be torch tensors on CUDA.
+        For CPU_NUMPY backend, inputs will be numpy arrays.
+        """
+        # 1. Generate raw inputs and attributes
+        inputs, attrs = DataGenerator._generate_internal(op_type, signatures, backend)
+
+        # 2. Prepare inputs for the specified backend using CopyTo kernels
         if backend is not None:
             return DataGenerator._prepare_inputs_for_backend(inputs, backend), attrs
 
