@@ -1,3 +1,5 @@
+# Detailed implementation plan for the Static Memory & Compiled Execution System.
+
 ### Phase 1: Abstractions & Metadata
 Currently, `TensorNode` is used for both symbolic IR and execution. We need to decouple the *Logical Tensor* (the graph node) from the *Physical Buffer* (the memory address).
 
