@@ -126,7 +126,12 @@ def test_kernel_correctness(
                 "ref_atomic",
                 attrs=attrs,
             )
-        expected_output = evaluate_graph(graph_root, feed_dict)
+        raw_expected = evaluate_graph(graph_root, feed_dict)
+        # Ensure reference output is moved to CPU/NumPy
+        if isinstance(raw_expected, torch.Tensor):
+            expected_output = raw_expected.detach().cpu().numpy()
+        else:
+            expected_output = raw_expected
     except Exception as e:
         pytest.fail(f"Reference Graph Evaluation Failed: {e}")
 
