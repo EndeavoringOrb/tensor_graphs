@@ -14,8 +14,11 @@ from ....ops.atomic.mul import mul_ref
     backend=Backend.CPU_NUMPY,
     reference_factory=mul_ref,
 )
-def mul_generic_vector(inputs, attrs=None):
-    return inputs[0] * inputs[1]
+def mul_generic_vector(inputs, attrs=None, outputs=None):
+    if outputs is None:
+        return inputs[0] * inputs[1]
+    np.multiply(inputs[0], inputs[1], out=outputs[0])
+    return outputs[0]
 
 
 @KernelRegistry.register(
@@ -27,8 +30,11 @@ def mul_generic_vector(inputs, attrs=None):
     backend=Backend.CPU_NUMPY,
     reference_factory=mul_ref,
 )
-def mul_tensor_generic_scalar(inputs, attrs=None):
-    return inputs[0] * inputs[1]
+def mul_tensor_generic_scalar(inputs, attrs=None, outputs=None):
+    if outputs is None:
+        return inputs[0] * inputs[1]
+    np.multiply(inputs[0], inputs[1], out=outputs[0])
+    return outputs[0]
 
 
 # Generic Tensor (Any Rank)
@@ -41,5 +47,8 @@ def mul_tensor_generic_scalar(inputs, attrs=None):
     backend=Backend.CPU_NUMPY,
     reference_factory=mul_ref,
 )
-def mul_generic_tensor(inputs, attrs=None):
-    return inputs[0] * inputs[1]
+def mul_generic_tensor(inputs, attrs=None, outputs=None):
+    if outputs is None:
+        return inputs[0] * inputs[1]
+    np.multiply(inputs[0], inputs[1], out=outputs[0])
+    return outputs[0]

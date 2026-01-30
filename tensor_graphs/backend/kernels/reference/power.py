@@ -14,5 +14,9 @@ from ....ops.atomic.power import power_ref
     backend=Backend.CPU_NUMPY,
     reference_factory=power_ref,
 )
-def power_generic(inputs, attrs=None):
-    return np.power(inputs[0], inputs[1])
+def power_generic(inputs, attrs=None, outputs=None):
+    result = np.power(inputs[0], inputs[1])
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result

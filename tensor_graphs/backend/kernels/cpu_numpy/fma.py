@@ -12,5 +12,9 @@ from ....ops.fused.fma import fma_decomposition
     ],
     reference_factory=fma_decomposition,
 )
-def fma_generic(inputs, attrs=None):
-    return inputs[0] * inputs[1] + inputs[2]
+def fma_generic(inputs, attrs=None, outputs=None):
+    # Multiply first two elements
+    np.multiply(inputs[0], inputs[1], out=outputs[0])
+    # Then add the third element
+    outputs[0] += inputs[2]
+    return outputs[0]

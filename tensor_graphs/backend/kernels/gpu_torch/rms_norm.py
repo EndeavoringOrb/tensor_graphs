@@ -40,7 +40,7 @@ if _RMS_NORM_OPS is not None:
         backend=Backend.GPU_TORCH,
         reference_factory=rms_norm_ref,
     )
-    def rms_norm_cuda(inputs, attrs=None):
+    def rms_norm_cuda(inputs, attrs=None, outputs=None):
         # Static analysis (pyright) doesn't know _RMS_NORM_OPS is not None here,
         # nor does it know the attributes of the JIT-compiled module.
         # We cast to Any to suppress these errors.
@@ -62,8 +62,11 @@ if _RMS_NORM_OPS is not None:
         else:
             epsilon = float(eps_tensor)
 
-        # Allocate output
-        output = torch.empty_like(x)
+        # Allocate output if outputs is None
+        if outputs is None:
+            output = torch.empty_like(x)
+        else:
+            output = outputs[0]
 
         # Launch Kernel
         ops.rms_norm(x, weight, output, epsilon)
@@ -82,7 +85,7 @@ else:
         backend=Backend.GPU_TORCH,
         reference_factory=rms_norm_ref,
     )
-    def rms_norm_cuda_fallback(inputs, attrs=None):
+    def rms_norm_cuda_fallback(inputs, attrs=None, outputs=None):
         raise KernelUnavailableError(
             f"RMSNorm CUDA kernel is not available. Falling back to CPU execution."
         )

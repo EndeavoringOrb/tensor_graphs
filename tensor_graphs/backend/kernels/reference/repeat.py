@@ -28,7 +28,7 @@ from ....ops.atomic.repeat import repeat_ref
     target_dtype=DType.FP32,
     reference_factory=repeat_ref,
 )
-def repeat_generic(inputs, attrs=None):
+def repeat_generic(inputs, attrs=None, outputs=None):
     """
     Generic Repeat (Interleave).
     Repeats elements of an array.
@@ -49,6 +49,11 @@ def repeat_generic(inputs, attrs=None):
     # Validation for demo safety
     if len(data.shape) < 2:
         # Fallback for flat arrays
-        return np.repeat(data, repeats)
+        result = np.repeat(data, repeats)
+    else:
+        result = np.repeat(data, repeats, axis=axis)
 
-    return np.repeat(data, repeats, axis=axis)
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result

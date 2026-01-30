@@ -28,7 +28,7 @@ from ....ops.atomic.slice import slice_ref
     target_dtype=DType.FP32,
     reference_factory=slice_ref,
 )
-def slice_generic(inputs, attrs=None):
+def slice_generic(inputs, attrs=None, outputs=None):
     """
     Generic Slice Implementation.
     inputs[0]: Data tensor (Any Rank)
@@ -69,4 +69,8 @@ def slice_generic(inputs, attrs=None):
         st = int(steps[i]) if steps[i] is not None else 1
         slices.append(slice(s, e, st))
 
-    return data[tuple(slices)]
+    result = data[tuple(slices)]
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result

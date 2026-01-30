@@ -15,7 +15,11 @@ from ....ops.atomic.triu import triu_ref
     target_dtype=DType.FP32,
     reference_factory=triu_ref,
 )
-def triu_generic(inputs, attrs=None):
+def triu_generic(inputs, attrs=None, outputs=None):
     data = inputs[0]
     k = int(inputs[1].item() if inputs[1].ndim == 0 else inputs[1][0])
-    return np.triu(data, k=k)
+    result = np.triu(data, k=k)
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result

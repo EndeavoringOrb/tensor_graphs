@@ -19,7 +19,7 @@ from ....ops.atomic.permute import permute_ref
     target_dtype=DType.FP32,
     reference_factory=permute_ref,
 )
-def permute_generic(inputs, attrs=None):
+def permute_generic(inputs, attrs=None, outputs=None):
     """
     Generic Permute/Transpose Implementation.
     inputs[0]: Data tensor (Any Rank)
@@ -30,4 +30,8 @@ def permute_generic(inputs, attrs=None):
 
     # Convert numpy array of dims to tuple of ints
     perm_tuple = tuple(perm.astype(int))
-    return np.transpose(data, axes=perm_tuple)
+    result = np.transpose(data, axes=perm_tuple)
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result

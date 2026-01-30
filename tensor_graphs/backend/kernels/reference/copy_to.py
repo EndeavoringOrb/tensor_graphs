@@ -13,9 +13,13 @@ from ....ops.atomic.copy_to import copy_to_ref
     backend=Backend.CPU_NUMPY,
     reference_factory=copy_to_ref,
 )
-def copy_numpy_to_numpy(inputs, attrs=None):
+def copy_numpy_to_numpy(inputs, attrs=None, outputs=None):
     # Just ensure it's a new array, contiguous
-    return np.ascontiguousarray(inputs[0], dtype=np.float32)
+    result = np.ascontiguousarray(inputs[0], dtype=np.float32)
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result
 
 
 # --- 2. Cross-Backend Copy (GPU_TORCH -> CPU_NUMPY) ---
@@ -26,13 +30,18 @@ def copy_numpy_to_numpy(inputs, attrs=None):
     backend=Backend.CPU_NUMPY,
     reference_factory=copy_to_ref,  # Re-using ref factory is fine
 )
-def copy_torch_gpu_to_numpy(inputs, attrs=None):
+def copy_torch_gpu_to_numpy(inputs, attrs=None, outputs=None):
     tensor = inputs[0]
     # Handle torch tensor -> numpy conversion
     if isinstance(tensor, torch.Tensor):
-        return tensor.detach().cpu().numpy().astype(np.float32)
-    # Fallback if simulation passed a numpy array masquerading as GPU
-    return np.array(tensor, dtype=np.float32)
+        result = tensor.detach().cpu().numpy().astype(np.float32)
+    else:
+        # Fallback if simulation passed a numpy array masquerading as GPU
+        result = np.array(tensor, dtype=np.float32)
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result
 
 
 # --- 3. Cross-Backend Copy (CPU_NUMPY -> GPU_TORCH) ---
@@ -42,7 +51,7 @@ def copy_torch_gpu_to_numpy(inputs, attrs=None):
     backend=Backend.GPU_TORCH,
     reference_factory=copy_to_ref,
 )
-def copy_numpy_to_torch_gpu(inputs, attrs=None):
+def copy_numpy_to_torch_gpu(inputs, attrs=None, outputs=None):
     data = inputs[0]
 
     if not torch.cuda.is_available():
@@ -54,7 +63,11 @@ def copy_numpy_to_torch_gpu(inputs, attrs=None):
 
     # Create torch tensor on GPU
     # torch.from_numpy creates a tensor sharing memory on CPU, then we move it.
-    return torch.from_numpy(data).to(device="cuda", dtype=torch.float32)
+    result = torch.from_numpy(data).to(device="cuda", dtype=torch.float32)
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result
 
 
 # --- 4. Int32 Support ---
@@ -63,5 +76,9 @@ def copy_numpy_to_torch_gpu(inputs, attrs=None):
     [TensorSignature(DType.INT32, shape=None, backend=Backend.CPU_NUMPY)],
     backend=Backend.CPU_NUMPY,
 )
-def copy_numpy_to_numpy_int(inputs, attrs=None):
-    return np.ascontiguousarray(inputs[0], dtype=np.int32)
+def copy_numpy_to_numpy_int(inputs, attrs=None, outputs=None):
+    result = np.ascontiguousarray(inputs[0], dtype=np.int32)
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result

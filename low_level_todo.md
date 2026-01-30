@@ -9,38 +9,8 @@ The current `StaticExecutor` implementation performs dictionary lookups and crea
 
 ## 2. Evolve Kernel API (Zero-Copy Goal)
 Currently, kernels return new arrays/tensors, forcing `StaticExecutor` to perform a copy (`np.copyto` or `out.copy_`) to the pre-allocated buffer.
-- [ ] **Update `KernelRegistry`:** Make kernels that accept an `out` parameter.
-- [ ] **Refactor ALL Kernels:** Update kernels to write directly into the provided `out` buffer.
-    - [ ] `reference/add.py`
-    - [ ] `reference/arange.py`
-    - [ ] `reference/cast.py`
-    - [ ] `reference/concat.py`
-    - [ ] `reference/copy_to.py`
-    - [ ] `reference/cos.py`
-    - [ ] `reference/divide.py`
-    - [ ] `reference/dot.py`
-    - [ ] `reference/exp.py`
-    - [ ] `reference/fill.py`
-    - [ ] `reference/gather.py`
-    - [ ] `reference/max.py`
-    - [ ] `reference/mul.py`
-    - [ ] `reference/negate.py`
-    - [ ] `reference/permute.py`
-    - [ ] `reference/power.py`
-    - [ ] `reference/repeat.py`
-    - [ ] `reference/reshape.py`
-    - [ ] `reference/sin.py`
-    - [ ] `reference/slice.py`
-    - [ ] `reference/sqrt.py`
-    - [ ] `reference/sum.py`
-    - [ ] `reference/triu.py`
-    - [ ] `reference/where.py`
-    - [ ] `cpu_numpy/fma.py`
-    - [ ] `cpu_numpy/gelu.py`
-    - [ ] `cpu_numpy/rms_norm.py`
-    - [ ] `cpu_numpy/rope.py`
-    - [ ] `cpu_numpy/softmax.py`
-    - [ ] `gpu_torch/rms_norm.py`
+- [x] **Update `KernelRegistry`:** Make kernels that accept an `out` parameter.
+- [x] **Refactor ALL Kernels:** Update kernels to write directly into the provided `out` buffer.
 - [ ] **Conditional Execution:** Update `StaticExecutor` to pass the `out_view` to kernels.
 
 ## 3. Improve Constant & Weight Handling

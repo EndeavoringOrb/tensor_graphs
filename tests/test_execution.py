@@ -6,7 +6,7 @@ from tensor_graphs.ir.buffer import StorageType
 from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.compiler.planner import Planner
 from tensor_graphs.compiler.compiler import Compiler
-from tensor_graphs.backend.static_executor import StaticExecutor
+from tensor_graphs.backend.executor import Executor
 
 
 def test_static_execution_basic():
@@ -30,7 +30,7 @@ def test_static_execution_basic():
     compiler = Compiler()
     compiled_graph = compiler.compile(recipe)
 
-    executor = StaticExecutor(compiled_graph)
+    executor = Executor(compiled_graph)
 
     # Prepare inputs
     a_val = np.array([[1, 2], [3, 4]], dtype=np.float32)
@@ -66,7 +66,7 @@ def test_static_execution_persistent():
     compiler = Compiler()
     compiled_graph = compiler.compile(recipe)
 
-    executor = StaticExecutor(compiled_graph)
+    executor = Executor(compiled_graph)
 
     # Prepare data
     x_val = np.array([[1, 2, 3, 4]], dtype=np.float32)

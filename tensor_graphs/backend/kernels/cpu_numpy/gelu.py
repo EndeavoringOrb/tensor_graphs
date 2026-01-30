@@ -10,9 +10,13 @@ from ....ops.fused.gelu import gelu_decomposition
     [TensorSignature(DType.FP32, shape=None)],
     reference_factory=gelu_decomposition,
 )
-def gelu_kernel(inputs, attrs=None):
+def gelu_kernel(inputs, attrs=None, outputs=None):
     x = inputs[0]
     c1 = np.sqrt(2.0 / np.pi)
     c2 = 0.044715
     inner = c1 * (x + c2 * np.power(x, 3))
-    return 0.5 * x * (1.0 + np.tanh(inner))
+    result = 0.5 * x * (1.0 + np.tanh(inner))
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result

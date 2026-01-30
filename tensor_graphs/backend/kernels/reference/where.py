@@ -16,8 +16,11 @@ from ....ops.atomic.where import where_ref
     target_dtype=DType.FP32,
     reference_factory=where_ref,
 )
-def where_bool_fp32(inputs, attrs=None):
-    return np.where(inputs[0], inputs[1], inputs[2])
+def where_bool_fp32(inputs, attrs=None, outputs=None):
+    if outputs is None:
+        return np.where(inputs[0], inputs[1], inputs[2])
+    np.where(inputs[0], inputs[1], inputs[2], out=outputs[0])
+    return outputs[0]
 
 
 @KernelRegistry.register(
@@ -33,8 +36,11 @@ def where_bool_fp32(inputs, attrs=None):
     target_dtype=DType.FP32,
     reference_factory=where_ref,
 )
-def where_int32_fp32(inputs, attrs=None):
-    return np.where(inputs[0], inputs[1], inputs[2])
+def where_int32_fp32(inputs, attrs=None, outputs=None):
+    if outputs is None:
+        return np.where(inputs[0], inputs[1], inputs[2])
+    np.where(inputs[0], inputs[1], inputs[2], out=outputs[0])
+    return outputs[0]
 
 
 @KernelRegistry.register(
@@ -48,5 +54,8 @@ def where_int32_fp32(inputs, attrs=None):
     target_dtype=DType.FP32,
     reference_factory=where_ref,
 )
-def where_fp32_fp32(inputs, attrs=None):
-    return np.where(inputs[0], inputs[1], inputs[2])
+def where_fp32_fp32(inputs, attrs=None, outputs=None):
+    if outputs is None:
+        return np.where(inputs[0], inputs[1], inputs[2])
+    np.where(inputs[0], inputs[1], inputs[2], out=outputs[0])
+    return outputs[0]

@@ -15,7 +15,7 @@ from ....ops.atomic.concat import concat_ref
     target_dtype=DType.FP32,
     reference_factory=concat_ref,
 )
-def concat_generic(inputs, attrs=None):
+def concat_generic(inputs, attrs=None, outputs=None):
     """
     Generic Concatenation of two tensors.
     inputs[0]: Tensor A
@@ -25,5 +25,8 @@ def concat_generic(inputs, attrs=None):
     a = inputs[0]
     b = inputs[1]
     axis = int(inputs[2][0])
-
-    return np.concatenate((a, b), axis=axis)
+    result = np.concatenate((a, b), axis=axis)
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result

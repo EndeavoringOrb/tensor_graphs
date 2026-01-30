@@ -22,11 +22,15 @@ def _dtype_to_numpy(dtype_enum):
 
 
 # Generic function, but we will register it for specific pairings below
-def cast_implementation(inputs, attrs=None):
+def cast_implementation(inputs, attrs=None, outputs=None):
     if attrs is None:
         attrs = {}
     target_dtype = attrs.get("to", DType.FP32)
-    return inputs[0].astype(_dtype_to_numpy(target_dtype))
+    result = inputs[0].astype(_dtype_to_numpy(target_dtype))
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result
 
 
 # --- Explicit Registrations for Planner Visibility ---

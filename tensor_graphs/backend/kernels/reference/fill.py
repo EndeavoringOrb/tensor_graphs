@@ -17,7 +17,7 @@ from ....ops.atomic.fill import fill_ref
     target_dtype=DType.FP32,
     reference_factory=fill_ref,
 )
-def fill_fp32(inputs, attrs=None):
+def fill_fp32(inputs, attrs=None, outputs=None):
     value = inputs[0]
     shape_tensor = inputs[1]
 
@@ -33,7 +33,11 @@ def fill_fp32(inputs, attrs=None):
     # Extract shape tuple
     target_shape = tuple(shape_tensor.astype(int))
 
-    return np.full(target_shape, val, dtype=np.float32)
+    result = np.full(target_shape, val, dtype=np.float32)
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result
 
 
 @KernelRegistry.register(
@@ -48,11 +52,15 @@ def fill_fp32(inputs, attrs=None):
     target_dtype=DType.INT32,
     reference_factory=fill_ref,
 )
-def fill_int32(inputs, attrs=None):
+def fill_int32(inputs, attrs=None, outputs=None):
     value = inputs[0]
     shape_tensor = inputs[1]
 
     val = value.item()
     target_shape = tuple(shape_tensor.astype(int))
 
-    return np.full(target_shape, val, dtype=np.int32)
+    result = np.full(target_shape, val, dtype=np.int32)
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result
