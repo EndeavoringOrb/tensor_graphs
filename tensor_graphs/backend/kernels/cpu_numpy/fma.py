@@ -14,10 +14,9 @@ from ....ops.fused.fma import fma_decomposition
     reference_factory=fma_decomposition,
 )
 def fma_generic(inputs, attrs=None, outputs=None):
-    if inputs is None or outputs is None:
-        return None
-    # Multiply first two elements
-    np.multiply(inputs[0], inputs[1], out=outputs[0])
-    # Then add the third element
-    outputs[0] += inputs[2]
-    return outputs[0]
+    # Multiply first two elements, then add the third
+    result = inputs[0] * inputs[1] + inputs[2]
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result

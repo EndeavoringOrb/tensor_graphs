@@ -27,17 +27,15 @@ def test_permute_3d_reorder():
     """Test reordering 3D dimensions (0, 1, 2) -> (2, 0, 1)."""
     # Input Shape: (2, 3, 4)
     data_node = TensorNode(OpType.INPUT, (2, 3, 4), DType.FP32, [], "data")
-    perm_node = TensorNode(OpType.INPUT, (3,), DType.INT32, [], "perm")
 
     # Output Shape: (4, 2, 3) based on perm (2, 0, 1)
     permute_node = TensorNode(
-        OpType.PERMUTE, (4, 2, 3), DType.FP32, [data_node, perm_node], "permute"
+        OpType.PERMUTE, (4, 2, 3), DType.FP32, [data_node], "permute", attrs={"dims": [2, 0, 1]}
     )
 
     input_data = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
-    perm_val = np.array([2, 0, 1], dtype=np.int32)
 
-    res = evaluate_graph(permute_node, {"data": input_data, "perm": perm_val})
+    res = evaluate_graph(permute_node, {"data": input_data})
 
     expected = np.transpose(input_data, (2, 0, 1))
     np.testing.assert_array_equal(res, expected)
