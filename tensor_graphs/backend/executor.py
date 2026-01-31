@@ -86,7 +86,7 @@ class Executor:
             return torch.bool
         return torch.float32
 
-    def _get_view(self, offset: int, name: str, device: str = None) -> Any:
+    def _get_view(self, offset: int, name: str, device: Optional[str] = None) -> Any:
         meta = self.graph.node_metadata[name]
         alloc = self.graph.buffer_allocations[name]
         dev = device or alloc.device
@@ -175,14 +175,10 @@ def evaluate_graph(
     recipe = planner.plan(root)
 
     compiler = Compiler()
-    compiled_graph = compiler.compile(recipe)
+    # Pass inputs as known_values to enable shape inference
+    compiled_graph = compiler.compile(recipe, known_values=inputs)
 
     executor = Executor(compiled_graph)
 
     # Handle constants that might be in inputs or attributes
-    # The new Executor expects persistent weights to be loaded via load_weights,
-    # but for simple evaluation, we treat everything as inputs or simple constants.
-
-    # Identify persistent inputs (params) vs transient inputs
-    # For evaluate_graph usage (tests), inputs provided are usually everything needed.
     return executor.run(inputs)

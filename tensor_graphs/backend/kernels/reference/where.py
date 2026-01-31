@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Any, List, Optional
 from ....backend.registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature, Backend
 from ....ops.atomic_types import OpType
@@ -16,10 +17,12 @@ from ....ops.atomic.where import where_ref
     target_dtype=DType.FP32,
     reference_factory=where_ref,
 )
-def where_bool_fp32(inputs, attrs=None, outputs=None):
+def where_bool_fp32(
+    inputs: List[Any], attrs=None, outputs: Optional[List[Any]] = None
+) -> Any:
     if outputs is None:
-        return np.where(inputs[0], inputs[1], inputs[2])
-    np.where(inputs[0], inputs[1], inputs[2], out=outputs[0])
+        return np.array(np.where(inputs[0], inputs[1], inputs[2]))
+    outputs[0] = np.where(inputs[0], inputs[1], inputs[2])
     return outputs[0]
 
 
@@ -36,10 +39,12 @@ def where_bool_fp32(inputs, attrs=None, outputs=None):
     target_dtype=DType.FP32,
     reference_factory=where_ref,
 )
-def where_int32_fp32(inputs, attrs=None, outputs=None):
+def where_int32_fp32(
+    inputs: List[Any], attrs=None, outputs: Optional[List[Any]] = None
+) -> Any:
     if outputs is None:
-        return np.where(inputs[0], inputs[1], inputs[2])
-    np.where(inputs[0], inputs[1], inputs[2], out=outputs[0])
+        return np.array(np.where(inputs[0], inputs[1], inputs[2]))
+    outputs[0] = np.where(inputs[0], inputs[1], inputs[2])
     return outputs[0]
 
 
@@ -54,8 +59,10 @@ def where_int32_fp32(inputs, attrs=None, outputs=None):
     target_dtype=DType.FP32,
     reference_factory=where_ref,
 )
-def where_fp32_fp32(inputs, attrs=None, outputs=None):
+def where_fp32_fp32(
+    inputs: List[Any], attrs=None, outputs: Optional[List[Any]] = None
+) -> Any:
     if outputs is None:
-        return np.where(inputs[0], inputs[1], inputs[2])
-    np.where(inputs[0], inputs[1], inputs[2], out=outputs[0])
+        return np.array(np.where(inputs[0], inputs[1], inputs[2]))
+    outputs[0] = np.where(inputs[0], inputs[1], inputs[2])
     return outputs[0]

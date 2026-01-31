@@ -18,7 +18,8 @@ def gather_ref(
 
     return TensorNode(
         OpType.GATHER,
-        indices.shape,
+        # Output shape: indices.shape + data.shape[1:] if len(data.shape) > 1 else indices.shape,
+        indices.shape + data.shape[1:] if len(data.shape) > 1 else indices.shape,
         data.dtype,
         [data, indices],
         f"gather_{data.name}_{indices.name}",

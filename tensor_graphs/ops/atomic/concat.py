@@ -17,9 +17,19 @@ def concat_ref(
 
     a, b, axis_tensor = inputs
 
+    # Get axis value from tensor attributes (set by compiler)
+    axis = axis_tensor.attrs.get("value", [0])[0] if axis_tensor.attrs else 0
+
+    # Calculate correct output shape
+    if len(a.shape) != len(b.shape):
+        raise ValueError("Concatenation requires tensors of same rank")
+
+    out_shape = list(a.shape)
+    out_shape[axis] = a.shape[axis] + b.shape[axis]
+
     return TensorNode(
         OpType.CONCAT,
-        a.shape,  # Shape of output tensor (same as input A)
+        tuple(out_shape),  # Correct concatenated shape
         a.dtype,  # Same dtype as input A
         [a, b, axis_tensor],
         f"concat_{a.name}_{b.name}_{axis_tensor.name}",

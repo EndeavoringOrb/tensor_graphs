@@ -1,3 +1,4 @@
+import numpy as np
 from ...registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
 from ....ops.fused.fma import fma_decomposition
@@ -13,6 +14,8 @@ from ....ops.fused.fma import fma_decomposition
     reference_factory=fma_decomposition,
 )
 def fma_generic(inputs, attrs=None, outputs=None):
+    if inputs is None or outputs is None:
+        return None
     # Multiply first two elements
     np.multiply(inputs[0], inputs[1], out=outputs[0])
     # Then add the third element

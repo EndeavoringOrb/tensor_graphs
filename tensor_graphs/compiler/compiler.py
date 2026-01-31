@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict, Any
 from ..ir.node import TensorNode
 from ..ir.graph import topological_sort
 from ..ir.dtypes import TensorSignature
@@ -7,23 +7,30 @@ from .planner import ExecutionRecipe
 from .liveness import LivenessAnalyzer
 from .memory_planner import MemoryPlanner
 from .compiled_graph import CompiledGraph, OpInstruction, TensorMetadata
+from .shape_inference import ShapeInference
 
 
 class Compiler:
     def __init__(self, memory_planner: Optional[MemoryPlanner] = None):
         self.memory_planner = memory_planner or MemoryPlanner()
 
-    def compile(self, recipe: ExecutionRecipe) -> CompiledGraph:
+    def compile(
+        self, recipe: ExecutionRecipe, known_values: Optional[Dict[str, Any]] = None
+    ) -> CompiledGraph:
         # 1. Topo Sort
         nodes = topological_sort(recipe.root)
 
-        # 2. Liveness
+        # 2. Shape Inference (if values are provided)
+        if known_values:
+            ShapeInference.infer(nodes, known_values)
+
+        # 3. Liveness
         liveness = LivenessAnalyzer.analyze(nodes)
 
-        # 3. Memory Planning
+        # 4. Memory Planning
         allocations = self.memory_planner.plan(nodes, liveness)
 
-        # 4. Instruction Generation
+        # 5. Instruction Generation
         instructions = []
         node_metadata = {}
 
@@ -35,7 +42,9 @@ class Compiler:
 
         # Helper to get metadata
         def get_metadata(node: TensorNode) -> TensorMetadata:
-            return TensorMetadata(shape=node.shape, dtype=node.dtype)
+            return TensorMetadata(
+                shape=tuple(s for s in node.shape if s is not None), dtype=node.dtype
+            )
 
         # Calculate total memory needed
         max_offset = 0
@@ -75,7 +84,6 @@ class Compiler:
             input_names = [p.name for p in node.parents]
 
             # Currently TensorNode supports single output, so we wrap it in a list
-            # Future-proofing: if node has multiple outputs, we'd gather them here
             output_offs = [get_offset(node)]
 
             instr = OpInstruction(

@@ -26,7 +26,8 @@ def sum_ref(
     else:
         raise ValueError("Sum requires 1 or 2 inputs")
 
-    out_shape = x.shape if not ("axis" in attrs and attrs["axis"] is not None) else (1,)
+    # Global sum (axis=None) or per-axis sum both produce (1,) when keepdims=True
+    out_shape = (1,)
 
     return TensorNode(
         OpType.SUM,

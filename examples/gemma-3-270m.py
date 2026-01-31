@@ -17,7 +17,7 @@ from tensor_graphs.backend.executor import evaluate_graph
 # Compiler Imports
 from tensor_graphs.compiler.planner import Planner
 from tensor_graphs.compiler.compiler import Compiler
-from tensor_graphs.backend.static_executor import StaticExecutor
+from tensor_graphs.backend.executor import Executor
 
 # Import Fused Ops Definitions
 from tensor_graphs.ops.fused import (
@@ -615,7 +615,7 @@ def main():
     )
 
     # Initialize Executor
-    executor = StaticExecutor(compiled_graph)
+    executor = Executor(compiled_graph)
 
     # Load Persistent Weights
     print("Loading Weights into Static Memory...")

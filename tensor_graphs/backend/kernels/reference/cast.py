@@ -64,5 +64,5 @@ def cast_implementation(inputs, attrs=None, outputs=None):
     target_dtype=DType.FP16,
     reference_factory=cast_ref,
 )
-def cast_wrappers(inputs, attrs=None):
-    return cast_implementation(inputs, attrs)
+def cast_wrappers(inputs, attrs=None, outputs=None):
+    return cast_implementation(inputs, attrs, outputs)
