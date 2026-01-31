@@ -15,19 +15,14 @@ from ....ops.atomic.gather import gather_ref
     target_dtype=DType.FP32,
     reference_factory=gather_ref,
 )
-def gather_embedding(inputs, attrs=None, outputs=None):
+def gather_embedding(inputs, outputs, attrs):
     """
     Gather / Embedding Lookup Implementation.
     inputs[0]: Data matrix - commonly (Vocab, Dim)
     inputs[1]: Indices (Any Rank)
-
-    Performs data[indices] (axis=0 gather).
     """
     data = inputs[0]
     indices = inputs[1]
 
     result = data[indices]
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

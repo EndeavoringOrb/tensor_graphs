@@ -14,15 +14,10 @@ from ....ops.atomic.concat import concat_ref
     target_dtype=DType.FP32,
     reference_factory=concat_ref,
 )
-def concat_generic(inputs, attrs=None, outputs=None):
+def concat_generic(inputs, outputs, attrs):
     if attrs is None or "axis" not in attrs:
         raise ValueError("Concat kernel requires 'axis' attribute")
-        
+
     axis = attrs["axis"]
-    # inputs is a list of arrays
     result = np.concatenate(inputs, axis=axis)
-    
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

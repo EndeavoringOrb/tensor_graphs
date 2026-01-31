@@ -13,13 +13,10 @@ from ....ops.atomic.copy_to import copy_to_ref
     backend=Backend.CPU_NUMPY,
     reference_factory=copy_to_ref,
 )
-def copy_numpy_to_numpy(inputs, attrs=None, outputs=None):
+def copy_numpy_to_numpy(inputs, outputs, attrs):
     # Just ensure it's a new array, contiguous
     result = np.ascontiguousarray(inputs[0], dtype=np.float32)
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result
 
 
 # --- 2. Cross-Backend Copy (GPU_TORCH -> CPU_NUMPY) ---
@@ -30,7 +27,7 @@ def copy_numpy_to_numpy(inputs, attrs=None, outputs=None):
     backend=Backend.CPU_NUMPY,
     reference_factory=copy_to_ref,  # Re-using ref factory is fine
 )
-def copy_torch_gpu_to_numpy(inputs, attrs=None, outputs=None):
+def copy_torch_gpu_to_numpy(inputs, outputs, attrs):
     tensor = inputs[0]
     # Handle torch tensor -> numpy conversion
     if isinstance(tensor, torch.Tensor):
@@ -38,10 +35,7 @@ def copy_torch_gpu_to_numpy(inputs, attrs=None, outputs=None):
     else:
         # Fallback if simulation passed a numpy array masquerading as GPU
         result = np.array(tensor, dtype=np.float32)
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result
 
 
 # --- 3. Cross-Backend Copy (CPU_NUMPY -> GPU_TORCH) ---
@@ -51,7 +45,7 @@ def copy_torch_gpu_to_numpy(inputs, attrs=None, outputs=None):
     backend=Backend.GPU_TORCH,
     reference_factory=copy_to_ref,
 )
-def copy_numpy_to_torch_gpu(inputs, attrs=None, outputs=None):
+def copy_numpy_to_torch_gpu(inputs, outputs, attrs):
     data = inputs[0]
 
     if not torch.cuda.is_available():
@@ -64,10 +58,7 @@ def copy_numpy_to_torch_gpu(inputs, attrs=None, outputs=None):
     # Create torch tensor on GPU
     # torch.from_numpy creates a tensor sharing memory on CPU, then we move it.
     result = torch.from_numpy(data).to(device="cuda", dtype=torch.float32)
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result
 
 
 # --- 4. Int32 Support ---
@@ -76,9 +67,6 @@ def copy_numpy_to_torch_gpu(inputs, attrs=None, outputs=None):
     [TensorSignature(DType.INT32, shape=None, backend=Backend.CPU_NUMPY)],
     backend=Backend.CPU_NUMPY,
 )
-def copy_numpy_to_numpy_int(inputs, attrs=None, outputs=None):
+def copy_numpy_to_numpy_int(inputs, outputs, attrs):
     result = np.ascontiguousarray(inputs[0], dtype=np.int32)
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

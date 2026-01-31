@@ -14,8 +14,5 @@ from ....ops.atomic.dot import dot_ref
     ],
     reference_factory=dot_ref,
 )
-def dot_generic(inputs, attrs=None, outputs=None):
-    if outputs is None:
-        return np.matmul(inputs[0], inputs[1])
+def dot_generic(inputs, outputs, attrs):
     np.matmul(inputs[0], inputs[1], out=outputs[0])
-    return outputs[0]

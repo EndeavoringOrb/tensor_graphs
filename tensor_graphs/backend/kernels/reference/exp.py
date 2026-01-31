@@ -10,12 +10,9 @@ from ....ops.atomic.exp import exp_ref
     [TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY)],
     reference_factory=exp_ref,
 )
-def exp_generic(inputs, attrs=None, outputs=None):
+def exp_generic(inputs, outputs, attrs):
     """
     Generic Exponential Implementation.
     inputs[0]: Data tensor (Any Rank)
     """
-    if outputs is None:
-        return np.exp(inputs[0])
     np.exp(inputs[0], out=outputs[0])
-    return outputs[0]

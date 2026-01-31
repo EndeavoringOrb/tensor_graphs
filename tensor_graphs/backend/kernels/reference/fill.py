@@ -17,27 +17,15 @@ from ....ops.atomic.fill import fill_ref
     target_dtype=DType.FP32,
     reference_factory=fill_ref,
 )
-def fill_fp32(inputs, attrs=None, outputs=None):
+def fill_fp32(inputs, outputs, attrs):
     value = inputs[0]
     shape_tensor = inputs[1]
 
-    # Extract scalar value
-    if value.size != 1:
-        # Allow for (1, 1, ...) if it essentially scalar?
-        # For now, strict (1,) or scalar check.
-        # But numpy often handles (1,) as scalar in item().
-        pass
-
     val = value.item()
-
-    # Extract shape tuple
     target_shape = tuple(shape_tensor.astype(int))
 
     result = np.full(target_shape, val, dtype=np.float32)
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result
 
 
 @KernelRegistry.register(
@@ -45,14 +33,14 @@ def fill_fp32(inputs, attrs=None, outputs=None):
     [
         TensorSignature(
             DType.INT32, shape=(1,), backend=Backend.CPU_NUMPY
-        ),  # Value (Scalar)
-        TensorSignature(DType.INT32, shape=(None,), backend=Backend.CPU_NUMPY),  # Shape
+        ),
+        TensorSignature(DType.INT32, shape=(None,), backend=Backend.CPU_NUMPY),
     ],
     backend=Backend.CPU_NUMPY,
     target_dtype=DType.INT32,
     reference_factory=fill_ref,
 )
-def fill_int32(inputs, attrs=None, outputs=None):
+def fill_int32(inputs, outputs, attrs):
     value = inputs[0]
     shape_tensor = inputs[1]
 
@@ -60,7 +48,4 @@ def fill_int32(inputs, attrs=None, outputs=None):
     target_shape = tuple(shape_tensor.astype(int))
 
     result = np.full(target_shape, val, dtype=np.int32)
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

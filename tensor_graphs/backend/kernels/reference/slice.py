@@ -12,15 +12,15 @@ from ....ops.atomic.slice import slice_ref
     target_dtype=DType.FP32,
     reference_factory=slice_ref,
 )
-def slice_generic(inputs, attrs=None, outputs=None):
+def slice_generic(inputs, outputs, attrs):
     if not attrs or "starts" not in attrs:
         raise ValueError("Slice kernel requires attributes (starts, ends)")
-        
+
     data = inputs[0]
     starts = attrs["starts"]
     ends = attrs["ends"]
     steps = attrs.get("steps", [1] * len(starts))
-    
+
     slices = []
     for i in range(len(starts)):
         s = int(starts[i]) if starts[i] is not None else None
@@ -29,7 +29,4 @@ def slice_generic(inputs, attrs=None, outputs=None):
         slices.append(slice(s, e, st))
 
     result = data[tuple(slices)]
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

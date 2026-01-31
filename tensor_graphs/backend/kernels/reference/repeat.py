@@ -12,7 +12,7 @@ from ....ops.atomic.repeat import repeat_ref
     target_dtype=DType.FP32,
     reference_factory=repeat_ref,
 )
-def repeat_generic(inputs, attrs=None, outputs=None):
+def repeat_generic(inputs, outputs, attrs):
     if attrs is None or "repeats" not in attrs:
          raise ValueError("Repeat kernel requires 'repeats' attribute")
 
@@ -25,7 +25,4 @@ def repeat_generic(inputs, attrs=None, outputs=None):
     else:
         result = np.repeat(data, repeats, axis=axis)
 
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

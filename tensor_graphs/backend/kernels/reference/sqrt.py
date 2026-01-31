@@ -11,15 +11,9 @@ from ....ops.atomic.sqrt import sqrt_ref
         TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY)
     ],  # Matches any rank/shape
 )
-def sqrt_generic(inputs, attrs=None, outputs=None):
+def sqrt_generic(inputs, outputs, attrs):
     """
     Generic Square Root Implementation.
     inputs[0]: Data tensor (Any Rank)
     """
-    if outputs is None:
-        # Fallback for non-static contexts (if any)
-        return np.sqrt(inputs[0])
-
-    # Explicit output writing
     np.sqrt(inputs[0], out=outputs[0])
-    return outputs[0]

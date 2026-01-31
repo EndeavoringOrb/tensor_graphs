@@ -153,9 +153,8 @@ class Executor:
 
         # 2. Execution Loop
         for kernel, input_views, output_views, attrs in self.prepared_instructions:
-            # Unified Kernel API: (inputs, attrs, outputs)
-            # outputs is a list of views.
-            kernel(input_views, attrs, outputs=output_views)
+            # Unified Kernel API: (inputs, outputs, attrs)
+            kernel(input_views, output_views, attrs)
 
         # 3. Return Output
         if len(self.output_views) == 1:

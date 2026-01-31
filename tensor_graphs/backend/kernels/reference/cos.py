@@ -10,13 +10,10 @@ from ....ops.atomic.cos import cos_ref
     [TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY)],
     reference_factory=cos_ref,
 )
-def cos_generic(inputs, attrs=None, outputs=None):
+def cos_generic(inputs, outputs, attrs):
     """
     Generic Cosine Implementation.
     inputs[0]: Data tensor (Any Rank)
     """
     result = np.cos(inputs[0])
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

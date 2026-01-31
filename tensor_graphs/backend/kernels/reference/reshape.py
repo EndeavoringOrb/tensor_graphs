@@ -19,7 +19,7 @@ from ....ops.atomic.reshape import reshape_ref
     target_dtype=DType.FP32,
     reference_factory=reshape_ref,
 )
-def reshape_generic(inputs, attrs=None, outputs=None):
+def reshape_generic(inputs, outputs, attrs):
     """
     Generic Reshape Implementation.
     inputs[0]: Data tensor (Any Rank)
@@ -28,10 +28,6 @@ def reshape_generic(inputs, attrs=None, outputs=None):
     data = inputs[0]
     target_shape = inputs[1]
 
-    # Convert numpy array of shape dims to tuple of ints
     shape_tuple = tuple(target_shape.astype(int))
     result = np.reshape(data, shape_tuple)
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

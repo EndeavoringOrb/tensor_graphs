@@ -25,10 +25,9 @@ from ....ops.atomic.max import max_ref
     target_dtype=DType.FP32,
     reference_factory=max_ref,
 )
-def max_generic(inputs, attrs=None, outputs=None):
+def max_generic(inputs, outputs, attrs):
     data = inputs[0]
 
-    # 1. Determine Axis
     if attrs and "axis" in attrs:
         axis = attrs["axis"]
     elif len(inputs) > 1:
@@ -37,7 +36,4 @@ def max_generic(inputs, attrs=None, outputs=None):
         axis = None
 
     result = np.max(data, axis=axis, keepdims=True)
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

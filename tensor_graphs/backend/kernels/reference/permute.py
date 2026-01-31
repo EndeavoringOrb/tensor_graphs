@@ -12,15 +12,12 @@ from ....ops.atomic.permute import permute_ref
     target_dtype=DType.FP32,
     reference_factory=permute_ref,
 )
-def permute_generic(inputs, attrs=None, outputs=None):
+def permute_generic(inputs, outputs, attrs):
     if attrs is None or "dims" not in attrs:
         raise ValueError("Permute kernel requires 'dims' attribute")
-        
+
     data = inputs[0]
-    dims = attrs["dims"] # e.g. (1, 0)
-    
+    dims = attrs["dims"]
+
     result = np.transpose(data, axes=dims)
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

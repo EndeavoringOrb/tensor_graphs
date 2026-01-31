@@ -17,14 +17,9 @@ from ....ops.atomic.where import where_ref
     target_dtype=DType.FP32,
     reference_factory=where_ref,
 )
-def where_bool_fp32(
-    inputs: List[Any], attrs=None, outputs: Optional[List[Any]] = None
-) -> Any:
+def where_bool_fp32(inputs, outputs, attrs):
     result = np.where(inputs[0], inputs[1], inputs[2])
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result
 
 
 @KernelRegistry.register(
@@ -32,40 +27,30 @@ def where_bool_fp32(
     [
         TensorSignature(
             DType.INT32, shape=None, backend=Backend.CPU_NUMPY
-        ),  # Condition
-        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),  # X
-        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),  # Y
+        ),
+        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),
+        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),
     ],
     backend=Backend.CPU_NUMPY,
     target_dtype=DType.FP32,
     reference_factory=where_ref,
 )
-def where_int32_fp32(
-    inputs: List[Any], attrs=None, outputs: Optional[List[Any]] = None
-) -> Any:
+def where_int32_fp32(inputs, outputs, attrs):
     result = np.where(inputs[0], inputs[1], inputs[2])
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result
 
 
 @KernelRegistry.register(
     OpType.WHERE,
     [
-        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),  # Condition
-        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),  # X
-        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),  # Y
+        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),
+        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),
+        TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),
     ],
     backend=Backend.CPU_NUMPY,
     target_dtype=DType.FP32,
     reference_factory=where_ref,
 )
-def where_fp32_fp32(
-    inputs: List[Any], attrs=None, outputs: Optional[List[Any]] = None
-) -> Any:
+def where_fp32_fp32(inputs, outputs, attrs):
     result = np.where(inputs[0], inputs[1], inputs[2])
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result

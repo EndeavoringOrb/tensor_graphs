@@ -79,11 +79,89 @@ def test_kernel_correctness(
     # 5. Execute Candidate Kernel
     actual_output = None
     try:
-        out = kernel_func(prepared_inputs, attrs)
-        if isinstance(out, torch.Tensor):
-            actual_output = out.detach().cpu().numpy()
+        # Create pre-allocated output buffer (empty, same shape as first input for unary, or infer from op)
+        first_input = prepared_inputs[0]
+        if isinstance(first_input, torch.Tensor):
+            output_shape = first_input.shape
+            output_dtype = torch.float32
         else:
-            actual_output = out
+            output_shape = first_input.shape
+            output_dtype = np.float32
+
+        # Handle special cases for output shape
+        if op_type == OpType.ADD:
+            if len(prepared_inputs) >= 2:
+                output_shape = np.broadcast_shapes(prepared_inputs[0].shape, prepared_inputs[1].shape)
+        elif op_type == OpType.MUL:
+            if len(prepared_inputs) >= 2:
+                output_shape = np.broadcast_shapes(prepared_inputs[0].shape, prepared_inputs[1].shape)
+        elif op_type == OpType.DIVIDE:
+            if len(prepared_inputs) >= 2:
+                output_shape = np.broadcast_shapes(prepared_inputs[0].shape, prepared_inputs[1].shape)
+        elif op_type == OpType.DOT:
+            # Output is matrix product result
+            pass  # Keep first input shape as starting point
+        elif op_type == OpType.CONCAT:
+            # Concatenation - need to compute from attrs
+            axis = attrs.get("axis", 0) if attrs else 0
+            concat_dim = sum(arr.shape[axis] for arr in prepared_inputs)
+            new_shape = list(prepared_inputs[0].shape)
+            new_shape[axis] = concat_dim
+            output_shape = tuple(new_shape)
+        elif op_type == OpType.RESHAPE:
+            if attrs and "shape" in attrs:
+                output_shape = tuple(attrs["shape"])
+        elif op_type == OpType.PERMUTE:
+            if attrs and "axes" in attrs:
+                output_shape = tuple(first_input.shape[ax] for ax in attrs["axes"])
+        elif op_type == OpType.SLICE:
+            # Slice output shape depends on starts/ends
+            pass  # Keep original shape
+        elif op_type == OpType.REPEAT:
+            if attrs and "repeats" in attrs:
+                repeats = attrs["repeats"]
+                output_shape = tuple(s * r for s, r in zip(first_input.shape, repeats))
+        elif op_type == OpType.ARANGE:
+            start = attrs.get("start", 0) if attrs else 0
+            step = attrs.get("step", 1) if attrs else 1
+            n = attrs.get("n") or len(prepared_inputs[1]) if len(prepared_inputs) > 1 else 10
+            output_shape = (n,)
+        elif op_type == OpType.FILL:
+            if len(prepared_inputs) >= 2:
+                output_shape = tuple(int(x) for x in prepared_inputs[1])
+        elif op_type == OpType.GATHER:
+            # Output shape from indices
+            pass  # Keep original
+        elif op_type == OpType.WHERE:
+            pass  # Keep first input shape
+        elif op_type == OpType.COPY_TO:
+            output_shape = first_input.shape
+        elif op_type == OpType.CAST:
+            if target_dtype == DType.FP16:
+                output_dtype = np.float16
+            elif target_dtype == DType.FP32:
+                output_dtype = np.float32
+            elif target_dtype == DType.INT32:
+                output_dtype = np.int32
+            elif target_dtype == DType.BOOL:
+                output_dtype = np.bool_
+        elif op_type == OpType.TRIU:
+            output_shape = first_input.shape
+
+        # Allocate output buffer
+        if isinstance(first_input, torch.Tensor):
+            output = torch.empty(output_shape, dtype=output_dtype, device="cuda" if first_input.is_cuda else "cpu")
+        else:
+            output = np.empty(output_shape, dtype=output_dtype)
+
+        # Call kernel with new signature: (inputs, outputs, attrs)
+        kernel_func(prepared_inputs, [output], attrs)
+
+        # Output is now in 'output'
+        if isinstance(output, torch.Tensor):
+            actual_output = output.detach().cpu().numpy()
+        else:
+            actual_output = output
     except Exception as e:
         pytest.fail(f"Kernel Execution Failed ({backend.value}): {e}")
 

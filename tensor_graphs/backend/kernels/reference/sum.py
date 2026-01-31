@@ -26,25 +26,19 @@ from ....ops.atomic.sum import sum_ref
     target_dtype=DType.FP32,
     reference_factory=sum_ref,
 )
-def sum_generic(inputs, attrs=None, outputs=None):
+def sum_generic(inputs, outputs, attrs):
     data = inputs[0]
 
-    # 1. Determine Axis
     if attrs and "axis" in attrs:
         axis = attrs["axis"]
     elif len(inputs) > 1:
-        # Backward compatibility for when axis was an input node
         axis = int(inputs[1][0])
     else:
-        axis = None  # Global sum
+        axis = None
 
-    # 2. Determine Keepdims
     keepdims = True
     if attrs and "keepdims" in attrs:
         keepdims = attrs["keepdims"]
 
     result = np.sum(data, axis=axis, keepdims=keepdims)
-    if outputs is not None:
-        outputs[0][:] = result
-        return outputs[0]
-    return result
+    outputs[0][:] = result
