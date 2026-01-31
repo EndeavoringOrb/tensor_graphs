@@ -79,28 +79,37 @@ class ShapeInference:
 
             # OpType.REPEAT
             elif node.op_type == OpType.REPEAT:
-                # Repeat operation has two inputs: data tensor and repeats tensor.
                 data = node.parents[0] if node.parents else None
-                if data and data.shape:
-                    # Get input shape (use first dim for 1D repeat)
+                if data and data.shape and node.attrs and "repeats" in node.attrs:
+                    repeats = int(node.attrs["repeats"])
+                    # Assuming 1D / Flattened repeat for simple shape logic unless axis is handled
+                    # (Codebase implementation was rudimentary, keeping it simple here)
                     input_shape = data.shape
-                    input_dim = input_shape[0] if input_shape else None
+                    if input_shape and input_shape[0] is not None:
+                        node.shape = (input_shape[0] * repeats,)
 
-                    if input_dim is not None:
-                        # Try to get repeats value from second parent or attrs
-                        repeats_val = None
-                        if len(node.parents) >= 2:
-                            repeats_val = get_val(node.parents[1])
-
-                        if repeats_val is None and node.attrs and "repeats" in node.attrs:
-                            repeats_val = node.attrs["repeats"]
-
-                        if repeats_val is not None:
-                            try:
-                                repeats = int(repeats_val.item()) if hasattr(repeats_val, "item") else int(repeats_val)
-                                node.shape = (input_dim * repeats,)
-                            except (ValueError, TypeError):
-                                pass
+            # OpType.CONCAT
+            elif node.op_type == OpType.CONCAT:
+                if len(node.parents) >= 2:
+                    a = node.parents[0]
+                    # We only support same-rank concat for now
+                    axis = node.attrs.get("axis", 0)
+                    
+                    if a.shape is not None:
+                         out_shape = list(a.shape)
+                         ndim = len(a.shape)
+                         if axis < 0: axis += ndim
+                         
+                         total_dim = 0
+                         valid = True
+                         for p in node.parents:
+                             if p.shape is None or p.shape[axis] is None:
+                                 valid = False; break
+                             total_dim += p.shape[axis]
+                        
+                         if valid and 0 <= axis < ndim:
+                             out_shape[axis] = total_dim
+                             node.shape = tuple(out_shape)
 
             # OpType.RESHAPE
             elif node.op_type == OpType.RESHAPE:

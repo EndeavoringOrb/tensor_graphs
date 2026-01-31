@@ -7,34 +7,31 @@ def repeat_ref(
     inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
 ) -> TensorNode:
     """
-    Reference graph for Repeat: Repeat elements along an axis
-    inputs[0]: Data tensor
-    inputs[1]: Repeats (optional)
-    attrs["repeats"]: Number of repeats
-    attrs["axis"]: Axis along which to repeat (default: 0)
+    Reference graph for Repeat.
+    inputs: [Data Tensor]
+    attrs['repeats']: int
+    attrs['axis']: int (optional, default 0)
     """
-    if len(inputs) == 1:
-        data = inputs[0]
-        if attrs is None:
-            attrs = {}
-        parents = [data]
-        node_attrs = attrs
-    elif len(inputs) == 2:
-        data = inputs[0]
-        repeats = inputs[1]
-        if attrs is None:
-            attrs = {}
-        parents = [data, repeats]
-        node_attrs = attrs
-    else:
-        raise ValueError("Repeat requires 1 or 2 inputs")
+    if len(inputs) != 1:
+        raise ValueError("Repeat requires exactly 1 data input")
 
+    if attrs is None or "repeats" not in attrs:
+        raise ValueError("Repeat requires 'repeats' in attributes")
+
+    data = inputs[0]
+    repeats = attrs["repeats"]
+    axis = attrs.get("axis", 0)
+
+    out_shape = list(data.shape)
+    if out_shape[axis] is not None:
+        out_shape[axis] *= repeats
+    
     return TensorNode(
         OpType.REPEAT,
-        data.shape,
+        tuple(out_shape),
         data.dtype,
-        parents,
+        inputs,
         f"repeat_{data.name}",
-        attrs=node_attrs,
+        attrs=attrs,
         backend=data.backend,
     )

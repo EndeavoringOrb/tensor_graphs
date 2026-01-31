@@ -9,11 +9,8 @@ from tensor_graphs.backend.executor import evaluate_graph
 def test_permute_matrix_transpose():
     """Test transposing a 2D matrix (2, 3) -> (3, 2)."""
     data_node = TensorNode(OpType.INPUT, (2, 3), DType.FP32, [], "data")
-    perm_node = TensorNode(OpType.INPUT, (2,), DType.INT32, [], "perm")
-
-    # Expected output shape (3, 2)
     permute_node = TensorNode(
-        OpType.PERMUTE, (3, 2), DType.FP32, [data_node, perm_node], "permute"
+        OpType.PERMUTE, (3, 2), DType.FP32, [data_node], "permute", attrs={"dims": [1, 0]}
     )
 
     input_data = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.float32)

@@ -100,12 +100,12 @@ class GraphBuilder:
     def permute(self, x, dims, perm_node):
         new_shape = tuple(x.shape[i] for i in dims)
         return TensorNode(
-            OpType.PERMUTE, new_shape, DType.FP32, [x, perm_node], f"permute_{x.name}"
+            OpType.PERMUTE, new_shape, DType.FP32, [x], f"permute_{x.name}", attrs={"dims": dims}
         )
 
     def concat(self, inputs, axis_node, axis_idx, output_shape):
         return TensorNode(
-            OpType.CONCAT, output_shape, DType.FP32, [*inputs, axis_node], "concat"
+            OpType.CONCAT, output_shape, DType.FP32, inputs, "concat", attrs={"axis": axis_idx}
         )
 
     def arange(self, start_node, stop_node, step_node):
@@ -121,7 +121,7 @@ class GraphBuilder:
         return TensorNode(OpType.POWER, base.shape, DType.FP32, [base, exp], "power")
 
     def triu(self, x, k_node):
-        return TensorNode(OpType.TRIU, x.shape, DType.FP32, [x, k_node], "triu")
+        return TensorNode(OpType.TRIU, x.shape, DType.FP32, [x], "triu", attrs={"k": 1})
 
     def cast(self, x, target_dtype):
         return TensorNode(

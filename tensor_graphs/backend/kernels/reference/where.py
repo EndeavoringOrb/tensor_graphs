@@ -20,10 +20,11 @@ from ....ops.atomic.where import where_ref
 def where_bool_fp32(
     inputs: List[Any], attrs=None, outputs: Optional[List[Any]] = None
 ) -> Any:
-    if outputs is None:
-        return np.array(np.where(inputs[0], inputs[1], inputs[2]))
-    outputs[0] = np.where(inputs[0], inputs[1], inputs[2])
-    return outputs[0]
+    result = np.where(inputs[0], inputs[1], inputs[2])
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result
 
 
 @KernelRegistry.register(
@@ -42,10 +43,11 @@ def where_bool_fp32(
 def where_int32_fp32(
     inputs: List[Any], attrs=None, outputs: Optional[List[Any]] = None
 ) -> Any:
-    if outputs is None:
-        return np.array(np.where(inputs[0], inputs[1], inputs[2]))
-    outputs[0] = np.where(inputs[0], inputs[1], inputs[2])
-    return outputs[0]
+    result = np.where(inputs[0], inputs[1], inputs[2])
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result
 
 
 @KernelRegistry.register(
@@ -62,7 +64,8 @@ def where_int32_fp32(
 def where_fp32_fp32(
     inputs: List[Any], attrs=None, outputs: Optional[List[Any]] = None
 ) -> Any:
-    if outputs is None:
-        return np.array(np.where(inputs[0], inputs[1], inputs[2]))
-    outputs[0] = np.where(inputs[0], inputs[1], inputs[2])
-    return outputs[0]
+    result = np.where(inputs[0], inputs[1], inputs[2])
+    if outputs is not None:
+        outputs[0][:] = result
+        return outputs[0]
+    return result

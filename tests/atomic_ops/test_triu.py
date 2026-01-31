@@ -8,8 +8,7 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 def test_triu_k0():
     x = TensorNode(OpType.INPUT, (3, 3), DType.FP32, [], "x")
-    k = TensorNode(OpType.INPUT, (1,), DType.INT32, [], "k")
-    triu_node = TensorNode(OpType.TRIU, (3, 3), DType.FP32, [x, k], "triu")
+    triu_node = TensorNode(OpType.TRIU, (3, 3), DType.FP32, [x], "triu", attrs={"k": 0})
 
     data = np.ones((3, 3), dtype=np.float32)
     inputs = {"x": data, "k": np.array([0], dtype=np.int32)}
@@ -21,8 +20,7 @@ def test_triu_k0():
 
 def test_triu_k1():
     x = TensorNode(OpType.INPUT, (3, 3), DType.FP32, [], "x")
-    k = TensorNode(OpType.INPUT, (1,), DType.INT32, [], "k")
-    triu_node = TensorNode(OpType.TRIU, (3, 3), DType.FP32, [x, k], "triu")
+    triu_node = TensorNode(OpType.TRIU, (3, 3), DType.FP32, [x], "triu", attrs={"k": 1})
 
     data = np.ones((3, 3), dtype=np.float32)
     inputs = {"x": data, "k": np.array([1], dtype=np.int32)}

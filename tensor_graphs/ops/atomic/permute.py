@@ -7,20 +7,28 @@ def permute_ref(
     inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
 ) -> TensorNode:
     """
-    Reference graph for Permute/Transpose: permute dimensions
-    inputs[0]: Data tensor
-    inputs[1]: Permutation axes (1D tensor of integers)
+    Reference graph for Permute/Transpose.
+    inputs: [Data Tensor]
+    attrs['dims']: List[int] (Permutation order)
     """
-    if len(inputs) != 2:
-        raise ValueError("Permute requires exactly 2 inputs: data and permutation axes")
+    if len(inputs) != 1:
+        raise ValueError("Permute requires exactly 1 data input")
+    
+    if attrs is None or "dims" not in attrs:
+         raise ValueError("Permute requires 'dims' (permutation order) in attributes")
 
-    data, perm = inputs
+    data = inputs[0]
+    dims = attrs["dims"]
+
+    # Calculate output shape
+    out_shape = tuple(data.shape[i] for i in dims) if data.shape else None
 
     return TensorNode(
         OpType.PERMUTE,
-        data.shape,
+        out_shape,
         data.dtype,
-        [data, perm],
+        inputs,
         f"permute_{data.name}",
+        attrs=attrs,
         backend=data.backend,
     )

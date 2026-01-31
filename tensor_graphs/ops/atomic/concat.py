@@ -7,30 +7,34 @@ def concat_ref(
     inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
 ) -> TensorNode:
     """
-    Reference graph for Concat: A + B along axis
-    inputs[0]: Tensor A
-    inputs[1]: Tensor B
-    inputs[2]: Axis (1-element 1D INT32 tensor)
+    Reference graph for Concat: Concatenate list of tensors along axis.
+    inputs: List[TensorNode] (Data tensors)
+    attrs['axis']: int (Required)
     """
-    if len(inputs) != 3:
-        raise ValueError("Concat requires 3 inputs: two tensors and an axis")
+    if attrs is None or "axis" not in attrs:
+        raise ValueError("Concat requires 'axis' in attributes")
 
-    a, b, axis_tensor = inputs
-
-    # Get axis value from tensor attributes (set by compiler)
-    axis = axis_tensor.attrs.get("value", [0])[0] if axis_tensor.attrs else 0
-
-    # Calculate correct output shape
-    if len(a.shape) != len(b.shape):
-        raise ValueError("Concatenation requires tensors of same rank")
-
-    out_shape = list(a.shape)
-    out_shape[axis] = a.shape[axis] + b.shape[axis]
+    axis = attrs["axis"]
+    
+    # Calculate output shape (if possible statically)
+    # We assume all inputs have same rank and same shape except on axis
+    out_shape = list(inputs[0].shape)
+    for i, inp in enumerate(inputs[1:]):
+        if len(inp.shape) != len(out_shape):
+             raise ValueError("Concatenation requires tensors of same rank")
+        
+        # Accumulate dimension on axis
+        dim = inp.shape[axis]
+        if out_shape[axis] is not None and dim is not None:
+            out_shape[axis] += dim
+        else:
+            out_shape[axis] = None
 
     return TensorNode(
         OpType.CONCAT,
-        tuple(out_shape),  # Correct concatenated shape
-        a.dtype,  # Same dtype as input A
-        [a, b, axis_tensor],
-        f"concat_{a.name}_{b.name}_{axis_tensor.name}",
+        tuple(out_shape),
+        inputs[0].dtype,
+        inputs,
+        f"concat_{len(inputs)}_inputs",
+        attrs=attrs,
     )

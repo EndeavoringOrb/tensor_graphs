@@ -200,29 +200,23 @@ class DataGenerator:
             return inputs_with_backends, attrs
 
         elif op_type == OpType.PERMUTE:
-            # Data: Random Shape, Perm: Random Shuffle of axes
+            # Input: Data
+            # Attr: dims
             if len(signatures) >= 1:
-                shape = (
-                    signatures[0].shape
-                    if signatures[0].shape
-                    else DataGenerator._random_shape(min_rank=2)
-                )
+                shape = signatures[0].shape or DataGenerator._random_shape(min_rank=2)
                 dtype = signatures[0].dtype
             else:
                 shape = DataGenerator._random_shape(min_rank=2)
                 dtype = DType.FP32
 
             data = DataGenerator.random_tensor(shape, dtype)
+            inputs_with_backends.append(
+                (data, signatures[0].backend if signatures else backend)
+            )
 
             axes = list(range(len(shape)))
             random.shuffle(axes)
-            perm = np.array(axes, dtype=np.int32)
-
-            if signatures:
-                inputs_with_backends.append(
-                    (data, signatures[0].backend if len(signatures) > 0 else backend)
-                )
-            inputs_with_backends.append((perm, Backend.CPU_NUMPY))
+            attrs = {"dims": axes}
             return inputs_with_backends, attrs
 
         elif op_type == OpType.CONCAT:
@@ -251,6 +245,7 @@ class DataGenerator:
             shape_b = [d if d is not None else 32 for d in shape_b]
 
             axis_idx = random.randint(0, len(shape_a) - 1)
+            attrs = {"axis": axis_idx}
             # Ensure dimensions match on all axes except concat axis
             for i in range(len(shape_a)):
                 if i != axis_idx:
@@ -266,7 +261,6 @@ class DataGenerator:
             inputs_with_backends.append(
                 (b, signatures[1].backend if len(signatures) > 1 else backend)
             )
-            inputs_with_backends.append((axis, Backend.CPU_NUMPY))
             return inputs_with_backends, attrs
 
         elif op_type == OpType.SLICE:
@@ -293,23 +287,8 @@ class DataGenerator:
                 ends.append(end)
                 steps.append(step)
 
-            if len(signatures) == 4:
-                inputs_with_backends.append((data, signatures[0].backend or backend))
-                inputs_with_backends.append(
-                    (np.array(starts, dtype=np.int32), Backend.CPU_NUMPY)
-                )
-                inputs_with_backends.append(
-                    (np.array(ends, dtype=np.int32), Backend.CPU_NUMPY)
-                )
-                inputs_with_backends.append(
-                    (np.array(steps, dtype=np.int32), Backend.CPU_NUMPY)
-                )
-            else:
-                if len(signatures) > 0:
-                    inputs_with_backends.append(
-                        (data, signatures[0].backend or backend)
-                    )
-                attrs = {"starts": starts, "ends": ends, "steps": steps}
+            inputs_with_backends.append((data, signatures[0].backend if signatures else backend))
+            attrs = {"starts": starts, "ends": ends, "steps": steps}
             return inputs_with_backends, attrs
 
         elif op_type == OpType.ARANGE:

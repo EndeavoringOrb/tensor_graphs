@@ -7,34 +7,37 @@ def slice_ref(
     inputs: List[TensorNode], attrs: Optional[Dict[str, Any]] = None
 ) -> TensorNode:
     """
-    Reference graph for Slice: Extract sub-tensor
-    inputs[0]: Data tensor
-    inputs[1...3]: starts, ends, steps (optional)
-    attrs["starts"]: List of start indices
-    attrs["ends"]: List of end indices
-    attrs["steps"]: List of step values
+    Reference graph for Slice.
+    inputs: [Data Tensor]
+    attrs['starts']: List[int]
+    attrs['ends']: List[int]
+    attrs['steps']: List[int] (optional)
     """
+    if len(inputs) != 1:
+        raise ValueError("Slice requires exactly 1 data input. Params must be in attrs.")
+    
+    if attrs is None or "starts" not in attrs or "ends" not in attrs:
+        raise ValueError("Slice requires 'starts' and 'ends' in attributes")
+
     data = inputs[0]
+    
+    # Simple static shape inference (approximation)
+    # Ideally handled by ShapeInference, but we set what we can here
+    out_shape = list(data.shape)
+    starts = attrs["starts"]
+    ends = attrs["ends"]
+    steps = attrs.get("steps", [1] * len(starts))
 
-    if len(inputs) == 4:
-        # Explicit input nodes for slicing parameters
-        starts, ends, steps = inputs[1], inputs[2], inputs[3]
-        parents = [data, starts, ends, steps]
-        node_attrs = {}
-    elif len(inputs) == 1:
-        if attrs is None:
-            attrs = {}
-        parents = [data]
-        node_attrs = attrs
-    else:
-        raise ValueError("Slice requires either 1 input (with attrs) or 4 inputs")
-
+    # Note: Logic to compute exact output shape is complex due to broadcasting/step logic
+    # We leave exact calculation to ShapeInference or assume caller provided generic shape
+    # For now, we preserve rank.
+    
     return TensorNode(
         OpType.SLICE,
-        data.shape,
+        tuple(out_shape), # Placeholder, effectively
         data.dtype,
-        parents,
+        inputs,
         f"slice_{data.name}",
-        attrs=node_attrs,
+        attrs=attrs,
         backend=data.backend,
     )

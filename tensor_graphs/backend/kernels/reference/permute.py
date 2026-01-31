@@ -7,30 +7,19 @@ from ....ops.atomic.permute import permute_ref
 
 @KernelRegistry.register(
     OpType.PERMUTE,
-    [
-        TensorSignature(
-            DType.FP32, shape=None, backend=Backend.CPU_NUMPY
-        ),  # Matches any rank/shape
-        TensorSignature(
-            DType.INT32, shape=(None,), backend=Backend.CPU_NUMPY
-        ),  # Permutation order vector
-    ],
+    [TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY)],
     backend=Backend.CPU_NUMPY,
     target_dtype=DType.FP32,
     reference_factory=permute_ref,
 )
 def permute_generic(inputs, attrs=None, outputs=None):
-    """
-    Generic Permute/Transpose Implementation.
-    inputs[0]: Data tensor (Any Rank)
-    inputs[1]: Permutation axes (1D tensor of integers)
-    """
+    if attrs is None or "dims" not in attrs:
+        raise ValueError("Permute kernel requires 'dims' attribute")
+        
     data = inputs[0]
-    perm = inputs[1]
-
-    # Convert numpy array of dims to tuple of ints
-    perm_tuple = tuple(perm.astype(int))
-    result = np.transpose(data, axes=perm_tuple)
+    dims = attrs["dims"] # e.g. (1, 0)
+    
+    result = np.transpose(data, axes=dims)
     if outputs is not None:
         outputs[0][:] = result
         return outputs[0]
