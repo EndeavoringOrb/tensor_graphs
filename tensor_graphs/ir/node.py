@@ -3,6 +3,7 @@ from typing import List, Tuple, Optional, Dict, Any
 import uuid
 from .dtypes import DType, TensorSignature, Backend
 from .buffer import StorageType
+from ..ops.atomic_types import OpType
 
 
 @dataclass(eq=False)
@@ -15,6 +16,15 @@ class TensorNode:
     attrs: Dict[str, Any] = field(default_factory=dict)
     backend: Backend = Backend.CPU_NUMPY
     storage_type: StorageType = StorageType.TRANSIENT
+
+    def __post_init__(self):
+        """
+        Post-initialization logic to set defaults based on node type.
+        """
+        # If storage_type is the default TRANSIENT, check if we should promote it to PERSISTENT
+        if self.storage_type == StorageType.TRANSIENT:
+            if self.op_type == OpType.CONSTANT:
+                object.__setattr__(self, "storage_type", StorageType.PERSISTENT)
 
     def get_attr(self, key: str, default: Any = None) -> Any:
         return self.attrs.get(key, default)

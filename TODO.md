@@ -1,0 +1,2 @@
+make sure tensor_graphs/ops/atomic/* uses attrs for constant inputs instead of input nodes
+decide whether to make shape_inference handle all out shape stuff, right now some tensor_graphs/ops/atomic/* ref functions set output shape

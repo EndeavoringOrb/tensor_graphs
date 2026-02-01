@@ -16,16 +16,13 @@ def rope_decomposition(inputs, attrs=None):
         OpType.NEGATE, x2_node.shape, x2_node.dtype, [x2_node], f"{x.name}_neg_x2"
     )
 
-    axis_node = TensorNode(
-        OpType.CONSTANT, (1,), DType.INT32, [], f"{x.name}_axis", attrs={"value": [-1]}
-    )
-
     rotated_node = TensorNode(
         OpType.CONCAT,
         x.shape,
         x.dtype,
-        [neg_x2_node, x1_node, axis_node],
+        [neg_x2_node, x1_node],
         f"{x.name}_rotated",
+        attrs={"axis": -1},
     )
 
     term1 = TensorNode(OpType.MUL, x.shape, x.dtype, [x, cos], f"{x.name}_t1")

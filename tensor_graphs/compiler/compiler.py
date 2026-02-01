@@ -8,6 +8,7 @@ from .liveness import LivenessAnalyzer
 from .memory_planner import MemoryPlanner
 from .compiled_graph import CompiledGraph, OpInstruction, TensorMetadata
 from .shape_inference import ShapeInference
+from .constant_folding import ConstantFolding
 
 
 class Compiler:
@@ -30,7 +31,11 @@ class Compiler:
         # 4. Memory Planning
         allocations = self.memory_planner.plan(nodes, liveness)
 
-        # 5. Instruction Generation
+        # 5. Constant Folding
+        if known_values:
+            recipe.root = ConstantFolding.fold(recipe.root, known_values)
+
+        # 6. Instruction Generation
         instructions = []
         node_metadata = {}
 

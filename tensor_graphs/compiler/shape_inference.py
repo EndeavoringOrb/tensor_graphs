@@ -133,6 +133,92 @@ class ShapeInference:
 
                     node.shape = tuple(target_dims)
 
+            # OpType.SLICE
+            elif node.op_type == OpType.SLICE:
+                if len(node.parents) == 1 and node.parents[0].shape is not None:
+                    data_shape = node.parents[0].shape
+                    starts = node.attrs.get("starts", [0] * len(data_shape))
+                    ends = node.attrs.get("ends", [d for d in data_shape])
+                    steps = node.attrs.get("steps", [1] * len(data_shape))
+
+                    new_shape = []
+                    for i, dim in enumerate(data_shape):
+                        if dim is None:
+                            new_shape.append(None)
+                            continue
+
+                        s = starts[i] if i < len(starts) else 0
+                        e = ends[i] if i < len(ends) else dim
+                        st = steps[i] if i < len(steps) else 1
+
+                        if e is None:
+                            e = dim
+                        if s is None:
+                            s = 0
+                        if st is None or st == 0:
+                            st = 1
+
+                        # Handle negative indices
+                        if s < 0:
+                            s += dim
+                        if e < 0:
+                            e += dim
+
+                        s = max(0, min(s, dim))
+                        e = max(0, min(e, dim))
+
+                        length = 0
+                        if st > 0:
+                            if s < e:
+                                length = math.ceil((e - s) / st)
+                        else:
+                            if s > e:
+                                length = math.ceil((s - e) / abs(st))
+
+                        new_shape.append(int(length))
+                    node.shape = tuple(new_shape)
+
+            # OpType.SUM / MAX
+            elif node.op_type in (OpType.SUM, OpType.MAX):
+                if len(node.parents) > 0 and node.parents[0].shape is not None:
+                    data_shape = list(node.parents[0].shape)
+                    ndim = len(data_shape)
+                    
+                    axis = None
+                    if node.attrs and "axis" in node.attrs:
+                        axis = node.attrs["axis"]
+                    elif len(node.parents) > 1:
+                        axis_val = get_val(node.parents[1])
+                        if axis_val is not None:
+                             axis = int(axis_val.item()) if hasattr(axis_val, "item") else int(axis_val)
+                    
+                    keepdims = True
+                    if node.op_type == OpType.SUM:
+                        keepdims = node.attrs.get("keepdims", True)
+                    elif node.op_type == OpType.MAX:
+                        keepdims = True
+                        
+                    if axis is None:
+                        if keepdims:
+                            node.shape = tuple(1 for _ in range(ndim))
+                        else:
+                            node.shape = ()
+                    else:
+                        if hasattr(axis, "__iter__") and not isinstance(axis, (str, bytes)):
+                            axes = list(axis)
+                        else:
+                            axes = [axis]
+                        axes = [a + ndim if a < 0 else a for a in axes]
+                        
+                        new_shape = []
+                        for i, d in enumerate(data_shape):
+                            if i in axes:
+                                if keepdims:
+                                    new_shape.append(1)
+                            else:
+                                new_shape.append(d)
+                        node.shape = tuple(new_shape)
+
             # Unary Propagators (Generic)
             elif node.op_type in (
                 OpType.CAST,

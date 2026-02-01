@@ -39,12 +39,12 @@ def rms_norm_decomposition(inputs, attrs=None):
 register_reference_factory("RMSNorm", rms_norm_decomposition)
 
 
-def rms_norm_ref(inputs, name="rmsnorm", attrs=None):
+def rms_norm_ref(inputs, attrs=None):
     return TensorNode(
         "RMSNorm",
         inputs[0].shape,
         inputs[0].dtype,
         inputs,
-        name,
+        "rmsnorm",
         attrs=attrs if attrs is not None else {},
     )

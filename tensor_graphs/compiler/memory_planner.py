@@ -2,6 +2,7 @@ from typing import List, Dict, Tuple, Optional
 from ..ir.node import TensorNode
 from ..ir.buffer import BufferAllocation, StorageType
 from ..ir.dtypes import DType
+from ..ops.atomic_types import OpType
 import math
 
 
@@ -44,15 +45,9 @@ class MemoryPlanner:
         self, nodes: List[TensorNode], liveness: Dict[TensorNode, List[int]]
     ) -> Dict[TensorNode, BufferAllocation]:
         allocations = {}
-
-        # 1. Separate Persistent vs Transient
-        # Persistent: Weights, Constants, State (KV Cache)
-        # Transient: Activations (Intermediates)
-
-        # Track offsets per device
         persistent_offsets: Dict[str, int] = {}
 
-        # Allocate Persistent first (simple packing)
+        # 1. Separate Persistent vs Transient
         for node in nodes:
             if node.storage_type in (StorageType.PERSISTENT, StorageType.STATE):
                 device = node.backend.value if node.backend else "cpu"

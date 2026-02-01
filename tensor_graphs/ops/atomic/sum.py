@@ -26,15 +26,5 @@ def sum_ref(
     else:
         raise ValueError("Sum requires 1 or 2 inputs")
 
-    # Global sum (axis=None) or per-axis sum both produce (1,) when keepdims=True
-    out_shape = (1,)
-
-    return TensorNode(
-        OpType.SUM,
-        out_shape,
-        x.dtype,
-        parents,
-        f"sum_{x.name}",
-        attrs=attrs,
-        backend=x.backend,
-    )
+    out_shape = (None,)
+    return TensorNode(OpType.SUM, out_shape, x.dtype, parents, f"sum_{x.name}", attrs=attrs, backend=x.backend)

@@ -25,14 +25,5 @@ def max_ref(
     else:
         raise ValueError("Max requires 1 or 2 inputs")
 
-    out_shape = x.shape if not ("axis" in attrs and attrs["axis"] is not None) else (1,)
-
-    return TensorNode(
-        OpType.MAX,
-        out_shape,
-        x.dtype,
-        parents,
-        f"max_{x.name}",
-        attrs=attrs,
-        backend=x.backend,
-    )
+    out_shape = (None,)
+    return TensorNode(OpType.MAX, out_shape, x.dtype, parents, f"max_{x.name}", attrs=attrs, backend=x.backend)

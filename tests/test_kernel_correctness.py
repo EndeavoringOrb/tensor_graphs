@@ -10,6 +10,7 @@ from tensor_graphs.backend.registry import KernelRegistry
 from tensor_graphs.backend.executor import evaluate_graph
 from tensor_graphs.ops.registry import get_reference_factory
 from tensor_graphs.benchmark.data_gen import DataGenerator
+from tensor_graphs.compiler.shape_inference import ShapeInference
 
 # Ensure all kernels are loaded
 import tensor_graphs.backend.kernels
@@ -81,123 +82,116 @@ def test_kernel_correctness(
 
     # 5. Execute Candidate Kernel
     actual_output = None
-    try:
-        # Create pre-allocated output buffer (empty, same shape as first input for unary, or infer from op)
-        first_input = prepared_inputs[0]
-        if isinstance(first_input, torch.Tensor):
-            output_shape = first_input.shape
-            output_dtype = torch.float32
+
+    # --- Architecture-based Output Shape/Type Determination ---
+    input_nodes_for_shape = []
+    known_values = {}
+
+    def _map_to_dtype(obj):
+        if isinstance(obj, torch.Tensor):
+            dt = obj.dtype
+            if dt == torch.float32:
+                return DType.FP32
+            if dt == torch.float16:
+                return DType.FP16
+            if dt == torch.int32:
+                return DType.INT32
+            if dt == torch.bool:
+                return DType.BOOL
+            return DType.FP32
         else:
-            output_shape = first_input.shape
+            dt = obj.dtype
+            # handle numpy types
+            if dt == np.float32:
+                return DType.FP32
+            if dt == np.float16:
+                return DType.FP16
+            if dt == np.int32:
+                return DType.INT32
+            if dt == bool or dt == np.bool_:
+                return DType.BOOL
+            return DType.FP32
+
+    for i, val in enumerate(prepared_inputs):
+        node = TensorNode(
+            OpType.INPUT, tuple(val.shape), _map_to_dtype(val), [], name=f"in_{i}"
+        )
+        input_nodes_for_shape.append(node)
+        known_values[f"in_{i}"] = val
+
+    shape_node = None
+    if ref_factory:
+        try:
+            shape_node = ref_factory(input_nodes_for_shape, attrs)
+        except Exception:
+            pass
+
+    if shape_node is None:
+        # Fallback generic node
+        shape_node = TensorNode(
+            op_type,
+            (None,),
+            input_nodes_for_shape[0].dtype if input_nodes_for_shape else DType.FP32,
+            input_nodes_for_shape,
+            "temp_out",
+            attrs=attrs,
+        )
+
+    # Run Shape Inference
+    try:
+        ShapeInference.infer(input_nodes_for_shape + [shape_node], known_values)
+    except Exception as e:
+        print(f"Warning: Shape inference failed for {op_type}: {e}")
+
+    output_shape = shape_node.shape
+    # If output_shape has None, fallback to first input shape as a heuristic
+    if output_shape is None or any(d is None for d in output_shape):
+        if prepared_inputs:
+            output_shape = prepared_inputs[0].shape
+
+    # Determine Output DType
+    out_dt_enum = shape_node.dtype
+
+    first_input = prepared_inputs[0] if prepared_inputs else None
+    is_torch = isinstance(first_input, torch.Tensor)
+
+    if is_torch:
+        if out_dt_enum == DType.FP16:
+            output_dtype = torch.float16
+        elif out_dt_enum == DType.INT32:
+            output_dtype = torch.int32
+        elif out_dt_enum == DType.BOOL:
+            output_dtype = torch.bool
+        else:
+            output_dtype = torch.float32
+    else:
+        if out_dt_enum == DType.FP16:
+            output_dtype = np.float16
+        elif out_dt_enum == DType.INT32:
+            output_dtype = np.int32
+        elif out_dt_enum == DType.BOOL:
+            output_dtype = bool
+        else:
             output_dtype = np.float32
 
-        # Handle special cases for output shape
-        if op_type == OpType.ADD:
-            if len(prepared_inputs) >= 2:
-                output_shape = np.broadcast_shapes(
-                    prepared_inputs[0].shape, prepared_inputs[1].shape
-                )
-        elif op_type == OpType.MUL:
-            if len(prepared_inputs) >= 2:
-                output_shape = np.broadcast_shapes(
-                    prepared_inputs[0].shape, prepared_inputs[1].shape
-                )
-        elif op_type == OpType.DIVIDE:
-            if len(prepared_inputs) >= 2:
-                output_shape = np.broadcast_shapes(
-                    prepared_inputs[0].shape, prepared_inputs[1].shape
-                )
-        elif op_type == OpType.POWER:
-            if len(prepared_inputs) >= 2:
-                output_shape = np.broadcast_shapes(
-                    prepared_inputs[0].shape, prepared_inputs[1].shape
-                )
-        elif op_type == OpType.DOT:
-            # Output is matrix product result
-            pass  # Keep first input shape as starting point
-        elif op_type == OpType.CONCAT:
-            # Concatenation - need to compute from attrs
-            axis = attrs.get("axis", 0) if attrs else 0
-            concat_dim = sum(arr.shape[axis] for arr in prepared_inputs)
-            new_shape = list(prepared_inputs[0].shape)
-            new_shape[axis] = concat_dim
-            output_shape = tuple(new_shape)
-        elif op_type == OpType.RESHAPE:
-            if attrs and "shape" in attrs:
-                output_shape = tuple(attrs["shape"])
-        elif op_type == OpType.PERMUTE:
-            if attrs and "dims" in attrs:
-                output_shape = tuple(first_input.shape[ax] for ax in attrs["dims"])
-        elif op_type == OpType.SLICE:
-            # Slice output shape depends on starts/ends
-            pass  # Keep original shape
-        elif op_type in (OpType.MAX, OpType.SUM):
-            if attrs and "axis" in attrs:
-                axis = attrs["axis"]
-                keepdims = attrs.get("keepdims", False)
-                shape_list = list(first_input.shape)
-                if keepdims:
-                    shape_list[axis] = 1
-                elif isinstance(axis, int):
-                    del shape_list[axis]
-                output_shape = tuple(shape_list)
-        elif op_type == OpType.REPEAT:
-            if attrs and "repeats" in attrs:
-                repeats = attrs["repeats"]
-                if isinstance(repeats, (int, np.integer)):
-                    output_shape = tuple(s * repeats for s in first_input.shape)
-                else:
-                    output_shape = tuple(
-                        s * r for s, r in zip(first_input.shape, repeats)
-                    )
-        elif op_type == OpType.ARANGE:
-            start = int(prepared_inputs[0][0]) if len(prepared_inputs) >= 1 else 0
-            stop = int(prepared_inputs[1][0]) if len(prepared_inputs) >= 2 else 10
-            step = int(prepared_inputs[2][0]) if len(prepared_inputs) >= 3 else 1
-            n = max(0, (stop - start + step - 1) // step)
-            output_shape = (n,)
-        elif op_type == OpType.FILL:
-            if len(prepared_inputs) >= 2:
-                output_shape = tuple(int(x) for x in prepared_inputs[1])
-        elif op_type == OpType.GATHER:
-            # Output shape from indices
-            pass  # Keep original
-        elif op_type == OpType.WHERE:
-            pass  # Keep first input shape
-        elif op_type == OpType.COPY_TO:
-            output_shape = first_input.shape
-        elif op_type == OpType.CAST:
-            if target_dtype == DType.FP16:
-                output_dtype = np.float16
-            elif target_dtype == DType.FP32:
-                output_dtype = np.float32
-            elif target_dtype == DType.INT32:
-                output_dtype = np.int32
-            elif target_dtype == DType.BOOL:
-                output_dtype = np.bool_
-        elif op_type == OpType.TRIU:
-            output_shape = first_input.shape
+    # Allocate output buffer
+    if is_torch:
+        output = torch.empty(
+            output_shape,
+            dtype=output_dtype,
+            device="cuda" if first_input.is_cuda else "cpu",
+        )
+    else:
+        output = np.empty(output_shape, dtype=output_dtype)
 
-        # Allocate output buffer
-        if isinstance(first_input, torch.Tensor):
-            output = torch.empty(
-                output_shape,
-                dtype=output_dtype,
-                device="cuda" if first_input.is_cuda else "cpu",
-            )
-        else:
-            output = np.empty(output_shape, dtype=output_dtype)
+    # Call kernel with new signature: (inputs, outputs, attrs)
+    kernel_func(prepared_inputs, [output], attrs)
 
-        # Call kernel with new signature: (inputs, outputs, attrs)
-        kernel_func(prepared_inputs, [output], attrs)
-
-        # Output is now in 'output'
-        if isinstance(output, torch.Tensor):
-            actual_output = output.detach().cpu().numpy()
-        else:
-            actual_output = output
-    except Exception as e:
-        pytest.fail(f"Kernel Execution Failed ({backend.value}): {e}")
+    # Output is now in 'output'
+    if isinstance(output, torch.Tensor):
+        actual_output = output.detach().cpu().numpy()
+    else:
+        actual_output = output
 
     # 6. Execute Reference (Golden Truth) on CPU NumPy
     input_nodes = []
@@ -217,7 +211,7 @@ def test_kernel_correctness(
             dt = DType.FP32
         elif data_np.dtype == np.int32:
             dt = DType.INT32
-        elif data_np.dtype == bool:
+        elif data_np.dtype == bool or data_np.dtype == np.bool_:
             dt = DType.BOOL
 
         node = TensorNode(
@@ -226,27 +220,24 @@ def test_kernel_correctness(
         input_nodes.append(node)
         feed_dict[name] = data_np
 
-    try:
-        if ref_factory:
-            graph_root = ref_factory(input_nodes, attrs)
-        else:
-            graph_root = TensorNode(
-                op_type,
-                input_nodes[0].shape,
-                DType.FP32,
-                input_nodes,
-                "ref_atomic",
-                attrs=attrs,
-            )
-        should_debug = DEBUG_EXECUTION and op_type == "GELU"
-        raw_expected = evaluate_graph(graph_root, feed_dict, debug=should_debug)
-        # Ensure reference output is moved to CPU/NumPy
-        if isinstance(raw_expected, torch.Tensor):
-            expected_output = raw_expected.detach().cpu().numpy()
-        else:
-            expected_output = raw_expected
-    except Exception as e:
-        pytest.fail(f"Reference Graph Evaluation Failed: {e}")
+    if ref_factory:
+        graph_root = ref_factory(input_nodes, attrs)
+    else:
+        graph_root = TensorNode(
+            op_type,
+            input_nodes[0].shape,
+            DType.FP32,
+            input_nodes,
+            "ref_atomic",
+            attrs=attrs,
+        )
+    should_debug = DEBUG_EXECUTION and op_type == "GELU"
+    raw_expected = evaluate_graph(graph_root, feed_dict, debug=should_debug)
+    # Ensure reference output is moved to CPU/NumPy
+    if isinstance(raw_expected, torch.Tensor):
+        expected_output = raw_expected.detach().cpu().numpy()
+    else:
+        expected_output = raw_expected
 
     # 7. Comparison
     actual_arr = np.asarray(actual_output)
@@ -262,3 +253,8 @@ def test_kernel_correctness(
         atol=atol,
         err_msg=f"Kernel {kernel_name} output mismatch",
     )
+
+
+for item in get_all_test_kernels():
+    if item[0] == "Max":
+        test_kernel_correctness(*item)

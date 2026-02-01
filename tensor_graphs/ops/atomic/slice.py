@@ -34,9 +34,11 @@ def slice_ref(
     # We leave exact calculation to ShapeInference or assume caller provided generic shape
     # For now, we preserve rank.
 
+    # TODO: maybe set output shape properly here instead of leaving it to shape inference
+
     return TensorNode(
         OpType.SLICE,
-        tuple(out_shape),  # Placeholder, effectively
+        tuple(None for _ in range(len(data.shape))),
         data.dtype,
         inputs,
         f"slice_{data.name}",
