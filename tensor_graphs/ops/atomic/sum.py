@@ -27,4 +27,12 @@ def sum_ref(
         raise ValueError("Sum requires 1 or 2 inputs")
 
     out_shape = (None,)
-    return TensorNode(OpType.SUM, out_shape, x.dtype, parents, f"sum_{x.name}", attrs=attrs, backend=x.backend)
+    return TensorNode(
+        OpType.SUM,
+        out_shape,
+        x.dtype,
+        parents,
+        f"sum_{x.name}",
+        attrs=attrs,
+        backend=x.backend,
+    )

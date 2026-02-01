@@ -8,9 +8,9 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 def test_mul_vec32():
     # Should use optimized kernel
-    a = TensorNode(OpType.INPUT, (32,), DType.FP32, [], "a")
-    b = TensorNode(OpType.INPUT, (32,), DType.FP32, [], "b")
-    node = TensorNode(OpType.MUL, (32,), DType.FP32, [a, b], "mul")
+    a = TensorNode(OpType.INPUT, DType.FP32, [], (32,), "a")
+    b = TensorNode(OpType.INPUT, DType.FP32, [], (32,), "b")
+    node = TensorNode(OpType.MUL, DType.FP32, [a, b], (32,), "mul")
 
     res = evaluate_graph(
         node,

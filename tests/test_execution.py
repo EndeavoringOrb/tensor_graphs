@@ -12,17 +12,17 @@ from tensor_graphs.backend.executor import Executor
 def test_static_execution_basic():
     # Build a simple graph: (a * b) + c
     a = TensorNode(
-        OpType.INPUT, (2, 2), DType.FP32, [], "a", storage_type=StorageType.TRANSIENT
+        OpType.INPUT, DType.FP32, [], (2, 2), "a", storage_type=StorageType.TRANSIENT
     )
     b = TensorNode(
-        OpType.INPUT, (2, 2), DType.FP32, [], "b", storage_type=StorageType.TRANSIENT
+        OpType.INPUT, DType.FP32, [], (2, 2), "b", storage_type=StorageType.TRANSIENT
     )
     c = TensorNode(
-        OpType.INPUT, (2, 2), DType.FP32, [], "c", storage_type=StorageType.TRANSIENT
+        OpType.INPUT, DType.FP32, [], (2, 2), "c", storage_type=StorageType.TRANSIENT
     )
 
-    mul = TensorNode(OpType.MUL, (2, 2), DType.FP32, [a, b], "mul")
-    add = TensorNode(OpType.ADD, (2, 2), DType.FP32, [mul, c], "add")
+    mul = TensorNode(OpType.MUL, DType.FP32, [a, b], (2, 2), "mul")
+    add = TensorNode(OpType.ADD, DType.FP32, [mul, c], (2, 2), "add")
 
     planner = Planner()
     recipe = planner.plan(add)
@@ -48,17 +48,17 @@ def test_static_execution_basic():
 def test_static_execution_persistent():
     # Build a graph with persistent weights: (x * weight) + bias
     x = TensorNode(
-        OpType.INPUT, (1, 4), DType.FP32, [], "x", storage_type=StorageType.TRANSIENT
+        OpType.INPUT, DType.FP32, [], (1, 4), "x", storage_type=StorageType.TRANSIENT
     )
     w = TensorNode(
-        OpType.INPUT, (1, 4), DType.FP32, [], "w", storage_type=StorageType.PERSISTENT
+        OpType.INPUT, DType.FP32, [], (1, 4), "w", storage_type=StorageType.PERSISTENT
     )
     b = TensorNode(
-        OpType.INPUT, (1, 4), DType.FP32, [], "b", storage_type=StorageType.PERSISTENT
+        OpType.INPUT, DType.FP32, [], (1, 4), "b", storage_type=StorageType.PERSISTENT
     )
 
-    mul = TensorNode(OpType.MUL, (1, 4), DType.FP32, [x, w], "mul")
-    add = TensorNode(OpType.ADD, (1, 4), DType.FP32, [mul, b], "add")
+    mul = TensorNode(OpType.MUL, DType.FP32, [x, w], (1, 4), "mul")
+    add = TensorNode(OpType.ADD, DType.FP32, [mul, b], (1, 4), "add")
 
     planner = Planner()
     recipe = planner.plan(add)

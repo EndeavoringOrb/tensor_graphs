@@ -7,11 +7,11 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 
 def test_concat_vectors():
-    a = TensorNode(OpType.INPUT, (3,), DType.FP32, [], "a")
-    b = TensorNode(OpType.INPUT, (2,), DType.FP32, [], "b")
+    a = TensorNode(OpType.INPUT, DType.FP32, [], (3,), "a")
+    b = TensorNode(OpType.INPUT, DType.FP32, [], (2,), "b")
     # Axis is now an attribute
     concat_node = TensorNode(
-        OpType.CONCAT, (5,), DType.FP32, [a, b], "concat", attrs={"axis": 0}
+        OpType.CONCAT, DType.FP32, [a, b], (5,), "concat", attrs={"axis": 0}
     )
 
     val_a = np.array([1, 2, 3], dtype=np.float32)
@@ -25,11 +25,11 @@ def test_concat_vectors():
 def test_concat_matrices_axis_0():
     """Test concatenating two matrices along axis 0 (rows)."""
     # (2, 3) + (1, 3) -> (3, 3)
-    a = TensorNode(OpType.INPUT, (2, 3), DType.FP32, [], "a")
-    b = TensorNode(OpType.INPUT, (1, 3), DType.FP32, [], "b")
+    a = TensorNode(OpType.INPUT, DType.FP32, [], (2, 3), "a")
+    b = TensorNode(OpType.INPUT, DType.FP32, [], (1, 3), "b")
 
     concat_node = TensorNode(
-        OpType.CONCAT, (3, 3), DType.FP32, [a, b], "concat", attrs={"axis": 0}
+        OpType.CONCAT, DType.FP32, [a, b], (3, 3), "concat", attrs={"axis": 0}
     )
 
     val_a = np.zeros((2, 3), dtype=np.float32)
@@ -46,11 +46,11 @@ def test_concat_matrices_axis_0():
 def test_concat_matrices_axis_1():
     """Test concatenating two matrices along axis 1 (columns)."""
     # (2, 2) + (2, 1) -> (2, 3)
-    a = TensorNode(OpType.INPUT, (2, 2), DType.FP32, [], "a")
-    b = TensorNode(OpType.INPUT, (2, 1), DType.FP32, [], "b")
+    a = TensorNode(OpType.INPUT, DType.FP32, [], (2, 2), "a")
+    b = TensorNode(OpType.INPUT, DType.FP32, [], (2, 1), "b")
 
     concat_node = TensorNode(
-        OpType.CONCAT, (2, 3), DType.FP32, [a, b], "concat", attrs={"axis": 1}
+        OpType.CONCAT, DType.FP32, [a, b], (2, 3), "concat", attrs={"axis": 1}
     )
 
     val_a = np.full((2, 2), 1.0, dtype=np.float32)

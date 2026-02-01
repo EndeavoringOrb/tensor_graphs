@@ -8,9 +8,9 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 def test_dot_2x2():
     # Should use 2x2 optimized kernel
-    a = TensorNode(OpType.INPUT, (2, 2), DType.FP32, [], "a")
-    b = TensorNode(OpType.INPUT, (2, 2), DType.FP32, [], "b")
-    node = TensorNode(OpType.DOT, (2, 2), DType.FP32, [a, b], "dot")
+    a = TensorNode(OpType.INPUT, DType.FP32, [], (2, 2), "a")
+    b = TensorNode(OpType.INPUT, DType.FP32, [], (2, 2), "b")
+    node = TensorNode(OpType.DOT, DType.FP32, [a, b], (2, 2), "dot")
 
     mat = np.eye(2, dtype=np.float32)
     res = evaluate_graph(node, {"a": mat, "b": mat})

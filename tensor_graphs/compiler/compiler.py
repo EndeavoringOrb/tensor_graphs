@@ -47,9 +47,18 @@ class Compiler:
 
         # Helper to get metadata
         def get_metadata(node: TensorNode) -> TensorMetadata:
-            return TensorMetadata(
-                shape=tuple(s for s in node.shape if s is not None), dtype=node.dtype
-            )
+            if node.shape is None:
+                raise ValueError(
+                    f"Node {node.name} has undefined shape during compilation."
+                )
+
+            if any(s is None for s in node.shape):
+                raise ValueError(
+                    f"Node {node.name} has dynamic shape {node.shape} during compilation."
+                )
+
+            shape_tuple = tuple(s for s in node.shape if s is not None)
+            return TensorMetadata(shape=shape_tuple, dtype=node.dtype)
 
         # Calculate total memory needed
         max_offset = 0

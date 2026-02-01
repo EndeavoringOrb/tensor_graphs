@@ -1,6 +1,6 @@
+from typing import List, Dict, Any, Tuple, Optional, cast
 import math
 import numpy as np
-from typing import List, Dict, Any, Tuple, Optional, cast
 from ..ir.node import TensorNode
 from ..ops.atomic_types import OpType
 
@@ -47,18 +47,14 @@ class ShapeInference:
 
             # OpType.FILL
             elif node.op_type == OpType.FILL:
-                # Fill operation has two inputs: value tensor and shape tensor.
-                # The shape tensor may be a constant (provided via known values).
                 if len(node.parents) >= 2:
                     shape_val = get_val(node.parents[1])
                     if shape_val is not None:
-                        # Accept both torch tensors and numpy arrays
                         if hasattr(shape_val, "cpu"):
                             shape_arr = shape_val.cpu().numpy()
                         else:
                             shape_arr = np.asarray(shape_val)
 
-                        # Cast to int, flatten, and build a tuple
                         shape_tuple = tuple(
                             int(x) for x in shape_arr.astype(int).flatten()
                         )
@@ -66,14 +62,23 @@ class ShapeInference:
 
             # OpType.REPEAT
             elif node.op_type == OpType.REPEAT:
-                data = node.parents[0] if node.parents else None
-                if data and data.shape and node.attrs and "repeats" in node.attrs:
-                    repeats = int(node.attrs["repeats"])
-                    # Assuming 1D / Flattened repeat for simple shape logic unless axis is handled
-                    # (Codebase implementation was rudimentary, keeping it simple here)
-                    input_shape = data.shape
-                    if input_shape and input_shape[0] is not None:
-                        node.shape = (input_shape[0] * repeats,)
+                if node.parents and node.parents[0].shape:
+                    data_shape = list(node.parents[0].shape)
+                    repeats = int(node.attrs.get("repeats", 1))
+                    axis = int(node.attrs.get("axis", 0))
+
+                    ndim = len(data_shape)
+                    # Handle negative axis
+                    if axis < 0:
+                        axis += ndim
+
+                    if 0 <= axis < ndim:
+                        if data_shape[axis] is not None:
+                            data_shape[axis] *= repeats
+                        node.shape = tuple(data_shape)
+                    else:
+                        # Fallback or invalid axis; preserve shape to avoid crash
+                        node.shape = tuple(data_shape)
 
             # OpType.CONCAT
             elif node.op_type == OpType.CONCAT:
@@ -88,10 +93,25 @@ class ShapeInference:
                         if axis < 0:
                             axis += ndim
 
+                        # Try to get dynamic axis from 3rd input if present
+                        if len(node.parents) >= 3:
+                            axis_val = get_val(node.parents[2])
+                            if axis_val is not None:
+                                axis = (
+                                    int(axis_val.item())
+                                    if hasattr(axis_val, "item")
+                                    else int(axis_val)
+                                )
+
+                        # Fallback to static dim logic if simple concat
                         total_dim = 0
                         valid = True
                         for p in node.parents:
-                            if p.shape is None or p.shape[axis] is None:
+                            if (
+                                p.shape is None
+                                or len(p.shape) <= axis
+                                or p.shape[axis] is None
+                            ):
                                 valid = False
                                 break
                             total_dim += p.shape[axis]
@@ -106,9 +126,7 @@ class ShapeInference:
                 shape_tensor_val = get_val(node.parents[1])
 
                 if shape_tensor_val is not None:
-                    # Handle both torch tensors and numpy arrays
                     if hasattr(shape_tensor_val, "cpu"):
-                        # Type cast to handle torch tensor
                         shape_arr = cast(np.ndarray, shape_tensor_val.cpu().numpy())
                     else:
                         shape_arr = np.asarray(shape_tensor_val)
@@ -183,33 +201,41 @@ class ShapeInference:
                 if len(node.parents) > 0 and node.parents[0].shape is not None:
                     data_shape = list(node.parents[0].shape)
                     ndim = len(data_shape)
-                    
+
                     axis = None
                     if node.attrs and "axis" in node.attrs:
                         axis = node.attrs["axis"]
                     elif len(node.parents) > 1:
                         axis_val = get_val(node.parents[1])
                         if axis_val is not None:
-                             axis = int(axis_val.item()) if hasattr(axis_val, "item") else int(axis_val)
-                    
+                            axis = (
+                                int(axis_val.item())
+                                if hasattr(axis_val, "item")
+                                else int(axis_val)
+                            )
+
                     keepdims = True
                     if node.op_type == OpType.SUM:
                         keepdims = node.attrs.get("keepdims", True)
                     elif node.op_type == OpType.MAX:
-                        keepdims = True
-                        
+                        # Max kernel implementation implies keepdims=True usually (based on tests)
+                        # but let's check attributes
+                        keepdims = node.attrs.get("keepdims", True)
+
                     if axis is None:
                         if keepdims:
                             node.shape = tuple(1 for _ in range(ndim))
                         else:
-                            node.shape = ()
+                            node.shape = (1,)
                     else:
-                        if hasattr(axis, "__iter__") and not isinstance(axis, (str, bytes)):
+                        if hasattr(axis, "__iter__") and not isinstance(
+                            axis, (str, bytes)
+                        ):
                             axes = list(axis)
                         else:
                             axes = [axis]
                         axes = [a + ndim if a < 0 else a for a in axes]
-                        
+
                         new_shape = []
                         for i, d in enumerate(data_shape):
                             if i in axes:
@@ -220,6 +246,7 @@ class ShapeInference:
                         node.shape = tuple(new_shape)
 
             # Unary Propagators (Generic)
+            # Removed "RoPE" from here as it supports broadcasting
             elif node.op_type in (
                 OpType.CAST,
                 OpType.COPY_TO,
@@ -231,12 +258,12 @@ class ShapeInference:
                 "GELU",
                 "Softmax",
                 "RMSNorm",
-                "RoPE",
             ):
                 if node.parents and node.parents[0].shape:
                     node.shape = node.parents[0].shape
 
             # Broadcasting Ops
+            # Added "RoPE" here
             elif node.op_type in (
                 OpType.ADD,
                 OpType.MUL,
@@ -244,12 +271,12 @@ class ShapeInference:
                 OpType.POWER,
                 OpType.WHERE,
                 "FusedMulAdd",
+                "RoPE",
             ):
                 parents_to_check = node.parents
                 shapes = [p.shape for p in parents_to_check if p.shape is not None]
                 if len(shapes) == len(parents_to_check) and len(shapes) > 0:
                     if hasattr(np, "broadcast_shapes"):
-                        # Clean shapes: replace None dimensions with 1 for broadcasting inference
                         clean_shapes = []
                         for sh in shapes:
                             if sh is not None:
@@ -259,50 +286,10 @@ class ShapeInference:
                                 clean_shapes.append(clean_sh)
 
                         if clean_shapes:
-                            node.shape = cast(
-                                Tuple[int, ...], np.broadcast_shapes(*clean_shapes)
-                            )
-
-            # OpType.CONCAT
-            elif node.op_type == OpType.CONCAT:
-                # Concatenate A and B along specified axis
-                if len(node.parents) >= 2:
-                    a, b = node.parents[0], node.parents[1]
-
-                    axis = 0
-
-                    # 1. Try to get axis from 3rd input (Runtime Value)
-                    axis_val = None
-                    if len(node.parents) >= 3:
-                        axis_val = get_val(node.parents[2])
-
-                    if axis_val is not None:
-                        axis = (
-                            int(axis_val.item())
-                            if hasattr(axis_val, "item")
-                            else int(axis_val)
-                        )
-                    # 2. Try to get axis from attributes (Static Value)
-                    elif node.attrs and "axis" in node.attrs:
-                        val = node.attrs["axis"]
-                        if isinstance(val, list) and len(val) > 0:
-                            axis = val[0]
-                        else:
-                            axis = val
-
-                    if a.shape is not None and b.shape is not None:
-                        if len(a.shape) == len(b.shape):
-                            out_shape = list(a.shape)
-
-                            ndim = len(a.shape)
-                            if axis < 0:
-                                axis += ndim
-
-                            if 0 <= axis < ndim:
-                                da = a.shape[axis]
-                                db = b.shape[axis]
-                                if da is not None and db is not None:
-                                    out_shape[axis] = da + db
-                                else:
-                                    out_shape[axis] = None
-                                node.shape = tuple(out_shape)
+                            try:
+                                node.shape = cast(
+                                    Tuple[int, ...], np.broadcast_shapes(*clean_shapes)
+                                )
+                            except ValueError:
+                                # Broadcasting failed, cannot infer shape
+                                pass

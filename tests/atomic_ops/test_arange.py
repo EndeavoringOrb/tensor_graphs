@@ -7,12 +7,12 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 
 def test_arange_basic():
-    start = TensorNode(OpType.INPUT, (1,), DType.INT32, [], "start")
-    stop = TensorNode(OpType.INPUT, (1,), DType.INT32, [], "stop")
-    step = TensorNode(OpType.INPUT, (1,), DType.INT32, [], "step")
+    start = TensorNode(OpType.INPUT, DType.INT32, [], (1,), "start")
+    stop = TensorNode(OpType.INPUT, DType.INT32, [], (1,), "stop")
+    step = TensorNode(OpType.INPUT, DType.INT32, [], (1,), "step")
 
     arange_node = TensorNode(
-        OpType.ARANGE, (None,), DType.INT32, [start, stop, step], "arange"
+        OpType.ARANGE, DType.INT32, [start, stop, step], (None,), "arange"
     )
 
     inputs = {

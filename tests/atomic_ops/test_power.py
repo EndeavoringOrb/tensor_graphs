@@ -7,9 +7,9 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 
 def test_power_basic():
-    base = TensorNode(OpType.INPUT, (3,), DType.FP32, [], "base")
-    exp = TensorNode(OpType.INPUT, (3,), DType.FP32, [], "exp")
-    pow_node = TensorNode(OpType.POWER, (3,), DType.FP32, [base, exp], "pow")
+    base = TensorNode(OpType.INPUT, DType.FP32, [], (3,), "base")
+    exp = TensorNode(OpType.INPUT, DType.FP32, [], (3,), "exp")
+    pow_node = TensorNode(OpType.POWER, DType.FP32, [base, exp], (3,), "pow")
 
     inputs = {
         "base": np.array([2.0, 3.0, 4.0], dtype=np.float32),

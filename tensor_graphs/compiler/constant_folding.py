@@ -77,10 +77,9 @@ class ConstantFolding:
                 # Create a new Constant node
                 new_node = TensorNode(
                     OpType.CONSTANT,
-                    node.shape,  # Keep shape for compatibility
                     node.dtype,
                     [],  # No parents
-                    f"folded_{node.name}",
+                    name=f"folded_{node.name}",
                     attrs={"value": result},
                     backend=node.backend,
                 )

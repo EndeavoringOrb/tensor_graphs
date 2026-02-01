@@ -8,14 +8,14 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 def test_fill_fp32():
     # Value input: Scalar 5.0
-    val_node = TensorNode(OpType.INPUT, (1,), DType.FP32, [], "val")
+    val_node = TensorNode(OpType.INPUT, DType.FP32, [], (1,), "val")
 
     # Shape input: Tensor containing [2, 3] -> Shape is (2,)
-    shape_node = TensorNode(OpType.INPUT, (2,), DType.INT32, [], "shape_tensor")
+    shape_node = TensorNode(OpType.INPUT, DType.INT32, [], (2,), "shape_tensor")
 
     # Fill node: Output shape is (2, 3)
     fill_node = TensorNode(
-        OpType.FILL, (2, 3), DType.FP32, [val_node, shape_node], "fill"
+        OpType.FILL, DType.FP32, [val_node, shape_node], (2, 3), "fill"
     )
 
     val_input = np.array([5.0], dtype=np.float32)
@@ -29,14 +29,14 @@ def test_fill_fp32():
 
 def test_fill_int32():
     # Value input: Scalar 7
-    val_node = TensorNode(OpType.INPUT, (1,), DType.INT32, [], "val")
+    val_node = TensorNode(OpType.INPUT, DType.INT32, [], (1,), "val")
 
     # Shape input: Tensor containing [4] -> Shape is (1,)
-    shape_node = TensorNode(OpType.INPUT, (1,), DType.INT32, [], "shape_tensor")
+    shape_node = TensorNode(OpType.INPUT, DType.INT32, [], (1,), "shape_tensor")
 
     # Fill node: Output shape is (4,)
     fill_node = TensorNode(
-        OpType.FILL, (4,), DType.INT32, [val_node, shape_node], "fill"
+        OpType.FILL, DType.INT32, [val_node, shape_node], (4,), "fill"
     )
 
     val_input = np.array([7], dtype=np.int32)

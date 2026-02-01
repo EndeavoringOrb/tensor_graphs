@@ -2,7 +2,6 @@ from typing import List, Dict, Tuple, Optional
 from ..ir.node import TensorNode
 from ..ir.buffer import BufferAllocation, StorageType
 from ..ir.dtypes import DType
-from ..ops.atomic_types import OpType
 import math
 
 
@@ -20,10 +19,11 @@ def get_dtype_size(dtype: DType) -> int:
     raise ValueError(f"Unknown dtype size: {dtype}")
 
 
-def calculate_size_bytes(shape: Tuple[Optional[int], ...], dtype: DType) -> int:
-    # If shape has None (dynamic), we can't statically allocate easily.
-    # For now, we assume static shapes or fail.
-    # The TODO plan implies "Static Memory", so likely static shapes.
+def calculate_size_bytes(
+    shape: Optional[Tuple[Optional[int], ...]], dtype: DType
+) -> int:
+    if shape is None:
+        raise ValueError("Cannot statically allocate buffer for undefined shape.")
 
     num_elements = 1
     for dim in shape:

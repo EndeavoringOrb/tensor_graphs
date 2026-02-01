@@ -7,9 +7,9 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 
 def test_cast_int_to_float():
-    x = TensorNode(OpType.INPUT, (3,), DType.INT32, [], "x")
+    x = TensorNode(OpType.INPUT, DType.INT32, [], (3,), "x")
     cast_node = TensorNode(
-        OpType.CAST, (3,), DType.FP32, [x], "cast", attrs={"to": DType.FP32}
+        OpType.CAST, DType.FP32, [x], (3,), "cast", attrs={"to": DType.FP32}
     )
 
     inputs = {"x": np.array([1, 2, 3], dtype=np.int32)}

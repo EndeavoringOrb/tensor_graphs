@@ -8,12 +8,12 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 def test_permute_matrix_transpose():
     """Test transposing a 2D matrix (2, 3) -> (3, 2)."""
-    data_node = TensorNode(OpType.INPUT, (2, 3), DType.FP32, [], "data")
+    data_node = TensorNode(OpType.INPUT, DType.FP32, [], (2, 3), "data")
     permute_node = TensorNode(
         OpType.PERMUTE,
-        (3, 2),
         DType.FP32,
         [data_node],
+        (3, 2),
         "permute",
         attrs={"dims": [1, 0]},
     )
@@ -31,14 +31,14 @@ def test_permute_matrix_transpose():
 def test_permute_3d_reorder():
     """Test reordering 3D dimensions (0, 1, 2) -> (2, 0, 1)."""
     # Input Shape: (2, 3, 4)
-    data_node = TensorNode(OpType.INPUT, (2, 3, 4), DType.FP32, [], "data")
+    data_node = TensorNode(OpType.INPUT, DType.FP32, [], (2, 3, 4), "data")
 
     # Output Shape: (4, 2, 3) based on perm (2, 0, 1)
     permute_node = TensorNode(
         OpType.PERMUTE,
-        (4, 2, 3),
         DType.FP32,
         [data_node],
+        (4, 2, 3),
         "permute",
         attrs={"dims": [2, 0, 1]},
     )

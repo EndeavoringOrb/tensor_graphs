@@ -7,12 +7,12 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 
 def test_copy_to_cpu_numpy():
-    x = TensorNode(OpType.INPUT, (2, 2), DType.FP32, [], "x")
+    x = TensorNode(OpType.INPUT, DType.FP32, [], (2, 2), "x")
     copy_node = TensorNode(
         OpType.COPY_TO,
-        (2, 2),
         DType.FP32,
         [x],
+        (2, 2),
         "copy",
         attrs={"target_backend": Backend.CPU_NUMPY.value},
     )

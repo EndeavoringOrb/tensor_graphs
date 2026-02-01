@@ -8,8 +8,8 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 def test_exp_basic():
     """Test element-wise exponential."""
-    a = TensorNode(OpType.INPUT, (4,), DType.FP32, [], "a")
-    exp_node = TensorNode(OpType.EXP, (4,), DType.FP32, [a], "exp")
+    a = TensorNode(OpType.INPUT, DType.FP32, [], (4,), "a")
+    exp_node = TensorNode(OpType.EXP, DType.FP32, [a], (4,), "exp")
 
     val_a = np.array([0.0, 1.0, -1.0, 2.0], dtype=np.float32)
 
@@ -21,8 +21,8 @@ def test_exp_basic():
 
 def test_exp_matrix():
     """Test exponential on a matrix."""
-    a = TensorNode(OpType.INPUT, (2, 2), DType.FP32, [], "a")
-    exp_node = TensorNode(OpType.EXP, (2, 2), DType.FP32, [a], "exp")
+    a = TensorNode(OpType.INPUT, DType.FP32, [], (2, 2), "a")
+    exp_node = TensorNode(OpType.EXP, DType.FP32, [a], (2, 2), "exp")
 
     val_a = np.array([[0.0, 1.0], [0.5, -0.5]], dtype=np.float32)
 

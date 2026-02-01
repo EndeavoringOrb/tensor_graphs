@@ -7,8 +7,8 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 
 def test_max_reduce_all():
-    x = TensorNode(OpType.INPUT, (2, 3), DType.FP32, [], "x")
-    max_node = TensorNode(OpType.MAX, (1, 1), DType.FP32, [x], "max")
+    x = TensorNode(OpType.INPUT, DType.FP32, [], (2, 3), "x")
+    max_node = TensorNode(OpType.MAX, DType.FP32, [x], (1, 1), "max")
 
     data = np.array([[1, 5, 2], [4, 6, 3]], dtype=np.float32)
     inputs = {"x": data}
@@ -19,8 +19,8 @@ def test_max_reduce_all():
 
 
 def test_max_axis():
-    x = TensorNode(OpType.INPUT, (2, 3), DType.FP32, [], "x")
-    max_node = TensorNode(OpType.MAX, (2, 1), DType.FP32, [x], "max", attrs={"axis": 1})
+    x = TensorNode(OpType.INPUT, DType.FP32, [], (2, 3), "x")
+    max_node = TensorNode(OpType.MAX, DType.FP32, [x], (2, 1), "max", attrs={"axis": 1})
 
     data = np.array([[1, 5, 2], [4, 6, 3]], dtype=np.float32)
     inputs = {"x": data}

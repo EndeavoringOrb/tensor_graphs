@@ -9,9 +9,9 @@ from ..ops.atomic_types import OpType
 @dataclass(eq=False)
 class TensorNode:
     op_type: str
-    shape: Tuple[Optional[int], ...]
     dtype: DType
     parents: List["TensorNode"]
+    shape: Optional[Tuple[Optional[int], ...]] = None
     name: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     attrs: Dict[str, Any] = field(default_factory=dict)
     backend: Backend = Backend.CPU_NUMPY
@@ -126,9 +126,9 @@ class TensorNode:
 
         return TensorNode(
             "Slice",
-            tuple(new_shape),
             self.dtype,
             [self],
+            tuple(new_shape),
             f"{self.name}_slice",
             attrs={"starts": starts, "ends": ends, "steps": steps},
             backend=self.backend,

@@ -7,9 +7,9 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 
 def test_repeat():
-    x = TensorNode(OpType.INPUT, (2,), DType.FP32, [], "x")
+    x = TensorNode(OpType.INPUT, DType.FP32, [], (2,), "x")
     rep_node = TensorNode(
-        OpType.REPEAT, (6,), DType.FP32, [x], "rep", attrs={"repeats": 3, "axis": 0}
+        OpType.REPEAT, DType.FP32, [x], (6,), "rep", attrs={"repeats": 3, "axis": 0}
     )
 
     data = np.array([10, 20], dtype=np.float32)

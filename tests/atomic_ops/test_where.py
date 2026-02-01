@@ -9,11 +9,11 @@ from tensor_graphs.backend.executor import evaluate_graph
 class TestWhereOp(unittest.TestCase):
     def test_where_fp32(self):
         # Condition, X, Y all FP32
-        cond = TensorNode(OpType.INPUT, (3,), DType.FP32, [], "cond")
-        x = TensorNode(OpType.INPUT, (3,), DType.FP32, [], "x")
-        y = TensorNode(OpType.INPUT, (3,), DType.FP32, [], "y")
+        cond = TensorNode(OpType.INPUT, DType.FP32, [], (3,), "cond")
+        x = TensorNode(OpType.INPUT, DType.FP32, [], (3,), "x")
+        y = TensorNode(OpType.INPUT, DType.FP32, [], (3,), "y")
 
-        where_node = TensorNode(OpType.WHERE, (3,), DType.FP32, [cond, x, y], "where")
+        where_node = TensorNode(OpType.WHERE, DType.FP32, [cond, x, y], (3,), "where")
 
         inputs = {
             "cond": np.array([1.0, 0.0, 1.0], dtype=np.float32),
@@ -28,11 +28,11 @@ class TestWhereOp(unittest.TestCase):
 
     def test_where_bool(self):
         # Condition is BOOL
-        cond = TensorNode(OpType.INPUT, (3,), DType.BOOL, [], "cond")
-        x = TensorNode(OpType.INPUT, (3,), DType.FP32, [], "x")
-        y = TensorNode(OpType.INPUT, (3,), DType.FP32, [], "y")
+        cond = TensorNode(OpType.INPUT, DType.BOOL, [], (3,), "cond")
+        x = TensorNode(OpType.INPUT, DType.FP32, [], (3,), "x")
+        y = TensorNode(OpType.INPUT, DType.FP32, [], (3,), "y")
 
-        where_node = TensorNode(OpType.WHERE, (3,), DType.FP32, [cond, x, y], "where")
+        where_node = TensorNode(OpType.WHERE, DType.FP32, [cond, x, y], (3,), "where")
 
         inputs = {
             "cond": np.array([True, False, True], dtype=bool),

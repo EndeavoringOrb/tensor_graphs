@@ -43,7 +43,7 @@ class GraphBuilder:
     def input(self, name, shape, dtype=DType.FP32):
         # Inputs are transient/fed in
         node = TensorNode(
-            OpType.INPUT, shape, dtype, [], name, storage_type=StorageType.TRANSIENT
+            OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.TRANSIENT
         )
         self.inputs[name] = node
         return node
@@ -55,9 +55,9 @@ class GraphBuilder:
 
         node = TensorNode(
             op_type=OpType.CONSTANT,
-            shape=shape,
             dtype=dtype,
             parents=[],
+            shape=shape,
             name=name,
             attrs={"value": value},
             storage_type=StorageType.PERSISTENT,  # Constants are persistent
@@ -67,33 +67,33 @@ class GraphBuilder:
     def param(self, name, shape, dtype=DType.FP32):
         # Params are persistent weights
         node = TensorNode(
-            OpType.INPUT, shape, dtype, [], name, storage_type=StorageType.PERSISTENT
+            OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.PERSISTENT
         )
         self.params[name] = node
         return node
 
     # --- Atomic Wrappers ---
     def add(self, a, b):
-        return TensorNode(OpType.ADD, a.shape, DType.FP32, [a, b], f"add_{a.name}")
+        return TensorNode(OpType.ADD, DType.FP32, [a, b], a.shape, f"add_{a.name}")
 
     def mul(self, a, b):
-        return TensorNode(OpType.MUL, a.shape, DType.FP32, [a, b], f"mul_{a.name}")
+        return TensorNode(OpType.MUL, DType.FP32, [a, b], a.shape, f"mul_{a.name}")
 
     def divide(self, a, b):
-        return TensorNode(OpType.DIVIDE, a.shape, DType.FP32, [a, b], f"div_{a.name}")
+        return TensorNode(OpType.DIVIDE, DType.FP32, [a, b], a.shape, f"div_{a.name}")
 
     def matmul(self, a, b):
         out_shape = list(a.shape[:-1]) + [b.shape[-1]]
         return TensorNode(
-            OpType.DOT, tuple(out_shape), DType.FP32, [a, b], f"dot_{a.name}"
+            OpType.DOT, DType.FP32, [a, b], tuple(out_shape), f"dot_{a.name}"
         )
 
     def reshape(self, x, target_shape, shape_node):
         return TensorNode(
             OpType.RESHAPE,
-            target_shape,
             DType.FP32,
             [x, shape_node],
+            target_shape,
             f"reshape_{x.name}",
         )
 
@@ -101,9 +101,9 @@ class GraphBuilder:
         new_shape = tuple(x.shape[i] for i in dims)
         return TensorNode(
             OpType.PERMUTE,
-            new_shape,
             DType.FP32,
             [x],
+            new_shape,
             f"permute_{x.name}",
             attrs={"dims": dims},
         )
@@ -111,9 +111,9 @@ class GraphBuilder:
     def concat(self, inputs, axis_node, axis_idx, output_shape):
         return TensorNode(
             OpType.CONCAT,
-            output_shape,
             DType.FP32,
             inputs,
+            output_shape,
             "concat",
             attrs={"axis": axis_idx},
         )
@@ -121,51 +121,51 @@ class GraphBuilder:
     def arange(self, start_node, stop_node, step_node):
         return TensorNode(
             OpType.ARANGE,
-            (None,),  # Dynamic shape usually, but handled by kernel logic mostly
             DType.INT32,
             [start_node, stop_node, step_node],
+            (None,),  # Dynamic shape usually, but handled by kernel logic mostly
             "arange",
         )
 
     def power(self, base, exp):
-        return TensorNode(OpType.POWER, base.shape, DType.FP32, [base, exp], "power")
+        return TensorNode(OpType.POWER, DType.FP32, [base, exp], base.shape, "power")
 
     def triu(self, x, k_node):
-        return TensorNode(OpType.TRIU, x.shape, DType.FP32, [x], "triu", attrs={"k": 1})
+        return TensorNode(OpType.TRIU, DType.FP32, [x], x.shape, "triu", attrs={"k": 1})
 
     def cast(self, x, target_dtype):
         return TensorNode(
             OpType.CAST,
-            x.shape,
             target_dtype,
             [x],
+            x.shape,
             f"cast_{x.name}",
             attrs={"to": target_dtype},
         )
 
     def cos(self, x):
-        return TensorNode(OpType.COS, x.shape, DType.FP32, [x], "cos")
+        return TensorNode(OpType.COS, DType.FP32, [x], x.shape, "cos")
 
     def sin(self, x):
-        return TensorNode(OpType.SIN, x.shape, DType.FP32, [x], "sin")
+        return TensorNode(OpType.SIN, DType.FP32, [x], x.shape, "sin")
 
     def fill(self, value_node, shape_node, target_shape):
         return TensorNode(
             OpType.FILL,
-            target_shape,
             value_node.dtype,
             [value_node, shape_node],
+            target_shape,
             "fill",
         )
 
     def embedding(self, indices, weights):
         out_shape = indices.shape + (weights.shape[-1],)
         return TensorNode(
-            OpType.GATHER, out_shape, DType.FP32, [weights, indices], "embed"
+            OpType.GATHER, DType.FP32, [weights, indices], out_shape, "embed"
         )
 
     def rms_norm(self, x, scale, eps_node):
-        node = rms_norm_ref([x, scale, eps_node], name=f"rmsnorm_{x.name}")
+        node = rms_norm_ref([x, scale, eps_node])
         return node
 
     def gelu(self, x):
@@ -183,9 +183,9 @@ class GraphBuilder:
         new_shape[axis] *= repeats
         return TensorNode(
             OpType.REPEAT,
-            tuple(new_shape),
             x.dtype,
             [x],
+            tuple(new_shape),
             "repeat",
             attrs={"repeats": repeats, "axis": axis},
         )
@@ -203,9 +203,9 @@ class GraphBuilder:
 
         return TensorNode(
             OpType.SUM,
-            tuple(new_shape),
             x.dtype,
             [x],
+            tuple(new_shape),
             "sum",
             attrs={"axis": axis, "keepdims": keepdims},
         )

@@ -8,13 +8,13 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 def test_slice_explicit_1d():
     """Test simple 1D slicing with attrs: data[2:6:2]"""
-    data_node = TensorNode(OpType.INPUT, (10,), DType.FP32, [], "data")
+    data_node = TensorNode(OpType.INPUT, DType.FP32, [], (10,), "data")
 
     slice_node = TensorNode(
         OpType.SLICE,
-        (2,),
         DType.FP32,
         [data_node],
+        (2,),
         "slice",
         attrs={"starts": [2], "ends": [6], "steps": [2]},
     )
@@ -29,13 +29,13 @@ def test_slice_explicit_1d():
 
 def test_slice_explicit_multi_dim():
     """Test multi-dim slicing with attrs: data[0:2, 1:3]"""
-    data_node = TensorNode(OpType.INPUT, (4, 4), DType.FP32, [], "data")
+    data_node = TensorNode(OpType.INPUT, DType.FP32, [], (4, 4), "data")
 
     slice_node = TensorNode(
         OpType.SLICE,
-        (2, 2),
         DType.FP32,
         [data_node],
+        (2, 2),
         "slice",
         attrs={"starts": [0, 1], "ends": [2, 3], "steps": [1, 1]},
     )
@@ -50,7 +50,7 @@ def test_slice_explicit_multi_dim():
 
 def test_slice_getitem_1d():
     """Test slicing via __getitem__ on 1D tensor."""
-    data_node = TensorNode(OpType.INPUT, (10,), DType.FP32, [], "data")
+    data_node = TensorNode(OpType.INPUT, DType.FP32, [], (10,), "data")
     # data[2:6:2]
     slice_node = data_node[2:6:2]
 
@@ -69,7 +69,7 @@ def test_slice_getitem_1d():
 
 def test_slice_getitem_multi_dim():
     """Test multi-dim slicing via __getitem__."""
-    data_node = TensorNode(OpType.INPUT, (4, 4), DType.FP32, [], "data")
+    data_node = TensorNode(OpType.INPUT, DType.FP32, [], (4, 4), "data")
     # data[0:2, 1:3]
     slice_node = data_node[0:2, 1:3]
 
@@ -88,7 +88,7 @@ def test_slice_getitem_multi_dim():
 
 def test_slice_ellipsis():
     """Test slicing with Ellipsis."""
-    data_node = TensorNode(OpType.INPUT, (2, 3, 4, 5), DType.FP32, [], "data")
+    data_node = TensorNode(OpType.INPUT, DType.FP32, [], (2, 3, 4, 5), "data")
     # data[..., 1:3] -> data[:, :, :, 1:3]
     slice_node = data_node[..., 1:3]
 
@@ -103,7 +103,7 @@ def test_slice_ellipsis():
 
 def test_slice_negative_indices():
     """Test slicing with negative indices."""
-    data_node = TensorNode(OpType.INPUT, (10,), DType.FP32, [], "data")
+    data_node = TensorNode(OpType.INPUT, DType.FP32, [], (10,), "data")
     # data[-5:-1]
     slice_node = data_node[-5:-1]
 

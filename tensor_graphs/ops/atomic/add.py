@@ -13,4 +13,4 @@ def add_ref(
         raise ValueError("Add requires 2 inputs")
 
     a, b = inputs
-    return TensorNode(OpType.ADD, a.shape, a.dtype, [a, b], f"add_{a.name}_{b.name}")
+    return TensorNode(OpType.ADD, a.dtype, [a, b], name=f"add_{a.name}_{b.name}")

@@ -12,14 +12,14 @@ def test_gather_embedding():
     embed_dim = 4
 
     # Weight Matrix (10, 4)
-    w = TensorNode(OpType.INPUT, (vocab_size, embed_dim), DType.FP32, [], "w")
+    w = TensorNode(OpType.INPUT, DType.FP32, [], (vocab_size, embed_dim), "w")
 
     # Indices (3,)
-    idx = TensorNode(OpType.INPUT, (3,), DType.INT32, [], "idx")
+    idx = TensorNode(OpType.INPUT, DType.INT32, [], (3,), "idx")
 
     # Gather -> (3, 4)
     gather_node = TensorNode(
-        OpType.GATHER, (3, embed_dim), DType.FP32, [w, idx], "gather"
+        OpType.GATHER, DType.FP32, [w, idx], (3, embed_dim), "gather"
     )
 
     val_w = np.random.randn(vocab_size, embed_dim).astype(np.float32)
@@ -36,14 +36,14 @@ def test_gather_multidim_indices():
     vocab_size = 10
     embed_dim = 4
 
-    w = TensorNode(OpType.INPUT, (vocab_size, embed_dim), DType.FP32, [], "w")
+    w = TensorNode(OpType.INPUT, DType.FP32, [], (vocab_size, embed_dim), "w")
 
     # Indices (2, 2)
-    idx = TensorNode(OpType.INPUT, (2, 2), DType.INT32, [], "idx")
+    idx = TensorNode(OpType.INPUT, DType.INT32, [], (2, 2), "idx")
 
     # Gather -> (2, 2, 4)
     gather_node = TensorNode(
-        OpType.GATHER, (2, 2, embed_dim), DType.FP32, [w, idx], "gather"
+        OpType.GATHER, DType.FP32, [w, idx], (2, 2, embed_dim), "gather"
     )
 
     val_w = np.random.randn(vocab_size, embed_dim).astype(np.float32)

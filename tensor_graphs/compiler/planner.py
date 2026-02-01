@@ -57,9 +57,9 @@ class Planner:
                 # If backend differs, inject a CopyTo node
                 new_node = TensorNode(
                     OpType.COPY_TO,
-                    node.shape,
                     node.dtype,
                     [node],
+                    node.shape,
                     f"copy_{node.name}",
                     attrs={"target_backend": target_backend.value},
                     backend=target_backend,
@@ -142,9 +142,9 @@ class Planner:
                     ):
                         fma_node = TensorNode(
                             "FusedMulAdd",
-                            node.shape,
                             node.dtype,
                             fma_parents,
+                            node.shape,
                             f"fused_{node.name}",
                             backend=target_backend,
                         )
@@ -168,9 +168,9 @@ class Planner:
 
                 copy_back = TensorNode(
                     OpType.COPY_TO,
-                    node.shape,
                     node.dtype,
                     [cpu_root],
+                    node.shape,
                     f"copy_back_{node.name}",
                     attrs={"target_backend": target_backend.value},
                     backend=target_backend,

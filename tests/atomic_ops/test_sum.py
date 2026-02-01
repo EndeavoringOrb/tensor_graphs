@@ -7,8 +7,8 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 
 def test_sum_global():
-    x = TensorNode(OpType.INPUT, (2, 2), DType.FP32, [], "x")
-    sum_node = TensorNode(OpType.SUM, (1,), DType.FP32, [x], "sum")
+    x = TensorNode(OpType.INPUT, DType.FP32, [], (2, 2), "x")
+    sum_node = TensorNode(OpType.SUM, DType.FP32, [x], (1,), "sum")
 
     data = np.ones((2, 2), dtype=np.float32)
     inputs = {"x": data}
@@ -19,9 +19,9 @@ def test_sum_global():
 
 
 def test_sum_axis_keepdims():
-    x = TensorNode(OpType.INPUT, (2, 3), DType.FP32, [], "x")
+    x = TensorNode(OpType.INPUT, DType.FP32, [], (2, 3), "x")
     sum_node = TensorNode(
-        OpType.SUM, (2, 1), DType.FP32, [x], "sum", attrs={"axis": 1, "keepdims": True}
+        OpType.SUM, DType.FP32, [x], (2, 1), "sum", attrs={"axis": 1, "keepdims": True}
     )
 
     data = np.ones((2, 3), dtype=np.float32)

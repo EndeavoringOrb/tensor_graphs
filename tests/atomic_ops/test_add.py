@@ -8,9 +8,9 @@ from tensor_graphs.backend.executor import evaluate_graph
 
 def test_add_generic_vector():
     # Shape (10,) matches (None,)
-    a = TensorNode(OpType.INPUT, (10,), DType.FP32, [], "a")
-    b = TensorNode(OpType.INPUT, (10,), DType.FP32, [], "b")
-    add_node = TensorNode(OpType.ADD, (10,), DType.FP32, [a, b], "add")
+    a = TensorNode(OpType.INPUT, DType.FP32, [], (10,), "a")
+    b = TensorNode(OpType.INPUT, DType.FP32, [], (10,), "b")
+    add_node = TensorNode(OpType.ADD, DType.FP32, [a, b], (10,), "add")
 
     val_a = np.ones(10, dtype=np.float32)
     val_b = np.ones(10, dtype=np.float32) * 2
@@ -21,9 +21,9 @@ def test_add_generic_vector():
 
 def test_add_vec32_optimized():
     # Shape (32,) matches (32,)
-    a = TensorNode(OpType.INPUT, (32,), DType.FP32, [], "a")
-    b = TensorNode(OpType.INPUT, (32,), DType.FP32, [], "b")
-    add_node = TensorNode(OpType.ADD, (32,), DType.FP32, [a, b], "add")
+    a = TensorNode(OpType.INPUT, DType.FP32, [], (32,), "a")
+    b = TensorNode(OpType.INPUT, DType.FP32, [], (32,), "b")
+    add_node = TensorNode(OpType.ADD, DType.FP32, [a, b], (32,), "add")
 
     val_a = np.ones(32, dtype=np.float32)
     val_b = np.ones(32, dtype=np.float32)
@@ -33,9 +33,9 @@ def test_add_vec32_optimized():
 
 
 def test_add_broadcast():
-    s = TensorNode(OpType.INPUT, (1,), DType.FP32, [], "s")
-    m = TensorNode(OpType.INPUT, (4, 4), DType.FP32, [], "m")
-    add_node = TensorNode(OpType.ADD, (4, 4), DType.FP32, [s, m], "add")
+    s = TensorNode(OpType.INPUT, DType.FP32, [], (1,), "s")
+    m = TensorNode(OpType.INPUT, DType.FP32, [], (4, 4), "m")
+    add_node = TensorNode(OpType.ADD, DType.FP32, [s, m], (4, 4), "add")
 
     val_s = np.array([10.0], dtype=np.float32)
     val_m = np.ones((4, 4), dtype=np.float32)

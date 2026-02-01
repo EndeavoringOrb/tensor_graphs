@@ -114,7 +114,7 @@ def test_kernel_correctness(
 
     for i, val in enumerate(prepared_inputs):
         node = TensorNode(
-            OpType.INPUT, tuple(val.shape), _map_to_dtype(val), [], name=f"in_{i}"
+            OpType.INPUT, _map_to_dtype(val), [], tuple(val.shape), name=f"in_{i}"
         )
         input_nodes_for_shape.append(node)
         known_values[f"in_{i}"] = val
@@ -130,9 +130,9 @@ def test_kernel_correctness(
         # Fallback generic node
         shape_node = TensorNode(
             op_type,
-            (None,),
             input_nodes_for_shape[0].dtype if input_nodes_for_shape else DType.FP32,
             input_nodes_for_shape,
+            (None,),
             "temp_out",
             attrs=attrs,
         )
@@ -215,7 +215,7 @@ def test_kernel_correctness(
             dt = DType.BOOL
 
         node = TensorNode(
-            OpType.INPUT, data_np.shape, dt, [], name=name, backend=Backend.CPU_NUMPY
+            OpType.INPUT, dt, [], data_np.shape, name=name, backend=Backend.CPU_NUMPY
         )
         input_nodes.append(node)
         feed_dict[name] = data_np
@@ -225,13 +225,12 @@ def test_kernel_correctness(
     else:
         graph_root = TensorNode(
             op_type,
-            input_nodes[0].shape,
             DType.FP32,
             input_nodes,
-            "ref_atomic",
+            name="ref_atomic",
             attrs=attrs,
         )
-    should_debug = DEBUG_EXECUTION and op_type == "GELU"
+    should_debug = DEBUG_EXECUTION and op_type in ["RoPE", "Repeat"]
     raw_expected = evaluate_graph(graph_root, feed_dict, debug=should_debug)
     # Ensure reference output is moved to CPU/NumPy
     if isinstance(raw_expected, torch.Tensor):
@@ -253,8 +252,3 @@ def test_kernel_correctness(
         atol=atol,
         err_msg=f"Kernel {kernel_name} output mismatch",
     )
-
-
-for item in get_all_test_kernels():
-    if item[0] == "Max":
-        test_kernel_correctness(*item)
