@@ -14,7 +14,7 @@ from ....ops.atomic.repeat import repeat_ref
 )
 def repeat_generic(inputs, outputs, attrs):
     if attrs is None or "repeats" not in attrs:
-         raise ValueError("Repeat kernel requires 'repeats' attribute")
+        raise ValueError("Repeat kernel requires 'repeats' attribute")
 
     data = inputs[0]
     repeats = int(attrs["repeats"])

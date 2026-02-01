@@ -10,7 +10,12 @@ def test_permute_matrix_transpose():
     """Test transposing a 2D matrix (2, 3) -> (3, 2)."""
     data_node = TensorNode(OpType.INPUT, (2, 3), DType.FP32, [], "data")
     permute_node = TensorNode(
-        OpType.PERMUTE, (3, 2), DType.FP32, [data_node], "permute", attrs={"dims": [1, 0]}
+        OpType.PERMUTE,
+        (3, 2),
+        DType.FP32,
+        [data_node],
+        "permute",
+        attrs={"dims": [1, 0]},
     )
 
     input_data = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.float32)
@@ -30,7 +35,12 @@ def test_permute_3d_reorder():
 
     # Output Shape: (4, 2, 3) based on perm (2, 0, 1)
     permute_node = TensorNode(
-        OpType.PERMUTE, (4, 2, 3), DType.FP32, [data_node], "permute", attrs={"dims": [2, 0, 1]}
+        OpType.PERMUTE,
+        (4, 2, 3),
+        DType.FP32,
+        [data_node],
+        "permute",
+        attrs={"dims": [2, 0, 1]},
     )
 
     input_data = np.arange(24, dtype=np.float32).reshape(2, 3, 4)

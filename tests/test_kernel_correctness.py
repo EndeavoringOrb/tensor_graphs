@@ -14,6 +14,9 @@ from tensor_graphs.benchmark.data_gen import DataGenerator
 # Ensure all kernels are loaded
 import tensor_graphs.backend.kernels
 
+# Toggle this to True to see detailed execution logs for failing tests
+DEBUG_EXECUTION = True
+
 
 def get_all_test_kernels():
     registry = KernelRegistry.get_all_kernels()
@@ -91,13 +94,24 @@ def test_kernel_correctness(
         # Handle special cases for output shape
         if op_type == OpType.ADD:
             if len(prepared_inputs) >= 2:
-                output_shape = np.broadcast_shapes(prepared_inputs[0].shape, prepared_inputs[1].shape)
+                output_shape = np.broadcast_shapes(
+                    prepared_inputs[0].shape, prepared_inputs[1].shape
+                )
         elif op_type == OpType.MUL:
             if len(prepared_inputs) >= 2:
-                output_shape = np.broadcast_shapes(prepared_inputs[0].shape, prepared_inputs[1].shape)
+                output_shape = np.broadcast_shapes(
+                    prepared_inputs[0].shape, prepared_inputs[1].shape
+                )
         elif op_type == OpType.DIVIDE:
             if len(prepared_inputs) >= 2:
-                output_shape = np.broadcast_shapes(prepared_inputs[0].shape, prepared_inputs[1].shape)
+                output_shape = np.broadcast_shapes(
+                    prepared_inputs[0].shape, prepared_inputs[1].shape
+                )
+        elif op_type == OpType.POWER:
+            if len(prepared_inputs) >= 2:
+                output_shape = np.broadcast_shapes(
+                    prepared_inputs[0].shape, prepared_inputs[1].shape
+                )
         elif op_type == OpType.DOT:
             # Output is matrix product result
             pass  # Keep first input shape as starting point
@@ -112,19 +126,35 @@ def test_kernel_correctness(
             if attrs and "shape" in attrs:
                 output_shape = tuple(attrs["shape"])
         elif op_type == OpType.PERMUTE:
-            if attrs and "axes" in attrs:
-                output_shape = tuple(first_input.shape[ax] for ax in attrs["axes"])
+            if attrs and "dims" in attrs:
+                output_shape = tuple(first_input.shape[ax] for ax in attrs["dims"])
         elif op_type == OpType.SLICE:
             # Slice output shape depends on starts/ends
             pass  # Keep original shape
+        elif op_type in (OpType.MAX, OpType.SUM):
+            if attrs and "axis" in attrs:
+                axis = attrs["axis"]
+                keepdims = attrs.get("keepdims", False)
+                shape_list = list(first_input.shape)
+                if keepdims:
+                    shape_list[axis] = 1
+                elif isinstance(axis, int):
+                    del shape_list[axis]
+                output_shape = tuple(shape_list)
         elif op_type == OpType.REPEAT:
             if attrs and "repeats" in attrs:
                 repeats = attrs["repeats"]
-                output_shape = tuple(s * r for s, r in zip(first_input.shape, repeats))
+                if isinstance(repeats, (int, np.integer)):
+                    output_shape = tuple(s * repeats for s in first_input.shape)
+                else:
+                    output_shape = tuple(
+                        s * r for s, r in zip(first_input.shape, repeats)
+                    )
         elif op_type == OpType.ARANGE:
-            start = attrs.get("start", 0) if attrs else 0
-            step = attrs.get("step", 1) if attrs else 1
-            n = attrs.get("n") or len(prepared_inputs[1]) if len(prepared_inputs) > 1 else 10
+            start = int(prepared_inputs[0][0]) if len(prepared_inputs) >= 1 else 0
+            stop = int(prepared_inputs[1][0]) if len(prepared_inputs) >= 2 else 10
+            step = int(prepared_inputs[2][0]) if len(prepared_inputs) >= 3 else 1
+            n = max(0, (stop - start + step - 1) // step)
             output_shape = (n,)
         elif op_type == OpType.FILL:
             if len(prepared_inputs) >= 2:
@@ -150,7 +180,11 @@ def test_kernel_correctness(
 
         # Allocate output buffer
         if isinstance(first_input, torch.Tensor):
-            output = torch.empty(output_shape, dtype=output_dtype, device="cuda" if first_input.is_cuda else "cpu")
+            output = torch.empty(
+                output_shape,
+                dtype=output_dtype,
+                device="cuda" if first_input.is_cuda else "cpu",
+            )
         else:
             output = np.empty(output_shape, dtype=output_dtype)
 
@@ -204,7 +238,8 @@ def test_kernel_correctness(
                 "ref_atomic",
                 attrs=attrs,
             )
-        raw_expected = evaluate_graph(graph_root, feed_dict)
+        should_debug = DEBUG_EXECUTION and op_type == "GELU"
+        raw_expected = evaluate_graph(graph_root, feed_dict, debug=should_debug)
         # Ensure reference output is moved to CPU/NumPy
         if isinstance(raw_expected, torch.Tensor):
             expected_output = raw_expected.detach().cpu().numpy()

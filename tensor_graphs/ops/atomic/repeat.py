@@ -25,7 +25,7 @@ def repeat_ref(
     out_shape = list(data.shape)
     if out_shape[axis] is not None:
         out_shape[axis] *= repeats
-    
+
     return TensorNode(
         OpType.REPEAT,
         tuple(out_shape),

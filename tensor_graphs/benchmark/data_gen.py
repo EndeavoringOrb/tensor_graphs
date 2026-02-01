@@ -287,7 +287,9 @@ class DataGenerator:
                 ends.append(end)
                 steps.append(step)
 
-            inputs_with_backends.append((data, signatures[0].backend if signatures else backend))
+            inputs_with_backends.append(
+                (data, signatures[0].backend if signatures else backend)
+            )
             attrs = {"starts": starts, "ends": ends, "steps": steps}
             return inputs_with_backends, attrs
 
@@ -320,12 +322,11 @@ class DataGenerator:
                 dtype = DType.FP32
 
             data = DataGenerator.random_tensor(shape, dtype)
-            k = np.array([random.randint(-2, 2)], dtype=np.int32)
 
             inputs_with_backends.append(
                 (data, signatures[0].backend if len(signatures) > 0 else backend)
             )
-            inputs_with_backends.append((k, Backend.CPU_NUMPY))
+            attrs["k"] = random.randint(-2, 2)
             return inputs_with_backends, attrs
 
         elif op_type == OpType.FILL:
@@ -380,15 +381,8 @@ class DataGenerator:
                 (data, signatures[0].backend if len(signatures) > 0 else backend)
             )
 
-            axis_idx = random.randint(0, len(shape) - 1)
-
-            if len(signatures) > 1:
-                inputs_with_backends.append(
-                    (np.array([axis_idx], dtype=np.int32), Backend.CPU_NUMPY)
-                )
-            else:
-                attrs["axis"] = axis_idx
-                attrs["keepdims"] = True
+            attrs["axis"] = random.randint(0, len(shape) - 1)
+            attrs["keepdims"] = True
             return inputs_with_backends, attrs
 
         elif op_type == OpType.REPEAT:
@@ -409,15 +403,9 @@ class DataGenerator:
             )
 
             repeats = random.randint(2, 5)
-
-            if len(signatures) > 1:
-                inputs_with_backends.append(
-                    (np.array([repeats], dtype=np.int32), Backend.CPU_NUMPY)
-                )
-            else:
-                attrs["repeats"] = repeats
-                # Pick valid axis
-                attrs["axis"] = random.randint(0, len(shape) - 1)
+            attrs["repeats"] = repeats
+            # Pick valid axis
+            attrs["axis"] = random.randint(0, len(shape) - 1)
             return inputs_with_backends, attrs
 
         elif op_type == OpType.COPY_TO:

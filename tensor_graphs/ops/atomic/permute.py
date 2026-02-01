@@ -13,9 +13,9 @@ def permute_ref(
     """
     if len(inputs) != 1:
         raise ValueError("Permute requires exactly 1 data input")
-    
+
     if attrs is None or "dims" not in attrs:
-         raise ValueError("Permute requires 'dims' (permutation order) in attributes")
+        raise ValueError("Permute requires 'dims' (permutation order) in attributes")
 
     data = inputs[0]
     dims = attrs["dims"]

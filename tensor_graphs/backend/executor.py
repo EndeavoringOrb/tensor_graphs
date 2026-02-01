@@ -7,6 +7,8 @@ from ..ir.dtypes import DType
 from ..ir.node import TensorNode
 from ..compiler.planner import Planner
 from ..compiler.compiler import Compiler
+from ..ir.graph import topological_sort
+from ..ops.atomic_types import OpType
 
 
 class Executor:
@@ -51,7 +53,7 @@ class Executor:
                 output_views.append(self._get_view(offset, inst.node_name))
 
             self.prepared_instructions.append(
-                (inst.kernel, input_views, output_views, inst.attrs)
+                (inst.node_name, inst.kernel, input_views, output_views, inst.attrs)
             )
 
         # Pre-calculate input/output views
@@ -117,12 +119,18 @@ class Executor:
 
         if isinstance(buf, np.ndarray):
             if not isinstance(data, np.ndarray):
-                data = np.array(data)
+                # Expand scalar to match node shape
+                if np.isscalar(data):
+                    data = np.full(
+                        meta.shape, data, dtype=self._map_dtype_np(meta.dtype)
+                    )
+                else:
+                    data = np.array(data)
 
             np_dtype = self._map_dtype_np(meta.dtype)
 
             # Flatten and view as uint8 to copy
-            data_casted = data.astype(np_dtype)
+            data_casted = data.astype(np_dtype).reshape(-1)
             data_u8 = data_casted.view(np.uint8).flatten()
 
             end = offset + len(data_u8)
@@ -135,7 +143,7 @@ class Executor:
             else:
                 data = data.to(dtype=t_dtype, device=alloc.device)
 
-            data_u8 = data.view(torch.uint8).flatten()
+            data_u8 = data.reshape(-1).view(torch.uint8).flatten()
             end = offset + len(data_u8)
             buf[offset:end] = data_u8
 
@@ -146,15 +154,49 @@ class Executor:
                 if alloc.storage_type in (StorageType.PERSISTENT, StorageType.STATE):
                     self.copy_to_buffer(name, data)
 
-    def run(self, inputs: Dict[str, Any]) -> Any:
+    def run(self, inputs: Dict[str, Any], debug: bool = False) -> Any:
         # 1. Copy inputs
         for name, data in inputs.items():
+            if debug:
+                print(f"[DEBUG] Loading input: '{name}' shape: {np.shape(data)}")
             self.copy_to_buffer(name, data)
 
         # 2. Execution Loop
-        for kernel, input_views, output_views, attrs in self.prepared_instructions:
+        for (
+            node_name,
+            kernel,
+            input_views,
+            output_views,
+            attrs,
+        ) in self.prepared_instructions:
+            if debug:
+                print(f"[DEBUG] Executing: {node_name} using {kernel.__name__}")
+                for i, v in enumerate(input_views):
+                    mean_val = (
+                        v.float().mean().item()
+                        if isinstance(v, torch.Tensor)
+                        else v.mean()
+                    )
+                    print(f"  Input {i} shape: {v.shape}, mean: {mean_val:.6f}")
+
             # Unified Kernel API: (inputs, outputs, attrs)
             kernel(input_views, output_views, attrs)
+
+            if debug:
+                for i, v in enumerate(output_views):
+                    mean_val = (
+                        v.float().mean().item()
+                        if isinstance(v, torch.Tensor)
+                        else v.mean()
+                    )
+                    nz = (
+                        (v != 0).sum().item()
+                        if isinstance(v, torch.Tensor)
+                        else np.count_nonzero(v)
+                    )
+                    print(
+                        f"  Output {i} shape: {v.shape}, mean: {mean_val:.6f}, non-zeros: {nz}"
+                    )
 
         # 3. Return Output
         if len(self.output_views) == 1:
@@ -164,7 +206,10 @@ class Executor:
 
 
 def evaluate_graph(
-    root: TensorNode, inputs: Dict[str, Any], db_path: str = "benchmarks.db"
+    root: TensorNode,
+    inputs: Dict[str, Any],
+    db_path: str = "benchmarks.db",
+    debug: bool = False,
 ) -> Any:
     """
     Helper function to maintain compatibility with tests.
@@ -177,7 +222,28 @@ def evaluate_graph(
     # Pass inputs as known_values to enable shape inference
     compiled_graph = compiler.compile(recipe, known_values=inputs)
 
+    if debug:
+        print(f"\n[DEBUG] Compiled Graph for {root.op_type}:")
+        for inst in compiled_graph.instructions:
+            print(
+                f"  {inst.node_name} = {inst.kernel.__name__}({[n for n in inst.input_node_names]})"
+            )
+
     executor = Executor(compiled_graph)
 
+    # Automatically load constants found in the graph
+    all_nodes = topological_sort(recipe.root)
+    constants = {}
+    for node in all_nodes:
+        if node.op_type == OpType.CONSTANT:
+            val = node.attrs.get("value")
+            if val is not None:
+                constants[node.name] = val
+
+    if debug:
+        print(f"[DEBUG] Found {len(constants)} constants in graph.")
+
+    executor.load_weights(constants)
+
     # Handle constants that might be in inputs or attributes
-    return executor.run(inputs)
+    return executor.run(inputs, debug=debug)

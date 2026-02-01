@@ -16,7 +16,7 @@ def triu_ref(
 
     data = inputs[0]
     k_val = attrs.get("k", 0) if attrs else 0
-    
+
     return TensorNode(
         OpType.TRIU,
         data.shape,

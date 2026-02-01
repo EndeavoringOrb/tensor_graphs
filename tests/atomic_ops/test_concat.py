@@ -10,7 +10,9 @@ def test_concat_vectors():
     a = TensorNode(OpType.INPUT, (3,), DType.FP32, [], "a")
     b = TensorNode(OpType.INPUT, (2,), DType.FP32, [], "b")
     # Axis is now an attribute
-    concat_node = TensorNode(OpType.CONCAT, (5,), DType.FP32, [a, b], "concat", attrs={"axis": 0})
+    concat_node = TensorNode(
+        OpType.CONCAT, (5,), DType.FP32, [a, b], "concat", attrs={"axis": 0}
+    )
 
     val_a = np.array([1, 2, 3], dtype=np.float32)
     val_b = np.array([4, 5], dtype=np.float32)
@@ -26,7 +28,9 @@ def test_concat_matrices_axis_0():
     a = TensorNode(OpType.INPUT, (2, 3), DType.FP32, [], "a")
     b = TensorNode(OpType.INPUT, (1, 3), DType.FP32, [], "b")
 
-    concat_node = TensorNode(OpType.CONCAT, (3, 3), DType.FP32, [a, b], "concat", attrs={"axis": 0})
+    concat_node = TensorNode(
+        OpType.CONCAT, (3, 3), DType.FP32, [a, b], "concat", attrs={"axis": 0}
+    )
 
     val_a = np.zeros((2, 3), dtype=np.float32)
     val_b = np.ones((1, 3), dtype=np.float32)
@@ -45,7 +49,9 @@ def test_concat_matrices_axis_1():
     a = TensorNode(OpType.INPUT, (2, 2), DType.FP32, [], "a")
     b = TensorNode(OpType.INPUT, (2, 1), DType.FP32, [], "b")
 
-    concat_node = TensorNode(OpType.CONCAT, (2, 3), DType.FP32, [a, b], "concat", attrs={"axis": 1})
+    concat_node = TensorNode(
+        OpType.CONCAT, (2, 3), DType.FP32, [a, b], "concat", attrs={"axis": 1}
+    )
 
     val_a = np.full((2, 2), 1.0, dtype=np.float32)
     val_b = np.full((2, 1), 2.0, dtype=np.float32)

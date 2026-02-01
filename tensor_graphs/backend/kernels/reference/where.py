@@ -25,9 +25,7 @@ def where_bool_fp32(inputs, outputs, attrs):
 @KernelRegistry.register(
     OpType.WHERE,
     [
-        TensorSignature(
-            DType.INT32, shape=None, backend=Backend.CPU_NUMPY
-        ),
+        TensorSignature(DType.INT32, shape=None, backend=Backend.CPU_NUMPY),
         TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),
         TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY),
     ],

@@ -1,6 +1,7 @@
 from typing import List, Dict, Tuple
 from ..ir.node import TensorNode
 from ..ir.graph import topological_sort
+from ..ops.atomic_types import OpType
 
 
 class LivenessAnalyzer:
@@ -19,11 +20,8 @@ class LivenessAnalyzer:
         node_to_time = {node: i for i, node in enumerate(nodes)}
         intervals = {node: [i, i] for i, node in enumerate(nodes)}
 
-        # Inputs are born at time 0 because they are loaded at the start
-        from ..ops.atomic_types import OpType
-
         for node in nodes:
-            if node.op_type == OpType.INPUT:
+            if node.op_type == OpType.INPUT or node.op_type == OpType.CONSTANT:
                 intervals[node][0] = 0
 
         # Update death times
