@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Tuple, Optional, cast
+from typing import List, Dict, Any, Tuple, Optional, cast, Iterable
 import math
 import numpy as np
 from ..ir.node import TensorNode
@@ -51,7 +51,7 @@ class ShapeInference:
                     shape_val = get_val(node.parents[1])
                     if shape_val is not None:
                         if hasattr(shape_val, "cpu"):
-                            shape_arr = shape_val.cpu().numpy()
+                            shape_arr = cast(Any, shape_val).cpu().numpy()
                         else:
                             shape_arr = np.asarray(shape_val)
 
@@ -73,8 +73,9 @@ class ShapeInference:
                         axis += ndim
 
                     if 0 <= axis < ndim:
-                        if data_shape[axis] is not None:
-                            data_shape[axis] *= repeats
+                        dim_val = data_shape[axis]
+                        if dim_val is not None:
+                            data_shape[axis] = dim_val * repeats
                         node.shape = tuple(data_shape)
                     else:
                         # Fallback or invalid axis; preserve shape to avoid crash
@@ -107,18 +108,18 @@ class ShapeInference:
                         total_dim = 0
                         valid = True
                         for p in node.parents:
-                            if (
-                                p.shape is None
-                                or len(p.shape) <= axis
-                                or p.shape[axis] is None
-                            ):
+                            if p.shape is None or len(p.shape) <= axis:
                                 valid = False
                                 break
-                            total_dim += p.shape[axis]
+
+                            dim_p = p.shape[axis]
+                            if dim_p is None:
+                                valid = False
+                                break
+                            total_dim += dim_p
 
                         if valid and 0 <= axis < ndim:
                             out_shape[axis] = total_dim
-                            node.shape = tuple(out_shape)
 
             # OpType.RESHAPE
             elif node.op_type == OpType.RESHAPE:
@@ -127,7 +128,9 @@ class ShapeInference:
 
                 if shape_tensor_val is not None:
                     if hasattr(shape_tensor_val, "cpu"):
-                        shape_arr = cast(np.ndarray, shape_tensor_val.cpu().numpy())
+                        shape_arr = cast(
+                            np.ndarray, cast(Any, shape_tensor_val).cpu().numpy()
+                        )
                     else:
                         shape_arr = np.asarray(shape_tensor_val)
 
@@ -231,10 +234,12 @@ class ShapeInference:
                         if hasattr(axis, "__iter__") and not isinstance(
                             axis, (str, bytes)
                         ):
-                            axes = list(axis)
+                            axes = list(cast(Iterable[Any], axis))
                         else:
                             axes = [axis]
-                        axes = [a + ndim if a < 0 else a for a in axes]
+                        axes = [
+                            int(a) + ndim if int(a) < 0 else int(a) for a in axes
+                        ]
 
                         new_shape = []
                         for i, d in enumerate(data_shape):
