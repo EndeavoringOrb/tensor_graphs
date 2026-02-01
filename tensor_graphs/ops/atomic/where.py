@@ -20,9 +20,8 @@ def where_ref(
 
     return TensorNode(
         OpType.WHERE,
-        x.shape,
         x.dtype,
         [condition, x, y],
-        f"where_{x.name}",
+        name=f"where_{x.name}",
         backend=x.backend,
     )

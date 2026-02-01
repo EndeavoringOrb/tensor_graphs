@@ -23,25 +23,11 @@ def slice_ref(
 
     data = inputs[0]
 
-    # Simple static shape inference (approximation)
-    # Ideally handled by ShapeInference, but we set what we can here
-    out_shape = list(data.shape)
-    starts = attrs["starts"]
-    ends = attrs["ends"]
-    steps = attrs.get("steps", [1] * len(starts))
-
-    # Note: Logic to compute exact output shape is complex due to broadcasting/step logic
-    # We leave exact calculation to ShapeInference or assume caller provided generic shape
-    # For now, we preserve rank.
-
-    # TODO: maybe set output shape properly here instead of leaving it to shape inference
-
     return TensorNode(
         OpType.SLICE,
-        tuple(None for _ in range(len(data.shape))),
         data.dtype,
         inputs,
-        f"slice_{data.name}",
+        name=f"slice_{data.name}",
         attrs=attrs,
         backend=data.backend,
     )

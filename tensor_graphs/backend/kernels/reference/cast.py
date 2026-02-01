@@ -17,7 +17,7 @@ def _dtype_to_numpy(dtype_enum):
     elif dtype_enum == DType.INT32:
         return np.int32
     elif dtype_enum == DType.BOOL:
-        return bool
+        return np.bool_
     return np.float32
 
 

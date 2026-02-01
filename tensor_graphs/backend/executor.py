@@ -10,6 +10,9 @@ from ..compiler.compiler import Compiler
 from ..ir.graph import topological_sort
 from ..ops.atomic_types import OpType
 
+DEBUG_EXECUTION = True
+DEBUG_TYPES = ["rope", "repeat"]
+
 
 class Executor:
     """
@@ -66,7 +69,7 @@ class Executor:
             for name, offset in self.graph.output_offsets.items()
         }
 
-    def _map_dtype_np(self, dtype: DType):
+    def _map_dtype_np(self, dtype: DType) -> Any:
         if dtype == DType.FP32:
             return np.float32
         if dtype == DType.INT32:
@@ -77,7 +80,7 @@ class Executor:
             return np.bool_
         return np.float32
 
-    def _map_dtype_torch(self, dtype: DType):
+    def _map_dtype_torch(self, dtype: DType) -> Any:
         if dtype == DType.FP32:
             return torch.float32
         if dtype == DType.INT32:
@@ -154,10 +157,10 @@ class Executor:
                 if alloc.storage_type in (StorageType.PERSISTENT, StorageType.STATE):
                     self.copy_to_buffer(name, data)
 
-    def run(self, inputs: Dict[str, Any], debug: bool = False) -> Any:
+    def run(self, inputs: Dict[str, Any]) -> Any:
         # 1. Copy inputs
         for name, data in inputs.items():
-            if debug:
+            if DEBUG_EXECUTION:
                 print(f"[DEBUG] Loading input: '{name}' shape: {np.shape(data)}")
             self.copy_to_buffer(name, data)
 
@@ -169,33 +172,50 @@ class Executor:
             output_views,
             attrs,
         ) in self.prepared_instructions:
-            if debug:
+            is_detailed = any(x in node_name.lower() for x in DEBUG_TYPES)
+            if DEBUG_EXECUTION:
                 print(f"[DEBUG] Executing: {node_name} using {kernel.__name__}")
-                for i, v in enumerate(input_views):
-                    mean_val = (
-                        v.float().mean().item()
-                        if isinstance(v, torch.Tensor)
-                        else v.mean()
-                    )
-                    print(f"  Input {i} shape: {v.shape}, mean: {mean_val:.6f}")
+
+                if is_detailed:
+                    for i, v in enumerate(input_views):
+                        view: Any = v
+                        if isinstance(view, torch.Tensor):
+                            val = (
+                                f"{view.float().mean().item():.6f}"
+                                if view.is_floating_point() and view.numel() > 0
+                                else "N/A"
+                            )
+                        else:
+                            val = (
+                                f"{view.mean():.6f}"
+                                if np.issubdtype(view.dtype, np.number)
+                                and view.size > 0
+                                else "N/A"
+                            )
+                        print(f"  Input {i} shape: {view.shape}, mean: {val}")
 
             # Unified Kernel API: (inputs, outputs, attrs)
             kernel(input_views, output_views, attrs)
 
-            if debug:
+            if DEBUG_EXECUTION and is_detailed:
                 for i, v in enumerate(output_views):
-                    mean_val = (
-                        v.float().mean().item()
-                        if isinstance(v, torch.Tensor)
-                        else v.mean()
-                    )
-                    nz = (
-                        (v != 0).sum().item()
-                        if isinstance(v, torch.Tensor)
-                        else np.count_nonzero(v)
-                    )
+                    view: Any = v
+                    if isinstance(view, torch.Tensor):
+                        val = (
+                            f"{view.float().mean().item():.6f}"
+                            if view.is_floating_point() and view.numel() > 0
+                            else "N/A"
+                        )
+                        nz = f"{(view != 0).sum().item()}"
+                    else:
+                        val = (
+                            f"{view.mean():.6f}"
+                            if np.issubdtype(view.dtype, np.number) and view.size > 0
+                            else "N/A"
+                        )
+                        nz = f"{np.count_nonzero(view)}"
                     print(
-                        f"  Output {i} shape: {v.shape}, mean: {mean_val:.6f}, non-zeros: {nz}"
+                        f"  Output {i} shape: {view.shape}, mean: {val}, non-zeros: {nz}"
                     )
 
         # 3. Return Output
@@ -209,7 +229,6 @@ def evaluate_graph(
     root: TensorNode,
     inputs: Dict[str, Any],
     db_path: str = "benchmarks.db",
-    debug: bool = False,
 ) -> Any:
     """
     Helper function to maintain compatibility with tests.
@@ -222,7 +241,7 @@ def evaluate_graph(
     # Pass inputs as known_values to enable shape inference
     compiled_graph = compiler.compile(recipe, known_values=inputs)
 
-    if debug:
+    if DEBUG_EXECUTION:
         print(f"\n[DEBUG] Compiled Graph for {root.op_type}:")
         for inst in compiled_graph.instructions:
             print(
@@ -240,10 +259,10 @@ def evaluate_graph(
             if val is not None:
                 constants[node.name] = val
 
-    if debug:
+    if DEBUG_EXECUTION:
         print(f"[DEBUG] Found {len(constants)} constants in graph.")
 
     executor.load_weights(constants)
 
     # Handle constants that might be in inputs or attributes
-    return executor.run(inputs, debug=debug)
+    return executor.run(inputs)

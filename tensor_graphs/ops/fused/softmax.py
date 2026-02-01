@@ -11,24 +11,22 @@ def softmax_decomposition(inputs, attrs=None):
 
     x_max = TensorNode(
         OpType.MAX,
-        tuple(reduced_shape),
         x.dtype,
         [x],
-        "max",
+        name="max",
         attrs={"axis": axis, "keepdims": True},
     )
-    neg_max = TensorNode(OpType.NEGATE, x_max.shape, x_max.dtype, [x_max], "neg_max")
-    shifted = TensorNode(OpType.ADD, x.shape, x.dtype, [x, neg_max], "shifted")
-    exps = TensorNode(OpType.EXP, x.shape, x.dtype, [shifted], "exps")
+    neg_max = TensorNode(OpType.NEGATE, x_max.dtype, [x_max], name="neg_max")
+    shifted = TensorNode(OpType.ADD, x.dtype, [x, neg_max], name="shifted")
+    exps = TensorNode(OpType.EXP, x.dtype, [shifted], name="exps")
     sum_exps = TensorNode(
         OpType.SUM,
-        tuple(reduced_shape),
         x.dtype,
         [exps],
-        "sum",
+        name="sum",
         attrs={"axis": axis, "keepdims": True},
     )
-    return TensorNode(OpType.DIVIDE, x.shape, x.dtype, [exps, sum_exps], "softmax_out")
+    return TensorNode(OpType.DIVIDE, x.dtype, [exps, sum_exps], name="softmax_out")
 
 
 register_reference_factory("Softmax", softmax_decomposition)
@@ -37,9 +35,8 @@ register_reference_factory("Softmax", softmax_decomposition)
 def softmax_ref(inputs, attrs=None):
     return TensorNode(
         "Softmax",
-        inputs[0].shape,
         inputs[0].dtype,
         inputs,
-        "softmax",
+        name="softmax",
         attrs=attrs if attrs is not None else {},
     )

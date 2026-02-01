@@ -18,9 +18,8 @@ def power_ref(
 
     return TensorNode(
         OpType.POWER,
-        a.shape,
         a.dtype,
         [a, b],
-        f"power_{a.name}_{b.name}",
+        name=f"power_{a.name}_{b.name}",
         backend=a.backend,
     )

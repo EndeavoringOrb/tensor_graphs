@@ -18,22 +18,22 @@ class Compiler:
     def compile(
         self, recipe: ExecutionRecipe, known_values: Optional[Dict[str, Any]] = None
     ) -> CompiledGraph:
-        # 1. Topo Sort
+        # 1. Constant Folding (Rebuilds graph structure, so must happen first)
+        if known_values:
+            recipe.root = ConstantFolding.fold(recipe.root, known_values)
+
+        # 2. Topo Sort (After potential structural changes from folding)
         nodes = topological_sort(recipe.root)
 
-        # 2. Shape Inference (if values are provided)
+        # 3. Shape Inference (if values are provided)
         if known_values:
             ShapeInference.infer(nodes, known_values)
 
-        # 3. Liveness
+        # 4. Liveness
         liveness = LivenessAnalyzer.analyze(nodes)
 
-        # 4. Memory Planning
+        # 5. Memory Planning
         allocations = self.memory_planner.plan(nodes, liveness)
-
-        # 5. Constant Folding
-        if known_values:
-            recipe.root = ConstantFolding.fold(recipe.root, known_values)
 
         # 6. Instruction Generation
         instructions = []

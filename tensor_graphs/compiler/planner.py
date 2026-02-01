@@ -117,6 +117,10 @@ class Planner:
                 # Expand the high-level op into its atomic/reference subgraph
                 subgraph_root = ref_factory(node.parents, node.attrs)
 
+                # Transfer shape from original node if available and missing in subgraph
+                if node.shape and not subgraph_root.shape:
+                    subgraph_root.shape = node.shape
+
                 # Recursively plan the resulting subgraph
                 decomp_cost, decomp_root, decomp_assigns = self._min_cost(
                     subgraph_root, target_backend, new_stack

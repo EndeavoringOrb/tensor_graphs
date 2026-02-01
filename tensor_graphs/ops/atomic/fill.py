@@ -19,9 +19,8 @@ def fill_ref(
 
     return TensorNode(
         OpType.FILL,
-        target_shape,
         value_tensor.dtype,
         [value_tensor, shape_tensor],
-        f"fill_{value_tensor.name}_{shape_tensor.name}",
+        name=f"fill_{value_tensor.name}_{shape_tensor.name}",
         backend=value_tensor.backend,
     )

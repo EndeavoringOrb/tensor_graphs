@@ -17,9 +17,8 @@ def sqrt_ref(
 
     return TensorNode(
         OpType.SQRT,
-        x.shape,
         x.dtype,
         [x],
-        f"sqrt_{x.name}",
+        name=f"sqrt_{x.name}",
         backend=x.backend,
     )

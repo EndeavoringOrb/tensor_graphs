@@ -120,6 +120,53 @@ class ShapeInference:
 
                         if valid and 0 <= axis < ndim:
                             out_shape[axis] = total_dim
+                            node.shape = tuple(out_shape)
+
+            # OpType.PERMUTE
+            elif node.op_type == OpType.PERMUTE:
+                if node.parents and node.parents[0].shape is not None:
+                    dims = node.attrs.get("dims")
+                    if dims:
+                        input_shape = node.parents[0].shape
+                        if len(input_shape) == len(dims):
+                            node.shape = tuple(input_shape[d] for d in dims)
+
+            # OpType.TRIU
+            elif node.op_type == OpType.TRIU:
+                if node.parents and node.parents[0].shape is not None:
+                    node.shape = node.parents[0].shape
+
+            # OpType.GATHER
+            elif node.op_type == OpType.GATHER:
+                if len(node.parents) >= 2:
+                    data_shape = node.parents[0].shape
+                    indices_shape = node.parents[1].shape
+                    if data_shape and indices_shape:
+                        # Standard gather behavior on axis 0
+                        # Output shape = indices_shape + data_shape[1:]
+                        node.shape = indices_shape + data_shape[1:]
+
+            # OpType.DOT
+            elif node.op_type == OpType.DOT:
+                if len(node.parents) == 2:
+                    s0 = node.parents[0].shape
+                    s1 = node.parents[1].shape
+                    if s0 and s1:
+                        if any(not isinstance(d, int) for d in s0) or any(
+                            not isinstance(d, int) for d in s1
+                        ):
+                            raise ValueError(
+                                f"DOT requires concrete shapes, found None in: {s0}, {s1}"
+                            )
+
+                        # Handle basic MatMul logic
+                        # If 2D: (M, K) @ (K, N) -> (M, N)
+                        if len(s0) == 2 and len(s1) == 2:
+                            node.shape = (s0[0], s1[1])
+                        # Handle broadcasting (batch dims)
+                        elif len(s0) >= 2 and len(s1) >= 2:
+                            batch_shape = np.broadcast_shapes(s0[:-2], s1[:-2])
+                            node.shape = batch_shape + (s0[-2], s1[-1])
 
             # OpType.RESHAPE
             elif node.op_type == OpType.RESHAPE:
@@ -249,7 +296,6 @@ class ShapeInference:
                         node.shape = tuple(new_shape)
 
             # Unary Propagators (Generic)
-            # Removed "RoPE" from here as it supports broadcasting
             elif node.op_type in (
                 OpType.CAST,
                 OpType.COPY_TO,
@@ -258,41 +304,30 @@ class ShapeInference:
                 OpType.SIN,
                 OpType.COS,
                 OpType.SQRT,
-                "GELU",
-                "Softmax",
-                "RMSNorm",
             ):
                 if node.parents and node.parents[0].shape:
                     node.shape = node.parents[0].shape
 
             # Broadcasting Ops
-            # Added "RoPE" here
             elif node.op_type in (
                 OpType.ADD,
                 OpType.MUL,
                 OpType.DIVIDE,
                 OpType.POWER,
                 OpType.WHERE,
-                "FusedMulAdd",
-                "RoPE",
             ):
                 parents_to_check = node.parents
                 shapes = [p.shape for p in parents_to_check if p.shape is not None]
                 if len(shapes) == len(parents_to_check) and len(shapes) > 0:
                     if hasattr(np, "broadcast_shapes"):
-                        clean_shapes = []
+                        # Verify no dynamic dimensions and cast for type checker
                         for sh in shapes:
-                            if sh is not None:
-                                clean_sh = tuple(
-                                    (d if d is not None else 1) for d in sh
+                            if any(d is None for d in sh):
+                                raise ValueError(
+                                    f"Dynamic dimensions in broadcasting op '{node.name}' not supported."
                                 )
-                                clean_shapes.append(clean_sh)
 
-                        if clean_shapes:
-                            try:
-                                node.shape = cast(
-                                    Tuple[int, ...], np.broadcast_shapes(*clean_shapes)
-                                )
-                            except ValueError:
-                                # Broadcasting failed, cannot infer shape
-                                pass
+                        node.shape = cast(
+                            Tuple[int, ...],
+                            np.broadcast_shapes(*cast(List[Tuple[int, ...]], shapes)),
+                        )

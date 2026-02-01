@@ -16,8 +16,7 @@ def cos_ref(
     x = inputs[0]
     return TensorNode(
         OpType.COS,
-        x.shape,
         x.dtype,
         [x],
-        f"cos_{x.name}",
+        name=f"cos_{x.name}",
     )

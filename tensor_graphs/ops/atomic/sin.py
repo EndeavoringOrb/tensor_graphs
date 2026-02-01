@@ -17,9 +17,8 @@ def sin_ref(
 
     return TensorNode(
         OpType.SIN,
-        x.shape,
         x.dtype,
         [x],
-        f"sin_{x.name}",
+        name=f"sin_{x.name}",
         backend=x.backend,
     )

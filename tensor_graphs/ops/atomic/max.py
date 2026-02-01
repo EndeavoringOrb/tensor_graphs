@@ -28,10 +28,9 @@ def max_ref(
     out_shape = (None,)
     return TensorNode(
         OpType.MAX,
-        out_shape,
         x.dtype,
         parents,
-        f"max_{x.name}",
+        name=f"max_{x.name}",
         attrs=attrs,
         backend=x.backend,
     )

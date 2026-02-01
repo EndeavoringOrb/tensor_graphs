@@ -16,8 +16,7 @@ def exp_ref(
     x = inputs[0]
     return TensorNode(
         OpType.EXP,
-        x.shape,
         x.dtype,
         [x],
-        f"exp_{x.name}",
+        name=f"exp_{x.name}",
     )

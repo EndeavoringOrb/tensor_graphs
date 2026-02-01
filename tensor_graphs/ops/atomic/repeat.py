@@ -19,19 +19,12 @@ def repeat_ref(
         raise ValueError("Repeat requires 'repeats' in attributes")
 
     data = inputs[0]
-    repeats = attrs["repeats"]
-    axis = attrs.get("axis", 0)
-
-    out_shape = list(data.shape)
-    if out_shape[axis] is not None:
-        out_shape[axis] *= repeats
 
     return TensorNode(
         OpType.REPEAT,
-        tuple(out_shape),
         data.dtype,
         inputs,
-        f"repeat_{data.name}",
+        name=f"repeat_{data.name}",
         attrs=attrs,
         backend=data.backend,
     )

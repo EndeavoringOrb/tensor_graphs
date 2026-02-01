@@ -11,12 +11,10 @@ from tensor_graphs.backend.executor import evaluate_graph
 from tensor_graphs.ops.registry import get_reference_factory
 from tensor_graphs.benchmark.data_gen import DataGenerator
 from tensor_graphs.compiler.shape_inference import ShapeInference
+from tensor_graphs.ir.graph import topological_sort
 
 # Ensure all kernels are loaded
 import tensor_graphs.backend.kernels
-
-# Toggle this to True to see detailed execution logs for failing tests
-DEBUG_EXECUTION = True
 
 
 def get_all_test_kernels():
@@ -119,16 +117,12 @@ def test_kernel_correctness(
         input_nodes_for_shape.append(node)
         known_values[f"in_{i}"] = val
 
-    shape_node = None
+    # 1. Build the reference/decomposed subgraph to determine output shape
     if ref_factory:
-        try:
-            shape_node = ref_factory(input_nodes_for_shape, attrs)
-        except Exception:
-            pass
-
-    if shape_node is None:
-        # Fallback generic node
-        shape_node = TensorNode(
+        subgraph_root = ref_factory(input_nodes_for_shape, attrs)
+    else:
+        # Fallback for atomic ops without a factory in the registry
+        subgraph_root = TensorNode(
             op_type,
             input_nodes_for_shape[0].dtype if input_nodes_for_shape else DType.FP32,
             input_nodes_for_shape,
@@ -137,20 +131,27 @@ def test_kernel_correctness(
             attrs=attrs,
         )
 
-    # Run Shape Inference
+    # 2. Run Shape Inference on the entire decomposed subgraph
+    subgraph_nodes = topological_sort(subgraph_root)
+    # We include input nodes to ensure their shapes are available to the inference engine
+    inference_nodes = input_nodes_for_shape + [
+        n for n in subgraph_nodes if n not in input_nodes_for_shape
+    ]
+
     try:
-        ShapeInference.infer(input_nodes_for_shape + [shape_node], known_values)
+        ShapeInference.infer(inference_nodes, known_values)
     except Exception as e:
         print(f"Warning: Shape inference failed for {op_type}: {e}")
 
-    output_shape = shape_node.shape
-    # If output_shape has None, fallback to first input shape as a heuristic
-    if output_shape is None or any(d is None for d in output_shape):
-        if prepared_inputs:
-            output_shape = prepared_inputs[0].shape
-
-    # Determine Output DType
-    out_dt_enum = shape_node.dtype
+    # 3. The true output shape is the inferred shape of the subgraph root
+    output_shape = subgraph_root.shape
+    out_dt_enum = subgraph_root.dtype
+    if not (
+        isinstance(output_shape, Tuple)
+        and len(output_shape) > 0
+        and all([isinstance(item, int) for item in output_shape])
+    ):
+        raise ValueError(f"output_shape could not be inferred")
 
     first_input = prepared_inputs[0] if prepared_inputs else None
     is_torch = isinstance(first_input, torch.Tensor)
@@ -170,19 +171,23 @@ def test_kernel_correctness(
         elif out_dt_enum == DType.INT32:
             output_dtype = np.int32
         elif out_dt_enum == DType.BOOL:
-            output_dtype = bool
+            output_dtype = np.bool_
         else:
             output_dtype = np.float32
 
     # Allocate output buffer
     if is_torch:
+        safe_shape = cast(Tuple[int], output_shape)
+        output_dtype = cast(torch.dtype, output_dtype)
         output = torch.empty(
-            output_shape,
+            safe_shape,
             dtype=output_dtype,
             device="cuda" if first_input.is_cuda else "cpu",
         )
     else:
-        output = np.empty(output_shape, dtype=output_dtype)
+        safe_shape = cast(Tuple[int], output_shape)
+        output_dtype = cast(np.dtype, output_dtype)
+        output = np.empty(safe_shape, dtype=output_dtype)
 
     # Call kernel with new signature: (inputs, outputs, attrs)
     kernel_func(prepared_inputs, [output], attrs)
@@ -230,8 +235,7 @@ def test_kernel_correctness(
             name="ref_atomic",
             attrs=attrs,
         )
-    should_debug = DEBUG_EXECUTION and op_type in ["RoPE", "Repeat"]
-    raw_expected = evaluate_graph(graph_root, feed_dict, debug=should_debug)
+    raw_expected = evaluate_graph(graph_root, feed_dict)
     # Ensure reference output is moved to CPU/NumPy
     if isinstance(raw_expected, torch.Tensor):
         expected_output = raw_expected.detach().cpu().numpy()
@@ -252,3 +256,9 @@ def test_kernel_correctness(
         atol=atol,
         err_msg=f"Kernel {kernel_name} output mismatch",
     )
+
+
+# For debugging with vscode debugger
+for item in get_all_test_kernels():
+    if item[0] == "GELU":
+        test_kernel_correctness(*item)

@@ -19,10 +19,9 @@ def triu_ref(
 
     return TensorNode(
         OpType.TRIU,
-        data.shape,
         data.dtype,
         inputs,
-        f"triu_{data.name}",
+        name=f"triu_{data.name}",
         attrs={"k": k_val},
         backend=data.backend,
     )

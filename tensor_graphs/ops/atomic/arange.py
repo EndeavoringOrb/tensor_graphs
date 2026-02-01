@@ -15,9 +15,8 @@ def arange_ref(
     start, stop, step = inputs
     return TensorNode(
         OpType.ARANGE,
-        shape=(None,),
         dtype=start.dtype,
         parents=[start, stop, step],
         name=f"arange_{start.name}_{stop.name}_{step.name}",
-        attrs={"step": step},  # Store step value in attributes
+        attrs=attrs or {},
     )

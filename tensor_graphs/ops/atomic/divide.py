@@ -13,6 +13,4 @@ def divide_ref(
         raise ValueError("Divide requires 2 inputs")
 
     a, b = inputs
-    return TensorNode(
-        OpType.DIVIDE, a.shape, a.dtype, [a, b], f"divide_{a.name}_{b.name}"
-    )
+    return TensorNode(OpType.DIVIDE, a.dtype, [a, b], name=f"divide_{a.name}_{b.name}")

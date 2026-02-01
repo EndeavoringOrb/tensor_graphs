@@ -29,10 +29,9 @@ def copy_to_ref(
 
     return TensorNode(
         OpType.COPY_TO,
-        input_tensor.shape,
         input_tensor.dtype,
         [input_tensor],
-        f"copy_{input_tensor.name}_to_{target_backend.value}",
+        name=f"copy_{input_tensor.name}_to_{target_backend.value}",
         attrs=attrs,
         backend=target_backend,
     )

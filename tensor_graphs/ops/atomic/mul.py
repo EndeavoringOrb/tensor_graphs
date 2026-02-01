@@ -18,9 +18,8 @@ def mul_ref(
 
     return TensorNode(
         OpType.MUL,
-        a.shape,
         a.dtype,
         [a, b],
-        f"mul_{a.name}_{b.name}",
+        name=f"mul_{a.name}_{b.name}",
         backend=a.backend,
     )

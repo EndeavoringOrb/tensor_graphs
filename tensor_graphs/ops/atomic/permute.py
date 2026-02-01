@@ -25,10 +25,9 @@ def permute_ref(
 
     return TensorNode(
         OpType.PERMUTE,
-        out_shape,
         data.dtype,
         inputs,
-        f"permute_{data.name}",
+        name=f"permute_{data.name}",
         attrs=attrs,
         backend=data.backend,
     )

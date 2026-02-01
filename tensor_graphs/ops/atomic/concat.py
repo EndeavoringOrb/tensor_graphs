@@ -14,27 +14,10 @@ def concat_ref(
     if attrs is None or "axis" not in attrs:
         raise ValueError("Concat requires 'axis' in attributes")
 
-    axis = attrs["axis"]
-
-    # Calculate output shape (if possible statically)
-    # We assume all inputs have same rank and same shape except on axis
-    out_shape = list(inputs[0].shape)
-    for i, inp in enumerate(inputs[1:]):
-        if len(inp.shape) != len(out_shape):
-            raise ValueError("Concatenation requires tensors of same rank")
-
-        # Accumulate dimension on axis
-        dim = inp.shape[axis]
-        if out_shape[axis] is not None and dim is not None:
-            out_shape[axis] += dim
-        else:
-            out_shape[axis] = None
-
     return TensorNode(
         OpType.CONCAT,
-        tuple(out_shape),
         inputs[0].dtype,
         inputs,
-        f"concat_{len(inputs)}_inputs",
+        name=f"concat_{len(inputs)}_inputs",
         attrs=attrs,
     )

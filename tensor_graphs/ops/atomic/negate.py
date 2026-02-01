@@ -17,9 +17,8 @@ def negate_ref(
 
     return TensorNode(
         OpType.NEGATE,
-        x.shape,
         x.dtype,
         [x],
-        f"negate_{x.name}",
+        name=f"negate_{x.name}",
         backend=x.backend,
     )

@@ -18,10 +18,9 @@ def cast_ref(
 
     return TensorNode(
         OpType.CAST,
-        input_tensor.shape,
         target_dtype,
         [input_tensor],
-        f"cast_{input_tensor.name}",
+        name=f"cast_{input_tensor.name}",
         attrs={"to": target_dtype},
         backend=input_tensor.backend,
     )

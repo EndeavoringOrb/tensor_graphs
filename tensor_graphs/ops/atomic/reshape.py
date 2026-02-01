@@ -16,15 +16,10 @@ def reshape_ref(
 
     data, shape_tensor = inputs
 
-    # The output shape is dynamic based on the *values* in shape_tensor.
-    # We initialize it to (None,) to indicate it needs inference.
-    # ShapeInference will later resolve this using the actual values.
-
     return TensorNode(
         OpType.RESHAPE,
-        (None,),
         data.dtype,
         [data, shape_tensor],
-        f"reshape_{data.name}",
+        name=f"reshape_{data.name}",
         backend=data.backend,
     )
