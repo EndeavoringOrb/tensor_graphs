@@ -237,9 +237,7 @@ class ShapeInference:
                             axes = list(cast(Iterable[Any], axis))
                         else:
                             axes = [axis]
-                        axes = [
-                            int(a) + ndim if int(a) < 0 else int(a) for a in axes
-                        ]
+                        axes = [int(a) + ndim if int(a) < 0 else int(a) for a in axes]
 
                         new_shape = []
                         for i, d in enumerate(data_shape):

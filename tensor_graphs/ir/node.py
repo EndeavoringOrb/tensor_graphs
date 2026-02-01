@@ -71,6 +71,11 @@ class TensorNode:
         Syntactic sugar for OpType.SLICE.
         Supports standard Python slicing logic.
         """
+        if self.shape is None:
+            raise ValueError(
+                f"Cannot slice node '{self.name}' because its shape is undefined."
+            )
+
         if not isinstance(key, tuple):
             key = (key,)
 
