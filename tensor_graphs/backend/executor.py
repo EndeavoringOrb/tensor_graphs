@@ -9,9 +9,7 @@ from ..compiler.planner import Planner
 from ..compiler.compiler import Compiler
 from ..ir.graph import topological_sort
 from ..ops.atomic_types import OpType
-
-DEBUG_EXECUTION = True
-DEBUG_TYPES = ["rope", "repeat"]
+from ..config import *
 
 
 class Executor:
@@ -172,11 +170,10 @@ class Executor:
             output_views,
             attrs,
         ) in self.prepared_instructions:
-            is_detailed = any(x in node_name.lower() for x in DEBUG_TYPES)
             if DEBUG_EXECUTION:
                 print(f"[DEBUG] Executing: {node_name} using {kernel.__name__}")
 
-                if is_detailed:
+                if DEBUG_DETAILED:
                     for i, v in enumerate(input_views):
                         view: Any = v
                         if isinstance(view, torch.Tensor):
@@ -197,7 +194,7 @@ class Executor:
             # Unified Kernel API: (inputs, outputs, attrs)
             kernel(input_views, output_views, attrs)
 
-            if DEBUG_EXECUTION and is_detailed:
+            if DEBUG_EXECUTION and DEBUG_DETAILED:
                 for i, v in enumerate(output_views):
                     view: Any = v
                     if isinstance(view, torch.Tensor):
@@ -235,7 +232,7 @@ def evaluate_graph(
     Compiles and runs the graph on the fly.
     """
     planner = Planner(db_path)
-    recipe = planner.plan(root)
+    recipe = planner.plan(root, known_values=inputs)
 
     compiler = Compiler()
     # Pass inputs as known_values to enable shape inference

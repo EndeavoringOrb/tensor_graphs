@@ -259,6 +259,6 @@ def test_kernel_correctness(
 
 
 # For debugging with vscode debugger
-for item in get_all_test_kernels():
-    if item[0] == "GELU":
-        test_kernel_correctness(*item)
+# for item in get_all_test_kernels():
+#     if item[0] == "GELU":
+#         test_kernel_correctness(*item)

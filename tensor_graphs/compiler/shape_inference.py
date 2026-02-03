@@ -3,6 +3,8 @@ import math
 import numpy as np
 from ..ir.node import TensorNode
 from ..ops.atomic_types import OpType
+from ..ops.registry import get_reference_factory
+from ..ir.graph import topological_sort
 
 
 class ShapeInference:
@@ -295,6 +297,10 @@ class ShapeInference:
                                 new_shape.append(d)
                         node.shape = tuple(new_shape)
 
+            # OpType.CONSTANT
+            elif node.op_type == OpType.CONSTANT:
+                node.shape = (1,)
+
             # Unary Propagators (Generic)
             elif node.op_type in (
                 OpType.CAST,
@@ -331,3 +337,16 @@ class ShapeInference:
                             Tuple[int, ...],
                             np.broadcast_shapes(*cast(List[Tuple[int, ...]], shapes)),
                         )
+
+            elif node.op_type != OpType.INPUT:
+
+                factory = get_reference_factory(node.op_type)
+                if factory:
+                    # Decompose the node into its reference implementation
+                    sub_root = factory(node.parents, node.attrs)
+                    # Infer shapes for the entire decomposed subgraph
+                    sub_nodes = topological_sort(sub_root)
+                    # Recursively process sub-nodes using the same value context
+                    ShapeInference.infer(sub_nodes, known_values)
+                    # High-level node inherits the shape of its decomposition's root
+                    node.shape = sub_root.shape
