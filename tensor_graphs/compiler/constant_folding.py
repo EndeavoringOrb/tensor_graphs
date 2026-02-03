@@ -54,7 +54,7 @@ class ConstantFolding:
 
             if all_parents_constant and (len(parent_values) == len(node.parents)):
                 # Try to fold using kernels
-                folded_node = cls._try_fold_node(node, parent_values)
+                folded_node = cls._try_fold_node(node, parent_values, known_values)
                 if folded_node:
                     node_map[node] = folded_node
                 else:
@@ -70,7 +70,7 @@ class ConstantFolding:
 
     @classmethod
     def _try_fold_node(
-        cls, node: TensorNode, parent_values: List[Any]
+        cls, node: TensorNode, parent_values: List[Any], known_values: Dict[str, Any]
     ) -> Optional[TensorNode]:
         """
         Attempts to evaluate the node using CPU kernels.
@@ -81,7 +81,7 @@ class ConstantFolding:
         if any(p.shape is None for p in node.parents):
             return None
 
-        ShapeInference.infer([node], {})
+        ShapeInference.infer([node], known_values)
 
         if node.shape is None or any(d is None for d in node.shape):
             return None

@@ -31,160 +31,93 @@ class GraphBuilder:
     def __init__(self):
         self.params = {}
         self.inputs = {}
+        self._count = 0
+
+    def _next_name(self, op_name):
+        self._count += 1
+        return f"{op_name}_{self._count}"
 
     def input(self, name, shape, dtype=DType.FP32):
-        # Inputs are transient/fed in
-        node = TensorNode(
-            OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.TRANSIENT
-        )
+        node = TensorNode(OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.TRANSIENT)
         self.inputs[name] = node
         return node
 
     def constant(self, value, shape, dtype, name):
-        # Convert to numpy array for consistency with backend expectations
         if not isinstance(value, np.ndarray):
             value = np.array(value)
-
-        node = TensorNode(
-            op_type=OpType.CONSTANT,
-            dtype=dtype,
-            parents=[],
-            shape=shape,
-            name=name,
-            attrs={"value": value},
-            storage_type=StorageType.PERSISTENT,  # Constants are persistent
-        )
+        node = TensorNode(OpType.CONSTANT, dtype, [], shape, name, attrs={"value": value}, storage_type=StorageType.PERSISTENT)
         return node
 
     def param(self, name, shape, dtype=DType.FP32):
-        # Params are persistent weights
-        node = TensorNode(
-            OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.PERSISTENT
-        )
+        node = TensorNode(OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.PERSISTENT)
         self.params[name] = node
         return node
 
-    # --- Atomic Wrappers ---
+    # --- Fixed Atomic Wrappers with Unique Names ---
     def add(self, a, b):
-        return TensorNode(OpType.ADD, DType.FP32, [a, b], a.shape, f"add_{a.name}")
+        return TensorNode(OpType.ADD, a.dtype, [a, b], name=self._next_name("add"))
 
     def mul(self, a, b):
-        return TensorNode(OpType.MUL, DType.FP32, [a, b], a.shape, f"mul_{a.name}")
+        return TensorNode(OpType.MUL, a.dtype, [a, b], a.shape, name=self._next_name("mul"))
 
     def divide(self, a, b):
-        return TensorNode(OpType.DIVIDE, DType.FP32, [a, b], a.shape, f"div_{a.name}")
+        return TensorNode(OpType.DIVIDE, a.dtype, [a, b], a.shape, name=self._next_name("div"))
 
     def matmul(self, a, b):
-        return TensorNode(OpType.DOT, DType.FP32, [a, b], name=f"dot_{a.name}")
+        return TensorNode(OpType.DOT, a.dtype, [a, b], name=self._next_name("dot"))
 
     def reshape(self, x, target_shape, shape_node):
-        return TensorNode(
-            OpType.RESHAPE,
-            DType.FP32,
-            [x, shape_node],
-            target_shape,
-            f"reshape_{x.name}",
-        )
+        return TensorNode(OpType.RESHAPE, x.dtype, [x, shape_node], target_shape, name=self._next_name("reshape"))
 
-    def permute(self, x, dims, perm_node):
-        return TensorNode(
-            OpType.PERMUTE,
-            DType.FP32,
-            [x],
-            name=f"permute_{x.name}",
-            attrs={"dims": dims},
-        )
+    def permute(self, x, dims, perm_node=None):
+        # Using a more descriptive name for weight permutations
+        return TensorNode(OpType.PERMUTE, x.dtype, [x], name=self._next_name("permute"), attrs={"dims": dims})
 
     def concat(self, inputs, axis_node, axis_idx, output_shape):
-        return TensorNode(
-            OpType.CONCAT,
-            DType.FP32,
-            inputs,
-            output_shape,
-            "concat",
-            attrs={"axis": axis_idx},
-        )
+        return TensorNode(OpType.CONCAT, inputs[0].dtype, inputs, output_shape, name=self._next_name("concat"), attrs={"axis": axis_idx})
 
     def arange(self, start_node, stop_node, step_node):
-        return TensorNode(
-            OpType.ARANGE,
-            DType.INT32,
-            [start_node, stop_node, step_node],
-            (None,),  # Dynamic shape usually, but handled by kernel logic mostly
-            "arange",
-        )
+        return TensorNode(OpType.ARANGE, DType.INT32, [start_node, stop_node, step_node], (None,), name=self._next_name("arange"))
 
     def power(self, base, exp):
-        return TensorNode(OpType.POWER, DType.FP32, [base, exp], base.shape, "power")
+        return TensorNode(OpType.POWER, base.dtype, [base, exp], base.shape, name=self._next_name("pow"))
 
     def triu(self, x, k_node):
-        return TensorNode(OpType.TRIU, DType.FP32, [x], x.shape, "triu", attrs={"k": 1})
+        return TensorNode(OpType.TRIU, x.dtype, [x], x.shape, name=self._next_name("triu"))
 
     def cast(self, x, target_dtype):
-        return TensorNode(
-            OpType.CAST,
-            target_dtype,
-            [x],
-            x.shape,
-            f"cast_{x.name}",
-            attrs={"to": target_dtype},
-        )
+        return TensorNode(OpType.CAST, target_dtype, [x], x.shape, name=self._next_name("cast"), attrs={"to": target_dtype})
 
     def cos(self, x):
-        return TensorNode(OpType.COS, DType.FP32, [x], x.shape, "cos")
+        return TensorNode(OpType.COS, x.dtype, [x], x.shape, name=self._next_name("cos"))
 
     def sin(self, x):
-        return TensorNode(OpType.SIN, DType.FP32, [x], x.shape, "sin")
+        return TensorNode(OpType.SIN, x.dtype, [x], x.shape, name=self._next_name("sin"))
 
     def fill(self, value_node, shape_node, target_shape):
-        return TensorNode(
-            OpType.FILL,
-            value_node.dtype,
-            [value_node, shape_node],
-            target_shape,
-            "fill",
-        )
+        return TensorNode(OpType.FILL, value_node.dtype, [value_node, shape_node], target_shape, name=self._next_name("fill"))
 
     def embedding(self, indices, weights):
-        out_shape = indices.shape + (weights.shape[-1],)
-        return TensorNode(
-            OpType.GATHER, DType.FP32, [weights, indices], out_shape, "embed"
-        )
+        out_shape = indices.shape + (weights.shape[-1],) if indices.shape and weights.shape else None
+        return TensorNode(OpType.GATHER, weights.dtype, [weights, indices], out_shape, name=self._next_name("embed"))
 
     def rms_norm(self, x, scale, eps_node):
-        # Pass Op name as string so the Registry can match it later
-        return TensorNode(
-            "RMSNorm", x.dtype, [x, scale, eps_node], x.shape, f"rmsnorm_{x.name}"
-        )
+        return TensorNode("RMSNorm", x.dtype, [x, scale, eps_node], x.shape, name=self._next_name("rmsnorm"))
 
     def gelu(self, x):
-        return TensorNode("GELU", x.dtype, [x], x.shape, f"gelu_{x.name}")
+        return TensorNode("GELU", x.dtype, [x], x.shape, name=self._next_name("gelu"))
 
     def softmax(self, x):
-        return TensorNode("Softmax", x.dtype, [x], x.shape, f"softmax_{x.name}")
+        return TensorNode("Softmax", x.dtype, [x], x.shape, name=self._next_name("softmax"))
 
     def rope(self, x, cos, sin):
-        return TensorNode("RoPE", x.dtype, [x, cos, sin], x.shape, f"rope_{x.name}")
+        return TensorNode("RoPE", x.dtype, [x, cos, sin], x.shape, name=self._next_name("rope"))
 
     def repeat(self, x, repeats, axis=1):
-        """Repeats the input tensor along the specified axis."""
-        return TensorNode(
-            OpType.REPEAT,
-            x.dtype,
-            [x],
-            name="repeat",
-            attrs={"repeats": repeats, "axis": axis},
-        )
+        return TensorNode(OpType.REPEAT, x.dtype, [x], name=self._next_name("repeat"), attrs={"repeats": repeats, "axis": axis})
 
     def sum(self, x, axis=1, keepdims=True):
-        """Sums the input tensor along the specified axis."""
-        return TensorNode(
-            OpType.SUM,
-            x.dtype,
-            [x],
-            name="sum",
-            attrs={"axis": axis, "keepdims": keepdims},
-        )
+        return TensorNode(OpType.SUM, x.dtype, [x], name=self._next_name("sum"), attrs={"axis": axis, "keepdims": keepdims})
 
 
 # ==============================================================================

@@ -3,7 +3,8 @@ from .node import TensorNode
 from .dtypes import DType, Backend
 import json
 import numpy as np
-from enum import Enum  # Add this import
+from enum import Enum
+import sympy
 
 
 def topological_sort(root: TensorNode) -> List[TensorNode]:
@@ -95,6 +96,8 @@ class GraphEncoder(json.JSONEncoder):
             return o.value
         if isinstance(o, TensorNode):
             return str(o)
+        if isinstance(o, sympy.Integer):
+            return int(o)
         return super().default(o)
 
 

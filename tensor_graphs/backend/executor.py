@@ -124,8 +124,8 @@ class Executor:
         meta = self.graph.node_metadata[name]
 
         # Add this safety check:
-        data_size = np.prod(np.shape(data))
-        meta_size = np.prod(meta.shape)
+        data_size = int(np.prod(np.shape(data)))
+        meta_size = int(np.prod(meta.shape))
         if data_size != meta_size:
             raise ValueError(
                 f"Shape mismatch for node '{name}': "
@@ -188,14 +188,8 @@ class Executor:
             if DEBUG_EXECUTION:
                 print(f"[DEBUG] Executing: {node_name} ({kernel.__name__})")
 
-            start_k = time.perf_counter()
-            kernel(input_views, output_views, attrs)
-            end_k = time.perf_counter()
-
             if DEBUG_EXECUTION and DEBUG_DETAILED:
-                duration = (end_k - start_k) * 1000
-                print(f"  -> Finished in {duration:.4f} ms")
-                for i, v in enumerate(output_views):
+                for i, v in enumerate(input_views):
                     view: Any = v
                     if isinstance(view, torch.Tensor):
                         val = (
@@ -212,9 +206,13 @@ class Executor:
                     print(f"  Input {i} shape: {view.shape}, mean: {val}")
 
             # Unified Kernel API: (inputs, outputs, attrs)
+            start_k = time.perf_counter()
             kernel(input_views, output_views, attrs)
+            end_k = time.perf_counter()
 
             if DEBUG_EXECUTION and DEBUG_DETAILED:
+                duration = (end_k - start_k) * 1000
+                print(f"  -> Finished in {duration:.4f} ms")
                 for i, v in enumerate(output_views):
                     view: Any = v
                     if isinstance(view, torch.Tensor):

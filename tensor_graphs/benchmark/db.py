@@ -257,7 +257,13 @@ class BenchmarkDB:
                 WHERE op_type=? AND backend=? AND dtype=? AND shape_json=? AND attrs_json=?
                 ORDER BY timestamp DESC LIMIT 1
             """,
-                (op_type, backend, dtype, json.dumps(shape_list), attrs_json),
+                (
+                    op_type,
+                    backend,
+                    dtype,
+                    json.dumps(shape_list, cls=GraphEncoder),
+                    attrs_json,
+                ),
             )
             row = cursor.fetchone()
             if row:
