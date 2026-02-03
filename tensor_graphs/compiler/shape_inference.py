@@ -161,6 +161,10 @@ class ShapeInference:
                                 f"DOT requires concrete shapes, found None in: {s0}, {s1}"
                             )
 
+                        # Cast to concrete tuples for the type checker
+                        s0 = cast(Tuple[int, ...], s0)
+                        s1 = cast(Tuple[int, ...], s1)
+
                         # Handle basic MatMul logic
                         # If 2D: (M, K) @ (K, N) -> (M, N)
                         if len(s0) == 2 and len(s1) == 2:

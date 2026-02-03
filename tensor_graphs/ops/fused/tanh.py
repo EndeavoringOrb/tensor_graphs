@@ -17,7 +17,3 @@ def tanh_decomposition(inputs, attrs=None):
 
 
 register_reference_factory("Tanh", tanh_decomposition)
-
-
-def tanh_ref(inputs, attrs=None):
-    return TensorNode("Tanh", inputs[0].dtype, inputs, name="tanh")

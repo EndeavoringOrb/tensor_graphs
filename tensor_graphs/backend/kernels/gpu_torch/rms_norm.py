@@ -6,7 +6,7 @@ from typing import Any, cast
 from torch.utils.cpp_extension import load
 from ...registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature, Backend, KernelUnavailableError
-from ....ops.fused.rms_norm import rms_norm_ref
+from ....ops.fused.rms_norm import rms_norm_decomposition
 
 # 1. JIT Compile the Kernel
 _CUR_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,7 +38,7 @@ if _RMS_NORM_OPS is not None:
             TensorSignature(DType.FP32, shape=(1,), backend=Backend.GPU_TORCH),
         ],
         backend=Backend.GPU_TORCH,
-        reference_factory=rms_norm_ref,
+        reference_factory=rms_norm_decomposition,
     )
     def rms_norm_cuda(inputs, outputs, attrs):
         # Static analysis (pyright) doesn't know _RMS_NORM_OPS is not None here,
@@ -78,7 +78,7 @@ else:
             TensorSignature(DType.FP32, shape=(1,), backend=Backend.GPU_TORCH),
         ],
         backend=Backend.GPU_TORCH,
-        reference_factory=rms_norm_ref,
+        reference_factory=rms_norm_decomposition,
     )
     def rms_norm_cuda_fallback(inputs, outputs, attrs):
         raise KernelUnavailableError(

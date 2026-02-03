@@ -10,7 +10,3 @@ def fma_decomposition(inputs, attrs=None):
 
 
 register_reference_factory("FusedMulAdd", fma_decomposition)
-
-
-def fused_mul_add_ref(inputs, attrs=None):
-    return TensorNode("FusedMulAdd", inputs[0].dtype, inputs, name="fma")

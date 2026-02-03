@@ -21,10 +21,10 @@ from tensor_graphs.backend.executor import Executor
 
 # Import Fused Ops Definitions
 from tensor_graphs.ops.fused import (
-    rope_ref,
-    gelu_ref,
-    rms_norm_ref,
-    softmax_ref,
+    rope_decomposition,
+    gelu_decomposition,
+    rms_norm_decomposition,
+    softmax_decomposition,
 )
 
 # Ensure Kernels are Registered
@@ -165,17 +165,17 @@ class GraphBuilder:
         )
 
     def rms_norm(self, x, scale, eps_node):
-        node = rms_norm_ref([x, scale, eps_node])
+        node = rms_norm_decomposition([x, scale, eps_node])
         return node
 
     def gelu(self, x):
-        return gelu_ref([x])
+        return gelu_decomposition([x])
 
     def softmax(self, x):
-        return softmax_ref([x])
+        return softmax_decomposition([x])
 
     def rope(self, x, cos, sin):
-        return rope_ref([x, cos, sin])
+        return rope_decomposition([x, cos, sin])
 
     def repeat(self, x, repeats, axis=1):
         """Repeats the input tensor along the specified axis."""

@@ -2,7 +2,7 @@ from ...ir.node import TensorNode
 from ..atomic_types import OpType
 from ..registry import register_reference_factory
 import numpy as np
-from .tanh import tanh_ref
+from .tanh import tanh_decomposition
 
 
 def gelu_decomposition(inputs, attrs=None):
@@ -23,6 +23,7 @@ def gelu_decomposition(inputs, attrs=None):
     term2 = TensorNode(OpType.ADD, x.dtype, [x, term1], name="t2")
     inner = TensorNode(OpType.MUL, x.dtype, [term2, c_sqrt], name="inner")
 
+    tanh_node = tanh_decomposition([inner])
     # Check if we should use high-level tanh or atomic
     # For robust decomposition, use atomic factory directly if needed, or rely on recursion
     # Here we invoke the decomposition logic for tanh manually to be safe, or just return Tanh node
@@ -35,7 +36,3 @@ def gelu_decomposition(inputs, attrs=None):
 
 
 register_reference_factory("GELU", gelu_decomposition)
-
-
-def gelu_ref(inputs, attrs=None):
-    return TensorNode("GELU", inputs[0].dtype, inputs, name="gelu")

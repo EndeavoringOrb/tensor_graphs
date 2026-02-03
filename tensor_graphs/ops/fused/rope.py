@@ -31,8 +31,3 @@ def rope_decomposition(inputs, attrs=None):
 
 
 register_reference_factory("RoPE", rope_decomposition)
-
-
-# Main entry point returns High-Level Node
-def rope_ref(inputs, attrs=None):
-    return TensorNode("RoPE", inputs[0].dtype, inputs, name="rope")
