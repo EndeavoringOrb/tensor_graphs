@@ -5,10 +5,13 @@ from ..registry import register_reference_factory
 
 def rms_norm_decomposition(inputs, attrs=None):
     x, scale, eps = inputs
+    if x.shape is None:
+        raise ValueError(
+            f"Decomposition of RMSNorm failed: Node '{x.name}' has no inferred shape. "
+            "Ensure ShapeInference.infer() is called before expanding fused operations."
+        )
     sq = TensorNode(OpType.MUL, x.dtype, [x, x], name="rmsnorm_sq")
     axis = attrs.get("axis", -1) if attrs else -1
-    sum_shape = list(x.shape)
-    sum_shape[axis] = 1
     sum_sq = TensorNode(
         OpType.SUM,
         x.dtype,

@@ -19,14 +19,6 @@ from tensor_graphs.compiler.planner import Planner
 from tensor_graphs.compiler.compiler import Compiler
 from tensor_graphs.backend.executor import Executor
 
-# Import Fused Ops Definitions
-from tensor_graphs.ops.fused import (
-    rope_decomposition,
-    gelu_decomposition,
-    rms_norm_decomposition,
-    softmax_decomposition,
-)
-
 # Ensure Kernels are Registered
 import tensor_graphs.backend.kernels
 
@@ -83,10 +75,7 @@ class GraphBuilder:
         return TensorNode(OpType.DIVIDE, DType.FP32, [a, b], a.shape, f"div_{a.name}")
 
     def matmul(self, a, b):
-        out_shape = list(a.shape[:-1]) + [b.shape[-1]]
-        return TensorNode(
-            OpType.DOT, DType.FP32, [a, b], tuple(out_shape), f"dot_{a.name}"
-        )
+        return TensorNode(OpType.DOT, DType.FP32, [a, b], name=f"dot_{a.name}")
 
     def reshape(self, x, target_shape, shape_node):
         return TensorNode(
@@ -98,13 +87,11 @@ class GraphBuilder:
         )
 
     def permute(self, x, dims, perm_node):
-        new_shape = tuple(x.shape[i] for i in dims)
         return TensorNode(
             OpType.PERMUTE,
             DType.FP32,
             [x],
-            new_shape,
-            f"permute_{x.name}",
+            name=f"permute_{x.name}",
             attrs={"dims": dims},
         )
 
@@ -165,48 +152,37 @@ class GraphBuilder:
         )
 
     def rms_norm(self, x, scale, eps_node):
-        node = rms_norm_decomposition([x, scale, eps_node])
-        return node
+        # Pass Op name as string so the Registry can match it later
+        return TensorNode(
+            "RMSNorm", x.dtype, [x, scale, eps_node], x.shape, f"rmsnorm_{x.name}"
+        )
 
     def gelu(self, x):
-        return gelu_decomposition([x])
+        return TensorNode("GELU", x.dtype, [x], x.shape, f"gelu_{x.name}")
 
     def softmax(self, x):
-        return softmax_decomposition([x])
+        return TensorNode("Softmax", x.dtype, [x], x.shape, f"softmax_{x.name}")
 
     def rope(self, x, cos, sin):
-        return rope_decomposition([x, cos, sin])
+        return TensorNode("RoPE", x.dtype, [x, cos, sin], x.shape, f"rope_{x.name}")
 
     def repeat(self, x, repeats, axis=1):
         """Repeats the input tensor along the specified axis."""
-        new_shape = list(x.shape)
-        new_shape[axis] *= repeats
         return TensorNode(
             OpType.REPEAT,
             x.dtype,
             [x],
-            tuple(new_shape),
-            "repeat",
+            name="repeat",
             attrs={"repeats": repeats, "axis": axis},
         )
 
     def sum(self, x, axis=1, keepdims=True):
         """Sums the input tensor along the specified axis."""
-        new_shape = list(x.shape)
-        if axis is not None:
-            if keepdims:
-                new_shape[axis] = 1
-            else:
-                new_shape.pop(axis)
-        else:
-            new_shape = [1] if keepdims else []
-
         return TensorNode(
             OpType.SUM,
             x.dtype,
             [x],
-            tuple(new_shape),
-            "sum",
+            name="sum",
             attrs={"axis": axis, "keepdims": keepdims},
         )
 
@@ -545,6 +521,10 @@ def main():
     tokenizer_path = "resources/tokenizer.json"
     weights_path = "resources/model.safetensors"
 
+    if not os.path.exists(weights_path):
+        print(f"Weights not found at {weights_path}. Please ensure the file exists.")
+        return
+
     print(f"Loading weights from {weights_path}...")
     state_dict = load_file(weights_path)
 
@@ -561,27 +541,25 @@ def main():
     prompt = "<start_of_turn>user\nExplain Quantum Mechanics to a 5 year old.<end_of_turn>\n<start_of_turn>model\n"
     input_ids = tokenizer.encode(prompt).ids
 
-    # Generation Loop
+    # Generation Loop Params
     max_new_tokens = 50
-    # Fixed Context Length for Compilation
     MAX_SEQ_LEN = 128
 
     print(f"\nPrompt: {prompt}")
     print("Generating...", end="", flush=True)
 
-    # Precompute RoPE cache (Full Context) using GRAPH OPS
+    # Precompute RoPE cache using evaluate_graph (handled inside compute_rope_params_graph)
     full_cos, full_sin = compute_rope_params_graph(
         GEMMA3_CONFIG_270M["head_dim"],
         theta_base=10000.0,
         context_length=4096,
     )
 
-    # --- BUILD GRAPH ONCE ---
+    # --- BUILD GRAPH ---
     cfg = GEMMA3_CONFIG_270M
     model = Gemma3Model(cfg, weights_np)
 
-    # Define Fixed Inputs for Compiled Graph
-    # Using MAX_SEQ_LEN
+    # Define Input Nodes
     in_node = model.builder.input("input_ids", (1, MAX_SEQ_LEN), DType.INT32)
     cos_node = model.builder.input(
         "cos", (1, 1, MAX_SEQ_LEN, cfg["head_dim"]), DType.FP32
@@ -593,12 +571,6 @@ def main():
         "mask", (1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), DType.FP32
     )
 
-    # Dynamic Shape Inputs for Reshape
-    # (Must be fixed value inputs now, effectively constants or inputs that don't change size, just values?)
-    # But for Reshape op, the `shape_node` is input.
-    # The `shape` must be consistent with memory alloc.
-    # We will pass the fixed MAX shapes.
-
     q_shape_node = model.builder.input("q_shape", (4,), DType.INT32)
     kv_shape_node = model.builder.input("kv_shape", (4,), DType.INT32)
     flat_shape_node = model.builder.input("flat_shape", (3,), DType.INT32)
@@ -609,69 +581,29 @@ def main():
         "flat_shape": flat_shape_node,
     }
 
-    # Build Forward Pass
+    # Build the computational graph
     logits_node = model.forward(in_node, cos_node, sin_node, mask_node, shapes)
 
-    # --- COMPILE ---
-    print("\nCompiling Graph...")
-    planner = Planner()
-    recipe = planner.plan(logits_node)
-
-    compiler = Compiler()
-    compiled_graph = compiler.compile(recipe)
-
-    print(
-        f"Compiled! Total Memory: {compiled_graph.total_memory_bytes / 1024 / 1024:.2f} MB"
-    )
-
-    # Initialize Executor
-    executor = Executor(compiled_graph)
-
-    # Load Persistent Weights
-    print("Loading Weights into Static Memory...")
-    # Merge weights and constants
-    all_persistent = {**model.weights, **model.constant_inputs}
-    executor.load_weights(all_persistent)
+    # Combine weights and constant inputs into a base dictionary
+    # These will be passed as inputs to evaluate_graph since they are defined as Param/Input nodes
+    base_inputs = {**model.weights, **model.constant_inputs}
 
     # --- RUN LOOP ---
     for _ in range(max_new_tokens):
         seq_len = len(input_ids)
         if seq_len > MAX_SEQ_LEN:
-            print("Max sequence length reached.")
             break
 
-        # 3a. Prepare Inputs (Padded)
+        # Prepare iteration-specific inputs
         input_ids_padded = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
         input_ids_padded[0, :seq_len] = input_ids
 
-        cos_cur = full_cos[:, :, :MAX_SEQ_LEN, :]
-        sin_cur = full_sin[:, :, :MAX_SEQ_LEN, :]
-
-        # Mask
+        # Construct Attention Mask
         mask_cur_small = compute_causal_mask_np(seq_len)
-        mask_cur = np.zeros((1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), dtype=np.float32)
-        # We need to mask the padding too.
-        # Padding tokens should be ignored.
-        # But we are just running for correctness of the *next token*.
-        # The next token depends on the first seq_len tokens.
-        # The attention mask for the first seq_len tokens should be correct.
-        # The rest doesn't matter much if we ignore their logits.
-
-        # Actually, simpler: Mask the attention.
-        # If we use 0 for padding in input_ids, they embed to something.
-        # We should mask attention to padding.
-        # compute_causal_mask_np returns -1e9 for future.
-        # We want to mask everything > seq_len.
-
-        # Construct full mask:
-        # 1. Causal mask for [0..seq_len]
-        # 2. Block everything for [seq_len..MAX]
-
         mask_full = np.full((1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), -1e9, dtype=np.float32)
-        # Copy causal mask to top-left
         mask_full[:, :, :seq_len, :seq_len] = mask_cur_small
 
-        # 3b. Fixed Shapes
+        # Define concrete values for shape tensors
         q_shape = np.array(
             [1, MAX_SEQ_LEN, cfg["n_heads"], cfg["head_dim"]], dtype=np.int32
         )
@@ -682,28 +614,28 @@ def main():
             [1, MAX_SEQ_LEN, cfg["n_heads"] * cfg["head_dim"]], dtype=np.int32
         )
 
-        # 3c. Final Feed Dict
-        feed_dict = {
+        # Final input dictionary for this step
+        step_inputs = {
+            **base_inputs,
             "input_ids": input_ids_padded,
-            "cos": cos_cur,
-            "sin": sin_cur,
+            "cos": full_cos[:, :, :MAX_SEQ_LEN, :],
+            "sin": full_sin[:, :, :MAX_SEQ_LEN, :],
             "mask": mask_full,
             "q_shape": q_shape,
             "kv_shape": kv_shape,
             "flat_shape": flat_shape,
         }
 
-        # 3d. Execute
-        logits_out = executor.run(feed_dict)
+        # --- EXECUTE VIA evaluate_graph ---
+        # This helper handles optimization, compilation, and execution in one go.
+        # It uses step_inputs for shape inference, resolving the previous ValueError.
+        logits_out = evaluate_graph(logits_node, step_inputs)
 
-        # 3e. Next Token Strategy (Greedy)
-        # We need logits at index seq_len - 1
+        # Greedy Decoding
         next_token_logits = logits_out[0, seq_len - 1, :]
         next_token_id = int(np.argmax(next_token_logits))
 
         input_ids.append(next_token_id)
-
-        # Decode and Print
         word = tokenizer.decode([next_token_id])
         print(word, end="", flush=True)
 

@@ -10,6 +10,7 @@ from ..compiler.compiler import Compiler
 from ..ir.graph import topological_sort
 from ..ops.atomic_types import OpType
 from ..config import *
+import time
 
 
 class Executor:
@@ -28,14 +29,22 @@ class Executor:
             end = alloc.offset + alloc.size_bytes
             device_sizes[alloc.device] = max(device_sizes.get(alloc.device, 0), end)
 
+        if DEBUG_EXECUTION:
+            print(
+                f"[DEBUG] Initializing Executor with {len(self.graph.instructions)} instructions."
+            )
+
         for device, size in device_sizes.items():
+            if DEBUG_EXECUTION:
+                print(
+                    f"[DEBUG] Pre-allocating {size / 1024 / 1024:.2f} MB on device: {device}"
+                )
+
             if "cuda" in device or "gpu" in device:
-                # Align to 256 bytes or more
                 self.buffers[device] = torch.empty(
                     size, dtype=torch.uint8, device=device
                 )
             else:
-                # CPU
                 self.buffers[device] = np.zeros(size, dtype=np.uint8)
 
         # Pre-calculate views for instructions
@@ -47,9 +56,6 @@ class Executor:
                 input_views.append(self._get_view(offset, input_name))
 
             output_views = []
-            # Note: TensorNode metadata usually keyed by node_name.
-            # For multi-output nodes, we might need refined metadata keys.
-            # Assuming single-output nodes for now:
             for offset in inst.output_offsets:
                 output_views.append(self._get_view(offset, inst.node_name))
 
@@ -57,7 +63,6 @@ class Executor:
                 (inst.node_name, inst.kernel, input_views, output_views, inst.attrs)
             )
 
-        # Pre-calculate input/output views
         self.input_views = {
             name: self._get_view(offset, name)
             for name, offset in self.graph.input_offsets.items()
@@ -118,6 +123,16 @@ class Executor:
         buf = self.buffers[alloc.device]
         meta = self.graph.node_metadata[name]
 
+        # Add this safety check:
+        data_size = np.prod(np.shape(data))
+        meta_size = np.prod(meta.shape)
+        if data_size != meta_size:
+            raise ValueError(
+                f"Shape mismatch for node '{name}': "
+                f"Buffer expects {meta_size} elements ({meta.shape}), "
+                f"but provided data has {data_size} elements ({np.shape(data)})."
+            )
+
         if isinstance(buf, np.ndarray):
             if not isinstance(data, np.ndarray):
                 # Expand scalar to match node shape
@@ -171,25 +186,30 @@ class Executor:
             attrs,
         ) in self.prepared_instructions:
             if DEBUG_EXECUTION:
-                print(f"[DEBUG] Executing: {node_name} using {kernel.__name__}")
+                print(f"[DEBUG] Executing: {node_name} ({kernel.__name__})")
 
-                if DEBUG_DETAILED:
-                    for i, v in enumerate(input_views):
-                        view: Any = v
-                        if isinstance(view, torch.Tensor):
-                            val = (
-                                f"{view.float().mean().item():.6f}"
-                                if view.is_floating_point() and view.numel() > 0
-                                else "N/A"
-                            )
-                        else:
-                            val = (
-                                f"{view.mean():.6f}"
-                                if np.issubdtype(view.dtype, np.number)
-                                and view.size > 0
-                                else "N/A"
-                            )
-                        print(f"  Input {i} shape: {view.shape}, mean: {val}")
+            start_k = time.perf_counter()
+            kernel(input_views, output_views, attrs)
+            end_k = time.perf_counter()
+
+            if DEBUG_EXECUTION and DEBUG_DETAILED:
+                duration = (end_k - start_k) * 1000
+                print(f"  -> Finished in {duration:.4f} ms")
+                for i, v in enumerate(output_views):
+                    view: Any = v
+                    if isinstance(view, torch.Tensor):
+                        val = (
+                            f"{view.float().mean().item():.6f}"
+                            if view.is_floating_point() and view.numel() > 0
+                            else "N/A"
+                        )
+                    else:
+                        val = (
+                            f"{view.mean():.6f}"
+                            if np.issubdtype(view.dtype, np.number) and view.size > 0
+                            else "N/A"
+                        )
+                    print(f"  Input {i} shape: {view.shape}, mean: {val}")
 
             # Unified Kernel API: (inputs, outputs, attrs)
             kernel(input_views, output_views, attrs)
@@ -228,38 +248,65 @@ def evaluate_graph(
     db_path: str = "benchmarks.db",
 ) -> Any:
     """
-    Helper function to maintain compatibility with tests.
-    Compiles and runs the graph on the fly.
+    Compiles and runs the graph with enhanced stage logging.
     """
+    total_start = time.perf_counter()
+
+    if DEBUG_EXECUTION:
+        print(
+            f"\n{'='*60}\n[DEBUG] EVALUATING GRAPH: {root.name} (Op: {root.op_type})\n{'='*60}"
+        )
+
+    # 1. Planning Stage
+    if DEBUG_EXECUTION:
+        print("[DEBUG] Stage 1: Planning (Cost-based optimization & decomposition)...")
     planner = Planner(db_path)
     recipe = planner.plan(root, known_values=inputs)
 
+    # 2. Compilation Stage
+    if DEBUG_EXECUTION:
+        print("[DEBUG] Stage 2: Compiling (Liveness analysis & memory planning)...")
     compiler = Compiler()
-    # Pass inputs as known_values to enable shape inference
     compiled_graph = compiler.compile(recipe, known_values=inputs)
 
     if DEBUG_EXECUTION:
-        print(f"\n[DEBUG] Compiled Graph for {root.op_type}:")
-        for inst in compiled_graph.instructions:
+        print(f"[DEBUG] Compiled Graph Instructions:")
+        for i, inst in enumerate(compiled_graph.instructions):
             print(
-                f"  {inst.node_name} = {inst.kernel.__name__}({[n for n in inst.input_node_names]})"
+                f"  {i:03d} | {inst.node_name:<20} = {inst.kernel.__name__}({', '.join(inst.input_node_names)})"
             )
+        print(
+            f"[DEBUG] Total Static Memory Required: {compiled_graph.total_memory_bytes / 1024:.2f} KB"
+        )
 
+    # 3. Allocation Stage
+    if DEBUG_EXECUTION:
+        print("[DEBUG] Stage 3: Initializing Executor & Buffers...")
     executor = Executor(compiled_graph)
 
-    # Automatically load constants found in the graph
+    # 4. Weight Loading Stage
     all_nodes = topological_sort(recipe.root)
-    constants = {}
-    for node in all_nodes:
-        if node.op_type == OpType.CONSTANT:
-            val = node.attrs.get("value")
-            if val is not None:
-                constants[node.name] = val
+    constants = {
+        n.name: n.attrs["value"]
+        for n in all_nodes
+        if n.op_type == OpType.CONSTANT and "value" in n.attrs
+    }
 
     if DEBUG_EXECUTION:
-        print(f"[DEBUG] Found {len(constants)} constants in graph.")
-
+        print(
+            f"[DEBUG] Stage 4: Loading {len(constants)} constants into persistent buffers..."
+        )
     executor.load_weights(constants)
 
-    # Handle constants that might be in inputs or attributes
-    return executor.run(inputs)
+    # 5. Execution Stage
+    if DEBUG_EXECUTION:
+        print("[DEBUG] Stage 5: Running kernel execution loop...")
+    result = executor.run(inputs)
+
+    total_end = time.perf_counter()
+    if DEBUG_EXECUTION:
+        print(
+            f"{'='*60}\n[DEBUG] GRAPH EVALUATION COMPLETE in {(total_end - total_start)*1000:.2f} ms\n{'='*60}\n"
+        )
+
+    return result

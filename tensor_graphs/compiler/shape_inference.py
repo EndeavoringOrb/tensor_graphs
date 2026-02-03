@@ -189,21 +189,35 @@ class ShapeInference:
 
                     target_dims = shape_arr.astype(int).flatten().tolist()
 
-                    if -1 in target_dims:
-                        if data.shape and all(d is not None for d in data.shape):
-                            total_elems = int(
-                                np.prod([d for d in data.shape if d is not None])
-                            )
+                    # Validation: Check volume consistency if input shape is known
+                    if data.shape is not None and all(
+                        d is not None for d in data.shape
+                    ):
+                        input_vol = math.prod(cast(Iterable[int], data.shape))
+
+                        if -1 in target_dims:
                             known_prod = 1
                             for d in target_dims:
                                 if d != -1:
                                     known_prod *= d
 
-                            if known_prod != 0 and total_elems % known_prod == 0:
-                                missing_dim = total_elems // known_prod
-                                target_dims = [
-                                    d if d != -1 else missing_dim for d in target_dims
-                                ]
+                            if known_prod == 0 or input_vol % known_prod != 0:
+                                raise ValueError(
+                                    f"Reshape volume mismatch at '{node.name}': "
+                                    f"Input vol {input_vol} not divisible by target dims {target_dims}"
+                                )
+
+                            missing_dim = input_vol // known_prod
+                            target_dims = [
+                                d if d != -1 else missing_dim for d in target_dims
+                            ]
+                        else:
+                            target_vol = math.prod(target_dims)
+                            if input_vol != target_vol:
+                                raise ValueError(
+                                    f"Reshape volume mismatch at '{node.name}': "
+                                    f"Cannot reshape {data.shape} (vol {input_vol}) to {tuple(target_dims)} (vol {target_vol})."
+                                )
 
                     node.shape = tuple(target_dims)
 
@@ -303,7 +317,18 @@ class ShapeInference:
 
             # OpType.CONSTANT
             elif node.op_type == OpType.CONSTANT:
-                node.shape = (1,)
+                # If the constant already has a value, use its shape
+                val = node.attrs.get("value")
+                if val is not None:
+                    if hasattr(val, "shape"):
+                        node.shape = tuple(val.shape)
+                    elif isinstance(val, (list, tuple)):
+                        node.shape = (len(val),)
+                    else:
+                        node.shape = ()  # Scalar
+                elif node.shape is None:
+                    # Only default to (1,) if no shape is provided at all
+                    node.shape = (1,)
 
             # Unary Propagators (Generic)
             elif node.op_type in (

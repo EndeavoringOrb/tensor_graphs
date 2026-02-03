@@ -11,7 +11,7 @@ from ....ops.atomic.fill import fill_ref
         TensorSignature(
             DType.FP32, shape=(1,), backend=Backend.CPU_NUMPY
         ),  # Value (Scalar)
-        TensorSignature(DType.INT32, shape=(None,), backend=Backend.CPU_NUMPY),  # Shape
+        TensorSignature(DType.INT32, shape=None, backend=Backend.CPU_NUMPY),  # Shape
     ],
     backend=Backend.CPU_NUMPY,
     target_dtype=DType.FP32,
@@ -32,7 +32,7 @@ def fill_fp32(inputs, outputs, attrs):
     OpType.FILL,
     [
         TensorSignature(DType.INT32, shape=(1,), backend=Backend.CPU_NUMPY),
-        TensorSignature(DType.INT32, shape=(None,), backend=Backend.CPU_NUMPY),
+        TensorSignature(DType.INT32, shape=None, backend=Backend.CPU_NUMPY),
     ],
     backend=Backend.CPU_NUMPY,
     target_dtype=DType.INT32,

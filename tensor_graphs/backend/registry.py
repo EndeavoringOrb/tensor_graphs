@@ -118,12 +118,10 @@ class KernelRegistry:
         for pat, con in zip(patterns, concrete):
 
             # 1. Backend Match
-            # If pattern specifies a backend, it MUST match.
-            # If pattern is None (wildcard), it matches anything (score +0)
             if pat.backend is not None:
                 if pat.backend != con.backend:
                     return -1
-                total_score += 10  # Strong match for explicit backend
+                total_score += 10
 
             # 2. DType Match
             if pat.dtype != con.dtype:
@@ -134,6 +132,11 @@ class KernelRegistry:
                 total_score += 1
             elif con.shape is None:
                 return -1
+            elif pat.is_scalar() and con.is_scalar():
+                # Treat () and (1,) as equivalent scalars.
+                # Use a high score (8) to prefer this over a generic wildcard (1),
+                # but slightly lower than an exact dim match (10).
+                total_score += 8
             elif len(pat.shape) != len(con.shape):
                 return -1
             else:
