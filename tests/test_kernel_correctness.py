@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from typing import List, Dict, Any, Tuple, cast, Optional
 
+import numbers
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType, Backend, TensorSignature
 from tensor_graphs.ops.atomic_types import OpType
@@ -149,7 +150,7 @@ def test_kernel_correctness(
     if not (
         isinstance(output_shape, Tuple)
         and len(output_shape) > 0
-        and all([isinstance(item, int) for item in output_shape])
+        and all([isinstance(item, numbers.Integral) for item in output_shape])
     ):
         raise ValueError(f"output_shape could not be inferred")
 
@@ -259,6 +260,6 @@ def test_kernel_correctness(
 
 
 # For debugging with vscode debugger
-# for item in get_all_test_kernels():
-#     if item[0] == "RoPE":
-#         test_kernel_correctness(*item)
+for item in get_all_test_kernels():
+    if item[0] == "FusedMulAdd":
+        test_kernel_correctness(*item)
