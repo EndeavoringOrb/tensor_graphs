@@ -246,9 +246,16 @@ def evaluate_graph(
     root: TensorNode,
     inputs: Dict[str, Any],
     db_path: str = "benchmarks.db",
+    greedy: bool = True,
 ) -> Any:
     """
     Compiles and runs the graph with enhanced stage logging.
+    Args:
+        root: The root node of the graph.
+        inputs: Dictionary of input values.
+        db_path: Path to benchmark database.
+        greedy: If True, the Planner uses greedy optimization (fast compilation).
+                If False, it performs exhaustive search (slow compilation, potentially faster execution).
     """
     total_start = time.perf_counter()
 
@@ -259,8 +266,10 @@ def evaluate_graph(
 
     # 1. Planning Stage
     if DEBUG_EXECUTION:
-        print("[DEBUG] Stage 1: Planning (Cost-based optimization & decomposition)...")
-    planner = Planner(db_path)
+        strategy_name = "Greedy" if greedy else "Exhaustive"
+        print(f"[DEBUG] Stage 1: Planning ({strategy_name} optimization)...")
+
+    planner = Planner(db_path, greedy=greedy)
     recipe = planner.plan(root, known_values=inputs)
 
     # 2. Compilation Stage

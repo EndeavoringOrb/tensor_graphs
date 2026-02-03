@@ -19,11 +19,12 @@ class ExecutionRecipe:
 
 
 class Planner:
-    def __init__(self, db_path="benchmarks.db"):
+    def __init__(self, db_path="benchmarks.db", greedy: bool = True):
         self.db = BenchmarkDB(db_path)
         self.cost_model = CostModel(self.db)
         # Memoization: (node_hash, target_backend) -> (cost, rewritten_node, backend_assignments)
         self.memo = {}
+        self.greedy = greedy
 
     def plan(
         self, root: TensorNode, known_values: Optional[Dict[str, Any]] = None
@@ -56,7 +57,7 @@ class Planner:
 
         candidates = []
 
-        # 2. Base Cases
+        # 1. Base Cases
         if node.op_type in (OpType.INPUT, OpType.CONSTANT):
             transfer_cost = self.cost_model.estimate_transfer_cost(
                 node.backend, target_backend, node.shape, node.dtype
@@ -78,6 +79,41 @@ class Planner:
 
             self.memo[node_hash] = res
             return res
+
+        # 2. Strategy C: Fusion (Prioritized in Greedy Mode)
+        # We check fusion before direct execution because fused kernels are generally more efficient.
+        if node.op_type == OpType.ADD and len(node.parents) == 2:
+            for i, p in enumerate(node.parents):
+                if p.op_type == OpType.MUL and len(p.parents) == 2:
+                    mul_node = p
+                    other_node = node.parents[1 - i]
+                    fma_parents = mul_node.parents + [other_node]
+                    fma_sigs = [
+                        TensorSignature(parent.dtype, parent.shape, target_backend)
+                        for parent in fma_parents
+                    ]
+                    if KernelRegistry.select_best_kernel(
+                        "FusedMulAdd", fma_sigs, target_backend, node.dtype
+                    ):
+                        fma_node = TensorNode(
+                            "FusedMulAdd",
+                            node.dtype,
+                            fma_parents,
+                            node.shape,
+                            f"fused_{node.name}",
+                            backend=target_backend,
+                        )
+                        fma_cost, fma_root, fma_assigns = self._min_cost(
+                            fma_node, target_backend, expansion_stack, known_values
+                        )
+                        res = (fma_cost, fma_root, fma_assigns)
+
+                        if self.greedy:
+                            self.memo[node_hash] = res
+                            return res
+
+                        candidates.append(res)
+                        break
 
         # 3. Strategy A: Direct Kernel Execution
         parent_results = [
@@ -104,18 +140,24 @@ class Planner:
             new_node.backend = target_backend
             assignments = parent_assigns.copy()
             assignments[new_node] = target_backend
-            candidates.append((parent_cost + k_cost, new_node, assignments))
+
+            res = (parent_cost + k_cost, new_node, assignments)
+
+            if self.greedy:
+                self.memo[node_hash] = res
+                return res
+
+            candidates.append(res)
 
         # 4. Strategy B: Decomposition (Expansion)
+        # In greedy mode, we only try decomposition if Direct Kernel failed (was not returned above).
         if node.op_type not in expansion_stack:
             ref_factory = get_reference_factory(node.op_type)
             if ref_factory:
                 new_stack = expansion_stack | {node.op_type}
                 subgraph_root = ref_factory(node.parents, node.attrs)
 
-                # NEW: Run shape inference on the decomposition.
-                # This ensures constants inside the decomposition get shapes
-                # before they are hashed in the recursive _min_cost call.
+                # Run shape inference on the decomposition.
                 subgraph_nodes = topological_sort(subgraph_root)
                 ShapeInference.infer(subgraph_nodes, known_values or {})
 
@@ -125,37 +167,16 @@ class Planner:
                 decomp_cost, decomp_root, decomp_assigns = self._min_cost(
                     subgraph_root, target_backend, new_stack, known_values
                 )
-                candidates.append((decomp_cost, decomp_root, decomp_assigns))
 
-        # 5. Strategy C: Fusion
-        if node.op_type == OpType.ADD and len(node.parents) == 2:
-            for i, p in enumerate(node.parents):
-                if p.op_type == OpType.MUL and len(p.parents) == 2:
-                    mul_node = p
-                    other_node = node.parents[1 - i]
-                    fma_parents = mul_node.parents + [other_node]
-                    fma_sigs = [
-                        TensorSignature(parent.dtype, parent.shape, target_backend)
-                        for parent in fma_parents
-                    ]
-                    if KernelRegistry.select_best_kernel(
-                        "FusedMulAdd", fma_sigs, target_backend, node.dtype
-                    ):
-                        fma_node = TensorNode(
-                            "FusedMulAdd",
-                            node.dtype,
-                            fma_parents,
-                            node.shape,
-                            f"fused_{node.name}",
-                            backend=target_backend,
-                        )
-                        fma_cost, fma_root, fma_assigns = self._min_cost(
-                            fma_node, target_backend, expansion_stack, known_values
-                        )
-                        candidates.append((fma_cost, fma_root, fma_assigns))
-                        break
+                res = (decomp_cost, decomp_root, decomp_assigns)
 
-        # 6. Final Evaluation / Fallback
+                if self.greedy:
+                    self.memo[node_hash] = res
+                    return res
+
+                candidates.append(res)
+
+        # 5. Final Evaluation / Fallback
         if not candidates:
             if target_backend != Backend.CPU_NUMPY:
                 cpu_cost, cpu_root, cpu_assigns = self._min_cost(
