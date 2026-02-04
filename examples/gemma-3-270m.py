@@ -38,18 +38,30 @@ class GraphBuilder:
         return f"{op_name}_{self._count}"
 
     def input(self, name, shape, dtype=DType.FP32):
-        node = TensorNode(OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.TRANSIENT)
+        node = TensorNode(
+            OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.TRANSIENT
+        )
         self.inputs[name] = node
         return node
 
     def constant(self, value, shape, dtype, name):
         if not isinstance(value, np.ndarray):
             value = np.array(value)
-        node = TensorNode(OpType.CONSTANT, dtype, [], shape, name, attrs={"value": value}, storage_type=StorageType.PERSISTENT)
+        node = TensorNode(
+            OpType.CONSTANT,
+            dtype,
+            [],
+            shape,
+            name,
+            attrs={"value": value},
+            storage_type=StorageType.PERSISTENT,
+        )
         return node
 
     def param(self, name, shape, dtype=DType.FP32):
-        node = TensorNode(OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.PERSISTENT)
+        node = TensorNode(
+            OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.PERSISTENT
+        )
         self.params[name] = node
         return node
 
@@ -58,66 +70,275 @@ class GraphBuilder:
         return TensorNode(OpType.ADD, a.dtype, [a, b], name=self._next_name("add"))
 
     def mul(self, a, b):
-        return TensorNode(OpType.MUL, a.dtype, [a, b], a.shape, name=self._next_name("mul"))
+        return TensorNode(
+            OpType.MUL, a.dtype, [a, b], a.shape, name=self._next_name("mul")
+        )
 
     def divide(self, a, b):
-        return TensorNode(OpType.DIVIDE, a.dtype, [a, b], a.shape, name=self._next_name("div"))
+        return TensorNode(
+            OpType.DIVIDE, a.dtype, [a, b], a.shape, name=self._next_name("div")
+        )
 
     def matmul(self, a, b):
         return TensorNode(OpType.DOT, a.dtype, [a, b], name=self._next_name("dot"))
 
     def reshape(self, x, target_shape, shape_node):
-        return TensorNode(OpType.RESHAPE, x.dtype, [x, shape_node], target_shape, name=self._next_name("reshape"))
+        return TensorNode(
+            OpType.RESHAPE,
+            x.dtype,
+            [x, shape_node],
+            target_shape,
+            name=self._next_name("reshape"),
+        )
 
     def permute(self, x, dims, perm_node=None):
         # Using a more descriptive name for weight permutations
-        return TensorNode(OpType.PERMUTE, x.dtype, [x], name=self._next_name("permute"), attrs={"dims": dims})
+        return TensorNode(
+            OpType.PERMUTE,
+            x.dtype,
+            [x],
+            name=self._next_name("permute"),
+            attrs={"dims": dims},
+        )
 
     def concat(self, inputs, axis_node, axis_idx, output_shape):
-        return TensorNode(OpType.CONCAT, inputs[0].dtype, inputs, output_shape, name=self._next_name("concat"), attrs={"axis": axis_idx})
+        return TensorNode(
+            OpType.CONCAT,
+            inputs[0].dtype,
+            inputs,
+            output_shape,
+            name=self._next_name("concat"),
+            attrs={"axis": axis_idx},
+        )
 
     def arange(self, start_node, stop_node, step_node):
-        return TensorNode(OpType.ARANGE, DType.INT32, [start_node, stop_node, step_node], (None,), name=self._next_name("arange"))
+        return TensorNode(
+            OpType.ARANGE,
+            DType.INT32,
+            [start_node, stop_node, step_node],
+            (None,),
+            name=self._next_name("arange"),
+        )
 
     def power(self, base, exp):
-        return TensorNode(OpType.POWER, base.dtype, [base, exp], base.shape, name=self._next_name("pow"))
+        return TensorNode(
+            OpType.POWER,
+            base.dtype,
+            [base, exp],
+            base.shape,
+            name=self._next_name("pow"),
+        )
 
     def triu(self, x, k_node):
-        return TensorNode(OpType.TRIU, x.dtype, [x], x.shape, name=self._next_name("triu"))
+        return TensorNode(
+            OpType.TRIU, x.dtype, [x], x.shape, name=self._next_name("triu")
+        )
 
     def cast(self, x, target_dtype):
-        return TensorNode(OpType.CAST, target_dtype, [x], x.shape, name=self._next_name("cast"), attrs={"to": target_dtype})
+        return TensorNode(
+            OpType.CAST,
+            target_dtype,
+            [x],
+            x.shape,
+            name=self._next_name("cast"),
+            attrs={"to": target_dtype},
+        )
 
     def cos(self, x):
-        return TensorNode(OpType.COS, x.dtype, [x], x.shape, name=self._next_name("cos"))
+        return TensorNode(
+            OpType.COS, x.dtype, [x], x.shape, name=self._next_name("cos")
+        )
 
     def sin(self, x):
-        return TensorNode(OpType.SIN, x.dtype, [x], x.shape, name=self._next_name("sin"))
+        return TensorNode(
+            OpType.SIN, x.dtype, [x], x.shape, name=self._next_name("sin")
+        )
 
     def fill(self, value_node, shape_node, target_shape):
-        return TensorNode(OpType.FILL, value_node.dtype, [value_node, shape_node], target_shape, name=self._next_name("fill"))
+        return TensorNode(
+            OpType.FILL,
+            value_node.dtype,
+            [value_node, shape_node],
+            target_shape,
+            name=self._next_name("fill"),
+        )
 
     def embedding(self, indices, weights):
-        out_shape = indices.shape + (weights.shape[-1],) if indices.shape and weights.shape else None
-        return TensorNode(OpType.GATHER, weights.dtype, [weights, indices], out_shape, name=self._next_name("embed"))
+        out_shape = (
+            indices.shape + (weights.shape[-1],)
+            if indices.shape and weights.shape
+            else None
+        )
+        return TensorNode(
+            OpType.GATHER,
+            weights.dtype,
+            [weights, indices],
+            out_shape,
+            name=self._next_name("embed"),
+        )
 
     def rms_norm(self, x, scale, eps_node):
-        return TensorNode("RMSNorm", x.dtype, [x, scale, eps_node], x.shape, name=self._next_name("rmsnorm"))
+        return TensorNode(
+            "RMSNorm",
+            x.dtype,
+            [x, scale, eps_node],
+            x.shape,
+            name=self._next_name("rmsnorm"),
+        )
 
     def gelu(self, x):
         return TensorNode("GELU", x.dtype, [x], x.shape, name=self._next_name("gelu"))
 
     def softmax(self, x):
-        return TensorNode("Softmax", x.dtype, [x], x.shape, name=self._next_name("softmax"))
+        return TensorNode(
+            "Softmax", x.dtype, [x], x.shape, name=self._next_name("softmax")
+        )
 
     def rope(self, x, cos, sin):
-        return TensorNode("RoPE", x.dtype, [x, cos, sin], x.shape, name=self._next_name("rope"))
+        return TensorNode(
+            "RoPE", x.dtype, [x, cos, sin], x.shape, name=self._next_name("rope")
+        )
 
     def repeat(self, x, repeats, axis=1):
-        return TensorNode(OpType.REPEAT, x.dtype, [x], name=self._next_name("repeat"), attrs={"repeats": repeats, "axis": axis})
+        return TensorNode(
+            OpType.REPEAT,
+            x.dtype,
+            [x],
+            name=self._next_name("repeat"),
+            attrs={"repeats": repeats, "axis": axis},
+        )
 
     def sum(self, x, axis=1, keepdims=True):
-        return TensorNode(OpType.SUM, x.dtype, [x], name=self._next_name("sum"), attrs={"axis": axis, "keepdims": keepdims})
+        return TensorNode(
+            OpType.SUM,
+            x.dtype,
+            [x],
+            name=self._next_name("sum"),
+            attrs={"axis": axis, "keepdims": keepdims},
+        )
+
+    # --- RoPE and Mask Computation Inside Graph ---
+
+    def compute_rope(self, seq_len_node, head_dim, theta_base=10000.0):
+        """
+        Build RoPE (cos, sin) computation into the graph.
+        Returns (cos_node, sin_node) with shape (1, 1, seq_len, head_dim)
+
+        Formula:
+        - inv_freq = (theta_base ** (arange(0, head_dim, 2) / head_dim)) ** -1
+        - positions = arange(seq_len)
+        - angles = outer(positions, inv_freq)  # (seq_len, head_dim//2)
+        - angles = concat([angles, angles], axis=1)  # (seq_len, head_dim)
+        - cos = cos(angles), sin = sin(angles)
+        - reshape to (1, 1, seq_len, head_dim)
+        """
+        b = self
+
+        def _const(val, dtype=DType.INT32):
+            arr = np.array(val, dtype=np.int32 if dtype == DType.INT32 else np.float32)
+            if arr.ndim == 0:
+                arr = arr.reshape(1)
+            node = b.constant(arr, (1,), dtype, self._next_name("const"))
+            return node
+
+        # 1. arange(0, head_dim, 2) -> indices
+        start, stop, step = _const(0), _const(head_dim), _const(2)
+        indices_int = b.arange(start, stop, step)
+        indices = b.cast(indices_int, DType.FP32)
+
+        # 2. inv_freq = theta_base ** (indices / head_dim) ** -1
+        h_dim_fp = _const(float(head_dim), DType.FP32)
+        exponent = b.divide(indices, h_dim_fp)
+
+        theta_node = _const(theta_base, DType.FP32)
+        base_to_exponent = b.power(theta_node, exponent)
+
+        one_node = _const(1.0, DType.FP32)
+        inv_freq = b.divide(one_node, base_to_exponent)
+
+        # 3. positions = arange(seq_len)
+        p_start, p_stop, p_step = _const(0), seq_len_node, _const(1)
+        pos_int = b.arange(p_start, p_stop, p_step)
+        pos = b.cast(pos_int, DType.FP32)
+
+        # 4. Reshape pos to (seq_len, 1) and inv_freq to (1, head_dim//2)
+        seq_len_1 = b.concat([seq_len_node, _const(1)], _const([1]), 1, (None, 1))
+        pos_col = b.reshape(pos, (None, 1), seq_len_1)
+
+        half_dim = head_dim // 2
+        freq_shape = b.concat([_const(1), _const(half_dim)], _const([1]), 1, (1, None))
+        freq_row = b.reshape(inv_freq, (1, None), freq_shape)
+
+        # 5. Outer product: angles = pos_col * freq_row -> (seq_len, head_dim//2)
+        angles = b.mul(pos_col, freq_row)
+
+        # 6. Concat [angles, angles] -> (seq_len, head_dim)
+        angles = b.concat([angles, angles], _const([1]), 1, (None, head_dim))
+
+        # 7. Cos, Sin
+        cos_t = b.cos(angles)
+        sin_t = b.sin(angles)
+
+        # 8. Final Reshape to (1, 1, seq_len, head_dim) for broadcasting
+        final_shape = b.concat(
+            [_const(1), _const(1), seq_len_node, _const(head_dim)],
+            _const([1]),
+            1,
+            (1, 1, None, head_dim),
+        )
+        cos_out = b.reshape(cos_t, (1, 1, None, head_dim), final_shape)
+        sin_out = b.reshape(sin_t, (1, 1, None, head_dim), final_shape)
+
+        return cos_out, sin_out
+
+    def compute_causal_mask(self, seq_len_node, max_seq_len, mask_val=-1e9):
+        """
+        Build causal mask computation into the graph.
+        Returns mask with shape (1, 1, max_seq_len, max_seq_len)
+
+        The mask is computed as:
+        - fill ones matrix (seq_len, seq_len)
+        - triu(k=1) to get upper triangle (strictly causal)
+        - scale by mask_val
+
+        Then reshape to (1, 1, seq_len, seq_len) for broadcasting.
+        """
+        b = self
+
+        def _const(val, dtype=DType.INT32):
+            arr = np.array(val, dtype=np.int32 if dtype == DType.INT32 else np.float32)
+            if arr.ndim == 0:
+                arr = arr.reshape(1)
+            node = b.constant(arr, (1,), dtype, self._next_name("const"))
+            return node
+
+        # Shape for mask matrix: (seq_len, seq_len)
+        mask_shape = b.concat(
+            [seq_len_node, seq_len_node], _const([1]), 1, (None, None)
+        )
+
+        # Fill with ones
+        ones_val = _const(1.0, DType.FP32)
+        ones_matrix = b.fill(ones_val, mask_shape, (None, None))
+
+        # Apply triu with k=1
+        k_node = _const(1, DType.INT32)
+        triu_mask = b.triu(ones_matrix, k_node)
+
+        # Scale by mask_val (convert to const)
+        mask_scale = _const(mask_val, DType.FP32)
+        scaled_mask = b.mul(triu_mask, mask_scale)
+
+        # Reshape to (1, 1, seq_len, seq_len) for broadcasting
+        final_shape = b.concat(
+            [_const(1), _const(1), seq_len_node, seq_len_node],
+            _const([1]),
+            1,
+            (1, 1, None, None),
+        )
+        mask_out = b.reshape(scaled_mask, (1, 1, None, None), final_shape)
+
+        return mask_out
 
 
 # ==============================================================================
@@ -147,7 +368,18 @@ class Gemma3Model:
         self.constant_inputs[name] = val_arr
         return node
 
-    def forward(self, input_ids_node, cos, sin, mask, shapes: Dict[str, TensorNode]):
+    def forward(
+        self, input_ids_node, seq_len_node, max_seq_len, shapes: Dict[str, TensorNode]
+    ):
+        """
+        Forward pass with integrated RoPE and mask computation.
+
+        Args:
+            input_ids_node: Input token IDs
+            seq_len_node: Current sequence length (runtime value)
+            max_seq_len: Maximum sequence length (compile-time constant)
+            shapes: Shape nodes for reshape operations
+        """
         cfg = self.cfg
 
         # Embedding
@@ -159,6 +391,20 @@ class Gemma3Model:
         # Scale
         scale_val = self._const([cfg["emb_dim"] ** 0.5], "emb_scale_val", DType.FP32)
         x = self.builder.mul(x, scale_val)
+
+        # Compute RoPE (cos, sin) internally
+        cos, sin = self.builder.compute_rope(
+            seq_len_node,
+            cfg["head_dim"],
+            theta_base=10000.0,
+        )
+
+        # Compute causal mask internally
+        mask = self.builder.compute_causal_mask(
+            seq_len_node,
+            max_seq_len,
+            mask_val=-1e9,
+        )
 
         # Layers
         for i in range(cfg["n_layers"]):
@@ -330,106 +576,6 @@ class Gemma3Model:
         return self.builder.matmul(self.builder.mul(gate, up), w_down_t)
 
 
-# ==============================================================================
-# 4. Utilities (Now using Graph Operators)
-# ==============================================================================
-
-
-def compute_causal_mask_np(S):
-    # Create ones matrix using Fill node
-    ones_node = GraphBuilder().fill(
-        GraphBuilder().constant(1.0, (1,), DType.FP32, "ones_val"),
-        GraphBuilder().input("ones_shape", (2,), DType.INT32),
-        (S, S),
-    )
-
-    # Apply triu
-    k_node = GraphBuilder().constant(1, (1,), DType.INT32, "k_triu")
-    mask_node = GraphBuilder().triu(ones_node, k_node)
-
-    # Evaluate with feed_dict
-    feed_dict = {
-        "ones_val": np.array([1.0], dtype=np.float32),
-        "ones_shape": np.array([S, S], dtype=np.int32),
-        "k_triu": np.array([1], dtype=np.int32),
-    }
-    mask = evaluate_graph(mask_node, feed_dict)
-    mask = mask * -1e9
-    return mask.reshape(1, 1, S, S)
-
-
-def compute_rope_params_graph(head_dim, theta_base=10000.0, context_length=4096):
-    """
-    Constructs and evaluates a graph to compute RoPE cos/sin tables.
-    """
-    b = GraphBuilder()
-    feed_dict = {}
-
-    def _c(val, name, dtype=DType.INT32):
-        arr = np.array(val, dtype=np.int32 if dtype == DType.INT32 else np.float32)
-        if arr.ndim == 0:
-            arr = arr.reshape(1)
-
-        node = b.constant(arr, (1,), dtype, name)
-        feed_dict[name] = arr
-        return node
-
-    # 1. arange(0, head_dim, 2)
-    start, stop, step = _c(0, "r_start"), _c(head_dim, "r_stop"), _c(2, "r_step")
-    indices_int = b.arange(start, stop, step)
-    indices = b.cast(indices_int, DType.FP32)
-
-    # 2. theta_base ** (indices / head_dim)
-    h_dim_node = _c(head_dim, "h_dim", DType.FP32)
-    exponent = b.divide(indices, h_dim_node)
-
-    base_node = _c(theta_base, "theta_base", DType.FP32)
-    denom = b.power(base_node, exponent)
-
-    # 3. inv_freq = 1.0 / denom
-    one_node = _c(1.0, "one", DType.FP32)
-    inv_freq = b.divide(one_node, denom)
-
-    # 4. pos = arange(context_length)
-    p_start, p_stop, p_step = (
-        _c(0, "p_start"),
-        _c(context_length, "p_stop"),
-        _c(1, "p_step"),
-    )
-    pos_int = b.arange(p_start, p_stop, p_step)
-    pos = b.cast(pos_int, DType.FP32)
-
-    # 5. Outer Product: pos (S, 1) * inv_freq (1, D/2)
-    # Reshape pos to (S, 1)
-    shape_pos = _c([context_length, 1], "shape_pos_col")
-    pos_col = b.reshape(pos, (context_length, 1), shape_pos)
-
-    # Reshape inv_freq to (1, D/2)
-    half_dim = head_dim // 2
-    shape_freq = _c([1, half_dim], "shape_freq_row")
-    freq_row = b.reshape(inv_freq, (1, half_dim), shape_freq)
-
-    angles = b.mul(pos_col, freq_row)  # Broadcasting (S, D/2)
-
-    # 6. Concat [angles, angles] -> (S, D)
-    axis_c = _c([1], "axis_concat")
-    angles = b.concat([angles, angles], axis_c, 1, (context_length, head_dim))
-
-    # 7. Cos, Sin
-    cos_t = b.cos(angles)
-    sin_t = b.sin(angles)
-
-    # 8. Final Reshape to (1, 1, S, D) for broadcasting
-    shape_final = _c([1, 1, context_length, head_dim], "shape_final_rope")
-    cos_out = b.reshape(cos_t, (1, 1, context_length, head_dim), shape_final)
-    sin_out = b.reshape(sin_t, (1, 1, context_length, head_dim), shape_final)
-
-    cos_val = evaluate_graph(cos_out, feed_dict)
-    sin_val = evaluate_graph(sin_out, feed_dict)
-
-    return cos_val, sin_val
-
-
 GEMMA3_CONFIG_270M = {
     "vocab_size": 262_144,
     "context_length": 32_768,
@@ -442,8 +588,9 @@ GEMMA3_CONFIG_270M = {
     "query_pre_attn_scalar": 256,
 }
 
+
 # ==============================================================================
-# 5. Main Execution
+# 4. Main Execution
 # ==============================================================================
 
 
@@ -481,28 +628,13 @@ def main():
     print(f"\nPrompt: {prompt}")
     print("Generating...", end="", flush=True)
 
-    # Precompute RoPE cache using evaluate_graph (handled inside compute_rope_params_graph)
-    full_cos, full_sin = compute_rope_params_graph(
-        GEMMA3_CONFIG_270M["head_dim"],
-        theta_base=10000.0,
-        context_length=4096,
-    )
-
     # --- BUILD GRAPH ---
     cfg = GEMMA3_CONFIG_270M
     model = Gemma3Model(cfg, weights_np)
 
     # Define Input Nodes
     in_node = model.builder.input("input_ids", (1, MAX_SEQ_LEN), DType.INT32)
-    cos_node = model.builder.input(
-        "cos", (1, 1, MAX_SEQ_LEN, cfg["head_dim"]), DType.FP32
-    )
-    sin_node = model.builder.input(
-        "sin", (1, 1, MAX_SEQ_LEN, cfg["head_dim"]), DType.FP32
-    )
-    mask_node = model.builder.input(
-        "mask", (1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), DType.FP32
-    )
+    seq_len_node = model.builder.input("seq_len", (1,), DType.INT32)
 
     q_shape_node = model.builder.input("q_shape", (4,), DType.INT32)
     kv_shape_node = model.builder.input("kv_shape", (4,), DType.INT32)
@@ -514,12 +646,20 @@ def main():
         "flat_shape": flat_shape_node,
     }
 
-    # Build the computational graph
-    logits_node = model.forward(in_node, cos_node, sin_node, mask_node, shapes)
+    # Build the computational graph (RoPE and mask computed internally)
+    logits_node = model.forward(in_node, seq_len_node, MAX_SEQ_LEN, shapes)
 
     # Combine weights and constant inputs into a base dictionary
-    # These will be passed as inputs to evaluate_graph since they are defined as Param/Input nodes
     base_inputs = {**model.weights, **model.constant_inputs}
+    q_shape = np.array(
+        [1, MAX_SEQ_LEN, cfg["n_heads"], cfg["head_dim"]], dtype=np.int32
+    )
+    kv_shape = np.array(
+        [1, MAX_SEQ_LEN, cfg["n_kv_groups"], cfg["head_dim"]], dtype=np.int32
+    )
+    flat_shape = np.array(
+        [1, MAX_SEQ_LEN, cfg["n_heads"] * cfg["head_dim"]], dtype=np.int32
+    )
 
     # --- RUN LOOP ---
     for _ in range(max_new_tokens):
@@ -531,29 +671,14 @@ def main():
         input_ids_padded = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
         input_ids_padded[0, :seq_len] = input_ids
 
-        # Construct Attention Mask
-        mask_cur_small = compute_causal_mask_np(seq_len)
-        mask_full = np.full((1, 1, MAX_SEQ_LEN, MAX_SEQ_LEN), -1e9, dtype=np.float32)
-        mask_full[:, :, :seq_len, :seq_len] = mask_cur_small
-
-        # Define concrete values for shape tensors
-        q_shape = np.array(
-            [1, MAX_SEQ_LEN, cfg["n_heads"], cfg["head_dim"]], dtype=np.int32
-        )
-        kv_shape = np.array(
-            [1, MAX_SEQ_LEN, cfg["n_kv_groups"], cfg["head_dim"]], dtype=np.int32
-        )
-        flat_shape = np.array(
-            [1, MAX_SEQ_LEN, cfg["n_heads"] * cfg["head_dim"]], dtype=np.int32
-        )
+        # Define concrete values for sequence length
+        seq_len_val = np.array([seq_len], dtype=np.int32)
 
         # Final input dictionary for this step
         step_inputs = {
             **base_inputs,
             "input_ids": input_ids_padded,
-            "cos": full_cos[:, :, :MAX_SEQ_LEN, :],
-            "sin": full_sin[:, :, :MAX_SEQ_LEN, :],
-            "mask": mask_full,
+            "seq_len": seq_len_val,
             "q_shape": q_shape,
             "kv_shape": kv_shape,
             "flat_shape": flat_shape,
@@ -561,7 +686,6 @@ def main():
 
         # --- EXECUTE VIA evaluate_graph ---
         # This helper handles optimization, compilation, and execution in one go.
-        # It uses step_inputs for shape inference, resolving the previous ValueError.
         logits_out = evaluate_graph(logits_node, step_inputs)
 
         # Greedy Decoding

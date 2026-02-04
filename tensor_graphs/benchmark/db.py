@@ -251,6 +251,7 @@ class BenchmarkDB:
             cursor = conn.cursor()
 
             # 1. Exact Match
+            json_str = json.dumps(shape_list, cls=GraphEncoder)
             cursor.execute(
                 """
                 SELECT latency_ms FROM kernel_benchmarks 
@@ -261,7 +262,7 @@ class BenchmarkDB:
                     op_type,
                     backend,
                     dtype,
-                    json.dumps(shape_list, cls=GraphEncoder),
+                    json_str,
                     attrs_json,
                 ),
             )

@@ -10,11 +10,14 @@ from ..ir.graph import topological_sort
 from tqdm import tqdm
 from ..config import *
 
+
 class _SymShape:
     _symbol_cache = {}
 
     @staticmethod
-    def to_symbolic(dim: Optional[Union[int, sympy.Expr]], prefix: str = "d") -> sympy.Expr:
+    def to_symbolic(
+        dim: Optional[Union[int, sympy.Expr]], prefix: str = "d"
+    ) -> sympy.Expr:
         if dim is None:
             # Deterministic naming based on prefix to prevent UUID bloat
             count = _SymShape._symbol_cache.get(prefix, 0)
@@ -96,7 +99,9 @@ class ShapeInference:
             return None
 
         # 2. Inference Loop
-        for node in tqdm(nodes, desc="Inferring symbolic shapes", disable=not DEBUG_EXECUTION):
+        for node in tqdm(
+            nodes, desc="Inferring symbolic shapes", disable=not DEBUG_EXECUTION
+        ):
 
             # Ensure shape is a tuple of Sympy Expressions or None (initially)
             if node.shape is None:
