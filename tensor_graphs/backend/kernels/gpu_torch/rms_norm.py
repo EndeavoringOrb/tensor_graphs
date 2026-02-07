@@ -82,5 +82,5 @@ else:
     )
     def rms_norm_cuda_fallback(inputs, outputs, attrs):
         raise KernelUnavailableError(
-            f"RMSNorm CUDA kernel is not available. Falling back to CPU execution."
+            "RMSNorm CUDA kernel is not available. Falling back to CPU execution."
         )

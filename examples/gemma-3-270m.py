@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 from tqdm import tqdm
-from typing import Dict, Any
+from typing import Dict
 
 from safetensors.torch import load_file
 from tokenizers import Tokenizer
@@ -15,12 +15,8 @@ from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.backend.executor import evaluate_graph
 
 # Compiler Imports
-from tensor_graphs.compiler.planner import Planner
-from tensor_graphs.compiler.compiler import Compiler
-from tensor_graphs.backend.executor import Executor
 
 # Ensure Kernels are Registered
-import tensor_graphs.backend.kernels
 
 # ==============================================================================
 # 1. Graph Construction Helpers

@@ -1,8 +1,6 @@
-from typing import List, Dict, Any, Tuple, Optional, cast, Iterable, Union, Callable
+from typing import List, Dict, Any, Tuple, Optional, Callable
 import math
 import numpy as np
-import sympy
-import uuid
 from ..ir.node import TensorNode
 from ..ops.atomic_types import OpType
 from ..ops.registry import get_reference_factory
@@ -11,58 +9,45 @@ from tqdm import tqdm
 from ..config import *
 
 
-class _SymShape:
-    _symbol_cache = {}
+def _broadcast_shapes(
+    shape1: Tuple[Optional[int], ...], shape2: Tuple[Optional[int], ...]
+) -> Tuple[Optional[int], ...]:
+    """Broadcasts two shapes according to numpy rules."""
+    ndim1, ndim2 = len(shape1), len(shape2)
+    out_ndim = max(ndim1, ndim2)
 
-    @staticmethod
-    def to_symbolic(
-        dim: Optional[Union[int, sympy.Expr]], prefix: str = "d"
-    ) -> sympy.Expr:
-        if dim is None:
-            # Deterministic naming based on prefix to prevent UUID bloat
-            count = _SymShape._symbol_cache.get(prefix, 0)
-            _SymShape._symbol_cache[prefix] = count + 1
-            return sympy.Symbol(f"{prefix}_{count}", integer=True, positive=True)
-        if isinstance(dim, int):
-            return sympy.Integer(dim)
-        return dim
+    # Prepend 1s
+    s1 = (1,) * (out_ndim - ndim1) + shape1
+    s2 = (1,) * (out_ndim - ndim2) + shape2
 
-    @staticmethod
-    def prod(iterable: Iterable[Union[int, sympy.Expr]]) -> sympy.Expr:
-        """Symbolic product."""
-        res = sympy.Integer(1)
-        for x in iterable:
-            res = res * x
-        return res
+    out_shape = []
+    for d1, d2 in zip(s1, s2):
+        if d1 == 1:
+            out_shape.append(d2)
+        elif d2 == 1:
+            out_shape.append(d1)
+        elif d1 == d2:
+            out_shape.append(d1)
+        elif d1 is None or d2 is None:
+            # If either dimension is dynamic (None), result is dynamic
+            out_shape.append(None)
+        else:
+            # Incompatible dimensions - just use d1 (same as sympy behavior)
+            out_shape.append(d1)
 
-    @staticmethod
-    def broadcast(
-        shape1: Tuple[sympy.Expr, ...], shape2: Tuple[sympy.Expr, ...]
-    ) -> Tuple[sympy.Expr, ...]:
-        """Broadcasts two symbolic shapes according to numpy rules."""
-        ndim1, ndim2 = len(shape1), len(shape2)
-        out_ndim = max(ndim1, ndim2)
+    return tuple(out_shape)
 
-        # Prepend 1s
-        s1 = (sympy.Integer(1),) * (out_ndim - ndim1) + shape1
-        s2 = (sympy.Integer(1),) * (out_ndim - ndim2) + shape2
 
-        out_shape = []
-        for d1, d2 in zip(s1, s2):
-            if d1 == 1:
-                out_shape.append(d2)
-            elif d2 == 1:
-                out_shape.append(d1)
-            elif d1 == d2:
-                out_shape.append(d1)
-            else:
-                # Symbolic Equality Check
-                # In a dynamic graph, we assume they are compatible.
-                # We prioritize the non-integer symbol if one is concrete 1 and the other isn't,
-                # but here d1 != 1 and d2 != 1. We usually pick d1.
-                out_shape.append(d1)
-
-        return tuple(out_shape)
+def _prod_shape(shape: Tuple[Optional[int], ...]) -> Optional[int]:
+    """Product of shape dimensions. Returns None if any dimension is None."""
+    if not shape:
+        return 1
+    result = 1
+    for d in shape:
+        if d is None:
+            return None
+        result *= d
+    return result
 
 
 class ShapeInference:
@@ -79,8 +64,8 @@ class ShapeInference:
     @staticmethod
     def infer(nodes: List[TensorNode], known_values: Dict[str, Any]):
         """
-        Updates the shapes of nodes in-place based on symbolic inference.
-        If known_values are provided, attempts to resolve symbols to concrete integers.
+        Updates the shapes of nodes in-place based on shape inference.
+        If known_values are provided, attempts to resolve shapes to concrete integers.
         """
         # 1. Normalize Constants in known_values
         computed_values = known_values.copy()
@@ -92,25 +77,21 @@ class ShapeInference:
                 val = node.attrs.get("value")
                 if isinstance(val, (int, float, bool)):
                     val = np.array([val])
-                elif isinstance(val, list):
+                elif isinstance(val, (list, tuple)):
                     val = np.array(val)
                 computed_values[node.name] = val
                 return val
             return None
 
         # 2. Inference Loop
-        for node in tqdm(
-            nodes, desc="Inferring symbolic shapes", disable=not DEBUG_EXECUTION
-        ):
-
-            # Ensure shape is a tuple of Sympy Expressions or None (initially)
+        for node in tqdm(nodes, desc="Inferring shapes", disable=not DEBUG_EXECUTION):
+            # Ensure shape is a tuple of ints or None (initially)
             if node.shape is None:
                 pass
             else:
-                # Normalize existing int/None shape to Sympy
+                # Normalize existing shape to plain int/None (remove sympy if any)
                 node.shape = tuple(
-                    _SymShape.to_symbolic(d, prefix=f"in_{node.name}")
-                    for d in node.shape
+                    d if isinstance(d, int) else None for d in node.shape
                 )
 
             # --- Dispatch ---
@@ -144,18 +125,11 @@ class ShapeInference:
 def handle_input(node: TensorNode, get_val):
     val = get_val(node)
     if val is not None and hasattr(val, "shape"):
-        node.shape = tuple(sympy.Integer(d) for d in val.shape)
+        node.shape = tuple(int(d) for d in val.shape)
         return
     if node.shape:
-        new_shape = []
-        for i, d in enumerate(node.shape):
-            if d is None or (isinstance(d, sympy.Symbol) and d.name.startswith("in_")):
-                # Generate a clean symbol for the input dimension
-                sym_name = f"{node.name}_dim{i}"
-                new_shape.append(sympy.Symbol(sym_name, integer=True, positive=True))
-            else:
-                new_shape.append(_SymShape.to_symbolic(d))
-        node.shape = tuple(new_shape)
+        # Keep existing shape if it's already concrete
+        node.shape = tuple(d if isinstance(d, int) else None for d in node.shape)
     else:
         node.shape = ()
 
@@ -165,15 +139,16 @@ def handle_constant(node: TensorNode, get_val):
     val = get_val(node)
     if val is not None:
         if hasattr(val, "shape"):
-            node.shape = tuple(sympy.Integer(d) for d in val.shape)
+            node.shape = tuple(int(d) for d in val.shape)
         elif isinstance(val, (list, tuple)):
-            node.shape = (sympy.Integer(len(val)),)
+            node.shape = (len(val),)
         else:
             node.shape = ()
     elif node.shape is None:
-        node.shape = (sympy.Integer(1),)
+        node.shape = (1,)
     else:
-        node.shape = tuple(_SymShape.to_symbolic(d) for d in node.shape)
+        # Keep existing shape, ensure it's int/None
+        node.shape = tuple(d if isinstance(d, int) else None for d in node.shape)
 
 
 # --- Arithmetic & Broadcasting ---
@@ -184,7 +159,7 @@ def _handle_broadcast(node: TensorNode, get_val):
 
     current_shape = shapes[0]
     for s in shapes[1:]:
-        current_shape = _SymShape.broadcast(current_shape, s)
+        current_shape = _broadcast_shapes(current_shape, s)
     node.shape = current_shape
 
 
@@ -227,9 +202,7 @@ def handle_fill(node: TensorNode, get_val):
             else:
                 shape_arr = np.asarray(shape_val)
 
-            shape_tuple = tuple(
-                sympy.Integer(int(x)) for x in shape_arr.astype(int).flatten()
-            )
+            shape_tuple = tuple(int(x) for x in shape_arr.astype(int).flatten())
             node.shape = shape_tuple
 
 
@@ -246,12 +219,10 @@ def handle_arange(node: TensorNode, get_val):
         if st != 0:
             length = math.ceil((e - s) / st)
             length = max(0, int(length))
-            node.shape = (sympy.Integer(length),)
+            node.shape = (length,)
     else:
-        # Symbolic length
-        node.shape = (
-            sympy.Symbol(f"arange_{node.name}_len", integer=True, positive=True),
-        )
+        # Shape remains None until runtime resolution (dynamic dimension)
+        node.shape = (None,)
 
 
 @ShapeInference.register_handler(OpType.REPEAT)
@@ -266,7 +237,11 @@ def handle_repeat(node: TensorNode, get_val):
             axis += ndim
 
         if 0 <= axis < ndim:
-            data_shape[axis] = data_shape[axis] * repeats
+            dim_val = data_shape[axis]
+            if dim_val is not None:
+                data_shape[axis] = dim_val * repeats
+            else:
+                data_shape[axis] = None
 
         node.shape = tuple(data_shape)
 
@@ -310,9 +285,13 @@ def handle_concat(node: TensorNode, get_val):
         for s in shapes[1:]:
             # We assume ranks match for valid concat
             if len(s) == rank:
-                total_dim = total_dim + s[axis]
+                other_dim = s[axis]
+                if total_dim is not None and other_dim is not None:
+                    total_dim = total_dim + other_dim
+                else:
+                    total_dim = None  # Dynamic if any operand is dynamic
+                new_shape[axis] = total_dim
 
-        new_shape[axis] = total_dim
         node.shape = tuple(new_shape)
 
 
@@ -323,7 +302,10 @@ def handle_gather(node: TensorNode, get_val):
         indices_shape = node.parents[1].shape
         if data_shape and indices_shape:
             # Standard gather behavior on axis 0
-            node.shape = indices_shape + data_shape[1:]
+            if data_shape[1:] is not None:
+                node.shape = indices_shape + data_shape[1:]
+            else:
+                node.shape = (None,) * (len(indices_shape) + len(data_shape[1:]))
 
 
 # --- Mathematical Ops ---
@@ -338,11 +320,24 @@ def handle_dot(node: TensorNode, get_val):
             # Handle Rank 3 @ Rank 2 specifically (Batch Matmul)
             if len(s0) == 3 and len(s1) == 2:
                 # (B, M, K) @ (K, N) -> (B, M, N)
-                node.shape = (s0[0], s0[1], s1[1])
+                batch_out = []
+                if s0[0] is not None:
+                    batch_out.append(s0[0])
+                else:
+                    batch_out.append(None)
+                if s0[1] is not None:
+                    batch_out.append(s0[1])
+                else:
+                    batch_out.append(None)
+                if s1[1] is not None:
+                    batch_out.append(s1[1])
+                else:
+                    batch_out.append(None)
+                node.shape = tuple(batch_out)
             elif len(s0) >= 2 and len(s1) >= 2:
                 batch0 = s0[:-2]
                 batch1 = s1[:-2]
-                batch_out = _SymShape.broadcast(batch0, batch1)
+                batch_out = _broadcast_shapes(batch0, batch1)
                 m = s0[-2]
                 n = s1[-1]
                 node.shape = batch_out + (m, n)
@@ -374,9 +369,9 @@ def handle_reduction(node: TensorNode, get_val):
     if axis is None:
         # Global reduction
         if keepdims:
-            node.shape = tuple(sympy.Integer(1) for _ in range(ndim))
+            node.shape = tuple(1 for _ in range(ndim))
         else:
-            node.shape = (sympy.Integer(1),)
+            node.shape = (1,)
     else:
         # Resolve axes
         if hasattr(axis, "__iter__") and not isinstance(axis, (str, bytes)):
@@ -391,7 +386,10 @@ def handle_reduction(node: TensorNode, get_val):
         for i, d in enumerate(data_shape):
             if i in axes:
                 if keepdims:
-                    new_shape.append(sympy.Integer(1))
+                    new_shape.append(1)
+                else:
+                    # Skip this dimension
+                    pass
             else:
                 new_shape.append(d)
         node.shape = tuple(new_shape)
@@ -417,30 +415,31 @@ def handle_reshape(node: TensorNode, get_val):
         if -1 in target_dims_raw:
             if data.shape is None:
                 # Can't resolve -1 without input shape
-                node.shape = tuple(
-                    sympy.Integer(d) if d != -1 else _SymShape.to_symbolic(None)
-                    for d in target_dims_raw
-                )
+                node.shape = tuple(d if d != -1 else None for d in target_dims_raw)
                 return
 
-            total_vol = _SymShape.prod(data.shape)
-            known_vol = sympy.Integer(1)
+            total_vol = _prod_shape(data.shape)
+            known_vol = 1
             idx_neg = -1
 
-            target_dims_sym = []
+            target_dims = []
             for i, d in enumerate(target_dims_raw):
                 if d == -1:
                     idx_neg = i
-                    target_dims_sym.append(None)
+                    target_dims.append(None)
                 else:
                     known_vol *= d
-                    target_dims_sym.append(sympy.Integer(d))
+                    target_dims.append(d)
 
-            missing = total_vol / known_vol
-            target_dims_sym[idx_neg] = missing
-            node.shape = tuple(target_dims_sym)
+            if total_vol is not None and known_vol is not None:
+                missing = total_vol // known_vol
+                target_dims[idx_neg] = missing
+                node.shape = tuple(target_dims)
+            else:
+                # Dynamic shape - can't compute missing dim
+                node.shape = tuple(target_dims)
         else:
-            node.shape = tuple(sympy.Integer(d) for d in target_dims_raw)
+            node.shape = tuple(target_dims_raw)
 
 
 @ShapeInference.register_handler(OpType.SLICE)
@@ -450,9 +449,7 @@ def handle_slice(node: TensorNode, get_val):
 
     data_shape = node.parents[0].shape
     starts = node.attrs.get("starts", [0] * len(data_shape))
-    ends = node.attrs.get(
-        "ends", [None] * len(data_shape)
-    )  # None acts as dim placeholder
+    ends = node.attrs.get("ends", [None] * len(data_shape))
     steps = node.attrs.get("steps", [1] * len(data_shape))
 
     new_shape = []
@@ -465,21 +462,25 @@ def handle_slice(node: TensorNode, get_val):
         if e_val is None:
             e = dim
         else:
-            e = _SymShape.to_symbolic(e_val)
+            e = int(e_val)
 
-        s = _SymShape.to_symbolic(s_val)
-        st = _SymShape.to_symbolic(st_val)
+        s = int(s_val) if isinstance(s_val, int) else None
+        st = int(st_val) if isinstance(st_val, int) else 1
 
-        # Simple negative index handling for constants (symbolic is harder)
-        if isinstance(s, sympy.Integer) and isinstance(dim, sympy.Integer) and s < 0:
+        # Simple negative index handling for constants
+        if isinstance(s, int) and isinstance(dim, int) and s < 0:
             s += dim
-        if isinstance(e, sympy.Integer) and isinstance(dim, sympy.Integer) and e < 0:
+        if isinstance(e, int) and isinstance(dim, int) and e < 0:
             e += dim
 
-        # Calculation: ceil((end - start) / step)
-        diff = e - s
-        dim_len = sympy.ceiling(diff / st)
-        new_shape.append(dim_len)
+        # If any dimension is dynamic (None), result is dynamic
+        if dim is None or s is None or e is None:
+            new_shape.append(None)
+        else:
+            # Calculation: ceil((end - start) / step)
+            diff = e - s
+            dim_len = math.ceil(diff / st) if st != 0 else 0
+            new_shape.append(max(0, dim_len))
 
     node.shape = tuple(new_shape)
 

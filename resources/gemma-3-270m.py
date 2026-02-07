@@ -123,18 +123,18 @@ class GroupedQueryAttention(nn.Module):
         dtype=None,
     ):
         super().__init__()
-        assert (
-            num_heads % num_kv_groups == 0
-        ), "num_heads must be divisible by num_kv_groups"
+        assert num_heads % num_kv_groups == 0, (
+            "num_heads must be divisible by num_kv_groups"
+        )
 
         self.num_heads = num_heads
         self.num_kv_groups = num_kv_groups
         self.group_size = num_heads // num_kv_groups
 
         if head_dim is None:
-            assert (
-                d_in % num_heads == 0
-            ), "`d_in` must be divisible by `num_heads` if `head_dim` is not set"
+            assert d_in % num_heads == 0, (
+                "`d_in` must be divisible by `num_heads` if `head_dim` is not set"
+            )
             head_dim = d_in // num_heads
 
         self.head_dim = head_dim
@@ -207,7 +207,6 @@ class GroupedQueryAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-
     def __init__(self, cfg, attn_type):
         super().__init__()
         self.attn_type = attn_type

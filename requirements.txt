@@ -1,6 +1,5 @@
 numpy
 psutil
-sympy
 pytest
 pytest-cov
 tqdm

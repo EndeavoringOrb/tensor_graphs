@@ -1,4 +1,3 @@
-import numpy as np
 from ....backend.registry import KernelRegistry
 from ....ir.dtypes import DType, Backend, TensorSignature
 from ....ops.atomic_types import OpType

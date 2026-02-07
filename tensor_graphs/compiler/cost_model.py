@@ -21,9 +21,10 @@ class CostModel:
 
         # Heuristic fallback if DB is empty
         # Assume generic cost based on shape volume
+        # Shapes are now plain int/None; None means dynamic (unknown at compile time)
         import math
 
-        vol = math.prod(x for x in shape if x is not None) if shape else 1
+        vol = math.prod(shape) if shape and all(shape) else 1
         return self.default_kernel_cost + (vol * 1e-7)
 
     def estimate_transfer_cost(
@@ -35,7 +36,7 @@ class CostModel:
         base = self.transfer_overhead.get((src_backend, dst_backend), 0.1)
         import math
 
-        vol = math.prod(x for x in shape if x is not None) if shape else 1
+        vol = math.prod(shape) if shape and all(shape) else 1
         # 4 bytes per float32
         bytes_transferred = vol * 4
         # Assume PCIe gen3/4 speeds roughly ~10GB/s

@@ -5,7 +5,6 @@ import torch
 from ..ir.dtypes import DType, Backend, TensorSignature
 from ..ops.atomic_types import OpType
 from ..ir.node import TensorNode
-from ..ops.atomic.copy_to import copy_to_ref
 
 
 class DataGenerator:

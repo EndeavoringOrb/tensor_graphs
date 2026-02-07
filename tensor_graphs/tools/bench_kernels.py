@@ -3,9 +3,6 @@ from tensor_graphs.backend.registry import KernelRegistry
 from tensor_graphs.benchmark.db import BenchmarkDB
 from tensor_graphs.benchmark.data_gen import DataGenerator
 from tensor_graphs.ir.dtypes import (
-    Backend,
-    DType,
-    TensorSignature,
     KernelUnavailableError,
 )
 

@@ -16,7 +16,6 @@ classifiers = [
 ]
 dependencies = [
     "numpy",
-    "sympy",
     "tqdm",
     "tokenizers",
     "huggingface_hub",

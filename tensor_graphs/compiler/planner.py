@@ -201,7 +201,7 @@ class Planner:
                 return res
             else:
                 raise RuntimeError(
-                    f"No execution strategy found for {node.op_type} on {target_backend}."
+                    f"No execution strategy found for {node.op_type} on {target_backend}.\nnode: {node}\nnode.parents: {node.parents}"
                 )
 
         best = min(candidates, key=lambda x: x[0])

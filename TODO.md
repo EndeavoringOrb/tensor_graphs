@@ -1,5 +1,7 @@
 Remove sympy in favor of nodes. Instead of sympy expr seq_len, just have an input node with seq_len as value and connect that to wherever it is needed.
 
+attrs arg for kernels is only for values that cannot be a TensorNode like DType.
+
 I want to implement incremental execution with selective materialization. Dynamic programming with bounded memoization. Example:
 
 inputs: a,b,c

@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Callable, Any, Tuple
 from ..ir.buffer import BufferAllocation
 from ..ir.dtypes import DType

@@ -1,7 +1,6 @@
 from typing import Optional, Dict, Any
 from ..ir.node import TensorNode
 from ..ir.graph import topological_sort
-from ..ir.dtypes import TensorSignature
 from ..backend.registry import KernelRegistry
 from .planner import ExecutionRecipe
 from .liveness import LivenessAnalyzer

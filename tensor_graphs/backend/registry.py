@@ -1,4 +1,4 @@
-from typing import Dict, List, Callable, Optional, Tuple, Any
+from typing import Dict, List, Callable, Optional, Tuple
 from ..ir.dtypes import DType, TensorSignature, Backend
 from ..ops.registry import register_reference_factory, get_reference_factory
 
@@ -116,7 +116,6 @@ class KernelRegistry:
 
         total_score = 0
         for pat, con in zip(patterns, concrete):
-
             # 1. Backend Match
             if pat.backend is not None:
                 if pat.backend != con.backend:

@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from ..compiler.compiled_graph import CompiledGraph
 from ..ir.buffer import StorageType
 from ..ir.dtypes import DType
@@ -259,7 +259,7 @@ def evaluate_graph(
 
     if DEBUG_EXECUTION:
         print(
-            f"\n{'='*60}\n[DEBUG] EVALUATING GRAPH: {root.name} (Op: {root.op_type})\n{'='*60}"
+            f"\n{'=' * 60}\n[DEBUG] EVALUATING GRAPH: {root.name} (Op: {root.op_type})\n{'=' * 60}"
         )
 
     # 1. Planning Stage
@@ -277,7 +277,7 @@ def evaluate_graph(
     compiled_graph = compiler.compile(recipe, known_values=inputs)
 
     if DEBUG_EXECUTION:
-        print(f"[DEBUG] Compiled Graph Instructions:")
+        print("[DEBUG] Compiled Graph Instructions:")
         for i, inst in enumerate(compiled_graph.instructions):
             print(
                 f"  {i:03d} | {inst.node_name:<20} = {inst.kernel.__name__}({', '.join(inst.input_node_names)})"
@@ -313,7 +313,7 @@ def evaluate_graph(
     total_end = time.perf_counter()
     if DEBUG_EXECUTION:
         print(
-            f"{'='*60}\n[DEBUG] GRAPH EVALUATION COMPLETE in {(total_end - total_start)*1000:.2f} ms\n{'='*60}\n"
+            f"{'=' * 60}\n[DEBUG] GRAPH EVALUATION COMPLETE in {(total_end - total_start) * 1000:.2f} ms\n{'=' * 60}\n"
         )
 
     return result

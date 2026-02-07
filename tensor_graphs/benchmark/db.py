@@ -2,8 +2,7 @@ import sqlite3
 import json
 import math
 import uuid
-from typing import Optional, Dict, Any, List
-from ..ir.dtypes import DType
+from typing import Optional, Dict, Any
 from ..ir.graph import GraphEncoder
 
 

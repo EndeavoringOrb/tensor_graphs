@@ -1,9 +1,9 @@
 import time
 import numpy as np
 import json
-from typing import Dict, Any, List, Set
+from typing import Dict, Any, List
 from ..ir.node import TensorNode
-from ..ir.dtypes import DType, Backend
+from ..ir.dtypes import DType
 from ..ops.atomic_types import OpType
 from ..backend.executor import Executor
 from .db import BenchmarkDB

@@ -1,7 +1,5 @@
 import platform
 import psutil
-import json
-import os
 import importlib.metadata
 from typing import Dict, Any
 

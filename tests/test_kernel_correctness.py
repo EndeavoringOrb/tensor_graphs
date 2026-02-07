@@ -1,11 +1,11 @@
 import pytest
 import numpy as np
 import torch
-from typing import List, Dict, Any, Tuple, cast, Optional
+from typing import Tuple, cast
 
 import numbers
 from tensor_graphs.ir.node import TensorNode
-from tensor_graphs.ir.dtypes import DType, Backend, TensorSignature
+from tensor_graphs.ir.dtypes import DType, Backend
 from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.backend.registry import KernelRegistry
 from tensor_graphs.backend.executor import evaluate_graph
@@ -15,7 +15,6 @@ from tensor_graphs.compiler.shape_inference import ShapeInference
 from tensor_graphs.ir.graph import topological_sort
 
 # Ensure all kernels are loaded
-import tensor_graphs.backend.kernels
 
 
 def get_all_test_kernels():
@@ -152,7 +151,7 @@ def test_kernel_correctness(
         and len(output_shape) > 0
         and all([isinstance(item, numbers.Integral) for item in output_shape])
     ):
-        raise ValueError(f"output_shape could not be inferred")
+        raise ValueError("output_shape could not be inferred")
 
     first_input = prepared_inputs[0] if prepared_inputs else None
     is_torch = isinstance(first_input, torch.Tensor)
@@ -260,6 +259,6 @@ def test_kernel_correctness(
 
 
 # For debugging with vscode debugger
-for item in get_all_test_kernels():
-    if item[0] == "FusedMulAdd":
-        test_kernel_correctness(*item)
+# for item in get_all_test_kernels():
+#     if item[0] == "FusedMulAdd":
+#         test_kernel_correctness(*item)

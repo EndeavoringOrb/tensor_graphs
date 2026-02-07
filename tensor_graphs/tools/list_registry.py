@@ -1,5 +1,4 @@
 from tensor_graphs.backend.registry import KernelRegistry
-from tensor_graphs.ir.dtypes import Backend
 
 
 def check():

@@ -1,10 +1,9 @@
-from typing import List, Set, Dict, Any
+from typing import List, Set, Dict
 from .node import TensorNode
 from .dtypes import DType, Backend
 import json
 import numpy as np
 from enum import Enum
-import sympy
 
 
 def topological_sort(root: TensorNode) -> List[TensorNode]:
@@ -96,8 +95,7 @@ class GraphEncoder(json.JSONEncoder):
             return o.value
         if isinstance(o, TensorNode):
             return str(o)
-        if isinstance(o, sympy.Integer):
-            return int(o)
+        # Shapes are now plain int/None; sympy no longer used
         return super().default(o)
 
 

@@ -1,6 +1,5 @@
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from ..ir.node import TensorNode
-from ..ir.graph import topological_sort
 from ..ops.atomic_types import OpType
 
 
