@@ -14,10 +14,6 @@ from tensor_graphs.ir.buffer import StorageType
 from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.backend.executor import evaluate_graph
 
-# Compiler Imports
-
-# Ensure Kernels are Registered
-
 # ==============================================================================
 # 1. Graph Construction Helpers
 # ==============================================================================
@@ -258,11 +254,11 @@ class GraphBuilder:
         pos = b.cast(pos_int, DType.FP32)
 
         # 4. Reshape pos to (seq_len, 1) and inv_freq to (1, head_dim//2)
-        seq_len_1 = b.concat([seq_len_node, _const(1)], _const([1]), 1, (None, 1))
+        seq_len_1 = b.concat([seq_len_node, _const(1)], _const([0]), 0, (2,))
         pos_col = b.reshape(pos, (None, 1), seq_len_1)
 
         half_dim = head_dim // 2
-        freq_shape = b.concat([_const(1), _const(half_dim)], _const([1]), 1, (1, None))
+        freq_shape = b.concat([_const(1), _const(half_dim)], _const([0]), 0, (2,))
         freq_row = b.reshape(inv_freq, (1, None), freq_shape)
 
         # 5. Outer product: angles = pos_col * freq_row -> (seq_len, head_dim//2)
@@ -278,9 +274,9 @@ class GraphBuilder:
         # 8. Final Reshape to (1, 1, seq_len, head_dim) for broadcasting
         final_shape = b.concat(
             [_const(1), _const(1), seq_len_node, _const(head_dim)],
-            _const([1]),
-            1,
-            (1, 1, None, head_dim),
+            _const([0]),
+            0,
+            (4,),
         )
         cos_out = b.reshape(cos_t, (1, 1, None, head_dim), final_shape)
         sin_out = b.reshape(sin_t, (1, 1, None, head_dim), final_shape)
@@ -309,9 +305,7 @@ class GraphBuilder:
             return node
 
         # Shape for mask matrix: (seq_len, seq_len)
-        mask_shape = b.concat(
-            [seq_len_node, seq_len_node], _const([1]), 1, (None, None)
-        )
+        mask_shape = b.concat([seq_len_node, seq_len_node], _const([0]), 0, (2,))
 
         # Fill with ones
         ones_val = _const(1.0, DType.FP32)
@@ -328,9 +322,9 @@ class GraphBuilder:
         # Reshape to (1, 1, seq_len, seq_len) for broadcasting
         final_shape = b.concat(
             [_const(1), _const(1), seq_len_node, seq_len_node],
-            _const([1]),
-            1,
-            (1, 1, None, None),
+            _const([0]),
+            0,
+            (4,),
         )
         mask_out = b.reshape(scaled_mask, (1, 1, None, None), final_shape)
 
@@ -668,7 +662,7 @@ def main():
         input_ids_padded[0, :seq_len] = input_ids
 
         # Define concrete values for sequence length
-        seq_len_val = np.array([seq_len], dtype=np.int32)
+        seq_len_val = np.array([MAX_SEQ_LEN], dtype=np.int32)
 
         # Final input dictionary for this step
         step_inputs = {

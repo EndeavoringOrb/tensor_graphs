@@ -7,7 +7,6 @@ from .liveness import LivenessAnalyzer
 from .memory_planner import MemoryPlanner
 from .compiled_graph import CompiledGraph, OpInstruction, TensorMetadata
 from .shape_inference import ShapeInference
-from .constant_folding import ConstantFolding
 
 
 class Compiler:
@@ -17,24 +16,21 @@ class Compiler:
     def compile(
         self, recipe: ExecutionRecipe, known_values: Optional[Dict[str, Any]] = None
     ) -> CompiledGraph:
-        # 1. Constant Folding (Rebuilds graph structure, so must happen first)
-        if known_values:
-            recipe.root = ConstantFolding.fold(recipe.root, known_values)
-
-        # 2. Topo Sort (After potential structural changes from folding)
+        # 1. Topo Sort (Flatten graph)
         nodes = topological_sort(recipe.root)
 
-        # 3. Shape Inference (if values are provided)
+        # 2. Shape Inference (if values are provided)
+        # This now handles recursive value evaluation for shape nodes automatically.
         if known_values:
             ShapeInference.infer(nodes, known_values)
 
-        # 4. Liveness
+        # 3. Liveness
         liveness = LivenessAnalyzer.analyze(nodes)
 
-        # 5. Memory Planning
+        # 4. Memory Planning
         allocations = self.memory_planner.plan(nodes, liveness)
 
-        # 6. Instruction Generation
+        # 5. Instruction Generation
         instructions = []
         node_metadata = {}
 

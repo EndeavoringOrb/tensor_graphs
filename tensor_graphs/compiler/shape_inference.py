@@ -4,7 +4,9 @@ import numpy as np
 from ..ir.node import TensorNode
 from ..ops.atomic_types import OpType
 from ..ops.registry import get_reference_factory
+from ..backend.registry import KernelRegistry
 from ..ir.graph import topological_sort
+from ..ir.dtypes import Backend, TensorSignature, DType
 from tqdm import tqdm
 from ..config import *
 
@@ -49,6 +51,16 @@ def _prod_shape(shape: Tuple[Optional[int], ...]) -> Optional[int]:
         result *= d
     return result
 
+def _map_dtype_np(dtype: DType) -> Any:
+    if dtype == DType.FP32:
+        return np.float32
+    if dtype == DType.INT32:
+        return np.int32
+    if dtype == DType.FP16:
+        return np.float16
+    if dtype == DType.BOOL:
+        return np.bool_
+    return np.float32
 
 class ShapeInference:
     _handlers: Dict[str, Callable] = {}
@@ -111,9 +123,27 @@ class ShapeInference:
                     # Default: Propagate from 0th input if available (unary-like)
                     if node.parents and node.parents[0].shape:
                         node.shape = node.parents[0].shape
-
-        # 3. Final Resolution (Optional) could go here
-        pass
+            
+            if node.shape is None or any(item is None for item in node.shape):
+                raise ValueError(f"Cannot resolve shape for node {node}")
+        
+            # Add Value Resolution:
+            # If this is a "shape-relevant" op (Arithmetic/Concat/Cast) 
+            # and all parents have entries in computed_values:
+            if node.op_type in [OpType.ADD, OpType.MUL, OpType.CONCAT, OpType.CAST, OpType.SLICE]:
+                if all(p.name in computed_values for p in node.parents):
+                    # 1. Select CPU kernel
+                    input_sigs = [TensorSignature(p.dtype, p.shape, Backend.CPU_NUMPY) for p in node.parents]
+                    kernel = KernelRegistry.select_best_kernel(node.op_type, input_sigs, Backend.CPU_NUMPY, node.dtype)
+                    
+                    if kernel:
+                        # 2. Allocate temporary output
+                        out_np = np.zeros(node.shape, dtype=_map_dtype_np(node.dtype))
+                        # 3. Execute
+                        parent_vals = [computed_values[p.name] for p in node.parents]
+                        kernel(parent_vals, [out_np], node.attrs)
+                        # 4. Store result for children (like the Reshape node)
+                        computed_values[node.name] = out_np
 
 
 # ==============================================================================
@@ -131,7 +161,7 @@ def handle_input(node: TensorNode, get_val):
         # Keep existing shape if it's already concrete
         node.shape = tuple(d if isinstance(d, int) else None for d in node.shape)
     else:
-        node.shape = ()
+        node.shape = None
 
 
 @ShapeInference.register_handler(OpType.CONSTANT)
@@ -143,7 +173,7 @@ def handle_constant(node: TensorNode, get_val):
         elif isinstance(val, (list, tuple)):
             node.shape = (len(val),)
         else:
-            node.shape = ()
+            node.shape = None
     elif node.shape is None:
         node.shape = (1,)
     else:
