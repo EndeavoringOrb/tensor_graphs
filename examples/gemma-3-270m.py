@@ -12,7 +12,7 @@ from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ir.buffer import StorageType
 from tensor_graphs.ops.atomic_types import OpType
-from tensor_graphs.backend.executor import evaluate_graph
+from tensor_graphs.session import GraphSession
 
 # ==============================================================================
 # 1. Graph Construction Helpers
@@ -636,11 +636,15 @@ def main():
         "flat_shape": flat_shape_node,
     }
 
-    # Build the computational graph (RoPE and mask computed internally)
+    # Build the computational graph
     logits_node = model.forward(in_node, seq_len_node, MAX_SEQ_LEN, shapes)
 
-    # Combine weights and constant inputs into a base dictionary
+    # Initialize Session
+    session = GraphSession(logits_node)
+
+    # Base inputs
     base_inputs = {**model.weights, **model.constant_inputs}
+    # Shapes constants
     q_shape = np.array(
         [1, MAX_SEQ_LEN, cfg["n_heads"], cfg["head_dim"]], dtype=np.int32
     )
@@ -657,14 +661,12 @@ def main():
         if seq_len > MAX_SEQ_LEN:
             break
 
-        # Prepare iteration-specific inputs
         input_ids_padded = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
         input_ids_padded[0, :seq_len] = input_ids
+        seq_len_val = np.array(
+            [MAX_SEQ_LEN], dtype=np.int32
+        )  # Note: using MAX for consistent shape
 
-        # Define concrete values for sequence length
-        seq_len_val = np.array([MAX_SEQ_LEN], dtype=np.int32)
-
-        # Final input dictionary for this step
         step_inputs = {
             **base_inputs,
             "input_ids": input_ids_padded,
@@ -674,14 +676,12 @@ def main():
             "flat_shape": flat_shape,
         }
 
-        # --- EXECUTE VIA evaluate_graph ---
-        # This helper handles optimization, compilation, and execution in one go.
-        logits_out = evaluate_graph(logits_node, step_inputs)
+        # USE SESSION
+        logits_out = session.run(step_inputs)
 
-        # Greedy Decoding
+        # Decoding
         next_token_logits = logits_out[0, seq_len - 1, :]
         next_token_id = int(np.argmax(next_token_logits))
-
         input_ids.append(next_token_id)
         word = tokenizer.decode([next_token_id])
         print(word, end="", flush=True)

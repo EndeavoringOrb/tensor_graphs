@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Callable, Any, Tuple
 from ..ir.buffer import BufferAllocation
 from ..ir.dtypes import DType
+from ..ir.node import TensorNode
 
 
 @dataclass
@@ -28,3 +29,5 @@ class CompiledGraph:
     total_memory_bytes: int
     input_offsets: Dict[str, int]
     output_offsets: Dict[str, int]
+    # Map back to original nodes for runtime state management (caching, dirty flags)
+    nodes_map: Dict[str, TensorNode]
