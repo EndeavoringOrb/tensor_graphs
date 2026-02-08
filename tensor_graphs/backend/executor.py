@@ -230,7 +230,6 @@ class Executor:
                     if has_cache:
                         # Restore from cache to make transient buffer valid
                         should_restore = True
-                        restored_count += 1
                     else:
                         # Clean but lost buffer -> Force Full Recompute
                         should_compute = True
@@ -245,6 +244,7 @@ class Executor:
 
             # 1. Restore (if needed)
             if should_restore and self.cache_manager:
+                restored_count += 1
                 cached_data = self.cache_manager.get(node)
                 if cached_data is not None:
                     self.copy_to_buffer(node_name, cached_data)

@@ -224,140 +224,71 @@ class DirtyPropagator:
         return tuple(out_slices) if out_slices else None
 
     @staticmethod
-    def get_input_slices(node: TensorNode, output_region: DirtyRegion) -> List[Any]:
+    def get_input_slices(
+        node: TensorNode, output_region: DirtyRegion
+    ) -> List[DirtyRegion]:
         """
         Given that 'node' needs to compute 'output_region', calculate the
-        slices required from each parent.
+        slices required from each parent using the SymbolicPropagator.
         """
         if output_region is None:
             return []
 
-        handler = _SLICE_MAPPING_HANDLERS.get(node.op_type, _map_slice_elementwise)
-        return handler(node, output_region)
+        # 1. Get Compiled Backward Propagator
+        propagator = SymbolicPropagator.get_backward_propagator(node)
 
+        # 2. Prepare Arguments
+        out_rank = len(node.shape) if node.shape is not None else 0
+        out_args = []
+        for d in range(out_rank):
+            if d < len(output_region):
+                s = output_region[d]
+                dim_size = node.shape[d] if node.shape[d] is not None else 1_000_000_000
+                # s.indices() handles None and negative indices correctly
+                start, stop, _ = s.indices(dim_size)
+                out_args.extend([float(start), float(stop)])
+            else:
+                # If output_region is smaller than rank (shouldn't happen), assume full
+                out_args.extend([0.0, float(node.shape[d] or 1_000_000_000)])
 
-# --- Helper Functions for Reverse Mapping (unchanged) ---
+        shape_args = []
+        for p in node.parents:
+            p_shape = p.shape if p.shape is not None else ()
+            for d in p_shape:
+                shape_args.append(float(d if d is not None else 1_000_000_000))
 
-
-def _map_slice_elementwise(
-    node: TensorNode, out_region: DirtyRegion
-) -> List[DirtyRegion]:
-    if out_region is None:
-        return []
-    res = []
-    out_rank = len(out_region)
-    for p in node.parents:
-        p_shape = p.shape if p.shape is not None else ()
-        p_rank = len(p_shape)
-        if p_rank == 0:
-            res.append(())
-            continue
-        p_slices = list(out_region[max(0, out_rank - p_rank) :])
-        if len(p_slices) < p_rank:
-            p_slices = [slice(None)] * (p_rank - len(p_slices)) + p_slices
-        for i in range(p_rank):
-            if p_shape[i] == 1:
-                p_slices[i] = slice(None)
-        res.append(tuple(p_slices))
-    return res
-
-
-def _map_slice_matmul(node: TensorNode, out_region: DirtyRegion) -> List[DirtyRegion]:
-    if out_region is None:
-        return []
-    out_rank = len(out_region)
-    rows = out_region[-2] if out_rank >= 2 else out_region[0]
-    cols = out_region[-1] if out_rank >= 2 else slice(None)
-    batch_slices = out_region[:-2] if out_rank > 2 else ()
-
-    def _get_input_batch_slices(parent, out_batch_region):
-        p_shape = parent.shape if parent.shape else ()
-        p_batch_rank = max(0, len(p_shape) - 2)
-        if p_batch_rank == 0:
-            return []
-        p_batch_slices = list(
-            out_batch_region[max(0, len(out_batch_region) - p_batch_rank) :]
-        )
-        if len(p_batch_slices) < p_batch_rank:
-            p_batch_slices = [slice(None)] * (
-                p_batch_rank - len(p_batch_slices)
-            ) + p_batch_slices
-        for i in range(p_batch_rank):
-            if p_shape[i] == 1:
-                p_batch_slices[i] = slice(None)
-        return p_batch_slices
-
-    slice_a = tuple(_get_input_batch_slices(node.parents[0], batch_slices)) + (
-        rows,
-        slice(None),
-    )
-    slice_b = tuple(_get_input_batch_slices(node.parents[1], batch_slices)) + (
-        slice(None),
-        cols,
-    )
-    return [slice_a, slice_b]
-
-
-def _map_slice_concat(node: TensorNode, out_region: DirtyRegion) -> List[DirtyRegion]:
-    axis = node.attrs.get("axis", 0)
-    if out_region is None:
-        return []
-    out_s = out_region[axis]
-    if out_s == slice(None):
-        return [
-            tuple(slice(None) for _ in range(len(p.shape)))
-            if p.shape
-            else (slice(None),)
-            for p in node.parents
+        out_shape_args = [
+            float(d if d is not None else 1_000_000_000) for d in (node.shape or ())
         ]
 
-    start, stop = out_s.start, out_s.stop
-    if start is None:
-        start = 0
-    # Stop None needs handling based on total shape, but here we do relative
+        # 3. Execute
+        res_flat = propagator(*(out_args + shape_args + out_shape_args))
 
-    res = []
-    curr = 0
-    for p in node.parents:
-        dim = p.shape[axis] if p.shape else 0
-        p_start = curr
-        p_end = curr + dim
-        curr += dim
+        # 4. Map back to DirtyRegion list
+        input_regions = []
+        idx = 0
+        for p in node.parents:
+            p_shape = p.shape if p.shape is not None else ()
+            rank = len(p_shape)
 
-        # If stop is None, it means end of concat
-        eff_stop = stop if stop is not None else 1_000_000_000
+            p_slices = []
+            for d in range(rank):
+                s, e = res_flat[idx], res_flat[idx + 1]
+                idx += 2
 
-        ov_start = max(start, p_start)
-        ov_end = min(eff_stop, p_end)
+                # Convert to slice
+                # We use (0, 0) for empty ranges to avoid Executor using full buffer
+                if s >= e or s == np.inf or e == -np.inf:
+                    p_slices.append(slice(0, 0))
+                    continue
 
-        if ov_start < ov_end:
-            rel_start = ov_start - p_start
-            rel_end = ov_end - p_start
-            p_slice = list(out_region)
-            p_slice[axis] = slice(rel_start, rel_end)
-            res.append(tuple(p_slice))
-        else:
-            p_slice = list(out_region)
-            p_slice[axis] = slice(0, 0)
-            res.append(tuple(p_slice))
-    return res
+                start = int(max(0, s)) if s != -np.inf else 0
+                stop = int(max(0, e)) if e != np.inf else p_shape[d]
+                p_slices.append(slice(start, stop))
 
+            if rank == 0:
+                input_regions.append(())
+            else:
+                input_regions.append(tuple(p_slices))
 
-def _map_slice_full(node: TensorNode, out_region: DirtyRegion) -> List[DirtyRegion]:
-    return [
-        tuple(slice(None) for _ in range(len(p.shape))) if p.shape else (slice(None),)
-        for p in node.parents
-    ]
-
-
-_SLICE_MAPPING_HANDLERS = {
-    OpType.ADD: _map_slice_elementwise,
-    OpType.MUL: _map_slice_elementwise,
-    OpType.DIVIDE: _map_slice_elementwise,
-    OpType.POWER: _map_slice_elementwise,
-    OpType.WHERE: _map_slice_elementwise,
-    OpType.DOT: _map_slice_matmul,
-    OpType.CONCAT: _map_slice_concat,
-    OpType.SLICE: _map_slice_elementwise,
-    OpType.RESHAPE: _map_slice_full,
-}
+        return input_regions
