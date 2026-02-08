@@ -15,8 +15,12 @@ def repeat_ref(
     if len(inputs) != 1:
         raise ValueError("Repeat requires exactly 1 data input")
 
-    if attrs is None or "repeats" not in attrs:
+    if attrs is None:
+        raise ValueError("Repeat requires attrs")
+    if "repeats" not in attrs:
         raise ValueError("Repeat requires 'repeats' in attributes")
+    if "axis" not in attrs:
+        raise ValueError("Repeat requires 'axis' in attributes")
 
     data = inputs[0]
 

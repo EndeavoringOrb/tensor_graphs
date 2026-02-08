@@ -5,7 +5,7 @@ File: tensor_graphs/compiler/symbolic.py
 import sympy as sp
 import numpy as np
 import json
-from typing import List, Tuple, Dict, Any, Callable
+from typing import List, Tuple, Dict, Any, Callable, Optional
 from dataclasses import dataclass
 from ..ir.node import TensorNode
 from ..ops.atomic_types import OpType
@@ -65,7 +65,9 @@ class SymbolicPropagator:
         return decorator
 
     @classmethod
-    def get_propagator(cls, node: TensorNode) -> Callable:
+    def get_propagator(
+        cls, node: TensorNode, known_values: Optional[dict] = None
+    ) -> Callable:
         """
         Returns a compiled function that calculates the output dirty region
         given input dirty regions and shapes.
@@ -86,12 +88,14 @@ class SymbolicPropagator:
             return cls._cache[key]
 
         # 2. Compile if not found
-        func = cls._compile(node)
+        func = cls._compile(node, known_values)
         cls._cache[key] = func
         return func
 
     @classmethod
-    def get_backward_propagator(cls, node: TensorNode) -> Callable:
+    def get_backward_propagator(
+        cls, node: TensorNode, known_values: Optional[dict] = None
+    ) -> Callable:
         """
         Returns a compiled function that calculates input dirty regions
         given output dirty region and input shapes.
@@ -110,13 +114,17 @@ class SymbolicPropagator:
         if key in cls._cache:
             return cls._cache[key]
 
-        func = cls._compile_backward(node)
+        func = cls._compile_backward(node, known_values)
         cls._cache[key] = func
         return func
 
     @classmethod
     def _trace_backward_node(
-        cls, node: TensorNode, output_region: SymbolicRegion, context: Dict[str, Any]
+        cls,
+        node: TensorNode,
+        output_region: SymbolicRegion,
+        context: Dict[str, Any],
+        known_values: Optional[dict] = None,
     ) -> List[SymbolicRegion]:
         # 1. Atomic Handler
         if node.op_type in cls._backward_registry:
@@ -137,7 +145,7 @@ class SymbolicPropagator:
         node_map: Dict[TensorNode, SymbolicRegion] = {sub_root: output_region}
 
         # Perform shape inference on the decomposition subgraph
-        ShapeInference.infer(sub_nodes, {})
+        ShapeInference.infer(sub_nodes, known_values)
 
         # Propagate backward in reverse topological order
         for sub in reversed(sub_nodes):
@@ -155,7 +163,9 @@ class SymbolicPropagator:
                 "op_type": sub.op_type,
             }
 
-            sub_inputs = cls._trace_backward_node(sub, node_map[sub], sub_ctx)
+            sub_inputs = cls._trace_backward_node(
+                sub, node_map[sub], sub_ctx, known_values
+            )
 
             for p, p_reg in zip(sub.parents, sub_inputs):
                 if p not in node_map:
@@ -189,7 +199,9 @@ class SymbolicPropagator:
         return decorator
 
     @classmethod
-    def _compile_backward(cls, node: TensorNode) -> Callable:
+    def _compile_backward(
+        cls, node: TensorNode, known_values: Optional[dict] = None
+    ) -> Callable:
         # 1. Symbols for Output Dirty Region
         out_ranges = []
         out_dirty_args = []
@@ -229,7 +241,9 @@ class SymbolicPropagator:
         }
 
         # 4. Trace
-        input_regions = cls._trace_backward_node(node, output_region, context)
+        input_regions = cls._trace_backward_node(
+            node, output_region, context, known_values
+        )
 
         # 5. Flatten Results
         flat_results = []
@@ -245,13 +259,19 @@ class SymbolicPropagator:
             lam = lambda *args: []
         else:
             if DEBUG_EXECUTION:
-                print(f"[SYMBOLIC] _compile_backward running lambdify for node {node.op_type}")
-            lam = sp.lambdify(all_args, flat_results, modules=["numpy", "math"], cse=True)
+                print(
+                    f"[SYMBOLIC] _compile_backward running lambdify for node {node.op_type}"
+                )
+            lam = sp.lambdify(
+                all_args, flat_results, modules=["numpy", "math"], cse=True
+            )
 
         return lam
 
     @classmethod
-    def _compile(cls, node: TensorNode) -> Callable:
+    def _compile(
+        cls, node: TensorNode, known_values: Optional[dict] = None
+    ) -> Callable:
         # Create Symbols for Inputs: (start, stop) pairs
         input_symbols = []
         input_shape_symbols = []
@@ -269,12 +289,12 @@ class SymbolicPropagator:
                 e = sp.Symbol(f"in{i}_d{d}_e")
                 p_ranges.append((s, e))
                 dirty_args.extend([s, e])
-            
+
             # Initial is_dirty: all dims must have s < e
             is_d = sp.true
             if p_ranges:
                 is_d = sp.And(*[s < e for s, e in p_ranges])
-                
+
             input_symbols.append(SymbolicRegion(p_ranges, is_dirty_expr=is_d))
 
             # Shape Symbols
@@ -292,7 +312,7 @@ class SymbolicPropagator:
             "op_type": node.op_type,
         }
 
-        final_region = cls._trace_node(node, input_symbols, context)
+        final_region = cls._trace_node(node, input_symbols, context, known_values)
 
         # Flatten Output
         out_exprs = []
@@ -316,7 +336,11 @@ class SymbolicPropagator:
 
     @classmethod
     def _trace_node(
-        cls, node: TensorNode, inputs: List[SymbolicRegion], context: Dict[str, Any]
+        cls,
+        node: TensorNode,
+        inputs: List[SymbolicRegion],
+        context: Dict[str, Any],
+        known_values: Optional[dict] = None,
     ) -> SymbolicRegion:
         # 1. Atomic Handler
         if node.op_type in cls._registry:
@@ -337,7 +361,7 @@ class SymbolicPropagator:
         sub_nodes = topological_sort(sub_root)
 
         # Perform shape inference on the decomposition subgraph
-        ShapeInference.infer(sub_nodes, {})
+        ShapeInference.infer(sub_nodes, known_values)
 
         # Map original parents to symbolic inputs
         node_map: Dict[TensorNode, SymbolicRegion] = {}
@@ -367,7 +391,7 @@ class SymbolicPropagator:
                 "op_type": sub.op_type,
             }
 
-            res = cls._trace_node(sub, sub_inputs, sub_ctx)
+            res = cls._trace_node(sub, sub_inputs, sub_ctx, known_values)
             node_map[sub] = res
 
         return node_map[sub_root]
@@ -412,6 +436,33 @@ def _is_dirty(region: SymbolicRegion) -> sp.Expr:
 # ==============================================================================
 # Atomic Handlers
 # ==============================================================================
+
+
+@SymbolicPropagator.register(OpType.ARANGE)
+def symbolic_arange(
+    inputs: List[SymbolicRegion], ctx: Dict[str, Any]
+) -> SymbolicRegion:
+    """
+    Arange operation: arange(start, stop, step) -> [start, start+step, ..., stop-1]
+    Output is 1D with shape (ceil((stop-start)/step),)
+    """
+    if len(inputs) < 3:
+        return SymbolicPropagator._clean_region(1)
+
+    start_region, stop_region, step_region = inputs[0], inputs[1], inputs[2]
+
+    # For arange, the output is dirty if any input is dirty
+    # (since the output values depend on start/stop/step)
+    is_dirty = sp.Or(
+        _is_dirty(start_region), _is_dirty(stop_region), _is_dirty(step_region)
+    )
+
+    # Output is always 1D
+    # The dirty region is (0, output_length) if dirty, else clean (inf, -inf)
+    out_s = sp.Piecewise((sp.Integer(0), is_dirty), (S_INF, True))
+    out_e = sp.Piecewise((S_INF, is_dirty), (RT_NEG_INF, True))
+
+    return SymbolicRegion([(out_s, out_e)], is_dirty_expr=is_dirty)
 
 
 @SymbolicPropagator.register(OpType.ADD)
@@ -767,6 +818,35 @@ def symbolic_unary(inputs: List[SymbolicRegion], ctx: Dict[str, Any]) -> Symboli
 # ==============================================================================
 # Backward Atomic Handlers
 # ==============================================================================
+
+
+@SymbolicPropagator.register_backward(OpType.ARANGE)
+def backward_arange(
+    out_region: SymbolicRegion, ctx: Dict[str, Any]
+) -> List[SymbolicRegion]:
+    """
+    Backward for ARANGE: Since arange generates values from start/stop/step,
+    if the output is dirty, all inputs must be considered dirty (full range).
+    """
+    input_shapes = ctx.get("input_shapes", [])
+    is_out_dirty = _is_dirty(out_region)
+
+    # ARANGE has 3 inputs: start, stop, step
+    # Each is typically a scalar (rank 0 or shape [1])
+    # If output is dirty, all inputs are dirty (full range 0 to 1 for scalars)
+    results = []
+    for p_shape in input_shapes:
+        p_rank = len(p_shape) if p_shape else 0
+        if p_rank == 0:
+            # Scalar input
+            s = sp.Piecewise((sp.Integer(0), is_out_dirty), (S_INF, True))
+            e = sp.Piecewise((sp.Integer(1), is_out_dirty), (RT_NEG_INF, True))
+            results.append(SymbolicRegion([(s, e)]))
+        else:
+            # Non-scalar input - use full dirty region
+            results.append(SymbolicPropagator._full_dirty_region(p_rank))
+
+    return results
 
 
 @SymbolicPropagator.register_backward(OpType.ADD)

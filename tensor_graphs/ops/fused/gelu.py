@@ -4,6 +4,13 @@ from ..registry import register_reference_factory
 import numpy as np
 from .tanh import tanh_decomposition
 
+def gelu(x):
+    return TensorNode(
+        "GELU",
+        x.dtype,
+        [x],
+        name=f"{x.name}_gelu",
+    )
 
 def gelu_decomposition(inputs, attrs=None):
     # (Implementation from original file)

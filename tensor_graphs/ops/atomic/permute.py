@@ -18,10 +18,6 @@ def permute_ref(
         raise ValueError("Permute requires 'dims' (permutation order) in attributes")
 
     data = inputs[0]
-    dims = attrs["dims"]
-
-    # Calculate output shape
-    out_shape = tuple(data.shape[i] for i in dims) if data.shape else None
 
     return TensorNode(
         OpType.PERMUTE,

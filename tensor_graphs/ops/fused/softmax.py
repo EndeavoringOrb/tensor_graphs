@@ -2,6 +2,14 @@ from ...ir.node import TensorNode
 from ..atomic_types import OpType
 from ..registry import register_reference_factory
 
+def softmax(x, axis=-1, name=None):
+    return TensorNode(
+        "Softmax",
+        x.dtype,
+        [x],
+        name=name or f"{x.name}_softmax",
+        attrs={"axis": axis},
+    )
 
 def softmax_decomposition(inputs, attrs=None):
     x = inputs[0]

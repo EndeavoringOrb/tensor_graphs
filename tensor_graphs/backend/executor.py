@@ -197,7 +197,7 @@ class Executor:
             # Inputs already have dirty_region set.
             # Constants have None (Clean).
             if node.op_type not in (OpType.INPUT, OpType.CONSTANT):
-                node.dirty_region = DirtyPropagator.propagate(node)
+                node.dirty_region = DirtyPropagator.propagate(node, inputs)
 
             # --- B. Determine Execution Strategy ---
 
@@ -290,7 +290,7 @@ class Executor:
 
                 # Get input slices required for this output region
                 input_slice_regions = DirtyPropagator.get_input_slices(
-                    node, compute_region
+                    node, compute_region, inputs
                 )
 
                 # Prepare views

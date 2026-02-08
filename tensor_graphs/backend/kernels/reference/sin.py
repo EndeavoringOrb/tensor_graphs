@@ -2,6 +2,7 @@ import numpy as np
 from ....backend.registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature, Backend
 from ....ops.atomic_types import OpType
+from ....ops.atomic.sin import sin_ref
 
 
 @KernelRegistry.register(
@@ -9,6 +10,7 @@ from ....ops.atomic_types import OpType
     [
         TensorSignature(DType.FP32, shape=None, backend=Backend.CPU_NUMPY)
     ],  # Matches any rank/shape
+    reference_factory=sin_ref,
 )
 def sin_generic(inputs, outputs, attrs):
     """

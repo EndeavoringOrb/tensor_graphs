@@ -74,7 +74,7 @@ class DirtyPropagator:
         return tuple(slices)
 
     @staticmethod
-    def propagate(node: TensorNode) -> DirtyRegion:
+    def propagate(node: TensorNode, known_values: Optional[dict] = None) -> DirtyRegion:
         """
         Calculates the dirty region of 'node' based on the dirty regions of its parents
         using the SymbolicPropagator.
@@ -86,7 +86,7 @@ class DirtyPropagator:
             return node.dirty_region
 
         # 1. Get Compiled Propagator
-        propagator = SymbolicPropagator.get_propagator(node)
+        propagator = SymbolicPropagator.get_propagator(node, known_values)
 
         # 2. Prepare Arguments
         dirty_args = []
@@ -219,7 +219,9 @@ class DirtyPropagator:
 
     @staticmethod
     def get_input_slices(
-        node: TensorNode, output_region: DirtyRegion
+        node: TensorNode,
+        output_region: DirtyRegion,
+        known_values: Optional[dict] = None,
     ) -> List[DirtyRegion]:
         """
         Given that 'node' needs to compute 'output_region', calculate the
@@ -229,7 +231,7 @@ class DirtyPropagator:
             return []
 
         # 1. Get Compiled Backward Propagator
-        propagator = SymbolicPropagator.get_backward_propagator(node)
+        propagator = SymbolicPropagator.get_backward_propagator(node, known_values)
 
         # 2. Prepare Arguments
         out_rank = len(node.shape) if node.shape is not None else 0

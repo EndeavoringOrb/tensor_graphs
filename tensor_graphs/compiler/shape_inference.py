@@ -98,7 +98,7 @@ class ShapeInference:
             return None
 
         # 2. Inference Loop
-        for node in tqdm(nodes, desc="Inferring shapes", disable=not DEBUG_EXECUTION):
+        for node in nodes:
             # Ensure shape is a tuple of ints or None (initially)
             if node.shape is None:
                 pass
@@ -107,6 +107,13 @@ class ShapeInference:
                 node.shape = tuple(
                     d if isinstance(d, int) else None for d in node.shape
                 )
+
+            if (
+                node.shape
+                and all(isinstance(d, int) for d in node.shape)
+                and (not node.parents)
+            ):
+                pass  # input or cut off parent node with prefilled shape
 
             # --- Dispatch ---
             if node.op_type in ShapeInference._handlers:

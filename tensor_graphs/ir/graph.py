@@ -163,3 +163,41 @@ def graph_from_json(json_str: str) -> TensorNode:
 
     # The last node in the topological list is the root
     return id_to_node[data[-1]["id"]]
+
+class GraphBuilder:
+    def __init__(self):
+        self.params = {}
+        self.inputs = {}
+        self._count = 0
+
+    def _next_name(self, op_name):
+        self._count += 1
+        return f"{op_name}_{self._count}"
+    
+    def input(self, name, shape, dtype=DType.FP32):
+        node = TensorNode(
+            OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.TRANSIENT
+        )
+        self.inputs[name] = node
+        return node
+
+    def constant(self, value, shape, dtype, name):
+        if not isinstance(value, np.ndarray):
+            value = np.array(value)
+        node = TensorNode(
+            OpType.CONSTANT,
+            dtype,
+            [],
+            shape,
+            name,
+            attrs={"value": value},
+            storage_type=StorageType.PERSISTENT,
+        )
+        return node
+
+    def param(self, name, shape, dtype=DType.FP32):
+        node = TensorNode(
+            OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.PERSISTENT
+        )
+        self.params[name] = node
+        return node

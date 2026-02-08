@@ -2,6 +2,13 @@ from ...ir.node import TensorNode
 from ..atomic_types import OpType
 from ..registry import register_reference_factory
 
+def rms_norm(x, scale, eps, name=None):
+    return TensorNode(
+        "RMSNorm",
+        x.dtype,
+        [x, scale, eps],
+        name=name or f"{x.name}_rmsnorm"
+    )
 
 def rms_norm_decomposition(inputs, attrs=None):
     x, scale, eps = inputs
@@ -19,7 +26,7 @@ def rms_norm_decomposition(inputs, attrs=None):
         name="rmsnorm_sum",
         attrs={"axis": axis, "keepdims": True},
     )
-    n = x.shape[axis] or 1
+    n = x.shape[axis]
     n_const = TensorNode(
         OpType.CONSTANT, x.dtype, [], name="n", attrs={"value": float(n)}
     )

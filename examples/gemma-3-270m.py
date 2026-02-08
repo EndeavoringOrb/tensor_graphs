@@ -22,15 +22,6 @@ from tensor_graphs.backend.kernels import *
 
 
 class GraphBuilder:
-    def __init__(self):
-        self.params = {}
-        self.inputs = {}
-        self._count = 0
-
-    def _next_name(self, op_name):
-        self._count += 1
-        return f"{op_name}_{self._count}"
-
     def input(self, name, shape, dtype=DType.FP32):
         node = TensorNode(
             OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.TRANSIENT
@@ -59,147 +50,6 @@ class GraphBuilder:
         self.params[name] = node
         return node
 
-    # --- Fixed Atomic Wrappers with Unique Names ---
-    def add(self, a, b):
-        return TensorNode(OpType.ADD, a.dtype, [a, b], name=self._next_name("add"))
-
-    def mul(self, a, b):
-        return TensorNode(
-            OpType.MUL, a.dtype, [a, b], a.shape, name=self._next_name("mul")
-        )
-
-    def divide(self, a, b):
-        return TensorNode(
-            OpType.DIVIDE, a.dtype, [a, b], a.shape, name=self._next_name("div")
-        )
-
-    def matmul(self, a, b):
-        return TensorNode(OpType.DOT, a.dtype, [a, b], name=self._next_name("dot"))
-
-    def reshape(self, x, target_shape, shape_node):
-        return TensorNode(
-            OpType.RESHAPE,
-            x.dtype,
-            [x, shape_node],
-            target_shape,
-            name=self._next_name("reshape"),
-        )
-
-    def permute(self, x, dims, perm_node=None):
-        # Using a more descriptive name for weight permutations
-        return TensorNode(
-            OpType.PERMUTE,
-            x.dtype,
-            [x],
-            name=self._next_name("permute"),
-            attrs={"dims": dims},
-        )
-
-    def concat(self, inputs, axis_node, axis_idx, output_shape):
-        return TensorNode(
-            OpType.CONCAT,
-            inputs[0].dtype,
-            inputs,
-            output_shape,
-            name=self._next_name("concat"),
-            attrs={"axis": axis_idx},
-        )
-
-    def arange(self, start_node, stop_node, step_node):
-        return TensorNode(
-            OpType.ARANGE,
-            DType.INT32,
-            [start_node, stop_node, step_node],
-            (None,),
-            name=self._next_name("arange"),
-        )
-
-    def power(self, base, exp):
-        return TensorNode(
-            OpType.POWER,
-            base.dtype,
-            [base, exp],
-            base.shape,
-            name=self._next_name("pow"),
-        )
-
-    def triu(self, x, k_node):
-        return TensorNode(
-            OpType.TRIU, x.dtype, [x], x.shape, name=self._next_name("triu")
-        )
-
-    def cast(self, x, target_dtype):
-        return TensorNode(
-            OpType.CAST,
-            target_dtype,
-            [x],
-            x.shape,
-            name=self._next_name("cast"),
-            attrs={"to": target_dtype},
-        )
-
-    def cos(self, x):
-        return TensorNode(
-            OpType.COS, x.dtype, [x], x.shape, name=self._next_name("cos")
-        )
-
-    def sin(self, x):
-        return TensorNode(
-            OpType.SIN, x.dtype, [x], x.shape, name=self._next_name("sin")
-        )
-
-    def fill(self, value_node, shape_node, target_shape):
-        return TensorNode(
-            OpType.FILL,
-            value_node.dtype,
-            [value_node, shape_node],
-            target_shape,
-            name=self._next_name("fill"),
-        )
-
-    def embedding(self, indices, weights):
-        return gather.gather_ref([weights, indices])
-
-    def rms_norm(self, x, scale, eps_node):
-        return TensorNode(
-            "RMSNorm",
-            x.dtype,
-            [x, scale, eps_node],
-            x.shape,
-            name=self._next_name("rmsnorm"),
-        )
-
-    def gelu(self, x):
-        return TensorNode("GELU", x.dtype, [x], x.shape, name=self._next_name("gelu"))
-
-    def softmax(self, x):
-        return TensorNode(
-            "Softmax", x.dtype, [x], x.shape, name=self._next_name("softmax")
-        )
-
-    def rope(self, x, cos, sin):
-        return TensorNode(
-            "RoPE", x.dtype, [x, cos, sin], x.shape, name=self._next_name("rope")
-        )
-
-    def repeat(self, x, repeats, axis=1):
-        return TensorNode(
-            OpType.REPEAT,
-            x.dtype,
-            [x],
-            name=self._next_name("repeat"),
-            attrs={"repeats": repeats, "axis": axis},
-        )
-
-    def sum(self, x, axis=1, keepdims=True):
-        return TensorNode(
-            OpType.SUM,
-            x.dtype,
-            [x],
-            name=self._next_name("sum"),
-            attrs={"axis": axis, "keepdims": keepdims},
-        )
-
     # --- RoPE and Mask Computation Inside Graph ---
 
     def compute_rope(self, seq_len_node, head_dim, theta_base=10000.0):
@@ -226,51 +76,48 @@ class GraphBuilder:
 
         # 1. arange(0, head_dim, 2) -> indices
         start, stop, step = _const(0), _const(head_dim), _const(2)
-        indices_int = b.arange(start, stop, step)
-        indices = b.cast(indices_int, DType.FP32)
+        indices_int = arange.arange_ref([start, stop, step])
+        indices = cast.cast_ref([indices_int], {"to": DType.FP32})
 
         # 2. inv_freq = theta_base ** (indices / head_dim) ** -1
         h_dim_fp = _const(float(head_dim), DType.FP32)
-        exponent = b.divide(indices, h_dim_fp)
+        exponent = divide.divide_ref([indices, h_dim_fp])
 
         theta_node = _const(theta_base, DType.FP32)
-        base_to_exponent = b.power(theta_node, exponent)
+        base_to_exponent = power.power_ref([theta_node, exponent])
 
         one_node = _const(1.0, DType.FP32)
-        inv_freq = b.divide(one_node, base_to_exponent)
+        inv_freq = divide.divide_ref([one_node, base_to_exponent])
 
         # 3. positions = arange(seq_len)
         p_start, p_stop, p_step = _const(0), seq_len_node, _const(1)
-        pos_int = b.arange(p_start, p_stop, p_step)
-        pos = b.cast(pos_int, DType.FP32)
+        pos_int = arange.arange_ref([p_start, p_stop, p_step])
+        pos = cast.cast_ref([pos_int], {"to": DType.FP32})
 
         # 4. Reshape pos to (seq_len, 1) and inv_freq to (1, head_dim//2)
-        seq_len_1 = b.concat([seq_len_node, _const(1)], _const([0]), 0, (2,))
-        pos_col = b.reshape(pos, (None, 1), seq_len_1)
+        seq_len_1 = concat.concat_ref([seq_len_node, _const(1)], {"axis": 0})
+        pos_col = reshape.reshape_ref([pos, seq_len_1])
 
         half_dim = head_dim // 2
-        freq_shape = b.concat([_const(1), _const(half_dim)], _const([0]), 0, (2,))
-        freq_row = b.reshape(inv_freq, (1, None), freq_shape)
+        freq_shape = concat.concat_ref([_const(1), _const(half_dim)], {"axis": 0})
+        freq_row = reshape.reshape_ref([inv_freq, freq_shape])
 
         # 5. Outer product: angles = pos_col * freq_row -> (seq_len, head_dim//2)
-        angles = b.mul(pos_col, freq_row)
+        angles = mul.mul_ref([pos_col, freq_row])
 
         # 6. Concat [angles, angles] -> (seq_len, head_dim)
-        angles = b.concat([angles, angles], _const([1]), 1, (None, head_dim))
+        angles = concat.concat_ref([angles, angles], {"axis": 1})
 
         # 7. Cos, Sin
-        cos_t = b.cos(angles)
-        sin_t = b.sin(angles)
+        cos_t = cos.cos_ref([angles])
+        sin_t = sin.sin_ref([angles])
 
         # 8. Final Reshape to (1, 1, seq_len, head_dim) for broadcasting
-        final_shape = b.concat(
-            [_const(1), _const(1), seq_len_node, _const(head_dim)],
-            _const([0]),
-            0,
-            (4,),
+        final_shape = concat.concat_ref(
+            [_const(1), _const(1), seq_len_node, _const(head_dim)], {"axis": 0}
         )
-        cos_out = b.reshape(cos_t, (1, 1, None, head_dim), final_shape)
-        sin_out = b.reshape(sin_t, (1, 1, None, head_dim), final_shape)
+        cos_out = reshape.reshape_ref([cos_t, final_shape])
+        sin_out = reshape.reshape_ref([sin_t, final_shape])
 
         return cos_out, sin_out
 
@@ -296,28 +143,24 @@ class GraphBuilder:
             return node
 
         # Shape for mask matrix: (seq_len, seq_len)
-        mask_shape = b.concat([seq_len_node, seq_len_node], _const([0]), 0, (2,))
+        mask_shape = concat.concat_ref([seq_len_node, seq_len_node], {"axis": 0})
 
         # Fill with ones
         ones_val = _const(1.0, DType.FP32)
-        ones_matrix = b.fill(ones_val, mask_shape, (None, None))
+        ones_matrix = fill.fill_ref([ones_val, mask_shape])
 
         # Apply triu with k=1
-        k_node = _const(1, DType.INT32)
-        triu_mask = b.triu(ones_matrix, k_node)
+        triu_mask = triu.triu_ref([ones_matrix], {"k": 1})
 
         # Scale by mask_val (convert to const)
         mask_scale = _const(mask_val, DType.FP32)
-        scaled_mask = b.mul(triu_mask, mask_scale)
+        scaled_mask = mul.mul_ref([triu_mask, mask_scale])
 
         # Reshape to (1, 1, seq_len, seq_len) for broadcasting
-        final_shape = b.concat(
-            [_const(1), _const(1), seq_len_node, seq_len_node],
-            _const([0]),
-            0,
-            (4,),
+        final_shape = concat.concat_ref(
+            [_const(1), _const(1), seq_len_node, seq_len_node], {"axis": 0}
         )
-        mask_out = b.reshape(scaled_mask, (1, 1, None, None), final_shape)
+        mask_out = reshape.reshape_ref([scaled_mask, final_shape])
 
         return mask_out
 
@@ -367,11 +210,11 @@ class Gemma3Model:
         w_emb = self._get_param(
             "model.embed_tokens.weight", (cfg["vocab_size"], cfg["emb_dim"])
         )
-        x = self.builder.embedding(input_ids_node, w_emb)
+        x = gather.gather_ref([w_emb, input_ids_node])
 
         # Scale
         scale_val = self._const([cfg["emb_dim"] ** 0.5], "emb_scale_val", DType.FP32)
-        x = self.builder.mul(x, scale_val)
+        x = mul.mul_ref([x, scale_val])
 
         # Compute RoPE (cos, sin) internally
         cos, sin = self.builder.compute_rope(
@@ -394,7 +237,7 @@ class Gemma3Model:
         # Final Norm
         w_norm = self._get_param("model.norm.weight", (cfg["emb_dim"],))
         eps_node = self._const([1e-6], "final_norm_eps", DType.FP32)
-        x = self.builder.rms_norm(x, w_norm, eps_node)
+        x = rms_norm.rms_norm(x, w_norm, eps_node)
 
         # Head (Weight Tying)
         w_head = w_emb
@@ -404,9 +247,8 @@ class Gemma3Model:
             )
 
         # Permute for MatMul
-        perm_t = self._const([1, 0], "perm_head_T")
-        w_head_t = self.builder.permute(w_head, [1, 0], perm_t)
-        logits = self.builder.matmul(x, w_head_t)
+        w_head_t = permute.permute_ref([w_head], {"dims": [1, 0]})
+        logits = dot.dot_ref([x, w_head_t])
 
         return logits
 
@@ -418,7 +260,7 @@ class Gemma3Model:
         # Input Norm
         w_ln = self._get_param(f"{prefix}.input_layernorm.weight", (cfg["emb_dim"],))
         eps_ln = self._const([1e-6], f"ln_eps_{layer_idx}", DType.FP32)
-        x_norm = self.builder.rms_norm(x, w_ln, eps_ln)
+        x_norm = rms_norm.rms_norm(x, w_ln, eps_ln)
 
         # Attention
         x_attn = self._attention(x_norm, layer_idx, cos, sin, mask, shapes)
@@ -428,9 +270,9 @@ class Gemma3Model:
             f"{prefix}.post_attention_layernorm.weight", (cfg["emb_dim"],)
         )
         eps_post = self._const([1e-6], f"post_attn_eps_{layer_idx}", DType.FP32)
-        x_attn = self.builder.rms_norm(x_attn, w_post, eps_post)
+        x_attn = rms_norm.rms_norm(x_attn, w_post, eps_post)
 
-        x = self.builder.add(residual, x_attn)
+        x = add.add_ref([residual, x_attn])
 
         # Feed Forward
         residual = x
@@ -438,7 +280,7 @@ class Gemma3Model:
             f"{prefix}.pre_feedforward_layernorm.weight", (cfg["emb_dim"],)
         )
         eps_pre = self._const([1e-6], f"pre_ff_eps_{layer_idx}", DType.FP32)
-        x_norm = self.builder.rms_norm(x, w_pre, eps_pre)
+        x_norm = rms_norm.rms_norm(x, w_pre, eps_pre)
 
         x_ff = self._mlp(x_norm, layer_idx)
 
@@ -446,9 +288,9 @@ class Gemma3Model:
             f"{prefix}.post_feedforward_layernorm.weight", (cfg["emb_dim"],)
         )
         eps_post_ff = self._const([1e-6], f"post_ff_eps_{layer_idx}", DType.FP32)
-        x_ff = self.builder.rms_norm(x_ff, w_post_ff, eps_post_ff)
+        x_ff = rms_norm.rms_norm(x_ff, w_post_ff, eps_post_ff)
 
-        return self.builder.add(residual, x_ff)
+        return add.add_ref([residual, x_ff])
 
     def _attention(self, x, layer_idx, cos, sin, mask, shapes):
         cfg = self.cfg
@@ -464,77 +306,70 @@ class Gemma3Model:
         wv = self._get_param(f"{prefix}.v_proj.weight", (n_kv * head_dim, d_model))
 
         perm_w = self._const([1, 0], f"perm_w_{layer_idx}")
-        wq_t = self.builder.permute(wq, [1, 0], perm_w)
-        wk_t = self.builder.permute(wk, [1, 0], perm_w)
-        wv_t = self.builder.permute(wv, [1, 0], perm_w)
+        wq_t = permute.permute_ref([wq], {"dims": [1, 0]})
+        wk_t = permute.permute_ref([wk], {"dims": [1, 0]})
+        wv_t = permute.permute_ref([wv], {"dims": [1, 0]})
 
-        q = self.builder.matmul(x, wq_t)
-        k = self.builder.matmul(x, wk_t)
-        v = self.builder.matmul(x, wv_t)
+        q = dot.dot_ref([x, wq_t])
+        k = dot.dot_ref([x, wk_t])
+        v = dot.dot_ref([x, wv_t])
 
         # Reshape & Permute
-        perm_attn = self._const([0, 2, 1, 3], f"perm_attn_{layer_idx}")
-
-        q = self.builder.permute(
-            self.builder.reshape(q, (None, None, n_heads, head_dim), shapes["q_shape"]),
-            [0, 2, 1, 3],
-            perm_attn,
+        q = permute.permute_ref(
+            [reshape.reshape_ref([q, shapes["q_shape"]])],
+            {"dims": [0, 2, 1, 3]},
         )
-        k = self.builder.permute(
-            self.builder.reshape(k, (None, None, n_kv, head_dim), shapes["kv_shape"]),
-            [0, 2, 1, 3],
-            perm_attn,
+        k = permute.permute_ref(
+            [reshape.reshape_ref([k, shapes["kv_shape"]])],
+            {"dims": [0, 2, 1, 3]},
         )
-        v = self.builder.permute(
-            self.builder.reshape(v, (None, None, n_kv, head_dim), shapes["kv_shape"]),
-            [0, 2, 1, 3],
-            perm_attn,
+        v = permute.permute_ref(
+            [reshape.reshape_ref([v, shapes["kv_shape"]])],
+            {"dims": [0, 2, 1, 3]},
         )
 
         # QK Norm
         w_q_norm = self._get_param(f"{prefix}.q_norm.weight", (head_dim,))
         w_k_norm = self._get_param(f"{prefix}.k_norm.weight", (head_dim,))
         eps_qk = self._const([1e-6], f"eps_qk_{layer_idx}", DType.FP32)
-        q = self.builder.rms_norm(q, w_q_norm, eps_qk)
-        k = self.builder.rms_norm(k, w_k_norm, eps_qk)
+        q = rms_norm.rms_norm(q, w_q_norm, eps_qk)
+        k = rms_norm.rms_norm(k, w_k_norm, eps_qk)
 
         # RoPE
-        q = self.builder.rope(q, cos, sin)
-        k = self.builder.rope(k, cos, sin)
+        q = rope.rope(q, cos, sin)
+        k = rope.rope(k, cos, sin)
 
         # GQA Repeat
         if n_heads != n_kv:
-            k = self.builder.repeat(k, n_heads // n_kv, axis=1)
-            v = self.builder.repeat(v, n_heads // n_kv, axis=1)
+            k = repeat.repeat_ref([k], {"repeats": n_heads // n_kv, "axis": 1})
+            v = repeat.repeat_ref([v], {"repeats": n_heads // n_kv, "axis": 1})
 
         # Scale
         scale_node = self._const(
             [cfg["query_pre_attn_scalar"] ** -0.5], "attn_scale", DType.FP32
         )
-        q = self.builder.mul(q, scale_node)
+        q = mul.mul_ref([q, scale_node])
 
         # Scores
-        perm_kt = self._const([0, 1, 3, 2], "perm_kt")
-        k_t = self.builder.permute(k, [0, 1, 3, 2], perm_kt)
-        scores = self.builder.matmul(q, k_t)
+        k_t = permute.permute_ref([k], {"dims": [0, 1, 3, 2]})
+        scores = dot.dot_ref([q, k_t])
 
         # Mask
-        scores = self.builder.add(scores, mask)
-        probs = self.builder.softmax(scores)
+        scores = add.add_ref([scores, mask])
+        probs = softmax.softmax(scores)
 
         # Context
-        context = self.builder.matmul(probs, v)
-        perm_back = self._const([0, 2, 1, 3], f"perm_back_{layer_idx}")
-        context = self.builder.permute(context, [0, 2, 1, 3], perm_back)
+        context = dot.dot_ref([probs, v])
+        context = permute.permute_ref([context], {"dims": [0, 2, 1, 3]})
 
-        context = self.builder.reshape(
-            context, (None, None, n_heads * head_dim), shapes["flat_shape"]
+        context = reshape.reshape_ref(
+            [context, shapes["flat_shape"]]
         )
 
         # Output Proj
         wo = self._get_param(f"{prefix}.o_proj.weight", (d_model, n_heads * head_dim))
-        wo_t = self.builder.permute(wo, [1, 0], perm_w)
-        return self.builder.matmul(context, wo_t)
+        wo_t = permute.permute_ref([wo], {"dims": [1, 0]})
+        return dot.dot_ref([context, wo_t])
 
     def _mlp(self, x, layer_idx):
         cfg = self.cfg
@@ -546,15 +381,14 @@ class Gemma3Model:
         w_up = self._get_param(f"{prefix}.up_proj.weight", (d_hidden, d_model))
         w_down = self._get_param(f"{prefix}.down_proj.weight", (d_model, d_hidden))
 
-        perm_mlp = self._const([1, 0], f"perm_mlp_{layer_idx}")
-        w_gate_t = self.builder.permute(w_gate, [1, 0], perm_mlp)
-        w_up_t = self.builder.permute(w_up, [1, 0], perm_mlp)
-        w_down_t = self.builder.permute(w_down, [1, 0], perm_mlp)
+        w_gate_t = permute.permute_ref([w_gate], {"dims": [1, 0]})
+        w_up_t = permute.permute_ref([w_up], {"dims": [1, 0]})
+        w_down_t = permute.permute_ref([w_down], {"dims": [1, 0]})
 
-        gate = self.builder.gelu(self.builder.matmul(x, w_gate_t))
-        up = self.builder.matmul(x, w_up_t)
+        gate = gelu.gelu(dot.dot_ref([x, w_gate_t]))
+        up = dot.dot_ref([x, w_up_t])
 
-        return self.builder.matmul(self.builder.mul(gate, up), w_down_t)
+        return dot.dot_ref([mul.mul_ref([gate, up]), w_down_t])
 
 
 GEMMA3_CONFIG_270M = {

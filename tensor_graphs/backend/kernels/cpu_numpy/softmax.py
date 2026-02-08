@@ -1,7 +1,7 @@
 import numpy as np
 from ...registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
-from ....ops.fused.softmax import softmax_decomposition
+from ....ops.fused.softmax import softmax_decomposition, softmax
 
 
 # --- Softmax ---

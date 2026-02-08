@@ -35,7 +35,7 @@ class Planner:
         # 1. Run Shape Inference before planning.
         # This ensures constants get shapes, preventing hash collisions.
         nodes = topological_sort(root)
-        ShapeInference.infer(nodes, known_values or {})
+        ShapeInference.infer(nodes, known_values)
 
         # 2. Proceed with cost-based planning
         _, new_root, assignments = self._min_cost(
@@ -159,7 +159,7 @@ class Planner:
 
                 # Run shape inference on the decomposition.
                 subgraph_nodes = topological_sort(subgraph_root)
-                ShapeInference.infer(subgraph_nodes, known_values or {})
+                ShapeInference.infer(subgraph_nodes, known_values)
 
                 if node.shape and not subgraph_root.shape:
                     subgraph_root.shape = node.shape
