@@ -1,11 +1,13 @@
 import numpy as np
 import torch
+import time
 from typing import Dict, Any, Optional
 from ..compiler.compiled_graph import CompiledGraph
 from ..ir.buffer import StorageType
 from ..ir.dtypes import DType
 from ..ops.atomic_types import OpType
 from ..compiler.dirty_propagation import DirtyPropagator
+from ..ir.node import CachePolicy
 from ..config import *
 from .cache import CacheManager
 
@@ -13,7 +15,8 @@ from .cache import CacheManager
 class Executor:
     """
     Unified Executor that runs a CompiledGraph with incremental execution support.
-    Uses DirtyRegion propagation to execute kernels only on changed data slices.
+    Integrates DirtyRegion propagation and CacheManager to selectively execute
+    or restore data.
     """
 
     def __init__(
@@ -22,18 +25,14 @@ class Executor:
         cache_manager: Optional[CacheManager] = None,
     ):
         self.graph = compiled_graph
+        self.cache_manager = cache_manager
         self.buffers: Dict[str, Any] = {}
-
-        # Store last inputs to calculate diffs between runs
         self.last_inputs: Dict[str, Any] = {}
 
         # 1. Allocate persistent buffers for the entire graph memory space
         self._allocate_buffers()
 
-        # 2. Store instructions for linear execution
-        self.prepared_instructions = self.graph.instructions
-
-        # 3. Create full-buffer views for inputs and outputs
+        # 2. Pre-calculate views
         self.input_views = {
             name: self._get_view(offset, name)
             for name, offset in self.graph.input_offsets.items()
@@ -51,7 +50,8 @@ class Executor:
 
         for device, size in device_sizes.items():
             if "cuda" in device or "gpu" in device:
-                self.buffers[device] = torch.empty(
+                # Use standard tensor for GPU
+                self.buffers[device] = torch.zeros(
                     size, dtype=torch.uint8, device=device
                 )
             else:
@@ -88,18 +88,20 @@ class Executor:
 
         if isinstance(buf, np.ndarray):
             np_dtype = self._map_dtype_np(meta.dtype)
+            # Create a view into the buffer
             return np.ndarray(
                 meta.shape, dtype=np_dtype, buffer=buf.data, offset=offset
             )
         elif isinstance(buf, torch.Tensor):
             torch_dtype = self._map_dtype_torch(meta.dtype)
+            # Create a view
             slice_t = buf[offset : offset + size_bytes]
             return slice_t.view(torch_dtype).view(meta.shape)
 
         return None
 
     def copy_to_buffer(self, name: str, data: Any):
-        """Writes data into the persistent buffer at the node's allocated offset."""
+        """Writes data into the buffer at the node's allocated offset."""
         if name not in self.graph.buffer_allocations:
             return
 
@@ -112,10 +114,11 @@ class Executor:
             if not isinstance(data, np.ndarray):
                 data = np.array(data, dtype=self._map_dtype_np(meta.dtype))
 
-            data_u8 = (
+            # Flatten and copy bytes
+            data_view = (
                 data.astype(self._map_dtype_np(meta.dtype)).view(np.uint8).flatten()
             )
-            buf[offset : offset + len(data_u8)] = data_u8
+            buf[offset : offset + len(data_view)] = data_view
 
         elif isinstance(buf, torch.Tensor):
             t_dtype = self._map_dtype_torch(meta.dtype)
@@ -124,31 +127,30 @@ class Executor:
             else:
                 data = data.to(dtype=t_dtype, device=alloc.device)
 
-            data_u8 = data.reshape(-1).view(torch.uint8).flatten()
-            buf[offset : offset + len(data_u8)] = data_u8
+            data_view = data.reshape(-1).view(torch.uint8).flatten()
+            buf[offset : offset + len(data_view)] = data_view
 
     def load_weights(self, weights: Dict[str, Any]):
-        """Initializes persistent weights and marks them as CLEAN."""
+        """Initializes persistent weights."""
         for name, data in weights.items():
             self.copy_to_buffer(name, data)
-            if name in self.graph.nodes_map:
-                self.graph.nodes_map[name].dirty_region = None
+            # Weights are implicitly clean initially
 
     def _update_inputs(self, inputs: Dict[str, Any]):
-        """Diffs new inputs against previous ones and updates buffer."""
+        """Diffs inputs and updates persistent buffers."""
         for name, data in inputs.items():
             node = self.graph.nodes_map.get(name)
             if not node:
                 continue
 
-            # Calculate what region of the input actually changed
+            # Calculate diff
             old_data = self.last_inputs.get(name)
             node.dirty_region = DirtyPropagator.get_diff(old_data, data)
 
-            # Overwrite buffer with new content
+            # Update buffer
             self.copy_to_buffer(name, data)
 
-            # Update history for next diff
+            # Store history
             if hasattr(data, "clone"):
                 self.last_inputs[name] = data.clone()
             elif isinstance(data, np.ndarray):
@@ -157,61 +159,162 @@ class Executor:
                 self.last_inputs[name] = data
 
     def run(self, inputs: Dict[str, Any]) -> Any:
+        # 1. Update Inputs & Set Input Dirty Flags
         self._update_inputs(inputs)
-        executed_count = 0
 
-        for inst in self.prepared_instructions:
+        executed_count = 0
+        restored_count = 0
+        skipped_count = 0
+
+        # 2. Execute Instructions (Topological Order)
+        for inst in self.graph.instructions:
             node_name = inst.node_name
             node = self.graph.nodes_map[node_name]
 
-            if node.op_type != OpType.INPUT and node.op_type != OpType.CONSTANT:
+            # --- A. Propagate Dirty Region ---
+            # Inputs already have dirty_region set.
+            # Constants have None (Clean).
+            if node.op_type not in (OpType.INPUT, OpType.CONSTANT):
                 node.dirty_region = DirtyPropagator.propagate(node)
 
-            # Only skip if CLEAN AND NOT RECYCLABLE.
-            # Transient nodes must re-run to restore their buffers if they were clobbered.
-            if node.dirty_region is None and node.storage_type != StorageType.TRANSIENT:
-                continue
+            # --- B. Determine Execution Strategy ---
 
-            # If it's Clean but forced to run (Transient), compute the FULL region
-            compute_region = node.dirty_region
-            if compute_region is None:
-                compute_region = (
-                    tuple(slice(None) for _ in range(len(node.shape)))
-                    if node.shape
-                    else (slice(None),)
+            is_dirty = node.dirty_region is not None
+            is_persistent = node.storage_type in (
+                StorageType.PERSISTENT,
+                StorageType.STATE,
+            )
+
+            # We treat Transient buffers as "Logically Lost" between runs unless restored.
+            # However, Persistent buffers retain data.
+
+            should_compute = False
+            should_restore = False
+            compute_region = node.dirty_region  # Default to propagating partial dirty
+
+            # Check Cache Availability
+            has_cache = self.cache_manager and self.cache_manager.has(node)
+
+            if is_dirty:
+                node.dirty_count += 1
+                if is_persistent:
+                    # Persistent buffer + Dirty -> Compute only the dirty slice (Patching)
+                    should_compute = True
+                else:
+                    # Transient + Dirty
+                    # We need the full buffer to be valid for children.
+                    # Since transient buffer is recyclable, it's likely garbage.
+                    # Option 1: Restore Full from Cache, then Compute Partial.
+                    # Option 2: Compute Full.
+                    if has_cache:
+                        should_restore = True
+                        should_compute = True  # Compute partial on top of restored
+                    else:
+                        should_compute = True
+                        compute_region = None  # Force Full Recompute (None -> Full in get_input_slices logic usually, or explicit full)
+                        if compute_region is None:
+                            # Create explicit full slice for clarity if Propagator returns None for clean
+                            # But here we want full dirty
+                            compute_region = (
+                                (slice(None),) * len(node.shape)
+                                if node.shape
+                                else (slice(None),)
+                            )
+
+            else:  # Clean
+                if is_persistent:
+                    # Persistent + Clean -> Skip
+                    skipped_count += 1
+                else:
+                    # Transient + Clean
+                    if has_cache:
+                        # Restore from cache to make transient buffer valid
+                        should_restore = True
+                        restored_count += 1
+                    else:
+                        # Clean but lost buffer -> Force Full Recompute
+                        should_compute = True
+                        compute_region = (
+                            (slice(None),) * len(node.shape)
+                            if node.shape
+                            else (slice(None),)
+                        )
+                        executed_count += 1  # Count as execution
+
+            # --- C. Perform Actions ---
+
+            # 1. Restore (if needed)
+            if should_restore and self.cache_manager:
+                cached_data = self.cache_manager.get(node)
+                if cached_data is not None:
+                    self.copy_to_buffer(node_name, cached_data)
+                else:
+                    raise ValueError(
+                        "cached_data is None even though cache_manager.has() returned True"
+                    )
+
+            # 2. Compute (if needed)
+            if should_compute:
+                start_time = time.perf_counter()
+
+                # If compute_region is None here, it implies Full Dirty (from propagation)
+                # Ensure we handle the "Full Dirty" tuple correctly
+                if compute_region is None:
+                    compute_region = (
+                        (slice(None),) * len(node.shape)
+                        if node.shape
+                        else (slice(None),)
+                    )
+
+                # Get input slices required for this output region
+                input_slice_regions = DirtyPropagator.get_input_slices(
+                    node, compute_region
                 )
 
-            input_regions = DirtyPropagator.get_input_slices(node, compute_region)
+                # Prepare views
+                kernel_inputs = []
+                for i, p_name in enumerate(inst.input_node_names):
+                    p_view_full = self._get_view(inst.input_offsets[i], p_name)
 
-            # Generate sub-views for inputs
-            input_views = []
-            for i, p_name in enumerate(inst.input_node_names):
-                p_view_full = self._get_view(inst.input_offsets[i], p_name)
+                    if (
+                        i < len(input_slice_regions)
+                        and input_slice_regions[i] is not None
+                    ):
+                        kernel_inputs.append(p_view_full[input_slice_regions[i]])
+                    else:
+                        kernel_inputs.append(p_view_full)
 
-                # Apply the slice calculated by the propagator
-                if i < len(input_regions) and input_regions[i] is not None:
-                    input_views.append(p_view_full[input_regions[i]])
-                else:
-                    # If no specific slice mapping exists, use full parent view
-                    input_views.append(p_view_full)
+                # Output view
+                out_view_full = self._get_view(inst.output_offsets[0], node_name)
+                out_view_slice = out_view_full[compute_region]
 
-            # D. Slice the output buffer to match the dirty region
-            out_view_full = self._get_view(inst.output_offsets[0], node_name)
-            out_view_slice = out_view_full[node.dirty_region]
+                # Execute
+                inst.kernel(kernel_inputs, [out_view_slice], inst.attrs)
 
-            if DEBUG_EXECUTION and DEBUG_DETAILED:
-                print(f"[Executor] EXEC: {node_name} | Region: {node.dirty_region}")
+                end_time = time.perf_counter()
+                node.compute_cost = (end_time - start_time) * 1000  # ms
+                executed_count += 1
 
-            # E. Execute the kernel on sub-slices
-            inst.kernel(input_views, [out_view_slice], inst.attrs)
-            executed_count += 1
+                # 3. Update Cache (Post-Compute)
+                # Only cache if policy allows and we have a valid FULL buffer now.
+                # If we did Restore+Partial, buffer is valid.
+                # If we did Full Compute, buffer is valid.
+                # If we did Partial on Persistent, buffer is valid.
+                # If we did Partial on Transient (without restore), buffer is GARBAGE (mixed).
+                # But our logic above prevents Partial on Transient without Restore.
+
+                if self.cache_manager and node.cache_policy != CachePolicy.NEVER:
+                    # Policy check logic could be more complex (AUTO)
+                    # For now, put full buffer
+                    full_out_view = self._get_view(inst.output_offsets[0], node_name)
+                    self.cache_manager.put(node, full_out_view)
 
         if DEBUG_EXECUTION:
             print(
-                f"[Executor] Run complete. Executed: {executed_count}, Skipped: {len(self.prepared_instructions) - executed_count}"
+                f"[Executor] Executed: {executed_count}, Restored: {restored_count}, Skipped: {skipped_count}"
             )
 
-        # 3. Return output views
+        # 3. Return outputs
         if len(self.output_views) == 1:
             return next(iter(self.output_views.values()))
         return self.output_views

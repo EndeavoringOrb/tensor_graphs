@@ -1,4 +1,2 @@
-Do NOT use try except.
+Do NOT use try except. NO fallbacks, NO simplifications. If something is incomplete, I want it to ERROR and FAIL. I do not want half-working solutions that go unnoticed because they patch over errors.
 When running python, use .venv/Scripts/python.exe
-For kernels/ops, the inputs list is strictly Tensor Inputs (runtime data), and attrs is strictly Static Arguments (compile-time configuration)
-OpType.INPUT is for values not known at compile time. OpType.CONSTANT is for values known at compile time.

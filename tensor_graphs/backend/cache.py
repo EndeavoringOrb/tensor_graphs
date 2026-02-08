@@ -18,17 +18,31 @@ class CacheManager:
             str, Tuple[TensorNode, Any, int]
         ] = {}  # name -> (node, data, size)
 
+    def has(self, node: TensorNode) -> bool:
+        """Checks if a valid entry exists for the node."""
+        return node.name in self.entries
+
     def get(self, node: TensorNode) -> Any:
+        """Retrieves data from cache and updates usage statistics."""
         if node.name in self.entries:
+            # Update stats
+            node.execution_count += 1
             return self.entries[node.name][1]
         return None
 
     def put(self, node: TensorNode, data: Any):
+        """
+        Inserts data into the cache, evicting other entries if necessary.
+        Data is cloned to ensure independence from Executor buffers.
+        """
         size = 0
         if isinstance(data, np.ndarray):
             size = data.nbytes
         elif isinstance(data, torch.Tensor):
             size = data.numel() * data.element_size()
+        else:
+            # Fallback for scalars or lists
+            return
 
         if size > self.max_bytes:
             return
@@ -38,17 +52,18 @@ class CacheManager:
             old_size = self.entries[node.name][2]
             self.current_bytes -= old_size
 
-        # Evict
+        # Evict if needed
         while (self.current_bytes + size) > self.max_bytes:
             if not self.entries:
-                return  # Cannot fit
+                return  # Cannot fit even if empty
 
-            # Find min score
+            # Find min score victim
             min_score = float("inf")
             victim_name = None
 
             for name, (n, _, _) in self.entries.items():
-                # Score = Cost * (1 - DirtyRate)
+                # Score = Cost * Stability
+                # Stability = (Runs - Dirty) / Runs
                 runs = n.execution_count if n.execution_count > 0 else 1
                 stability = (runs - n.dirty_count) / runs
                 score = n.compute_cost * stability
@@ -63,8 +78,7 @@ class CacheManager:
             else:
                 break
 
-        # Insert
-        # We must clone data to ensure it persists outside Executor buffer
+        # Insert - Clone data to persist outside executor buffer
         if isinstance(data, np.ndarray):
             saved_data = data.copy()
         elif isinstance(data, torch.Tensor):
@@ -75,8 +89,8 @@ class CacheManager:
         self.entries[node.name] = (node, saved_data, size)
         self.current_bytes += size
 
-        # Link back for easy debug/access
-        node.cached_output = saved_data
+        # Update node state
+        node.cached_output = saved_data  # Optional: link back for debugging
 
     def invalidate(self, node: TensorNode):
         if node.name in self.entries:

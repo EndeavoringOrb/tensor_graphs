@@ -4,13 +4,12 @@ from enum import Enum
 import uuid
 from .dtypes import DType, TensorSignature, Backend
 from .buffer import StorageType
-from ..ops.atomic_types import OpType
 
 
 class CachePolicy(Enum):
-    NEVER = "never"
-    ALWAYS = "always"
-    AUTO = "auto"
+    NEVER = "never"  # Never cache (views, cheap ops)
+    ALWAYS = "always"  # Always cache if space allows (weights, expensive embeddings)
+    AUTO = "auto"  # Heuristic eviction (default)
 
 
 @dataclass(eq=False)
@@ -27,69 +26,36 @@ class TensorNode:
     # --- Caching & Runtime State ---
     cache_policy: CachePolicy = CachePolicy.AUTO
 
-    # Runtime flags
+    # Runtime flags (Reset by Session/Executor usually, but stored here for graph connectivity)
     # dirty_region: None means CLEAN.
-    # Tuple[slice, ...] means partial or full dirty.
-    # (slice(None),) * rank means fully dirty.
     dirty_region: Optional[Tuple[slice, ...]] = None
 
-    cached_output: Any = None
-
     # Statistics for Cache Eviction (AUTO policy)
-    execution_count: int = 0  # Total times this node was required (hit + miss)
-    dirty_count: int = 0  # Times this node was invalidated
-    compute_cost: float = 0.0  # Last measured execution time in ms
-    last_run_tick: int = 0  # Logical timestamp of last access
+    execution_count: int = 0
+    dirty_count: int = 0
+    compute_cost: float = 0.0
+    last_run_tick: int = 0
 
     def __post_init__(self):
-        # Promote INPUT and CONSTANT to PERSISTENT to prevent buffer recycling
+        # Promote INPUT and CONSTANT to PERSISTENT
         if self.storage_type == StorageType.TRANSIENT:
-            if self.op_type in [OpType.CONSTANT, OpType.INPUT]:
+            if self.op_type in ["Input", "Constant"]:
                 object.__setattr__(self, "storage_type", StorageType.PERSISTENT)
 
         # Default View-only and cheap nodes to NEVER cache
-        if self.op_type in [
-            OpType.RESHAPE,
-            OpType.SLICE,
-            OpType.PERMUTE,
-            OpType.INPUT,
-            OpType.CONSTANT,
-        ]:
+        if self.op_type in ["Reshape", "Slice", "Permute", "Input", "Constant"]:
             self.cache_policy = CachePolicy.NEVER
-
-    def get_attr(self, key: str, default: Any = None) -> Any:
-        return self.attrs.get(key, default)
 
     @property
     def signature(self) -> TensorSignature:
         return TensorSignature(self.dtype, self.shape, self.backend)
 
-    @property
-    def is_dirty(self) -> bool:
-        return self.dirty_region is not None
+    def __repr__(self):
+        attr_keys = list(self.attrs.keys()) if self.attrs else []
+        attrs_summary = f" | attrs={attr_keys}" if attr_keys else ""
+        return f"[{self.dtype.value}|{self.shape}{attrs_summary}] {self.op_type}({self.name})"
 
-    def get_details(self) -> str:
-        out_sig = f"{self.dtype.name if hasattr(self.dtype, 'name') else self.dtype} | {self.shape}"
-        lines = []
-        header = f"Node: {self.name} [{self.op_type}]"
-        lines.append(header)
-        lines.append("-" * len(header))
-        lines.append(f"Output Signature : {out_sig}")
-        lines.append(f"Backend          : {self.backend}")
-        lines.append(f"Cache Policy     : {self.cache_policy.value}")
-        lines.append("Parents          :")
-        if not self.parents:
-            lines.append("  (None - Leaf Node)")
-        else:
-            for idx, parent in enumerate(self.parents):
-                p_sig = f"{parent.dtype.name if hasattr(parent.dtype, 'name') else parent.dtype} | {parent.shape}"
-                lines.append(f"  [{idx}] {parent.name:<10} -> {p_sig}")
-        if self.attrs:
-            lines.append("Attributes       :")
-            for k, v in self.attrs.items():
-                lines.append(f"  {k:<14} : {v}")
-        return "\n".join(lines)
-
+    # ... (Slice support __getitem__ remains same) ...
     def __getitem__(self, key) -> "TensorNode":
         if self.shape is None:
             raise ValueError(
@@ -155,8 +121,3 @@ class TensorNode:
             attrs={"starts": starts, "ends": ends, "steps": steps},
             backend=self.backend,
         )
-
-    def __repr__(self):
-        attr_keys = list(self.attrs.keys()) if self.attrs else []
-        attrs_summary = f" | attrs={attr_keys}" if attr_keys else ""
-        return f"[{self.dtype.value}|{self.shape}{attrs_summary}] {self.op_type}({self.name})"

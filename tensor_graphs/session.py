@@ -6,7 +6,7 @@ from .backend.executor import Executor
 from .backend.cache import CacheManager
 from .ir.graph import topological_sort
 from .ops.atomic_types import OpType
-from .config import *
+from .config import DEBUG_EXECUTION
 
 
 class GraphSession:
@@ -20,7 +20,7 @@ class GraphSession:
         root: TensorNode,
         db_path: str = "benchmarks.db",
         greedy: bool = True,
-        max_cache_bytes: int = 1024**3,
+        max_cache_bytes: int = 1024**3,  # 1GB default
     ):
         self.root = root
         self.db_path = db_path
@@ -46,6 +46,7 @@ class GraphSession:
         compiler = Compiler()
         compiled_graph = compiler.compile(recipe, known_values=sample_inputs)
 
+        # Pass CacheManager to Executor
         self.executor = Executor(compiled_graph, cache_manager=self.cache_manager)
 
         # Load constants once
@@ -71,3 +72,9 @@ class GraphSession:
             raise RuntimeError("Session executor is not initialized.")
 
         return self.executor.run(inputs)
+
+    def invalidate_cache(self):
+        """Clears the session cache."""
+        self.cache_manager = CacheManager(self.max_cache_bytes)
+        if self.executor:
+            self.executor.cache_manager = self.cache_manager

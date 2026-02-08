@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional
-from ...ir.node import TensorNode
+from ...ir.node import TensorNode, CachePolicy
 from ..atomic_types import OpType
 
 
@@ -22,4 +22,5 @@ def gather_ref(
         [data, indices],
         name=f"gather_{data.name}_{indices.name}",
         backend=data.backend,
+        cache_policy=CachePolicy.NEVER,
     )

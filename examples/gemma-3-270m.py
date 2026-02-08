@@ -14,6 +14,8 @@ from tensor_graphs.ir.buffer import StorageType
 from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.session import GraphSession
 
+from tensor_graphs.backend.kernels import *
+
 # ==============================================================================
 # 1. Graph Construction Helpers
 # ==============================================================================
@@ -156,18 +158,7 @@ class GraphBuilder:
         )
 
     def embedding(self, indices, weights):
-        out_shape = (
-            indices.shape + (weights.shape[-1],)
-            if indices.shape and weights.shape
-            else None
-        )
-        return TensorNode(
-            OpType.GATHER,
-            weights.dtype,
-            [weights, indices],
-            out_shape,
-            name=self._next_name("embed"),
-        )
+        return gather.gather_ref([weights, indices])
 
     def rms_norm(self, x, scale, eps_node):
         return TensorNode(

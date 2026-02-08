@@ -100,13 +100,13 @@ def test_kernel_correctness(
         else:
             dt = obj.dtype
             # handle numpy types
-            if dt == np.float32:
+            if dt is np.float32:
                 return DType.FP32
-            if dt == np.float16:
+            if dt is np.float16:
                 return DType.FP16
-            if dt == np.int32:
+            if dt is np.int32:
                 return DType.INT32
-            if dt == bool or dt == np.bool_:
+            if dt is bool or dt is np.bool_:
                 return DType.BOOL
             return DType.FP32
 
