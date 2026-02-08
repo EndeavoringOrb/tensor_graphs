@@ -356,12 +356,31 @@ def symbolic_elementwise(
     if not inputs:
         return SymbolicPropagator._clean_region(0)
 
+    input_shapes = ctx.get("input_shapes", [])
+
     # Align ranks (broadcasting)
     max_rank = max(len(inp.ranges) for inp in inputs)
     aligned_ranges = []
 
-    for inp in inputs:
+    for i, inp in enumerate(inputs):
         ranges = list(inp.ranges)
+
+        # Handle size-1 broadcasting in existing dims
+        if i < len(input_shapes):
+            p_shape = input_shapes[i]
+            is_d = _is_dirty(inp)
+            for d in range(len(ranges)):
+                s, e = ranges[d]
+                dim_size = p_shape[d]
+                # If this dimension has size 1, it broadcasts to full if dirty
+                s_final = sp.Piecewise(
+                    (sp.Integer(0), sp.And(is_d, sp.Eq(dim_size, 1))), (s, True)
+                )
+                e_final = sp.Piecewise(
+                    (S_INF, sp.And(is_d, sp.Eq(dim_size, 1))), (e, True)
+                )
+                ranges[d] = (s_final, e_final)
+
         pad = max_rank - len(ranges)
         if pad > 0:
             # If input is dirty, broadcasted dimensions are full (0, inf)
