@@ -169,13 +169,13 @@ class Executor:
             node = self.graph.nodes_map[inst.node_name]
             if node.op_type in (OpType.INPUT, OpType.CONSTANT):
                 continue
-            
+
             input_shapes = []
             for name in inst.input_node_names:
                 meta = self.graph.node_metadata.get(name)
                 if meta:
                     input_shapes.append(meta.shape)
-            
+
             total += calculate_flops(node.op_type, node.shape, input_shapes, inst.attrs)
         return total
 
@@ -318,9 +318,13 @@ class Executor:
                 executed_count += 1
 
                 # Track actual FLOPS
-                input_regions_shapes = [get_region_shape(self.graph.nodes_map[p_name].shape, reg) 
-                                        for p_name, reg in zip(inst.input_node_names, input_slice_regions)]
-                actual_flops += calculate_flops(node.op_type, out_view_slice.shape, input_regions_shapes, inst.attrs)
+                input_regions_shapes = [
+                    get_region_shape(self.graph.nodes_map[p_name].shape, reg)
+                    for p_name, reg in zip(inst.input_node_names, input_slice_regions)
+                ]
+                actual_flops += calculate_flops(
+                    node.op_type, out_view_slice.shape, input_regions_shapes, inst.attrs
+                )
 
                 # 3. Update Cache (Post-Compute)
                 # Only cache if policy allows and we have a valid FULL buffer now.
@@ -342,7 +346,11 @@ class Executor:
             )
             if DEBUG_DETAILED:
                 saved_flops = self._total_graph_flops - actual_flops
-                saved_pct = (saved_flops / self._total_graph_flops * 100) if self._total_graph_flops > 0 else 0
+                saved_pct = (
+                    (saved_flops / self._total_graph_flops * 100)
+                    if self._total_graph_flops > 0
+                    else 0
+                )
                 print(f"[Executor] Total FLOPS:  {self._total_graph_flops:,}")
                 print(f"[Executor] Actual FLOPS: {actual_flops:,}")
                 print(f"[Executor] FLOPS Saved:  {saved_pct:.2f}%")

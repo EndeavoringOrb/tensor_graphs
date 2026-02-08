@@ -648,15 +648,14 @@ def apply_chat_template(user_text):
     return f"<start_of_turn>user\n{user_text}<end_of_turn>\n<start_of_turn>model\n"
 
 
-tokenizer_file_path = "tokenizer.json"  # os.path.join(local_dir, "tokenizer.json")
+tokenizer_file_path = "tokenizer.json"
 if not os.path.exists(tokenizer_file_path):
-    try:
-        tokenizer_file_path = hf_hub_download(
-            repo_id=repo_id, filename="tokenizer.json", local_dir=local_dir
-        )
-    except Exception as e:
-        print(f"Warning: failed to download tokenizer.json: {e}")
-        tokenizer_file_path = "tokenizer.json"
+    print(
+        f"Tokenizer does not exist locally at '{tokenizer_file_path}', trying to download from huggingface..."
+    )
+    tokenizer_file_path = hf_hub_download(
+        repo_id=repo_id, filename="tokenizer.json", local_dir=local_dir
+    )
 
 tokenizer = GemmaTokenizer(tokenizer_file_path=tokenizer_file_path)
 

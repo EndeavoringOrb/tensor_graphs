@@ -35,48 +35,43 @@ class DirtyPropagator:
             if new_data.shape != old_data.shape:
                 return tuple(slice(None) for _ in range(new_data.ndim))
 
-        try:
-            n_new = new_data
-            n_old = old_data
+        n_new = new_data
+        n_old = old_data
 
-            if hasattr(new_data, "cpu"):
-                n_new = new_data.cpu().numpy()
-            if hasattr(old_data, "cpu"):
-                n_old = old_data.cpu().numpy()
+        if hasattr(new_data, "cpu"):
+            n_new = new_data.cpu().numpy()
+        if hasattr(old_data, "cpu"):
+            n_old = old_data.cpu().numpy()
 
-            if not isinstance(n_new, np.ndarray):
-                n_new = np.array(n_new)
-            if not isinstance(n_old, np.ndarray):
-                n_old = np.array(n_old)
+        if not isinstance(n_new, np.ndarray):
+            n_new = np.array(n_new)
+        if not isinstance(n_old, np.ndarray):
+            n_old = np.array(n_old)
 
-            if n_new.shape != n_old.shape:
-                return tuple(slice(None) for _ in range(n_new.ndim))
+        if n_new.shape != n_old.shape:
+            return tuple(slice(None) for _ in range(n_new.ndim))
 
-            diff = n_new != n_old
-            if not np.any(diff):
-                return None
+        diff = n_new != n_old
+        if not np.any(diff):
+            return None
 
-            slices = []
-            for dim in range(diff.ndim):
-                axes_to_reduce = tuple(i for i in range(diff.ndim) if i != dim)
-                if axes_to_reduce:
-                    dim_diff = np.any(diff, axis=axes_to_reduce)
-                else:
-                    dim_diff = diff
+        slices = []
+        for dim in range(diff.ndim):
+            axes_to_reduce = tuple(i for i in range(diff.ndim) if i != dim)
+            if axes_to_reduce:
+                dim_diff = np.any(diff, axis=axes_to_reduce)
+            else:
+                dim_diff = diff
 
-                indices = np.where(dim_diff)[0]
-                if len(indices) == 0:
-                    slices.append(slice(0, 0))
-                else:
-                    start = indices[0]
-                    stop = indices[-1] + 1
-                    slices.append(slice(int(start), int(stop)))
+            indices = np.where(dim_diff)[0]
+            if len(indices) == 0:
+                slices.append(slice(0, 0))
+            else:
+                start = indices[0]
+                stop = indices[-1] + 1
+                slices.append(slice(int(start), int(stop)))
 
-            return tuple(slices)
-
-        except Exception:
-            ndim = new_data.ndim if hasattr(new_data, "ndim") else 0
-            return tuple(slice(None) for _ in range(ndim))
+        return tuple(slices)
 
     @staticmethod
     def propagate(node: TensorNode) -> DirtyRegion:

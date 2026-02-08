@@ -74,10 +74,7 @@ class SymbolicPropagator:
             (len(p.shape) if p.shape is not None else 0) for p in node.parents
         )
 
-        try:
-            attrs_key = json.dumps(node.attrs, sort_keys=True, default=str)
-        except TypeError:
-            attrs_key = str(node.attrs)
+        attrs_key = json.dumps(node.attrs, sort_keys=True, default=str)
 
         key = f"{node.op_type}|{input_ranks}|{attrs_key}"
 
@@ -102,10 +99,7 @@ class SymbolicPropagator:
         )
         out_rank = len(node.shape) if node.shape is not None else 0
 
-        try:
-            attrs_key = json.dumps(node.attrs, sort_keys=True, default=str)
-        except TypeError:
-            attrs_key = str(node.attrs)
+        attrs_key = json.dumps(node.attrs, sort_keys=True, default=str)
 
         key = f"BACKWARD|{node.op_type}|{input_ranks}|{out_rank}|{attrs_key}"
 
@@ -165,22 +159,7 @@ class SymbolicPropagator:
         }
 
         # 4. Trace
-        try:
-            if node.op_type in cls._backward_registry:
-                input_regions = cls._backward_registry[node.op_type](
-                    output_region, context
-                )
-            else:
-                # Fallback: All inputs full dirty
-                input_regions = [
-                    cls._full_dirty_region(len(p.shape) if p.shape else 0)
-                    for p in node.parents
-                ]
-        except Exception:
-            input_regions = [
-                cls._full_dirty_region(len(p.shape) if p.shape else 0)
-                for p in node.parents
-            ]
+        input_regions = cls._backward_registry[node.op_type](output_region, context)
 
         # 5. Flatten Results
         flat_results = []
@@ -235,11 +214,7 @@ class SymbolicPropagator:
             "op_type": node.op_type,
         }
 
-        try:
-            final_region = cls._trace_node(node, input_symbols, context)
-        except Exception as e:
-            # Fallback for complex/unknown ops: Full Dirty
-            final_region = cls._full_dirty_region(len(node.shape) if node.shape else 0)
+        final_region = cls._trace_node(node, input_symbols, context)
 
         # Flatten Output
         out_exprs = []

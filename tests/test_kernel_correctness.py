@@ -46,10 +46,7 @@ def test_kernel_correctness(
         pytest.skip(f"No reference factory for {op_type}, cannot verify correctness.")
 
     # 3. Generate Inputs (DataGenerator handles backend conversion)
-    try:
-        inputs_list, attrs = DataGenerator.generate(op_type, signatures, backend)
-    except Exception as e:
-        pytest.skip(f"Failed to generate inputs for {op_type}: {e}")
+    inputs_list, attrs = DataGenerator.generate(op_type, signatures, backend)
 
     if target_dtype and op_type == OpType.CAST:
         attrs["to"] = target_dtype
@@ -138,10 +135,7 @@ def test_kernel_correctness(
         n for n in subgraph_nodes if n not in input_nodes_for_shape
     ]
 
-    try:
-        ShapeInference.infer(inference_nodes, known_values)
-    except Exception as e:
-        print(f"Warning: Shape inference failed for {op_type}: {e}")
+    ShapeInference.infer(inference_nodes, known_values)
 
     # 3. The true output shape is the inferred shape of the subgraph root
     output_shape = subgraph_root.shape

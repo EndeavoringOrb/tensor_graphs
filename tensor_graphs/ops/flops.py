@@ -1,11 +1,13 @@
 from typing import Tuple, List, Optional
 from ..ops.atomic_types import OpType
-import numpy as np
 
-def get_region_shape(full_shape: Tuple[int, ...], region: Optional[Tuple[slice, ...]]) -> Tuple[int, ...]:
+
+def get_region_shape(
+    full_shape: Tuple[int, ...], region: Optional[Tuple[slice, ...]]
+) -> Tuple[int, ...]:
     if region is None:
         return full_shape
-    
+
     if not full_shape:
         return ()
 
@@ -13,7 +15,7 @@ def get_region_shape(full_shape: Tuple[int, ...], region: Optional[Tuple[slice, 
     for i, s in enumerate(region):
         if i >= len(full_shape):
             break
-        
+
         dim_size = full_shape[i]
         if dim_size is None:
             # Symbolic?
@@ -24,14 +26,20 @@ def get_region_shape(full_shape: Tuple[int, ...], region: Optional[Tuple[slice, 
         # Bounding box size (conservative)
         out_dim = (abs(stop - start) + abs(step) - 1) // abs(step)
         shape.append(max(0, out_dim))
-    
+
     # Pad with remaining full_shape dims if region is shorter
     if len(region) < len(full_shape):
-        shape.extend(full_shape[len(region):])
-        
+        shape.extend(full_shape[len(region) :])
+
     return tuple(shape)
 
-def calculate_flops(op_type: str, shape: Tuple[int, ...], input_shapes: List[Tuple[int, ...]], attrs: dict) -> int:
+
+def calculate_flops(
+    op_type: str,
+    shape: Tuple[int, ...],
+    input_shapes: List[Tuple[int, ...]],
+    attrs: dict,
+) -> int:
     """
     Calculates the number of floating point operations for a given op and output shape.
     Args:
@@ -51,7 +59,21 @@ def calculate_flops(op_type: str, shape: Tuple[int, ...], input_shapes: List[Tup
                 return 0
 
     # Atomic Ops
-    if op_type in [OpType.ADD, OpType.MUL, OpType.DIVIDE, OpType.POWER, OpType.NEGATE, OpType.EXP, OpType.SIN, OpType.COS, OpType.SQRT, OpType.CAST, OpType.TRIU, OpType.FILL, OpType.WHERE]:
+    if op_type in [
+        OpType.ADD,
+        OpType.MUL,
+        OpType.DIVIDE,
+        OpType.POWER,
+        OpType.NEGATE,
+        OpType.EXP,
+        OpType.SIN,
+        OpType.COS,
+        OpType.SQRT,
+        OpType.CAST,
+        OpType.TRIU,
+        OpType.FILL,
+        OpType.WHERE,
+    ]:
         return num_elements
 
     if op_type == OpType.DOT:
@@ -59,18 +81,20 @@ def calculate_flops(op_type: str, shape: Tuple[int, ...], input_shapes: List[Tup
         # FLOPS = 2 * M * N * K
         if len(input_shapes) < 2:
             return 0
-        
+
         # Output shape matches (..., M, N)
         # Input 0 is (..., M, K)
-        # K is the last dim of A (or second to last if B is transposed? 
+        # K is the last dim of A (or second to last if B is transposed?
         # but in tensor_graphs DOT usually follows standard matmul)
         K = input_shapes[0][-1]
-        if K is None: return 0
+        if K is None:
+            return 0
         return 2 * num_elements * K
 
     if op_type == OpType.SUM:
         # Reduce: input_elements additions
-        if not input_shapes: return 0
+        if not input_shapes:
+            return 0
         p_elements = 1
         for d in input_shapes[0]:
             if d is not None:
@@ -80,13 +104,13 @@ def calculate_flops(op_type: str, shape: Tuple[int, ...], input_shapes: List[Tup
     # Higher-level OPs (if they exist as atomic in current impl)
     if op_type == "RMSNorm":
         return 6 * num_elements
-    
+
     if op_type == "Softmax":
         return 3 * num_elements
-    
+
     if op_type == "GELU":
         return 8 * num_elements
-        
+
     if op_type == "RoPE":
         # Broadly: few muls and adds per head_dim
         return 4 * num_elements
