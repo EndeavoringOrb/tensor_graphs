@@ -1,8 +1,8 @@
-import pytest
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.compiler.dirty_propagation import DirtyPropagator
+
 
 def test_reduce_forward():
     # out = sum(a, axis=0)
@@ -18,6 +18,7 @@ def test_reduce_forward():
     a.dirty_region = (slice(1, 3), slice(2, 4))
     out_dirty = DirtyPropagator.propagate(reduce_sum)
     assert out_dirty == (slice(2, 4),)
+
 
 def test_reduce_backward():
     a = TensorNode(OpType.INPUT, DType.FP32, [], (5, 10), "a")

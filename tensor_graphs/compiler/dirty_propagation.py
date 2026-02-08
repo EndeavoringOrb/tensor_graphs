@@ -5,7 +5,6 @@ File: tensor_graphs/compiler/dirty_propagation.py
 from typing import Tuple, Optional, List, Any
 import numpy as np
 from ..ir.node import TensorNode
-from ..ops.atomic_types import OpType
 from .symbolic import SymbolicPropagator
 
 # A DirtyRegion is a tuple of slices, one per dimension.

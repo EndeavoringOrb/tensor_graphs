@@ -1,8 +1,8 @@
-import pytest
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.compiler.dirty_propagation import DirtyPropagator
+
 
 def test_permute_forward():
     # out = a.permute(1, 0)
@@ -17,6 +17,7 @@ def test_permute_forward():
     out_dirty = DirtyPropagator.propagate(perm)
     # Result should be dirty in out[0:3, 1:2]
     assert out_dirty == (slice(0, 3), slice(1, 2))
+
 
 def test_permute_backward():
     a = TensorNode(OpType.INPUT, DType.FP32, [], (2, 3), "a")

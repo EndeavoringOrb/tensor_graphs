@@ -5,14 +5,12 @@ File: tensor_graphs/compiler/symbolic.py
 import sympy as sp
 import numpy as np
 import json
-import functools
-from typing import List, Tuple, Dict, Any, Optional, Callable, Union
+from typing import List, Tuple, Dict, Any, Callable
 from dataclasses import dataclass
 from ..ir.node import TensorNode
 from ..ops.atomic_types import OpType
 from ..ops.registry import get_reference_factory
 from ..ir.graph import topological_sort
-from ..ir.dtypes import DType
 
 # ==============================================================================
 # Constants & Types

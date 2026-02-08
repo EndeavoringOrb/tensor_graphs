@@ -1,8 +1,8 @@
-import pytest
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.compiler.dirty_propagation import DirtyPropagator
+
 
 def test_slice_forward():
     # out = a[2:10:2]
@@ -22,6 +22,7 @@ def test_slice_forward():
     a.dirty_region = (slice(4, 6),)
     out_dirty = DirtyPropagator.propagate(slc)
     assert out_dirty == (slice(1, 2),)
+
 
 def test_slice_backward():
     a = TensorNode(OpType.INPUT, DType.FP32, [], (20,), "a")

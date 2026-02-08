@@ -1,8 +1,8 @@
-import pytest
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.compiler.dirty_propagation import DirtyPropagator
+
 
 def test_gather_forward():
     # out = gather(data, indices)
@@ -18,7 +18,8 @@ def test_gather_forward():
     indices.dirty_region = (slice(1, 2),)
     data.dirty_region = None
     out_dirty = DirtyPropagator.propagate(gather)
-    assert out_dirty == (slice(1, 2),) # Indices dirty at [1:2]
+    assert out_dirty == (slice(1, 2),)  # Indices dirty at [1:2]
+
 
 def test_gather_backward():
     data = TensorNode(OpType.INPUT, DType.FP32, [], (10, 5), "data")
