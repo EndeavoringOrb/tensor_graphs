@@ -7,6 +7,7 @@ from ..ir.dtypes import DType
 from ..ops.atomic_types import OpType
 from ..compiler.dirty_propagation import DirtyPropagator
 from ..config import *
+from .cache import CacheManager
 
 
 class Executor:
@@ -18,7 +19,7 @@ class Executor:
     def __init__(
         self,
         compiled_graph: CompiledGraph,
-        cache_manager: Optional[Any] = None,  # Kept for signature compatibility
+        cache_manager: Optional[CacheManager] = None,
     ):
         self.graph = compiled_graph
         self.buffers: Dict[str, Any] = {}

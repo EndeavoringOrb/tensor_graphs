@@ -3,7 +3,7 @@ from .ir.node import TensorNode
 from .compiler.planner import Planner
 from .compiler.compiler import Compiler
 from .backend.executor import Executor
-from .backend.cache import SimpleCacheManager
+from .backend.cache import CacheManager
 from .ir.graph import topological_sort
 from .ops.atomic_types import OpType
 from .config import *
@@ -28,7 +28,7 @@ class GraphSession:
         self.max_cache_bytes = max_cache_bytes
 
         self.executor: Optional[Executor] = None
-        self.cache_manager = SimpleCacheManager(max_cache_bytes)
+        self.cache_manager = CacheManager(max_cache_bytes)
 
         # State
         self.is_compiled = False
