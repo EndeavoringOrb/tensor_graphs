@@ -174,12 +174,6 @@ def _merge_regions(r1: DirtyRegion, r2: DirtyRegion) -> DirtyRegion:
         return tuple(slice(None) for _ in range(ndim))
 
 
-def _is_full_dirty(region: DirtyRegion) -> bool:
-    if region is None:
-        return False
-    return all(s == slice(None) for s in region)
-
-
 # --- Propagation Handlers ---
 
 
@@ -469,11 +463,6 @@ _PROPAGATION_HANDLERS = {
     OpType.RESHAPE: _propagate_reshape,
     OpType.SUM: _propagate_reduce,
     OpType.MAX: _propagate_reduce,
-    # Fused ops treated as elementwise (shape preserving)
-    "RoPE": _propagate_elementwise,
-    "GELU": _propagate_elementwise,
-    "RMSNorm": _propagate_elementwise,  # Row independent
-    "Softmax": _propagate_reduce,  # Technically reduce-like dependencies
 }
 
 
@@ -483,27 +472,91 @@ _PROPAGATION_HANDLERS = {
 def _map_slice_elementwise(
     node: TensorNode, out_region: DirtyRegion
 ) -> List[DirtyRegion]:
-    # For elementwise, input slices are identical to output slice
-    return [out_region for _ in node.parents]
+    """
+    Maps output dirty region back to inputs for elementwise ops,
+    accounting for broadcasting and rank differences.
+    """
+    if out_region is None:
+        return []
+
+    res = []
+    out_rank = len(out_region)
+
+    for p in node.parents:
+        p_shape = p.shape if p.shape is not None else ()
+        p_rank = len(p_shape)
+
+        if p_rank == 0:
+            res.append(())  # Scalar
+            continue
+
+        # Align from the right (standard broadcasting rules)
+        # If output is (Batch, Seq, Dim) and parent is (Dim,),
+        # parent only cares about the last slice.
+        p_slices = list(out_region[max(0, out_rank - p_rank) :])
+
+        # If parent rank is higher than output rank (should not happen in valid graphs),
+        # or if parent rank is lower, ensure we have the correct number of slices.
+        if len(p_slices) < p_rank:
+            # Prepend full slices for leading broadcasted dims
+            p_slices = [slice(None)] * (p_rank - len(p_slices)) + p_slices
+
+        # Handle dimensions of size 1 (broadcasted)
+        # If a parent dim is 1, it provides the same value for all indices
+        # in the output dim. Therefore, the "slice" for the parent is always the full 1-element.
+        for i in range(p_rank):
+            if p_shape[i] == 1:
+                p_slices[i] = slice(None)
+
+        res.append(tuple(p_slices))
+
+    return res
 
 
 def _map_slice_matmul(node: TensorNode, out_region: DirtyRegion) -> List[DirtyRegion]:
     # A @ B = C
-    # C dirty at (rows, cols)
-    # Need A[rows, :] and B[:, cols]
-
-    # A slice: (rows, :)
-    # B slice: (:, cols)
-
+    # Handle Batch Matmul (..., M, K) @ (..., K, N) -> (..., M, N)
     if out_region is None:
         return []
 
-    # Handle batch dims? Assuming 2D logic mostly for this level
-    rows = out_region[0]
-    cols = out_region[1] if len(out_region) > 1 else slice(None)
+    out_rank = len(out_region)
+    rows = out_region[-2] if out_rank >= 2 else out_region[0]
+    cols = out_region[-1] if out_rank >= 2 else slice(None)
 
-    slice_a = (rows, slice(None))
-    slice_b = (slice(None), cols)
+    # Batch dimensions (everything before M, N)
+    batch_slices = out_region[:-2] if out_rank > 2 else ()
+
+    # A needs (Batch, rows, full_K)
+    # B needs (Batch, full_K, cols)
+
+    # We apply the same rank-aware logic for the batch dimensions
+    def _get_input_batch_slices(parent, out_batch_region):
+        p_shape = parent.shape if parent.shape else ()
+        p_batch_rank = max(0, len(p_shape) - 2)
+        if p_batch_rank == 0:
+            return []
+
+        p_batch_slices = list(
+            out_batch_region[max(0, len(out_batch_region) - p_batch_rank) :]
+        )
+        if len(p_batch_slices) < p_batch_rank:
+            p_batch_slices = [slice(None)] * (
+                p_batch_rank - len(p_batch_slices)
+            ) + p_batch_slices
+
+        for i in range(p_batch_rank):
+            if p_shape[i] == 1:
+                p_batch_slices[i] = slice(None)
+        return p_batch_slices
+
+    slice_a = tuple(_get_input_batch_slices(node.parents[0], batch_slices)) + (
+        rows,
+        slice(None),
+    )
+    slice_b = tuple(_get_input_batch_slices(node.parents[1], batch_slices)) + (
+        slice(None),
+        cols,
+    )
 
     return [slice_a, slice_b]
 

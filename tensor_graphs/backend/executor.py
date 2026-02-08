@@ -1,12 +1,11 @@
 import numpy as np
 import torch
-from typing import Dict, Any, Optional, List
-import time
+from typing import Dict, Any, Optional
 from ..compiler.compiled_graph import CompiledGraph
 from ..ir.buffer import StorageType
 from ..ir.dtypes import DType
 from ..ops.atomic_types import OpType
-from ..compiler.dirty_propagation import DirtyPropagator, DirtyRegion
+from ..compiler.dirty_propagation import DirtyPropagator
 from ..config import *
 
 
@@ -157,28 +156,31 @@ class Executor:
                 self.last_inputs[name] = data
 
     def run(self, inputs: Dict[str, Any]) -> Any:
-        # 1. Diff inputs and update persistent buffers
         self._update_inputs(inputs)
-
         executed_count = 0
-        skipped_count = 0
 
-        # 2. Execution Loop
         for inst in self.prepared_instructions:
             node_name = inst.node_name
             node = self.graph.nodes_map[node_name]
 
-            # A. Propagate dirty regions from parents to current node
             if node.op_type != OpType.INPUT and node.op_type != OpType.CONSTANT:
                 node.dirty_region = DirtyPropagator.propagate(node)
 
-            # B. If the node's output region is CLEAN, we skip kernel execution
-            if node.dirty_region is None:
-                skipped_count += 1
+            # Only skip if CLEAN AND NOT RECYCLABLE.
+            # Transient nodes must re-run to restore their buffers if they were clobbered.
+            if node.dirty_region is None and node.storage_type != StorageType.TRANSIENT:
                 continue
 
-            # C. Map the output dirty region back to specific slices of input buffers
-            input_regions = DirtyPropagator.get_input_slices(node, node.dirty_region)
+            # If it's Clean but forced to run (Transient), compute the FULL region
+            compute_region = node.dirty_region
+            if compute_region is None:
+                compute_region = (
+                    tuple(slice(None) for _ in range(len(node.shape)))
+                    if node.shape
+                    else (slice(None),)
+                )
+
+            input_regions = DirtyPropagator.get_input_slices(node, compute_region)
 
             # Generate sub-views for inputs
             input_views = []
@@ -205,7 +207,7 @@ class Executor:
 
         if DEBUG_EXECUTION:
             print(
-                f"[Executor] Run complete. Executed: {executed_count}, Skipped: {skipped_count}"
+                f"[Executor] Run complete. Executed: {executed_count}, Skipped: {len(self.prepared_instructions) - executed_count}"
             )
 
         # 3. Return output views

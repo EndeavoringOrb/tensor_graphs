@@ -42,9 +42,9 @@ class TensorNode:
     last_run_tick: int = 0  # Logical timestamp of last access
 
     def __post_init__(self):
-        # If storage_type is the default TRANSIENT, check if we should promote it to PERSISTENT
+        # Promote INPUT and CONSTANT to PERSISTENT to prevent buffer recycling
         if self.storage_type == StorageType.TRANSIENT:
-            if self.op_type == OpType.CONSTANT:
+            if self.op_type in [OpType.CONSTANT, OpType.INPUT]:
                 object.__setattr__(self, "storage_type", StorageType.PERSISTENT)
 
         # Default View-only and cheap nodes to NEVER cache

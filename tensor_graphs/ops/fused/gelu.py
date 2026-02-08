@@ -24,11 +24,6 @@ def gelu_decomposition(inputs, attrs=None):
     inner = TensorNode(OpType.MUL, x.dtype, [term2, c_sqrt], name="inner")
 
     tanh_node = tanh_decomposition([inner])
-    # Check if we should use high-level tanh or atomic
-    # For robust decomposition, use atomic factory directly if needed, or rely on recursion
-    # Here we invoke the decomposition logic for tanh manually to be safe, or just return Tanh node
-    # Let's return a Tanh Node and let the Planner handle IT.
-    tanh_node = TensorNode("Tanh", x.dtype, [inner], name="tanh_inner")
 
     one_plus = TensorNode(OpType.ADD, x.dtype, [c_one, tanh_node], name="one_plus")
     half_x = TensorNode(OpType.MUL, x.dtype, [x, c_half], name="half_x")
