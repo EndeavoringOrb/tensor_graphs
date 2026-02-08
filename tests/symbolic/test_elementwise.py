@@ -30,7 +30,7 @@ def test_elementwise_forward():
     # is_d = _is_dirty(inp)
     # pad_range = (sp.Piecewise((sp.Integer(0), is_d), (S_INF, True)), ...)
     # If b is dirty [0:1], it's dirty, so it broadcasts to (0, INF)
-    assert out_dirty == (slice(0, None),)
+    assert out_dirty == (slice(0, 10),)
 
 
 def test_elementwise_backward():

@@ -18,7 +18,10 @@ def test_gather_forward():
     indices.dirty_region = (slice(1, 2),)
     data.dirty_region = None
     out_dirty = DirtyPropagator.propagate(gather)
-    assert out_dirty == (slice(1, 2),)  # Indices dirty at [1:2]
+    assert out_dirty == (
+        slice(1, 2),
+        slice(0, 5),
+    )  # Indices dirty at [1:2], trailing dims Full
 
 
 def test_gather_backward():
@@ -26,7 +29,7 @@ def test_gather_backward():
     indices = TensorNode(OpType.INPUT, DType.INT32, [], (3,), "indices")
     gather = TensorNode(OpType.GATHER, DType.FP32, [data, indices], (3, 5), "gather")
 
-    # Gather backward fallback to full
-    in_slices = DirtyPropagator.get_input_slices(gather, (slice(0, 1),))
+    # Gather backward precision
+    in_slices = DirtyPropagator.get_input_slices(gather, (slice(0, 1), slice(0, 5)))
     assert in_slices[0] == (slice(0, 10), slice(0, 5))
-    assert in_slices[1] == (slice(0, 3),)
+    assert in_slices[1] == (slice(0, 1),)

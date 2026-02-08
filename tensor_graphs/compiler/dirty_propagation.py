@@ -203,7 +203,7 @@ class DirtyPropagator:
             start = int(max(0, s))
 
             if e == np.inf:
-                stop = None  # Slice end
+                stop = node.shape[i] if node.shape and i < len(node.shape) else None
             elif e == -np.inf:
                 is_clean = True
                 break

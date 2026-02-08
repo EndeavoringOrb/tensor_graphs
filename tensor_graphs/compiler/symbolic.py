@@ -11,6 +11,8 @@ from ..ir.node import TensorNode
 from ..ops.atomic_types import OpType
 from ..ops.registry import get_reference_factory
 from ..ir.graph import topological_sort
+from .shape_inference import ShapeInference
+from ..config import DEBUG_EXECUTION
 
 # ==============================================================================
 # Constants & Types
@@ -29,9 +31,11 @@ class SymbolicRegion:
     """
     Represents the dirty region of a tensor symbolically.
     ranges: A list of (start, stop) SymPy expressions for each dimension.
+    is_dirty_expr: A symbolic expression that evaluates to True if the region is dirty.
     """
 
     ranges: List[Tuple[sp.Expr, sp.Expr]]
+    is_dirty_expr: sp.Expr = None
 
     def __repr__(self):
         return f"SymReg({self.ranges})"
@@ -111,6 +115,72 @@ class SymbolicPropagator:
         return func
 
     @classmethod
+    def _trace_backward_node(
+        cls, node: TensorNode, output_region: SymbolicRegion, context: Dict[str, Any]
+    ) -> List[SymbolicRegion]:
+        # 1. Atomic Handler
+        if node.op_type in cls._backward_registry:
+            return cls._backward_registry[node.op_type](output_region, context)
+
+        # 2. Decomposition
+        factory = get_reference_factory(node.op_type)
+        if not factory:
+            raise ValueError(
+                f"No symbolic backward handler or decomposition for {node.op_type}"
+            )
+
+        # Instantiate decomposition
+        sub_root = factory(node.parents, node.attrs)
+        sub_nodes = topological_sort(sub_root)
+
+        # Map sub_root to our output region
+        node_map: Dict[TensorNode, SymbolicRegion] = {sub_root: output_region}
+
+        # Perform shape inference on the decomposition subgraph
+        ShapeInference.infer(sub_nodes, {})
+
+        # Propagate backward in reverse topological order
+        for sub in reversed(sub_nodes):
+            if sub not in node_map:
+                continue
+
+            if sub.op_type == OpType.CONSTANT or not sub.parents:
+                continue
+
+            # Use actual shapes from inference
+            sub_ctx = {
+                "attrs": sub.attrs,
+                "input_shapes": [p.shape or () for p in sub.parents],
+                "output_shape": sub.shape or (),
+                "op_type": sub.op_type,
+            }
+
+            sub_inputs = cls._trace_backward_node(sub, node_map[sub], sub_ctx)
+
+            for p, p_reg in zip(sub.parents, sub_inputs):
+                if p not in node_map:
+                    node_map[p] = p_reg
+                else:
+                    # Merge existing and new
+                    if len(node_map[p].ranges) == len(p_reg.ranges):
+                        new_ranges = []
+                        for r1, r2 in zip(node_map[p].ranges, p_reg.ranges):
+                            new_ranges.append(_merge_dim(r1, r2))
+                        node_map[p] = SymbolicRegion(new_ranges)
+                    else:
+                        # Rank mismatch fallback
+                        node_map[p] = p_reg
+
+        # Return regions for the original node parents
+        results = []
+        for p in node.parents:
+            results.append(
+                node_map.get(p, cls._clean_region(len(p.shape) if p.shape else 0))
+            )
+
+        return results
+
+    @classmethod
     def register_backward(cls, op_type: str):
         def decorator(func):
             cls._backward_registry[op_type] = func
@@ -159,7 +229,7 @@ class SymbolicPropagator:
         }
 
         # 4. Trace
-        input_regions = cls._backward_registry[node.op_type](output_region, context)
+        input_regions = cls._trace_backward_node(node, output_region, context)
 
         # 5. Flatten Results
         flat_results = []
@@ -174,7 +244,9 @@ class SymbolicPropagator:
         if not flat_results:
             lam = lambda *args: []
         else:
-            lam = sp.lambdify(all_args, flat_results, modules=["numpy", "math"])
+            if DEBUG_EXECUTION:
+                print(f"[SYMBOLIC] _compile_backward running lambdify for node {node.op_type}")
+            lam = sp.lambdify(all_args, flat_results, modules=["numpy", "math"], cse=True)
 
         return lam
 
@@ -197,7 +269,13 @@ class SymbolicPropagator:
                 e = sp.Symbol(f"in{i}_d{d}_e")
                 p_ranges.append((s, e))
                 dirty_args.extend([s, e])
-            input_symbols.append(SymbolicRegion(p_ranges))
+            
+            # Initial is_dirty: all dims must have s < e
+            is_d = sp.true
+            if p_ranges:
+                is_d = sp.And(*[s < e for s, e in p_ranges])
+                
+            input_symbols.append(SymbolicRegion(p_ranges, is_dirty_expr=is_d))
 
             # Shape Symbols
             p_dims = []
@@ -229,8 +307,10 @@ class SymbolicPropagator:
         if not out_exprs:
             lam = lambda *args: []
         else:
+            if DEBUG_EXECUTION:
+                print(f"[SYMBOLIC] _compile running lambdify for node {node.op_type}")
             # numpy used for Piecewise/min/max/inf handling
-            lam = sp.lambdify(all_args, out_exprs, modules=["numpy", "math"])
+            lam = sp.lambdify(all_args, out_exprs, modules=["numpy", "math"], cse=True)
 
         return lam
 
@@ -247,9 +327,17 @@ class SymbolicPropagator:
         if not factory:
             raise ValueError(f"No symbolic handler or decomposition for {node.op_type}")
 
+        # Cut parents because we already have parent input regions
+        cut_parents = [parent for parent in node.parents]
+        for i in range(len(cut_parents)):
+            cut_parents[i].parents = []
+
         # Instantiate decomposition
-        sub_root = factory(node.parents, node.attrs)
+        sub_root = factory(cut_parents, node.attrs)
         sub_nodes = topological_sort(sub_root)
+
+        # Perform shape inference on the decomposition subgraph
+        ShapeInference.infer(sub_nodes, {})
 
         # Map original parents to symbolic inputs
         node_map: Dict[TensorNode, SymbolicRegion] = {}
@@ -266,12 +354,18 @@ class SymbolicPropagator:
                 rank = len(sub.shape) if sub.shape else 0
                 node_map[sub] = cls._clean_region(rank)
                 continue
+            if sub.op_type == OpType.INPUT:
+                pass
 
             sub_inputs = [node_map[p] for p in sub.parents]
 
-            # For internal nodes, we lack symbolic shapes unless we infer them.
-            # We pass empty shapes context; handlers needing shapes (Concat) might fail or degrade.
-            sub_ctx = {"attrs": sub.attrs, "input_shapes": [], "op_type": sub.op_type}
+            # Use actual shapes from inference
+            sub_ctx = {
+                "attrs": sub.attrs,
+                "input_shapes": [p.shape or () for p in sub.parents],
+                "output_shape": sub.shape or (),
+                "op_type": sub.op_type,
+            }
 
             res = cls._trace_node(sub, sub_inputs, sub_ctx)
             node_map[sub] = res
@@ -303,13 +397,15 @@ def _merge_dim(
 
 def _is_dirty(region: SymbolicRegion) -> sp.Expr:
     """Returns symbolic boolean: True if region is NOT empty (dirty)."""
+    if region.is_dirty_expr is not None:
+        return region.is_dirty_expr
+
     if not region.ranges:
-        return sp.true  # Scalar dirty
+        return sp.true  # Scalar dirty (fallback)
 
     # A region is dirty if ALL dimensions have start < end
     # (Intersection of non-empty intervals)
     conditions = [s < e for s, e in region.ranges]
-    # Use And
     return sp.And(*conditions)
 
 
@@ -373,7 +469,12 @@ def symbolic_elementwise(
             current = _merge_dim(current, d)
         out_ranges.append(current)
 
-    return SymbolicRegion(out_ranges)
+    # Output is dirty if ANY input is dirty
+    out_is_d = sp.false
+    if inputs:
+        out_is_d = sp.Or(*[_is_dirty(inp) for inp in inputs])
+
+    return SymbolicRegion(out_ranges, is_dirty_expr=out_is_d)
 
 
 @SymbolicPropagator.register(OpType.DOT)
@@ -407,7 +508,10 @@ def symbolic_dot(inputs: List[SymbolicRegion], ctx: Dict[str, Any]) -> SymbolicR
     batch_ranges = []
     # TODO: Implement batch broadcasting if needed
 
-    return SymbolicRegion(batch_ranges + [(out_m_s, out_m_e), (out_n_s, out_n_e)])
+    return SymbolicRegion(
+        batch_ranges + [(out_m_s, out_m_e), (out_n_s, out_n_e)],
+        is_dirty_expr=sp.Or(_is_dirty(rA), _is_dirty(rB)),
+    )
 
 
 @SymbolicPropagator.register(OpType.SLICE)
@@ -448,7 +552,10 @@ def symbolic_slice(inputs: List[SymbolicRegion], ctx: Dict[str, Any]) -> Symboli
 
         out_ranges.append((fin_s, fin_e))
 
-    return SymbolicRegion(out_ranges)
+    # For slice, we re-evaluate dirty state from output ranges
+    # because slicing can make a dirty region clean.
+    out_is_d = sp.And(*[s < e for s, e in out_ranges]) if out_ranges else sp.true
+    return SymbolicRegion(out_ranges, is_dirty_expr=out_is_d)
 
 
 @SymbolicPropagator.register(OpType.CONCAT)
@@ -500,7 +607,8 @@ def symbolic_concat(
         else:
             final_ranges.append(out_non_concat[d])
 
-    return SymbolicRegion(final_ranges)
+    out_is_d = sp.Or(*[_is_dirty(inp) for inp in inputs])
+    return SymbolicRegion(final_ranges, is_dirty_expr=out_is_d)
 
 
 @SymbolicPropagator.register(OpType.RESHAPE)
@@ -508,7 +616,7 @@ def symbolic_reshape(
     inputs: List[SymbolicRegion], ctx: Dict[str, Any]
 ) -> SymbolicRegion:
     # Conservative Full Dirty
-    return SymbolicRegion([(sp.Integer(0), S_INF)])
+    return SymbolicRegion([(sp.Integer(0), S_INF)], is_dirty_expr=_is_dirty(inputs[0]))
 
 
 @SymbolicPropagator.register(OpType.PERMUTE)
@@ -528,7 +636,7 @@ def symbolic_permute(
         else:
             new_ranges[i] = (sp.Integer(0), S_INF)
 
-    return SymbolicRegion(new_ranges)
+    return SymbolicRegion(new_ranges, is_dirty_expr=_is_dirty(inp))
 
 
 @SymbolicPropagator.register(OpType.GATHER)
@@ -536,33 +644,43 @@ def symbolic_gather(
     inputs: List[SymbolicRegion], ctx: Dict[str, Any]
 ) -> SymbolicRegion:
     """
-    Gather operation: output[i...] = data[indices[i...], ...]
-
-    ctx
-    "input_shapes": input_shape_symbols
-    "attrs": node.attrs
-    "op_type": node.op_type
-
-    The output shape matches the indices shape.
-    For each dimension in indices:
-    - If that dimension is dirty in indices -> full dirty (0, inf)
-    - Otherwise clean
-
-    The data tensor's first dimension (gather axis) doesn't affect output shape,
-    but its dirty region affects whether values change.
+    Gather operation: output[indices_shape, data_trailing_shape]
+    data: (N, ...)
+    indices: (M, ...)
+    output: (M, ..., ...)
     """
-    ind_region = inputs[1]  # Indices region
+    if len(inputs) < 2:
+        return SymbolicPropagator._clean_region(0)
 
-    # Output shape matches indices shape
-    # For each dimension in indices:
-    # - If indices dimension is dirty -> full range (0, inf) since we access varying indices
-    # - Clean indices dimension -> clean output for that dim
+    data_region = inputs[0]
+    ind_region = inputs[1]
+
+    # Check if anything in indices is dirty
+    is_ind_dirty = _is_dirty(ind_region)
+    # Check if gathered axis of data is dirty
+    gathered_axis_dirty = data_region.ranges[0][0] < data_region.ranges[0][1]
+
     out_ranges = []
+    # Output dims corresponding to indices
     for s_in, e_in in ind_region.ranges:
-        dim_dirty = s_in < e_in  # Is this indices dimension dirty?
+        # This dimension of output is dirty if:
+        # a) this dimension of indices is dirty
+        # b) OR the gathered axis of data is dirty (making all indices potentially dirty)
+        dim_dirty = s_in < e_in
+        s = sp.Piecewise(
+            (s_in, dim_dirty), (sp.Integer(0), gathered_axis_dirty), (S_INF, True)
+        )
+        e = sp.Piecewise(
+            (e_in, dim_dirty), (S_INF, gathered_axis_dirty), (RT_NEG_INF, True)
+        )
+        out_ranges.append((s, e))
 
-        s = sp.Piecewise((s_in, dim_dirty), (S_INF, True))
-        e = sp.Piecewise((e_in, dim_dirty), (RT_NEG_INF, True))
+    # Output dims corresponding to data trailing dims
+    for sd, ed in data_region.ranges[1:]:
+        # These dims are dirty if they are dirty in data OR if indices shifted
+        dim_dirty = sd < ed
+        s = sp.Piecewise((sd, dim_dirty), (sp.Integer(0), is_ind_dirty), (S_INF, True))
+        e = sp.Piecewise((ed, dim_dirty), (S_INF, is_ind_dirty), (RT_NEG_INF, True))
         out_ranges.append((s, e))
 
     return SymbolicRegion(out_ranges)
@@ -630,7 +748,7 @@ def symbolic_reduce(
             # So preserving ranges is safe.
             out_ranges.append((s, e))
 
-    return SymbolicRegion(out_ranges)
+    return SymbolicRegion(out_ranges, is_dirty_expr=is_inp_dirty)
 
 
 @SymbolicPropagator.register(OpType.CAST)
@@ -642,7 +760,8 @@ def symbolic_reduce(
 @SymbolicPropagator.register(OpType.SQRT)
 @SymbolicPropagator.register(OpType.TRIU)
 def symbolic_unary(inputs: List[SymbolicRegion], ctx: Dict[str, Any]) -> SymbolicRegion:
-    return inputs[0]
+    inp = inputs[0]
+    return SymbolicRegion(inp.ranges, is_dirty_expr=_is_dirty(inp))
 
 
 # ==============================================================================
@@ -843,4 +962,67 @@ def backward_permute(
         p_inv[d] = i
 
     in_ranges = [out_ranges[p_inv[j]] for j in range(len(dims))]
+    return [SymbolicRegion(in_ranges)]
+
+
+@SymbolicPropagator.register_backward(OpType.GATHER)
+def backward_gather(
+    out_region: SymbolicRegion, ctx: Dict[str, Any]
+) -> List[SymbolicRegion]:
+    # data, indices = inputs
+    # To compute out_region, we need matching indices
+    # The first N dimensions of out_region correspond to indices
+    input_shapes = ctx.get("input_shapes", [])
+    if not input_shapes:
+        return [SymbolicPropagator._full_dirty_region(1), out_region]
+
+    indices_rank = len(input_shapes[1])
+    indices_region = SymbolicRegion(out_region.ranges[:indices_rank])
+
+    # data needs its gathered axis full, and trailing dims matching out_region
+    data_rank = len(input_shapes[0])
+    data_ranges = [(sp.Integer(0), S_INF)]  # Full gathered axis
+    data_ranges.extend(out_region.ranges[indices_rank:])
+
+    return [SymbolicRegion(data_ranges), indices_region]
+
+
+@SymbolicPropagator.register_backward(OpType.SUM)
+@SymbolicPropagator.register_backward(OpType.MAX)
+def backward_reduce(
+    out_region: SymbolicRegion, ctx: Dict[str, Any]
+) -> List[SymbolicRegion]:
+    input_shapes = ctx.get("input_shapes", [])
+    if not input_shapes:
+        return [SymbolicPropagator._full_dirty_region(1)]
+
+    p_shape = input_shapes[0]
+    rank_in = len(p_shape)
+    attrs = ctx.get("attrs", {})
+    axis = attrs.get("axis", None)
+    keepdims = attrs.get("keepdims", True)
+
+    if axis is None:
+        axes = list(range(rank_in))
+    elif isinstance(axis, (list, tuple)):
+        axes = [a if a >= 0 else a + rank_in for a in axis]
+    else:
+        axes = [axis if axis >= 0 else axis + rank_in]
+
+    in_ranges = []
+    out_idx = 0
+    for d in range(rank_in):
+        if d in axes:
+            # Need whole dimension
+            in_ranges.append((sp.Integer(0), S_INF))
+            if keepdims:
+                out_idx += 1
+        else:
+            # Need matching slice
+            if out_idx < len(out_region.ranges):
+                in_ranges.append(out_region.ranges[out_idx])
+            else:
+                in_ranges.append((sp.Integer(0), S_INF))
+            out_idx += 1
+
     return [SymbolicRegion(in_ranges)]

@@ -26,6 +26,6 @@ def test_reduce_backward():
         OpType.SUM, DType.FP32, [a], (10,), "sum", attrs={"axis": 0, "keepdims": False}
     )
 
-    # Backward reduce fallback to full
+    # Backward reduce precision
     in_slices = DirtyPropagator.get_input_slices(reduce_sum, (slice(2, 4),))
-    assert in_slices[0] == (slice(0, 5), slice(0, 10))
+    assert in_slices[0] == (slice(0, 5), slice(2, 4))

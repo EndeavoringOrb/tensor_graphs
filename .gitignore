@@ -8,3 +8,4 @@ resources/*.safetensors
 resources/*.html
 resources/*.json
 pack.bat
+.vscode

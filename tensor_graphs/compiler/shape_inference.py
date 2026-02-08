@@ -90,7 +90,7 @@ class ShapeInference:
             if node.op_type == OpType.CONSTANT:
                 val = node.attrs.get("value")
                 if isinstance(val, (int, float, bool)):
-                    val = np.array([val])
+                    val = np.array(val)
                 elif isinstance(val, (list, tuple)):
                     val = np.array(val)
                 computed_values[node.name] = val
@@ -188,7 +188,7 @@ def handle_constant(node: TensorNode, get_val):
         else:
             node.shape = None
     elif node.shape is None:
-        node.shape = (1,)
+        node.shape = ()
     else:
         # Keep existing shape, ensure it's int/None
         node.shape = tuple(d if isinstance(d, int) else None for d in node.shape)

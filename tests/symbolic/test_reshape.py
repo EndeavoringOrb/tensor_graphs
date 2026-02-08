@@ -13,7 +13,7 @@ def test_reshape_forward():
     # Reshape is currently conservative: any dirt makes it full dirty
     a.dirty_region = (slice(0, 1), slice(0, 1))
     out_dirty = DirtyPropagator.propagate(res)
-    assert out_dirty == (slice(0, None),)
+    assert out_dirty == (slice(0, 10),)
 
 
 def test_reshape_backward():
