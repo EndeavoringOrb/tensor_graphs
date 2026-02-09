@@ -672,22 +672,9 @@ def _fwd_slice(input_regions, input_shapes, output_shape, attrs):
 
 @GraphPropagator.register_backward(OpType.SLICE)
 def _bwd_slice(output_region, input_shapes, output_shape, attrs):
-    if _is_clean(output_region):
-        return [None]
-    in_shape = input_shapes[0]
-    starts = attrs.get("starts", [])
-    steps = attrs.get("steps", [])
-    result = []
-    for d in range(len(in_shape)):
-        out_start, out_stop = (
-            output_region[d] if d < len(output_region) else (0, output_shape[d])
-        )
-        sl_start = starts[d] if d < len(starts) else 0
-        sl_step = steps[d] if d < len(steps) and steps[d] else 1
-        in_start = sl_start + out_start * sl_step
-        in_stop = sl_start + (out_stop - 1) * sl_step + 1
-        result.append((max(0, in_start), min(in_stop, in_shape[d])))
-    return [tuple(result)]
+    # Always return None — kernel needs full input
+    # because it uses absolute indices from attrs
+    return [None]
 
 
 # ---------------------------------------------------------------------------
@@ -1253,3 +1240,48 @@ def _bwd_repeat(output_region, input_shapes, output_shape, attrs):
 def _shape_fused_preserving(node: TensorNode, get_val):
     if node.parents and node.parents[0].shape:
         node.shape = node.parents[0].shape
+
+# ---------------------------------------------------------------------------
+# Normalization Ops (Softmax, RMSNorm)
+# ---------------------------------------------------------------------------
+
+@GraphPropagator.register_forward("Softmax", "RMSNorm")
+def _fwd_norm(input_regions, input_shapes, output_shape, attrs):
+    """
+    Forward: If any element in a vector is dirty, the entire output vector 
+    along the normalization axis becomes dirty.
+    """
+    inp = input_regions[0]
+    if _is_clean(inp):
+        return None
+        
+    axis = attrs.get("axis", -1)
+    rank = len(output_shape)
+    if axis < 0:
+        axis += rank
+        
+    result = list(inp)
+    # Any change in the row makes the entire output row dirty 
+    # because the normalization constant changes for everyone.
+    result[axis] = (0, output_shape[axis])
+    return tuple(result)
+
+
+@GraphPropagator.register_backward("Softmax", "RMSNorm")
+def _bwd_norm(output_region, input_shapes, output_shape, attrs):
+    """
+    Backward: To compute even one element of the output, we need the 
+    entire input vector along the normalization axis.
+    """
+    if _is_clean(output_region):
+        return [None]
+        
+    axis = attrs.get("axis", -1)
+    rank = len(output_shape)
+    if axis < 0:
+        axis += rank
+        
+    result = list(output_region)
+    # We need the full row from the input to compute the sum/mean
+    result[axis] = (0, input_shapes[0][axis])
+    return [tuple(result)]
