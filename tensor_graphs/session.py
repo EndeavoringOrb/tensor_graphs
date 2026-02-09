@@ -20,7 +20,7 @@ class GraphSession:
         root: TensorNode,
         db_path: str = "benchmarks.db",
         greedy: bool = True,
-        max_cache_bytes: int = 5*1024**3,  # 5GB default
+        max_cache_bytes: int = 5 * 1024**3,  # 5GB default
     ):
         self.root = root
         self.db_path = db_path

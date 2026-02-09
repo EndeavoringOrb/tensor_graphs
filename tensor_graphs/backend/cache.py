@@ -132,7 +132,9 @@ class CacheManager:
 
             # Only evict if incoming node is more valuable
             # Use a small epsilon for floating point comparison
-            if incoming_score * 1.001 <= victim_score_sum:  # 0.1% tolerance, prioritize keeping existing nodes
+            if (
+                incoming_score * 1.001 <= victim_score_sum
+            ):  # 0.1% tolerance, prioritize keeping existing nodes
                 return  # Don't evict, incoming item not valuable enough
 
             # Perform eviction
