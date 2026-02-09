@@ -1,77 +1,41 @@
 from typing import Optional, Dict, Any
-from ..ir.node import TensorNode
 from ..ir.graph import topological_sort
 from ..backend.registry import KernelRegistry
 from .planner import ExecutionRecipe
-from .memory_planner import MemoryPlanner
-from .compiled_graph import CompiledGraph, OpInstruction, TensorMetadata
-from .shape_inference import ShapeInference
+from .compiled_graph import CompiledGraph, OpInstruction
+from .propagation import GraphPropagator
 
 
 class Compiler:
-    def __init__(self, memory_planner: Optional[MemoryPlanner] = None):
-        self.memory_planner = memory_planner or MemoryPlanner()
-
     def compile(
         self, recipe: ExecutionRecipe, known_values: Optional[Dict[str, Any]] = None
     ) -> CompiledGraph:
-        # 1. Topo Sort (Flatten graph)
+        # 1. Topo Sort
         nodes = topological_sort(recipe.root)
 
-        # 2. Shape Inference (if values are provided)
+        # 2. Shape Inference
         if known_values:
-            ShapeInference.infer(nodes, known_values)
+            GraphPropagator.infer_shapes(nodes, known_values)
 
-        # 3. Memory Planning
-        allocations = self.memory_planner.plan(nodes)
+        # 3. Calculate Ref Counts for memory release
+        ref_counts = {n.name: 0 for n in nodes}
+        for node in nodes:
+            for p in node.parents:
+                ref_counts[p.name] = ref_counts.get(p.name, 0) + 1
+
+        # Root is implicitly consumed by the session output
+        ref_counts[recipe.root.name] += 1
 
         # 4. Instruction Generation
         instructions = []
-        node_metadata = {}
-
-        # Helper to get offset
-        def get_offset(node: TensorNode) -> int:
-            if node not in allocations:
-                raise RuntimeError(f"No allocation for node {node.name}")
-            return allocations[node].offset
-
-        # Helper to get metadata
-        def get_metadata(node: TensorNode) -> TensorMetadata:
-            if node.shape is None:
-                raise ValueError(
-                    f"Node {node.name} has undefined shape during compilation."
-                )
-
-            if any(s is None for s in node.shape):
-                raise ValueError("none shape")
-
-            shape_tuple = tuple(s for s in node.shape if s is not None)
-            return TensorMetadata(shape=shape_tuple, dtype=node.dtype)
-
-        # Calculate total memory needed
-        max_offset = 0
-        for alloc in allocations.values():
-            max_offset = max(max_offset, alloc.offset + alloc.size_bytes)
-
-        input_offsets = {}
-        output_offsets = {}
         nodes_map = {}
 
         for node in nodes:
             nodes_map[node.name] = node
-            # Store metadata
-            node_metadata[node.name] = get_metadata(node)
 
-            # Inputs
-            if node.op_type == "Input":
-                input_offsets[node.name] = get_offset(node)
+            if node.op_type in ("Input", "Constant"):
                 continue
 
-            if node.op_type == "Constant":
-                # Constants are handled via load_weights usually
-                continue
-
-            # Find Kernel
             backend = recipe.assignments.get(node, node.backend)
             input_sigs = [p.signature for p in node.parents]
 
@@ -80,36 +44,20 @@ class Compiler:
             )
 
             if not kernel:
-                # If it's a structural node like a subgraph root that wasn't decomposed, this is an issue.
-                # But assume valid recipe.
-                raise RuntimeError(f"Kernel not found for {node.op_type} on {backend}")
+                raise RuntimeError(f"Kernel not found for {node.op_type}")
 
-            # Create Instruction
-            input_offs = [get_offset(p) for p in node.parents]
             input_names = [p.name for p in node.parents]
-
-            # Currently TensorNode supports single output, so we wrap it in a list
-            output_offs = [get_offset(node)]
 
             instr = OpInstruction(
                 node_name=node.name,
                 kernel=kernel,
-                input_offsets=input_offs,
                 input_node_names=input_names,
-                output_offsets=output_offs,
                 attrs=node.attrs,
             )
             instructions.append(instr)
 
-        # Root is the output
-        output_offsets[recipe.root.name] = get_offset(recipe.root)
-
         return CompiledGraph(
             instructions=instructions,
-            buffer_allocations={n.name: a for n, a in allocations.items()},
-            node_metadata=node_metadata,
-            total_memory_bytes=max_offset,
-            input_offsets=input_offsets,
-            output_offsets=output_offsets,
+            ref_counts=ref_counts,
             nodes_map=nodes_map,
         )

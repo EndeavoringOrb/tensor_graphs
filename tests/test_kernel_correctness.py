@@ -11,7 +11,7 @@ from tensor_graphs.backend.registry import KernelRegistry
 from tensor_graphs.session import GraphSession
 from tensor_graphs.ops.registry import get_reference_factory
 from tensor_graphs.benchmark.data_gen import DataGenerator
-from tensor_graphs.compiler.shape_inference import ShapeInference
+from tensor_graphs.compiler.propagation import GraphPropagator
 from tensor_graphs.ir.graph import topological_sort
 
 # Ensure all kernels are loaded
@@ -135,7 +135,7 @@ def test_kernel_correctness(
         n for n in subgraph_nodes if n not in input_nodes_for_shape
     ]
 
-    ShapeInference.infer(inference_nodes, known_values)
+    GraphPropagator.infer_shapes(inference_nodes, known_values)
 
     # 3. The true output shape is the inferred shape of the subgraph root
     output_shape = subgraph_root.shape

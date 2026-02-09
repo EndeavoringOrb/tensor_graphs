@@ -1,8 +1,7 @@
-# tensor_graphs/compiler/dirty_propagation.py
 from typing import Tuple, Optional, List, Any
 import numpy as np
 from ..ir.node import TensorNode
-from .numeric_propagation import NumericPropagator, _to_slices, _from_slices
+from .propagation import GraphPropagator, _to_slices, _from_slices
 
 DirtyRegion = Optional[Tuple[slice, ...]]
 
@@ -10,7 +9,7 @@ DirtyRegion = Optional[Tuple[slice, ...]]
 class DirtyPropagator:
     @staticmethod
     def get_diff(old_data: Any, new_data: Any) -> DirtyRegion:
-        """Compute the dirty region between old and new data."""
+        """Compute the bounding-box dirty region between *old_data* and *new_data*."""
         if old_data is None:
             ndim = new_data.ndim if hasattr(new_data, "ndim") else 0
             return (slice(None),) * ndim if ndim > 0 else (slice(None),)
@@ -33,7 +32,7 @@ class DirtyPropagator:
         if not np.any(diff):
             return None
 
-        slices = []
+        slices: list = []
         for dim in range(diff.ndim):
             axes_to_reduce = tuple(i for i in range(diff.ndim) if i != dim)
             dim_diff = np.any(diff, axis=axes_to_reduce) if axes_to_reduce else diff
@@ -46,8 +45,7 @@ class DirtyPropagator:
 
     @staticmethod
     def propagate(node: TensorNode, known_values: Optional[dict] = None) -> DirtyRegion:
-        """Propagate dirty regions forward through a node."""
-        result = NumericPropagator.propagate(node, known_values)
+        result = GraphPropagator.propagate(node, known_values)
         return _to_slices(result)
 
     @staticmethod
@@ -56,7 +54,6 @@ class DirtyPropagator:
         output_region: DirtyRegion,
         known_values: Optional[dict] = None,
     ) -> List[DirtyRegion]:
-        """Backward propagate: compute input regions needed for output region."""
         numeric_output = _from_slices(output_region, node.shape or ())
-        results = NumericPropagator.get_input_slices(node, numeric_output, known_values)
+        results = GraphPropagator.get_input_slices(node, numeric_output, known_values)
         return [_to_slices(r) for r in results]
