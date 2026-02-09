@@ -39,9 +39,14 @@ class Gemma3Model:
         pos = b.cast(pos_int, DType.FP32)
 
         # 4. Reshaping for outer product
-        pos_col = b.reshape(pos, b.concat([seq_len_node, b.const(1)], axis=0))
+        pos_col = b.reshape(
+            pos, b.concat([seq_len_node, b.const([1])], axis=0)
+        )  # Changed to [1]
         freq_row = b.reshape(
-            inv_freq, b.concat([b.const(1), b.const(head_dim // 2)], axis=0)
+            inv_freq,
+            b.concat(
+                [b.const([1]), b.const([head_dim // 2])], axis=0
+            ),  # Changed to [1] and [head_dim // 2]
         )
 
         # 5. Outer product: angles = pos_col * freq_row
@@ -52,7 +57,8 @@ class Gemma3Model:
 
         # 7. Cos, Sin and final broadcast reshape
         final_shape = b.concat(
-            [b.const(1), b.const(1), seq_len_node, b.const(head_dim)], axis=0
+            [b.const([1]), b.const([1]), seq_len_node, b.const([head_dim])],
+            axis=0,  # Changed to [1], [1], and [head_dim]
         )
         cos_out = b.reshape(b.cos(angles), final_shape)
         sin_out = b.reshape(b.sin(angles), final_shape)
@@ -67,7 +73,8 @@ class Gemma3Model:
         scaled_mask = b.mul(triu_mask, b.const(mask_val, DType.FP32))
 
         final_shape = b.concat(
-            [b.const(1), b.const(1), seq_len_node, seq_len_node], axis=0
+            [b.const([1]), b.const([1]), seq_len_node, seq_len_node],
+            axis=0,  # Changed to [1] and [1]
         )
         return b.reshape(scaled_mask, final_shape)
 

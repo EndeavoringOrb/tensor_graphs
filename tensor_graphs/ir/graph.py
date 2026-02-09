@@ -189,9 +189,15 @@ class GraphBuilder:
 
     def const(self, value, dtype=None):
         if dtype is None:
-            if isinstance(value, float):
+            if isinstance(value, float) or (
+                isinstance(value, list)
+                and len(value) > 0
+                and isinstance(value[0], float)
+            ):
                 dtype = DType.FP32
-            elif isinstance(value, int):
+            elif isinstance(value, int) or (
+                isinstance(value, list) and len(value) > 0 and isinstance(value[0], int)
+            ):
                 dtype = DType.INT32
             else:
                 raise ValueError("Could not infer dtype for constant")
