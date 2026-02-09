@@ -5,7 +5,6 @@ from dataclasses import dataclass
 class StorageType(Enum):
     TRANSIENT = "transient"  # Activations (recyclable)
     PERSISTENT = "persistent"  # Weights (static)
-    STATE = "state"  # KV Cache (persistent but mutable)
 
 
 @dataclass

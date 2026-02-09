@@ -146,6 +146,7 @@ class Executor:
             node = self.graph.nodes_map.get(name)
             if not node:
                 continue
+            # TODO: We don't need to diff weights, they won't change. But we need to make sure they are copied to buffer the first time
 
             # Calculate diff
             old_data = self.last_inputs.get(name)
@@ -202,10 +203,7 @@ class Executor:
             # --- B. Determine Execution Strategy ---
 
             is_dirty = node.dirty_region is not None
-            is_persistent = node.storage_type in (
-                StorageType.PERSISTENT,
-                StorageType.STATE,
-            )
+            is_persistent = node.storage_type == StorageType.PERSISTENT
 
             # We treat Transient buffers as "Logically Lost" between runs unless restored.
             # However, Persistent buffers retain data.

@@ -47,10 +47,7 @@ class Compiler:
                 )
 
             if any(s is None for s in node.shape):
-                # For now, we allow dynamic shapes but compiled graph works best with fixed.
-                # If None is present, we might have issues in Executor if buffer size is strictly checked.
-                # But let's proceed.
-                pass
+                raise ValueError("none shape")
 
             shape_tuple = tuple(s for s in node.shape if s is not None)
             return TensorMetadata(shape=shape_tuple, dtype=node.dtype)

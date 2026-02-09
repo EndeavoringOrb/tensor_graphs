@@ -45,9 +45,7 @@ class DirtyPropagator:
         return tuple(slices)
 
     @staticmethod
-    def propagate(
-        node: TensorNode, known_values: Optional[dict] = None
-    ) -> DirtyRegion:
+    def propagate(node: TensorNode, known_values: Optional[dict] = None) -> DirtyRegion:
         """Propagate dirty regions forward through a node."""
         result = NumericPropagator.propagate(node, known_values)
         return _to_slices(result)

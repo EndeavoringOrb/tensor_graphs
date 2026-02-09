@@ -5,7 +5,7 @@ from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.session import GraphSession
 
 
-def test_copy_to_cpu_numpy():   
+def test_copy_to_cpu_numpy():
     x = TensorNode(OpType.INPUT, DType.FP32, [], (2, 2), "x")
     copy_node = TensorNode(
         OpType.COPY_TO,

@@ -49,7 +49,7 @@ class MemoryPlanner:
 
         # 1. Separate Persistent vs Transient
         for node in nodes:
-            if node.storage_type in (StorageType.PERSISTENT, StorageType.STATE):
+            if node.storage_type == StorageType.PERSISTENT:
                 device = node.backend.value if node.backend else "cpu"
                 size = calculate_size_bytes(node.shape, node.dtype)
                 size_aligned = self._align(size)
@@ -99,13 +99,6 @@ class MemoryPlanner:
             best_offset = -1
             candidate_start = 0
 
-            # Skip persistent memory range?
-            # We treat persistent and transient as separate pools OR shared?
-            # If shared, transient must start after persistent.
-            # But persistent grows...
-            # Let's assume shared address space: Persistent [0...P], Transient [P...]
-            # The 'P' is fixed after step 1.
-
             base_offset = persistent_offsets.get(device, 0)
             # Actually, if we use a single buffer, we should offset everything by base_offset?
             # Or just start searching from base_offset.
@@ -124,7 +117,7 @@ class MemoryPlanner:
                 candidate_start = max(candidate_start, end)
 
             if best_offset == -1:
-                best_offset = candidate_start
+                best_offset = candidate_start # Couldn't find a gap, put it at the end
 
             # 3. Alloc
             allocations[node] = BufferAllocation(
