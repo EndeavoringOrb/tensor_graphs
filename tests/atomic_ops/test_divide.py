@@ -2,7 +2,7 @@ import numpy as np
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic_types import OpType
-from tensor_graphs.backend.executor import evaluate_graph
+from tensor_graphs.session import GraphSession
 
 
 def test_div_generic_vector():
@@ -14,7 +14,8 @@ def test_div_generic_vector():
     val_a = np.full(10, 10.0, dtype=np.float32)
     val_b = np.full(10, 2.0, dtype=np.float32)
 
-    res = evaluate_graph(div_node, {"a": val_a, "b": val_b})
+    sess = GraphSession(div_node)
+    res = sess.run({"a": val_a, "b": val_b})
     np.testing.assert_array_equal(res, np.full(10, 5.0, dtype=np.float32))
 
 
@@ -27,7 +28,8 @@ def test_div_scalar_broadcast():
     val_s = np.array([10.0], dtype=np.float32)
     val_m = np.full((2, 2), 2.0, dtype=np.float32)
 
-    res = evaluate_graph(div_node, {"s": val_s, "m": val_m})
+    sess = GraphSession(div_node)
+    res = sess.run({"s": val_s, "m": val_m})
     # 10 / 2 = 5
     np.testing.assert_array_equal(res, np.full((2, 2), 5.0, dtype=np.float32))
 
@@ -41,6 +43,7 @@ def test_div_matrix_scalar():
     val_m = np.full((2, 2), 20.0, dtype=np.float32)
     val_s = np.array([4.0], dtype=np.float32)
 
-    res = evaluate_graph(div_node, {"m": val_m, "s": val_s})
+    sess = GraphSession(div_node)
+    res = sess.run({"m": val_m, "s": val_s})
     # 20 / 4 = 5
     np.testing.assert_array_equal(res, np.full((2, 2), 5.0, dtype=np.float32))

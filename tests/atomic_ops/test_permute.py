@@ -2,7 +2,7 @@ import numpy as np
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic_types import OpType
-from tensor_graphs.backend.executor import evaluate_graph
+from tensor_graphs.session import GraphSession
 
 
 def test_permute_matrix_transpose():
@@ -20,7 +20,8 @@ def test_permute_matrix_transpose():
     input_data = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.float32)
     perm_val = np.array([1, 0], dtype=np.int32)
 
-    res = evaluate_graph(permute_node, {"data": input_data, "perm": perm_val})
+    sess = GraphSession(permute_node)
+    res = sess.run({"data": input_data, "perm": perm_val})
 
     expected = input_data.T
     np.testing.assert_array_equal(res, expected)
@@ -44,7 +45,8 @@ def test_permute_3d_reorder():
 
     input_data = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
 
-    res = evaluate_graph(permute_node, {"data": input_data})
+    sess = GraphSession(permute_node)
+    res = sess.run({"data": input_data})
 
     expected = np.transpose(input_data, (2, 0, 1))
     np.testing.assert_array_equal(res, expected)

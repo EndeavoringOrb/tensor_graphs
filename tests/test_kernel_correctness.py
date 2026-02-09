@@ -8,7 +8,7 @@ from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType, Backend
 from tensor_graphs.ops.atomic_types import OpType
 from tensor_graphs.backend.registry import KernelRegistry
-from tensor_graphs.backend.executor import evaluate_graph
+from tensor_graphs.session import GraphSession
 from tensor_graphs.ops.registry import get_reference_factory
 from tensor_graphs.benchmark.data_gen import DataGenerator
 from tensor_graphs.compiler.shape_inference import ShapeInference
@@ -229,7 +229,8 @@ def test_kernel_correctness(
             name="ref_atomic",
             attrs=attrs,
         )
-    raw_expected = evaluate_graph(graph_root, feed_dict)
+    sess = GraphSession(graph_root)
+    raw_expected = sess.run(feed_dict)
     # Ensure reference output is moved to CPU/NumPy
     if isinstance(raw_expected, torch.Tensor):
         expected_output = raw_expected.detach().cpu().numpy()

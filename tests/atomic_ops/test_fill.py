@@ -2,7 +2,7 @@ import numpy as np
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic_types import OpType
-from tensor_graphs.backend.executor import evaluate_graph
+from tensor_graphs.session import GraphSession
 
 
 def test_fill_fp32():
@@ -20,7 +20,8 @@ def test_fill_fp32():
     val_input = np.array([5.0], dtype=np.float32)
     shape_input = np.array([2, 3], dtype=np.int32)
 
-    res = evaluate_graph(fill_node, {"val": val_input, "shape_tensor": shape_input})
+    sess = GraphSession(fill_node)
+    res = sess.run({"val": val_input, "shape_tensor": shape_input})
 
     expected = np.full((2, 3), 5.0, dtype=np.float32)
     np.testing.assert_array_equal(res, expected)
@@ -41,7 +42,8 @@ def test_fill_int32():
     val_input = np.array([7], dtype=np.int32)
     shape_input = np.array([4], dtype=np.int32)
 
-    res = evaluate_graph(fill_node, {"val": val_input, "shape_tensor": shape_input})
+    sess = GraphSession(fill_node)
+    res = sess.run({"val": val_input, "shape_tensor": shape_input})
 
     expected = np.full((4,), 7, dtype=np.int32)
     np.testing.assert_array_equal(res, expected)

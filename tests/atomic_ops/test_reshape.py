@@ -2,7 +2,7 @@ import numpy as np
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ops.atomic_types import OpType
-from tensor_graphs.backend.executor import evaluate_graph
+from tensor_graphs.session import GraphSession
 
 
 def test_reshape_vector_to_matrix():
@@ -17,9 +17,8 @@ def test_reshape_vector_to_matrix():
     input_data = np.arange(6, dtype=np.float32)
     target_shape_val = np.array([2, 3], dtype=np.int32)
 
-    res = evaluate_graph(
-        reshape_node, {"data": input_data, "target_shape": target_shape_val}
-    )
+    sess = GraphSession(reshape_node)
+    res = sess.run({"data": input_data, "target_shape": target_shape_val})
 
     expected = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.float32)
     np.testing.assert_array_equal(res, expected)
@@ -38,9 +37,8 @@ def test_reshape_3d_to_flattened():
     input_data = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
     target_shape_val = np.array([8], dtype=np.int32)
 
-    res = evaluate_graph(
-        reshape_node, {"data": input_data, "target_shape": target_shape_val}
-    )
+    sess = GraphSession(reshape_node)
+    res = sess.run({"data": input_data, "target_shape": target_shape_val})
 
     expected = np.arange(8, dtype=np.float32)
     np.testing.assert_array_equal(res, expected)
@@ -60,8 +58,7 @@ def test_reshape_with_inference():
     # Target shape: [-1, 2] -> Should become [3, 2]
     target_shape_val = np.array([-1, 2], dtype=np.int32)
 
-    res = evaluate_graph(
-        reshape_node, {"data": input_data, "target_shape": target_shape_val}
-    )
+    sess = GraphSession(reshape_node)
+    res = sess.run({"data": input_data, "target_shape": target_shape_val})
 
     assert res.shape == (3, 2)
