@@ -3,7 +3,6 @@ from ..ir.node import TensorNode
 from ..ir.graph import topological_sort
 from ..backend.registry import KernelRegistry
 from .planner import ExecutionRecipe
-from .liveness import LivenessAnalyzer
 from .memory_planner import MemoryPlanner
 from .compiled_graph import CompiledGraph, OpInstruction, TensorMetadata
 from .shape_inference import ShapeInference
@@ -23,13 +22,10 @@ class Compiler:
         if known_values:
             ShapeInference.infer(nodes, known_values)
 
-        # 3. Liveness
-        liveness = LivenessAnalyzer.analyze(nodes)
+        # 3. Memory Planning
+        allocations = self.memory_planner.plan(nodes)
 
-        # 4. Memory Planning
-        allocations = self.memory_planner.plan(nodes, liveness)
-
-        # 5. Instruction Generation
+        # 4. Instruction Generation
         instructions = []
         node_metadata = {}
 
