@@ -6,7 +6,7 @@ from typing import Any, cast
 from torch.utils.cpp_extension import load
 from ...registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature, Backend, KernelUnavailableError
-from ....ops.fused.rms_norm import rms_norm_decomposition, rms_norm
+from ....ops.fused.rms_norm import rms_norm_decomposition
 
 # 1. JIT Compile the Kernel
 _CUR_DIR = os.path.dirname(os.path.abspath(__file__))

@@ -1,8 +1,11 @@
-from typing import List, Set, Dict
 from .node import TensorNode
-from .dtypes import DType, Backend
-import json
+from .dtypes import DType
+from ..ops.atomic_types import OpType
+from .buffer import StorageType
 import numpy as np
+from typing import Set, Dict, List
+from .dtypes import Backend
+import json
 from enum import Enum
 
 
@@ -164,6 +167,7 @@ def graph_from_json(json_str: str) -> TensorNode:
     # The last node in the topological list is the root
     return id_to_node[data[-1]["id"]]
 
+
 class GraphBuilder:
     def __init__(self):
         self.params = {}
@@ -173,7 +177,9 @@ class GraphBuilder:
     def _next_name(self, op_name):
         self._count += 1
         return f"{op_name}_{self._count}"
-    
+
+    # --- Core Nodes ---
+
     def input(self, name, shape, dtype=DType.FP32):
         node = TensorNode(
             OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.TRANSIENT
@@ -181,15 +187,27 @@ class GraphBuilder:
         self.inputs[name] = node
         return node
 
-    def constant(self, value, shape, dtype, name):
+    def const(self, value, dtype=None):
+        if dtype is None:
+            if isinstance(value, float):
+                dtype = DType.FP32
+            elif isinstance(value, int):
+                dtype = DType.INT32
+            else:
+                raise ValueError("Could not infer dtype for constant")
         if not isinstance(value, np.ndarray):
-            value = np.array(value)
+            # If it's a scalar, wrap it; if it's a list, convert it
+            value = np.array(
+                value, dtype=np.float32 if dtype == DType.FP32 else np.int32
+            )
+            if value.ndim == 0:
+                value = np.array([value])
         node = TensorNode(
             OpType.CONSTANT,
             dtype,
             [],
-            shape,
-            name,
+            value.shape,
+            name=self._next_name("const"),
             attrs={"value": value},
             storage_type=StorageType.PERSISTENT,
         )
@@ -201,3 +219,158 @@ class GraphBuilder:
         )
         self.params[name] = node
         return node
+
+    # --- Math Ops ---
+
+    def add(self, a, b):
+        return TensorNode(OpType.ADD, a.dtype, [a, b], name=self._next_name("add"))
+
+    def mul(self, a, b):
+        return TensorNode(OpType.MUL, a.dtype, [a, b], name=self._next_name("mul"))
+
+    def divide(self, a, b):
+        return TensorNode(OpType.DIVIDE, a.dtype, [a, b], name=self._next_name("div"))
+
+    def dot(self, a, b):
+        return TensorNode(OpType.DOT, a.dtype, [a, b], name=self._next_name("dot"))
+
+    def sqrt(self, a):
+        return TensorNode(OpType.SQRT, a.dtype, [a], name=self._next_name("sqrt"))
+
+    def sin(self, a):
+        return TensorNode(OpType.SIN, a.dtype, [a], name=self._next_name("sin"))
+
+    def cos(self, a):
+        return TensorNode(OpType.COS, a.dtype, [a], name=self._next_name("cos"))
+
+    def exp(self, a):
+        return TensorNode(OpType.EXP, a.dtype, [a], name=self._next_name("exp"))
+
+    def negate(self, a):
+        return TensorNode(OpType.NEGATE, a.dtype, [a], name=self._next_name("neg"))
+
+    def power(self, a, b):
+        return TensorNode(OpType.POWER, a.dtype, [a, b], name=self._next_name("pow"))
+
+    # --- Reduction Ops ---
+
+    def sum(self, a, axis=None, keepdims=True):
+        return TensorNode(
+            OpType.SUM,
+            a.dtype,
+            [a],
+            name=self._next_name("sum"),
+            attrs={"axis": axis, "keepdims": keepdims},
+        )
+
+    def max(self, a, axis=None, keepdims=True):
+        return TensorNode(
+            OpType.MAX,
+            a.dtype,
+            [a],
+            name=self._next_name("max"),
+            attrs={"axis": axis, "keepdims": keepdims},
+        )
+
+    # --- Manipulation Ops ---
+
+    def reshape(self, a, shape_node):
+        return TensorNode(
+            OpType.RESHAPE, a.dtype, [a, shape_node], name=self._next_name("reshape")
+        )
+
+    def permute(self, a, dims: List[int]):
+        return TensorNode(
+            OpType.PERMUTE,
+            a.dtype,
+            [a],
+            name=self._next_name("permute"),
+            attrs={"dims": dims},
+        )
+
+    def slice(self, a, starts, ends, steps=None):
+        attrs = {"starts": starts, "ends": ends}
+        if steps:
+            attrs["steps"] = steps
+        return TensorNode(
+            OpType.SLICE, a.dtype, [a], name=self._next_name("slice"), attrs=attrs
+        )
+
+    def concat(self, tensors: List[TensorNode], axis: int):
+        return TensorNode(
+            OpType.CONCAT,
+            tensors[0].dtype,
+            tensors,
+            name=self._next_name("concat"),
+            attrs={"axis": axis},
+        )
+
+    def cast(self, a, dtype: DType):
+        return TensorNode(
+            OpType.CAST, dtype, [a], name=self._next_name("cast"), attrs={"to": dtype}
+        )
+
+    def repeat(self, a, repeats: int, axis: int):
+        return TensorNode(
+            OpType.REPEAT,
+            a.dtype,
+            [a],
+            name=self._next_name("repeat"),
+            attrs={"repeats": repeats, "axis": axis},
+        )
+
+    def arange(self, start, stop, step):
+        return TensorNode(
+            OpType.ARANGE,
+            start.dtype,
+            [start, stop, step],
+            name=self._next_name("arange"),
+        )
+
+    def triu(self, a, k=0):
+        return TensorNode(
+            OpType.TRIU, a.dtype, [a], name=self._next_name("triu"), attrs={"k": k}
+        )
+
+    def gather(self, data, indices):
+        return TensorNode(
+            OpType.GATHER, data.dtype, [data, indices], name=self._next_name("gather")
+        )
+
+    def fill(self, value_node, shape_node):
+        return TensorNode(
+            OpType.FILL,
+            value_node.dtype,
+            [value_node, shape_node],
+            name=self._next_name("fill"),
+        )
+
+    def where(self, condition, x, y):
+        return TensorNode(
+            OpType.WHERE, x.dtype, [condition, x, y], name=self._next_name("where")
+        )
+
+    # --- Fused Ops ---
+
+    def rms_norm(self, x, scale, eps):
+        return TensorNode(
+            "RMSNorm", x.dtype, [x, scale, eps], name=self._next_name("rmsnorm")
+        )
+
+    def softmax(self, x, axis=-1):
+        return TensorNode(
+            "Softmax",
+            x.dtype,
+            [x],
+            name=self._next_name("softmax"),
+            attrs={"axis": axis},
+        )
+
+    def gelu(self, x):
+        return TensorNode("GELU", x.dtype, [x], name=self._next_name("gelu"))
+
+    def rope(self, x, cos, sin):
+        return TensorNode("RoPE", x.dtype, [x, cos, sin], name=self._next_name("rope"))
+
+    def tanh(self, x):
+        return TensorNode("Tanh", x.dtype, [x], name=self._next_name("tanh"))

@@ -7,7 +7,6 @@ from ..ops.registry import get_reference_factory
 from ..backend.registry import KernelRegistry
 from ..ir.graph import topological_sort
 from ..ir.dtypes import Backend, TensorSignature, DType
-from tqdm import tqdm
 from ..config import *
 
 
@@ -76,7 +75,11 @@ class ShapeInference:
         return decorator
 
     @staticmethod
-    def infer(nodes: List[TensorNode], known_values: Dict[str, Any]):
+    def infer(
+        nodes: List[TensorNode],
+        known_values: Dict[str, Any],
+        keep_cut_parent_shapes: bool = False,
+    ):
         """
         Updates the shapes of nodes in-place based on shape inference.
         If known_values are provided, attempts to resolve shapes to concrete integers.
@@ -109,11 +112,12 @@ class ShapeInference:
                 )
 
             if (
-                node.shape
+                keep_cut_parent_shapes
+                and node.shape
                 and all(isinstance(d, int) for d in node.shape)
                 and (not node.parents)
             ):
-                pass  # input or cut off parent node with prefilled shape
+                continue  # input or cut off parent node with prefilled shape
 
             # --- Dispatch ---
             if node.op_type in ShapeInference._handlers:
@@ -145,6 +149,7 @@ class ShapeInference:
                 OpType.CONCAT,
                 OpType.CAST,
                 OpType.SLICE,
+                OpType.RESHAPE,
             ]:
                 if all(p.name in computed_values for p in node.parents):
                     # 1. Select CPU kernel
@@ -232,9 +237,6 @@ for op in [
     OpType.COS,
     OpType.SQRT,
     OpType.TRIU,
-    "GELU",
-    "Softmax",
-    "RoPE",
 ]:
     ShapeInference.register_handler(op)(_handle_unary)
 
@@ -308,17 +310,12 @@ def handle_permute(node: TensorNode, get_val):
 
 @ShapeInference.register_handler(OpType.CONCAT)
 def handle_concat(node: TensorNode, get_val):
-    if not node.parents:
+    if not node.parents or any(p.shape is None for p in node.parents):
         return
 
     axis = node.attrs.get("axis", 0)
-    # Check if we can get axis dynamically
-    if len(node.parents) >= 3:
-        axis_val = get_val(node.parents[2])
-        if axis_val is not None:
-            axis = int(axis_val.item()) if hasattr(axis_val, "item") else int(axis_val)
 
-    shapes = [p.shape for p in node.parents if p.shape is not None]
+    shapes = [p.shape for p in node.parents]
     if len(shapes) < 2:
         if len(shapes) == 1:
             node.shape = shapes[0]

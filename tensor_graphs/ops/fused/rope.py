@@ -2,13 +2,10 @@ from ...ir.node import TensorNode
 from ..atomic_types import OpType
 from ..registry import register_reference_factory
 
+
 def rope(x, cos, sin, name=None):
-    return TensorNode(
-        "RoPE", 
-        x.dtype, 
-        [x, cos, sin], 
-        name=name or f"{x.name}_rope"
-    )
+    return TensorNode("RoPE", x.dtype, [x, cos, sin], name=name or f"{x.name}_rope")
+
 
 # Register atomic decomposition logic
 def rope_decomposition(inputs, attrs=None):

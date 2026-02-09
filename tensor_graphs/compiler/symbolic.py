@@ -3,7 +3,7 @@ File: tensor_graphs/compiler/symbolic.py
 """
 
 import sympy as sp
-import numpy as np
+import time
 import json
 from typing import List, Tuple, Dict, Any, Callable, Optional
 from dataclasses import dataclass
@@ -20,10 +20,6 @@ from ..config import DEBUG_EXECUTION
 
 # SymPy Infinity
 S_INF = sp.oo
-
-# Runtime constants for "Clean" and "Full" regions
-RT_INF = np.inf
-RT_NEG_INF = -np.inf
 
 
 @dataclass
@@ -145,7 +141,7 @@ class SymbolicPropagator:
         node_map: Dict[TensorNode, SymbolicRegion] = {sub_root: output_region}
 
         # Perform shape inference on the decomposition subgraph
-        ShapeInference.infer(sub_nodes, known_values)
+        ShapeInference.infer(sub_nodes, known_values, keep_cut_parent_shapes=True)
 
         # Propagate backward in reverse topological order
         for sub in reversed(sub_nodes):
@@ -259,12 +255,15 @@ class SymbolicPropagator:
             lam = lambda *args: []
         else:
             if DEBUG_EXECUTION:
-                print(
-                    f"[SYMBOLIC] _compile_backward running lambdify for node {node.op_type}"
-                )
+                print(f"[SYMBOLIC] _compile_backward running lambdify for node {node.op_type}")
+            # Use only "numpy" - including "math" causes Piecewise conversion errors
+            start_time = time.perf_counter()
             lam = sp.lambdify(
-                all_args, flat_results, modules=["numpy", "math"], cse=True
+                all_args, flat_results, modules=["numpy"], cse=True
             )
+            end_time = time.perf_counter()
+            if DEBUG_EXECUTION:
+                print(f"[SYMBOLIC] _compile_backward lambdify for node {node.op_type} took {end_time - start_time} seconds")
 
         return lam
 
@@ -329,8 +328,11 @@ class SymbolicPropagator:
         else:
             if DEBUG_EXECUTION:
                 print(f"[SYMBOLIC] _compile running lambdify for node {node.op_type}")
-            # numpy used for Piecewise/min/max/inf handling
-            lam = sp.lambdify(all_args, out_exprs, modules=["numpy", "math"], cse=True)
+            start_time = time.perf_counter()
+            lam = sp.lambdify(all_args, out_exprs, modules=["numpy"], cse=True)
+            end_time = time.perf_counter()
+            if DEBUG_EXECUTION:
+                print(f"[SYMBOLIC] _compile lambdify for node {node.op_type} took {end_time - start_time} seconds")
 
         return lam
 
@@ -351,23 +353,32 @@ class SymbolicPropagator:
         if not factory:
             raise ValueError(f"No symbolic handler or decomposition for {node.op_type}")
 
-        # Cut parents because we already have parent input regions
-        cut_parents = [parent for parent in node.parents]
-        for i in range(len(cut_parents)):
-            cut_parents[i].parents = []
+        # --- FIX: Create isolated leaf nodes instead of modifying in-place ---
+        leaf_parents = [
+            TensorNode(
+                op_type=p.op_type,
+                dtype=p.dtype,
+                parents=[],  # Isolate from the rest of the graph
+                shape=p.shape,
+                name=p.name,  # Keep name for known_values lookup
+                attrs=p.attrs,
+                backend=p.backend,
+                storage_type=p.storage_type,
+            )
+            for p in node.parents
+        ]
 
-        # Instantiate decomposition
-        sub_root = factory(cut_parents, node.attrs)
+        # Instantiate decomposition with isolated inputs
+        sub_root = factory(leaf_parents, node.attrs)
         sub_nodes = topological_sort(sub_root)
 
-        # Perform shape inference on the decomposition subgraph
-        ShapeInference.infer(sub_nodes, known_values)
+        # Perform shape inference on the isolated decomposition subgraph
+        ShapeInference.infer(sub_nodes, known_values, keep_cut_parent_shapes=True)
 
-        # Map original parents to symbolic inputs
+        # Map leaf parents to their symbolic input regions
         node_map: Dict[TensorNode, SymbolicRegion] = {}
-
-        for p_node, p_sym in zip(node.parents, inputs):
-            node_map[p_node] = p_sym
+        for lp, p_sym in zip(leaf_parents, inputs):
+            node_map[lp] = p_sym
 
         # Propagate through subgraph
         for sub in sub_nodes:
@@ -460,7 +471,7 @@ def symbolic_arange(
     # Output is always 1D
     # The dirty region is (0, output_length) if dirty, else clean (inf, -inf)
     out_s = sp.Piecewise((sp.Integer(0), is_dirty), (S_INF, True))
-    out_e = sp.Piecewise((S_INF, is_dirty), (RT_NEG_INF, True))
+    out_e = sp.Piecewise((S_INF, is_dirty), (-S_INF, True))
 
     return SymbolicRegion([(out_s, out_e)], is_dirty_expr=is_dirty)
 
@@ -507,7 +518,7 @@ def symbolic_elementwise(
             is_d = _is_dirty(inp)
             pad_range = (
                 sp.Piecewise((sp.Integer(0), is_d), (S_INF, True)),
-                sp.Piecewise((S_INF, is_d), (RT_NEG_INF, True)),
+                sp.Piecewise((S_INF, is_d), (-S_INF, True)),
             )
             ranges = [pad_range] * pad + ranges
         aligned_ranges.append(ranges)
@@ -599,7 +610,7 @@ def symbolic_slice(inputs: List[SymbolicRegion], ctx: Dict[str, Any]) -> Symboli
         raw_e = sym_ceil(overlap_e - st, step)
 
         fin_s = sp.Piecewise((S_INF, is_empty), (sp.Max(0, raw_s), True))
-        fin_e = sp.Piecewise((RT_NEG_INF, is_empty), (sp.Max(0, raw_e), True))
+        fin_e = sp.Piecewise((-S_INF, is_empty), (sp.Max(0, raw_e), True))
 
         out_ranges.append((fin_s, fin_e))
 
@@ -630,12 +641,12 @@ def symbolic_concat(
         if d == axis:
             out_non_concat.append(None)
             continue
-        current = (S_INF, RT_NEG_INF)
+        current = (S_INF, -S_INF)
         for inp in inputs:
             current = _merge_dim(current, inp.ranges[d])
         out_non_concat.append(current)
 
-    concat_axis_range = (S_INF, RT_NEG_INF)
+    concat_axis_range = (S_INF, -S_INF)
     current_offset = sp.Integer(0)
 
     for i, inp in enumerate(inputs):
@@ -646,7 +657,7 @@ def symbolic_concat(
         e_shifted = e + current_offset
 
         s_term = sp.Piecewise((s_shifted, is_d), (S_INF, True))
-        e_term = sp.Piecewise((e_shifted, is_d), (RT_NEG_INF, True))
+        e_term = sp.Piecewise((e_shifted, is_d), (-S_INF, True))
 
         concat_axis_range = _merge_dim(concat_axis_range, (s_term, e_term))
         current_offset += input_shapes[i][axis]
@@ -722,7 +733,7 @@ def symbolic_gather(
             (s_in, dim_dirty), (sp.Integer(0), gathered_axis_dirty), (S_INF, True)
         )
         e = sp.Piecewise(
-            (e_in, dim_dirty), (S_INF, gathered_axis_dirty), (RT_NEG_INF, True)
+            (e_in, dim_dirty), (S_INF, gathered_axis_dirty), (-S_INF, True)
         )
         out_ranges.append((s, e))
 
@@ -731,7 +742,7 @@ def symbolic_gather(
         # These dims are dirty if they are dirty in data OR if indices shifted
         dim_dirty = sd < ed
         s = sp.Piecewise((sd, dim_dirty), (sp.Integer(0), is_ind_dirty), (S_INF, True))
-        e = sp.Piecewise((ed, dim_dirty), (S_INF, is_ind_dirty), (RT_NEG_INF, True))
+        e = sp.Piecewise((ed, dim_dirty), (S_INF, is_ind_dirty), (-S_INF, True))
         out_ranges.append((s, e))
 
     return SymbolicRegion(out_ranges)
@@ -787,7 +798,7 @@ def symbolic_reduce(
                 # If keepdims=True, it's size 1.
                 # If the *result* is dirty (which is true if inp is dirty), this dim is dirty.
                 s_kd = sp.Piecewise((sp.Integer(0), is_inp_dirty), (S_INF, True))
-                e_kd = sp.Piecewise((sp.Integer(1), is_inp_dirty), (RT_NEG_INF, True))
+                e_kd = sp.Piecewise((sp.Integer(1), is_inp_dirty), (-S_INF, True))
                 out_ranges.append((s_kd, e_kd))
             else:
                 pass  # Dropped
@@ -840,7 +851,7 @@ def backward_arange(
         if p_rank == 0:
             # Scalar input
             s = sp.Piecewise((sp.Integer(0), is_out_dirty), (S_INF, True))
-            e = sp.Piecewise((sp.Integer(1), is_out_dirty), (RT_NEG_INF, True))
+            e = sp.Piecewise((sp.Integer(1), is_out_dirty), (-S_INF, True))
             results.append(SymbolicRegion([(s, e)]))
         else:
             # Non-scalar input - use full dirty region
