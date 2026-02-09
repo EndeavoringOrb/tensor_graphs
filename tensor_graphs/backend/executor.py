@@ -5,6 +5,7 @@ import math
 from ..compiler.compiled_graph import CompiledGraph
 from ..ir.buffer import StorageType
 from ..ir.dtypes import DType
+from ..ops import OpType
 from ..compiler.dirty_propagation import DirtyPropagator
 from .memory import MemoryManager
 
@@ -90,7 +91,7 @@ class Executor:
             should_compute = False
             compute_region = None
 
-            if is_dirty:
+            if is_dirty and in_cache:
                 should_compute = True
                 compute_region = node.dirty_region
             elif not in_cache:
@@ -134,6 +135,8 @@ class Executor:
                     self.mem.lock(p_node)
 
                     full_view = self.mem.get_view(p_node)
+                    if input_slice_regions[i] is None:
+                        continue
 
                     if (
                         i < len(input_slice_regions)
@@ -148,6 +151,9 @@ class Executor:
                 out_slice = out_view[compute_region]
 
                 inst.kernel(kernel_inputs, [out_slice], inst.attrs)
+
+                if node.op_type == OpType.CONCAT and node.shape == (2,):
+                    pass
 
                 executed_count += 1
                 node.compute_cost = (time.perf_counter() - start_time) * 1000

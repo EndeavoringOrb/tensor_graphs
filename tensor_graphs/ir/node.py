@@ -39,7 +39,7 @@ class TensorNode:
     def __post_init__(self):
         # Promote INPUT and CONSTANT to PERSISTENT
         if self.storage_type == StorageType.TRANSIENT:
-            if self.op_type in ["Input", "Constant"]:
+            if self.op_type in ["Constant"]:
                 object.__setattr__(self, "storage_type", StorageType.PERSISTENT)
 
         # Default View-only and cheap nodes to NEVER cache

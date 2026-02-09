@@ -1,3 +1,4 @@
+# resources/gemma-3-270m.py
 from importlib.metadata import version
 
 pkgs = [

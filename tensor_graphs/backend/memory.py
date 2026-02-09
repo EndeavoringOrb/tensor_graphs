@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from ..ir.buffer import StorageType
 from ..ir.node import TensorNode
 from ..ir.dtypes import DType
+from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
+
+DEBUG = DEBUG_EXECUTION and DEBUG_DETAILED
 
 
 @dataclass
@@ -111,11 +114,18 @@ class DeviceBuffer:
         if node_name in self.views:
             del self.views[node_name]
 
+        if DEBUG:
+            print(
+                f"[DeviceBuffer.allocate] {node_name} {offset}-{offset + aligned_size}"
+            )
+
         return offset
 
     def free(self, node_name: str):
         """Mark a block as free (used for persistent removal or eviction)."""
         if node_name not in self.allocations:
+            if DEBUG:
+                print(f"[DeviceBuffer.free] {node_name} not allocated")
             return
 
         block = self.allocations.pop(node_name)
@@ -125,16 +135,30 @@ class DeviceBuffer:
         self.free_segments.append((block.offset, block.size))
         self._defrag()
 
-    def get_view(self, node_name: str, shape: Tuple[int, ...], dtype: DType) -> Any:
+        if DEBUG:
+            print(
+                f"[DeviceBuffer.free] {node_name} {block.offset}-{block.offset + block.size}"
+            )
+
+    def get_view(
+        self,
+        node_name: str,
+        shape: Tuple[int, ...],
+        dtype: DType,
+        dirty_region: Optional[List] = None,
+    ) -> Any:
         if node_name not in self.allocations:
             raise RuntimeError(
                 f"Attempted to access unallocated memory for {node_name}"
             )
 
-        # Return cached view if valid
-        # Note: We must be careful about shape/dtype changes if node name is reused,
-        # but in this graph IR node names are unique per session.
-        if node_name in self.views:
+        # For dirty regions, we don't use the cache since the region might change
+        use_cache = dirty_region is None
+
+        # Return cached view if valid and no dirty region
+        if use_cache and node_name in self.views:
+            if DEBUG:
+                print(f"[DeviceBuffer.get_view] {node_name} cached view")
             return self.views[node_name]
 
         block = self.allocations[node_name]
@@ -154,7 +178,27 @@ class DeviceBuffer:
                 shape, dtype=np_dtype, buffer=self.data.data, offset=block.offset
             )
 
-        self.views[node_name] = view
+        # Apply dirty region slicing if specified
+        if dirty_region:
+            # Ensure we have enough slices for all dimensions
+            full_slices = list(dirty_region) + [slice(None)] * (
+                len(shape) - len(dirty_region)
+            )
+            view = view[tuple(full_slices[: len(shape)])]
+            if DEBUG:
+                print(
+                    f"[DeviceBuffer.get_view] {node_name} dirty region {dirty_region} -> shape {view.shape}"
+                )
+
+        # Only cache if no dirty region
+        if use_cache:
+            self.views[node_name] = view
+
+        if DEBUG:
+            print(
+                f"[DeviceBuffer.get_view] {node_name} {block.offset}-{block.offset + block.size}"
+            )
+
         return view
 
     def _calc_bytes(self, shape, dtype):
@@ -238,6 +282,11 @@ class MemoryManager:
         # Lock forever
         self.buffers[device].allocations[node.name].is_locked = True
 
+        if DEBUG:
+            print(
+                f"[DeviceBuffer.allocate_persistent] {node.name} {offset}-{offset + size}"
+            )
+
     def prepare_allocation(self, node: TensorNode, size_bytes: int) -> bool:
         """
         Ensure space exists for a transient node.
@@ -257,6 +306,8 @@ class MemoryManager:
         if node.name in buf.allocations:
             buf.allocations[node.name].last_used_step = self.current_step
             buf.allocations[node.name].is_locked = True
+            if DEBUG:
+                print(f"[DeviceBuffer.prepare_allocation] {node.name} hit")
             return True
 
         # 2. Try Allocate
@@ -275,6 +326,10 @@ class MemoryManager:
 
             freed = 0
             for victim in candidates:
+                if DEBUG:
+                    print(
+                        f"[DeviceBuffer.prepare_allocation] Evicting {victim.node_name}"
+                    )
                 buf.free(victim.node_name)
                 freed += victim.size
                 if freed >= size_bytes:  # Heuristic check
@@ -288,9 +343,12 @@ class MemoryManager:
                     f"OOM: Could not allocate {size_bytes} bytes for {node.name} after eviction."
                 )
 
+        if DEBUG:
+            print(f"[DeviceBuffer.prepare_allocation] {node.name} miss")
+
         return True
 
-    def get_view(self, node: TensorNode) -> Any:
+    def get_view(self, node: TensorNode, use_dirty: bool = False) -> Any:
         device = node.backend.value if node.backend else "cpu"
         if "numpy" in device:
             device = "cpu"
@@ -304,7 +362,9 @@ class MemoryManager:
         else:
             shape = tuple(node.shape)
 
-        return self.buffers[device].get_view(node.name, shape, node.dtype)
+        # Pass dirty_region to the buffer's get_view
+        dirty_region = getattr(node, "dirty_region", None) if use_dirty else None
+        return self.buffers[device].get_view(node.name, shape, node.dtype, dirty_region)
 
     def write(self, node: TensorNode, data: Any):
         view = self.get_view(node)
@@ -355,6 +415,11 @@ class MemoryManager:
                 node.name
             ].last_used_step = self.current_step
 
+        if DEBUG:
+            print(
+                f"[DeviceBuffer.lock] {node.name} {self.buffers[device].allocations[node.name].is_locked}"
+            )
+
     def unlock(self, node: TensorNode):
         """Mark node as done for current execution (can be evicted if needed)."""
         device = node.backend.value if node.backend else "cpu"
@@ -368,6 +433,14 @@ class MemoryManager:
             if node.storage_type == StorageType.TRANSIENT:
                 self.buffers[device].allocations[node.name].is_locked = False
 
+        if DEBUG:
+            print(
+                f"[DeviceBuffer.unlock] {node.name} {self.buffers[device].allocations[node.name].is_locked}"
+            )
+
     def step(self):
         """Advance time step (for LRU)."""
         self.current_step += 1
+
+        if DEBUG:
+            print(f"[DeviceBuffer.step] {self.current_step}")

@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -11,6 +12,7 @@ from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ir.graph import GraphBuilder
 from tensor_graphs.session import GraphSession
+from tensor_graphs.config import DEBUG_EXECUTION
 
 
 class Gemma3Model:
@@ -278,6 +280,25 @@ GEMMA3_CONFIG_270M = {
 # ==============================================================================
 
 
+# Define timer for debug timing that can use with __enter__ and __exit__. Only enabled when DEBUG_EXECUTION is set.
+class Timer:
+    def __init__(self, name="Elapsed"):
+        if not DEBUG_EXECUTION:
+            return
+        self.name = name
+        self.start = time.perf_counter()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not DEBUG_EXECUTION:
+            return
+        self.end = time.perf_counter()
+        self.elapsed = self.end - self.start
+        print(f"{self.name}: {self.elapsed:.2f} seconds")
+
+
 def main():
     print("Initializing Gemma 3 (270M) on tensor_graphs...")
 
@@ -290,13 +311,15 @@ def main():
         return
 
     print(f"Loading weights from {weights_path}...")
-    state_dict = load_file(weights_path)
+    with Timer("Loading weights"):
+        state_dict = load_file(weights_path)
 
     # Convert weights to FP32 numpy
     weights_np = {}
     print("Converting weights to FP32 numpy...")
-    for k, v in tqdm(state_dict.items()):
-        weights_np[k] = v.to(torch.float32).numpy()
+    with Timer("Converting weights to FP32 numpy"):
+        for k, v in state_dict.items():
+            weights_np[k] = v.to(torch.float32).numpy()
 
     # 2. Setup Tokenizer
     tokenizer = Tokenizer.from_file(tokenizer_path)
@@ -331,7 +354,8 @@ def main():
     }
 
     # Build the computational graph
-    logits_node = model.forward(in_node, seq_len_node, MAX_SEQ_LEN, shapes)
+    with Timer("Building graph"):
+        logits_node = model.forward(in_node, seq_len_node, MAX_SEQ_LEN, shapes)
 
     # Initialize Session
     session = GraphSession(logits_node)
@@ -371,7 +395,8 @@ def main():
         }
 
         # USE SESSION
-        logits_out = session.run(step_inputs)
+        with Timer("Running session"):
+            logits_out = session.run(step_inputs)
 
         # Decoding
         next_token_logits = logits_out[0, seq_len - 1, :]
