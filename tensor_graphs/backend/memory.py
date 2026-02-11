@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from ..ir.buffer import StorageType
 from ..ir.node import TensorNode
 from ..ir.dtypes import DType
+from ..ops.atomic_types import OpType
 from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
 
 DEBUG = DEBUG_EXECUTION and DEBUG_DETAILED
@@ -15,41 +16,55 @@ class MemoryBlock:
     offset: int
     size: int
     node_name: str
+    region_id: int = 0  # 0 = Internal Arena, >0 = External Region
     is_free: bool = True
-    is_locked: bool = False  # Locked by current execution step
-    last_used_step: int = 0  # For LRU eviction
+    is_locked: bool = False
+    last_used_step: int = 0
 
 
 class DeviceBuffer:
-    """Manages a single linear block of memory (CPU or GPU)."""
+    """
+    Manages memory for a specific device.
+    Supports multiple memory regions:
+    - Region 0: Internal contiguous arena (allocated at init).
+    - Region N: External regions (registered memory, e.g., mmap'd weights).
+    """
 
     def __init__(self, device: str, size_bytes: int):
         self.device = device
-        self.size_bytes = size_bytes
+        self.size_bytes = size_bytes  # Size of Region 0 only
         self.alignment = 256
 
-        # Physical storage
+        # List of backing arrays.
+        # Index 0 is always the internal arena.
+        self.regions: List[Any] = []
+
+        # Initialize Region 0 (Internal Arena)
         if "cuda" in device or "gpu" in device:
-            self.data = torch.zeros(size_bytes, dtype=torch.uint8, device=device)
+            self.regions.append(
+                torch.zeros(size_bytes, dtype=torch.uint8, device=device)
+            )
             self.is_torch = True
         else:
-            self.data = np.zeros(size_bytes, dtype=np.uint8)
+            self.regions.append(np.zeros(size_bytes, dtype=np.uint8))
             self.is_torch = False
 
-        # Memory Management (Simple Best-Fit Allocator)
-        # We track used blocks. Free space is implicit between blocks or explicitly tracked.
-        # For simplicity and robustness, we maintain a list of distinct free segments.
-        self.allocations: Dict[str, MemoryBlock] = {}  # Active allocations
-        self.free_segments: List[Tuple[int, int]] = [(0, size_bytes)]  # (start, size)
-
-        # Views cache to avoid overhead
+        # Allocation tracking (only applies to Region 0)
+        self.allocations: Dict[str, MemoryBlock] = {}
+        self.free_segments: List[Tuple[int, int]] = [(0, size_bytes)]
         self.views: Dict[str, Any] = {}
+
+    def register_external_region(self, data: Any) -> int:
+        """Registers an external array (e.g., mmap) as a new region. Returns region_id."""
+        region_id = len(self.regions)
+        self.regions.append(data)
+        return region_id
 
     def _align(self, val: int) -> int:
         return (val + self.alignment - 1) // self.alignment * self.alignment
 
     def _defrag(self):
-        """Merge adjacent free segments."""
+        """Merge adjacent free segments in Region 0."""
         self.free_segments.sort()
         merged = []
         if not self.free_segments:
@@ -66,13 +81,9 @@ class DeviceBuffer:
         self.free_segments = merged
 
     def allocate(self, node_name: str, size: int, step: int) -> Optional[int]:
-        """
-        Allocate memory for a node.
-        Returns offset if successful, None if eviction is required.
-        """
+        """Allocate memory in Region 0 (Internal Arena)."""
         aligned_size = self._align(size)
 
-        # 1. Best-fit strategy
         best_idx = -1
         min_waste = float("inf")
 
@@ -82,47 +93,77 @@ class DeviceBuffer:
                 if waste < min_waste:
                     min_waste = waste
                     best_idx = i
-                # Optimization: perfect fit
                 if waste == 0:
                     break
 
         if best_idx == -1:
-            return None  # Out of memory / needs eviction
+            return None
 
-        # 2. Carve out memory
         start, seg_size = self.free_segments.pop(best_idx)
         offset = start
 
-        # Return remaining chunk to free list
         remaining = seg_size - aligned_size
         if remaining > 0:
             self.free_segments.append((start + aligned_size, remaining))
-            self.free_segments.sort()  # Keep sorted for defrag
+            self.free_segments.sort()
 
-        # 3. Record allocation
         block = MemoryBlock(
             offset=offset,
             size=aligned_size,
             node_name=node_name,
+            region_id=0,
             is_free=False,
             is_locked=True,
             last_used_step=step,
         )
         self.allocations[node_name] = block
 
-        # Invalidate specific view cache
         if node_name in self.views:
             del self.views[node_name]
 
         if DEBUG:
             print(
-                f"[DeviceBuffer.allocate] {node_name} {offset}-{offset + aligned_size}"
+                f"[DeviceBuffer.allocate] {node_name} Region0 {offset}-{offset + aligned_size}"
             )
 
         return offset
 
+    def allocate_external(self, node_name: str, data: Any, step: int):
+        """
+        Register an external memory region and create a block pointing to it.
+        Used for Zero-Copy weights.
+        """
+        # Register the external memory region
+        region_id = self.register_external_region(data)
+
+        # Determine size (used for tracking, not allocation)
+        if hasattr(data, "nbytes"):
+            size = data.nbytes
+        elif hasattr(data, "numel"):
+            size = data.numel() * data.element_size()
+        else:
+            size = 0  # Scalar?
+
+        # Create block pointing to this region
+        # Offset is 0 relative to the region start (the data IS the region)
+        block = MemoryBlock(
+            offset=0,
+            size=size,
+            node_name=node_name,
+            region_id=region_id,
+            is_free=False,
+            is_locked=True,  # Weights are always locked
+            last_used_step=step,
+        )
+        self.allocations[node_name] = block
+
+        if DEBUG:
+            print(
+                f"[DeviceBuffer.allocate_external] {node_name} Region{region_id} (Zero-Copy)"
+            )
+
     def free(self, node_name: str):
-        """Mark a block as free (used for persistent removal or eviction)."""
+        """Mark a block as free (used for eviction from Region 0)."""
         if node_name not in self.allocations:
             if DEBUG:
                 print(f"[DeviceBuffer.free] {node_name} not allocated")
@@ -132,13 +173,21 @@ class DeviceBuffer:
         if node_name in self.views:
             del self.views[node_name]
 
-        self.free_segments.append((block.offset, block.size))
-        self._defrag()
-
-        if DEBUG:
-            print(
-                f"[DeviceBuffer.free] {node_name} {block.offset}-{block.offset + block.size}"
-            )
+        # Only Region 0 blocks can be freed back to the arena
+        if block.region_id == 0:
+            self.free_segments.append((block.offset, block.size))
+            self._defrag()
+            if DEBUG:
+                print(
+                    f"[DeviceBuffer.free] {node_name} Region0 {block.offset}-{block.offset + block.size}"
+                )
+        else:
+            # External regions are not 'freed' via the allocator.
+            # They are managed by the weight source lifetime.
+            if DEBUG:
+                print(
+                    f"[DeviceBuffer.free] {node_name} Region{block.region_id} (External, just dereferenced)"
+                )
 
     def get_view(
         self,
@@ -152,10 +201,7 @@ class DeviceBuffer:
                 f"Attempted to access unallocated memory for {node_name}"
             )
 
-        # For dirty regions, we don't use the cache since the region might change
         use_cache = dirty_region is None
-
-        # Return cached view if valid and no dirty region
         if use_cache and node_name in self.views:
             if DEBUG:
                 print(f"[DeviceBuffer.get_view] {node_name} cached view")
@@ -163,24 +209,48 @@ class DeviceBuffer:
 
         block = self.allocations[node_name]
 
+        # Select backing array based on region_id
+        backing_array = self.regions[block.region_id]
+
         if self.is_torch:
             t_dtype = self._map_dtype_torch(dtype)
-            # View as bytes then cast
-            raw = self.data[block.offset : block.offset + block.size]
-            # Ensure we only view the exact number of bytes for the shape
-            # (Block might be padded)
-            req_bytes = self._calc_bytes(shape, dtype)
-            sliced = raw[:req_bytes]
-            view = sliced.view(t_dtype).reshape(shape)
+            # For external regions (weights), backing_array IS the tensor.
+            # We just need to ensure it matches shape/dtype (view logic).
+            if block.region_id > 0:
+                # External data is usually already the right shape/dtype if source is correct
+                # but we force a view to be safe and handle slicing.
+                # Note: Torch tensor from Safetensors might need viewing.
+                # We assume 'data' passed to allocate_external was the raw tensor.
+                view = backing_array.view(t_dtype).reshape(shape)
+            else:
+                # Region 0 logic (byte slab)
+                raw = backing_array[block.offset : block.offset + block.size]
+                req_bytes = self._calc_bytes(shape, dtype)
+                sliced = raw[:req_bytes]
+                view = sliced.view(t_dtype).reshape(shape)
         else:
+            # NumPy logic
             np_dtype = self._map_dtype_np(dtype)
-            view = np.ndarray(
-                shape, dtype=np_dtype, buffer=self.data.data, offset=block.offset
-            )
+
+            if block.region_id > 0:
+                # External region: backing_array is the mmap'd array (or numpy array)
+                # We trust the caller to provide data with compatible shape/dtype.
+                # We return the array itself, potentially reshaping if needed (handled by view logic).
+                # Note: block.offset is 0 for external regions.
+                view = np.ndarray(
+                    shape, dtype=np_dtype, buffer=backing_array.data, offset=0
+                )
+            else:
+                # Region 0 logic
+                view = np.ndarray(
+                    shape,
+                    dtype=np_dtype,
+                    buffer=backing_array.data,
+                    offset=block.offset,
+                )
 
         # Apply dirty region slicing if specified
         if dirty_region:
-            # Ensure we have enough slices for all dimensions
             full_slices = list(dirty_region) + [slice(None)] * (
                 len(shape) - len(dirty_region)
             )
@@ -190,14 +260,8 @@ class DeviceBuffer:
                     f"[DeviceBuffer.get_view] {node_name} dirty region {dirty_region} -> shape {view.shape}"
                 )
 
-        # Only cache if no dirty region
         if use_cache:
             self.views[node_name] = view
-
-        if DEBUG:
-            print(
-                f"[DeviceBuffer.get_view] {node_name} {block.offset}-{block.offset + block.size}"
-            )
 
         return view
 
@@ -237,51 +301,33 @@ class DeviceBuffer:
 
 
 class MemoryManager:
-    """
-    Unified manager for Static Persistence, Dynamic Execution, and Caching.
-
-    - No copying for cache: Cache is just a block that isn't freed yet.
-    - Handles eviction: If dynamic allocation fails, evict LRU cached blocks.
-    """
-
     def __init__(self, max_bytes: int = 4 * 1024**3):
         self.max_bytes = max_bytes
-        self.buffers: Dict[str, DeviceBuffer] = {}  # e.g., "cuda:0", "cpu"
+        self.buffers: Dict[str, DeviceBuffer] = {}
         self.current_step = 0
-
-        # Default CPU buffer
         self._ensure_device("cpu")
 
     def _ensure_device(self, device: str):
         if device not in self.buffers:
-            # For now, simplistic split of max_bytes or dedicated size
-            # In production, this might be per-device limits.
             self.buffers[device] = DeviceBuffer(device, self.max_bytes)
 
     def allocate_persistent(self, node: TensorNode, data: Any):
-        """Allocate space for weights once. Panic if full."""
-        # Handle different data types for size calculation
+        """
+        Allocate space for weights.
+        - GPU: Allocates in Region 0 (Arena) and copies data (Memcpy).
+        - CPU: Registers data as External Region (Zero-Copy).
+        """
+        # Handle size
         if hasattr(data, "nbytes"):
-            # NumPy array
             size = data.nbytes
         elif hasattr(data, "numel"):
-            # PyTorch tensor
             size = data.numel() * data.element_size()
         elif isinstance(data, (int, float, bool)):
-            # Python scalar - determine size from node dtype or default
-            dtype_sizes = {
-                DType.FP32: 4,
-                DType.FP16: 2,
-                DType.INT32: 4,
-                DType.BOOL: 1,
-                DType.FP8E4M3: 1,
-            }
-            size = dtype_sizes.get(node.dtype, 4)  # Default to 4 bytes
+            # Scalar
+            size = 4
         elif isinstance(data, np.generic):
-            # NumPy scalar
             size = data.nbytes
         else:
-            # Fallback: try to convert to numpy and get size
             try:
                 arr = np.asarray(data)
                 size = arr.nbytes
@@ -295,27 +341,31 @@ class MemoryManager:
             device = "cpu"
 
         self._ensure_device(device)
-        offset = self.buffers[device].allocate(node.name, size, step=0)
+        buf = self.buffers[device]
 
-        if offset is None:
-            raise MemoryError(f"OOM allocating persistent node {node.name}")
+        # Strategy: Zero-Copy for CPU, Copy for GPU
+        if device == "cpu" and node.op_type != OpType.CONSTANT:
+            # --- Zero-Copy Path ---
+            # Register the external memory region
+            buf.allocate_external(node.name, data, step=0)
+        else:
+            # --- Standard Copy Path (GPU) ---
+            offset = buf.allocate(node.name, size, step=0)
+            if offset is None:
+                raise MemoryError(f"OOM allocating persistent node {node.name}")
 
-        # Write immediately
-        self.write(node, data)
+            # Write data to Region 0
+            self.write(node, data)
+
         # Lock forever
-        self.buffers[device].allocations[node.name].is_locked = True
+        if node.name in buf.allocations:
+            buf.allocations[node.name].is_locked = True
 
         if DEBUG:
-            print(
-                f"[DeviceBuffer.allocate_persistent] {node.name} {offset}-{offset + size}"
-            )
+            print(f"[MemoryManager.allocate_persistent] {node.name} on {device}")
 
     def prepare_allocation(self, node: TensorNode, size_bytes: int) -> bool:
-        """
-        Ensure space exists for a transient node.
-        If node is already cached, marks it as used (LRU update) and returns True.
-        If not, allocates space (evicting if needed).
-        """
+        """Ensure space exists for a transient node (Region 0)."""
         device = node.backend.value if node.backend else "cpu"
         if "numpy" in device:
             device = "cpu"
@@ -325,49 +375,38 @@ class MemoryManager:
         self._ensure_device(device)
         buf = self.buffers[device]
 
-        # 1. Cache Hit?
         if node.name in buf.allocations:
             buf.allocations[node.name].last_used_step = self.current_step
             buf.allocations[node.name].is_locked = True
-            if DEBUG:
-                print(f"[DeviceBuffer.prepare_allocation] {node.name} hit")
             return True
 
-        # 2. Try Allocate
         offset = buf.allocate(node.name, size_bytes, self.current_step)
 
-        # 3. Evict if needed
         if offset is None:
-            # Gather evictable candidates (unlocked blocks)
             candidates = [
                 b
                 for b in buf.allocations.values()
-                if not b.is_locked and b.node_name != node.name
+                if not b.is_locked and b.region_id == 0 and b.node_name != node.name
             ]
-            # Sort by LRU
             candidates.sort(key=lambda b: b.last_used_step)
 
             freed = 0
             for victim in candidates:
                 if DEBUG:
                     print(
-                        f"[DeviceBuffer.prepare_allocation] Evicting {victim.node_name}"
+                        f"[MemoryManager.prepare_allocation] Evicting {victim.node_name}"
                     )
                 buf.free(victim.node_name)
                 freed += victim.size
-                if freed >= size_bytes:  # Heuristic check
+                if freed >= size_bytes:
                     offset = buf.allocate(node.name, size_bytes, self.current_step)
                     if offset is not None:
                         break
 
-            # Still failed?
             if offset is None:
                 raise MemoryError(
                     f"OOM: Could not allocate {size_bytes} bytes for {node.name} after eviction."
                 )
-
-        if DEBUG:
-            print(f"[DeviceBuffer.prepare_allocation] {node.name} miss")
 
         return True
 
@@ -378,39 +417,32 @@ class MemoryManager:
         elif "torch" in device and "cpu" in device:
             device = "cpu"
 
-        # Ensure shape is concrete
         if not node.shape or any(d is None for d in node.shape):
-            # Scalar fallback
             shape = ()
         else:
             shape = tuple(node.shape)
 
-        # Pass dirty_region to the buffer's get_view
         dirty_region = getattr(node, "dirty_region", None) if use_dirty else None
         return self.buffers[device].get_view(node.name, shape, node.dtype, dirty_region)
 
     def write(self, node: TensorNode, data: Any):
         view = self.get_view(node)
 
-        # Handle different source/dest types
         if isinstance(view, np.ndarray):
             if hasattr(data, "cpu"):
                 data = data.cpu().numpy()
             elif isinstance(data, (int, float)):
                 data = np.array(data, dtype=view.dtype)
 
-            # Use [...] instead of [:] to handle 0-dimensional arrays (scalars)
-            # [...] works for all dimensions, [:] fails for 0-d arrays
             if data.shape != view.shape:
                 try:
                     view[...] = data.reshape(view.shape)
                 except:
-                    view[...] = data  # Hope for broadcast
+                    view[...] = data
             else:
                 view[...] = data
 
         elif hasattr(view, "copy_"):
-            # Torch
             if isinstance(data, np.ndarray):
                 data = torch.from_numpy(data)
             if not isinstance(data, torch.Tensor):
@@ -427,7 +459,6 @@ class MemoryManager:
         return node_name in self.buffers[device_hint].allocations
 
     def lock(self, node: TensorNode):
-        """Mark node as needed for current execution."""
         device = node.backend.value if node.backend else "cpu"
         if "numpy" in device:
             device = "cpu"
@@ -440,12 +471,9 @@ class MemoryManager:
             ].last_used_step = self.current_step
 
         if DEBUG:
-            print(
-                f"[DeviceBuffer.lock] {node.name} {self.buffers[device].allocations[node.name].is_locked}"
-            )
+            print(f"[MemoryManager.lock] {node.name}")
 
     def unlock(self, node: TensorNode):
-        """Mark node as done for current execution (can be evicted if needed)."""
         device = node.backend.value if node.backend else "cpu"
         if "numpy" in device:
             device = "cpu"
@@ -453,18 +481,13 @@ class MemoryManager:
             device = "cpu"
 
         if node.name in self.buffers[device].allocations:
-            # Persistent nodes stay locked
             if node.storage_type == StorageType.TRANSIENT:
                 self.buffers[device].allocations[node.name].is_locked = False
 
         if DEBUG:
-            print(
-                f"[DeviceBuffer.unlock] {node.name} {self.buffers[device].allocations[node.name].is_locked}"
-            )
+            print(f"[MemoryManager.unlock] {node.name}")
 
     def step(self):
-        """Advance time step (for LRU)."""
         self.current_step += 1
-
         if DEBUG:
-            print(f"[DeviceBuffer.step] {self.current_step}")
+            print(f"[MemoryManager.step] {self.current_step}")
