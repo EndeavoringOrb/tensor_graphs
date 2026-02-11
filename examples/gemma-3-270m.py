@@ -2,7 +2,6 @@ import os
 import time
 import torch
 import numpy as np
-from tqdm import tqdm
 from typing import Dict
 
 from safetensors.torch import load_file

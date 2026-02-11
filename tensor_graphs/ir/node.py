@@ -36,8 +36,11 @@ class TensorNode:
     compute_cost: float = 0.0
     last_run_tick: int = 0
 
+    # Counter for slices to avoid name collision
+    _slice_counter: int = 0
+
     def __post_init__(self):
-        # Promote INPUT and CONSTANT to PERSISTENT
+        # Promote CONSTANT to PERSISTENT
         if self.storage_type == StorageType.TRANSIENT:
             if self.op_type in ["Constant"]:
                 object.__setattr__(self, "storage_type", StorageType.PERSISTENT)
@@ -55,7 +58,6 @@ class TensorNode:
         attrs_summary = f" | attrs={attr_keys}" if attr_keys else ""
         return f"[{self.dtype.value}|{self.shape}{attrs_summary}] {self.op_type}({self.name})"
 
-    # ... (Slice support __getitem__ remains same) ...
     def __getitem__(self, key) -> "TensorNode":
         if self.shape is None:
             raise ValueError(
@@ -112,12 +114,14 @@ class TensorNode:
             else:
                 raise ValueError(f"Unsupported index type: {type(k)}")
 
+        self._slice_counter += 1
+
         return TensorNode(
             "Slice",
             self.dtype,
             [self],
             tuple(new_shape),
-            f"{self.name}_slice",
+            f"{self.name}_slice_{self._slice_counter}",
             attrs={"starts": starts, "ends": ends, "steps": steps},
             backend=self.backend,
         )

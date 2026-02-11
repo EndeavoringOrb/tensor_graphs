@@ -31,6 +31,10 @@ class Compiler:
         nodes_map = {}
 
         for node in nodes:
+            if node.name in nodes_map:
+                raise ValueError(
+                    f"Error compiling, {node.name} already exists in nodes_map"
+                )
             nodes_map[node.name] = node
 
             if node.op_type in ("Input", "Constant"):

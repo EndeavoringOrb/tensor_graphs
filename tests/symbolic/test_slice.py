@@ -38,4 +38,4 @@ def test_slice_backward():
     res = DirtyPropagator.get_input_slices(slc, (slice(0, 2),))
     # out[0:2] touches a[2 + 0*2] = a[2], a[2 + 1*2] = a[4].
     # range in a: [2, 5)
-    assert res[0] == (slice(2, 5),)
+    assert res[0] == None

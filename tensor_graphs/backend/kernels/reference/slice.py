@@ -12,6 +12,10 @@ from ....ops.atomic.slice import slice_ref
     reference_factory=slice_ref,
 )
 def slice_generic(inputs, outputs, attrs):
+    print("DEBUG slice_generic:")
+    print(f"  input shape:  {inputs[0].shape}")
+    print(f"  output shape: {outputs[0].shape}")
+    print(f"  attrs:        {attrs}")
     if not attrs or "starts" not in attrs:
         raise ValueError("Slice kernel requires attributes (starts, ends)")
 

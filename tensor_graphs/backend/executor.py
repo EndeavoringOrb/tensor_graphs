@@ -48,7 +48,9 @@ class Executor:
             # Transient Inputs (Dynamic inputs like ids)
             # Allocation/Write
             size = (
-                data.nbytes if hasattr(data, "nbytes") else (data.numel() * 4)
+                data.nbytes
+                if hasattr(data, "nbytes")
+                else ((data.numel() if hasattr(data, "numel") else 1) * 4)
             )  # approx fallback
             self.mem.prepare_allocation(node, size)
 
@@ -135,16 +137,15 @@ class Executor:
                     self.mem.lock(p_node)
 
                     full_view = self.mem.get_view(p_node)
-                    if input_slice_regions[i] is None:
-                        continue
 
-                    if (
-                        i < len(input_slice_regions)
-                        and input_slice_regions[i] is not None
-                    ):
-                        kernel_inputs.append(full_view[input_slice_regions[i]])
-                    else:
+                    if i >= len(input_slice_regions):
+                        # No slice info, use full view
                         kernel_inputs.append(full_view)
+                    elif input_slice_regions[i] is None:
+                        # None means use full view (constant/clean input)
+                        kernel_inputs.append(full_view)
+                    else:
+                        kernel_inputs.append(full_view[input_slice_regions[i]])
 
                 # 5. Execute
                 out_view = self.mem.get_view(node)

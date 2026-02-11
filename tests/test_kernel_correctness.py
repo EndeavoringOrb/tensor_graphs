@@ -255,5 +255,5 @@ def test_kernel_correctness(
 
 # For debugging with vscode debugger
 # for item in get_all_test_kernels():
-#     if item[0] == "FusedMulAdd":
+#     if item[0] == "RoPE":
 #         test_kernel_correctness(*item)

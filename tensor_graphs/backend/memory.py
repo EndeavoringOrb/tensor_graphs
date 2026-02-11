@@ -260,11 +260,34 @@ class MemoryManager:
 
     def allocate_persistent(self, node: TensorNode, data: Any):
         """Allocate space for weights once. Panic if full."""
-        size = (
-            data.nbytes
-            if hasattr(data, "nbytes")
-            else (data.numel() * data.element_size())
-        )
+        # Handle different data types for size calculation
+        if hasattr(data, "nbytes"):
+            # NumPy array
+            size = data.nbytes
+        elif hasattr(data, "numel"):
+            # PyTorch tensor
+            size = data.numel() * data.element_size()
+        elif isinstance(data, (int, float, bool)):
+            # Python scalar - determine size from node dtype or default
+            dtype_sizes = {
+                DType.FP32: 4,
+                DType.FP16: 2,
+                DType.INT32: 4,
+                DType.BOOL: 1,
+                DType.FP8E4M3: 1,
+            }
+            size = dtype_sizes.get(node.dtype, 4)  # Default to 4 bytes
+        elif isinstance(data, np.generic):
+            # NumPy scalar
+            size = data.nbytes
+        else:
+            # Fallback: try to convert to numpy and get size
+            try:
+                arr = np.asarray(data)
+                size = arr.nbytes
+            except:
+                raise TypeError(f"Cannot determine size for data of type {type(data)}")
+
         device = node.backend.value if node.backend else "cpu"
         if "numpy" in device:
             device = "cpu"
@@ -376,14 +399,15 @@ class MemoryManager:
             elif isinstance(data, (int, float)):
                 data = np.array(data, dtype=view.dtype)
 
-            # Reshape data to flat to allow linear copy if shapes mismatch slightly but size is same
+            # Use [...] instead of [:] to handle 0-dimensional arrays (scalars)
+            # [...] works for all dimensions, [:] fails for 0-d arrays
             if data.shape != view.shape:
                 try:
-                    view[:] = data.reshape(view.shape)
+                    view[...] = data.reshape(view.shape)
                 except:
-                    view[:] = data  # Hope for broadcast
+                    view[...] = data  # Hope for broadcast
             else:
-                view[:] = data
+                view[...] = data
 
         elif hasattr(view, "copy_"):
             # Torch

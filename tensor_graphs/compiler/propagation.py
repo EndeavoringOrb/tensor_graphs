@@ -56,7 +56,7 @@ def _is_clean(region: NumericRegion) -> bool:
 
 def _make_full(shape: Tuple[int, ...]) -> NumericRegion:
     if not shape:
-        return ()
+        return None
     return tuple((0, dim) for dim in shape)
 
 
@@ -562,7 +562,7 @@ def _bwd_elementwise(output_region, input_shapes, output_shape, attrs):
     for in_shape in input_shapes:
         in_rank = len(in_shape)
         if in_rank == 0:
-            results.append(())
+            results.append(None)
             continue
         pad = out_rank - in_rank
         in_region = []
@@ -619,26 +619,24 @@ def _shape_slice(node: TensorNode, get_val):
     if not node.parents or node.parents[0].shape is None:
         return
     data_shape = node.parents[0].shape
-    starts = node.attrs.get("starts", [0] * len(data_shape))
-    ends = node.attrs.get("ends", [None] * len(data_shape))
-    steps = node.attrs.get("steps", [1] * len(data_shape))
+    starts = node.attrs.get("starts", [])
+    ends = node.attrs.get("ends", [])
+    steps = node.attrs.get("steps", [])
 
     new_shape = []
     for i, dim in enumerate(data_shape):
-        s_val = starts[i] if i < len(starts) else 0
-        e_val = ends[i] if i < len(ends) else None
-        st_val = steps[i] if i < len(steps) else 1
-        e = dim if e_val is None else int(e_val)
-        s = int(s_val) if isinstance(s_val, int) else None
-        st = int(st_val) if isinstance(st_val, int) else 1
-        if isinstance(s, int) and isinstance(dim, int) and s < 0:
-            s += dim
-        if isinstance(e, int) and isinstance(dim, int) and e < 0:
-            e += dim
-        if dim is None or s is None or e is None:
+        if dim is None:
             new_shape.append(None)
-        else:
-            new_shape.append(max(0, math.ceil((e - s) / st) if st != 0 else 0))
+            continue
+
+        s = int(starts[i]) if i < len(starts) and starts[i] is not None else None
+        e = int(ends[i]) if i < len(ends) and ends[i] is not None else None
+        st = int(steps[i]) if i < len(steps) and steps[i] is not None else 1
+
+        # Let Python compute the canonical (start, stop, step) for this dim
+        start, stop, step = slice(s, e, st).indices(dim)
+        new_shape.append(len(range(start, stop, step)))
+
     node.shape = tuple(new_shape)
 
 
@@ -672,8 +670,6 @@ def _fwd_slice(input_regions, input_shapes, output_shape, attrs):
 
 @GraphPropagator.register_backward(OpType.SLICE)
 def _bwd_slice(output_region, input_shapes, output_shape, attrs):
-    # Always return None — kernel needs full input
-    # because it uses absolute indices from attrs
     return [None]
 
 
@@ -752,7 +748,14 @@ def _bwd_concat(output_region, input_shapes, output_shape, attrs):
         ov_start = max(out_start, current_offset)
         ov_stop = min(out_stop, in_end)
         if ov_start >= ov_stop:
-            results.append(None)
+            results.append(
+                (
+                    (
+                        0,
+                        0,
+                    ),
+                )
+            )
         else:
             in_region = list(output_region)
             in_region[axis] = (ov_start - current_offset, ov_stop - current_offset)
