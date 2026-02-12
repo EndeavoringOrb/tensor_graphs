@@ -1,7 +1,3 @@
-"""
-File: tensor_graphs/backend/kernels/atomic/max.py
-"""
-
 import numpy as np
 from ....backend.registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature, Backend
@@ -30,10 +26,16 @@ def max_generic(inputs, outputs, attrs):
 
     if attrs and "axis" in attrs:
         axis = attrs["axis"]
+        # Ensure axis is a tuple if it's a list for NumPy compatibility
+        if isinstance(axis, list):
+            axis = tuple(axis)
     elif len(inputs) > 1:
         axis = int(inputs[1][0])
     else:
         axis = None
 
-    result = np.max(data, axis=axis, keepdims=True)
+    # Reference implementation often expects keepdims for graph consistency
+    keepdims = attrs.get("keepdims", True) if attrs else True
+
+    result = np.max(data, axis=axis, keepdims=keepdims)
     outputs[0][:] = result

@@ -263,6 +263,8 @@ class FluxBuilder(GraphBuilder):
         self,
         img_hidden: TensorNode,
         txt_hidden: TensorNode,
+        img_seq_len: TensorNode,  # Added argument
+        txt_seq_len: TensorNode,  # Added argument
         t_emb: TensorNode,
         block_weights: Dict[str, TensorNode],
         cos: TensorNode,
@@ -270,11 +272,6 @@ class FluxBuilder(GraphBuilder):
     ) -> Tuple[TensorNode, TensorNode]:
         """
         Double stream block: separate image and text streams with cross-attention.
-
-        Architecture:
-        1. Modulation from timestep
-        2. Image stream: norm -> Q, K, V -> attention with text K,V -> proj -> FFN
-        3. Text stream: norm -> Q, K, V -> attention with image K,V -> proj -> FFN
         """
         cfg = self.cfg
         hidden = cfg.hidden_size
@@ -283,7 +280,6 @@ class FluxBuilder(GraphBuilder):
         mlp_hidden = cfg.mlp_hidden
 
         # --- Modulation ---
-        # Double block has 6 modulation params: shift1, scale1, gate1, shift2, scale2, gate2
         img_shift, img_scale, img_gate, txt_shift, txt_scale, txt_gate = (
             self._double_block_modulation(
                 t_emb, block_weights["mod_img"], block_weights["mod_txt"], hidden
@@ -291,30 +287,27 @@ class FluxBuilder(GraphBuilder):
         )
 
         # --- Image Stream ---
-        # Norm + modulation
-        img_norm = self.rms_norm(img_hidden, self.const([1.0]))  # placeholder
+        img_norm = self.rms_norm(img_hidden, self.const([1.0]))
         img_mod = self.add(img_norm, img_shift)
         img_mod = self.mul(img_mod, self.add(self.const([1.0]), img_scale))
 
-        # Q, K, V projections
         img_q = self.dot(img_mod, self.permute(block_weights["img_q"], [1, 0]))
         img_k = self.dot(img_mod, self.permute(block_weights["img_k"], [1, 0]))
         img_v = self.dot(img_mod, self.permute(block_weights["img_v"], [1, 0]))
 
-        # QK norm
         img_q = self.qk_norm(img_q, block_weights["img_norm_q"], head_dim)
         img_k = self.qk_norm(img_k, block_weights["img_norm_k"], head_dim)
 
         # Reshape for attention [B, L, H, D] -> [B, H, L, D]
-        img_q = self._reshape_for_attn(img_q, num_heads, head_dim)
-        img_k = self._reshape_for_attn(img_k, num_heads, head_dim)
-        img_v = self._reshape_for_attn(img_v, num_heads, head_dim)
+        # Pass img_seq_len explicitly
+        img_q = self._reshape_for_attn(img_q, img_seq_len, num_heads, head_dim)
+        img_k = self._reshape_for_attn(img_k, img_seq_len, num_heads, head_dim)
+        img_v = self._reshape_for_attn(img_v, img_seq_len, num_heads, head_dim)
 
-        # Apply RoPE
         img_q = self.rope_2d(img_q, cos, sin)
         img_k = self.rope_2d(img_k, cos, sin)
 
-        # --- Text Stream (similar) ---
+        # --- Text Stream ---
         txt_norm = self.rms_norm(txt_hidden, self.const([1.0]))
         txt_mod = self.add(txt_norm, txt_shift)
         txt_mod = self.mul(txt_mod, self.add(self.const([1.0]), txt_scale))
@@ -326,26 +319,25 @@ class FluxBuilder(GraphBuilder):
         txt_q = self.qk_norm(txt_q, block_weights["txt_norm_q"], head_dim)
         txt_k = self.qk_norm(txt_k, block_weights["txt_norm_k"], head_dim)
 
-        txt_q = self._reshape_for_attn(txt_q, num_heads, head_dim)
-        txt_k = self._reshape_for_attn(txt_k, num_heads, head_dim)
-        txt_v = self._reshape_for_attn(txt_v, num_heads, head_dim)
+        # Reshape for attention
+        # Pass txt_seq_len explicitly
+        txt_q = self._reshape_for_attn(txt_q, txt_seq_len, num_heads, head_dim)
+        txt_k = self._reshape_for_attn(txt_k, txt_seq_len, num_heads, head_dim)
+        txt_v = self._reshape_for_attn(txt_v, txt_seq_len, num_heads, head_dim)
 
         txt_q = self.rope_2d(txt_q, cos, sin)
         txt_k = self.rope_2d(txt_k, cos, sin)
 
         # --- Joint Attention ---
-        # Concat K, V from both streams
-        joint_k = self.concat([img_k, txt_k], axis=2)  # concat along L
+        joint_k = self.concat([img_k, txt_k], axis=2)
         joint_v = self.concat([img_v, txt_v], axis=2)
 
-        # Image attends to joint
         img_attn_out = self.attention(img_q, joint_k, joint_v)
-        # Text attends to joint
         txt_attn_out = self.attention(txt_q, joint_k, joint_v)
 
         # Reshape back
-        img_attn_out = self._reshape_from_attn(img_attn_out, hidden)
-        txt_attn_out = self._reshape_from_attn(txt_attn_out, hidden)
+        img_attn_out = self._reshape_from_attn(img_attn_out, img_seq_len, hidden)
+        txt_attn_out = self._reshape_from_attn(txt_attn_out, txt_seq_len, hidden)
 
         # Output projections
         img_out = self.dot(
@@ -355,7 +347,6 @@ class FluxBuilder(GraphBuilder):
             txt_attn_out, self.permute(block_weights["txt_proj"], [1, 0])
         )
 
-        # Gate + residual
         img_hidden = self.add(img_hidden, self.mul(img_gate, img_out))
         txt_hidden = self.add(txt_hidden, self.mul(txt_gate, txt_out))
 
@@ -372,6 +363,7 @@ class FluxBuilder(GraphBuilder):
     def single_block(
         self,
         hidden: TensorNode,
+        seq_len: TensorNode,  # Added argument
         t_emb: TensorNode,
         block_weights: Dict[str, TensorNode],
         cos: TensorNode,
@@ -380,12 +372,6 @@ class FluxBuilder(GraphBuilder):
     ) -> TensorNode:
         """
         Single stream block: unified attention on concatenated [text, image].
-
-        Architecture:
-        1. Modulation
-        2. Joint Q, K, V from concatenated hidden
-        3. Self-attention
-        4. FFN with gate
         """
         cfg = self.cfg
         hidden_size = cfg.hidden_size
@@ -411,40 +397,32 @@ class FluxBuilder(GraphBuilder):
         k = self.slice(qkv, [hidden_size], [hidden_size * 2])
         v = self.slice(qkv, [hidden_size * 2], [hidden_size * 3])
 
-        # Remaining is MLP gate and up (fused)
         mlp_gate = self.slice(qkv, [hidden_size * 3], [hidden_size * 3 + mlp_hidden])
         mlp_up = self.slice(
             qkv, [hidden_size * 3 + mlp_hidden], [hidden_size * 3 + mlp_hidden * 2]
         )
 
-        # QK norm
         q = self.qk_norm(q, block_weights["norm_q"], head_dim)
         k = self.qk_norm(k, block_weights["norm_k"], head_dim)
 
         # Reshape for attention
-        q = self._reshape_for_attn(q, num_heads, head_dim)
-        k = self._reshape_for_attn(k, num_heads, head_dim)
-        v = self._reshape_for_attn(v, num_heads, head_dim)
+        q = self._reshape_for_attn(q, seq_len, num_heads, head_dim)
+        k = self._reshape_for_attn(k, seq_len, num_heads, head_dim)
+        v = self._reshape_for_attn(v, seq_len, num_heads, head_dim)
 
-        # RoPE
         q = self.rope_2d(q, cos, sin)
         k = self.rope_2d(k, cos, sin)
 
-        # Self-attention
         attn_out = self.attention(q, k, v)
-        attn_out = self._reshape_from_attn(attn_out, hidden_size)
+        attn_out = self._reshape_from_attn(attn_out, seq_len, hidden_size)
 
-        # FFN
         mlp_gate = self.silu(mlp_gate)
         mlp_out = self.mul(mlp_gate, mlp_up)
 
-        # Concat attention and FFN outputs
         concat_out = self.concat([attn_out, mlp_out], axis=-1)
 
-        # Output projection (fused with FFN)
         out = self.dot(concat_out, self.permute(block_weights["proj"], [1, 0]))
 
-        # Gate + residual
         return self.add(hidden, self.mul(gate, out))
 
     def final_layer(
@@ -520,17 +498,27 @@ class FluxBuilder(GraphBuilder):
         return self.add(hidden, hidden_ff)
 
     def _reshape_for_attn(
-        self, x: TensorNode, num_heads: int, head_dim: int
+        self, x: TensorNode, seq_len: TensorNode, num_heads: int, head_dim: int
     ) -> TensorNode:
         """Reshape [B, L, H*D] -> [B, H, L, D]"""
-        # This would need dynamic shape inference
-        # For now, use a custom reshape
-        shape = self.const([1, num_heads, -1, head_dim])  # -1 for dynamic L
+        # Explicitly construct shape node: [1, num_heads, seq_len, head_dim]
+        shape = self.concat(
+            [
+                self.const([1]),
+                self.const([num_heads]),
+                seq_len,
+                self.const([head_dim]),
+            ],
+            axis=0,
+        )
         return self.reshape(x, shape)
 
-    def _reshape_from_attn(self, x: TensorNode, hidden: int) -> TensorNode:
+    def _reshape_from_attn(
+        self, x: TensorNode, seq_len: TensorNode, hidden: int
+    ) -> TensorNode:
         """Reshape [B, H, L, D] -> [B, L, H*D]"""
-        shape = self.const([1, -1, hidden])
+        # Explicitly construct shape node: [1, seq_len, hidden]
+        shape = self.concat([self.const([1]), seq_len, self.const([hidden])], axis=0)
         return self.reshape(x, shape)
 
 
@@ -567,15 +555,13 @@ class FluxTransformer:
         )
 
         # Input projections
-        # Image: [B, C, H, W] -> [B, H*W, hidden]
-        img_flat = b.permute(self.img_latent, [0, 2, 3, 1])  # [B, H, W, C]
+        img_flat = b.permute(self.img_latent, [0, 2, 3, 1])
         img_seq = b.mul(self.img_h, self.img_w)
         img_flat = b.reshape(
             img_flat,
             b.concat([b.const([1]), img_seq, b.const([cfg.latent_channels])], 0),
         )
 
-        # Patchify: 2x2 patches
         img_hidden = b.dot(
             img_flat,
             b.permute(
@@ -583,7 +569,6 @@ class FluxTransformer:
             ),
         )
 
-        # Text projection
         txt_hidden = b.dot(
             self.txt_emb,
             b.permute(
@@ -591,31 +576,33 @@ class FluxTransformer:
             ),
         )
 
-        # Compute RoPE frequencies
-        # For FLUX, RoPE is 2D with T dimension
         cos, sin = self._build_rope(img_seq)
+
+        # Create text sequence length node (fixed constant for FLUX)
+        txt_seq = b.const([cfg.text_max_seq])
 
         # Double blocks
         for i in range(cfg.num_double_layers):
             weights = self._get_double_block_weights(i)
+            # Pass sequence lengths to double_block
             img_hidden, txt_hidden = b.double_block(
-                img_hidden, txt_hidden, t_emb, weights, cos, sin
+                img_hidden, txt_hidden, img_seq, txt_seq, t_emb, weights, cos, sin
             )
 
         # Concatenate for single blocks: [txt, img]
         combined = b.concat([txt_hidden, img_hidden], axis=1)
 
+        # Calculate total sequence length for single blocks
+        total_seq = b.add(txt_seq, img_seq)
+
         # Single blocks
         for i in range(cfg.num_single_layers):
             weights = self._get_single_block_weights(i)
-            combined = b.single_block(combined, t_emb, weights, cos, sin, i)
+            # Pass total sequence length to single_block
+            combined = b.single_block(combined, total_seq, t_emb, weights, cos, sin, i)
 
         # Extract image portion
-        # txt_seq is fixed at 512 for FLUX
-        txt_seq = b.const([cfg.text_max_seq])
-        img_out = b.slice(
-            combined, [txt_seq], [b.add(txt_seq, b.mul(self.img_h, self.img_w))]
-        )
+        img_out = b.slice(combined, [txt_seq], [b.add(txt_seq, img_seq)])
 
         # Final layer
         final_weights = {
@@ -865,9 +852,6 @@ class VAEDecoder(GraphBuilder):
         """
         ResBlock: norm1 -> swish -> conv1 -> norm2 -> swish -> conv2 + skip
         """
-        in_ch = x.shape[1] if x.shape and len(x.shape) >= 2 else None
-        out_ch = conv1_w.shape[0] if conv1_w.shape else None
-
         # Main path
         h = self.group_norm(x, norm1_w, norm1_b, num_groups)
         h = self.swish(h)
@@ -897,46 +881,49 @@ class VAEDecoder(GraphBuilder):
         v_b: TensorNode,
         out_w: TensorNode,
         out_b: TensorNode,
+        h: TensorNode,  # Added argument
+        w: TensorNode,  # Added argument
         num_groups: int = 32,
     ) -> TensorNode:
         """
         Self-attention block for VAE.
         Integrated decomposition: norm -> Q, K, V -> flattened attention -> out_proj + residual
         """
+        # Determine channels from weight shape (output channels of Q projection)
+        # q_w shape is [out_channels, in_channels, kH, kW] -> [C, C, 1, 1]
+        ch = q_w.shape[0] if q_w.shape else self.cfg.vae_channels
+
         # 1. Normalize
-        h = self.group_norm(x, norm_w, norm_b, num_groups)
+        h_norm = self.group_norm(x, norm_w, norm_b, num_groups)
 
         # 2. Q, K, V projections (1x1 conv)
-        # Inputs/Outputs for these are [B, C, H, W]
-        q = self.conv2d(h, q_w, q_b, kernel_size=1, stride=1, padding=0)
-        k = self.conv2d(h, k_w, k_b, kernel_size=1, stride=1, padding=0)
-        v = self.conv2d(h, v_w, v_b, kernel_size=1, stride=1, padding=0)
+        q = self.conv2d(h_norm, q_w, q_b, kernel_size=1, stride=1, padding=0)
+        k = self.conv2d(h_norm, k_w, k_b, kernel_size=1, stride=1, padding=0)
+        v = self.conv2d(h_norm, v_w, v_b, kernel_size=1, stride=1, padding=0)
 
         # 3. Flatten spatial dimensions for attention logic
         # [B, C, H, W] -> [B, H, W, C] -> [B, L, C]
         def flatten_spatial(node):
             # Transpose to Channel-last
             perm = self.permute(node, [0, 2, 3, 1])
-            # Reshape to [Batch, Sequence (H*W), Channels]
-            # Use -1 for spatial dimension to support dynamic resolution
-            # We assume B=1 for the target shape node based on the pipeline
-            c_dim = node.shape[1] if node.shape else self.cfg.vae_channels
-            return self.reshape(perm, self.const([1, -1, c_dim]))
+
+            # Calculate sequence length explicitly
+            seq_len = self.mul(h, w)
+            c_dim = node.shape[1] if node.shape else ch
+
+            # Explicit shape construction: [1, seq_len, C]
+            shape = self.concat([self.const([1]), seq_len, self.const([c_dim])], axis=0)
+            return self.reshape(perm, shape)
 
         q_flat = flatten_spatial(q)
         k_flat = flatten_spatial(k)
         v_flat = flatten_spatial(v)
 
         # 4. Compute Attention Scores: (Q @ K^T) * scale
-        # K_T: [B, C, L]
         k_t = self.permute(k_flat, [0, 2, 1])
-        
-        # [B, L, C] @ [B, C, L] -> [B, L, L]
         scores = self.dot(q_flat, k_t)
 
-        # Scale = 1 / sqrt(C)
-        c_val = self.cfg.vae_channels
-        scale_val = float(c_val) ** -0.5
+        scale_val = float(ch) ** -0.5
         scores_scaled = self.mul(scores, self.const([scale_val]))
 
         # 5. Softmax along last dimension
@@ -948,45 +935,85 @@ class VAEDecoder(GraphBuilder):
             attrs={"axis": -1},
         )
 
-        # 6. Context: Probs @ V -> [B, L, L] @ [B, L, C] -> [B, L, C]
+        # 6. Context: Probs @ V
         attn_out_flat = self.dot(probs, v_flat)
 
-        # 7. Reshape back to NCHW
+        # 7. Reshape back to NCHW using explicit h, w
         # [B, L, C] -> [B, H, W, C] -> [B, C, H, W]
-        # We extract spatial dimensions from the original 'x' input to ensure consistency
-        # Note: In a real graph, we'd use 'Shape' and 'Slice' nodes for full dynamism
-        # Here we use the builder's reshape with a dynamic middle
-        out_hwc = self.reshape(attn_out_flat, self.concat([
-            self.const([1]), # Batch
-            self.const([-1]), # H (inferred)
-            self.const([-1]), # W (inferred)
-            self.const([c_val]) # Channels
-        ], axis=0))
-        
-        # This specific permutation handles the HWC -> CHW move
-        # To be safe with the reshape above, we use the inferred spatial restoration
-        # flux_vae.c logic uses: [B, C, H, W]
-        # We'll use a simplified restoration for the graph builder:
+        out_hwc = self.reshape(
+            attn_out_flat,
+            self.concat(
+                [
+                    self.const([1]),
+                    h,
+                    w,
+                    self.const([ch]),
+                ],
+                axis=0,
+            ),
+        )
+
         attn_out = self.permute(out_hwc, [0, 3, 1, 2])
 
-        # 8. Output projection (1x1 conv)
+        # 8. Output projection
         out = self.conv2d(attn_out, out_w, out_b, kernel_size=1, stride=1, padding=0)
 
         # 9. Residual connection
         return self.add(out, x)
 
-    def decode(self, latent: TensorNode, weights: Dict[str, TensorNode]) -> TensorNode:
+    def unpack(
+        self, latent: TensorNode, h_in: TensorNode, w_in: TensorNode
+    ) -> Tuple[TensorNode, TensorNode, TensorNode]:
+        """
+        Unpack packed latents: [B, 128, H, W] -> [B, 32, H*2, W*2]
+        """
+        p = self.cfg.patch_size  # 2
+        c = self.cfg.vae_z_channels  # 32
+
+        # 1. Reshape [B, p, p, C, H, W]
+        shape1 = self.concat(
+            [
+                self.const([1]),
+                self.const([p]),
+                self.const([p]),
+                self.const([c]),
+                h_in,
+                w_in,
+            ],
+            axis=0,
+        )
+        h = self.reshape(latent, shape1)
+
+        # 2. Permute to [B, C, H, p, W, p]
+        # (Batch, p1, p2, Chan, H, W) -> (Batch, Chan, H, p1, W, p2)
+        h = self.permute(h, [0, 3, 4, 1, 5, 2])
+
+        # 3. Reshape to [B, C, H*p, W*p]
+        new_h = self.mul(h_in, self.const([p]))
+        new_w = self.mul(w_in, self.const([p]))
+
+        shape2 = self.concat([self.const([1]), self.const([c]), new_h, new_w], axis=0)
+
+        return self.reshape(h, shape2), new_h, new_w
+
+    def decode(
+        self,
+        latent: TensorNode,
+        h_in: TensorNode,
+        w_in: TensorNode,
+        weights: Dict[str, TensorNode],
+    ) -> TensorNode:
         """
         Full VAE decoder forward pass.
-
-        latent: [B, 32, H/8, W/8]
-        Returns: [B, 3, H, W] in [-1, 1] range
         """
         cfg = self.cfg
 
+        # --- NEW: Unpack FLUX latents ---
+        h, h_unpacked, w_unpacked = self.unpack(latent, h_in, w_in)
+
         # Post-quantization conv (32 -> 32)
         h = self.conv2d(
-            latent,
+            h,
             weights["post_quant_conv.weight"],
             weights["post_quant_conv.bias"],
             kernel_size=1,
@@ -1004,7 +1031,8 @@ class VAEDecoder(GraphBuilder):
             padding=1,
         )
 
-        # Mid block
+        # Mid block (ResBlock -> AttnBlock -> ResBlock)
+        # Note: Resolution is preserved in the mid block.
         h = self.resblock(
             h,
             weights["decoder.mid_block.resnets.0.norm1.weight"],
@@ -1017,6 +1045,7 @@ class VAEDecoder(GraphBuilder):
             weights["decoder.mid_block.resnets.0.conv2.bias"],
         )
 
+        # Pass the unpacked resolution to the Attention Block
         h = self.attnblock(
             h,
             weights["decoder.mid_block.attentions.0.group_norm.weight"],
@@ -1029,6 +1058,8 @@ class VAEDecoder(GraphBuilder):
             weights["decoder.mid_block.attentions.0.to_v.bias"],
             weights["decoder.mid_block.attentions.0.to_out.0.weight"],
             weights["decoder.mid_block.attentions.0.to_out.0.bias"],
+            h=h_unpacked,
+            w=w_unpacked,
         )
 
         h = self.resblock(
@@ -1043,18 +1074,29 @@ class VAEDecoder(GraphBuilder):
             weights["decoder.mid_block.resnets.1.conv2.bias"],
         )
 
-        for level in range(3, -1, -1):  # 3, 2, 1, 0
-            for r in range(3):  # 3 resblocks
+        for level in range(3, -1, -1):
+            for r in range(3):
+                res_prefix = f"decoder.up_blocks.{3 - level}.resnets.{r}"
+
+                # Check for shortcut weight (channel transition)
+                skip_w_key = f"{res_prefix}.conv_shortcut.weight"
+                skip_b_key = f"{res_prefix}.conv_shortcut.bias"
+
+                skip_w = weights.get(skip_w_key)
+                skip_b = weights.get(skip_b_key)
+
                 h = self.resblock(
                     h,
-                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.norm1.weight"],
-                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.norm1.bias"],
-                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.conv1.weight"],
-                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.conv1.bias"],
-                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.norm2.weight"],
-                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.norm2.bias"],
-                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.conv2.weight"],
-                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.conv2.bias"],
+                    weights[f"{res_prefix}.norm1.weight"],
+                    weights[f"{res_prefix}.norm1.bias"],
+                    weights[f"{res_prefix}.conv1.weight"],
+                    weights[f"{res_prefix}.conv1.bias"],
+                    weights[f"{res_prefix}.norm2.weight"],
+                    weights[f"{res_prefix}.norm2.bias"],
+                    weights[f"{res_prefix}.conv2.weight"],
+                    weights[f"{res_prefix}.conv2.bias"],
+                    skip_w=skip_w,
+                    skip_b=skip_b,
                 )
 
             # Upsample (except last level)
@@ -1538,6 +1580,9 @@ class FluxPipeline:
         latent = self.vae_decoder.input(
             "latent", (1, self.cfg.vae_channels, None, None), DType.FP32
         )
+        # Add height and width inputs for static shape construction
+        h_node = self.vae_decoder.input("h", (1,), DType.INT32)
+        w_node = self.vae_decoder.input("w", (1,), DType.INT32)
 
         # Build weights dict
         weights = {}
@@ -1546,15 +1591,20 @@ class FluxPipeline:
                 key, self.vae_weights.get_tensor_metadata(key)[0]
             )
 
-        # Build decoder
-        image = self.vae_decoder.decode(latent, weights)
+        # Build decoder with shape inputs
+        image = self.vae_decoder.decode(latent, h_node, w_node, weights)
 
         # Create session
         self.vae_session = GraphSession(image)
 
         # Compile with sample input
-        sample_latent = np.zeros((1, self.cfg.vae_channels, 16, 16), dtype=np.float32)
-        self.vae_session.compile({"latent": sample_latent})
+        sample_latent = np.zeros((1, self.cfg.vae_channels, 8, 8), dtype=np.float32)
+        sample_h = np.array([8], dtype=np.int32)
+        sample_w = np.array([8], dtype=np.int32)
+
+        self.vae_session.compile(
+            {"latent": sample_latent, "h": sample_h, "w": sample_w}
+        )
 
         print("VAE decoder ready!")
 
@@ -1612,8 +1662,20 @@ class FluxPipeline:
         # Build decoder if needed
         self.build_vae_decoder()
 
-        # Run decoder
-        image_tensor = self.vae_session.run({"latent": latent})
+        # Extract dimensions
+        h_val = latent.shape[2]
+        w_val = latent.shape[3]
+
+        self.vae_session.load_weights(self.vae_weights)
+
+        # Run decoder with shape inputs
+        image_tensor = self.vae_session.run(
+            {
+                "latent": latent,
+                "h": np.array([h_val], dtype=np.int32),
+                "w": np.array([w_val], dtype=np.int32),
+            }
+        )
 
         # Convert to image
         # image_tensor is [B, 3, H, W] in [-1, 1] range
@@ -1731,8 +1793,8 @@ def main():
 
     image = pipeline.generate(
         prompt=prompt,
-        height=256,
-        width=256,
+        height=128,
+        width=128,
         num_steps=4,  # Distilled model
         seed=42,
     )

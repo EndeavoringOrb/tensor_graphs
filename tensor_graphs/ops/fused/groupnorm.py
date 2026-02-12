@@ -2,6 +2,7 @@ from ...ir.node import TensorNode
 from ..atomic_types import OpType
 from ..registry import register_reference_factory
 import numpy as np
+from ...ir.dtypes import DType
 
 
 def groupnorm_decomposition(inputs, attrs=None):
@@ -23,7 +24,7 @@ def groupnorm_decomposition(inputs, attrs=None):
     new_shape_1 = [N, G, C // G, H, W]
     shape_node_1 = TensorNode(
         OpType.CONSTANT,
-        x.dtype,
+        DType.INT32,
         [],
         attrs={"value": np.array(new_shape_1, dtype=np.int32)},
     )
@@ -73,7 +74,7 @@ def groupnorm_decomposition(inputs, attrs=None):
 
     w_shape = TensorNode(
         OpType.CONSTANT,
-        x.dtype,
+        DType.INT32,
         [],
         attrs={"value": np.array([1, G, C // G, 1, 1], dtype=np.int32)},
     )
@@ -86,7 +87,7 @@ def groupnorm_decomposition(inputs, attrs=None):
     # Reshape back
     orig_shape = TensorNode(
         OpType.CONSTANT,
-        x.dtype,
+        DType.INT32,
         [],
         attrs={"value": np.array([N, C, H, W], dtype=np.int32)},
     )

@@ -40,5 +40,14 @@ def mul_tensor_generic_scalar(inputs, outputs, attrs):
     backend=Backend.CPU_NUMPY,
     reference_factory=mul_ref,
 )
+@KernelRegistry.register(
+    OpType.MUL,
+    [
+        TensorSignature(DType.INT32, shape=None, backend=Backend.CPU_NUMPY),
+        TensorSignature(DType.INT32, shape=None, backend=Backend.CPU_NUMPY),
+    ],
+    backend=Backend.CPU_NUMPY,
+    reference_factory=mul_ref,
+)
 def mul_generic_tensor(inputs, outputs, attrs):
     np.multiply(inputs[0], inputs[1], out=outputs[0])

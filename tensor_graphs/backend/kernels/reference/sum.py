@@ -1,7 +1,3 @@
-"""
-File: tensor_graphs/backend/kernels/atomic/sum.py
-"""
-
 import numpy as np
 from ....backend.registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature, Backend
@@ -31,6 +27,9 @@ def sum_generic(inputs, outputs, attrs):
 
     if attrs and "axis" in attrs:
         axis = attrs["axis"]
+        # NumPy requires a tuple for multiple axes, lists can cause TypeErrors in some versions
+        if isinstance(axis, list):
+            axis = tuple(axis)
     elif len(inputs) > 1:
         axis = int(inputs[1][0])
     else:

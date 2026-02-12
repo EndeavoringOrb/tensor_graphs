@@ -49,21 +49,10 @@ def get_structural_hash(node, memo=None) -> str:
 
     if node.op_type == OpType.CONSTANT:
         val = node.attrs.get("value")
-        # Include a hash of the value for all constants to avoid collisions
-        # for non-scalar constants (like shape tensors).
         if val is not None:
-            if isinstance(val, np.ndarray):
-                # For structural hash of constants, we use a lighter representation
-                # to avoid massive overhead during compilation, assuming constants don't change.
-                # However, for correctness, we should include content.
-                # Let's use a summarized str representation.
-                val_content = (
-                    str(val.shape)
-                    + str(val.dtype)
-                    + str(val.flat[0] if val.size > 0 else "")
-                )
-            else:
-                val_content = str(val)
+            # Use the full content hash to ensure uniqueness,
+            # especially for shape tensors which often share the same first element.
+            val_content = compute_content_hash(val)
             h = _hash_string(f"CONST|{node.dtype.value}|{node.shape}|{val_content}")
         else:
             h = _hash_string(f"CONST|{node.dtype.value}|{node.shape}")

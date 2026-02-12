@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from ...ir.node import TensorNode
 from ..atomic_types import OpType
 

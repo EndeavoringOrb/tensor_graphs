@@ -256,9 +256,34 @@ class GraphPropagator:
                 # Decomposition fallback
                 factory = get_reference_factory(node.op_type)
                 if factory:
-                    sub_root = factory(node.parents, node.attrs)
+                    # OPTIMIZATION: Create proxy parents to cut off the graph history.
+                    # This prevents topological_sort from walking back to the graph roots,
+                    # ensuring we only process the decomposition subgraph.
+                    proxy_parents = [
+                        TensorNode(
+                            op_type=p.op_type,
+                            dtype=p.dtype,
+                            parents=[],  # Cut off history
+                            shape=p.shape,
+                            name=p.name,  # Preserve name for value lookup
+                            attrs=p.attrs,
+                            backend=p.backend,
+                            storage_type=p.storage_type,
+                        )
+                        for p in node.parents
+                    ]
+
+                    sub_root = factory(proxy_parents, node.attrs)
                     sub_nodes = topological_sort(sub_root)
-                    cls.infer_shapes(sub_nodes, computed_values)
+
+                    # Recursively infer shapes only for the decomposition
+                    cls.infer_shapes(
+                        sub_nodes,
+                        computed_values,
+                        keep_cut_parent_shapes=True,
+                        disable_pbar=True,
+                    )
+
                     node.shape = sub_root.shape
                     if DEBUG_EXECUTION and DEBUG_DETAILED:
                         tqdm.write(
@@ -290,6 +315,10 @@ class GraphPropagator:
                         parent_vals = [computed_values[p.name] for p in node.parents]
                         kernel(parent_vals, [out_np], node.attrs)
                         computed_values[node.name] = out_np
+                    else:
+                        raise ValueError(
+                            "couldn't find kernel, maybe add new concat variation"
+                        )
 
     # -- forward dirty propagation -------------------------------------------
 
