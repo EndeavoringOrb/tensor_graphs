@@ -15,6 +15,7 @@ recurses through that subgraph.
 from typing import Dict, List, Tuple, Optional, Callable, Any, NamedTuple
 import math
 import numpy as np
+from tqdm import tqdm
 
 from ..ir.node import TensorNode
 from ..ir.dtypes import DType, TensorSignature, Backend
@@ -22,6 +23,7 @@ from ..ir.graph import topological_sort
 from ..ops.atomic_types import OpType
 from ..ops.registry import get_reference_factory
 from ..backend.registry import KernelRegistry
+from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
 
 # ---------------------------------------------------------------------------
 # Types
@@ -209,6 +211,7 @@ class GraphPropagator:
         nodes: List[TensorNode],
         known_values: Dict[str, Any],
         keep_cut_parent_shapes: bool = False,
+        disable_pbar: bool = True,
     ):
         """
         Update ``node.shape`` in-place for every node in *nodes*
@@ -229,7 +232,7 @@ class GraphPropagator:
                 return val
             return None
 
-        for node in nodes:
+        for node in tqdm(nodes, "Inferring shapes", disable=disable_pbar):
             # Normalize existing shape
             if node.shape is not None:
                 node.shape = tuple(
@@ -257,8 +260,10 @@ class GraphPropagator:
                     sub_nodes = topological_sort(sub_root)
                     cls.infer_shapes(sub_nodes, computed_values)
                     node.shape = sub_root.shape
-                elif node.parents and node.parents[0].shape:
-                    node.shape = node.parents[0].shape
+                    if DEBUG_EXECUTION and DEBUG_DETAILED:
+                        tqdm.write(
+                            f"[GraphPropagator.infer_shapes] recursing into {node.op_type} subgraph"
+                        )
 
             if node.shape is None or any(item is None for item in node.shape):
                 raise ValueError(f"Cannot resolve shape for node {node}")
@@ -478,7 +483,7 @@ class GraphPropagator:
 
 @GraphPropagator.register_shape(OpType.INPUT)
 def _shape_input(node: TensorNode, get_val):
-    if node.shape:
+    if node.shape and not any(d is None for d in node.shape):
         node.shape = tuple(d if isinstance(d, int) else None for d in node.shape)
         return
     val = get_val(node)
@@ -590,6 +595,8 @@ _UNARY_OPS = (
     OpType.COS,
     OpType.SQRT,
     OpType.TRIU,
+    "SiLU",
+    "Sigmoid",
 )
 
 
@@ -878,7 +885,7 @@ def _shape_dot(node: TensorNode, get_val):
 @GraphPropagator.register_forward(OpType.DOT)
 def _fwd_dot(input_regions, input_shapes, output_shape, attrs):
     rA, rB = input_regions[0], input_regions[1]
-    A_shape, B_shape = input_shapes[0], input_shapes[1]
+    A_shape = input_shapes[0]
     if _is_clean(rA) and _is_clean(rB):
         return None
     out_rank = len(output_shape)
@@ -1323,3 +1330,168 @@ def _bwd_norm(output_region, input_shapes, output_shape, attrs):
             input_regions.append(None)
 
     return input_regions
+
+
+# ---------------------------------------------------------------------------
+# IM2COL
+# ---------------------------------------------------------------------------
+
+
+@GraphPropagator.register_shape(OpType.IM2COL)
+def _shape_im2col(node: TensorNode, get_val):
+    if not node.parents or node.parents[0].shape is None:
+        return
+    # Input shape: (N, C, H, W)
+    x_shape = node.parents[0].shape
+    if len(x_shape) != 4:
+        return
+
+    N, C, H, W = x_shape
+    k = node.attrs.get("kernel_size", 1)
+    s = node.attrs.get("stride", 1)
+    p = node.attrs.get("padding", 0)
+
+    def calc_out_dim(in_dim, k, s, p):
+        if in_dim is None:
+            return None
+        return (in_dim + 2 * p - k) // s + 1
+
+    H_out = calc_out_dim(H, k, s, p)
+    W_out = calc_out_dim(W, k, s, p)
+
+    # Output channels = C * k * k
+    out_C = C * k * k if C is not None else None
+    # Output spatial = H_out * W_out
+    out_S = H_out * W_out if (H_out is not None and W_out is not None) else None
+
+    node.shape = (N, out_C, out_S)
+
+
+@GraphPropagator.register_forward(OpType.IM2COL)
+def _fwd_im2col(input_regions, input_shapes, output_shape, attrs):
+    inp = input_regions[0]
+    if _is_clean(inp):
+        return None
+
+    # inp: (N, C, H, W) -> out: (N, C*k*k, H_out*W_out)
+    N, C, H, W = input_shapes[0]
+    k = attrs.get("kernel_size", 1)
+    s = attrs.get("stride", 1)
+    p = attrs.get("padding", 0)
+
+    N_out, C_out, L_out = output_shape
+
+    # Batch dimension (direct mapping)
+    out_n = inp[0]
+
+    # Channel dimension
+    # Input channel c maps to output rows [c*k*k, (c+1)*k*k)
+    c_start, c_stop = inp[1]
+    out_c_start = c_start * k * k
+    out_c_stop = c_stop * k * k
+
+    # Spatial dimension
+    # Map input dirty region to output spatial region (flattened)
+    if H is None or W is None:
+        out_l = (0, L_out)
+    else:
+        H_out = (H + 2 * p - k) // s + 1
+        W_out = (W + 2 * p - k) // s + 1
+
+        def get_out_spatial_range(in_start, in_stop, k, s, p, out_dim):
+            if in_start >= in_stop:
+                return 0, 0
+
+            # Output coordinate i depends on input [i*s-p, i*s-p+k)
+            # We want i such that the receptive field intersects [in_start, in_stop)
+            # Condition: i*s - p < in_stop AND i*s - p + k > in_start
+
+            # Solve for i bounds:
+            # i > (in_start + p - k) / s
+            # i < (in_stop + p) / s
+
+            # Smallest integer i satisfying i*s - p + k > in_start
+            i_min = math.floor((in_start + p - k) / s) + 1
+            # Smallest integer i satisfying i*s - p >= in_stop (exclusive bound)
+            i_max = math.ceil((in_stop + p) / s)
+
+            # Clamp to valid output dimensions
+            i_min = max(0, i_min)
+            i_max = min(out_dim, i_max)
+
+            return i_min, i_max
+
+        h_r = inp[2]
+        w_r = inp[3]
+
+        h_out_start, h_out_stop = get_out_spatial_range(h_r[0], h_r[1], k, s, p, H_out)
+        w_out_start, w_out_stop = get_out_spatial_range(w_r[0], w_r[1], k, s, p, W_out)
+
+        if h_out_start >= h_out_stop or w_out_start >= w_out_stop:
+            out_l = (0, 0)
+        else:
+            # Map to flattened index (row-major)
+            # We compute the bounding box of the dirty elements in the flattened array
+            l_start = h_out_start * W_out + w_out_start
+            l_end = (h_out_stop - 1) * W_out + w_out_stop
+            out_l = (l_start, l_end)
+
+    return (out_n, (out_c_start, out_c_stop), out_l)
+
+
+@GraphPropagator.register_backward(OpType.IM2COL)
+def _bwd_im2col(output_region, input_shapes, output_shape, attrs):
+    if _is_clean(output_region):
+        return [None]
+
+    # out: (N, C*k*k, L) -> inp: (N, C, H, W)
+    N, C, H, W = input_shapes[0]
+    k = attrs.get("kernel_size", 1)
+    s = attrs.get("stride", 1)
+    p = attrs.get("padding", 0)
+
+    out_n_r, out_c_r, out_l_r = output_region
+
+    # Batch dimension (direct mapping)
+    in_n_r = out_n_r
+
+    # Channel dimension
+    # Output rows [s, e) map to input channels [s/k^2, (e-1)//k^2 + 1)
+    out_c_start, out_c_stop = out_c_r
+    in_c_start = out_c_start // (k * k)
+    in_c_stop = (out_c_stop - 1) // (k * k) + 1
+    in_c_r = (in_c_start, in_c_stop)
+
+    # Spatial dimension
+    if H is None or W is None:
+        return [(in_n_r, in_c_r, (0, H), (0, W))]
+
+    H_out = (H + 2 * p - k) // s + 1
+    W_out = (W + 2 * p - k) // s + 1
+
+    out_l_start, out_l_stop = out_l_r
+
+    # Map flattened L range to H_out, W_out bounding box
+    # L = h_out * W_out + w_out
+    h_out_min = out_l_start // W_out
+    h_out_max = (out_l_stop - 1) // W_out
+
+    w_out_min = out_l_start % W_out
+    w_out_max = (out_l_stop - 1) % W_out
+
+    # Calculate input region required for the output bounding box
+    # Input H range covering receptive fields of h_out \in [h_out_min, h_out_max]
+    in_h_start = h_out_min * s - p
+    in_h_stop = (h_out_max + 1) * s - p + k
+
+    # Input W range covering receptive fields of w_out \in [w_out_min, w_out_max]
+    in_w_start = w_out_min * s - p
+    in_w_stop = w_out_max * s - p + k
+
+    # Clamp to valid input ranges
+    in_h_start = max(0, in_h_start)
+    in_h_stop = min(H, in_h_stop)
+    in_w_start = max(0, in_w_start)
+    in_w_stop = min(W, in_w_stop)
+
+    return [(in_n_r, in_c_r, (in_h_start, in_h_stop), (in_w_start, in_w_stop))]

@@ -9,6 +9,7 @@ from . import dot
 from . import exp
 from . import fill
 from . import gather
+from . import im2col
 from . import max
 from . import mul
 from . import negate

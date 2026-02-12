@@ -12,11 +12,6 @@ def fill_ref(
     value_tensor = inputs[0]
     shape_tensor = inputs[1]
 
-    # The output shape is NOT shape_tensor.shape (which is something like (2,))
-    # In a symbolic graph, we usually pass the expected shape in attrs
-    # or rely on the caller to provide the target_shape.
-    target_shape = attrs.get("target_shape", (None,)) if attrs else (None,)
-
     return TensorNode(
         OpType.FILL,
         value_tensor.dtype,

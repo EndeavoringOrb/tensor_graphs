@@ -395,3 +395,39 @@ class GraphBuilder:
 
     def tanh(self, x):
         return TensorNode("Tanh", x.dtype, [x], name=self._next_name("tanh"))
+
+    def silu(self, x):
+        return TensorNode("SiLU", x.dtype, [x], name=self._next_name("silu"))
+
+    def sigmoid(self, x):
+        return TensorNode("Sigmoid", x.dtype, [x], name=self._next_name("sigmoid"))
+
+    def conv2d(self, x, weight, bias=None, kernel_size=3, stride=1, padding=1):
+        inputs = [x, weight]
+        if bias:
+            inputs.append(bias)
+        return TensorNode(
+            "Conv2D",
+            x.dtype,
+            inputs,
+            name=self._next_name("conv2d"),
+            attrs={"kernel_size": kernel_size, "stride": stride, "padding": padding},
+        )
+
+    def group_norm(self, x, weight, bias, num_groups, eps=1e-6):
+        return TensorNode(
+            "GroupNorm",
+            x.dtype,
+            [x, weight, bias],
+            name=self._next_name("groupnorm"),
+            attrs={"num_groups": num_groups, "eps": eps},
+        )
+
+    def upsample_nearest_2x(self, x):
+        return TensorNode(
+            "Upsample2x",
+            x.dtype,
+            [x],
+            name=self._next_name("upsample"),
+            attrs={"scale": 2},
+        )

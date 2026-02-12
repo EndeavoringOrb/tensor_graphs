@@ -10,6 +10,7 @@ from ..ops.registry import get_reference_factory
 from ..ops.atomic_types import OpType
 from ..ir.graph import topological_sort
 from .propagation import GraphPropagator
+from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
 
 
 class ExecutionRecipe:
@@ -35,7 +36,9 @@ class Planner:
         # 1. Run Shape Inference before planning.
         # This ensures constants get shapes, preventing hash collisions.
         nodes = topological_sort(root)
-        GraphPropagator.infer_shapes(nodes, known_values)
+        GraphPropagator.infer_shapes(
+            nodes, known_values, disable_pbar=not DEBUG_EXECUTION
+        )
 
         # 2. Proceed with cost-based planning
         _, new_root, assignments = self._min_cost(
@@ -50,6 +53,11 @@ class Planner:
         expansion_stack: FrozenSet,
         known_values: Optional[Dict[str, Any]] = None,
     ) -> Tuple[float, TensorNode, Dict[TensorNode, Backend]]:
+        if DEBUG_EXECUTION and DEBUG_DETAILED:
+            print(
+                f"[Planner._min_cost] Stack Len: {len(expansion_stack)} | {node}      ",
+                end="\r",
+            )
 
         node_hash = get_structural_hash(node) + f"|{target_backend.value}"
         if node_hash in self.memo:

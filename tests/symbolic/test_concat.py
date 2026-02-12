@@ -37,7 +37,7 @@ def test_concat_backward():
     # Case 1: Region entirely in 'a'
     res1 = DirtyPropagator.get_input_slices(concat, (slice(2, 4),))
     assert res1[0] == (slice(2, 4),)
-    assert res1[1] == None
+    assert res1[1] is None
 
     # Case 2: Region spanning both
     res2 = DirtyPropagator.get_input_slices(concat, (slice(4, 7),))

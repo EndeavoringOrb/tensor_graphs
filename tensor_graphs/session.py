@@ -30,10 +30,13 @@ class GraphSession:
 
     def compile(self, sample_inputs: Dict[str, Any]):
         if DEBUG_EXECUTION:
-            print("[Session] Compiling graph...")
+            print("[Session] Planning graph...")
 
         planner = Planner(self.db_path, greedy=self.greedy)
         recipe = planner.plan(self.root, known_values=sample_inputs)
+
+        if DEBUG_EXECUTION:
+            print("[Session] Compiling graph...")
 
         compiler = Compiler()
         compiled_graph = compiler.compile(recipe, known_values=sample_inputs)

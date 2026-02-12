@@ -25,7 +25,6 @@ def max_ref(
     else:
         raise ValueError("Max requires 1 or 2 inputs")
 
-    out_shape = (None,)
     return TensorNode(
         OpType.MAX,
         x.dtype,

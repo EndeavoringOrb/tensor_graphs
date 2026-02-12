@@ -9,3 +9,4 @@ huggingface_hub
 torch
 safetensors
 hf_xet
+pillow

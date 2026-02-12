@@ -32,6 +32,7 @@ class OpType:
     FILL = "Fill"
     WHERE = "Where"
     COPY_TO = "CopyTo"
+    IM2COL = "Im2Col"
 
     @classmethod
     def is_atomic(cls, op_type: str) -> bool:

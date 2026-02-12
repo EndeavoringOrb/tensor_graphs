@@ -8,6 +8,7 @@ from ..ir.dtypes import DType
 from ..ops import OpType
 from ..compiler.dirty_propagation import DirtyPropagator
 from .memory import MemoryManager
+from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
 
 
 class Executor:
@@ -57,6 +58,8 @@ class Executor:
         current_refs = self.graph.ref_counts.copy()
 
         for inst in self.graph.instructions:
+            if DEBUG_EXECUTION and DEBUG_DETAILED:
+                print(f"[Executor.run] Executing {inst}")
             node = self.graph.nodes_map[inst.node_name]
 
             # Skip Constants/Inputs as they have no instruction to execute

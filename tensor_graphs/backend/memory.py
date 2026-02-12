@@ -212,15 +212,18 @@ class DeviceBuffer:
         # Select backing array based on region_id
         backing_array = self.regions[block.region_id]
 
-        if self.is_torch:
+        # Check if the backing array for this region is a Torch Tensor
+        is_region_torch = isinstance(backing_array, torch.Tensor)
+
+        if is_region_torch:
             t_dtype = self._map_dtype_torch(dtype)
             # For external regions (weights), backing_array IS the tensor.
             # We just need to ensure it matches shape/dtype (view logic).
             if block.region_id > 0:
-                # External data is usually already the right shape/dtype if source is correct
-                # but we force a view to be safe and handle slicing.
-                # Note: Torch tensor from Safetensors might need viewing.
-                # We assume 'data' passed to allocate_external was the raw tensor.
+                # External region: data is the tensor itself.
+                # Assume it's contiguous or view-compatible.
+                # Force a view to handle slicing/shape adjustments.
+                # Note: If data is already the correct shape, view() is cheap.
                 view = backing_array.view(t_dtype).reshape(shape)
             else:
                 # Region 0 logic (byte slab)
@@ -233,10 +236,7 @@ class DeviceBuffer:
             np_dtype = self._map_dtype_np(dtype)
 
             if block.region_id > 0:
-                # External region: backing_array is the mmap'd array (or numpy array)
-                # We trust the caller to provide data with compatible shape/dtype.
-                # We return the array itself, potentially reshaping if needed (handled by view logic).
-                # Note: block.offset is 0 for external regions.
+                # External region: backing_array is the numpy array
                 view = np.ndarray(
                     shape, dtype=np_dtype, buffer=backing_array.data, offset=0
                 )
@@ -328,11 +328,8 @@ class MemoryManager:
         elif isinstance(data, np.generic):
             size = data.nbytes
         else:
-            try:
-                arr = np.asarray(data)
-                size = arr.nbytes
-            except:
-                raise TypeError(f"Cannot determine size for data of type {type(data)}")
+            arr = np.asarray(data)
+            size = arr.nbytes
 
         device = node.backend.value if node.backend else "cpu"
         if "numpy" in device:
@@ -347,6 +344,7 @@ class MemoryManager:
         if device == "cpu" and node.op_type != OpType.CONSTANT:
             # --- Zero-Copy Path ---
             # Register the external memory region
+            # We assume data is passed as a memory-backed object (Torch Tensor or Numpy Array)
             buf.allocate_external(node.name, data, step=0)
         else:
             # --- Standard Copy Path (GPU) ---
@@ -435,10 +433,7 @@ class MemoryManager:
                 data = np.array(data, dtype=view.dtype)
 
             if data.shape != view.shape:
-                try:
-                    view[...] = data.reshape(view.shape)
-                except:
-                    view[...] = data
+                view[...] = data.reshape(view.shape)
             else:
                 view[...] = data
 
@@ -464,7 +459,7 @@ class MemoryManager:
             device = "cpu"
         elif "torch" in device and "cpu" in device:
             device = "cpu"
-        if node.name in self.buffers[device].allocations:
+        if device in self.buffers and node.name in self.buffers[device].allocations:
             self.buffers[device].allocations[node.name].is_locked = True
             self.buffers[device].allocations[
                 node.name
@@ -480,7 +475,7 @@ class MemoryManager:
         elif "torch" in device and "cpu" in device:
             device = "cpu"
 
-        if node.name in self.buffers[device].allocations:
+        if device in self.buffers and node.name in self.buffers[device].allocations:
             if node.storage_type == StorageType.TRANSIENT:
                 self.buffers[device].allocations[node.name].is_locked = False
 

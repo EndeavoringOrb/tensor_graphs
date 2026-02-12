@@ -1,11 +1,11 @@
-"""
-File: tensor_graphs/ops/fused/__init__.py
-"""
-
-# Import to register
-from .fma import *
-from .gelu import *
-from .rms_norm import *
-from .rope import *
-from .softmax import *
-from .tanh import *
+from .fma import fma_decomposition
+from .gelu import gelu_decomposition
+from .rms_norm import rms_norm_decomposition
+from .rope import rope_decomposition
+from .softmax import softmax_decomposition
+from .tanh import tanh_decomposition
+from .conv2d import conv2d_decomposition
+from .groupnorm import groupnorm_decomposition
+from .silu import silu_decomposition
+from .sigmoid import sigmoid_decomposition
+from .upsample_nearest import upsample_nearest_decomposition

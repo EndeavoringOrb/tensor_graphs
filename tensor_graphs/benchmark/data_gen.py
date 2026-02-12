@@ -252,7 +252,6 @@ class DataGenerator:
 
             a = DataGenerator.random_tensor(tuple(shape_a), dtype_a)
             b = DataGenerator.random_tensor(tuple(shape_b), dtype_b)
-            axis = np.array([axis_idx], dtype=np.int32)
 
             inputs_with_backends.append(
                 (a, signatures[0].backend if len(signatures) > 0 else backend)

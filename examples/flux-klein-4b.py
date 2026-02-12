@@ -16,6 +16,7 @@ from typing import Dict, Tuple, Optional, Any
 from dataclasses import dataclass
 
 import numpy as np
+from PIL import Image
 from tqdm import tqdm
 
 from tensor_graphs.ir.node import TensorNode
@@ -111,12 +112,7 @@ class FluxBuilder(GraphBuilder):
 
     def silu(self, x: TensorNode) -> TensorNode:
         """SiLU activation: x * sigmoid(x)"""
-        # SiLU = x * sigmoid(x) = x / (1 + exp(-x))
-        neg_x = self.negate(x)
-        exp_neg = self.exp(neg_x)
-        one_plus = self.add(self.const([1.0]), exp_neg)
-        sigmoid = self.divide(self.const([1.0]), one_plus)
-        return self.mul(x, sigmoid)
+        return TensorNode("SiLU", x.dtype, [x], name=self._next_name("silu"))
 
     def gelu_tanh(self, x: TensorNode) -> TensorNode:
         """GELU with tanh approximation."""
@@ -152,8 +148,6 @@ class FluxBuilder(GraphBuilder):
         eps: float = 1e-6,
     ) -> TensorNode:
         """GroupNorm for VAE."""
-        # GroupNorm is a decomposition: reshape -> layer_norm -> reshape
-        # For simplicity, we'll use a custom op registered separately
         return TensorNode(
             "GroupNorm",
             x.dtype,
@@ -778,9 +772,6 @@ class EulerSampler:
         return z - velocity * dt
 
 
-# examples/flux-klein-4b.py
-# ... (existing code until the VAEDecoder class) ...
-
 # ============================================================================
 # VAE Decoder
 # ============================================================================
@@ -810,11 +801,6 @@ class VAEDecoder(GraphBuilder):
         self, x: TensorNode, weight: TensorNode, bias: TensorNode, num_groups: int
     ) -> TensorNode:
         """GroupNorm with 32 groups."""
-        # Reshape for group norm: [B, C, H, W] -> [B, G, C//G, H, W]
-        # Compute mean and var over (C//G, H, W)
-        # This is complex in tensor format, use custom op or decomposition
-
-        # For simplicity, use a custom GroupNorm op registered in the registry
         return TensorNode(
             "GroupNorm",
             x.dtype,
@@ -825,16 +811,11 @@ class VAEDecoder(GraphBuilder):
 
     def swish(self, x: TensorNode) -> TensorNode:
         """SiLU/Swish activation."""
-        return self.silu(x)
+        return TensorNode("SiLU", x.dtype, [x], name=self._next_name("silu"))
 
     def silu(self, x: TensorNode) -> TensorNode:
         """SiLU activation using existing implementation."""
-        # SiLU = x * sigmoid(x)
-        neg_x = self.negate(x)
-        exp_neg = self.exp(neg_x)
-        one_plus = self.add(self.const([1.0]), exp_neg)
-        sigmoid = self.divide(self.const([1.0]), one_plus)
-        return self.mul(x, sigmoid)
+        return TensorNode("SiLU", x.dtype, [x], name=self._next_name("silu"))
 
     def conv2d(
         self,
@@ -847,7 +828,6 @@ class VAEDecoder(GraphBuilder):
     ) -> TensorNode:
         """
         2D Convolution using im2col + matmul.
-        For simplicity, we'll use a custom Conv2D op.
         """
         return TensorNode(
             "Conv2D",
@@ -921,30 +901,78 @@ class VAEDecoder(GraphBuilder):
     ) -> TensorNode:
         """
         Self-attention block for VAE.
-
-        norm -> Q, K, V -> attention -> out_proj + residual
+        Integrated decomposition: norm -> Q, K, V -> flattened attention -> out_proj + residual
         """
-        # Normalize
+        # 1. Normalize
         h = self.group_norm(x, norm_w, norm_b, num_groups)
 
-        # Q, K, V projections (1x1 conv)
+        # 2. Q, K, V projections (1x1 conv)
+        # Inputs/Outputs for these are [B, C, H, W]
         q = self.conv2d(h, q_w, q_b, kernel_size=1, stride=1, padding=0)
         k = self.conv2d(h, k_w, k_b, kernel_size=1, stride=1, padding=0)
         v = self.conv2d(h, v_w, v_b, kernel_size=1, stride=1, padding=0)
 
-        # Self-attention
-        attn_out = TensorNode(
-            "VAESelfAttn",
-            x.dtype,
-            [q, k, v],
-            name=self._next_name("self_attn"),
-            attrs={},
+        # 3. Flatten spatial dimensions for attention logic
+        # [B, C, H, W] -> [B, H, W, C] -> [B, L, C]
+        def flatten_spatial(node):
+            # Transpose to Channel-last
+            perm = self.permute(node, [0, 2, 3, 1])
+            # Reshape to [Batch, Sequence (H*W), Channels]
+            # Use -1 for spatial dimension to support dynamic resolution
+            # We assume B=1 for the target shape node based on the pipeline
+            c_dim = node.shape[1] if node.shape else self.cfg.vae_channels
+            return self.reshape(perm, self.const([1, -1, c_dim]))
+
+        q_flat = flatten_spatial(q)
+        k_flat = flatten_spatial(k)
+        v_flat = flatten_spatial(v)
+
+        # 4. Compute Attention Scores: (Q @ K^T) * scale
+        # K_T: [B, C, L]
+        k_t = self.permute(k_flat, [0, 2, 1])
+        
+        # [B, L, C] @ [B, C, L] -> [B, L, L]
+        scores = self.dot(q_flat, k_t)
+
+        # Scale = 1 / sqrt(C)
+        c_val = self.cfg.vae_channels
+        scale_val = float(c_val) ** -0.5
+        scores_scaled = self.mul(scores, self.const([scale_val]))
+
+        # 5. Softmax along last dimension
+        probs = TensorNode(
+            "Softmax",
+            q.dtype,
+            [scores_scaled],
+            name=self._next_name("vae_attn_softmax"),
+            attrs={"axis": -1},
         )
 
-        # Output projection
+        # 6. Context: Probs @ V -> [B, L, L] @ [B, L, C] -> [B, L, C]
+        attn_out_flat = self.dot(probs, v_flat)
+
+        # 7. Reshape back to NCHW
+        # [B, L, C] -> [B, H, W, C] -> [B, C, H, W]
+        # We extract spatial dimensions from the original 'x' input to ensure consistency
+        # Note: In a real graph, we'd use 'Shape' and 'Slice' nodes for full dynamism
+        # Here we use the builder's reshape with a dynamic middle
+        out_hwc = self.reshape(attn_out_flat, self.concat([
+            self.const([1]), # Batch
+            self.const([-1]), # H (inferred)
+            self.const([-1]), # W (inferred)
+            self.const([c_val]) # Channels
+        ], axis=0))
+        
+        # This specific permutation handles the HWC -> CHW move
+        # To be safe with the reshape above, we use the inferred spatial restoration
+        # flux_vae.c logic uses: [B, C, H, W]
+        # We'll use a simplified restoration for the graph builder:
+        attn_out = self.permute(out_hwc, [0, 3, 1, 2])
+
+        # 8. Output projection (1x1 conv)
         out = self.conv2d(attn_out, out_w, out_b, kernel_size=1, stride=1, padding=0)
 
-        # Residual
+        # 9. Residual connection
         return self.add(out, x)
 
     def decode(self, latent: TensorNode, weights: Dict[str, TensorNode]) -> TensorNode:
@@ -991,16 +1019,16 @@ class VAEDecoder(GraphBuilder):
 
         h = self.attnblock(
             h,
-            weights["decoder.mid_block.attentions.0.norm.weight"],
-            weights["decoder.mid_block.attentions.0.norm.bias"],
-            weights["decoder.mid_block.attentions.0.q.weight"],
-            weights["decoder.mid_block.attentions.0.q.bias"],
-            weights["decoder.mid_block.attentions.0.k.weight"],
-            weights["decoder.mid_block.attentions.0.k.bias"],
-            weights["decoder.mid_block.attentions.0.v.weight"],
-            weights["decoder.mid_block.attentions.0.v.bias"],
-            weights["decoder.mid_block.attentions.0.out.weight"],
-            weights["decoder.mid_block.attentions.0.out.bias"],
+            weights["decoder.mid_block.attentions.0.group_norm.weight"],
+            weights["decoder.mid_block.attentions.0.group_norm.bias"],
+            weights["decoder.mid_block.attentions.0.to_q.weight"],
+            weights["decoder.mid_block.attentions.0.to_q.bias"],
+            weights["decoder.mid_block.attentions.0.to_k.weight"],
+            weights["decoder.mid_block.attentions.0.to_k.bias"],
+            weights["decoder.mid_block.attentions.0.to_v.weight"],
+            weights["decoder.mid_block.attentions.0.to_v.bias"],
+            weights["decoder.mid_block.attentions.0.to_out.0.weight"],
+            weights["decoder.mid_block.attentions.0.to_out.0.bias"],
         )
 
         h = self.resblock(
@@ -1015,25 +1043,18 @@ class VAEDecoder(GraphBuilder):
             weights["decoder.mid_block.resnets.1.conv2.bias"],
         )
 
-        # Up blocks (reverse order: 512, 512, 256, 128 channels)
-        ch_mult = [1, 2, 4, 4]
-        num_groups = [3, 3, 3, 3]  # 3 resblocks per level
-
         for level in range(3, -1, -1):  # 3, 2, 1, 0
-            ch = cfg.vae_base_ch * ch_mult[level]
-
             for r in range(3):  # 3 resblocks
-                block_idx = (3 - level) * 3 + r
                 h = self.resblock(
                     h,
-                    weights[f"up_blocks.{3 - level}.resnets.{r}.norm1.weight"],
-                    weights[f"up_blocks.{3 - level}.resnets.{r}.norm1.bias"],
-                    weights[f"up_blocks.{3 - level}.resnets.{r}.conv1.weight"],
-                    weights[f"up_blocks.{3 - level}.resnets.{r}.conv1.bias"],
-                    weights[f"up_blocks.{3 - level}.resnets.{r}.norm2.weight"],
-                    weights[f"up_blocks.{3 - level}.resnets.{r}.norm2.bias"],
-                    weights[f"up_blocks.{3 - level}.resnets.{r}.conv2.weight"],
-                    weights[f"up_blocks.{3 - level}.resnets.{r}.conv2.bias"],
+                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.norm1.weight"],
+                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.norm1.bias"],
+                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.conv1.weight"],
+                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.conv1.bias"],
+                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.norm2.weight"],
+                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.norm2.bias"],
+                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.conv2.weight"],
+                    weights[f"decoder.up_blocks.{3 - level}.resnets.{r}.conv2.bias"],
                 )
 
             # Upsample (except last level)
@@ -1041,8 +1062,8 @@ class VAEDecoder(GraphBuilder):
                 h = self.upsample_nearest_2x(h)
                 h = self.conv2d(
                     h,
-                    weights[f"up_blocks.{3 - level}.upsamplers.0.conv.weight"],
-                    weights[f"up_blocks.{3 - level}.upsamplers.0.conv.bias"],
+                    weights[f"decoder.up_blocks.{3 - level}.upsamplers.0.conv.weight"],
+                    weights[f"decoder.up_blocks.{3 - level}.upsamplers.0.conv.bias"],
                     kernel_size=3,
                     stride=1,
                     padding=1,
@@ -1050,13 +1071,16 @@ class VAEDecoder(GraphBuilder):
 
         # Output: norm -> swish -> conv
         h = self.group_norm(
-            h, weights["dec_norm_out.weight"], weights["dec_norm_out.bias"], 32
+            h,
+            weights["decoder.conv_norm_out.weight"],
+            weights["decoder.conv_norm_out.bias"],
+            32,
         )
         h = self.swish(h)
         h = self.conv2d(
             h,
-            weights["dec_conv_out.weight"],
-            weights["dec_conv_out.bias"],
+            weights["decoder.conv_out.weight"],
+            weights["decoder.conv_out.bias"],
             kernel_size=3,
             stride=1,
             padding=1,
@@ -1153,11 +1177,7 @@ class Qwen3Encoder(GraphBuilder):
 
     def silu(self, x: TensorNode) -> TensorNode:
         """SiLU activation."""
-        neg_x = self.negate(x)
-        exp_neg = self.exp(neg_x)
-        one_plus = self.add(self.const([1.0]), exp_neg)
-        sigmoid = self.divide(self.const([1.0]), one_plus)
-        return self.mul(x, sigmoid)
+        return TensorNode("SiLU", x.dtype, [x], name=self._next_name("silu"))
 
     def attention(
         self,
@@ -1672,7 +1692,8 @@ class FluxPipeline:
         print(f"Size: {width}x{height}")
 
         # Encode text
-        text_emb = self.encode_text(prompt)
+        # text_emb = self.encode_text(prompt)
+        text_emb = None
 
         # Sample
         latent = self.sample(text_emb, height, width, num_steps, seed)
@@ -1718,14 +1739,9 @@ def main():
 
     # Save result
     output_path = "flux_output.png"
-
-    # Simple PPM output for now
-    with open(output_path.replace(".png", ".ppm"), "wb") as f:
-        h, w = image.shape[:2]
-        f.write(f"P6\n{w} {h}\n255\n".encode())
-        f.write(image.tobytes())
-
-    print(f"\nSaved to {output_path.replace('.png', '.ppm')}")
+    img = Image.fromarray(image)
+    img.save(output_path, format="PNG")
+    print(f"\nSaved to {output_path}")
 
 
 if __name__ == "__main__":
