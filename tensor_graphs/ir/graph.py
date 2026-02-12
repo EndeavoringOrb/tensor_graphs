@@ -199,8 +199,23 @@ class GraphBuilder:
                 isinstance(value, list) and len(value) > 0 and isinstance(value[0], int)
             ):
                 dtype = DType.INT32
+            elif hasattr(value, "dtype"):
+                # Handle numpy arrays and numpy scalar types
+                dt = str(value.dtype)
+                if "float32" in dt or "float64" in dt:
+                    dtype = DType.FP32
+                elif "float16" in dt:
+                    dtype = DType.FP16
+                elif "int" in dt:
+                    dtype = DType.INT32
+                elif "bool" in dt:
+                    dtype = DType.BOOL
+                else:
+                    dtype = DType.FP32
             else:
-                raise ValueError("Could not infer dtype for constant")
+                raise ValueError(
+                    f"Could not infer dtype for constant with type {type(value)}"
+                )
         if not isinstance(value, np.ndarray):
             # If it's a scalar, wrap it; if it's a list, convert it
             value = np.array(

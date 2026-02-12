@@ -21,6 +21,7 @@ dependencies = [
     "huggingface_hub",
     "torch",
     "safetensors",
+    "hf_xet",
 ]
 
 [project.optional-dependencies]

@@ -478,14 +478,14 @@ class GraphPropagator:
 
 @GraphPropagator.register_shape(OpType.INPUT)
 def _shape_input(node: TensorNode, get_val):
+    if node.shape:
+        node.shape = tuple(d if isinstance(d, int) else None for d in node.shape)
+        return
     val = get_val(node)
     if val is not None and hasattr(val, "shape"):
         node.shape = tuple(int(d) for d in val.shape)
         return
-    if node.shape:
-        node.shape = tuple(d if isinstance(d, int) else None for d in node.shape)
-    else:
-        node.shape = None
+    node.shape = None
 
 
 @GraphPropagator.register_shape(OpType.CONSTANT)

@@ -1,26 +1,64 @@
+# tensor_graphs/weights/safetensors_source.py
+import os
 import torch
 from safetensors import safe_open
-from typing import Any, Tuple, List
+from typing import Any, Tuple, List, Dict
 
 from .interface import WeightSource
 
 
 class SafetensorsSource(WeightSource):
-    def __init__(self, filepath: str):
-        self.filepath = filepath
-        # Use framework="pt" to support bfloat16 and robust memory mapping
-        self._handle = safe_open(filepath, framework="pt", device="cpu")
+    def __init__(self, path: str):
+        self.path = path
+        self._handles: Dict[str, Any] = {}  # filepath -> handle
+        self._key_to_handle: Dict[str, Any] = {}  # tensor_name -> handle
+
+        # Determine if path is a file or directory
+        if os.path.isdir(path):
+            # Discover all safetensors files in the directory
+            safetensors_files = sorted(
+                [f for f in os.listdir(path) if f.endswith(".safetensors")]
+            )
+            if not safetensors_files:
+                raise FileNotFoundError(f"No safetensors files found in {path}")
+            filepaths = [os.path.join(path, f) for f in safetensors_files]
+        else:
+            # Single file
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Safetensors file not found: {path}")
+            filepaths = [path]
+
+        # Open all files and build key mapping
+        for fp in filepaths:
+            handle = safe_open(fp, framework="pt", device="cpu")
+            self._handles[fp] = handle
+
+            # Map each tensor name to this handle
+            for key in handle.keys():
+                if key in self._key_to_handle:
+                    raise ValueError(
+                        f"Duplicate tensor name '{key}' found in multiple shards "
+                        f"({path})"
+                    )
+                self._key_to_handle[key] = handle
 
     def keys(self) -> List[str]:
-        return self._handle.keys()
+        return list(self._key_to_handle.keys())
 
     def get_tensor_metadata(self, name: str) -> Tuple[Tuple[int, ...], str]:
-        info = self._handle.get_tensor_info(name)
-        return tuple(info.shape), info.dtype
+        if name not in self._key_to_handle:
+            raise KeyError(f"Tensor '{name}' not found in safetensors source")
+        handle = self._key_to_handle[name]
+        return tuple(handle.get_tensor(name).shape), handle.get_tensor(name).dtype
 
     def get_tensor(self, name: str) -> Any:
+        if name not in self._key_to_handle:
+            raise KeyError(f"Tensor '{name}' not found in safetensors source")
+
+        handle = self._key_to_handle[name]
+
         # 1. Get PyTorch tensor (Memory mapped on CPU)
-        tensor = self._handle.get_tensor(name)
+        tensor = handle.get_tensor(name)
 
         # 2. Handle Dtype Conversion (Framework currently expects FP32/INT32/BOOL)
         if tensor.dtype == torch.bfloat16:
@@ -37,4 +75,5 @@ class SafetensorsSource(WeightSource):
         return tensor.numpy()
 
     def close(self):
-        self._handle = None
+        self._handles.clear()
+        self._key_to_handle.clear()
