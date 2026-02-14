@@ -26,8 +26,7 @@ def rms_norm_decomposition(inputs, attrs=None):
     one = TensorNode(OpType.CONSTANT, x.dtype, [], attrs={"value": 1.0})
     inv_sqrt = TensorNode(OpType.DIVIDE, x.dtype, [one, rsqrt])
     norm = TensorNode(OpType.MUL, x.dtype, [x, inv_sqrt])
-    one_scale = TensorNode(OpType.ADD, scale.dtype, [one, scale])
-    return TensorNode(OpType.MUL, x.dtype, [norm, one_scale])
+    return TensorNode(OpType.MUL, x.dtype, [norm, scale])
 
 
 register_reference_factory("RMSNorm", rms_norm_decomposition)

@@ -19,5 +19,5 @@ def rms_norm_kernel(inputs, outputs, attrs):
     eps_val = eps[0]
     var = np.mean(x**2, axis=-1, keepdims=True)
     x_norm = x * (1.0 / np.sqrt(var + eps_val))
-    result = x_norm * (1.0 + scale)
+    result = x_norm * scale
     outputs[0][:] = result

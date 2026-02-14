@@ -52,7 +52,7 @@ class FluxConfig:
     text_num_heads: int = 32
     text_num_kv_heads: int = 8
     text_head_dim: int = 128
-    text_max_seq: int = 4
+    text_max_seq: int = 512
     text_rope_theta: float = 1000000.0
 
     # Latent
@@ -120,6 +120,29 @@ class FluxBuilder(GraphBuilder):
 
         # @ V
         return self.dot(probs, v)
+    
+    def layer_norm(self, x: TensorNode, eps: float = 1e-6) -> TensorNode:
+        """Standard LayerNorm without affine parameters (centering + scaling)."""
+        dim = self.cfg.hidden_size
+        
+        # Mean
+        mean = TensorNode("Sum", x.dtype, [x], attrs={"axis": -1, "keepdims": True})
+        mean = self.divide(mean, self.const([float(dim)]))
+        
+        # Sub Mean
+        x_sub = self.add(x, self.negate(mean))
+        
+        # Var
+        sq = self.mul(x_sub, x_sub)
+        var_sum = TensorNode("Sum", x.dtype, [sq], attrs={"axis": -1, "keepdims": True})
+        var = self.divide(var_sum, self.const([float(dim)]))
+        
+        # Div Std
+        std = self.sqrt(self.add(var, self.const([eps])))
+        one = self.const([1.0])
+        inv_std = self.divide(one, std)
+        
+        return self.mul(x_sub, inv_std)
 
     # --- Transformer Components ---
 
@@ -206,8 +229,9 @@ class FluxBuilder(GraphBuilder):
         txt_shift, txt_scale, txt_gate = txt_mods
 
         # --- Image Stream ---
-        # AdaLN: (1+scale)*norm(x) + shift
-        img_norm = self.rms_norm(img_hidden, self.const([1.0]))
+        # AdaLN: (1+scale)*LayerNorm(x) + shift
+        # Fixed: Use layer_norm instead of rms_norm
+        img_norm = self.layer_norm(img_hidden)
         img_mod = self.add(
             self.mul(img_norm, self.add(self.const([1.0]), img_scale)), img_shift
         )
@@ -220,7 +244,7 @@ class FluxBuilder(GraphBuilder):
         img_k = self._reshape_for_attn(img_k, img_seq_len, num_heads, head_dim)
         img_v = self._reshape_for_attn(img_v, img_seq_len, num_heads, head_dim)
 
-        # QK Norm
+        # QK Norm (Uses RMSNorm in Flux, correctly)
         img_q = self.rms_norm(img_q, weights["img_norm_q"])
         img_k = self.rms_norm(img_k, weights["img_norm_k"])
 
@@ -235,7 +259,8 @@ class FluxBuilder(GraphBuilder):
         img_k = self.rope_2d(img_k, img_cos, img_sin)
 
         # --- Text Stream ---
-        txt_norm = self.rms_norm(txt_hidden, self.const([1.0]))
+        # Fixed: Use layer_norm instead of rms_norm
+        txt_norm = self.layer_norm(txt_hidden)
         txt_mod = self.add(
             self.mul(txt_norm, self.add(self.const([1.0]), txt_scale)), txt_shift
         )
@@ -248,10 +273,11 @@ class FluxBuilder(GraphBuilder):
         txt_k = self._reshape_for_attn(txt_k, txt_seq_len, num_heads, head_dim)
         txt_v = self._reshape_for_attn(txt_v, txt_seq_len, num_heads, head_dim)
 
+        # QK Norm (Uses RMSNorm in Flux, correctly)
         txt_q = self.rms_norm(txt_q, weights["txt_norm_q"])
         txt_k = self.rms_norm(txt_k, weights["txt_norm_k"])
 
-        # --- Slice RoPE for Text (Text tokens are at the beginning) ---
+        # --- Slice RoPE for Text ---
         txt_cos = self.slice(
             cos, [0, 0, 0, 0], [None, None, self.cfg.text_max_seq, None]
         )
@@ -290,7 +316,7 @@ class FluxBuilder(GraphBuilder):
     ) -> TensorNode:
         shift, scale, gate = mods
 
-        norm = self.rms_norm(x, self.const([1.0]))
+        norm = self.layer_norm(x)
         mod = self.add(self.mul(norm, self.add(self.const([1.0]), scale)), shift)
 
         # Fused Gate + Up
@@ -322,7 +348,7 @@ class FluxBuilder(GraphBuilder):
 
         shift, scale, gate = mods
 
-        norm = self.rms_norm(hidden, self.const([1.0]))
+        norm = self.layer_norm(hidden)
         mod = self.add(self.mul(norm, self.add(self.const([1.0]), scale)), shift)
 
         # Fused QKV + MLP
@@ -343,7 +369,7 @@ class FluxBuilder(GraphBuilder):
         k = self._reshape_for_attn(k, seq_len, cfg.num_heads, cfg.head_dim)
         v = self._reshape_for_attn(v, seq_len, cfg.num_heads, cfg.head_dim)
 
-        # QK Norm
+        # QK Norm (Uses RMSNorm in Flux, correctly)
         q = self.rms_norm(q, weights["norm_q"])
         k = self.rms_norm(k, weights["norm_k"])
 
@@ -537,7 +563,7 @@ class FluxTransformer:
         )
         final_scale, final_shift = final_mods
 
-        norm_out = b.rms_norm(img_out, b.const([1.0]))
+        norm_out = b.layer_norm(img_out)
         mod_out = b.add(
             b.mul(norm_out, b.add(b.const([1.0]), final_scale)), final_shift
         )
@@ -1437,10 +1463,11 @@ class FluxPipeline:
             raise ValueError("no tokenizer")
 
         tokens = self.tokenizer.encode(prompt).ids
+        pad_id = 151643
         if len(tokens) > self.cfg.text_max_seq:
             tokens = tokens[: self.cfg.text_max_seq]
         else:
-            tokens = tokens + [0] * (self.cfg.text_max_seq - len(tokens))
+            tokens = tokens + [pad_id] * (self.cfg.text_max_seq - len(tokens))
         input_ids = np.array([tokens], dtype=np.int32)
 
         self.build_text_encoder()
@@ -1544,7 +1571,7 @@ class FluxPipeline:
         print(f"\nGenerating: {prompt[:50]}...")
         print(f"Size: {width}x{height}")
 
-        # prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         text_emb = self.encode_text(prompt)
         # text_emb = np.zeros(
         #     (1, self.cfg.text_max_seq, self.cfg.text_dim)
@@ -1568,17 +1595,19 @@ def main():
     cfg = FluxConfig()
     pipeline = FluxPipeline(model_dir, cfg)
 
-    image = pipeline.generate(
-        prompt="cat",
-        height=128,
-        width=128,
-        num_steps=4,
-        seed=42,
-    )
+    while True:
+        prompt = input("Enter prompt: ")
+        image = pipeline.generate(
+            prompt=prompt,
+            height=128,
+            width=128,
+            num_steps=4,
+            seed=42,
+        )
 
-    output_path = "flux_output.png"
-    Image.fromarray(image).save(output_path)
-    print(f"\nSaved to {output_path}")
+        output_path = "flux_output.png"
+        Image.fromarray(image).save(output_path)
+        print(f"\nSaved to {output_path}")
 
 
 if __name__ == "__main__":

@@ -63,6 +63,13 @@ class Gemma3Model:
         )
         return b.reshape(scaled_mask, final_shape)
 
+    def rms_norm_gemma(self, x, weight, eps):
+        """Gemma uses RMSNorm(x) * (1 + weight)"""
+        b = self.builder
+        # Add 1.0 to the weight parameter to match Gemma's offset scaling
+        scale = b.add(weight, b.const([1.0], DType.FP32))
+        return b.rms_norm(x, scale, eps)
+
     def forward(
         self, input_ids_node, seq_len_node, max_seq_len, shapes: Dict[str, TensorNode]
     ):
@@ -81,7 +88,7 @@ class Gemma3Model:
         for i in range(cfg["n_layers"]):
             x = self._transformer_block(x, i, cos, sin, mask, shapes)
 
-        x = b.rms_norm(x, b.param("model.norm.weight", (cfg["emb_dim"],)), self.eps)
+        x = self.rms_norm_gemma(x, b.param("model.norm.weight", (cfg["emb_dim"],)), self.eps)
         w_head = w_emb
         logits = b.dot(x, b.permute(w_head, [1, 0]))
 
@@ -92,13 +99,13 @@ class Gemma3Model:
         prefix = f"model.layers.{layer_idx}"
 
         residual = x
-        x_norm = b.rms_norm(
+        x_norm = self.rms_norm_gemma(
             x,
             b.param(f"{prefix}.input_layernorm.weight", (self.cfg["emb_dim"],)),
             self.eps,
         )
         x_attn = self._attention(x_norm, layer_idx, cos, sin, mask, shapes)
-        x_attn = b.rms_norm(
+        x_attn = self.rms_norm_gemma(
             x_attn,
             b.param(
                 f"{prefix}.post_attention_layernorm.weight", (self.cfg["emb_dim"],)
@@ -108,7 +115,7 @@ class Gemma3Model:
         x = b.add(residual, x_attn)
 
         residual = x
-        x_norm = b.rms_norm(
+        x_norm = self.rms_norm_gemma(
             x,
             b.param(
                 f"{prefix}.pre_feedforward_layernorm.weight", (self.cfg["emb_dim"],)
@@ -116,7 +123,7 @@ class Gemma3Model:
             self.eps,
         )
         x_ff = self._mlp(x_norm, layer_idx)
-        x_ff = b.rms_norm(
+        x_ff = self.rms_norm_gemma(
             x_ff,
             b.param(
                 f"{prefix}.post_feedforward_layernorm.weight", (self.cfg["emb_dim"],)
@@ -166,14 +173,14 @@ class Gemma3Model:
         v = b.permute(b.reshape(v, shapes["kv_shape"]), [0, 2, 1, 3])
 
         q = b.rope(
-            b.rms_norm(
+            self.rms_norm_gemma(
                 q, b.param(f"{prefix}.q_norm.weight", (cfg["head_dim"],)), self.eps
             ),
             cos,
             sin,
         )
         k = b.rope(
-            b.rms_norm(
+            self.rms_norm_gemma(
                 k, b.param(f"{prefix}.k_norm.weight", (cfg["head_dim"],)), self.eps
             ),
             cos,
@@ -280,14 +287,11 @@ def main():
     tokenizer = Tokenizer.from_file(tokenizer_path)
 
     # 3. Setup Logic
-    prompt = "<start_of_turn>user\nExplain Quantum Mechanics to a 5 year old.<end_of_turn>\n<start_of_turn>model\n"
-    input_ids = tokenizer.encode(prompt).ids
 
     # Generation Loop Params
-    max_new_tokens = 50
+    max_new_tokens = 5
     MAX_SEQ_LEN = 128
 
-    print(f"\nPrompt: {prompt}")
     print("Generating...", end="", flush=True)
 
     # --- BUILD GRAPH ---
@@ -345,39 +349,42 @@ def main():
     with Timer("Loading weights (Zero-Copy)"):
         session.load_weights(weights_path)
 
-    # --- RUN LOOP ---
-    for _ in range(max_new_tokens):
-        seq_len = len(input_ids)
-        if seq_len > MAX_SEQ_LEN:
-            break
+    while True:
+        prompt = input("Enter prompt: ")
+        # prompt = "Explain Quantum Mechanics to a 5 year old."
+        prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+        input_ids = tokenizer.encode(prompt).ids
+        # --- RUN LOOP ---
+        for _ in range(max_new_tokens):
+            seq_len = len(input_ids)
+            if seq_len > MAX_SEQ_LEN:
+                break
 
-        input_ids_padded = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
-        input_ids_padded[0, :seq_len] = input_ids
-        seq_len_val = np.array([MAX_SEQ_LEN], dtype=np.int32)
+            input_ids_padded = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
+            input_ids_padded[0, :seq_len] = input_ids
+            seq_len_val = np.array([MAX_SEQ_LEN], dtype=np.int32)
 
-        step_inputs = {
-            "input_ids": input_ids_padded,
-            "seq_len": seq_len_val,
-            "q_shape": q_shape,
-            "kv_shape": kv_shape,
-            "flat_shape": flat_shape,
-        }
+            step_inputs = {
+                "input_ids": input_ids_padded,
+                "seq_len": seq_len_val,
+                "q_shape": q_shape,
+                "kv_shape": kv_shape,
+                "flat_shape": flat_shape,
+            }
 
-        # USE SESSION
-        with Timer("Running session"):
-            logits_out = session.run(step_inputs)
+            # USE SESSION
+            with Timer("Running session"):
+                logits_out = session.run(step_inputs)
 
-        # Decoding
-        next_token_logits = logits_out[0, seq_len - 1, :]
-        next_token_id = int(np.argmax(next_token_logits))
-        input_ids.append(next_token_id)
-        word = tokenizer.decode([next_token_id])
-        print(word, end="", flush=True)
+            # Decoding
+            next_token_logits = logits_out[0, seq_len - 1, :]
+            next_token_id = int(np.argmax(next_token_logits))
+            input_ids.append(next_token_id)
+            word = tokenizer.decode([next_token_id])
+            print(word, flush=True)
 
-        if next_token_id == tokenizer.token_to_id("<end_of_turn>"):
-            break
-
-    print("\n\nDone.")
+            if next_token_id == tokenizer.token_to_id("<end_of_turn>"):
+                break
 
 
 if __name__ == "__main__":

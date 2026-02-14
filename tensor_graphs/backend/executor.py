@@ -166,6 +166,8 @@ class Executor:
                     if current_refs[p_name] == 0:
                         p_node = self.graph.nodes_map[p_name]
                         if p_node.storage_type == StorageType.TRANSIENT:
+                            if DEBUG_EXECUTION and DEBUG_DETAILED:
+                                print(f"[Executor.run] unlocking {p_node}")
                             self.mem.unlock(p_node)
 
         root_name = self.graph.instructions[-1].node_name
