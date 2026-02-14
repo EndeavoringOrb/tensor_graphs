@@ -659,38 +659,64 @@ def _shape_slice(node: TensorNode, get_val):
     ends = node.attrs.get("ends", [])
     steps = node.attrs.get("steps", [])
 
+    def resolve_attr_val(val_list, idx, default=None):
+        if idx >= len(val_list) or val_list[idx] is None:
+            return default
+        v = val_list[idx]
+        if isinstance(v, TensorNode):
+            node_val = get_val(v)
+            if node_val is not None:
+                return int(node_val.item() if hasattr(node_val, "item") else node_val)
+            return None  # Cannot resolve yet
+        return int(v)
+
     new_shape = []
     for i, dim in enumerate(data_shape):
-        if dim is None:
+        s = resolve_attr_val(starts, i, default=0)
+        e = resolve_attr_val(ends, i, default=dim)
+        st = resolve_attr_val(steps, i, default=1)
+
+        if dim is None or s is None or e is None or st is None:
             new_shape.append(None)
             continue
 
-        s = int(starts[i]) if i < len(starts) and starts[i] is not None else None
-        e = int(ends[i]) if i < len(ends) and ends[i] is not None else None
-        st = int(steps[i]) if i < len(steps) and steps[i] is not None else 1
-
         # Let Python compute the canonical (start, stop, step) for this dim
-        start, stop, step = slice(s, e, st).indices(dim)
-        new_shape.append(len(range(start, stop, step)))
+        try:
+            start, stop, step = slice(s, e, st).indices(dim)
+            new_shape.append(len(range(start, stop, step)))
+        except (TypeError, ValueError):
+            new_shape.append(None)
 
     node.shape = tuple(new_shape)
 
 
 @GraphPropagator.register_forward(OpType.SLICE)
 def _fwd_slice(input_regions, input_shapes, output_shape, attrs):
+    # For now, if slice parameters are dynamic nodes, we conservatively
+    # mark the whole output as dirty if the input is dirty.
+    # To be precise, we would need get_val() here, but forward/backward
+    # propagation currently doesn't receive the value resolver.
     inp = input_regions[0]
     if _is_clean(inp):
         return None
+
     starts = attrs.get("starts", [])
+    # If any slice parameter is a node, fallback to full dirty
+    if any(isinstance(s, TensorNode) for s in starts) or any(
+        isinstance(e, TensorNode) for e in attrs.get("ends", [])
+    ):
+        return _make_full(output_shape)
+
+    in_shape = input_shapes[0]
     ends = attrs.get("ends", [])
     steps = attrs.get("steps", [])
-    in_shape = input_shapes[0]
     result = []
     for d in range(len(output_shape)):
         in_start, in_stop = inp[d] if d < len(inp) else (0, in_shape[d])
-        sl_start = starts[d] if d < len(starts) else 0
-        sl_end = ends[d] if d < len(ends) and ends[d] is not None else in_shape[d]
-        sl_step = steps[d] if d < len(steps) and steps[d] is not None else 1
+        sl_start = int(starts[d]) if d < len(starts) else 0
+        sl_end = int(ends[d]) if d < len(ends) and ends[d] is not None else in_shape[d]
+        sl_step = int(steps[d]) if d < len(steps) and steps[d] is not None else 1
+
         ov_start = max(in_start, sl_start)
         ov_end = min(in_stop, sl_end)
         if ov_start >= ov_end:
@@ -909,6 +935,13 @@ def _shape_dot(node: TensorNode, get_val):
         node.shape = batch_out + (s0[-2], s1[-1])
     elif len(s0) == 2 and len(s1) == 2:
         node.shape = (s0[0], s1[1])
+    elif len(s0) == 1 and len(s1) == 2:
+        # Vector-Matrix multiplication: (K,) @ (K, N) -> (N,)
+        # NumPy promotes 1D to (1, K), computes (1, N), then squeezes to (N,)
+        if s0[0] is not None and s1[0] is not None:
+            # We can optionally check s0[0] == s1[0] here, but propagation is permissive
+            pass
+        node.shape = (s1[1],)
 
 
 @GraphPropagator.register_forward(OpType.DOT)

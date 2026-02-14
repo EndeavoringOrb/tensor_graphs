@@ -11,6 +11,14 @@ from ....ops.atomic_types import OpType
     [TensorSignature(DType.FP32, shape=None), TensorSignature(DType.FP32, shape=None)],
     reference_factory=add_ref,
 )
+@KernelRegistry.register(
+    OpType.ADD,
+    [
+        TensorSignature(DType.INT32, shape=None),
+        TensorSignature(DType.INT32, shape=None),
+    ],
+    reference_factory=add_ref,
+)
 def add_generic_tensor(inputs, outputs, attrs):
     """
     inputs: [a, b]
