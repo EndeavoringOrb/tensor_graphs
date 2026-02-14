@@ -6,3 +6,4 @@
 - [ ] set cache size based on min(max_bytes, total_mem - graph_mem - max_expected_compute_mem). max_expected_compute_mem means we need to (during benchmarking) measure peak memory usage. if we don't have benchmark, then use constant heuristic value of 1GB
 - [ ] Make it so multiple graphs can share memory so we don't have max_bytes * 3 (vae, qwen3, flux transformer) memory
 - [ ] Optimize fwd/back shape propagation to make sure they all have smallest possible slice for recomputation (not conservative)
+- [ ] IMPORTANT: scenario where on second run, input -> node1 -> node2, input is clean, node2 is cached, but node1 is not cached. The executor should skip forward to node2, but because node1 is not cached, it recomputes node1, which then marks node2 as dirty even though it is actually cached.
