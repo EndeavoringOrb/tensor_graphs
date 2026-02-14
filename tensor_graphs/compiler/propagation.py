@@ -1001,22 +1001,45 @@ def _bwd_dot(output_region, input_shapes, output_shape, attrs):
         return [None, None]
     A_shape, B_shape = input_shapes[0], input_shapes[1]
     out_rank = len(output_shape)
-    m_start, m_stop = output_region[-2] if out_rank >= 2 else (0, 1)
-    n_start, n_stop = output_region[-1] if out_rank >= 1 else (0, 1)
 
-    A_region = list(output_region[:-2]) if out_rank > 2 else []
-    while len(A_region) < len(A_shape) - 2:
-        A_region.insert(0, (0, A_shape[len(A_region)]))
-    A_region = A_region[-(len(A_shape) - 2) :] if len(A_shape) > 2 else []
-    A_region.append((m_start, m_stop))
-    A_region.append((0, A_shape[-1]))
+    # 1. Map output dirty regions to M (rows of A) and N (cols of B)
+    if len(A_shape) == 1:
+        # (K,) @ (K, N) -> (N,)
+        m_start, m_stop = (0, 1)
+        n_start, n_stop = output_region[-1] if out_rank >= 1 else (0, 1)
+    elif len(B_shape) == 1:
+        # (M, K) @ (K,) -> (M,)
+        m_start, m_stop = output_region[-1] if out_rank >= 1 else (0, 1)
+        n_start, n_stop = (0, 1)
+    else:
+        # (M, K) @ (K, N) -> (M, N)
+        m_start, m_stop = output_region[-2] if out_rank >= 2 else (0, 1)
+        n_start, n_stop = output_region[-1] if out_rank >= 1 else (0, 1)
 
-    B_region = list(output_region[:-2]) if out_rank > 2 else []
-    while len(B_region) < len(B_shape) - 2:
-        B_region.insert(0, (0, B_shape[len(B_region)]))
-    B_region = B_region[-(len(B_shape) - 2) :] if len(B_shape) > 2 else []
-    B_region.append((0, B_shape[-2]))
-    B_region.append((n_start, n_stop))
+    # 2. Batch regions (common prefix)
+    batch_region = list(output_region[:-2]) if out_rank > 2 else []
+
+    # 3. Construct A Region
+    if len(A_shape) == 1:
+        A_region = [(0, A_shape[0])]
+    else:
+        A_region = list(batch_region)
+        while len(A_region) < len(A_shape) - 2:
+            A_region.insert(0, (0, A_shape[len(A_region)]))
+        A_region = A_region[-(len(A_shape) - 2) :] if len(A_shape) > 2 else []
+        A_region.append((m_start, m_stop))
+        A_region.append((0, A_shape[-1]))
+
+    # 4. Construct B Region
+    if len(B_shape) == 1:
+        B_region = [(0, B_shape[0])]
+    else:
+        B_region = list(batch_region)
+        while len(B_region) < len(B_shape) - 2:
+            B_region.insert(0, (0, B_shape[len(B_region)]))
+        B_region = B_region[-(len(B_shape) - 2) :] if len(B_shape) > 2 else []
+        B_region.append((0, B_shape[-2]))
+        B_region.append((n_start, n_stop))
 
     return [tuple(A_region), tuple(B_region)]
 

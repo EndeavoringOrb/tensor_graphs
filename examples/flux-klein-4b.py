@@ -128,7 +128,9 @@ class FluxBuilder(GraphBuilder):
         Output: (dim,)
         """
         half = dim // 2
-        freqs = self.arange(self.const(0), self.const(half), self.const(1))
+        freqs = self.cast(
+            self.arange(self.const(0), self.const(half), self.const(1)), DType.FP32
+        )
         freqs = self.mul(freqs, self.const([-math.log(max_period) / half]))
         freqs = self.exp(freqs)
 
@@ -211,15 +213,15 @@ class FluxBuilder(GraphBuilder):
         img_q = self.dot(img_mod, self.permute(weights["img_q"], [1, 0]))
         img_k = self.dot(img_mod, self.permute(weights["img_k"], [1, 0]))
         img_v = self.dot(img_mod, self.permute(weights["img_v"], [1, 0]))
+        img_q = self._reshape_for_attn(img_q, img_seq_len, num_heads, head_dim)
+        img_k = self._reshape_for_attn(img_k, img_seq_len, num_heads, head_dim)
+        img_v = self._reshape_for_attn(img_v, img_seq_len, num_heads, head_dim)
 
         # QK Norm
         img_q = self.rms_norm(img_q, weights["img_norm_q"])
         img_k = self.rms_norm(img_k, weights["img_norm_k"])
 
         # RoPE (reshape to [B, H, L, D])
-        img_q = self._reshape_for_attn(img_q, img_seq_len, num_heads, head_dim)
-        img_k = self._reshape_for_attn(img_k, img_seq_len, num_heads, head_dim)
-        img_v = self._reshape_for_attn(img_v, img_seq_len, num_heads, head_dim)
         img_q = self.rope_2d(img_q, cos, sin)
         img_k = self.rope_2d(img_k, cos, sin)
 
@@ -233,15 +235,16 @@ class FluxBuilder(GraphBuilder):
         txt_k = self.dot(txt_mod, self.permute(weights["txt_k"], [1, 0]))
         txt_v = self.dot(txt_mod, self.permute(weights["txt_v"], [1, 0]))
 
+        txt_q = self._reshape_for_attn(txt_q, txt_seq_len, num_heads, head_dim)
+        txt_k = self._reshape_for_attn(txt_k, txt_seq_len, num_heads, head_dim)
+        txt_v = self._reshape_for_attn(txt_v, txt_seq_len, num_heads, head_dim)
+
         txt_q = self.rms_norm(txt_q, weights["txt_norm_q"])
         txt_k = self.rms_norm(txt_k, weights["txt_norm_k"])
 
         # Text RoPE (1D) - Uses different RoPE frequencies passed in via cos/sin arg
         # Note: In this simplified impl, we use the same rope nodes but logic in
         # FluxPipeline handles concatenation of frequencies.
-        txt_q = self._reshape_for_attn(txt_q, txt_seq_len, num_heads, head_dim)
-        txt_k = self._reshape_for_attn(txt_k, txt_seq_len, num_heads, head_dim)
-        txt_v = self._reshape_for_attn(txt_v, txt_seq_len, num_heads, head_dim)
         txt_q = self.rope_2d(txt_q, cos, sin)
         txt_k = self.rope_2d(txt_k, cos, sin)
 
@@ -281,8 +284,8 @@ class FluxBuilder(GraphBuilder):
         fused_ff = self.dot(mod, self.permute(weights[f"{prefix}_mlp_in"], [1, 0]))
 
         mlp_hidden = self.cfg.mlp_hidden
-        ff_gate = self.slice(fused_ff, [0], [mlp_hidden])
-        ff_up = self.slice(fused_ff, [mlp_hidden], [mlp_hidden * 2])
+        ff_gate = self.slice(fused_ff, [0, 0, 0], [None, None, mlp_hidden])
+        ff_up = self.slice(fused_ff, [0, 0, mlp_hidden], [None, None, mlp_hidden * 2])
 
         inner = self.mul(self.silu(ff_gate), ff_up)
 
@@ -313,20 +316,21 @@ class FluxBuilder(GraphBuilder):
         fused = self.dot(mod, self.permute(weights["qkv_mlp"], [1, 0]))
 
         # Split: Q, K, V, Gate, Up
-        q = self.slice(fused, [0], [h_size])
-        k = self.slice(fused, [h_size], [h_size * 2])
-        v = self.slice(fused, [h_size * 2], [h_size * 3])
-        mlp_gate = self.slice(fused, [h_size * 3], [h_size * 3 + mlp_h])
-        mlp_up = self.slice(fused, [h_size * 3 + mlp_h], [h_size * 3 + mlp_h * 2])
+        q = self.slice(fused, [0, 0, 0], [None, None, h_size])
+        k = self.slice(fused, [0, 0, h_size], [None, None, h_size * 2])
+        v = self.slice(fused, [0, 0, h_size * 2], [None, None, h_size * 3])
+        mlp_gate = self.slice(fused, [0, 0, h_size * 3], [None, None, h_size * 3 + mlp_h])
+        mlp_up = self.slice(fused, [0, 0, h_size * 3 + mlp_h], [None, None, h_size * 3 + mlp_h * 2])
+
+        q = self._reshape_for_attn(q, seq_len, cfg.num_heads, cfg.head_dim)
+        k = self._reshape_for_attn(k, seq_len, cfg.num_heads, cfg.head_dim)
+        v = self._reshape_for_attn(v, seq_len, cfg.num_heads, cfg.head_dim)
 
         # QK Norm
         q = self.rms_norm(q, weights["norm_q"])
         k = self.rms_norm(k, weights["norm_k"])
 
         # RoPE
-        q = self._reshape_for_attn(q, seq_len, cfg.num_heads, cfg.head_dim)
-        k = self._reshape_for_attn(k, seq_len, cfg.num_heads, cfg.head_dim)
-        v = self._reshape_for_attn(v, seq_len, cfg.num_heads, cfg.head_dim)
         q = self.rope_2d(q, cos, sin)
         k = self.rope_2d(k, cos, sin)
 
@@ -504,7 +508,7 @@ class FluxTransformer:
 
         # 6. Final Layer (Image Only)
         # Extract image part: slice(txt_seq, end)
-        img_out = b.slice(combined, [self.txt_seq], [total_seq], [b.const([1])])
+        img_out = b.slice(combined, [0, self.cfg.text_max_seq, 0], [None, None, None])
 
         # Final Mod
         final_mods = b.compute_modulation(
@@ -1251,30 +1255,30 @@ class FluxPipeline:
             sin_out.reshape(1, 1, total_seq, head_dim),
         )
 
-    def build_transformer(self):
+    def build_transformer(self, latent_h: int = 16, latent_w: int = 16):
+        """Build and compile the transformer. Resolution is locked at first compile."""
         if self.transformer_session:
             return
 
-        print("Building Transformer graph...")
+        print(f"Building Transformer graph for {latent_w * 16}x{latent_h * 16}...")
         self.load_transformer()
         self.flux_transformer = FluxTransformer(self.cfg)
         self.transformer_session = GraphSession(self.flux_transformer.output)
 
-        h_val, w_val = 16, 16
         txt_len = self.cfg.text_max_seq
 
         dummy_rope_cos, dummy_rope_sin = self.compute_rope(
-            txt_len, h_val, w_val, self.cfg.head_dim, self.cfg.rope_theta
+            txt_len, latent_h, latent_w, self.cfg.head_dim, self.cfg.rope_theta
         )
 
         sample_inputs = {
             "img_latent": np.zeros(
-                (1, self.cfg.latent_channels, h_val, w_val), dtype=np.float32
+                (1, self.cfg.latent_channels, latent_h, latent_w), dtype=np.float32
             ),
             "txt_emb": np.zeros((1, txt_len, self.cfg.text_dim), dtype=np.float32),
             "timestep": np.array([1.0], dtype=np.float32),
-            "img_h": np.array([h_val], dtype=np.int32),
-            "img_w": np.array([w_val], dtype=np.int32),
+            "img_h": np.array([latent_h], dtype=np.int32),
+            "img_w": np.array([latent_w], dtype=np.int32),
             "txt_seq": np.array([txt_len], dtype=np.int32),
             "rope_cos": dummy_rope_cos,
             "rope_sin": dummy_rope_sin,
@@ -1348,10 +1352,7 @@ class FluxPipeline:
         print(f"Encoding prompt: {prompt[:50]}...")
         self.load_tokenizer()
         if not self.tokenizer:
-            # Fallback random embedding
-            return np.random.randn(1, self.cfg.text_max_seq, self.cfg.text_dim).astype(
-                np.float32
-            )
+            raise ValueError("no tokenizer")
 
         tokens = self.tokenizer.encode(prompt).ids
         if len(tokens) > self.cfg.text_max_seq:
@@ -1368,9 +1369,7 @@ class FluxPipeline:
                 "seq_len": np.array([self.cfg.text_max_seq], dtype=np.int32),
             }
             return self.text_encoder_session.run(inputs)
-        return np.random.randn(1, self.cfg.text_max_seq, self.cfg.text_dim).astype(
-            np.float32
-        )
+        raise ValueError("no text_encoder_session")
 
     def decode_latent(self, latent: np.ndarray) -> np.ndarray:
         print("Decoding latent...")
@@ -1417,7 +1416,7 @@ class FluxPipeline:
         sampler = EulerSampler(steps)
         schedule = sampler.get_schedule()
 
-        self.build_transformer()
+        self.build_transformer(latent_h, latent_w)
         self.transformer_session.load_weights(self.transformer_weights)
 
         txt_seq = text_emb.shape[1]
@@ -1457,10 +1456,10 @@ class FluxPipeline:
         print(f"\nGenerating: {prompt[:50]}...")
         print(f"Size: {width}x{height}")
 
-        # text_emb = self.encode_text(prompt)
-        text_emb = np.zeros(
-            (1, self.cfg.text_max_seq, self.cfg.text_hidden_size)
-        )  # TODO: remove, this is a placeholder to skip expensive text encoding while testing sampling/latent decoding.
+        text_emb = self.encode_text(prompt)
+        # text_emb = np.zeros(
+        #     (1, self.cfg.text_max_seq, self.cfg.text_dim)
+        # )  # TODO: remove, this is a placeholder to skip expensive text encoding while testing sampling/latent decoding.
         latent = self.sample(text_emb, height, width, num_steps, seed)
         image = self.decode_latent(latent)
 

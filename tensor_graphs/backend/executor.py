@@ -9,6 +9,7 @@ from ..ops import OpType
 from ..compiler.dirty_propagation import DirtyPropagator
 from .memory import MemoryManager
 from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
+from tqdm import tqdm
 
 
 class Executor:
@@ -57,7 +58,7 @@ class Executor:
 
         current_refs = self.graph.ref_counts.copy()
 
-        for inst in self.graph.instructions:
+        for inst in tqdm(self.graph.instructions, desc="Executing graph instructions", disable=not DEBUG_EXECUTION):
             if DEBUG_EXECUTION and DEBUG_DETAILED:
                 print(f"[Executor.run] Executing {inst}")
             node = self.graph.nodes_map[inst.node_name]
