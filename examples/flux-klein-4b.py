@@ -259,169 +259,190 @@ class FluxBuilder(GraphBuilder):
         # For simplicity, we use standard RMSNorm
         return self.rms_norm(x, norm_weight)
 
+    def compute_modulation(
+        self, t_emb: TensorNode, weight: TensorNode, hidden: int, chunks: int
+    ) -> list[TensorNode]:
+        """
+        Compute shared modulation parameters.
+        C Code: iris_linear_nobias(..., t_emb_silu, adaln_weight, ...)
+        """
+        # t_emb input here is expected to be already SiLU'd if following C code exactly,
+        # but FluxTransformer passes raw t_emb. C code does: t_emb_silu = silu(t_emb).
+        # We will handle the SiLU inside FluxTransformer._build_graph before calling this.
+
+        # weight shape: [hidden * chunks, hidden]
+        # output: [1, hidden * chunks]
+        mod = self.dot(t_emb, self.permute(weight, [1, 0]))
+
+        # Split into chunks of size 'hidden'
+        results = []
+        for i in range(chunks):
+            start = i * hidden
+            end = (i + 1) * hidden
+            results.append(self.slice(mod, [start], [end]))
+        return results
+
     def double_block(
         self,
         img_hidden: TensorNode,
         txt_hidden: TensorNode,
-        img_seq_len: TensorNode,  # Added argument
-        txt_seq_len: TensorNode,  # Added argument
-        t_emb: TensorNode,
-        block_weights: Dict[str, TensorNode],
+        img_seq_len: TensorNode,
+        txt_seq_len: TensorNode,
+        # Pre-computed modulation tensors (passed from FluxTransformer)
+        img_mods: tuple[TensorNode, TensorNode, TensorNode],  # shift, scale, gate
+        txt_mods: tuple[TensorNode, TensorNode, TensorNode],
+        weights: Dict[str, TensorNode],
         cos: TensorNode,
         sin: TensorNode,
     ) -> Tuple[TensorNode, TensorNode]:
-        """
-        Double stream block: separate image and text streams with cross-attention.
-        """
+        """Double stream block with shared modulation inputs."""
         cfg = self.cfg
         hidden = cfg.hidden_size
-        num_heads = cfg.num_heads
         head_dim = cfg.head_dim
-        mlp_hidden = cfg.mlp_hidden
+        num_heads = cfg.num_heads
 
-        # --- Modulation ---
-        img_shift, img_scale, img_gate, txt_shift, txt_scale, txt_gate = (
-            self._double_block_modulation(
-                t_emb, block_weights["mod_img"], block_weights["mod_txt"], hidden
-            )
-        )
+        img_shift, img_scale, img_gate = img_mods
+        txt_shift, txt_scale, txt_gate = txt_mods
 
         # --- Image Stream ---
         img_norm = self.rms_norm(img_hidden, self.const([1.0]))
-        img_mod = self.add(img_norm, img_shift)
-        img_mod = self.mul(img_mod, self.add(self.const([1.0]), img_scale))
+        # AdaLN: (1+scale)*norm + shift
+        img_mod = self.add(
+            self.mul(img_norm, self.add(self.const([1.0]), img_scale)), img_shift
+        )
 
-        img_q = self.dot(img_mod, self.permute(block_weights["img_q"], [1, 0]))
-        img_k = self.dot(img_mod, self.permute(block_weights["img_k"], [1, 0]))
-        img_v = self.dot(img_mod, self.permute(block_weights["img_v"], [1, 0]))
+        # Q, K, V
+        img_q = self.dot(img_mod, self.permute(weights["img_q"], [1, 0]))
+        img_k = self.dot(img_mod, self.permute(weights["img_k"], [1, 0]))
+        img_v = self.dot(img_mod, self.permute(weights["img_v"], [1, 0]))
 
-        img_q = self.qk_norm(img_q, block_weights["img_norm_q"], head_dim)
-        img_k = self.qk_norm(img_k, block_weights["img_norm_k"], head_dim)
+        # QK Norm
+        img_q = self.rms_norm(img_q, weights["img_norm_q"])
+        img_k = self.rms_norm(img_k, weights["img_norm_k"])
 
-        # Reshape for attention [B, L, H, D] -> [B, H, L, D]
-        # Pass img_seq_len explicitly
+        # RoPE
         img_q = self._reshape_for_attn(img_q, img_seq_len, num_heads, head_dim)
         img_k = self._reshape_for_attn(img_k, img_seq_len, num_heads, head_dim)
         img_v = self._reshape_for_attn(img_v, img_seq_len, num_heads, head_dim)
-
         img_q = self.rope_2d(img_q, cos, sin)
         img_k = self.rope_2d(img_k, cos, sin)
 
         # --- Text Stream ---
         txt_norm = self.rms_norm(txt_hidden, self.const([1.0]))
-        txt_mod = self.add(txt_norm, txt_shift)
-        txt_mod = self.mul(txt_mod, self.add(self.const([1.0]), txt_scale))
+        txt_mod = self.add(
+            self.mul(txt_norm, self.add(self.const([1.0]), txt_scale)), txt_shift
+        )
 
-        txt_q = self.dot(txt_mod, self.permute(block_weights["txt_q"], [1, 0]))
-        txt_k = self.dot(txt_mod, self.permute(block_weights["txt_k"], [1, 0]))
-        txt_v = self.dot(txt_mod, self.permute(block_weights["txt_v"], [1, 0]))
+        txt_q = self.dot(txt_mod, self.permute(weights["txt_q"], [1, 0]))
+        txt_k = self.dot(txt_mod, self.permute(weights["txt_k"], [1, 0]))
+        txt_v = self.dot(txt_mod, self.permute(weights["txt_v"], [1, 0]))
 
-        txt_q = self.qk_norm(txt_q, block_weights["txt_norm_q"], head_dim)
-        txt_k = self.qk_norm(txt_k, block_weights["txt_norm_k"], head_dim)
+        txt_q = self.rms_norm(txt_q, weights["txt_norm_q"])
+        txt_k = self.rms_norm(txt_k, weights["txt_norm_k"])
 
-        # Reshape for attention
-        # Pass txt_seq_len explicitly
+        # Text RoPE (1D - handled by using same rope op but appropriate cos/sin)
         txt_q = self._reshape_for_attn(txt_q, txt_seq_len, num_heads, head_dim)
         txt_k = self._reshape_for_attn(txt_k, txt_seq_len, num_heads, head_dim)
         txt_v = self._reshape_for_attn(txt_v, txt_seq_len, num_heads, head_dim)
-
         txt_q = self.rope_2d(txt_q, cos, sin)
         txt_k = self.rope_2d(txt_k, cos, sin)
 
         # --- Joint Attention ---
-        joint_k = self.concat([img_k, txt_k], axis=2)
-        joint_v = self.concat([img_v, txt_v], axis=2)
+        # Concat [Text, Image] for K, V
+        joint_k = self.concat([txt_k, img_k], axis=2)
+        joint_v = self.concat([txt_v, img_v], axis=2)
 
         img_attn_out = self.attention(img_q, joint_k, joint_v)
         txt_attn_out = self.attention(txt_q, joint_k, joint_v)
 
-        # Reshape back
         img_attn_out = self._reshape_from_attn(img_attn_out, img_seq_len, hidden)
         txt_attn_out = self._reshape_from_attn(txt_attn_out, txt_seq_len, hidden)
 
-        # Output projections
-        img_out = self.dot(
-            img_attn_out, self.permute(block_weights["img_proj"], [1, 0])
+        img_attn_proj = self.dot(
+            img_attn_out, self.permute(weights["img_proj"], [1, 0])
         )
-        txt_out = self.dot(
-            txt_attn_out, self.permute(block_weights["txt_proj"], [1, 0])
+        txt_attn_proj = self.dot(
+            txt_attn_out, self.permute(weights["txt_proj"], [1, 0])
         )
 
-        img_hidden = self.add(img_hidden, self.mul(img_gate, img_out))
-        txt_hidden = self.add(txt_hidden, self.mul(txt_gate, txt_out))
-
-        # --- FFN ---
-        img_hidden = self._double_block_ffn(
-            img_hidden, block_weights, "img", mlp_hidden
-        )
-        txt_hidden = self._double_block_ffn(
-            txt_hidden, block_weights, "txt", mlp_hidden
-        )
+        # Residual with Gate
+        img_hidden = self.add(img_hidden, self.mul(img_gate, img_attn_proj))
+        txt_hidden = self.add(txt_hidden, self.mul(txt_gate, txt_attn_proj))
 
         return img_hidden, txt_hidden
+
+    def double_block_ffn(
+        self, x: TensorNode, mods: tuple, weights: Dict[str, TensorNode], prefix: str
+    ) -> TensorNode:
+        shift, scale, gate = mods
+
+        norm = self.rms_norm(x, self.const([1.0]))
+        mod = self.add(self.mul(norm, self.add(self.const([1.0]), scale)), shift)
+
+        # Fused Gate + Up: weights["mlp_in"] is [mlp*2, hidden]
+        fused_ff = self.dot(mod, self.permute(weights[f"{prefix}_mlp_in"], [1, 0]))
+
+        mlp_hidden = self.cfg.mlp_hidden
+        ff_gate = self.slice(fused_ff, [0], [mlp_hidden])
+        ff_up = self.slice(fused_ff, [mlp_hidden], [mlp_hidden * 2])
+
+        inner = self.mul(self.silu(ff_gate), ff_up)
+
+        out = self.dot(inner, self.permute(weights[f"{prefix}_mlp_out"], [1, 0]))
+
+        return self.add(x, self.mul(gate, out))
 
     def single_block(
         self,
         hidden: TensorNode,
-        seq_len: TensorNode,  # Added argument
-        t_emb: TensorNode,
-        block_weights: Dict[str, TensorNode],
+        seq_len: TensorNode,
+        mods: tuple[TensorNode, TensorNode, TensorNode],
+        weights: Dict[str, TensorNode],
         cos: TensorNode,
         sin: TensorNode,
-        block_idx: int,
     ) -> TensorNode:
-        """
-        Single stream block: unified attention on concatenated [text, image].
-        """
+        """Single stream block."""
         cfg = self.cfg
-        hidden_size = cfg.hidden_size
-        num_heads = cfg.num_heads
-        head_dim = cfg.head_dim
-        mlp_hidden = cfg.mlp_hidden
+        h_size = cfg.hidden_size
+        mlp_h = cfg.mlp_hidden
 
-        # Modulation
-        shift, scale, gate = self.ada_ln_single_modulation(
-            t_emb, block_weights["mod"], hidden_size
-        )
+        shift, scale, gate = mods
 
-        # Norm + mod
-        h_norm = self.rms_norm(hidden, self.const([1.0]))
-        h_mod = self.add(h_norm, shift)
-        h_mod = self.mul(h_mod, self.add(self.const([1.0]), scale))
+        # Norm + Mod
+        norm = self.rms_norm(hidden, self.const([1.0]))
+        mod = self.add(self.mul(norm, self.add(self.const([1.0]), scale)), shift)
 
-        # Fused QKV projection
-        qkv = self.dot(h_mod, self.permute(block_weights["qkv"], [1, 0]))
+        # Fused QKV + MLP: weights["qkv_mlp"] is [hidden*3 + mlp*2, hidden]
+        fused = self.dot(mod, self.permute(weights["qkv_mlp"], [1, 0]))
 
-        # Split Q, K, V
-        q = self.slice(qkv, [0], [hidden_size])
-        k = self.slice(qkv, [hidden_size], [hidden_size * 2])
-        v = self.slice(qkv, [hidden_size * 2], [hidden_size * 3])
+        # Split: Q, K, V, Gate, Up
+        q = self.slice(fused, [0], [h_size])
+        k = self.slice(fused, [h_size], [h_size * 2])
+        v = self.slice(fused, [h_size * 2], [h_size * 3])
+        mlp_gate = self.slice(fused, [h_size * 3], [h_size * 3 + mlp_h])
+        mlp_up = self.slice(fused, [h_size * 3 + mlp_h], [h_size * 3 + mlp_h * 2])
 
-        mlp_gate = self.slice(qkv, [hidden_size * 3], [hidden_size * 3 + mlp_hidden])
-        mlp_up = self.slice(
-            qkv, [hidden_size * 3 + mlp_hidden], [hidden_size * 3 + mlp_hidden * 2]
-        )
+        # QK Norm
+        q = self.rms_norm(q, weights["norm_q"])
+        k = self.rms_norm(k, weights["norm_k"])
 
-        q = self.qk_norm(q, block_weights["norm_q"], head_dim)
-        k = self.qk_norm(k, block_weights["norm_k"], head_dim)
-
-        # Reshape for attention
-        q = self._reshape_for_attn(q, seq_len, num_heads, head_dim)
-        k = self._reshape_for_attn(k, seq_len, num_heads, head_dim)
-        v = self._reshape_for_attn(v, seq_len, num_heads, head_dim)
-
+        # RoPE
+        q = self._reshape_for_attn(q, seq_len, cfg.num_heads, cfg.head_dim)
+        k = self._reshape_for_attn(k, seq_len, cfg.num_heads, cfg.head_dim)
+        v = self._reshape_for_attn(v, seq_len, cfg.num_heads, cfg.head_dim)
         q = self.rope_2d(q, cos, sin)
         k = self.rope_2d(k, cos, sin)
 
+        # Attention
         attn_out = self.attention(q, k, v)
-        attn_out = self._reshape_from_attn(attn_out, seq_len, hidden_size)
+        attn_out = self._reshape_from_attn(attn_out, seq_len, h_size)
 
-        mlp_gate = self.silu(mlp_gate)
-        mlp_out = self.mul(mlp_gate, mlp_up)
+        # MLP
+        mlp_out = self.mul(self.silu(mlp_gate), mlp_up)
 
-        concat_out = self.concat([attn_out, mlp_out], axis=-1)
-
-        out = self.dot(concat_out, self.permute(block_weights["proj"], [1, 0]))
+        # Concat & Project
+        concat = self.concat([attn_out, mlp_out], axis=-1)
+        out = self.dot(concat, self.permute(weights["proj_mlp"], [1, 0]))
 
         return self.add(hidden, self.mul(gate, out))
 
@@ -528,40 +549,40 @@ class FluxBuilder(GraphBuilder):
 
 
 class FluxTransformer:
-    """FLUX.2 Klein 4B Transformer."""
-
     def __init__(self, cfg: FluxConfig):
         self.cfg = cfg
         self.builder = FluxBuilder(cfg)
         self._build_graph()
 
     def _build_graph(self):
-        """Build the transformer computational graph."""
         b = self.builder
         cfg = self.cfg
 
-        # Input nodes
+        # Inputs
         self.img_latent = b.input("img_latent", (1, cfg.latent_channels, None, None))
         self.txt_emb = b.input("txt_emb", (1, None, cfg.text_dim))
         self.timestep = b.input("timestep", (1,))
         self.img_h = b.input("img_h", (1,))
         self.img_w = b.input("img_w", (1,))
+        self.img_seq = b.mul(self.img_h, self.img_w)
+        self.txt_seq = b.const([cfg.text_max_seq])  # Simplified for demo
 
-        # Timestep embedding
-        t_emb = b.time_embedder(
+        # 1. Embeddings
+        # Timestep
+        t_emb_raw = b.time_embedder(
             self.timestep,
-            b.param("time_embed.fc1.weight", (cfg.hidden_size, 512)),
+            b.param("time_embed.fc1.weight", (cfg.hidden_size, 256)),
             b.param("time_embed.fc2.weight", (cfg.hidden_size, cfg.hidden_size)),
+            dim=256,
         )
+        t_emb_silu = b.silu(t_emb_raw)  # Shared for modulation
 
-        # Input projections
+        # Image Projection (NLC)
         img_flat = b.permute(self.img_latent, [0, 2, 3, 1])
-        img_seq = b.mul(self.img_h, self.img_w)
         img_flat = b.reshape(
             img_flat,
-            b.concat([b.const([1]), img_seq, b.const([cfg.latent_channels])], 0),
+            b.concat([b.const([1]), self.img_seq, b.const([cfg.latent_channels])], 0),
         )
-
         img_hidden = b.dot(
             img_flat,
             b.permute(
@@ -569,6 +590,7 @@ class FluxTransformer:
             ),
         )
 
+        # Text Projection
         txt_hidden = b.dot(
             self.txt_emb,
             b.permute(
@@ -576,121 +598,140 @@ class FluxTransformer:
             ),
         )
 
-        cos, sin = self._build_rope(img_seq)
+        # RoPE
+        cos, sin = self._build_rope(self.img_seq)  # Simplified call
 
-        # Create text sequence length node (fixed constant for FLUX)
-        txt_seq = b.const([cfg.text_max_seq])
+        # 2. Shared Modulation (Computed Once)
+        # Double Blocks (6 components each: shift1, scale1, gate1, shift2, scale2, gate2)
+        mod_img_all = b.compute_modulation(
+            t_emb_silu,
+            b.param("double_mod_img.weight", (cfg.hidden_size * 6, cfg.hidden_size)),
+            cfg.hidden_size,
+            6,
+        )
+        mod_txt_all = b.compute_modulation(
+            t_emb_silu,
+            b.param("double_mod_txt.weight", (cfg.hidden_size * 6, cfg.hidden_size)),
+            cfg.hidden_size,
+            6,
+        )
 
-        # Double blocks
+        # Single Blocks (3 components: shift, scale, gate)
+        mod_single_all = b.compute_modulation(
+            t_emb_silu,
+            b.param("single_mod.weight", (cfg.hidden_size * 3, cfg.hidden_size)),
+            cfg.hidden_size,
+            3,
+        )
+
+        # 3. Double Blocks
         for i in range(cfg.num_double_layers):
             weights = self._get_double_block_weights(i)
-            # Pass sequence lengths to double_block
+
+            # Attn Modulation (first 3)
             img_hidden, txt_hidden = b.double_block(
-                img_hidden, txt_hidden, img_seq, txt_seq, t_emb, weights, cos, sin
+                img_hidden,
+                txt_hidden,
+                self.img_seq,
+                self.txt_seq,
+                mod_img_all[:3],
+                mod_txt_all[:3],
+                weights,
+                cos,
+                sin,
             )
 
-        # Concatenate for single blocks: [txt, img]
+            # FFN Modulation (last 3)
+            img_hidden = b.double_block_ffn(img_hidden, mod_img_all[3:], weights, "img")
+            txt_hidden = b.double_block_ffn(txt_hidden, mod_txt_all[3:], weights, "txt")
+
+        # 4. Concatenate [Text, Image]
         combined = b.concat([txt_hidden, img_hidden], axis=1)
+        total_seq = b.add(self.txt_seq, self.img_seq)
 
-        # Calculate total sequence length for single blocks
-        total_seq = b.add(txt_seq, img_seq)
-
-        # Single blocks
+        # 5. Single Blocks
         for i in range(cfg.num_single_layers):
             weights = self._get_single_block_weights(i)
-            # Pass total sequence length to single_block
-            combined = b.single_block(combined, total_seq, t_emb, weights, cos, sin, i)
+            combined = b.single_block(
+                combined, total_seq, mod_single_all, weights, cos, sin
+            )
 
-        # Extract image portion
-        img_out = b.slice(combined, [txt_seq], [b.add(txt_seq, img_seq)])
+        # 6. Final Layer (Image Only)
+        img_out = b.slice(combined, [self.txt_seq], [total_seq])
 
-        # Final layer
-        final_weights = {
-            "norm": b.param(
-                "final_norm.weight", (cfg.hidden_size, cfg.hidden_size * 2)
+        # Final Mod (reuse double_mod_img weights logic per C code, but graph needs separate compute for clarity or reuse node)
+        # C code reuses buffer but computes: linear(t_emb_silu, final_norm_weight) -> [shift, scale]
+        # Wait, C code says: `iris_linear_nobias(final_mod, tf->t_emb_silu, tf->final_norm_weight, ...)`
+        # final_norm_weight in C load is `norm_out.linear.weight` [2*hidden, hidden]
+        final_mods = b.compute_modulation(
+            t_emb_silu,
+            b.param("final_norm.weight", (cfg.hidden_size * 2, cfg.hidden_size)),
+            cfg.hidden_size,
+            2,
+        )
+
+        final_shift, final_scale = final_mods
+        norm_out = b.rms_norm(img_out, b.const([1.0]))
+        mod_out = b.add(
+            b.mul(norm_out, b.add(b.const([1.0]), final_scale)), final_shift
+        )
+
+        output = b.dot(
+            mod_out,
+            b.permute(
+                b.param("final_proj.weight", (cfg.latent_channels, cfg.hidden_size)),
+                [1, 0],
             ),
-            "proj": b.param(
-                "final_proj.weight", (cfg.latent_channels, cfg.hidden_size)
-            ),
-        }
-        output = b.final_layer(img_out, t_emb, final_weights, cfg.latent_channels)
+        )
 
-        # Reshape back to [B, C, H, W]
+        # Output Reshape
         output = b.permute(output, [0, 2, 1])
         output = b.reshape(
             output,
             b.concat(
-                [
-                    b.const([1]),
-                    b.const([cfg.latent_channels]),
-                    self.img_h,
-                    self.img_w,
-                ],
+                [b.const([1]), b.const([cfg.latent_channels]), self.img_h, self.img_w],
                 0,
             ),
         )
-
         self.output = output
 
-    def _build_rope(self, img_seq: TensorNode) -> Tuple[TensorNode, TensorNode]:
-        """Build 2D RoPE frequencies."""
-        b = self.builder
-        cfg = self.cfg
-
-        axis_dim = cfg.axis_dim  # 32 for head_dim=128
-
-        # Create position indices
-        # For 2D RoPE, we have 4 components: h_freq, w_freq, h_freq, w_freq
-        # (each half of head_dim gets h and w frequencies)
-
-        # Simplified: use precomputed frequencies
-        # In practice, this would compute frequencies based on img_h, img_w
-        cos = b.param("rope_cos", (1, 1, None, cfg.head_dim))
-        sin = b.param("rope_sin", (1, 1, None, cfg.head_dim))
-
-        return cos, sin
+    def _build_rope(self, img_seq_len):
+        # Placeholder for complex 2D RoPE logic, assuming precomputed inputs for this demo
+        # In a real impl, this would generate the frequencies graph based on img_h/img_w
+        return self.builder.param(
+            "rope_cos", (1, 1, None, self.cfg.head_dim)
+        ), self.builder.param("rope_sin", (1, 1, None, self.cfg.head_dim))
 
     def _get_double_block_weights(self, idx: int) -> Dict[str, TensorNode]:
-        """Get weights for double block."""
         b = self.builder
-        prefix = f"double_blocks.{idx}"
-
+        p = f"double_blocks.{idx}"
         return {
-            "mod_img": b.param(f"{prefix}.img_mod.linear.weight", (None,)),
-            "mod_txt": b.param(f"{prefix}.txt_mod.linear.weight", (None,)),
-            "img_q": b.param(f"{prefix}.img_attn.q.weight", (None,)),
-            "img_k": b.param(f"{prefix}.img_attn.k.weight", (None,)),
-            "img_v": b.param(f"{prefix}.img_attn.v.weight", (None,)),
-            "img_proj": b.param(f"{prefix}.img_attn.proj.weight", (None,)),
-            "img_norm_q": b.param(f"{prefix}.img_attn.norm_q.weight", (None,)),
-            "img_norm_k": b.param(f"{prefix}.img_attn.norm_k.weight", (None,)),
-            "img_mlp_gate": b.param(f"{prefix}.img_mlp.fc1.weight", (None,)),
-            "img_mlp_up": b.param(
-                f"{prefix}.img_mlp.fc1.weight", (None,)
-            ),  # same, split
-            "img_mlp_down": b.param(f"{prefix}.img_mlp.fc2.weight", (None,)),
-            "txt_q": b.param(f"{prefix}.txt_attn.q.weight", (None,)),
-            "txt_k": b.param(f"{prefix}.txt_attn.k.weight", (None,)),
-            "txt_v": b.param(f"{prefix}.txt_attn.v.weight", (None,)),
-            "txt_proj": b.param(f"{prefix}.txt_attn.proj.weight", (None,)),
-            "txt_norm_q": b.param(f"{prefix}.txt_attn.norm_q.weight", (None,)),
-            "txt_norm_k": b.param(f"{prefix}.txt_attn.norm_k.weight", (None,)),
-            "txt_mlp_gate": b.param(f"{prefix}.txt_mlp.fc1.weight", (None,)),
-            "txt_mlp_up": b.param(f"{prefix}.txt_mlp.fc1.weight", (None,)),
-            "txt_mlp_down": b.param(f"{prefix}.txt_mlp.fc2.weight", (None,)),
+            "img_q": b.param(f"{p}.img_attn.q.weight", (None,)),
+            "img_k": b.param(f"{p}.img_attn.k.weight", (None,)),
+            "img_v": b.param(f"{p}.img_attn.v.weight", (None,)),
+            "img_proj": b.param(f"{p}.img_attn.proj.weight", (None,)),
+            "img_norm_q": b.param(f"{p}.img_attn.norm_q.weight", (None,)),
+            "img_norm_k": b.param(f"{p}.img_attn.norm_k.weight", (None,)),
+            "img_mlp_in": b.param(f"{p}.img_mlp.in.weight", (None,)),  # Fused Gate+Up
+            "img_mlp_out": b.param(f"{p}.img_mlp.out.weight", (None,)),
+            "txt_q": b.param(f"{p}.txt_attn.q.weight", (None,)),
+            "txt_k": b.param(f"{p}.txt_attn.k.weight", (None,)),
+            "txt_v": b.param(f"{p}.txt_attn.v.weight", (None,)),
+            "txt_proj": b.param(f"{p}.txt_attn.proj.weight", (None,)),
+            "txt_norm_q": b.param(f"{p}.txt_attn.norm_q.weight", (None,)),
+            "txt_norm_k": b.param(f"{p}.txt_attn.norm_k.weight", (None,)),
+            "txt_mlp_in": b.param(f"{p}.txt_mlp.in.weight", (None,)),
+            "txt_mlp_out": b.param(f"{p}.txt_mlp.out.weight", (None,)),
         }
 
     def _get_single_block_weights(self, idx: int) -> Dict[str, TensorNode]:
-        """Get weights for single block."""
         b = self.builder
-        prefix = f"single_blocks.{idx}"
-
+        p = f"single_blocks.{idx}"
         return {
-            "mod": b.param(f"{prefix}.modulation.linear.weight", (None,)),
-            "qkv": b.param(f"{prefix}.attn.qkv.weight", (None,)),
-            "proj": b.param(f"{prefix}.attn.proj.weight", (None,)),
-            "norm_q": b.param(f"{prefix}.attn.norm_q.weight", (None,)),
-            "norm_k": b.param(f"{prefix}.attn.norm_k.weight", (None,)),
+            "qkv_mlp": b.param(f"{p}.qkv_mlp.weight", (None,)),
+            "proj_mlp": b.param(f"{p}.proj_mlp.weight", (None,)),
+            "norm_q": b.param(f"{p}.norm_q.weight", (None,)),
+            "norm_k": b.param(f"{p}.norm_k.weight", (None,)),
         }
 
 
@@ -1006,9 +1047,7 @@ class VAEDecoder(GraphBuilder):
         """
         Full VAE decoder forward pass.
         """
-        cfg = self.cfg
-
-        # --- NEW: Unpack FLUX latents ---
+        # Unpack FLUX latents
         h, h_unpacked, w_unpacked = self.unpack(latent, h_in, w_in)
 
         # Post-quantization conv (32 -> 32)
@@ -1584,7 +1623,7 @@ class FluxPipeline:
         h_node = self.vae_decoder.input("h", (1,), DType.INT32)
         w_node = self.vae_decoder.input("w", (1,), DType.INT32)
 
-        # Build weights dict
+        # Build weights shape dict
         weights = {}
         for key in self.vae_weights.keys():
             weights[key] = self.vae_decoder.param(
@@ -1607,6 +1646,47 @@ class FluxPipeline:
         )
 
         print("VAE decoder ready!")
+
+    def build_transformer(self):
+        """Build and compile the transformer graph."""
+        if self.transformer_session:
+            return
+
+        print("Building Transformer graph...")
+        self.load_transformer()
+
+        # Instantiate wrapper which builds the graph
+        self.flux_transformer = FluxTransformer(self.cfg)
+
+        # Create session attached to the output node
+        self.transformer_session = GraphSession(self.flux_transformer.output)
+
+        # Prepare dummy inputs for compilation
+        # Assuming H=W=16 (latent 8x8) for quick compile, or target resolution
+        h_val, w_val = 16, 16
+        sample_inputs = {
+            "img_latent": np.zeros(
+                (1, self.cfg.latent_channels, h_val, w_val), dtype=np.float32
+            ),
+            "txt_emb": np.zeros(
+                (1, self.cfg.text_max_seq, self.cfg.text_dim), dtype=np.float32
+            ),
+            "timestep": np.array([1.0], dtype=np.float32),
+            "img_h": np.array([h_val], dtype=np.int32),
+            "img_w": np.array([w_val], dtype=np.int32),
+            # Dummy RoPE cache (would need actual computation logic passed or computed inside)
+            "rope_cos": np.zeros(
+                (1, 1, h_val * w_val + self.cfg.text_max_seq, self.cfg.head_dim),
+                dtype=np.float32,
+            ),
+            "rope_sin": np.zeros(
+                (1, 1, h_val * w_val + self.cfg.text_max_seq, self.cfg.head_dim),
+                dtype=np.float32,
+            ),
+        }
+
+        self.transformer_session.compile(sample_inputs)
+        print("Transformer ready!")
 
     def encode_text(self, prompt: str) -> np.ndarray:
         """
@@ -1694,39 +1774,36 @@ class FluxPipeline:
         seed: Optional[int] = None,
         progress: bool = True,
     ) -> np.ndarray:
-        """
-        Run diffusion sampling.
-        """
-        # (Existing sampling code remains the same)
+        """Run diffusion sampling."""
         if seed is not None:
             np.random.seed(seed)
 
-        # Calculate latent dimensions
         latent_h = height // 16
         latent_w = width // 16
 
-        # Initialize noise
         z = np.random.randn(1, self.cfg.latent_channels, latent_h, latent_w).astype(
             np.float32
         )
 
-        # Get schedule
         steps = num_steps or self.cfg.num_steps_distilled
         sampler = EulerSampler(steps)
         schedule = sampler.get_schedule()
 
-        # Sampling loop
+        # Ensure transformer is built before loop
+        self.build_transformer()
+        self.transformer_session.load_weights(self.transformer_weights)
+
         iterator = tqdm(range(steps), desc="Sampling") if progress else range(steps)
 
         for i in iterator:
             t = schedule[i]
             t_next = schedule[i + 1]
-            dt = t - t_next
+            dt = t_next - t  # Euler: t to t_next
 
-            # Run transformer (placeholder)
+            # Model prediction (v-prediction)
             velocity = self._run_transformer(z, text_emb, t)
 
-            # Euler step
+            # Step
             z = sampler.step(z, velocity, t, dt)
 
         return z
@@ -1734,10 +1811,18 @@ class FluxPipeline:
     def _run_transformer(
         self, z: np.ndarray, text_emb: np.ndarray, t: float
     ) -> np.ndarray:
-        """Run transformer forward pass."""
-        # Placeholder - use numpy for now
-        # In full implementation, would build and run transformer graph
-        return np.random.randn(*z.shape).astype(np.float32) * 0.1
+        """Execute one step of the transformer."""
+        # Prepare inputs
+        _, _, h, w = z.shape
+        inputs = {
+            "img_latent": z,
+            "txt_emb": text_emb,
+            "timestep": np.array([t], dtype=np.float32),
+            "img_h": np.array([h], dtype=np.int32),
+            "img_w": np.array([w], dtype=np.int32),
+        }
+
+        return self.transformer_session.run(inputs)
 
     def generate(
         self,
@@ -1755,7 +1840,9 @@ class FluxPipeline:
 
         # Encode text
         # text_emb = self.encode_text(prompt)
-        text_emb = None
+        text_emb = np.zeros(
+            (1, self.cfg.text_max_seq, self.cfg.text_hidden_size)
+        )  # TODO: remove, this is a placeholder to skip expensive text encoding while testing sampling/latent decoding.
 
         # Sample
         latent = self.sample(text_emb, height, width, num_steps, seed)
