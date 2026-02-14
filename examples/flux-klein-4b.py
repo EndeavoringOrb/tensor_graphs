@@ -2,7 +2,7 @@
 FLUX.2 Klein 4B Image Generation on tensor_graphs
 
 Implements the complete diffusion transformer pipeline:
-- Text encoding (Qwen3-4B)
+- Text encoding (Qwen3-4B) with layer concatenation (8, 17, 26)
 - Latent diffusion (Transformer)
 - Image decoding (VAE)
 
@@ -53,6 +53,7 @@ class FluxConfig:
     text_num_kv_heads: int = 8
     text_head_dim: int = 128
     text_max_seq: int = 4
+    text_rope_theta: float = 1000000.0
 
     # Latent
     latent_channels: int = 128
@@ -89,7 +90,9 @@ class FluxBuilder(GraphBuilder):
         )
 
     def rope_2d(self, x: TensorNode, cos: TensorNode, sin: TensorNode) -> TensorNode:
-        return TensorNode("RoPE", x.dtype, [x, cos, sin], name=self._next_name("rope"))
+        return TensorNode(
+            "RoPE2DConsecutive", x.dtype, [x, cos, sin], name=self._next_name("rope")
+        )
 
     def attention(
         self,
@@ -221,9 +224,15 @@ class FluxBuilder(GraphBuilder):
         img_q = self.rms_norm(img_q, weights["img_norm_q"])
         img_k = self.rms_norm(img_k, weights["img_norm_k"])
 
-        # RoPE (reshape to [B, H, L, D])
-        img_q = self.rope_2d(img_q, cos, sin)
-        img_k = self.rope_2d(img_k, cos, sin)
+        # --- Slice RoPE for Image (Image tokens start after Text tokens) ---
+        img_cos = self.slice(
+            cos, [0, 0, self.cfg.text_max_seq, 0], [None, None, None, None]
+        )
+        img_sin = self.slice(
+            sin, [0, 0, self.cfg.text_max_seq, 0], [None, None, None, None]
+        )
+        img_q = self.rope_2d(img_q, img_cos, img_sin)
+        img_k = self.rope_2d(img_k, img_cos, img_sin)
 
         # --- Text Stream ---
         txt_norm = self.rms_norm(txt_hidden, self.const([1.0]))
@@ -242,11 +251,15 @@ class FluxBuilder(GraphBuilder):
         txt_q = self.rms_norm(txt_q, weights["txt_norm_q"])
         txt_k = self.rms_norm(txt_k, weights["txt_norm_k"])
 
-        # Text RoPE (1D) - Uses different RoPE frequencies passed in via cos/sin arg
-        # Note: In this simplified impl, we use the same rope nodes but logic in
-        # FluxPipeline handles concatenation of frequencies.
-        txt_q = self.rope_2d(txt_q, cos, sin)
-        txt_k = self.rope_2d(txt_k, cos, sin)
+        # --- Slice RoPE for Text (Text tokens are at the beginning) ---
+        txt_cos = self.slice(
+            cos, [0, 0, 0, 0], [None, None, self.cfg.text_max_seq, None]
+        )
+        txt_sin = self.slice(
+            sin, [0, 0, 0, 0], [None, None, self.cfg.text_max_seq, None]
+        )
+        txt_q = self.rope_2d(txt_q, txt_cos, txt_sin)
+        txt_k = self.rope_2d(txt_k, txt_cos, txt_sin)
 
         # --- Joint Attention ---
         # Concat [Text, Image] for K, V
@@ -319,8 +332,12 @@ class FluxBuilder(GraphBuilder):
         q = self.slice(fused, [0, 0, 0], [None, None, h_size])
         k = self.slice(fused, [0, 0, h_size], [None, None, h_size * 2])
         v = self.slice(fused, [0, 0, h_size * 2], [None, None, h_size * 3])
-        mlp_gate = self.slice(fused, [0, 0, h_size * 3], [None, None, h_size * 3 + mlp_h])
-        mlp_up = self.slice(fused, [0, 0, h_size * 3 + mlp_h], [None, None, h_size * 3 + mlp_h * 2])
+        mlp_gate = self.slice(
+            fused, [0, 0, h_size * 3], [None, None, h_size * 3 + mlp_h]
+        )
+        mlp_up = self.slice(
+            fused, [0, 0, h_size * 3 + mlp_h], [None, None, h_size * 3 + mlp_h * 2]
+        )
 
         q = self._reshape_for_attn(q, seq_len, cfg.num_heads, cfg.head_dim)
         k = self._reshape_for_attn(k, seq_len, cfg.num_heads, cfg.head_dim)
@@ -402,6 +419,7 @@ class FluxTransformer:
 
         # 1. Embeddings
         # Timestep
+        self.timestep = b.mul(self.timestep, b.const([1000.0]))
         t_emb_raw = b.time_embedder(
             self.timestep,
             b.param(
@@ -517,7 +535,7 @@ class FluxTransformer:
             cfg.hidden_size,
             2,
         )
-        final_shift, final_scale = final_mods
+        final_scale, final_shift = final_mods
 
         norm_out = b.rms_norm(img_out, b.const([1.0]))
         mod_out = b.add(
@@ -599,17 +617,46 @@ class FluxTransformer:
         }
 
 
-class EulerSampler:
-    def __init__(self, num_steps: int = 4):
+class Sampler:
+    """Proper FLUX.2 resolution-dependent Euler sampler."""
+
+    def __init__(self, num_steps: int):
         self.num_steps = num_steps
 
-    def get_schedule(self) -> np.ndarray:
-        # Simple linear schedule for distilled
-        return np.linspace(1.0, 0.0, self.num_steps + 1)
+    def get_schedule(self, image_seq_len: int) -> np.ndarray:
+        """Matches iris_schedule_flux and official FLUX.1/2 schedule logic."""
+        # Empirical constants from Flux training distribution
+        a1, b1 = 8.73809524e-05, 1.89833333
+        a2, b2 = 0.00016927, 0.45666666
 
-    def step(
-        self, z: np.ndarray, velocity: np.ndarray, t: float, dt: float
-    ) -> np.ndarray:
+        if image_seq_len > 4300:
+            mu = a2 * image_seq_len + b2
+        else:
+            # Interpolate between two linear fits
+            m_200 = a2 * image_seq_len + b2
+            m_10 = a1 * image_seq_len + b1
+            a = (m_200 - m_10) / 190.0
+            b = m_200 - 200.0 * a
+            mu = a * self.num_steps + b
+
+        # Linear timesteps from 1.0 down to 0.0
+        t_linear = 1.0 - np.linspace(0, 1, self.num_steps + 1)
+
+        # Apply generalized SNR shift: exp(mu) / (exp(mu) + (1/t - 1)^sigma)
+        schedule = np.zeros_like(t_linear)
+        for i, t in enumerate(t_linear):
+            if t <= 0:
+                schedule[i] = 0.0
+            elif t >= 1:
+                schedule[i] = 1.0
+            else:
+                # Flux uses sigma=1.0 for the generalized shift
+                schedule[i] = math.exp(mu) / (math.exp(mu) + (1.0 / t - 1.0))
+
+        return schedule
+
+    def step(self, z: np.ndarray, velocity: np.ndarray, dt: float) -> np.ndarray:
+        """Euler step: z_{t+dt} = z_t + dt * v"""
         return z + velocity * dt
 
 
@@ -621,7 +668,7 @@ class VAEDecoder(GraphBuilder):
     def __init__(self, cfg: FluxConfig):
         super().__init__()
         self.cfg = cfg
-        self.eps = 1e-6
+        self.eps = 1e-4
 
     def group_norm(
         self, x: TensorNode, weight: TensorNode, bias: TensorNode, num_groups: int
@@ -766,13 +813,14 @@ class VAEDecoder(GraphBuilder):
         p = self.cfg.patch_size
         c = self.cfg.vae_z_channels
 
-        # [B, p, p, C, H, W]
+        # [B, C, p, p, H, W]
+        # The channel dimension (128) is packed as C_base(32) * p(2) * p(2)
         shape1 = self.concat(
             [
                 self.const([1]),
-                self.const([p]),
-                self.const([p]),
                 self.const([c]),
+                self.const([p]),
+                self.const([p]),
                 h_in,
                 w_in,
             ],
@@ -781,7 +829,9 @@ class VAEDecoder(GraphBuilder):
         h = self.reshape(latent, shape1)
 
         # [B, C, H, p, W, p]
-        h = self.permute(h, [0, 3, 4, 1, 5, 2])
+        # Original dims: 0:B, 1:C, 2:Py, 3:Px, 4:H, 5:W
+        # Target dims:   0:B, 1:C, 4:H, 2:Py, 5:W, 3:Px
+        h = self.permute(h, [0, 1, 4, 2, 5, 3])
 
         new_h = self.mul(h_in, self.const([p]))
         new_w = self.mul(w_in, self.const([p]))
@@ -797,6 +847,20 @@ class VAEDecoder(GraphBuilder):
         w_in: TensorNode,
         weights: Dict[str, TensorNode],
     ) -> TensorNode:
+        bn_mean = weights["bn.running_mean"]
+        bn_var = weights["bn.running_var"]
+
+        # Reshape [128] -> [1, 128, 1, 1] for NCHW broadcasting
+        b_shape = self.const(
+            np.array([1, self.cfg.latent_channels, 1, 1], dtype=np.int32)
+        )
+        mu = self.reshape(bn_mean, b_shape)
+        var = self.reshape(bn_var, b_shape)
+
+        # Flux VAE uses eps=1e-4 for the latent batch norm
+        std = self.sqrt(self.add(var, self.const([self.eps])))
+        latent = self.add(self.mul(latent, std), mu)
+
         h, h_unpacked, w_unpacked = self.unpack(latent, h_in, w_in)
 
         h = self.conv2d(
@@ -911,7 +975,7 @@ class VAEDecoder(GraphBuilder):
 
 class Qwen3Encoder(GraphBuilder):
     """
-    Qwen3-4B Text Encoder.
+    Qwen3-4B Text Encoder with Flux specific layer extraction (8, 17, 26).
     """
 
     def __init__(self, cfg: FluxConfig):
@@ -920,7 +984,7 @@ class Qwen3Encoder(GraphBuilder):
         self.eps = 1e-6
 
     def compute_rope_freqs(
-        self, seq_len_node: TensorNode, head_dim: int, theta: float = 10000.0
+        self, seq_len_node: TensorNode, head_dim: int, theta: float = 1000000.0
     ) -> Tuple[TensorNode, TensorNode]:
         b = self
         half_dim = head_dim // 2
@@ -1109,12 +1173,25 @@ class Qwen3Encoder(GraphBuilder):
             [weights["model.embed_tokens.weight"], input_ids],
             name=self._next_name("embedding"),
         )
-        cos, sin = self.compute_rope_freqs(seq_len_node, self.cfg.text_head_dim)
+        cos, sin = self.compute_rope_freqs(
+            seq_len_node, self.cfg.text_head_dim, self.cfg.text_rope_theta
+        )
         mask = self.compute_causal_mask(seq_len_node)
-        for i in range(self.cfg.text_num_layers):
+
+        # Flux extraction logic: Layers 8, 17, 26 (0-indexed)
+        # We need to loop up to 26 inclusive.
+        target_layers = {8, 17, 26}
+        max_layer = 26
+        extracted_states = []
+
+        for i in range(max_layer + 1):
             x = self.transformer_block(x, weights, i, cos, sin, mask, seq_len_node)
-        x = self.rms_norm(x, weights["model.norm.weight"])
-        return x
+            if i in target_layers:
+                extracted_states.append(x)
+
+        # Concatenate extracted hidden states along feature dimension
+        # Shape: (1, L, 2560) -> (1, L, 2560*3=7680)
+        return self.concat(extracted_states, axis=-1)
 
     def compute_causal_mask(self, seq_len_node: TensorNode) -> TensorNode:
         mask_shape = self.concat([seq_len_node, seq_len_node], axis=0)
@@ -1124,7 +1201,8 @@ class Qwen3Encoder(GraphBuilder):
             [self.const([1]), self.const([1]), seq_len_node, seq_len_node],
             axis=0,
         )
-        return self.reshape(triu_mask, final_shape)
+        mask = self.mul(triu_mask, self.const(-1e9, DType.FP32))
+        return self.reshape(mask, final_shape)
 
 
 class FluxPipeline:
@@ -1299,15 +1377,19 @@ class FluxPipeline:
             print("Skipping text encoder build (no weights)")
             return
 
-        embeddings = self.text_encoder.forward(
-            input_ids,
-            {
-                k: self.text_encoder.param(
-                    k, self.text_encoder_weights.get_tensor_metadata(k)[0]
-                )
-                for k in self.text_encoder_weights.keys()
-            },
-        )
+        # Prepare weights dict
+        weights_nodes = {}
+        for k in self.text_encoder_weights.keys():
+            # Check for layers beyond 26 to save compilation time/memory (optimization)
+            if "model.layers." in k:
+                layer_idx = int(k.split(".")[2])
+                if layer_idx > 26:
+                    continue
+
+            shape = self.text_encoder_weights.get_tensor_metadata(k)[0]
+            weights_nodes[k] = self.text_encoder.param(k, shape)
+
+        embeddings = self.text_encoder.forward(input_ids, weights_nodes)
         self.text_encoder_session = GraphSession(embeddings)
         sample_inputs = {
             "input_ids": np.zeros((1, self.cfg.text_max_seq), dtype=np.int32),
@@ -1407,14 +1489,17 @@ class FluxPipeline:
 
         latent_h = height // 16
         latent_w = width // 16
+        img_seq_len = latent_h * latent_w
 
+        # Initialize noise
         z = np.random.randn(1, self.cfg.latent_channels, latent_h, latent_w).astype(
             np.float32
         )
 
         steps = num_steps or self.cfg.num_steps_distilled
-        sampler = EulerSampler(steps)
-        schedule = sampler.get_schedule()
+        sampler = Sampler(steps)
+        # Proper Flux schedule depends on the number of tokens (latent area)
+        schedule = sampler.get_schedule(img_seq_len)
 
         self.build_transformer(latent_h, latent_w)
         self.transformer_session.load_weights(self.transformer_weights)
@@ -1425,14 +1510,14 @@ class FluxPipeline:
         )
 
         for i in tqdm(range(steps), desc="Sampling"):
-            t = schedule[i]
+            t_curr = schedule[i]
             t_next = schedule[i + 1]
-            dt = t_next - t
+            dt = t_next - t_curr  # Negative for denoising
 
             inputs = {
                 "img_latent": z,
                 "txt_emb": text_emb,
-                "timestep": np.array([t], dtype=np.float32),
+                "timestep": np.array([t_curr], dtype=np.float32),
                 "img_h": np.array([latent_h], dtype=np.int32),
                 "img_w": np.array([latent_w], dtype=np.int32),
                 "txt_seq": np.array([txt_seq], dtype=np.int32),
@@ -1440,8 +1525,11 @@ class FluxPipeline:
                 "rope_sin": rope_sin,
             }
 
+            # Predict velocity
             velocity = self.transformer_session.run(inputs)
-            z = sampler.step(z, velocity, t, dt)
+
+            # Euler update
+            z = sampler.step(z, velocity, dt)
 
         return z
 
@@ -1456,6 +1544,7 @@ class FluxPipeline:
         print(f"\nGenerating: {prompt[:50]}...")
         print(f"Size: {width}x{height}")
 
+        # prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         text_emb = self.encode_text(prompt)
         # text_emb = np.zeros(
         #     (1, self.cfg.text_max_seq, self.cfg.text_dim)

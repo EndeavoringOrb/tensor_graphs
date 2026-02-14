@@ -1,1 +1,8 @@
-- [ ] Make decomposition for conv2d
+- [ ] ?? monte carlo tree search (SEARCH mode) or greedy (GREEDY mode) for caching
+- [ ] minimize memory usage (make sure no duplicate weights or anything)
+- [ ] make better safetensors loader that doesn't need to read whole tensor to get metadata
+- [ ] add cuda kernels to make gemma-3-270m go fast on gpu
+- [ ] make easy workflow to test end-to-end correctness against other frameworks where user provides a couple (input, output) references
+- [ ] set cache size based on min(max_bytes, total_mem - graph_mem - max_expected_compute_mem). max_expected_compute_mem means we need to (during benchmarking) measure peak memory usage. if we don't have benchmark, then use constant heuristic value of 1GB
+- [ ] Make it so multiple graphs can share memory so we don't have max_bytes * 3 (vae, qwen3, flux transformer) memory
+- [ ] Optimize fwd/back shape propagation to make sure they all have smallest possible slice for recomputation (not conservative)
