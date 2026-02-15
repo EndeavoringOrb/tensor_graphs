@@ -291,7 +291,7 @@ def main():
     # 3. Setup Logic
 
     # Generation Loop Params
-    max_new_tokens = 5
+    max_new_tokens = 128
     MAX_SEQ_LEN = 128
 
     print("Generating...", end="", flush=True)
@@ -352,8 +352,8 @@ def main():
         session.load_weights(weights_path)
 
     while True:
-        # prompt = input("Enter prompt: ")
-        prompt = "Explain Quantum Mechanics to a 5 year old."
+        prompt = input("Enter prompt: ")
+        # prompt = "Explain Quantum Mechanics to a 5 year old."
         prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
         input_ids = tokenizer.encode(prompt).ids
         # --- RUN LOOP ---
@@ -383,7 +383,7 @@ def main():
             next_token_id = int(np.argmax(next_token_logits))
             input_ids.append(next_token_id)
             word = tokenizer.decode([next_token_id])
-            print(word, flush=True)
+            print(word, end="\n" if DEBUG_EXECUTION else "", flush=True)
 
             if next_token_id == tokenizer.token_to_id("<end_of_turn>"):
                 break

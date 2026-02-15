@@ -21,6 +21,104 @@ class Executor:
         # Persistent cache across runs: Key = (node_name, shape_tuple) -> Kernel
         self._kernel_cache: Dict[Tuple[str, Tuple[Tuple[int, ...], ...]], Any] = {}
 
+    def _calculate_dirty_ratio(
+        self, regions: List[Tuple[slice, ...]], shape: Tuple[int, ...]
+    ) -> float:
+        """
+        Calculates the ratio of the dirty volume to the total tensor volume,
+        correctly handling overlapping regions using coordinate compression.
+        """
+        if not regions or not shape:
+            return 0.0
+
+        # 1. Normalize and Validate Regions
+        clean_regions = []
+        for reg in regions:
+            if len(reg) != len(shape):
+                continue
+
+            norm_slices = []
+            valid = True
+            for i, s in enumerate(reg):
+                start = s.start if s.start is not None else 0
+                stop = s.stop if s.stop is not None else shape[i]
+
+                # Clamp to shape bounds
+                start = max(0, start)
+                stop = min(shape[i], stop)
+
+                if start >= stop:
+                    valid = False
+                    break
+                norm_slices.append(slice(start, stop))
+
+            if valid:
+                clean_regions.append(tuple(norm_slices))
+
+        if not clean_regions:
+            return 0.0
+
+        total_vol = math.prod(shape)
+
+        # Optimization: If single region, no overlap possible
+        if len(clean_regions) == 1:
+            r = clean_regions[0]
+            vol = math.prod(s.stop - s.start for s in r)
+            return vol / total_vol
+
+        # 2. Coordinate Compression for N-Dimensional Overlap Handling
+        # Collect all unique boundaries per dimension
+        dim = len(shape)
+        dim_coords = [set() for _ in range(dim)]
+
+        for reg in clean_regions:
+            for d, s in enumerate(reg):
+                dim_coords[d].add(s.start)
+                dim_coords[d].add(s.stop)
+
+        # Sort coordinates to establish the compressed grid
+        sorted_coords = [sorted(list(s)) for s in dim_coords]
+        grid_shape = tuple(len(c) - 1 for c in sorted_coords)
+
+        if any(g <= 0 for g in grid_shape):
+            return 0.0
+
+        # Map coordinate value to index in the compressed grid
+        coord_to_idx = [{v: i for i, v in enumerate(c)} for c in sorted_coords]
+
+        # Create a boolean grid representing the compressed space
+        occupied = np.zeros(grid_shape, dtype=bool)
+
+        # Map each region to the compressed grid and mark occupied cells
+        for reg in clean_regions:
+            grid_slices = []
+            for d, s in enumerate(reg):
+                s_idx = coord_to_idx[d][s.start]
+                e_idx = coord_to_idx[d][s.stop]
+                grid_slices.append(slice(s_idx, e_idx))
+            occupied[tuple(grid_slices)] = True
+
+        # 3. Calculate Union Volume
+        # Find indices of all occupied cells in the compressed grid
+        indices = np.argwhere(occupied)
+        if indices.size == 0:
+            return 0.0
+
+        # Calculate the size of each segment in each dimension
+        intervals = [np.diff(c) for c in sorted_coords]
+
+        # Vectorized volume calculation:
+        # For every occupied cell (index), look up the segment lengths and multiply them.
+        # gathered_lengths[d] contains the lengths of the segments for that dimension
+        # corresponding to the occupied cells.
+        gathered_lengths = [intervals[d][indices[:, d]] for d in range(dim)]
+        
+        # Product of lengths across dimensions for each cell
+        cell_volumes = np.prod(gathered_lengths, axis=0)
+        dirty_vol = np.sum(cell_volumes)
+
+        return dirty_vol / total_vol
+
     def _update_inputs(self, inputs: Dict[str, Any]) -> None:
         for name, data in inputs.items():
             node = self.graph.nodes_map.get(name)
@@ -129,22 +227,18 @@ class Executor:
                     counters["pruned"] += 1
                 elif state["is_dirty"] and state["in_cache"]:
                     counters["part"] += 1
-                    partial_ratio_total = 0
-                    # Basic ratio calc for stats
-                    if (
-                        node.dirty_region
-                        and node.shape
-                        and all(len(node.shape) == len(reg) for reg in node.dirty_region)
-                    ):
-                        for reg in node.dirty_region:
-                            partial_ratio = 1
-                            for i, s in enumerate(reg):
-                                start = s.start if s.start is not None else 0
-                                stop = s.stop if s.stop is not None else node.shape[i]
-                                dim = node.shape[i] if node.shape[i] > 0 else 1
-                                partial_ratio *= (stop - start) / dim
-                            partial_ratio_total += partial_ratio
-                    partial_ratio_sum += partial_ratio_total
+                    
+                    if DEBUG_EXECUTION:
+                        # Updated ratio calculation with overlap handling
+                        if node.dirty_region and node.shape:
+                            partial_ratio = self._calculate_dirty_ratio(
+                                node.dirty_region, node.shape
+                            )
+                        else:
+                            partial_ratio = 1.0
+                        
+                        partial_ratio_sum += partial_ratio
+                    
                     # node.dirty_region is List[Tuple[slice, ...]]
                     # Filter out empty slices just in case
                     compute_regions = [
@@ -162,18 +256,19 @@ class Executor:
                     self.mem.lock(node)
 
                 # Update Stats
-                total_ops = counters["skip"] + counters["part"] + counters["full"]
-                counters["p_sum"] = (
-                    f"{partial_ratio_sum / counters['part']:.2f}"
-                    if counters["part"] > 0
-                    else "N/A"
-                )
-                counters["p_cache"] = (
-                    f"{(counters['skip'] + (counters['part'] - partial_ratio_sum)) / total_ops:.2f}"
-                    if total_ops > 0
-                    else "0.00"
-                )
-                pbar.set_postfix(counters)
+                if DEBUG_EXECUTION:
+                    total_ops = counters["skip"] + counters["part"] + counters["full"]
+                    counters["p_sum"] = (
+                        f"{partial_ratio_sum / counters['part']:.2f}"
+                        if counters["part"] > 0
+                        else "N/A"
+                    )
+                    counters["p_cache"] = (
+                        f"{(counters['skip'] + (counters['part'] - partial_ratio_sum)) / total_ops:.2f}"
+                        if total_ops > 0
+                        else "0.00"
+                    )
+                    pbar.set_postfix(counters)
 
                 if compute_regions:
                     # --- PREPARE OUTPUT BUFFER ---
