@@ -8,6 +8,8 @@ Implements the complete diffusion transformer pipeline:
 
 Reference: flux.c, flux_transformer.c, flux_vae.c
 """
+import warnings
+warnings.simplefilter('error', RuntimeWarning)
 
 import os
 import math
@@ -52,7 +54,7 @@ class FluxConfig:
     text_num_heads: int = 32
     text_num_kv_heads: int = 8
     text_head_dim: int = 128
-    text_max_seq: int = 512
+    text_max_seq: int = 32
     text_rope_theta: float = 1000000.0
 
     # Latent

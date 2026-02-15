@@ -301,7 +301,7 @@ class DeviceBuffer:
 
 
 class MemoryManager:
-    def __init__(self, max_bytes: int = 1 * 1024**3):
+    def __init__(self, max_bytes: int = 4 * 1024**3):
         self.max_bytes = max_bytes
         self.buffers: Dict[str, DeviceBuffer] = {}
         self.current_step = 0

@@ -1,3 +1,4 @@
+# tensor_graphs/backend/executor.py
 import numpy as np
 import time
 from typing import Dict, Any, List, Tuple, Optional
@@ -253,7 +254,8 @@ class Executor:
                 else:
                     # Cached & Clean & Needed -> Skip
                     counters["skip"] += 1
-                    self.mem.lock(node)
+                    # Node was already locked in Pass 2.5
+                    # self.mem.lock(node) # Redundant, but harmless
 
                 # Update Stats
                 if DEBUG_EXECUTION:
