@@ -3,6 +3,7 @@ from ...registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
 from ....ops.fused.sigmoid import sigmoid_decomposition
 
+
 @KernelRegistry.register(
     "Sigmoid",
     [TensorSignature(DType.FP32, shape=None)],

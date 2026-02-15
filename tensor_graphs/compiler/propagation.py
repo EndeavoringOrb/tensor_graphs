@@ -171,7 +171,6 @@ def _map_dtype_np(dtype: DType) -> Any:
     return {
         DType.FP32: np.float32,
         DType.INT32: np.int32,
-        DType.FP16: np.float16,
         DType.BOOL: np.bool_,
     }.get(dtype, np.float32)
 
@@ -885,19 +884,21 @@ def _bwd_concat(output_region, input_shapes, output_shape, attrs):
         ov_stop = min(out_stop, in_end)
         if ov_start >= ov_stop:
             results.append(
-                (
+                [
                     (
-                        0,
-                        0,
-                    ),
-                )
+                        (
+                            0,
+                            0,
+                        ),
+                    )
+                ]
             )
         else:
             in_region = list(output_region)
             in_region[axis] = (ov_start - current_offset, ov_stop - current_offset)
-            results.append(tuple(in_region))
+            results.append([tuple(in_region)])
         current_offset = in_end
-    return [results]
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -1216,66 +1217,92 @@ def _bwd_dot(
     if _is_clean(output_region):
         return [None, None]
 
-    # We need to satisfy ALL output boxes requested.
-    # Input regions are the union of requirements for each output box.
-    # Since NumericRegion is now a list of boxes, we can just accumulate requirements.
-
     A_requirements: List[Tuple] = []
     B_requirements: List[Tuple] = []
 
     A_shape = input_shapes[0]
     B_shape = input_shapes[1]
-    rank = len(output_shape)
+
+    # We check ranks to determine how output maps to inputs
+    ndim_a = len(A_shape)
+    ndim_b = len(B_shape)
 
     for out_box in output_region:
-        # out_box is a single bounding box
-        # Dimensions: (Batch..., M, N)
-
-        # Extract bounds
-        batch_bounds = out_box[:-2]
-        m_bounds = out_box[-2]
-        n_bounds = out_box[-1]
-
-        # A Requirement:
-        # To compute C[m_start:m_end, n_start:n_end], we need
-        # A[m_start:m_end, :] AND B[:, n_start:n_end]
-
-        # Construct A Box
         a_box = []
-        # Batch dims: If A is (B, M, K), it shares batch dims with C
-        if len(A_shape) > 2:
-            # We need to match batch dims.
-            # Assuming standard broadcasting, indices match.
-            a_box.extend(batch_bounds)
+        b_box = []
 
-        if len(A_shape) == 1:
-            # (K,) @ (K, N) -> (N,)
-            # If we need C[n_start:n_end], we need A (all)
-            # This logic is tricky with generic shapes, simplified here:
+        # CASE 1: Vector-Matrix Multiplication
+        # Shape: (K,) @ (..., K, N) -> (..., N)
+        if ndim_a == 1:
+            # The output box corresponds to N (and potentially batch dims of B)
+            # out_box structure: (Batch..., N_slice)
+            n_bounds = out_box[-1]
+            batch_bounds = out_box[:-1]
+
+            # A Requirement: The full vector (0, K)
             a_box.append((0, A_shape[0]))
+
+            # B Requirement: (Batch..., (0, K), N_slice)
+            if ndim_b > 2:
+                b_box.extend(batch_bounds)
+            b_box.append((0, B_shape[-2]))  # All K rows
+            b_box.append(n_bounds)  # Specific N cols
+
+        # CASE 2: Matrix-Vector Multiplication
+        # Shape: (..., M, K) @ (K,) -> (..., M)
+        elif ndim_b == 1:
+            # The output box corresponds to M (and potentially batch dims of A)
+            # out_box structure: (Batch..., M_slice)
+            m_bounds = out_box[-1]
+            batch_bounds = out_box[:-1]
+
+            # A Requirement: (Batch..., M_slice, (0, K))
+            if ndim_a > 2:
+                a_box.extend(batch_bounds)
+            a_box.append(m_bounds)  # Specific M rows
+            a_box.append((0, A_shape[-1]))  # All K cols
+
+            # B Requirement: The full vector (0, K)
+            b_box.append((0, B_shape[0]))
+
+        # CASE 3: Matrix-Matrix Multiplication (Standard)
+        # Shape: (..., M, K) @ (..., K, N) -> (..., M, N)
         else:
-            # A shape (..., M, K)
-            a_box.append(m_bounds)  # M rows
-            a_box.append((0, A_shape[-1]))  # All K
+            # out_box structure: (Batch..., M_slice, N_slice)
+            batch_bounds = out_box[:-2]
+            m_bounds = out_box[-2]
+            n_bounds = out_box[-1]
+
+            # A Requirement: (Batch..., M_slice, (0, K))
+            if ndim_a > 2:
+                a_box.extend(batch_bounds)
+            elif len(batch_bounds) > 0 and ndim_a == 2:
+                # Handle case where B is batched but A is not (broadcasting)
+                # If A is (M,K) and B is (Batch, K, N), A is reused.
+                # A does not take batch bounds.
+                pass
+            else:
+                # Standard batch matching
+                a_box.extend(batch_bounds)
+
+            a_box.append(m_bounds)
+            a_box.append((0, A_shape[-1]))
+
+            # B Requirement: (Batch..., (0, K), N_slice)
+            if ndim_b > 2:
+                b_box.extend(batch_bounds)
+            elif len(batch_bounds) > 0 and ndim_b == 2:
+                # Broadcasting where A is batched but B is not
+                pass
+            else:
+                b_box.extend(batch_bounds)
+
+            b_box.append((0, B_shape[-2]))
+            b_box.append(n_bounds)
 
         A_requirements.append(tuple(a_box))
-
-        # Construct B Box
-        b_box = []
-        if len(B_shape) > 2:
-            b_box.extend(batch_bounds)
-
-        if len(B_shape) == 1:
-            # (M, K) @ (K,) -> (M,)
-            b_box.append((0, B_shape[0]))
-        else:
-            # B shape (..., K, N)
-            b_box.append((0, B_shape[-2]))  # All K
-            b_box.append(n_bounds)  # N cols
-
         B_requirements.append(tuple(b_box))
 
-    # Return lists of requirements. The executor/propagator merges these if needed.
     return [A_requirements, B_requirements]
 
 
@@ -1444,6 +1471,7 @@ def _fwd_reduce(input_regions, input_shapes, output_shape, attrs):
 def _bwd_reduce(output_region, input_shapes, output_shape, attrs):
     if _is_clean(output_region):
         return [None]
+    output_region = output_region[0]
     in_shape = input_shapes[0]
     in_rank = len(in_shape)
     axes = _resolve_axes(attrs, in_rank)
@@ -1612,7 +1640,9 @@ def _bwd_repeat(output_region, input_shapes, output_shape, attrs):
     out_box = output_region[0]
 
     if len(out_box) < rank_in:
-        out_box = tuple(out_box) + tuple((0, dim) for dim in output_shape[len(out_box):])
+        out_box = tuple(out_box) + tuple(
+            (0, dim) for dim in output_shape[len(out_box) :]
+        )
     elif len(out_box) > rank_in:
         out_box = out_box[:rank_in]
 
@@ -1620,7 +1650,6 @@ def _bwd_repeat(output_region, input_shapes, output_shape, attrs):
     start, stop = result[axis]
     result[axis] = (start // repeats, (stop + repeats - 1) // repeats)
     return [[tuple(result)]]
-
 
 
 # ---------------------------------------------------------------------------
@@ -1762,6 +1791,7 @@ def _fwd_im2col(input_regions, input_shapes, output_shape, attrs):
     inp = input_regions[0]
     if _is_clean(inp):
         return None
+    inp = inp[0]
 
     # inp: (N, C, H, W) -> out: (N, C*k*k, H_out*W_out)
     N, C, H, W = input_shapes[0]

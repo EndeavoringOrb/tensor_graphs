@@ -14,8 +14,6 @@ class DataGenerator:
     def get_numpy_dtype(dtype: DType):
         if dtype == DType.FP32:
             return np.float32
-        elif dtype == DType.FP16:
-            return np.float16
         elif dtype == DType.INT32:
             return np.int32
         elif dtype == DType.BOOL:

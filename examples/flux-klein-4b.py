@@ -5,11 +5,11 @@ Implements the complete diffusion transformer pipeline:
 - Text encoding (Qwen3-4B) with layer concatenation (8, 17, 26)
 - Latent diffusion (Transformer)
 - Image decoding (VAE)
-
-Reference: flux.c, flux_transformer.c, flux_vae.c
 """
+
 import warnings
-warnings.simplefilter('error', RuntimeWarning)
+
+warnings.simplefilter("error", RuntimeWarning)
 
 import os
 import math
@@ -54,7 +54,7 @@ class FluxConfig:
     text_num_heads: int = 32
     text_num_kv_heads: int = 8
     text_head_dim: int = 128
-    text_max_seq: int = 32
+    text_max_seq: int = 512
     text_rope_theta: float = 1000000.0
 
     # Latent
@@ -648,11 +648,19 @@ class FluxTransformer:
 class Sampler:
     """Proper FLUX.2 resolution-dependent Euler sampler."""
 
-    def __init__(self, num_steps: int):
+    def __init__(self, num_steps: int, distilled: bool = True):
         self.num_steps = num_steps
+        self.distilled = distilled
 
     def get_schedule(self, image_seq_len: int) -> np.ndarray:
-        """Matches iris_schedule_flux and official FLUX.1/2 schedule logic."""
+        """
+        Generates the timestep schedule.
+        For distilled models (few steps), use a simple Linear schedule.
+        For base models (many steps), use the resolution-dependent Shifted Sigmoid schedule.
+        """
+        if self.distilled:
+            return np.linspace(1.0, 0.0, self.num_steps + 1, dtype=np.float32)
+
         # Empirical constants from Flux training distribution
         a1, b1 = 8.73809524e-05, 1.89833333
         a2, b2 = 0.00016927, 0.45666666
@@ -1448,6 +1456,8 @@ class FluxPipeline:
 
         image = self.vae_decoder.decode(latent, h_node, w_node, weights)
         self.vae_session = GraphSession(image)
+
+        # TODO: don't hardcode this to 8x8
         sample_latent = np.zeros((1, self.cfg.vae_channels, 8, 8), dtype=np.float32)
         self.vae_session.compile(
             {
@@ -1579,6 +1589,7 @@ class FluxPipeline:
         #     (1, self.cfg.text_max_seq, self.cfg.text_dim)
         # )  # TODO: remove, this is a placeholder to skip expensive text encoding while testing sampling/latent decoding.
         latent = self.sample(text_emb, height, width, num_steps, seed)
+        # latent = np.zeros((1, 128, 8, 8))
         image = self.decode_latent(latent)
         # image = None
 

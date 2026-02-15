@@ -4,7 +4,7 @@ from typing import Dict, Optional, List, Tuple, Any
 from dataclasses import dataclass
 from ..ir.buffer import StorageType
 from ..ir.node import TensorNode
-from ..ir.dtypes import DType
+from ..ir.dtypes import DType, get_buffer_size, get_size_bytes
 from ..ops.atomic_types import OpType
 from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
 
@@ -16,10 +16,12 @@ class MemoryBlock:
     offset: int
     size: int
     node_name: str
+    storage_type: StorageType  # Added to track if it's a weight vs activation
     region_id: int = 0  # 0 = Internal Arena, >0 = External Region
     is_free: bool = True
     is_locked: bool = False
     last_used_step: int = 0
+    ref_count: int = 0
 
 
 class DeviceBuffer:
@@ -80,7 +82,14 @@ class DeviceBuffer:
         merged.append((curr_start, curr_size))
         self.free_segments = merged
 
-    def allocate(self, node_name: str, size: int, step: int) -> Optional[int]:
+    def allocate(
+        self,
+        node_name: str,
+        size: int,
+        step: int,
+        storage_type: StorageType,
+        initial_refs: int,
+    ) -> Optional[int]:
         """Allocate memory in Region 0 (Internal Arena)."""
         aligned_size = self._align(size)
 
@@ -111,10 +120,12 @@ class DeviceBuffer:
             offset=offset,
             size=aligned_size,
             node_name=node_name,
+            storage_type=storage_type,
             region_id=0,
             is_free=False,
-            is_locked=True,
+            is_locked=True,  # Initially locked while refs > 0 or if persistent
             last_used_step=step,
+            ref_count=initial_refs,
         )
         self.allocations[node_name] = block
 
@@ -128,7 +139,9 @@ class DeviceBuffer:
 
         return offset
 
-    def allocate_external(self, node_name: str, data: Any, step: int):
+    def allocate_external(
+        self, node_name: str, data: Any, step: int, storage_type: StorageType
+    ):
         """
         Register an external memory region and create a block pointing to it.
         Used for Zero-Copy weights.
@@ -150,10 +163,12 @@ class DeviceBuffer:
             offset=0,
             size=size,
             node_name=node_name,
+            storage_type=storage_type,
             region_id=region_id,
             is_free=False,
-            is_locked=True,  # Weights are always locked
+            is_locked=True,
             last_used_step=step,
+            ref_count=0,  # Persistent weights typically don't use ref counting
         )
         self.allocations[node_name] = block
 
@@ -228,7 +243,7 @@ class DeviceBuffer:
             else:
                 # Region 0 logic (byte slab)
                 raw = backing_array[block.offset : block.offset + block.size]
-                req_bytes = self._calc_bytes(shape, dtype)
+                req_bytes = get_size_bytes(shape, dtype)
                 sliced = raw[:req_bytes]
                 view = sliced.view(t_dtype).reshape(shape)
         else:
@@ -265,25 +280,11 @@ class DeviceBuffer:
 
         return view
 
-    def _calc_bytes(self, shape, dtype):
-        import math
-
-        elem_size = 4
-        if dtype == DType.FP16:
-            elem_size = 2
-        elif dtype == DType.BOOL:
-            elem_size = 1
-        elif dtype == DType.FP8E4M3:
-            elem_size = 1
-        return math.prod(shape) * elem_size
-
     def _map_dtype_np(self, dtype: DType):
         if dtype == DType.FP32:
             return np.float32
         if dtype == DType.INT32:
             return np.int32
-        if dtype == DType.FP16:
-            return np.float16
         if dtype == DType.BOOL:
             return np.bool_
         return np.float32
@@ -293,8 +294,6 @@ class DeviceBuffer:
             return torch.float32
         if dtype == DType.INT32:
             return torch.int32
-        if dtype == DType.FP16:
-            return torch.float16
         if dtype == DType.BOOL:
             return torch.bool
         return torch.float32
@@ -317,19 +316,7 @@ class MemoryManager:
         - GPU: Allocates in Region 0 (Arena) and copies data (Memcpy).
         - CPU: Registers data as External Region (Zero-Copy).
         """
-        # Handle size
-        if hasattr(data, "nbytes"):
-            size = data.nbytes
-        elif hasattr(data, "numel"):
-            size = data.numel() * data.element_size()
-        elif isinstance(data, (int, float, bool)):
-            # Scalar
-            size = 4
-        elif isinstance(data, np.generic):
-            size = data.nbytes
-        else:
-            arr = np.asarray(data)
-            size = arr.nbytes
+        size = get_buffer_size(node.dtype, data=data)
 
         device = node.backend.value if node.backend else "cpu"
         if "numpy" in device:
@@ -345,10 +332,18 @@ class MemoryManager:
             # --- Zero-Copy Path ---
             # Register the external memory region
             # We assume data is passed as a memory-backed object (Torch Tensor or Numpy Array)
-            buf.allocate_external(node.name, data, step=0)
+            buf.allocate_external(
+                node.name, data, step=0, storage_type=StorageType.PERSISTENT
+            )
         else:
             # --- Standard Copy Path (GPU) ---
-            offset = buf.allocate(node.name, size, step=0)
+            offset = buf.allocate(
+                node.name,
+                size,
+                step=0,
+                storage_type=StorageType.PERSISTENT,
+                initial_refs=0,
+            )
             if offset is None:
                 raise MemoryError(f"OOM allocating persistent node {node.name}")
 
@@ -362,7 +357,9 @@ class MemoryManager:
         if DEBUG:
             print(f"[MemoryManager.allocate_persistent] {node.name} on {device}")
 
-    def prepare_allocation(self, node: TensorNode, size_bytes: int) -> bool:
+    def prepare_allocation(
+        self, node: TensorNode, size_bytes: int, initial_refs: int
+    ) -> bool:
         """Ensure space exists for a transient node (Region 0)."""
         device = node.backend.value if node.backend else "cpu"
         if "numpy" in device:
@@ -374,17 +371,29 @@ class MemoryManager:
         buf = self.buffers[device]
 
         if node.name in buf.allocations:
-            buf.allocations[node.name].last_used_step = self.current_step
-            buf.allocations[node.name].is_locked = True
+            block = buf.allocations[node.name]
+            block.last_used_step = self.current_step
+            # Only reset ref_count if we are moving from an unlocked (evictable)
+            # state to a locked (active) state for this run.
+            if not block.is_locked:
+                block.ref_count = initial_refs
+                block.is_locked = True
             return True
 
-        offset = buf.allocate(node.name, size_bytes, self.current_step)
+        offset = buf.allocate(
+            node.name,
+            size_bytes,
+            self.current_step,
+            StorageType.TRANSIENT,
+            initial_refs,
+        )
 
         if offset is None:
+            # Eviction logic: Only candidates with is_locked=False (which implies ref_count=0)
             candidates = [
                 b
                 for b in buf.allocations.values()
-                if not b.is_locked and b.region_id == 0 and b.node_name != node.name
+                if not b.is_locked and b.region_id == 0
             ]
             candidates.sort(key=lambda b: b.last_used_step)
 
@@ -397,7 +406,13 @@ class MemoryManager:
                 buf.free(victim.node_name)
                 freed += victim.size
                 if freed >= size_bytes:
-                    offset = buf.allocate(node.name, size_bytes, self.current_step)
+                    offset = buf.allocate(
+                        node.name,
+                        size_bytes,
+                        self.current_step,
+                        node.storage_type,
+                        initial_refs,
+                    )
                     if offset is not None:
                         break
 
@@ -407,6 +422,22 @@ class MemoryManager:
                 )
 
         return True
+
+    def release(self, node_name: str):
+        """Signals that a consumer is done with this node."""
+        for buf in self.buffers.values():
+            if node_name in buf.allocations:
+                block = buf.allocations[node_name]
+                if block.storage_type == StorageType.PERSISTENT:
+                    return  # Weights stay locked regardless of refs
+
+                if block.ref_count > 0:
+                    block.ref_count -= 1
+                    if block.ref_count == 0:
+                        block.is_locked = False
+                        if DEBUG_DETAILED:
+                            print(f"[MemoryManager] Unlocked {node_name} (refs=0)")
+                return
 
     def get_view(self, node: TensorNode, use_dirty: bool = False) -> Any:
         device = node.backend.value if node.backend else "cpu"

@@ -204,8 +204,6 @@ class GraphBuilder:
                 dt = str(value.dtype)
                 if "float32" in dt or "float64" in dt:
                     dtype = DType.FP32
-                elif "float16" in dt:
-                    dtype = DType.FP16
                 elif "int" in dt:
                     dtype = DType.INT32
                 elif "bool" in dt:

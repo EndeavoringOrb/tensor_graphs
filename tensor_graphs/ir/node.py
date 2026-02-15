@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
 from enum import Enum
 import uuid
-from .dtypes import DType, TensorSignature, Backend
+from .dtypes import DType, TensorSignature, Backend, get_size_bytes
 from .buffer import StorageType
 
 
@@ -59,6 +59,10 @@ class TensorNode:
     @property
     def signature(self) -> TensorSignature:
         return TensorSignature(self.dtype, self.shape, self.backend)
+
+    @property
+    def size_bytes(self) -> int:
+        return get_size_bytes(self.shape, self.dtype)
 
     def __repr__(self):
         attr_keys = list(self.attrs.keys()) if self.attrs else []

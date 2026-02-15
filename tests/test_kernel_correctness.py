@@ -87,8 +87,6 @@ def test_kernel_correctness(
             dt = obj.dtype
             if dt == torch.float32:
                 return DType.FP32
-            if dt == torch.float16:
-                return DType.FP16
             if dt == torch.int32:
                 return DType.INT32
             if dt == torch.bool:
@@ -99,8 +97,6 @@ def test_kernel_correctness(
             # handle numpy types
             if dt is np.float32:
                 return DType.FP32
-            if dt is np.float16:
-                return DType.FP16
             if dt is np.int32:
                 return DType.INT32
             if dt is bool or dt is np.bool_:
@@ -151,18 +147,14 @@ def test_kernel_correctness(
     is_torch = isinstance(first_input, torch.Tensor)
 
     if is_torch:
-        if out_dt_enum == DType.FP16:
-            output_dtype = torch.float16
-        elif out_dt_enum == DType.INT32:
+        if out_dt_enum == DType.INT32:
             output_dtype = torch.int32
         elif out_dt_enum == DType.BOOL:
             output_dtype = torch.bool
         else:
             output_dtype = torch.float32
     else:
-        if out_dt_enum == DType.FP16:
-            output_dtype = np.float16
-        elif out_dt_enum == DType.INT32:
+        if out_dt_enum == DType.INT32:
             output_dtype = np.int32
         elif out_dt_enum == DType.BOOL:
             output_dtype = np.bool_

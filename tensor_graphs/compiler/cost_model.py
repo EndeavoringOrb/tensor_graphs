@@ -1,5 +1,5 @@
 from ..benchmark.db import BenchmarkDB
-from ..ir.dtypes import Backend
+from ..ir.dtypes import Backend, get_size_bytes
 
 
 class CostModel:
@@ -34,11 +34,7 @@ class CostModel:
             return 0.0
 
         base = self.transfer_overhead.get((src_backend, dst_backend), 0.1)
-        import math
-
-        vol = math.prod(shape) if shape and all(shape) else 1
-        # 4 bytes per float32
-        bytes_transferred = vol * 4
+        bytes_transferred = get_size_bytes(shape, dtype)
         # Assume PCIe gen3/4 speeds roughly ~10GB/s
         transfer_time = bytes_transferred / (10 * 1024**3) * 1000
         return base + transfer_time
