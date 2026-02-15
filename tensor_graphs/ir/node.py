@@ -46,7 +46,14 @@ class TensorNode:
                 object.__setattr__(self, "storage_type", StorageType.PERSISTENT)
 
         # Default View-only and cheap nodes to NEVER cache
-        if self.op_type in ["Reshape", "Slice", "Permute", "Input", "Constant"]:
+        if self.op_type in [
+            "Reshape",
+            "Slice",
+            "Permute",
+            "Input",
+            "Constant",
+            "Repeat",
+        ]:
             self.cache_policy = CachePolicy.NEVER
 
     @property

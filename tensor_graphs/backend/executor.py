@@ -1,26 +1,25 @@
 import numpy as np
 import time
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple, Optional
 import math
 from ..compiler.compiled_graph import CompiledGraph
 from ..ir.buffer import StorageType
-from ..ir.dtypes import DType
+from ..ir.dtypes import DType, TensorSignature
 from ..ops import OpType
 from ..compiler.dirty_propagation import DirtyPropagator
 from .memory import MemoryManager
+from .registry import KernelRegistry
 from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
 from tqdm import tqdm
 
 
 class Executor:
-    def __init__(
-        self,
-        compiled_graph: CompiledGraph,
-        memory_manager: MemoryManager,
-    ):
+    def __init__(self, compiled_graph: CompiledGraph, memory_manager: MemoryManager):
         self.graph = compiled_graph
         self.mem = memory_manager
         self.last_inputs: Dict[str, Any] = {}
+        # Persistent cache across runs: Key = (node_name, shape_tuple) -> Kernel
+        self._kernel_cache: Dict[Tuple[str, Tuple[Tuple[int, ...], ...]], Any] = {}
 
     def _update_inputs(self, inputs: Dict[str, Any]) -> None:
         for name, data in inputs.items():
@@ -28,11 +27,9 @@ class Executor:
             if not node:
                 continue
 
-            # If persistent (parameters), skip (loaded via load_weights)
             if node.storage_type == StorageType.PERSISTENT:
                 continue
 
-            # Transient Inputs (Dynamic inputs like ids)
             size = (
                 data.nbytes
                 if hasattr(data, "nbytes")
@@ -55,17 +52,14 @@ class Executor:
     def run(self, inputs: Dict[str, Any]) -> Any:
         self.mem.step()
         self._update_inputs(inputs)
-
         current_refs = self.graph.ref_counts.copy()
 
         # --- Pass 1: Forward Propagation & Cache Check ---
-        # Determine the state (Is Dirty? Is Cached?) for every node
         node_states = {}  # name -> {'is_dirty': bool, 'in_cache': bool}
 
         for inst in self.graph.instructions:
             node = self.graph.nodes_map[inst.node_name]
 
-            # Skip Inputs/Constants as they are handled in _update_inputs or static
             if node.op_type in (OpType.INPUT, OpType.CONSTANT):
                 continue
 
@@ -80,22 +74,12 @@ class Executor:
             node_states[node.name] = {"is_dirty": is_dirty, "in_cache": in_cache}
 
         # --- Pass 2: Backward Liveness Analysis ---
-        # Determine which nodes MUST run.
-        # A node is needed if:
-        #   1. It is the graph output (root).
-        #   2. It is an input to a node that IS needed AND MUST compute.
-        #
-        # A node MUST compute if:
-        #   It is Needed AND (Dirty OR Not Cached).
-
         needed_nodes = set()
 
-        # Assume the last instruction corresponds to the graph output
         if self.graph.instructions:
             root_name = self.graph.instructions[-1].node_name
             needed_nodes.add(root_name)
 
-        # Iterate in reverse topological order
         for inst in reversed(self.graph.instructions):
             name = inst.node_name
             if name not in node_states:
@@ -103,22 +87,22 @@ class Executor:
 
             state = node_states[name]
 
-            # If this node is not needed by any downstream consumer, skip logic
             if name in needed_nodes:
-                # Do we need to actually execute this node?
-                # Yes, if it's dirty OR if it's missing from cache.
                 must_compute = state["is_dirty"] or not state["in_cache"]
 
                 if must_compute:
-                    # If we execute this node, we strictly need its inputs.
                     for p_name in inst.input_node_names:
                         needed_nodes.add(p_name)
-                # Else: Node is needed, but it is Cached & Clean.
-                # We can serve it from cache. We DO NOT mark its parents as needed
-                # (unless they are needed by someone else).
 
         # --- Pass 3: Execution ---
-        counters = {"no_op": 0, "skip": 0, "full": 0, "part": 0, "pruned": 0}
+        counters = {
+            "no_op": 0,
+            "skip": 0,
+            "full": 0,
+            "part": 0,
+            "pruned": 0,
+            "kernel_switch": 0,
+        }
         partial_ratio_sum = 0
 
         with tqdm(
@@ -139,38 +123,37 @@ class Executor:
                 state = node_states[name]
                 is_needed = name in needed_nodes
 
-                should_compute = False
-                compute_region = None
+                compute_regions: List[Tuple[slice, ...]] = []
 
                 if not is_needed:
-                    # Pruned: Node is clean but missing, and no downstream node needs it to run.
                     counters["pruned"] += 1
-                    # We skip execution entirely.
                 elif state["is_dirty"] and state["in_cache"]:
-                    # Partial Update
                     counters["part"] += 1
-                    partial_ratio = 1
+                    partial_ratio_total = 0
                     # Basic ratio calc for stats
                     if (
                         node.dirty_region
                         and node.shape
-                        and len(node.shape) == len(node.dirty_region)
+                        and all(len(node.shape) == len(reg) for reg in node.dirty_region)
                     ):
-                        for i, s in enumerate(node.dirty_region):
-                            start = s.start if s.start is not None else 0
-                            stop = s.stop if s.stop is not None else node.shape[i]
-                            dim = node.shape[i] if node.shape[i] > 0 else 1
-                            partial_ratio *= (stop - start) / dim
-                    partial_ratio_sum += partial_ratio
-
-                    should_compute = True
-                    compute_region = node.dirty_region
+                        for reg in node.dirty_region:
+                            partial_ratio = 1
+                            for i, s in enumerate(reg):
+                                start = s.start if s.start is not None else 0
+                                stop = s.stop if s.stop is not None else node.shape[i]
+                                dim = node.shape[i] if node.shape[i] > 0 else 1
+                                partial_ratio *= (stop - start) / dim
+                            partial_ratio_total += partial_ratio
+                    partial_ratio_sum += partial_ratio_total
+                    # node.dirty_region is List[Tuple[slice, ...]]
+                    # Filter out empty slices just in case
+                    compute_regions = [
+                        r for r in node.dirty_region if any(s.stop > s.start for s in r)
+                    ]
                 elif not state["in_cache"]:
-                    # Full Recompute (Dirty or Clean but Missing & Needed)
                     counters["full"] += 1
-                    should_compute = True
-                    compute_region = None
-                    # If clean but missing, ensure we don't mark it dirty for next run
+                    # Full recompute: One big region
+                    compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
                     if not state["is_dirty"]:
                         node.dirty_region = None
                 else:
@@ -192,56 +175,117 @@ class Executor:
                 )
                 pbar.set_postfix(counters)
 
-                if should_compute:
-                    start_time = time.perf_counter()
-
+                if compute_regions:
+                    # --- PREPARE OUTPUT BUFFER ---
                     size_bytes = math.prod(node.shape or ()) * 4
                     if node.dtype == DType.FP16:
                         size_bytes //= 2
                     elif node.dtype == DType.BOOL:
                         size_bytes //= 4
-
                     self.mem.prepare_allocation(node, size_bytes)
 
-                    kernel_inputs = []
-                    if compute_region is None:
-                        compute_region = tuple(slice(None) for _ in (node.shape or ()))
-
-                    input_slice_regions = DirtyPropagator.get_input_slices(
-                        node, compute_region, inputs
-                    )
-
-                    for i, p_name in enumerate(inst.input_node_names):
+                    # --- LOCK INPUTS (Once for all regions) ---
+                    for p_name in inst.input_node_names:
                         p_node = self.graph.nodes_map[p_name]
                         self.mem.lock(p_node)
-                        full_view = self.mem.get_view(p_node)
 
-                        if (
-                            i >= len(input_slice_regions)
-                            or input_slice_regions[i] is None
-                            or node.op_type in (OpType.RESHAPE,)
-                        ):
-                            kernel_inputs.append(full_view)
+                    # --- EXECUTE REGIONS ---
+                    for region_slice in compute_regions:
+                        start_time = time.perf_counter()
+
+                        # 1. Determine Input Requirements for this specific region
+                        # Backward prop returns List[DirtyRegion], we take the first box (index 0)
+                        # of the first DirtyRegion for each input.
+
+                        # If region is "Full", inputs are "Full" (None)
+                        is_full_region = all(s == slice(None) for s in region_slice)
+                        input_slice_regions: List[Optional[Tuple[slice, ...]]] = []
+
+                        if is_full_region:
+                            input_slice_regions = [None] * len(inst.input_node_names)
                         else:
-                            kernel_inputs.append(full_view[input_slice_regions[i]])
+                            # Query backward propagation for this specific region
+                            # query_region format: List[Tuple[slice,...]]
+                            query_region = [region_slice]
+                            reqs = DirtyPropagator.get_input_slices(
+                                node, query_region, inputs
+                            )
 
-                    out_view = self.mem.get_view(node)
-                    out_slice = out_view[compute_region] if node.op_type not in (OpType.RESHAPE,) else out_view
+                            for req in reqs:
+                                if req is None or not req:
+                                    input_slice_regions.append(None)
+                                else:
+                                    # Take the first box of the requirement list
+                                    input_slice_regions.append(req[0])
 
-                    inst.kernel(kernel_inputs, [out_slice], inst.attrs)
-                    node.compute_cost = (time.perf_counter() - start_time) * 1000
+                        # 2. Prepare Views
+                        kernel_inputs = []
+                        concrete_shapes = []
 
-                # Release Transient Memory
-                # We decrement ref counts even if we pruned the node, because
-                # "skipping" conceptually means we are done with the inputs at this stage.
-                for p_name in inst.input_node_names:
-                    current_refs[p_name] -= 1
-                    if current_refs[p_name] == 0:
-                        p_node = self.graph.nodes_map[p_name]
-                        if p_node.storage_type == StorageType.TRANSIENT:
-                            if DEBUG_EXECUTION and DEBUG_DETAILED:
-                                print(f"[Executor.run] unlocking {p_node}")
-                            self.mem.unlock(p_node)
+                        for i, p_name in enumerate(inst.input_node_names):
+                            p_node = self.graph.nodes_map[p_name]
+                            full_view = self.mem.get_view(p_node)
+
+                            sl = input_slice_regions[i]
+                            if sl is None or node.op_type in (OpType.RESHAPE,):
+                                view = full_view
+                            else:
+                                view = full_view[sl]
+
+                            kernel_inputs.append(view)
+                            concrete_shapes.append(view.shape)
+
+                        # 3. Dynamic Kernel Selection
+                        selected_kernel = inst.kernel
+
+                        # Only check for partial/changed shapes if we want optimized kernels
+                        # If region is full, we rely on the pre-compiled kernel unless shapes changed
+                        if not is_full_region or (concrete_shapes[0] != node.shape):
+                            cache_key = (name, tuple(concrete_shapes))
+
+                            if cache_key in self._kernel_cache:
+                                selected_kernel = self._kernel_cache[cache_key]
+                            else:
+                                # Build signatures for the specific shapes we have
+                                input_sigs = []
+                                for idx, shape in enumerate(concrete_shapes):
+                                    p_node = self.graph.nodes_map[
+                                        inst.input_node_names[idx]
+                                    ]
+                                    sig = TensorSignature(
+                                        p_node.dtype, shape, node.backend
+                                    )
+                                    input_sigs.append(sig)
+
+                                better_kernel = KernelRegistry.select_best_kernel(
+                                    node.op_type, input_sigs, node.backend, node.dtype
+                                )
+
+                                if better_kernel:
+                                    selected_kernel = better_kernel
+                                    counters["kernel_switch"] += 1
+
+                                self._kernel_cache[cache_key] = selected_kernel
+
+                        # 4. Run Kernel
+                        out_view = self.mem.get_view(node)
+                        if node.op_type in (OpType.RESHAPE,):
+                            out_slice = out_view
+                        else:
+                            out_slice = out_view[region_slice]
+
+                        selected_kernel(kernel_inputs, [out_slice], inst.attrs)
+                        node.compute_cost = (time.perf_counter() - start_time) * 1000
+
+                    # --- RELEASE INPUTS (Once after all regions) ---
+                    for p_name in inst.input_node_names:
+                        current_refs[p_name] -= 1
+                        if current_refs[p_name] == 0:
+                            p_node = self.graph.nodes_map[p_name]
+                            if p_node.storage_type == StorageType.TRANSIENT:
+                                if DEBUG_EXECUTION and DEBUG_DETAILED:
+                                    print(f"[Executor.run] unlocking {p_node}")
+                                self.mem.unlock(p_node)
 
         root_name = self.graph.instructions[-1].node_name
         return self.mem.get_view(self.graph.nodes_map[root_name])

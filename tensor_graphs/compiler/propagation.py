@@ -23,14 +23,15 @@ from ..ir.graph import topological_sort
 from ..ops.atomic_types import OpType
 from ..ops.registry import get_reference_factory
 from ..backend.registry import KernelRegistry
-from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
+from ..config import DEBUG_EXECUTION, DEBUG_DETAILED, USE_CONTIGUOUS_APPROXIMATION
 
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
 
-# A dirty region is None (clean) or a tuple of (start, stop) per dimension.
-NumericRegion = Optional[Tuple[Tuple[int, int], ...]]
+# A dirty region is None (clean) or a list of bounding boxes.
+# Each box is a tuple of (start, stop) per dimension.
+NumericRegion = Optional[List[Tuple[Tuple[int, int], ...]]]
 
 
 class PropagationHandler(NamedTuple):
@@ -53,46 +54,79 @@ class PropagationHandler(NamedTuple):
 def _is_clean(region: NumericRegion) -> bool:
     if region is None:
         return True
-    return all(start >= stop for start, stop in region)
+    if not region:  # Empty list
+        return True
+    # Check if all boxes are empty or invalid
+    for box in region:
+        if any(start < stop for start, stop in box):
+            return False
+    return True
 
 
 def _make_full(shape: Tuple[int, ...]) -> NumericRegion:
     if not shape:
         return None
-    return tuple((0, dim) for dim in shape)
+    return [tuple((0, dim) for dim in shape)]
 
 
 def _merge_regions(
     r1: NumericRegion, r2: NumericRegion, shape: Tuple[int, ...]
 ) -> NumericRegion:
-    if r1 is None and r2 is None:
+    if _is_clean(r1) and _is_clean(r2):
         return None
-    if r1 is None:
+    if _is_clean(r1):
         return r2
-    if r2 is None:
+    if _is_clean(r2):
         return r1
-    return tuple((min(a[0], b[0]), max(a[1], b[1])) for a, b in zip(r1, r2))
+
+    # Concatenate the lists of boxes
+    merged_list = list(r1) + list(r2)
+
+    if USE_CONTIGUOUS_APPROXIMATION:
+        # Collapse into a single bounding box
+        # Initialize with inverted bounds
+        rank = len(shape)
+        mins = [s for s, e in merged_list[0]]
+        maxs = [e for s, e in merged_list[0]]
+
+        for box in merged_list[1:]:
+            for i, (s, e) in enumerate(box):
+                mins[i] = min(mins[i], s)
+                maxs[i] = max(maxs[i], e)
+
+        return [tuple((mins[i], maxs[i]) for i in range(rank))]
+
+    return merged_list
 
 
-def _to_slices(region: NumericRegion) -> Optional[Tuple[slice, ...]]:
-    if region is None:
+def _to_slices(region: NumericRegion) -> Optional[List[Tuple[slice, ...]]]:
+    if _is_clean(region):
         return None
-    if all(start >= stop for start, stop in region):
-        return None
-    return tuple(slice(start, stop) for start, stop in region)
+
+    slices_list = []
+    for box in region:
+        # Skip empty boxes
+        if any(start >= stop for start, stop in box):
+            continue
+        slices_list.append(tuple(slice(start, stop) for start, stop in box))
+
+    return slices_list if slices_list else None
 
 
 def _from_slices(
-    slices: Optional[Tuple[slice, ...]], shape: Tuple[int, ...]
+    slices: Optional[List[Tuple[slice, ...]]], shape: Tuple[int, ...]
 ) -> NumericRegion:
     if slices is None:
         return None
     result = []
-    for i, s in enumerate(slices):
-        dim = shape[i] if i < len(shape) else 1
-        start, stop, _ = s.indices(dim)
-        result.append((start, stop))
-    return tuple(result)
+    for sl_tuple in slices:
+        box = []
+        for i, s in enumerate(sl_tuple):
+            dim = shape[i] if i < len(shape) else 1
+            start, stop, _ = s.indices(dim)
+            box.append((start, stop))
+        result.append(tuple(box))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +152,7 @@ def _broadcast_shapes(
         elif d1 is None or d2 is None:
             out_shape.append(None)
         else:
-            out_shape.append(d1)
+            raise ValueError("cannot figure out how to broadcast")
     return tuple(out_shape)
 
 
@@ -152,14 +186,12 @@ class GraphPropagator:
     Central registry that stores per-op shape, forward-dirty, and backward-dirty
     handlers and exposes three entry-points:
 
-    * ``infer_shapes``   – static shape inference over a topo-sorted node list
-    * ``propagate``      – forward dirty region for one node
-    * ``get_input_slices`` – backward dirty region for one node
+    * ``infer_shapes``     - static shape inference over a topo-sorted node list
+    * ``propagate``        - forward dirty region for one node
+    * ``get_input_slices`` - backward dirty region for one node
     """
 
     _handlers: Dict[str, PropagationHandler] = {}
-
-    # -- registration helpers ------------------------------------------------
 
     @classmethod
     def _ensure(cls, op_type: str) -> PropagationHandler:
@@ -169,8 +201,6 @@ class GraphPropagator:
 
     @classmethod
     def register_shape(cls, *op_types: str):
-        """Decorator: register a shape handler for one or more op types."""
-
         def decorator(func):
             for op in op_types:
                 old = cls._ensure(op)
@@ -181,20 +211,18 @@ class GraphPropagator:
 
     @classmethod
     def register_forward(cls, *op_types: str):
-        """Decorator: register a forward dirty-region handler."""
-
         def decorator(func):
             for op in op_types:
                 old = cls._ensure(op)
-                cls._handlers[op] = old._replace(forward=func)
+                # Wrap the handler to apply contiguous approximation if enabled
+                wrapped_func = cls._wrap_forward_handler(func)
+                cls._handlers[op] = old._replace(forward=wrapped_func)
             return func
 
         return decorator
 
     @classmethod
     def register_backward(cls, *op_types: str):
-        """Decorator: register a backward dirty-region handler."""
-
         def decorator(func):
             for op in op_types:
                 old = cls._ensure(op)
@@ -202,6 +230,33 @@ class GraphPropagator:
             return func
 
         return decorator
+
+    @staticmethod
+    def _wrap_forward_handler(func):
+        """Wrapper to merge non-contiguous regions into a single bounding box if toggle is set."""
+
+        def wrapper(input_regions, input_shapes, output_shape, attrs):
+            # Call the actual handler
+            result = func(input_regions, input_shapes, output_shape, attrs)
+
+            if USE_CONTIGUOUS_APPROXIMATION and result:
+                # Merge list of boxes into a single bounding box
+                rank = len(output_shape)
+                mins = [output_shape[i] for i in range(rank)]  # Init with max possible
+                maxs = [0 for _ in range(rank)]
+
+                for box in result:
+                    for i, (s, e) in enumerate(box):
+                        mins[i] = min(mins[i], s)
+                        maxs[i] = max(maxs[i], e)
+
+                # Clamp to valid range
+                final_box = tuple((mins[i], maxs[i]) for i in range(rank))
+                return [final_box]
+
+            return result
+
+        return wrapper
 
     # -- shape inference -----------------------------------------------------
 
@@ -564,27 +619,37 @@ def _fwd_elementwise(input_regions, input_shapes, output_shape, attrs):
     if out_rank == 0:
         return ()
 
+    # Wrapper collapses regions into a single box, so input_regions is [[(d0, d1), ...], ...]
     result = [(output_shape[d], 0) for d in range(out_rank)]
     has_dirty = False
 
-    for reg, shape in zip(input_regions, input_shapes):
-        if _is_clean(reg):
+    for reg_list, shape in zip(input_regions, input_shapes):
+        if _is_clean(reg_list):
             continue
         has_dirty = True
+
         in_rank = len(shape)
         pad = out_rank - in_rank
 
-        for d in range(in_rank):
-            out_d = d + pad
-            start, stop = reg[d]
-            if shape[d] == 1:
-                start, stop = 0, output_shape[out_d]
-            result[out_d] = (min(result[out_d][0], start), max(result[out_d][1], stop))
+        if reg_list:
+            # reg_list contains a single box tuple [(s0, e0), (s1, e1), ...]
+            reg_box = reg_list[0]
 
-        for d in range(pad):
-            result[d] = (0, output_shape[d])
+            for d in range(in_rank):
+                out_d = d + pad
+                # Access the d-th dimension of the box
+                start, stop = reg_box[d]
+                if shape[d] == 1:
+                    start, stop = 0, output_shape[out_d]
+                result[out_d] = (
+                    min(result[out_d][0], start),
+                    max(result[out_d][1], stop),
+                )
 
-    return tuple(result) if has_dirty else None
+            for d in range(pad):
+                result[d] = (0, output_shape[d])
+
+    return [tuple(result)] if has_dirty else None
 
 
 @GraphPropagator.register_backward(*_ELEMENTWISE_OPS)
@@ -602,12 +667,12 @@ def _bwd_elementwise(output_region, input_shapes, output_shape, attrs):
         in_region = []
         for d in range(in_rank):
             out_d = d + pad
-            start, stop = output_region[out_d]
+            start, stop = output_region[0][out_d]
             if in_shape[d] == 1:
                 in_region.append((0, 1))
             else:
                 in_region.append((start, stop))
-        results.append(tuple(in_region))
+        results.append([tuple(in_region)])
     return results
 
 
@@ -692,16 +757,13 @@ def _shape_slice(node: TensorNode, get_val):
 
 @GraphPropagator.register_forward(OpType.SLICE)
 def _fwd_slice(input_regions, input_shapes, output_shape, attrs):
-    # For now, if slice parameters are dynamic nodes, we conservatively
-    # mark the whole output as dirty if the input is dirty.
-    # To be precise, we would need get_val() here, but forward/backward
-    # propagation currently doesn't receive the value resolver.
-    inp = input_regions[0]
-    if _is_clean(inp):
+    # Input regions are lists of boxes: [[(s0, e0), (s1, e1), ...], ...]
+    inp_list = input_regions[0]
+    if _is_clean(inp_list):
         return None
 
     starts = attrs.get("starts", [])
-    # If any slice parameter is a node, fallback to full dirty
+    # Fallback to full dirty if any slice parameter is a node
     if any(isinstance(s, TensorNode) for s in starts) or any(
         isinstance(e, TensorNode) for e in attrs.get("ends", [])
     ):
@@ -710,9 +772,16 @@ def _fwd_slice(input_regions, input_shapes, output_shape, attrs):
     in_shape = input_shapes[0]
     ends = attrs.get("ends", [])
     steps = attrs.get("steps", [])
+
+    # Get the first (and only) box from the list
+    if not inp_list:
+        return None
+    inp_box = inp_list[0]
+
     result = []
     for d in range(len(output_shape)):
-        in_start, in_stop = inp[d] if d < len(inp) else (0, in_shape[d])
+        # Access dim d from the box
+        in_start, in_stop = inp_box[d] if d < len(inp_box) else (0, in_shape[d])
         sl_start = int(starts[d]) if d < len(starts) else 0
         sl_end = int(ends[d]) if d < len(ends) and ends[d] is not None else in_shape[d]
         sl_step = int(steps[d]) if d < len(steps) and steps[d] is not None else 1
@@ -727,7 +796,7 @@ def _fwd_slice(input_regions, input_shapes, output_shape, attrs):
             result.append((max(0, out_start), min(out_end, output_shape[d])))
     if all(s >= e for s, e in result):
         return None
-    return tuple(result)
+    return [tuple(result)]
 
 
 @GraphPropagator.register_backward(OpType.SLICE)
@@ -777,26 +846,31 @@ def _fwd_concat(input_regions, input_shapes, output_shape, attrs):
         return None
     result = [(output_shape[d], 0) for d in range(rank)]
     current_offset = 0
-    for reg, shape in zip(input_regions, input_shapes):
-        if not _is_clean(reg):
-            for d in range(rank):
-                start, stop = reg[d]
-                if d == axis:
-                    start += current_offset
-                    stop += current_offset
-                result[d] = (min(result[d][0], start), max(result[d][1], stop))
+    for reg_list, shape in zip(input_regions, input_shapes):
+        if not _is_clean(reg_list):
+            # Access the first box in the list
+            if reg_list:
+                reg_box = reg_list[0]
+                for d in range(rank):
+                    # Access the d-th dimension of the box
+                    start, stop = reg_box[d]
+                    if d == axis:
+                        start += current_offset
+                        stop += current_offset
+                    result[d] = (min(result[d][0], start), max(result[d][1], stop))
         current_offset += shape[axis]
     if all(r[0] >= r[1] for r in result):
         return None
-    return tuple(
-        (max(0, r[0]), min(r[1], output_shape[i])) for i, r in enumerate(result)
-    )
+    return [
+        tuple((max(0, r[0]), min(r[1], output_shape[i])) for i, r in enumerate(result))
+    ]
 
 
 @GraphPropagator.register_backward(OpType.CONCAT)
 def _bwd_concat(output_region, input_shapes, output_shape, attrs):
     if _is_clean(output_region):
         return [None] * len(input_shapes)
+    output_region = output_region[0]
     axis = attrs.get("axis", 0)
     rank = len(output_shape)
     if axis < 0:
@@ -823,7 +897,7 @@ def _bwd_concat(output_region, input_shapes, output_shape, attrs):
             in_region[axis] = (ov_start - current_offset, ov_stop - current_offset)
             results.append(tuple(in_region))
         current_offset = in_end
-    return results
+    return [results]
 
 
 # ---------------------------------------------------------------------------
@@ -868,31 +942,34 @@ def _get_flat_bounds(region: NumericRegion, shape: Tuple[int, ...]) -> Tuple[int
     strides = [1] * len(shape)
     for i in range(len(shape) - 2, -1, -1):
         strides[i] = strides[i + 1] * shape[i + 1]
-    
+
     flat_start = 0
     flat_stop_minus_1 = 0
     for i, (start, stop) in enumerate(region):
         flat_start += start * strides[i]
         # We calculate the flat index of the last element in the region
         flat_stop_minus_1 += (stop - 1) * strides[i]
-        
+
     return flat_start, flat_stop_minus_1 + 1
 
-def _unravel_flat_bounds(flat_start: int, flat_stop: int, shape: Tuple[int, ...]) -> NumericRegion:
+
+def _unravel_flat_bounds(
+    flat_start: int, flat_stop: int, shape: Tuple[int, ...]
+) -> NumericRegion:
     """Converts a flat [start, stop) linear range into a multidimensional bounding box."""
     temp_start = flat_start
-    temp_stop = flat_stop - 1 # Index of the last element
-    
+    temp_stop = flat_stop - 1  # Index of the last element
+
     coords_start = []
     coords_stop = []
-    
+
     # Unravel flat indices into coordinates
     for dim in reversed(shape):
         coords_start.append(temp_start % dim)
         temp_start //= dim
         coords_stop.append(temp_stop % dim)
         temp_stop //= dim
-    
+
     coords_start.reverse()
     coords_stop.reverse()
 
@@ -900,7 +977,7 @@ def _unravel_flat_bounds(flat_start: int, flat_stop: int, shape: Tuple[int, ...]
     found_diff = False
     for i in range(len(shape)):
         if found_diff:
-            # Once a higher dimension spans multiple indices, all sub-dimensions 
+            # Once a higher dimension spans multiple indices, all sub-dimensions
             # must be considered fully dirty to encompass the linear range.
             region.append((0, shape[i]))
         else:
@@ -910,40 +987,50 @@ def _unravel_flat_bounds(flat_start: int, flat_stop: int, shape: Tuple[int, ...]
             else:
                 # Still within the same index for this dimension
                 region.append((coords_start[i], coords_start[i] + 1))
-    
+
     return tuple(region)
+
 
 @GraphPropagator.register_forward(OpType.RESHAPE)
 def _fwd_reshape(input_regions, input_shapes, output_shape, attrs):
-    inp_reg = input_regions[0]
+    inp_list = input_regions[0]
     inp_shape = input_shapes[0]
-    
-    if _is_clean(inp_reg):
+
+    if _is_clean(inp_list):
         return None
 
     if not inp_shape or not output_shape or None in inp_shape or None in output_shape:
         return _make_full(output_shape)
 
+    # Get the first (and only) box from the list
+    if not inp_list:
+        return None
+    inp_box = inp_list[0]
+
     # 1. Input Box -> Linear Range
-    flat_start, flat_stop = _get_flat_bounds(inp_reg, inp_shape)
-    
+    flat_start, flat_stop = _get_flat_bounds(inp_box, inp_shape)
+
     # 2. Linear Range -> Output Box
-    return _unravel_flat_bounds(flat_start, flat_stop, output_shape)
+    return [_unravel_flat_bounds(flat_start, flat_stop, output_shape)]
+
 
 @GraphPropagator.register_backward(OpType.RESHAPE)
 def _bwd_reshape(output_region, input_shapes, output_shape, attrs):
     if _is_clean(output_region):
         return [None]
-        
+
     inp_shape = input_shapes[0]
     if not inp_shape or not output_shape or None in inp_shape or None in output_shape:
         return [_make_full(inp_shape)]
 
     # 1. Output Box -> Linear Range
-    flat_start, flat_stop = _get_flat_bounds(output_region, output_shape)
-    
+    flat_start, flat_stop = _get_flat_bounds(output_region[0], output_shape)
+
     # 2. Linear Range -> Input Box
-    return [_unravel_flat_bounds(flat_start, flat_stop, inp_shape)]
+    return [
+        [_unravel_flat_bounds(flat_start, flat_stop, inp_shape)],
+        _make_full(input_shapes[1]),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -963,11 +1050,18 @@ def _shape_permute(node: TensorNode, get_val):
 
 @GraphPropagator.register_forward(OpType.PERMUTE)
 def _fwd_permute(input_regions, input_shapes, output_shape, attrs):
-    inp = input_regions[0]
-    if _is_clean(inp):
+    inp_list = input_regions[0]
+    if _is_clean(inp_list):
         return None
+
+    # Get the first (and only) box from the list
+    if not inp_list:
+        return None
+    inp_box = inp_list[0]
+
     dims = attrs.get("dims", list(range(len(output_shape))))
-    return tuple(inp[dims[d]] for d in range(len(dims)))
+    # Access dimensions from the box based on permute dims
+    return [tuple(inp_box[dims[d]] for d in range(len(dims)))]
 
 
 @GraphPropagator.register_backward(OpType.PERMUTE)
@@ -978,7 +1072,7 @@ def _bwd_permute(output_region, input_shapes, output_shape, attrs):
     inv_dims = [0] * len(dims)
     for i, d in enumerate(dims):
         inv_dims[d] = i
-    return [tuple(output_region[inv_dims[d]] for d in range(len(dims)))]
+    return [[tuple(output_region[0][inv_dims[d]] for d in range(len(dims)))]]
 
 
 # ---------------------------------------------------------------------------
@@ -1014,98 +1108,175 @@ def _shape_dot(node: TensorNode, get_val):
 
 
 @GraphPropagator.register_forward(OpType.DOT)
-def _fwd_dot(input_regions, input_shapes, output_shape, attrs):
+def _fwd_dot(
+    input_regions: List[NumericRegion], input_shapes, output_shape, attrs
+) -> NumericRegion:
     rA, rB = input_regions[0], input_regions[1]
     A_shape, B_shape = input_shapes[0], input_shapes[1]
-    
+
     if _is_clean(rA) and _is_clean(rB):
         return None
-        
+
     out_rank = len(output_shape)
-    result = []
+    out_boxes = []
 
-    # 1. Handle Batch Dimensions (usually identical across A and B)
-    for d in range(out_rank - 2):
-        start, stop = output_shape[d], 0
-        if not _is_clean(rA) and d < len(rA) - 2:
-            start = min(start, rA[d][0])
-            stop = max(stop, rA[d][1])
-        if not _is_clean(rB) and d < len(rB) - 2:
-            start = min(start, rB[d][0])
-            stop = max(stop, rB[d][1])
-        if start >= stop: start, stop = 0, 0
-        result.append((start, stop))
+    # Helper to extract specific dims from a potentially non-contiguous input
+    # If input is non-contiguous, we treat the union of its dimensions as dirty
+    # (Conservative approach: we don't split the output boxes further based on input holes yet)
 
-    # 2. Handle M Dimension (Rows)
-    # Row i of C is dirty if Row i of A is dirty OR B is dirty at all
-    if not _is_clean(rB):
-        result.append((0, output_shape[-2]))
-    elif not _is_clean(rA):
-        # A_shape[-2] is the M dim of A. If A is 1D (vector-matrix), M is effectively 1.
-        m_s, m_e = rA[-2] if len(rA) >= 2 else (0, 1)
-        result.append((m_s, m_e))
-    else:
-        result.append((0, 0))
-
-    # 3. Handle N Dimension (Columns)
-    # Col j of C is dirty if Col j of B is dirty OR A is dirty at all
+    # 1. Contribution from A (Rows of C)
     if not _is_clean(rA):
-        result.append((0, output_shape[-1]))
-    elif not _is_clean(rB):
-        result.append(rB[-1]) # Last dim of B is N
-    else:
-        result.append((0, 0))
+        # Merge A's dirty regions to find the union of dirty M indices
+        # We need the M dimension (second to last)
+        m_indices = set()
+        for box in rA:
+            # box is tuple of (start, stop)
+            # If A is 2D (M, K): box[-2] is M range
+            # If A is 1D (K,): It broadcasts to 1 row?
+            # If A is 3D: box[-2] is M
 
-    return tuple(result)
+            # Handle broadcasting logic slightly
+            if len(A_shape) == 1:
+                # Vector-Matrix (K,) @ (K, N) -> (N,)
+                # If A changes, whole output changes (it's a single vector dot)
+                # We can just return full output
+                return _make_full(output_shape)
+            else:
+                s, e = box[-2]
+                for i in range(s, e):
+                    m_indices.add(i)  # Inefficient for large ranges, but correct
+
+        if m_indices:
+            m_min, m_max = min(m_indices), max(m_indices) + 1
+            # Output dirty region: rows [m_min, m_max), all cols
+            # We create a box for this
+            # Shape: (Batch..., M, N)
+            # Constructing a full box for the range
+            box = []
+            # Batch dimensions assumed dirty if A had batch dims dirty?
+            # For simplicity, let's grab the batch dims from the first dirty box of A
+            # This is a conservative approximation.
+            # Better: Union bounds.
+            batch_dims = []
+            if len(A_shape) > 2:
+                # Union batch bounds
+                b_mins = [s for s, e in rA[0][:-2]]
+                b_maxs = [e for s, e in rA[0][:-2]]
+                for bx in rA[1:]:
+                    for i, (s, e) in enumerate(bx[:-2]):
+                        b_mins[i] = min(b_mins[i], s)
+                        b_maxs[i] = max(b_maxs[i], e)
+                batch_dims = list(zip(b_mins, b_maxs))
+
+            box.extend(batch_dims)
+            box.append((m_min, m_max))  # M dim
+            box.append((0, output_shape[-1]))  # N dim (all cols)
+            out_boxes.append(tuple(box))
+
+    # 2. Contribution from B (Cols of C)
+    if not _is_clean(rB):
+        # Similar logic for N dimension
+        n_indices = set()
+        for box in rB:
+            if len(B_shape) == 1:
+                # (M, K) @ (K,) -> (M,)
+                # If B changes, whole output changes
+                return _make_full(output_shape)
+            else:
+                # B shape (K, N). Last dim is N.
+                s, e = box[-1]
+                for i in range(s, e):
+                    n_indices.add(i)
+
+        if n_indices:
+            n_min, n_max = min(n_indices), max(n_indices) + 1
+
+            box = []
+            if len(B_shape) > 2:
+                # Union batch bounds (conservative)
+                b_mins = [s for s, e in rB[0][:-2]]
+                b_maxs = [e for s, e in rB[0][:-2]]
+                for bx in rB[1:]:
+                    for i, (s, e) in enumerate(bx[:-2]):
+                        b_mins[i] = min(b_mins[i], s)
+                        b_maxs[i] = max(b_maxs[i], e)
+                box.extend(list(zip(b_mins, b_maxs)))
+
+            box.append((0, output_shape[-2]))  # M dim (all rows)
+            box.append((n_min, n_max))  # N dim
+            out_boxes.append(tuple(box))
+
+    return out_boxes if out_boxes else None
 
 
 @GraphPropagator.register_backward(OpType.DOT)
-def _bwd_dot(output_region, input_shapes, output_shape, attrs):
+def _bwd_dot(
+    output_region: NumericRegion, input_shapes, output_shape, attrs
+) -> List[NumericRegion]:
     if _is_clean(output_region):
         return [None, None]
-    A_shape, B_shape = input_shapes[0], input_shapes[1]
-    out_rank = len(output_shape)
 
-    # 1. Map output dirty regions to M (rows of A) and N (cols of B)
-    if len(A_shape) == 1:
-        # (K,) @ (K, N) -> (N,)
-        m_start, m_stop = (0, 1)
-        n_start, n_stop = output_region[-1] if out_rank >= 1 else (0, 1)
-    elif len(B_shape) == 1:
-        # (M, K) @ (K,) -> (M,)
-        m_start, m_stop = output_region[-1] if out_rank >= 1 else (0, 1)
-        n_start, n_stop = (0, 1)
-    else:
-        # (M, K) @ (K, N) -> (M, N)
-        m_start, m_stop = output_region[-2] if out_rank >= 2 else (0, 1)
-        n_start, n_stop = output_region[-1] if out_rank >= 1 else (0, 1)
+    # We need to satisfy ALL output boxes requested.
+    # Input regions are the union of requirements for each output box.
+    # Since NumericRegion is now a list of boxes, we can just accumulate requirements.
 
-    # 2. Batch regions (common prefix)
-    batch_region = list(output_region[:-2]) if out_rank > 2 else []
+    A_requirements: List[Tuple] = []
+    B_requirements: List[Tuple] = []
 
-    # 3. Construct A Region
-    if len(A_shape) == 1:
-        A_region = [(0, A_shape[0])]
-    else:
-        A_region = list(batch_region)
-        while len(A_region) < len(A_shape) - 2:
-            A_region.insert(0, (0, A_shape[len(A_region)]))
-        A_region = A_region[-(len(A_shape) - 2) :] if len(A_shape) > 2 else []
-        A_region.append((m_start, m_stop))
-        A_region.append((0, A_shape[-1]))
+    A_shape = input_shapes[0]
+    B_shape = input_shapes[1]
+    rank = len(output_shape)
 
-    # 4. Construct B Region
-    if len(B_shape) == 1:
-        B_region = [(0, B_shape[0])]
-    else:
-        B_region = list(batch_region)
-        while len(B_region) < len(B_shape) - 2:
-            B_region.insert(0, (0, B_shape[len(B_region)]))
-        B_region = B_region[-(len(B_shape) - 2) :] if len(B_shape) > 2 else []
-        B_region.append((0, B_shape[-2]))
-        B_region.append((n_start, n_stop))
+    for out_box in output_region:
+        # out_box is a single bounding box
+        # Dimensions: (Batch..., M, N)
 
-    return [tuple(A_region), tuple(B_region)]
+        # Extract bounds
+        batch_bounds = out_box[:-2]
+        m_bounds = out_box[-2]
+        n_bounds = out_box[-1]
+
+        # A Requirement:
+        # To compute C[m_start:m_end, n_start:n_end], we need
+        # A[m_start:m_end, :] AND B[:, n_start:n_end]
+
+        # Construct A Box
+        a_box = []
+        # Batch dims: If A is (B, M, K), it shares batch dims with C
+        if len(A_shape) > 2:
+            # We need to match batch dims.
+            # Assuming standard broadcasting, indices match.
+            a_box.extend(batch_bounds)
+
+        if len(A_shape) == 1:
+            # (K,) @ (K, N) -> (N,)
+            # If we need C[n_start:n_end], we need A (all)
+            # This logic is tricky with generic shapes, simplified here:
+            a_box.append((0, A_shape[0]))
+        else:
+            # A shape (..., M, K)
+            a_box.append(m_bounds)  # M rows
+            a_box.append((0, A_shape[-1]))  # All K
+
+        A_requirements.append(tuple(a_box))
+
+        # Construct B Box
+        b_box = []
+        if len(B_shape) > 2:
+            b_box.extend(batch_bounds)
+
+        if len(B_shape) == 1:
+            # (M, K) @ (K,) -> (M,)
+            b_box.append((0, B_shape[0]))
+        else:
+            # B shape (..., K, N)
+            b_box.append((0, B_shape[-2]))  # All K
+            b_box.append(n_bounds)  # N cols
+
+        B_requirements.append(tuple(b_box))
+
+    # Return lists of requirements. The executor/propagator merges these if needed.
+    return [A_requirements, B_requirements]
 
 
 # ---------------------------------------------------------------------------
@@ -1132,31 +1303,45 @@ def _fwd_gather(input_regions, input_shapes, output_shape, attrs):
     if _is_clean(data_reg) and _is_clean(idx_reg):
         return None
     idx_rank = len(idx_shape)
+
+    # Determine the result box (list of dimension ranges)
+    # We assume a single dirty box is present/enforced by wrapper, so we access the 0-th box.
     result = []
+
     for d in range(idx_rank):
         if not _is_clean(idx_reg):
-            result.append(idx_reg[d])
+            # Access the d-th dimension of the first box in idx_reg
+            if idx_reg and len(idx_reg[0]) > d:
+                result.append(idx_reg[0][d])
+            else:
+                result.append((0, 0))
         elif not _is_clean(data_reg):
             result.append((0, output_shape[d]))
         else:
             result.append((0, 0))
+
     for d in range(1, len(data_shape)):
         out_d = idx_rank + d - 1
         if not _is_clean(data_reg) and d < len(data_reg):
-            result.append(data_reg[d])
+            if data_reg and len(data_reg[0]) > d:
+                result.append(data_reg[0][d])
+            else:
+                result.append((0, 0))
         elif not _is_clean(idx_reg):
             result.append((0, output_shape[out_d]))
         else:
             result.append((0, 0))
+
     if all(s >= e for s, e in result):
         return None
-    return tuple(result)
+    return [tuple(result)]
 
 
 @GraphPropagator.register_backward(OpType.GATHER)
 def _bwd_gather(output_region, input_shapes, output_shape, attrs):
     if _is_clean(output_region):
         return [None, None]
+    output_region = output_region[0]
     data_shape, idx_shape = input_shapes[0], input_shapes[1]
     idx_rank = len(idx_shape)
     data_region = [(0, data_shape[0])]
@@ -1167,7 +1352,7 @@ def _bwd_gather(output_region, input_shapes, output_shape, attrs):
         else:
             data_region.append((0, data_shape[d]))
     idx_region = [output_region[d] for d in range(idx_rank)]
-    return [tuple(data_region), tuple(idx_region)]
+    return [[tuple(data_region)], [tuple(idx_region)]]
 
 
 # ---------------------------------------------------------------------------
@@ -1222,9 +1407,15 @@ def _shape_reduce(node: TensorNode, get_val):
 
 @GraphPropagator.register_forward(*_REDUCE_OPS)
 def _fwd_reduce(input_regions, input_shapes, output_shape, attrs):
-    inp = input_regions[0]
-    if _is_clean(inp):
+    inp_list = input_regions[0]
+    if _is_clean(inp_list):
         return None
+
+    # Get the first (and only) box from the list
+    if not inp_list:
+        return None
+    inp_box = inp_list[0]
+
     in_shape = input_shapes[0]
     in_rank = len(in_shape)
     axes = _resolve_axes(attrs, in_rank)
@@ -1233,15 +1424,20 @@ def _fwd_reduce(input_regions, input_shapes, output_shape, attrs):
     for d in range(in_rank):
         if d in axes:
             if keepdims:
-                if inp[d][0] < inp[d][1]:
-                    result.append((0, 1))
+                # Access dim d from the box
+                if d < len(inp_box):
+                    if inp_box[d][0] < inp_box[d][1]:
+                        result.append((0, 1))
+                    else:
+                        result.append((0, 0))
                 else:
                     result.append((0, 0))
         else:
-            result.append(inp[d])
+            # Access dim d from the box
+            result.append(inp_box[d])
     if all(s >= e for s, e in result):
         return None
-    return tuple(result)
+    return [tuple(result)]
 
 
 @GraphPropagator.register_backward(*_REDUCE_OPS)
@@ -1267,7 +1463,7 @@ def _bwd_reduce(output_region, input_shapes, output_shape, attrs):
         else:
             result.append(output_region[out_idx])
             out_idx += 1
-    return [tuple(result)]
+    return [[tuple(result)]]
 
 
 # ---------------------------------------------------------------------------
@@ -1363,15 +1559,36 @@ def _fwd_repeat(input_regions, input_shapes, output_shape, attrs):
     inp = input_regions[0]
     if _is_clean(inp):
         return None
+
     axis = attrs.get("axis", 0)
     repeats = attrs.get("repeats", 1)
-    rank = len(output_shape)
+    in_shape = input_shapes[0]
+
+    # Normalize axis relative to input rank (not output!)
+    rank_in = len(in_shape) if in_shape else 0
     if axis < 0:
-        axis += rank
-    result = list(inp)
+        axis += rank_in
+    if not (0 <= axis < rank_in):
+        # Invalid axis → assume full dirty output
+        return _make_full(output_shape)
+
+    # Extract box — assume single dirty region (wrapper ensures this)
+    if not inp:
+        return None
+    if len(inp) != 1:
+        return _make_full(output_shape)
+    box = inp[0]
+
+    # Pad/truncate box to match input rank
+    if len(box) < rank_in:
+        box = tuple(box) + tuple((0, dim) for dim in in_shape[len(box) :])
+    elif len(box) > rank_in:
+        box = box[:rank_in]
+
+    result = list(box)
     start, stop = result[axis]
     result[axis] = (start * repeats, stop * repeats)
-    return tuple(result)
+    return [tuple(result)]
 
 
 @GraphPropagator.register_backward(OpType.REPEAT)
@@ -1381,13 +1598,29 @@ def _bwd_repeat(output_region, input_shapes, output_shape, attrs):
     axis = attrs.get("axis", 0)
     repeats = attrs.get("repeats", 1)
     in_shape = input_shapes[0]
-    rank = len(in_shape)
+    rank_in = len(in_shape) if in_shape else 0
     if axis < 0:
-        axis += rank
-    result = list(output_region)
+        axis += rank_in
+    if not (0 <= axis < rank_in):
+        return [_make_full(in_shape)]
+
+    # Normalize output region box
+    if not output_region:
+        return [_make_full(in_shape)]
+    if len(output_region) != 1:
+        return [_make_full(in_shape)]
+    out_box = output_region[0]
+
+    if len(out_box) < rank_in:
+        out_box = tuple(out_box) + tuple((0, dim) for dim in output_shape[len(out_box):])
+    elif len(out_box) > rank_in:
+        out_box = out_box[:rank_in]
+
+    result = list(out_box)
     start, stop = result[axis]
     result[axis] = (start // repeats, (stop + repeats - 1) // repeats)
-    return [tuple(result)]
+    return [[tuple(result)]]
+
 
 
 # ---------------------------------------------------------------------------
@@ -1421,11 +1654,16 @@ def _fwd_norm(input_regions, input_shapes, output_shape, attrs):
     if axis < 0:
         axis += rank
 
-    result = list(inp)
+    # Convert inner tuples to lists so they can be modified
+    result = [list(region) for region in inp]
+
     # Any change in the row makes the entire output row dirty
     # because the normalization constant changes for everyone.
-    result[axis] = (0, output_shape[axis])
-    return tuple(result)
+    # We assign a full dirty range (0 to size) for the specific axis
+    result[0][axis] = (0, output_shape[axis])
+
+    # Convert back to tuples before returning
+    return [tuple(region) for region in result]
 
 
 @GraphPropagator.register_backward("Softmax")
@@ -1442,9 +1680,10 @@ def _bwd_softmax(output_region, input_shapes, output_shape, attrs):
     if axis < 0:
         axis += rank
 
-    result = list(output_region)
+    result = [list(region) for region in output_region]
     # We need the full row from the input to compute the sum/mean
-    result[axis] = (0, input_shapes[0][axis])
+    result[0][axis] = (0, input_shapes[0][axis])
+    result = [tuple(region) for region in result]
     return [tuple(result)]
 
 
@@ -1462,9 +1701,11 @@ def _bwd_norm(output_region, input_shapes, output_shape, attrs):
     if axis < 0:
         axis += rank
 
-    result = list(output_region)
+    # result = list(output_region)
+    result = [list(region) for region in output_region]
     # We need the full row from the input to compute the sum/mean
-    result[axis] = (0, input_shapes[0][axis])
+    result[0][axis] = (0, input_shapes[0][axis])
+    result = [tuple(region) for region in result]
 
     # Return regions for all inputs
     input_regions = [tuple(result)]
@@ -1474,7 +1715,7 @@ def _bwd_norm(output_region, input_shapes, output_shape, attrs):
         if input_shapes[i] is not None:
             # Scale parameter typically matches the normalized dimension
             # Just take the slice along the normalization axis
-            input_regions.append((result[axis],))
+            input_regions.append([(result[0][axis],)])
         else:
             input_regions.append(None)
 
@@ -1585,7 +1826,7 @@ def _fwd_im2col(input_regions, input_shapes, output_shape, attrs):
             l_end = (h_out_stop - 1) * W_out + w_out_stop
             out_l = (l_start, l_end)
 
-    return (out_n, (out_c_start, out_c_stop), out_l)
+    return [(out_n, (out_c_start, out_c_stop), out_l)]
 
 
 @GraphPropagator.register_backward(OpType.IM2COL)
@@ -1643,4 +1884,4 @@ def _bwd_im2col(output_region, input_shapes, output_shape, attrs):
     in_w_start = max(0, in_w_start)
     in_w_stop = min(W, in_w_stop)
 
-    return [(in_n_r, in_c_r, (in_h_start, in_h_stop), (in_w_start, in_w_stop))]
+    return [[(in_n_r, in_c_r, (in_h_start, in_h_stop), (in_w_start, in_w_stop))]]

@@ -352,8 +352,8 @@ def main():
         session.load_weights(weights_path)
 
     while True:
-        prompt = input("Enter prompt: ")
-        # prompt = "Explain Quantum Mechanics to a 5 year old."
+        # prompt = input("Enter prompt: ")
+        prompt = "Explain Quantum Mechanics to a 5 year old."
         prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
         input_ids = tokenizer.encode(prompt).ids
         # --- RUN LOOP ---

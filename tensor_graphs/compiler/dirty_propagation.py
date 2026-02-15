@@ -3,20 +3,20 @@ import numpy as np
 from ..ir.node import TensorNode
 from .propagation import GraphPropagator, _to_slices, _from_slices
 
-DirtyRegion = Optional[Tuple[slice, ...]]
+DirtyRegion = Optional[List[Tuple[slice, ...]]]
 
 
 class DirtyPropagator:
     @staticmethod
     def get_diff(old_data: Any, new_data: Any) -> DirtyRegion:
-        """Compute the bounding-box dirty region between *old_data* and *new_data*."""
+        """Compute the bounding-box dirty region. Returns a list containing one box."""
         if old_data is None:
             ndim = new_data.ndim if hasattr(new_data, "ndim") else 0
-            return (slice(None),) * ndim if ndim > 0 else (slice(None),)
+            return [(slice(None),) * ndim] if ndim > 0 else [(slice(None),)]
 
         if hasattr(new_data, "shape") and hasattr(old_data, "shape"):
             if new_data.shape != old_data.shape:
-                return (slice(None),) * new_data.ndim
+                return [(slice(None),) * new_data.ndim]
 
         n_new = (
             new_data.cpu().numpy() if hasattr(new_data, "cpu") else np.array(new_data)
@@ -26,7 +26,7 @@ class DirtyPropagator:
         )
 
         if n_new.shape != n_old.shape:
-            return (slice(None),) * n_new.ndim
+            return [(slice(None),) * n_new.ndim]
 
         diff = n_new != n_old
         if not np.any(diff):
@@ -41,7 +41,9 @@ class DirtyPropagator:
                 slices.append(slice(0, 0))
             else:
                 slices.append(slice(int(indices[0]), int(indices[-1] + 1)))
-        return tuple(slices)
+
+        # Return as a list of one box
+        return [tuple(slices)]
 
     @staticmethod
     def propagate(node: TensorNode, known_values: Optional[dict] = None) -> DirtyRegion:
