@@ -120,28 +120,28 @@ class FluxBuilder(GraphBuilder):
 
         # @ V
         return self.dot(probs, v)
-    
+
     def layer_norm(self, x: TensorNode, eps: float = 1e-6) -> TensorNode:
         """Standard LayerNorm without affine parameters (centering + scaling)."""
         dim = self.cfg.hidden_size
-        
+
         # Mean
         mean = TensorNode("Sum", x.dtype, [x], attrs={"axis": -1, "keepdims": True})
         mean = self.divide(mean, self.const([float(dim)]))
-        
+
         # Sub Mean
         x_sub = self.add(x, self.negate(mean))
-        
+
         # Var
         sq = self.mul(x_sub, x_sub)
         var_sum = TensorNode("Sum", x.dtype, [sq], attrs={"axis": -1, "keepdims": True})
         var = self.divide(var_sum, self.const([float(dim)]))
-        
+
         # Div Std
         std = self.sqrt(self.add(var, self.const([eps])))
         one = self.const([1.0])
         inv_std = self.divide(one, std)
-        
+
         return self.mul(x_sub, inv_std)
 
     # --- Transformer Components ---
@@ -1578,6 +1578,7 @@ class FluxPipeline:
         # )  # TODO: remove, this is a placeholder to skip expensive text encoding while testing sampling/latent decoding.
         latent = self.sample(text_emb, height, width, num_steps, seed)
         image = self.decode_latent(latent)
+        # image = None
 
         print("Done!")
         return image

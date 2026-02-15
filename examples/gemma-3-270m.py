@@ -88,7 +88,9 @@ class Gemma3Model:
         for i in range(cfg["n_layers"]):
             x = self._transformer_block(x, i, cos, sin, mask, shapes)
 
-        x = self.rms_norm_gemma(x, b.param("model.norm.weight", (cfg["emb_dim"],)), self.eps)
+        x = self.rms_norm_gemma(
+            x, b.param("model.norm.weight", (cfg["emb_dim"],)), self.eps
+        )
         w_head = w_emb
         logits = b.dot(x, b.permute(w_head, [1, 0]))
 

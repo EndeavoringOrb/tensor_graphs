@@ -863,18 +863,87 @@ def _shape_reshape(node: TensorNode, get_val):
             node.shape = tuple(target_dims_raw)
 
 
+def _get_flat_bounds(region: NumericRegion, shape: Tuple[int, ...]) -> Tuple[int, int]:
+    """Converts a multidimensional bounding box into a flat [start, stop) linear range."""
+    strides = [1] * len(shape)
+    for i in range(len(shape) - 2, -1, -1):
+        strides[i] = strides[i + 1] * shape[i + 1]
+    
+    flat_start = 0
+    flat_stop_minus_1 = 0
+    for i, (start, stop) in enumerate(region):
+        flat_start += start * strides[i]
+        # We calculate the flat index of the last element in the region
+        flat_stop_minus_1 += (stop - 1) * strides[i]
+        
+    return flat_start, flat_stop_minus_1 + 1
+
+def _unravel_flat_bounds(flat_start: int, flat_stop: int, shape: Tuple[int, ...]) -> NumericRegion:
+    """Converts a flat [start, stop) linear range into a multidimensional bounding box."""
+    temp_start = flat_start
+    temp_stop = flat_stop - 1 # Index of the last element
+    
+    coords_start = []
+    coords_stop = []
+    
+    # Unravel flat indices into coordinates
+    for dim in reversed(shape):
+        coords_start.append(temp_start % dim)
+        temp_start //= dim
+        coords_stop.append(temp_stop % dim)
+        temp_stop //= dim
+    
+    coords_start.reverse()
+    coords_stop.reverse()
+
+    region = []
+    found_diff = False
+    for i in range(len(shape)):
+        if found_diff:
+            # Once a higher dimension spans multiple indices, all sub-dimensions 
+            # must be considered fully dirty to encompass the linear range.
+            region.append((0, shape[i]))
+        else:
+            if coords_start[i] < coords_stop[i]:
+                region.append((coords_start[i], coords_stop[i] + 1))
+                found_diff = True
+            else:
+                # Still within the same index for this dimension
+                region.append((coords_start[i], coords_start[i] + 1))
+    
+    return tuple(region)
+
 @GraphPropagator.register_forward(OpType.RESHAPE)
 def _fwd_reshape(input_regions, input_shapes, output_shape, attrs):
-    if _is_clean(input_regions[0]):
+    inp_reg = input_regions[0]
+    inp_shape = input_shapes[0]
+    
+    if _is_clean(inp_reg):
         return None
-    return _make_full(output_shape)
 
+    if not inp_shape or not output_shape or None in inp_shape or None in output_shape:
+        return _make_full(output_shape)
+
+    # 1. Input Box -> Linear Range
+    flat_start, flat_stop = _get_flat_bounds(inp_reg, inp_shape)
+    
+    # 2. Linear Range -> Output Box
+    return _unravel_flat_bounds(flat_start, flat_stop, output_shape)
 
 @GraphPropagator.register_backward(OpType.RESHAPE)
 def _bwd_reshape(output_region, input_shapes, output_shape, attrs):
     if _is_clean(output_region):
-        return [None] * len(input_shapes)
-    return [_make_full(s) for s in input_shapes]
+        return [None]
+        
+    inp_shape = input_shapes[0]
+    if not inp_shape or not output_shape or None in inp_shape or None in output_shape:
+        return [_make_full(inp_shape)]
+
+    # 1. Output Box -> Linear Range
+    flat_start, flat_stop = _get_flat_bounds(output_region, output_shape)
+    
+    # 2. Linear Range -> Input Box
+    return [_unravel_flat_bounds(flat_start, flat_stop, inp_shape)]
 
 
 # ---------------------------------------------------------------------------
@@ -947,22 +1016,15 @@ def _shape_dot(node: TensorNode, get_val):
 @GraphPropagator.register_forward(OpType.DOT)
 def _fwd_dot(input_regions, input_shapes, output_shape, attrs):
     rA, rB = input_regions[0], input_regions[1]
-    A_shape = input_shapes[0]
+    A_shape, B_shape = input_shapes[0], input_shapes[1]
+    
     if _is_clean(rA) and _is_clean(rB):
         return None
+        
     out_rank = len(output_shape)
-
-    k_dirty = False
-    if not _is_clean(rA):
-        ks, ke = rA[-1]
-        if ks < ke:
-            k_dirty = True
-    if not _is_clean(rB):
-        ks, ke = rB[-2] if len(rB) >= 2 else (0, 0)
-        if ks < ke:
-            k_dirty = True
-
     result = []
+
+    # 1. Handle Batch Dimensions (usually identical across A and B)
     for d in range(out_rank - 2):
         start, stop = output_shape[d], 0
         if not _is_clean(rA) and d < len(rA) - 2:
@@ -971,27 +1033,29 @@ def _fwd_dot(input_regions, input_shapes, output_shape, attrs):
         if not _is_clean(rB) and d < len(rB) - 2:
             start = min(start, rB[d][0])
             stop = max(stop, rB[d][1])
-        if start >= stop:
-            start, stop = 0, 0
+        if start >= stop: start, stop = 0, 0
         result.append((start, stop))
 
-    if k_dirty:
+    # 2. Handle M Dimension (Rows)
+    # Row i of C is dirty if Row i of A is dirty OR B is dirty at all
+    if not _is_clean(rB):
         result.append((0, output_shape[-2]))
     elif not _is_clean(rA):
-        m_s, m_e = rA[-2] if len(rA) >= 2 else (0, A_shape[-2])
+        # A_shape[-2] is the M dim of A. If A is 1D (vector-matrix), M is effectively 1.
+        m_s, m_e = rA[-2] if len(rA) >= 2 else (0, 1)
         result.append((m_s, m_e))
     else:
         result.append((0, 0))
 
-    if k_dirty:
+    # 3. Handle N Dimension (Columns)
+    # Col j of C is dirty if Col j of B is dirty OR A is dirty at all
+    if not _is_clean(rA):
         result.append((0, output_shape[-1]))
     elif not _is_clean(rB):
-        result.append(rB[-1])
+        result.append(rB[-1]) # Last dim of B is N
     else:
         result.append((0, 0))
 
-    if all(s >= e for s, e in result):
-        return None
     return tuple(result)
 
 
