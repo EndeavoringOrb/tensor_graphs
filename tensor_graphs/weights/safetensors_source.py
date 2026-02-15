@@ -70,6 +70,9 @@ class SafetensorsSource(WeightSource):
             # We assume FP16 is acceptable for now, but typically we cast to FP32 for broad kernel support.
             # Let's cast to FP32 for safety in this framework version.
             tensor = tensor.to(torch.float32)
+        
+        if tensor.dtype not in (torch.float32, torch.int32, torch.bool):
+            raise TypeError(f"tensor.dtype {tensor.dtype} not supported")
 
         # 3. Convert to NumPy (Zero-copy if dtype was compatible, Copy if we casted)
         return tensor.numpy()
