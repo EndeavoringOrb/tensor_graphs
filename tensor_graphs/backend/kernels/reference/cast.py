@@ -41,5 +41,11 @@ def cast_implementation(inputs, outputs, attrs):
     target_dtype=DType.FP32,
     reference_factory=cast_ref,
 )
+@KernelRegistry.register(
+    OpType.CAST,
+    [TensorSignature(DType.BOOL, shape=None)],
+    target_dtype=DType.INT32,
+    reference_factory=cast_ref,
+)
 def cast_wrappers(inputs, outputs, attrs):
     cast_implementation(inputs, outputs, attrs)

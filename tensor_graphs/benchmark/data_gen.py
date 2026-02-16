@@ -360,6 +360,29 @@ class DataGenerator:
             inputs_with_backends.append((indices, Backend.CPU_NUMPY))
             return inputs_with_backends, attrs
 
+        elif op_type == OpType.IM2COL:
+            if len(signatures) >= 1:
+                shape = (
+                    signatures[0].shape
+                    if signatures[0].shape
+                    else DataGenerator._random_shape(min_rank=4)
+                )
+                dtype = signatures[0].dtype
+            else:
+                shape = DataGenerator._random_shape(min_rank=4)
+                dtype = DType.FP32
+
+            data = DataGenerator.random_tensor(shape, dtype)
+
+            inputs_with_backends.append(
+                (data, signatures[0].backend if len(signatures) > 0 else backend)
+            )
+
+            attrs["kernel_size"] = random.randint(2, 5)
+            attrs["stride"] = random.randint(1, 3)
+            attrs["padding"] = random.randint(0, 2)
+            return inputs_with_backends, attrs
+
         elif op_type in (OpType.MAX, OpType.SUM):
             if len(signatures) >= 1:
                 shape = (
@@ -501,6 +524,8 @@ class DataGenerator:
                     signatures[0].backend or backend,
                 )
             )
+            # Softmax requires an axis attribute
+            attrs["axis"] = -1  # Default to last axis
             return inputs_with_backends, attrs
 
         if op_type == "FusedMulAdd":

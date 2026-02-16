@@ -22,19 +22,19 @@ def get_all_test_kernels():
     for op_type, backends in registry.items():
         for backend, kernels in backends.items():
             for entry in kernels:
-                _, signatures, target_dtype, func = entry
+                _, signatures, target_dtype, inplace, func = entry
                 sig_str = ",".join([str(s.dtype.value) for s in signatures])
                 name = f"{op_type}-{backend.value}-[{sig_str}]"
-                yield (op_type, backend, signatures, target_dtype, func, name)
+                yield (op_type, backend, signatures, target_dtype, inplace, func, name)
 
 
 @pytest.mark.parametrize(
-    "op_type, backend, signatures, target_dtype, kernel_func, kernel_name",
+    "op_type, backend, signatures, target_dtype, inplace, kernel_func, kernel_name",
     get_all_test_kernels(),
     ids=lambda x: x[5] if isinstance(x, tuple) and len(x) > 5 else None,
 )
 def test_kernel_correctness(
-    op_type, backend, signatures, target_dtype, kernel_func, kernel_name
+    op_type, backend, signatures, target_dtype, inplace, kernel_func, kernel_name
 ):
     # 1. Skip if GPU backend required but not available
     if backend == Backend.GPU_TORCH and not torch.cuda.is_available():
@@ -247,5 +247,5 @@ def test_kernel_correctness(
 
 # For debugging with vscode debugger
 # for item in get_all_test_kernels():
-#     if item[0] == "RMSNorm":
+#     if item[0] == "Softmax":
 #         test_kernel_correctness(*item)
