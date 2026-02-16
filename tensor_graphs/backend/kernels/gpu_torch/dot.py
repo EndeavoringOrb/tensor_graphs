@@ -17,6 +17,7 @@ if torch.cuda.is_available():
     try:
         # Note: If dot.cu was already compiled, load will reuse the cached version
         _DOT_OPS = load(name="dot_cuda_kernel", sources=[_SRC_FILE], verbose=False)
+        print("✅ dot CUDA kernel compiled successfully.")
     except Exception as e:
         print(f"❌ Failed to compile Dot CUDA kernel: {e}")
 
