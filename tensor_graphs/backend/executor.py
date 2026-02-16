@@ -1,17 +1,21 @@
 # tensor_graphs/backend/executor.py
 import numpy as np
 import time
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple
 import math
 from ..compiler.compiled_graph import CompiledGraph
 from ..ir.buffer import StorageType
 from ..ir.dtypes import TensorSignature, get_buffer_size
+from ..ir.graph import GraphEncoder
 from ..ops import OpType
 from ..compiler.dirty_propagation import DirtyPropagator
 from .memory import MemoryManager
 from .registry import KernelRegistry
-from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
+from ..config import DEBUG_EXECUTION, DEBUG_DETAILED, RECORD_KERNEL_LAUNCHES, RECORD_KERNEL_LAUNCHES_FOLDER
 from tqdm import tqdm
+import os
+import json
+from datetime import datetime
 
 
 class Executor:
@@ -21,6 +25,17 @@ class Executor:
         self.last_inputs: Dict[str, Any] = {}
         # Persistent cache across runs: Key = (node_name, shape_tuple) -> Kernel
         self._kernel_cache: Dict[Tuple[str, Tuple[Tuple[int, ...], ...]], Any] = {}
+
+        # Determine output directory
+        output_dir = RECORD_KERNEL_LAUNCHES_FOLDER
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Find next available .jsonl file
+        run_num = 0
+        while os.path.exists(os.path.join(output_dir, f"{run_num}.jsonl")):
+            run_num += 1
+
+        self.kernel_launch_filename = os.path.join(output_dir, f"{run_num}.jsonl")
 
     def _calculate_dirty_ratio(
         self, regions: List[Tuple[slice, ...]], shape: Tuple[int, ...]
@@ -119,6 +134,28 @@ class Executor:
         dirty_vol = np.sum(cell_volumes)
 
         return dirty_vol / total_vol
+
+    def _record_kernel_launch(self, node_name: str, op_type: str, input_shapes: List[Tuple[int, ...]],
+                             output_shape: Tuple[int, ...], compute_time_ms: float,
+                             is_partial: bool, backend: str, attrs: Dict[str, Any]):
+        """Record kernel launch details to a .jsonl file."""
+        
+        # Create record
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "node_name": node_name,
+            "op_type": op_type,
+            "mode": "PARTIAL" if is_partial else "FULL",
+            "backend": backend,
+            "input_shapes": input_shapes,
+            "output_shape": output_shape,
+            "compute_time_ms": round(compute_time_ms, 6),
+            "attrs": attrs if attrs else {}
+        }
+
+        # Append to .jsonl file
+        with open(self.kernel_launch_filename, "a") as f:
+            f.write(json.dumps(record, cls=GraphEncoder) + "\n")
 
     def _update_inputs(self, inputs: Dict[str, Any]) -> None:
         for name, data in inputs.items():
@@ -254,7 +291,7 @@ class Executor:
 
                 dev_hint = node.backend.value if node.backend else "cpu"
                 actually_in_cache = self.mem.has(name, dev_hint)
-                
+
                 # Check for in-place signal from compiler
                 is_inplace = inst.inplace_input_index is not None
                 compute_regions: List[Tuple[slice, ...]] = []
@@ -263,40 +300,56 @@ class Executor:
                 if state["is_dirty"] and actually_in_cache:
                     counters["part"] += 1
                     if DEBUG_EXECUTION:
-                        partial_ratio = self._calculate_dirty_ratio(node.dirty_region, node.shape) if node.dirty_region and node.shape else 1.0
+                        partial_ratio = (
+                            self._calculate_dirty_ratio(node.dirty_region, node.shape)
+                            if node.dirty_region and node.shape
+                            else 1.0
+                        )
                         partial_ratio_sum += partial_ratio
-                    compute_regions = [r for r in node.dirty_region if any(s.stop > s.start for s in r)]
-                    self.mem.prepare_allocation(node, node.size_bytes, initial_refs=static_refs[name])
+                    compute_regions = [
+                        r for r in node.dirty_region if any(s.stop > s.start for s in r)
+                    ]
+                    self.mem.prepare_allocation(
+                        node, node.size_bytes, initial_refs=static_refs[name]
+                    )
 
                 elif not actually_in_cache:
                     if is_inplace:
                         # IN-PLACE EXECUTION
                         counters["inplace"] += 1
                         src_name = inst.input_node_names[inst.inplace_input_index]
-                        
+
                         # LOGICAL SHIFT: Move the buffer ownership from input to output.
                         # This avoids a new allocation and copies.
                         self.mem.transfer_ownership(src_name, name)
-                        
+
                         # In-place kernels are treated as full compute for the destination
-                        compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
+                        compute_regions = [
+                            tuple(slice(None) for _ in (node.shape or ()))
+                        ]
                     else:
                         # STANDARD FULL COMPUTE
                         counters["full"] += 1
-                        self.mem.prepare_allocation(node, node.size_bytes, initial_refs=static_refs[name])
-                        compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
+                        self.mem.prepare_allocation(
+                            node, node.size_bytes, initial_refs=static_refs[name]
+                        )
+                        compute_regions = [
+                            tuple(slice(None) for _ in (node.shape or ()))
+                        ]
 
                     if not state["is_dirty"]:
                         node.dirty_region = None
                 else:
                     counters["skip"] += 1
-                    self.mem.prepare_allocation(node, node.size_bytes, initial_refs=static_refs[name])
+                    self.mem.prepare_allocation(
+                        node, node.size_bytes, initial_refs=static_refs[name]
+                    )
 
                 # Execute Kernel
                 if compute_regions:
                     for region_slice in compute_regions:
                         start_time = time.perf_counter()
-                        
+
                         is_full_region = all(s == slice(None) for s in region_slice)
                         input_slice_regions = []
 
@@ -304,7 +357,9 @@ class Executor:
                             input_slice_regions = [None] * len(inst.input_node_names)
                         else:
                             query_region = [region_slice]
-                            reqs = DirtyPropagator.get_input_slices(node, query_region, inputs)
+                            reqs = DirtyPropagator.get_input_slices(
+                                node, query_region, inputs
+                            )
                             for req in reqs:
                                 input_slice_regions.append(req[0] if req else None)
 
@@ -315,12 +370,12 @@ class Executor:
                             p_node = self.graph.nodes_map[p_name]
                             full_view = self.mem.get_view(p_node)
                             sl = input_slice_regions[i]
-                            
+
                             if sl is None or node.op_type in (OpType.RESHAPE,):
                                 view = full_view
                             else:
                                 view = full_view[sl]
-                            
+
                             kernel_inputs.append(view)
                             concrete_shapes.append(view.shape)
 
@@ -353,10 +408,27 @@ class Executor:
 
                         # Run Kernel
                         out_view = self.mem.get_view(node)
-                        out_slice = out_view if node.op_type in (OpType.RESHAPE,) else out_view[region_slice]
+                        out_slice = (
+                            out_view
+                            if node.op_type in (OpType.RESHAPE,)
+                            else out_view[region_slice]
+                        )
 
                         selected_kernel(kernel_inputs, [out_slice], inst.attrs)
                         node.compute_cost = (time.perf_counter() - start_time) * 1000
+
+                        # Record kernel launch if enabled
+                        if RECORD_KERNEL_LAUNCHES:
+                            self._record_kernel_launch(
+                                node_name=name,
+                                op_type=node.op_type,
+                                input_shapes=concrete_shapes,
+                                output_shape=node.shape or (0,),
+                                compute_time_ms=node.compute_cost,
+                                is_partial=not is_full_region,
+                                backend=dev_hint,
+                                attrs=inst.attrs
+                            )
 
                 # Release Parents
                 for p_name in inst.input_node_names:

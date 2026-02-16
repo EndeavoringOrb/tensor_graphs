@@ -18,7 +18,7 @@ def bench_all(db_path="benchmarks.db"):
             print(f"Benchmarking {op_type} on {backend.value}...")
 
             for entry in kernels:
-                _, sigs, _, func = entry
+                _, sigs, _, inplace, func = entry
 
                 # Let DataGenerator handle shape generation based on signatures
                 inputs, attrs = DataGenerator.generate(op_type, tuple(sigs), backend)

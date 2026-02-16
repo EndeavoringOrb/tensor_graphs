@@ -528,23 +528,25 @@ class MemoryManager:
             if src_name in buf.allocations:
                 # 1. Pop the allocation from the source
                 block = buf.allocations.pop(src_name)
-                
+
                 # 2. Update the block identity
                 block.node_name = dst_name
-                
+
                 # 3. Assign to the destination
                 buf.allocations[dst_name] = block
-                
+
                 # 4. CRITICAL: Purge the view cache for the old name
                 # If we don't do this, a later request for src_name might return
                 # stale data even if the block was removed from allocations.
                 if src_name in buf.views:
                     del buf.views[src_name]
-                
+
                 if DEBUG_EXECUTION and DEBUG_DETAILED:
-                    print(f"[MemoryManager.transfer_ownership] Moved {src_name} -> {dst_name} on {device}")
+                    print(
+                        f"[MemoryManager.transfer_ownership] Moved {src_name} -> {dst_name} on {device}"
+                    )
                 return
 
-        raise RuntimeError(f"Cannot transfer ownership: {src_name} not found in any device buffer.")
-
-    
+        raise RuntimeError(
+            f"Cannot transfer ownership: {src_name} not found in any device buffer."
+        )
