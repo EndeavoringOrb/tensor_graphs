@@ -648,9 +648,8 @@ class FluxTransformer:
 class Sampler:
     """Proper FLUX.2 resolution-dependent Euler sampler."""
 
-    def __init__(self, num_steps: int, distilled: bool = True):
+    def __init__(self, num_steps: int):
         self.num_steps = num_steps
-        self.distilled = distilled
 
     def get_schedule(self, image_seq_len: int) -> np.ndarray:
         """
@@ -658,9 +657,6 @@ class Sampler:
         For distilled models (few steps), use a simple Linear schedule.
         For base models (many steps), use the resolution-dependent Shifted Sigmoid schedule.
         """
-        if self.distilled:
-            return np.linspace(1.0, 0.0, self.num_steps + 1, dtype=np.float32)
-
         # Empirical constants from Flux training distribution
         a1, b1 = 8.73809524e-05, 1.89833333
         a2, b2 = 0.00016927, 0.45666666
@@ -1434,7 +1430,7 @@ class FluxPipeline:
         self.text_encoder_session.compile(sample_inputs)
         print("Text encoder ready!")
 
-    def build_vae_decoder(self):
+    def build_vae_decoder(self, latent_h: int, latent_w: int):
         if self.vae_session:
             return
         print("Building VAE decoder graph...")
@@ -1455,15 +1451,14 @@ class FluxPipeline:
             )
 
         image = self.vae_decoder.decode(latent, h_node, w_node, weights)
-        self.vae_session = GraphSession(image)
+        self.vae_session = GraphSession(image, max_memory_bytes=10 * 1024 ** 3)
 
-        # TODO: don't hardcode this to 8x8
-        sample_latent = np.zeros((1, self.cfg.vae_channels, 8, 8), dtype=np.float32)
+        sample_latent = np.zeros((1, self.cfg.vae_channels, latent_h, latent_w), dtype=np.float32)
         self.vae_session.compile(
             {
                 "latent": sample_latent,
-                "h": np.array([8], dtype=np.int32),
-                "w": np.array([8], dtype=np.int32),
+                "h": np.array([latent_h], dtype=np.int32),
+                "w": np.array([latent_w], dtype=np.int32),
             }
         )
         print("VAE decoder ready!")
@@ -1494,7 +1489,8 @@ class FluxPipeline:
 
     def decode_latent(self, latent: np.ndarray) -> np.ndarray:
         print("Decoding latent...")
-        self.build_vae_decoder()
+        # Pass the actual latent dimensions to the decoder
+        self.build_vae_decoder(latent.shape[2], latent.shape[3])
         if self.vae_session:
             h_val = latent.shape[2]
             w_val = latent.shape[3]
@@ -1583,7 +1579,7 @@ class FluxPipeline:
         print(f"\nGenerating: {prompt[:50]}...")
         print(f"Size: {width}x{height}")
 
-        prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        prompt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
         text_emb = self.encode_text(prompt)
         # text_emb = np.zeros(
         #     (1, self.cfg.text_max_seq, self.cfg.text_dim)
@@ -1613,8 +1609,8 @@ def main():
         prompt = input("Enter prompt: ")
         image = pipeline.generate(
             prompt=prompt,
-            height=128,
-            width=128,
+            height=512,
+            width=512,
             num_steps=4,
             seed=42,
         )

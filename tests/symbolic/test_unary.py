@@ -11,9 +11,9 @@ def test_unary_forward():
     exp = TensorNode(OpType.EXP, DType.FP32, [a], (10,), "exp")
 
     # Unary ops propagate dirty region as is
-    a.dirty_region = (slice(2, 5),)
+    a.dirty_region = [(slice(2, 5),)]
     out_dirty = DirtyPropagator.propagate(exp)
-    assert out_dirty == (slice(2, 5),)
+    assert out_dirty == [(slice(2, 5),)]
 
 
 def test_unary_backward():
@@ -21,5 +21,5 @@ def test_unary_backward():
     exp = TensorNode(OpType.EXP, DType.FP32, [a], (10,), "exp")
 
     # Backward elementwise: out region maps directly to in region
-    in_slices = DirtyPropagator.get_input_slices(exp, (slice(2, 5),))
-    assert in_slices[0] == (slice(2, 5),)
+    in_slices = DirtyPropagator.get_input_slices(exp, [(slice(2, 5),)])
+    assert in_slices[0] == [(slice(2, 5),)]

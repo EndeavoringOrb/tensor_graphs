@@ -17,17 +17,15 @@ def test_concat_forward():
     a.dirty_region = [(slice(1, 3),)]
     b.dirty_region = None
     out_dirty = DirtyPropagator.propagate(concat)
-    assert out_dirty == (slice(1, 3),)
+    assert out_dirty == [(slice(1, 3),)]
 
     # b dirty [1:3], a clean
     a.dirty_region = None
-    b.dirty_region = (slice(1, 3),)
+    b.dirty_region = [(slice(1, 3),)]
     out_dirty = DirtyPropagator.propagate(concat)
     # Shifted by len(a)=5 -> [6, 8]
-    assert out_dirty == (slice(6, 8),)
+    assert out_dirty == [(slice(6, 8),)]
 
-
-test_concat_forward()
 
 
 def test_concat_backward():
@@ -38,11 +36,11 @@ def test_concat_backward():
     )
 
     # Case 1: Region entirely in 'a'
-    res1 = DirtyPropagator.get_input_slices(concat, (slice(2, 4),))
-    assert res1[0] == (slice(2, 4),)
+    res1 = DirtyPropagator.get_input_slices(concat, [(slice(2, 4),)])
+    assert res1[0] == [(slice(2, 4),)]
     assert res1[1] is None
 
     # Case 2: Region spanning both
-    res2 = DirtyPropagator.get_input_slices(concat, (slice(4, 7),))
-    assert res2[0] == (slice(4, 5),)
-    assert res2[1] == (slice(0, 2),)
+    res2 = DirtyPropagator.get_input_slices(concat, [(slice(4, 7),)])
+    assert res2[0] == [(slice(4, 5),)]
+    assert res2[1] == [(slice(0, 2),)]

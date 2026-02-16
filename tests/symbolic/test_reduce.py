@@ -15,9 +15,9 @@ def test_reduce_forward():
     # a dirty rows [1:3], all cols [0:10]
     # Since we reduce over axis 0, and axis 0 is dirty, the whole result might be dirty?
     # No, if only cols [2:4] were dirty across some rows, only those output cols are dirty.
-    a.dirty_region = (slice(1, 3), slice(2, 4))
+    a.dirty_region = [(slice(1, 3), slice(2, 4))]
     out_dirty = DirtyPropagator.propagate(reduce_sum)
-    assert out_dirty == (slice(2, 4),)
+    assert out_dirty == [(slice(2, 4),)]
 
 
 def test_reduce_backward():
@@ -27,5 +27,5 @@ def test_reduce_backward():
     )
 
     # Backward reduce precision
-    in_slices = DirtyPropagator.get_input_slices(reduce_sum, (slice(2, 4),))
-    assert in_slices[0] == (slice(0, 5), slice(2, 4))
+    in_slices = DirtyPropagator.get_input_slices(reduce_sum, [(slice(2, 4),)])
+    assert in_slices[0] == [(slice(0, 5), slice(2, 4))]

@@ -19,9 +19,9 @@ def test_slice_forward():
 
     # a dirty [4:6]
     # touches out index (4-2)//2 = 1 to (6-2)//2 = 2
-    a.dirty_region = (slice(4, 6),)
+    a.dirty_region = [(slice(4, 6),)]
     out_dirty = DirtyPropagator.propagate(slc)
-    assert out_dirty == (slice(1, 2),)
+    assert out_dirty == [(slice(1, 2),)]
 
 
 def test_slice_backward():
@@ -35,7 +35,7 @@ def test_slice_backward():
         attrs={"starts": [2], "ends": [10], "steps": [2]},
     )
 
-    res = DirtyPropagator.get_input_slices(slc, (slice(0, 2),))
+    res = DirtyPropagator.get_input_slices(slc, [(slice(0, 2),)])
     # out[0:2] touches a[2 + 0*2] = a[2], a[2 + 1*2] = a[4].
     # range in a: [2, 5)
     assert res[0] is None

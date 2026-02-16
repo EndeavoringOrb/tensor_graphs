@@ -13,10 +13,10 @@ def test_permute_forward():
     )
 
     # a dirty rows [1:2], all cols [0:3]
-    a.dirty_region = (slice(1, 2), slice(0, 3))
+    a.dirty_region = [(slice(1, 2), slice(0, 3))]
     out_dirty = DirtyPropagator.propagate(perm)
     # Result should be dirty in out[0:3, 1:2]
-    assert out_dirty == (slice(0, 3), slice(1, 2))
+    assert out_dirty == [(slice(0, 3), slice(1, 2))]
 
 
 def test_permute_backward():
@@ -26,5 +26,5 @@ def test_permute_backward():
     )
 
     # Request out[0:2, 1:2] -> a[1:2, 0:2]
-    res = DirtyPropagator.get_input_slices(perm, (slice(0, 2), slice(1, 2)))
-    assert res[0] == (slice(1, 2), slice(0, 2))
+    res = DirtyPropagator.get_input_slices(perm, [(slice(0, 2), slice(1, 2))])
+    assert res[0] == [(slice(1, 2), slice(0, 2))]

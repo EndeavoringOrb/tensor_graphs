@@ -1,7 +1,7 @@
-- [ ] tensor_graphs/compiler/dirty_propagation.py is a thin wrapper around tensor_graphs/compiler/propagation.py. Additionally, NumericRegion vs DirtyRegion is confusing, and the shape handling for shape/fwd/bwd functions is complicated due to the nested structure. I want to refactor so we just have Region. Forward and shape inference can be merged into one. Like shape inference is just a special case of forward propagation where every slice is (0, dim).
 - [ ] Add explicitly view-only (reshape) and in-place operations
 - [ ] add cuda kernels to make gemma-3-270m go fast on gpu
 - [ ] Make tests pass
+- [ ] tensor_graphs/compiler/dirty_propagation.py is a thin wrapper around tensor_graphs/compiler/propagation.py. Additionally, NumericRegion vs DirtyRegion is confusing, and the shape handling for shape/fwd/bwd functions is complicated due to the nested structure. I want to refactor so we just have Region. Forward and shape inference can be merged into one. Like shape inference is just a special case of forward propagation where every slice is (0, dim).
 
 - [ ] ?? monte carlo tree search (SEARCH mode) or greedy (GREEDY mode) for caching
 - [ ] minimize memory usage (make sure no duplicate weights or anything)

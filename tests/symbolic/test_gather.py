@@ -15,13 +15,10 @@ def test_gather_forward():
     # Actually symbolic.py implementation for GATHER:
     # gather only checks indices dirtyness for output ranges.
     # Logic: if indices[i] is dirty, out[i] is dirty.
-    indices.dirty_region = (slice(1, 2),)
+    indices.dirty_region = [(slice(1, 2),)]
     data.dirty_region = None
     out_dirty = DirtyPropagator.propagate(gather)
-    assert out_dirty == (
-        slice(1, 2),
-        slice(0, 5),
-    )  # Indices dirty at [1:2], trailing dims Full
+    assert out_dirty == [(slice(1, 2), slice(0, 5))]
 
 
 def test_gather_backward():
@@ -30,6 +27,6 @@ def test_gather_backward():
     gather = TensorNode(OpType.GATHER, DType.FP32, [data, indices], (3, 5), "gather")
 
     # Gather backward precision
-    in_slices = DirtyPropagator.get_input_slices(gather, (slice(0, 1), slice(0, 5)))
-    assert in_slices[0] == (slice(0, 10), slice(0, 5))
-    assert in_slices[1] == (slice(0, 1),)
+    in_slices = DirtyPropagator.get_input_slices(gather, [(slice(0, 1), slice(0, 5))])
+    assert in_slices[0] == [(slice(0, 10), slice(0, 5))]
+    assert in_slices[1] == [(slice(0, 1),)]

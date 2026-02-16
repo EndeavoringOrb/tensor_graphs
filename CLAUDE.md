@@ -1,2 +1,0 @@
-Do NOT use try except. NO fallbacks, NO simplifications. If something is incomplete, I want it to ERROR and FAIL. I do not want half-working solutions that go unnoticed because they patch over errors.
-When running python, use .venv/Scripts/python.exe
