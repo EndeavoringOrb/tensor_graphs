@@ -8,9 +8,6 @@ Implements the complete diffusion transformer pipeline:
 """
 
 import warnings
-
-warnings.simplefilter("error", RuntimeWarning)
-
 import os
 import math
 from typing import Dict, Tuple, Optional, Any
@@ -25,6 +22,8 @@ from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ir.graph import GraphBuilder
 from tensor_graphs.session import GraphSession
 from tensor_graphs.weights import SafetensorsSource
+
+warnings.simplefilter("error", RuntimeWarning)
 
 
 @dataclass
@@ -1451,9 +1450,11 @@ class FluxPipeline:
             )
 
         image = self.vae_decoder.decode(latent, h_node, w_node, weights)
-        self.vae_session = GraphSession(image, max_memory_bytes=10 * 1024 ** 3)
+        self.vae_session = GraphSession(image, max_memory_bytes=10 * 1024**3)
 
-        sample_latent = np.zeros((1, self.cfg.vae_channels, latent_h, latent_w), dtype=np.float32)
+        sample_latent = np.zeros(
+            (1, self.cfg.vae_channels, latent_h, latent_w), dtype=np.float32
+        )
         self.vae_session.compile(
             {
                 "latent": sample_latent,

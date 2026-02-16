@@ -361,10 +361,11 @@ class GraphPropagator:
                         TensorSignature(p.dtype, p.shape, Backend.CPU_NUMPY)
                         for p in node.parents
                     ]
-                    kernel = KernelRegistry.select_best_kernel(
+                    kernel_result = KernelRegistry.select_best_kernel(
                         node.op_type, input_sigs, Backend.CPU_NUMPY, node.dtype
                     )
-                    if kernel:
+                    if kernel_result:
+                        kernel, inplace = kernel_result
                         out_np = np.zeros(node.shape, dtype=_map_dtype_np(node.dtype))
                         parent_vals = [computed_values[p.name] for p in node.parents]
                         kernel(parent_vals, [out_np], node.attrs)

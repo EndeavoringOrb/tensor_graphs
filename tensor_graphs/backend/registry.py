@@ -2,7 +2,10 @@ from typing import Dict, List, Callable, Optional, Tuple
 from ..ir.dtypes import DType, TensorSignature, Backend
 from ..ops.registry import register_reference_factory, get_reference_factory
 
-KernelEntry = Tuple[Backend, Tuple[TensorSignature, ...], Optional[DType], Callable]
+# Backend, Input Signatures, Target DType, Inplace Flag, Kernel Function
+KernelEntry = Tuple[
+    Backend, Tuple[TensorSignature, ...], Optional[DType], bool, Callable
+]
 
 
 class KernelRegistry:
@@ -22,6 +25,7 @@ class KernelRegistry:
         backend: Backend = Backend.CPU_NUMPY,
         target_dtype: Optional[DType] = None,
         reference_factory: Optional[Callable] = None,
+        inplace: bool = False,
     ):
         def decorator(func):
             # 1. Register Reference if provided
@@ -38,19 +42,13 @@ class KernelRegistry:
                 cls._kernels[op_type][backend] = []
 
             # 3. Resolve Target DType
-            # Logic:
-            # - If target_dtype is explicit, use it.
-            # - If inputs are all same dtype, infer target_dtype = input_dtype.
-            # - If inputs are mixed dtypes, target_dtype MUST be specified (raise Error).
             resolved_target_dtype = target_dtype
 
             if resolved_target_dtype is None and input_sigs:
                 input_dtypes = {sig.dtype for sig in input_sigs}
                 if len(input_dtypes) == 1:
-                    # Constraint 1: All inputs same -> default to that dtype
                     resolved_target_dtype = list(input_dtypes)[0]
                 elif len(input_dtypes) > 1:
-                    # Constraint 2: Mixed inputs -> must specify target
                     dtypes_str = ", ".join([str(d.value) for d in input_dtypes])
                     raise ValueError(
                         f"Kernel registration error for '{op_type}' on backend '{backend.value}': "
@@ -58,18 +56,16 @@ class KernelRegistry:
                         f"You must explicitly specify 'target_dtype' in the @register decorator."
                     )
 
-            # If input signatures didn't specify backend, default to the execution backend
-            # This maintains backward compatibility with existing generic kernels
             final_sigs = []
             for sig in input_sigs:
                 if sig.backend is None:
-                    # Assume input is on same backend as execution if not specified
                     final_sigs.append(TensorSignature(sig.dtype, sig.shape, backend))
                 else:
                     final_sigs.append(sig)
 
+            # Store the inplace flag in the entry
             cls._kernels[op_type][backend].append(
-                (backend, tuple(final_sigs), resolved_target_dtype, func)
+                (backend, tuple(final_sigs), resolved_target_dtype, inplace, func)
             )
             return func
 
@@ -82,30 +78,45 @@ class KernelRegistry:
         concrete_inputs: List[TensorSignature],
         backend: Backend = Backend.CPU_NUMPY,
         target_dtype: Optional[DType] = None,
-    ) -> Optional[Callable]:
+        allow_inplace: bool = True,
+    ) -> Optional[Tuple[Callable, bool]]:
 
         candidates = cls._kernels.get(op_type, {}).get(backend, [])
         best_score = -1
         best_kernel = None
+        best_inplace = False
 
-        for cand_backend, pattern_sigs, cand_target_dtype, kernel_func in candidates:
+        for (
+            cand_backend,
+            pattern_sigs,
+            cand_target_dtype,
+            cand_inplace,
+            kernel_func,
+        ) in candidates:
             # 1. Execution Backend Check
             if cand_backend != backend:
                 continue
 
-            # 2. Output DType Check
+            # 2. Inplace Filter (For fallback re-querying)
+            if cand_inplace and not allow_inplace:
+                continue
+
+            # 3. Output DType Check
             if cand_target_dtype is not None and target_dtype is not None:
                 if cand_target_dtype != target_dtype:
                     continue
 
-            # 3. Input Signature Scoring
+            # 4. Input Signature Scoring
             score = cls._score_candidate(pattern_sigs, concrete_inputs)
 
             if score > best_score:
                 best_score = score
                 best_kernel = kernel_func
+                best_inplace = cand_inplace
 
-        return best_kernel
+        if best_kernel:
+            return best_kernel, best_inplace
+        return None
 
     @staticmethod
     def _score_candidate(
@@ -116,17 +127,14 @@ class KernelRegistry:
 
         total_score = 0
         for pat, con in zip(patterns, concrete):
-            # 1. Backend Match
             if pat.backend is not None:
                 if pat.backend != con.backend:
                     return -1
                 total_score += 10
 
-            # 2. DType Match
             if pat.dtype != con.dtype:
                 return -1
 
-            # 3. Shape Match
             if pat.shape is None:
                 total_score += 1
             elif con.shape is None:
@@ -147,7 +155,6 @@ class KernelRegistry:
                             return -1
                     else:
                         total_score += 1
-
         return total_score
 
     @classmethod
@@ -157,9 +164,6 @@ class KernelRegistry:
         dest_sig: TensorSignature,
         backend: Backend = Backend.CPU_NUMPY,
     ) -> bool:
-        """
-        Planner helper: Checks if a CAST kernel exists for src_dtype -> dest_dtype.
-        """
         return (
             cls.select_best_kernel(
                 "Cast", [src_sig], backend, target_dtype=dest_sig.dtype

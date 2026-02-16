@@ -18,6 +18,7 @@ def test_dot_forward():
     out_dirty = DirtyPropagator.propagate(dot)
     assert out_dirty == [(slice(1, 2, None), slice(0, 4, None))]
 
+
 def test_dot_backward():
     # a: (2, 3), b: (3, 4) -> out: (2, 4)
     a = TensorNode(OpType.INPUT, DType.FP32, [], (2, 3), "a")

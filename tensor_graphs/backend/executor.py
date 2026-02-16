@@ -224,6 +224,7 @@ class Executor:
             "part": 0,
             "pruned": 0,
             "kernel_switch": 0,
+            "inplace": 0,
         }
         partial_ratio_sum = 0
 
@@ -237,7 +238,6 @@ class Executor:
                     print(f"[Executor.run] Executing {inst}")
                 node = self.graph.nodes_map[inst.node_name]
 
-                # 1. Skip logic for Inputs/Constants
                 if node.op_type in (OpType.INPUT, OpType.CONSTANT):
                     counters["no_op"] += 1
                     continue
@@ -246,9 +246,6 @@ class Executor:
                 state = node_states[name]
                 is_needed = name in needed_nodes
 
-                # 2. Handle Pruned Nodes
-                # If the node isn't needed for the final output, we release its parents
-                # and skip it entirely. This maintains the ref-count balance.
                 if not is_needed:
                     counters["pruned"] += 1
                     for p_name in inst.input_node_names:
@@ -257,93 +254,73 @@ class Executor:
 
                 dev_hint = node.backend.value if node.backend else "cpu"
                 actually_in_cache = self.mem.has(name, dev_hint)
-
+                
+                # Check for in-place signal from compiler
+                is_inplace = inst.inplace_input_index is not None
                 compute_regions: List[Tuple[slice, ...]] = []
 
-                # 3. Determine Computation Mode
+                # Determine Computation Mode
                 if state["is_dirty"] and actually_in_cache:
-                    # PARTIAL RECOMPUTE (Cache is hot, but data changed)
                     counters["part"] += 1
-
                     if DEBUG_EXECUTION:
-                        if node.dirty_region and node.shape:
-                            partial_ratio = self._calculate_dirty_ratio(
-                                node.dirty_region, node.shape
-                            )
-                            partial_ratio_sum += partial_ratio
-                        else:
-                            partial_ratio = 1.0
-
-                    # Filter for non-empty slices
-                    compute_regions = [
-                        r for r in node.dirty_region if any(s.stop > s.start for s in r)
-                    ]
-
-                    # Initialize refs/lock in the memory manager
-                    self.mem.prepare_allocation(
-                        node, node.size_bytes, initial_refs=static_refs[name]
-                    )
+                        partial_ratio = self._calculate_dirty_ratio(node.dirty_region, node.shape) if node.dirty_region and node.shape else 1.0
+                        partial_ratio_sum += partial_ratio
+                    compute_regions = [r for r in node.dirty_region if any(s.stop > s.start for s in r)]
+                    self.mem.prepare_allocation(node, node.size_bytes, initial_refs=static_refs[name])
 
                 elif not actually_in_cache:
-                    # FULL COMPUTE (Buffer missing from memory)
-                    counters["full"] += 1
+                    if is_inplace:
+                        # IN-PLACE EXECUTION
+                        counters["inplace"] += 1
+                        src_name = inst.input_node_names[inst.inplace_input_index]
+                        
+                        # LOGICAL SHIFT: Move the buffer ownership from input to output.
+                        # This avoids a new allocation and copies.
+                        self.mem.transfer_ownership(src_name, name)
+                        
+                        # In-place kernels are treated as full compute for the destination
+                        compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
+                    else:
+                        # STANDARD FULL COMPUTE
+                        counters["full"] += 1
+                        self.mem.prepare_allocation(node, node.size_bytes, initial_refs=static_refs[name])
+                        compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
 
-                    # Allocate and set initial ref count
-                    self.mem.prepare_allocation(
-                        node, node.size_bytes, initial_refs=static_refs[name]
-                    )
-
-                    # Full recompute: One region covering the whole shape
-                    compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
                     if not state["is_dirty"]:
                         node.dirty_region = None
                 else:
-                    # CACHE HIT (Clean & Needed)
-                    # No computation needed, but we must refresh the ref count
-                    # so this node can eventually be evicted after its consumers are done.
                     counters["skip"] += 1
-                    self.mem.prepare_allocation(
-                        node, node.size_bytes, initial_refs=static_refs[name]
-                    )
+                    self.mem.prepare_allocation(node, node.size_bytes, initial_refs=static_refs[name])
 
-                # 4. Execute Kernel for needed regions
+                # Execute Kernel
                 if compute_regions:
                     for region_slice in compute_regions:
                         start_time = time.perf_counter()
-
-                        # Determine Input Slices
+                        
                         is_full_region = all(s == slice(None) for s in region_slice)
-                        input_slice_regions: List[Optional[Tuple[slice, ...]]] = []
+                        input_slice_regions = []
 
                         if is_full_region:
                             input_slice_regions = [None] * len(inst.input_node_names)
                         else:
-                            # Query backward propagation for specific required input chunks
                             query_region = [region_slice]
-                            reqs = DirtyPropagator.get_input_slices(
-                                node, query_region, inputs
-                            )
+                            reqs = DirtyPropagator.get_input_slices(node, query_region, inputs)
                             for req in reqs:
-                                if req is None or not req:
-                                    input_slice_regions.append(None)
-                                else:
-                                    input_slice_regions.append(req[0])
+                                input_slice_regions.append(req[0] if req else None)
 
-                        # Prepare Views
                         kernel_inputs = []
                         concrete_shapes = []
 
                         for i, p_name in enumerate(inst.input_node_names):
                             p_node = self.graph.nodes_map[p_name]
                             full_view = self.mem.get_view(p_node)
-
                             sl = input_slice_regions[i]
-                            # Special case: Reshape kernels usually need the full contiguous buffer
+                            
                             if sl is None or node.op_type in (OpType.RESHAPE,):
                                 view = full_view
                             else:
                                 view = full_view[sl]
-
+                            
                             kernel_inputs.append(view)
                             concrete_shapes.append(view.shape)
 
@@ -370,23 +347,18 @@ class Executor:
                                     node.op_type, input_sigs, node.backend, node.dtype
                                 )
                                 if better_kernel:
-                                    selected_kernel = better_kernel
+                                    selected_kernel, inplace = better_kernel
                                     counters["kernel_switch"] += 1
                                 self._kernel_cache[cache_key] = selected_kernel
 
                         # Run Kernel
                         out_view = self.mem.get_view(node)
-                        if node.op_type in (OpType.RESHAPE,):
-                            out_slice = out_view
-                        else:
-                            out_slice = out_view[region_slice]
+                        out_slice = out_view if node.op_type in (OpType.RESHAPE,) else out_view[region_slice]
 
                         selected_kernel(kernel_inputs, [out_slice], inst.attrs)
                         node.compute_cost = (time.perf_counter() - start_time) * 1000
 
-                # 5. Final Step: Consume Parents
-                # Every instruction that executes (Skip or Compute) consumes exactly one
-                # reference from each of its parents.
+                # Release Parents
                 for p_name in inst.input_node_names:
                     self.mem.release(p_name)
 
@@ -403,6 +375,5 @@ class Executor:
                     )
                     pbar.set_postfix(counters)
 
-        # Output the root node
         root_name = self.graph.instructions[-1].node_name
         return self.mem.get_view(self.graph.nodes_map[root_name])

@@ -27,7 +27,6 @@ def test_concat_forward():
     assert out_dirty == [(slice(6, 8),)]
 
 
-
 def test_concat_backward():
     a = TensorNode(OpType.INPUT, DType.FP32, [], (5,), "a")
     b = TensorNode(OpType.INPUT, DType.FP32, [], (5,), "b")

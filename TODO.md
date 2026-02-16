@@ -1,15 +1,16 @@
-- [ ] Add explicitly view-only (reshape) and in-place operations
+- [ ] Add explicitly view-only (reshape) operations
+- [ ] Make it so multiple graphs can share memory so we don't have max_bytes * 3 (vae, qwen3, flux transformer) memory
 - [ ] add cuda kernels to make gemma-3-270m go fast on gpu
+- [ ] Graph parallel execution
 - [ ] Make tests pass
-- [ ] tensor_graphs/compiler/dirty_propagation.py is a thin wrapper around tensor_graphs/compiler/propagation.py. Additionally, NumericRegion vs DirtyRegion is confusing, and the shape handling for shape/fwd/bwd functions is complicated due to the nested structure. I want to refactor so we just have Region. Forward and shape inference can be merged into one. Like shape inference is just a special case of forward propagation where every slice is (0, dim).
 
 - [ ] ?? monte carlo tree search (SEARCH mode) or greedy (GREEDY mode) for caching
 - [ ] minimize memory usage (make sure no duplicate weights or anything)
 - [ ] make better safetensors loader that doesn't need to read whole tensor to get metadata
 - [ ] make easy workflow to test end-to-end correctness against other frameworks where user provides a couple (input, output) references
 - [ ] set cache size based on min(max_bytes, total_mem - graph_mem - max_expected_compute_mem). max_expected_compute_mem means we need to (during benchmarking) measure peak memory usage. if we don't have benchmark, then use constant heuristic value of 1GB
-- [ ] Make it so multiple graphs can share memory so we don't have max_bytes * 3 (vae, qwen3, flux transformer) memory
 - [ ] Optimize fwd/back shape propagation to make sure they all have smallest possible slice for recomputation (not conservative)
 - [ ] Auto select dirty propagation (like for dot: bounding box, cross, or de-duplicated cross) instead of USE_CONTIGUOUS_APPROXIMATION flag
 - [ ] Make kernel signature support variable amount of ops so the concat variations don't have to explicitly register 2,3,4,5,6 etc.
 - [ ] Make all the locking/unlocking/liveness/cached-or-not/shape-propagation that happens in Executor.run happen in a pre-run re-compile. That way we won't unexpectedly have to recompute something because it was evicted from cache.
+- [ ] tensor_graphs/compiler/dirty_propagation.py is a thin wrapper around tensor_graphs/compiler/propagation.py. Additionally, NumericRegion vs DirtyRegion is confusing, and the shape handling for shape/fwd/bwd functions is complicated due to the nested structure. I want to refactor so we just have Region. Forward and shape inference can be merged into one. Like shape inference is just a special case of forward propagation where every slice is (0, dim).

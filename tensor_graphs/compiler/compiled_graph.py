@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Dict, Callable, Any
+from typing import List, Dict, Callable, Any, Optional
 from ..ir.node import TensorNode
 
 
@@ -9,6 +9,8 @@ class OpInstruction:
     kernel: Callable
     input_node_names: List[str]
     attrs: Dict[str, Any]
+    # New field for in-place support
+    inplace_input_index: Optional[int] = None
 
 
 @dataclass
