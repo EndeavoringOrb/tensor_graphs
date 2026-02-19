@@ -271,6 +271,8 @@ class Planner:
                     for i, p in enumerate(node.parents):
                         if p.op_type == OpType.MUL and len(p.parents) == 2:
                             fma_parents = p.parents + [node.parents[1 - i]]
+
+                            # 1. Create a temporary node to check signatures
                             fma_node = TensorNode(
                                 "FusedMulAdd",
                                 node.dtype,
@@ -279,15 +281,35 @@ class Planner:
                                 f"fused_{node.name}",
                                 backend=node.backend,
                             )
-                            # Fused node shape is same as original node
                             fma_node.shape = node.shape
 
+                            # 2. Verify if ANY backend has a kernel for this OpType + DType
+                            # This ensures we don't fuse INT32 patterns if we only have FP32 kernels
+                            has_valid_kernel = False
+                            for b in [Backend.CPU_NUMPY, Backend.GPU_TORCH]:
+                                # Construct signatures assuming this backend
+                                input_sigs = [
+                                    TensorSignature(pn.dtype, pn.shape, b)
+                                    for pn in fma_parents
+                                ]
+                                if KernelRegistry.select_best_kernel(
+                                    "FusedMulAdd", input_sigs, b, fma_node.dtype
+                                ):
+                                    has_valid_kernel = True
+                                    break
+
+                            if not has_valid_kernel:
+                                continue  # Skip this fusion if no implementation exists
+
+                            # 3. If valid, proceed with adding to fusion maps
                             if node_hash not in self.fusion_map:
                                 self.fusion_map[node_hash] = []
                             self.fusion_map[node_hash].append(fma_node)
 
                             if fma_node not in all_nodes_discovered:
-                                all_nodes_discovered.add(node)
+                                all_nodes_discovered.add(
+                                    fma_node
+                                )
                             break
 
         return list(all_nodes_discovered)
@@ -438,7 +460,7 @@ class Planner:
             # Final fallback: if no kernel exists and no decomposition worked,
             # the graph is technically un-executable.
             raise ValueError(
-                f"No execution path found for node {node.name} ({node.op_type}) with shape {node.shape}"
+                f"No execution path found for node {node} ({node.op_type}) with shape {node.shape}"
             )
 
         self.memo[node_hash] = best_k
