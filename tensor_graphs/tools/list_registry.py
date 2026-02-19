@@ -7,10 +7,11 @@ def check():
         print(f"Op: {op_type}")
         for backend, entries in backends.items():
             print(f"  Backend: {backend}")
-            for entry in entries:
+            for num, entry in enumerate(entries):
                 # entry is (backend, sigs, target_dtype, func)
-                print(f"    Sigs: {entry[1]}")
-                print(f"    Target DType: {entry[2]}")
+                print(f"    {num} Sigs: {entry[1]}")
+                print(f"    {num} Target DType: {entry[2]}")
+                print(f"    {num} Inplace: {entry[3]}")
 
 
 if __name__ == "__main__":

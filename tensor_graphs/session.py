@@ -30,7 +30,6 @@ class GraphSession:
             print("[Session] Planning & Compiling graph...")
 
         planner = Planner(self.db_path)
-        # Planner now returns CompiledGraph directly
         compiled_graph = planner.plan(self.root, known_values=sample_inputs)
 
         self.executor = Executor(compiled_graph, memory_manager=self.mem_manager)

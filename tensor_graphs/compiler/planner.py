@@ -129,23 +129,6 @@ class Planner:
             backend = best_recipe.assignments.get(node, node.backend)
             input_sigs = [p.signature for p in node.parents]
 
-            # Initial Selection: Allow any kernel (inplace or not) to ensure we find *something*
-            kernel_result = KernelRegistry.select_best_kernel(
-                node.op_type,
-                input_sigs,
-                backend,
-                target_dtype=node.dtype,
-                allow_inplace=True,
-            )
-
-            if not kernel_result:
-                raise RuntimeError(
-                    f"Kernel not found for {node.op_type} on {backend} with inputs {input_sigs}"
-                )
-
-            kernel, kernel_is_inplace = kernel_result
-            inplace_input_index = None
-
             # -----------------------------------------------------------------
             # PHASE 5: In-Place Optimization
             # -----------------------------------------------------------------
@@ -157,7 +140,7 @@ class Planner:
             # 3. Input 0 is TRANSIENT (not a persistent weight/constant).
             # 4. Sizes match exactly.
 
-            is_safe = False
+            is_inplace_safe = False
             if node.parents:
                 p0 = node.parents[0]
                 # Check if p0 is in our current graph (it should be)
@@ -170,35 +153,33 @@ class Planner:
                         and p0.storage_type == StorageType.TRANSIENT
                         and p0.size_bytes == node.size_bytes
                     ):
-                        is_safe = True
+                        is_inplace_safe = True
+
+            # Initial Selection: Allow any kernel (inplace or not) to ensure we find *something*
+            kernel_result = KernelRegistry.select_best_kernel(
+                node.op_type,
+                input_sigs,
+                backend,
+                target_dtype=node.dtype,
+                allow_inplace=is_inplace_safe,
+            )
+
+            if not kernel_result:
+                raise RuntimeError(
+                    f"Kernel not found for {node.op_type} on {backend} with inputs {input_sigs}"
+                )
+
+            kernel, kernel_is_inplace = kernel_result
+            inplace_input_index = None
 
             if kernel_is_inplace:
-                if is_safe:
+                if is_inplace_safe:
                     # Safe to use the inplace kernel in inplace mode
                     inplace_input_index = 0
                 else:
-                    # Kernel is inplace-capable, but usage is unsafe.
-                    # We must run it out-of-place (inplace_input_index = None).
-                    # Executor handles this by allocating separate output.
-                    inplace_input_index = None
-            else:
-                # Kernel is NOT inplace.
-                # Optimization: Can we find an inplace kernel if we look specifically?
-                if is_safe:
-                    inplace_result = KernelRegistry.select_best_kernel(
-                        node.op_type,
-                        input_sigs,
-                        backend,
-                        target_dtype=node.dtype,
-                        allow_inplace=True,
+                    raise ValueError(
+                        "Chose inplace kernel when it is not safe. This should not be possible."
                     )
-                    # If the registry returns an inplace kernel now (it might have preferred a non-inplace one before due to score/order)
-                    # We check if it's actually inplace
-                    if inplace_result:
-                        ip_kernel, ip_bool = inplace_result
-                        if ip_bool:
-                            kernel = ip_kernel
-                            inplace_input_index = 0
 
             input_names = [p.name for p in node.parents]
 
@@ -307,9 +288,7 @@ class Planner:
                             self.fusion_map[node_hash].append(fma_node)
 
                             if fma_node not in all_nodes_discovered:
-                                all_nodes_discovered.add(
-                                    fma_node
-                                )
+                                all_nodes_discovered.add(fma_node)
                             break
 
         return list(all_nodes_discovered)
@@ -348,7 +327,7 @@ class Planner:
     def _plan_node_iterative(
         self, node: TensorNode, known_values: Optional[Dict[str, Any]]
     ):
-        node_hash = get_structural_hash(node)
+        node_hash = get_structural_hash(node, self.hash_memo)
         if node_hash in self.memo:
             return
 
@@ -363,7 +342,7 @@ class Planner:
 
         # --- 2. Direct Kernel Execution ---
         # Note: All parents guaranteed to be in memo due to augmented sort
-        parent_hashes = [get_structural_hash(p) for p in node.parents]
+        parent_hashes = [get_structural_hash(p, self.hash_memo) for p in node.parents]
         parent_strats = [self.memo[ph] for ph in parent_hashes]
 
         available_backends = [Backend.CPU_NUMPY]

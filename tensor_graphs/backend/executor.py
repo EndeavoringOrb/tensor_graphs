@@ -412,7 +412,7 @@ class Executor:
                                     input_sigs.append(sig)
 
                                 better_kernel = KernelRegistry.select_best_kernel(
-                                    node.op_type, input_sigs, node.backend, node.dtype
+                                    node.op_type, input_sigs, node.backend, node.dtype, inst.inplace_input_index is not None
                                 )
                                 if better_kernel:
                                     selected_kernel, inplace = better_kernel
