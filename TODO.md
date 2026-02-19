@@ -1,3 +1,4 @@
+- [ ] Improve handling of multiple non-contiguous regions (like DOT output)
 - [ ] Add general fusion during planning based on decomposition functions
 - [ ] Offline bucket graph compilation
 - [ ] Add in-place kernels
