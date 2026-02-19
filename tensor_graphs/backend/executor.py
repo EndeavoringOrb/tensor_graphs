@@ -11,7 +11,12 @@ from ..ops import OpType
 from ..compiler.dirty_propagation import DirtyPropagator
 from .memory import MemoryManager
 from .registry import KernelRegistry
-from ..config import DEBUG_EXECUTION, DEBUG_DETAILED, RECORD_KERNEL_LAUNCHES, RECORD_KERNEL_LAUNCHES_FOLDER
+from ..config import (
+    DEBUG_EXECUTION,
+    DEBUG_DETAILED,
+    RECORD_KERNEL_LAUNCHES,
+    RECORD_KERNEL_LAUNCHES_FOLDER,
+)
 from tqdm import tqdm
 import os
 import json
@@ -135,11 +140,19 @@ class Executor:
 
         return dirty_vol / total_vol
 
-    def _record_kernel_launch(self, node_name: str, op_type: str, input_shapes: List[Tuple[int, ...]],
-                             output_shape: Tuple[int, ...], compute_time_ms: float,
-                             is_partial: bool, backend: str, attrs: Dict[str, Any]):
+    def _record_kernel_launch(
+        self,
+        node_name: str,
+        op_type: str,
+        input_shapes: List[Tuple[int, ...]],
+        output_shape: Tuple[int, ...],
+        compute_time_ms: float,
+        is_partial: bool,
+        backend: str,
+        attrs: Dict[str, Any],
+    ):
         """Record kernel launch details to a .jsonl file."""
-        
+
         # Create record
         record = {
             "timestamp": datetime.now().isoformat(),
@@ -150,7 +163,7 @@ class Executor:
             "input_shapes": input_shapes,
             "output_shape": output_shape,
             "compute_time_ms": round(compute_time_ms, 6),
-            "attrs": attrs if attrs else {}
+            "attrs": attrs if attrs else {},
         }
 
         # Append to .jsonl file
@@ -427,7 +440,7 @@ class Executor:
                                 compute_time_ms=node.compute_cost,
                                 is_partial=not is_full_region,
                                 backend=dev_hint,
-                                attrs=inst.attrs
+                                attrs=inst.attrs,
                             )
 
                 # Release Parents

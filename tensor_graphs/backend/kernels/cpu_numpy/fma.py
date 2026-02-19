@@ -6,9 +6,9 @@ from ....ops.fused.fma import fma_decomposition
 @KernelRegistry.register(
     "FusedMulAdd",
     [
-        TensorSignature(DType.FP32, (None,)),
-        TensorSignature(DType.FP32, (None,)),
-        TensorSignature(DType.FP32, (None,)),
+        TensorSignature(DType.FP32, shape=None),
+        TensorSignature(DType.FP32, shape=None),
+        TensorSignature(DType.FP32, shape=None),
     ],
     reference_factory=fma_decomposition,
 )

@@ -7,3 +7,6 @@ USE_CONTIGUOUS_APPROXIMATION = False
 
 RECORD_KERNEL_LAUNCHES = False
 RECORD_KERNEL_LAUNCHES_FOLDER = "kernel_launches"
+
+# Planner Configuration
+PLANNER_BEAM_WIDTH = 3  # Number of top strategies to keep per node

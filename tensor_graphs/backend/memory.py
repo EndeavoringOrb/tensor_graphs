@@ -306,6 +306,23 @@ class MemoryManager:
         self.current_step = 0
         self._ensure_device("cpu")
 
+    def _resolve_device(self, node: TensorNode) -> str:
+        """Helper to resolve the valid PyTorch device string from a node's backend."""
+        if not node.backend:
+            return "cpu"
+
+        val = node.backend.value
+        # Explicit mapping for GPU backend
+        if val == "gpu_torch":
+            return "cuda"
+
+        # Standard CPU backends
+        if "cpu" in val:
+            return "cpu"
+
+        # Fallback to CPU for safety
+        return "cpu"
+
     def _ensure_device(self, device: str):
         if device not in self.buffers:
             self.buffers[device] = DeviceBuffer(device, self.max_bytes)
@@ -318,11 +335,7 @@ class MemoryManager:
         """
         size = get_buffer_size(node.dtype, data=data)
 
-        device = node.backend.value if node.backend else "cpu"
-        if "numpy" in device:
-            device = "cpu"
-        elif "torch" in device and "cpu" in device:
-            device = "cpu"
+        device = self._resolve_device(node)
 
         self._ensure_device(device)
         buf = self.buffers[device]
@@ -361,11 +374,7 @@ class MemoryManager:
         self, node: TensorNode, size_bytes: int, initial_refs: int
     ) -> bool:
         """Ensure space exists for a transient node (Region 0)."""
-        device = node.backend.value if node.backend else "cpu"
-        if "numpy" in device:
-            device = "cpu"
-        elif "torch" in device and "cpu" in device:
-            device = "cpu"
+        device = self._resolve_device(node)
 
         self._ensure_device(device)
         buf = self.buffers[device]
@@ -440,11 +449,7 @@ class MemoryManager:
                 return
 
     def get_view(self, node: TensorNode, use_dirty: bool = False) -> Any:
-        device = node.backend.value if node.backend else "cpu"
-        if "numpy" in device:
-            device = "cpu"
-        elif "torch" in device and "cpu" in device:
-            device = "cpu"
+        device = self._resolve_device(node)
 
         if not node.shape or any(d is None for d in node.shape):
             shape = ()
@@ -485,11 +490,7 @@ class MemoryManager:
         return node_name in self.buffers[device_hint].allocations
 
     def lock(self, node: TensorNode):
-        device = node.backend.value if node.backend else "cpu"
-        if "numpy" in device:
-            device = "cpu"
-        elif "torch" in device and "cpu" in device:
-            device = "cpu"
+        device = self._resolve_device(node)
         if device in self.buffers and node.name in self.buffers[device].allocations:
             self.buffers[device].allocations[node.name].is_locked = True
             self.buffers[device].allocations[
@@ -500,11 +501,7 @@ class MemoryManager:
             print(f"[MemoryManager.lock] {node.name}")
 
     def unlock(self, node: TensorNode):
-        device = node.backend.value if node.backend else "cpu"
-        if "numpy" in device:
-            device = "cpu"
-        elif "torch" in device and "cpu" in device:
-            device = "cpu"
+        device = self._resolve_device(node)
 
         if device in self.buffers and node.name in self.buffers[device].allocations:
             if node.storage_type == StorageType.TRANSIENT:

@@ -1,7 +1,6 @@
 from typing import Dict, Any, Optional, Union
 from .ir.node import TensorNode
 from .compiler.planner import Planner
-from .compiler.compiler import Compiler
 from .backend.executor import Executor
 from .backend.memory import MemoryManager
 from .ir.graph import topological_sort
@@ -18,28 +17,21 @@ class GraphSession:
         self,
         root: TensorNode,
         db_path: str = "benchmarks.db",
-        greedy: bool = True,
         max_memory_bytes: int = 5 * 1024**3,
     ):
         self.root = root
         self.db_path = db_path
-        self.greedy = greedy
         self.mem_manager = MemoryManager(max_memory_bytes)
         self.executor: Optional[Executor] = None
         self.is_compiled = False
 
     def compile(self, sample_inputs: Dict[str, Any]):
         if DEBUG_EXECUTION:
-            print("[Session] Planning graph...")
+            print("[Session] Planning & Compiling graph...")
 
-        planner = Planner(self.db_path, greedy=self.greedy)
-        recipe = planner.plan(self.root, known_values=sample_inputs)
-
-        if DEBUG_EXECUTION:
-            print("[Session] Compiling graph...")
-
-        compiler = Compiler()
-        compiled_graph = compiler.compile(recipe, known_values=sample_inputs)
+        planner = Planner(self.db_path)
+        # Planner now returns CompiledGraph directly
+        compiled_graph = planner.plan(self.root, known_values=sample_inputs)
 
         self.executor = Executor(compiled_graph, memory_manager=self.mem_manager)
         self.is_compiled = True
@@ -125,13 +117,23 @@ class GraphSession:
             data = source.get_tensor(node.name)
 
             # Determine placement
-            assigned_backend = self.executor.graph.nodes_map[node.name].backend
-            if assigned_backend is None:
+            # We must use the node instance from the *compiled* graph (in executor)
+            # because that's where the backend is finalized.
+            if self.executor and node.name in self.executor.graph.nodes_map:
+                assigned_backend = self.executor.graph.nodes_map[node.name].backend
+            else:
                 assigned_backend = backend_hint
 
-            node.backend = assigned_backend
-
-            self.mem_manager.allocate_persistent(node, data)
+            # Update the node backend if we found it in the compiled graph
+            if self.executor and node.name in self.executor.graph.nodes_map:
+                # The executor graph nodes are copies/modified, so we use them
+                exec_node = self.executor.graph.nodes_map[node.name]
+                exec_node.backend = assigned_backend
+                self.mem_manager.allocate_persistent(exec_node, data)
+            else:
+                # Fallback if not compiled yet (shouldn't happen due to check above)
+                node.backend = assigned_backend
+                self.mem_manager.allocate_persistent(node, data)
 
         if DEBUG_EXECUTION:
             print("[Session] Weights loaded.")

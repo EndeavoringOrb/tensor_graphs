@@ -26,8 +26,12 @@ if _DOT_OPS is not None:
     @KernelRegistry.register(
         OpType.DOT,
         [
-            TensorSignature(DType.FP32, shape=(None, None, None, None), backend=Backend.GPU_TORCH),
-            TensorSignature(DType.FP32, shape=(None, None, None, None), backend=Backend.GPU_TORCH),
+            TensorSignature(
+                DType.FP32, shape=(None, None, None, None), backend=Backend.GPU_TORCH
+            ),
+            TensorSignature(
+                DType.FP32, shape=(None, None, None, None), backend=Backend.GPU_TORCH
+            ),
         ],
         backend=Backend.GPU_TORCH,
         reference_factory=dot_ref,
@@ -36,7 +40,9 @@ if _DOT_OPS is not None:
     @KernelRegistry.register(
         OpType.DOT,
         [
-            TensorSignature(DType.FP32, shape=(None, None, None), backend=Backend.GPU_TORCH),
+            TensorSignature(
+                DType.FP32, shape=(None, None, None), backend=Backend.GPU_TORCH
+            ),
             TensorSignature(DType.FP32, shape=(None, None), backend=Backend.GPU_TORCH),
         ],
         backend=Backend.GPU_TORCH,
@@ -46,14 +52,17 @@ if _DOT_OPS is not None:
         ops = cast(Any, _DOT_OPS)
         a, b = inputs
         out = outputs[0]
-        
+
         # Performance: avoid repeated checks if possible, but required for safety
-        if not a.is_cuda: a = a.cuda()
-        if not b.is_cuda: b = b.cuda()
+        if not a.is_cuda:
+            a = a.cuda()
+        if not b.is_cuda:
+            b = b.cuda()
 
         # Kernels assume C-contiguous pointers
         ops.dot(a.contiguous(), b.contiguous(), out)
 else:
+
     @KernelRegistry.register(
         OpType.DOT,
         [

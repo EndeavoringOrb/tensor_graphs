@@ -4,11 +4,11 @@ Analyze kernel launch recordings from .jsonl files.
 Usage: python tensor_graphs/tools/analyze_kernels.py [file]
 """
 
-import sys
 import json
 import argparse
 from pathlib import Path
 from collections import defaultdict
+
 
 def load_jsonl(filepath):
     """Load all records from a .jsonl file."""
@@ -19,6 +19,7 @@ def load_jsonl(filepath):
             if line:
                 records.append(json.loads(line))
     return records
+
 
 def analyze_records(records):
     """Analyze kernel execution data."""
@@ -43,11 +44,18 @@ def analyze_records(records):
             "avg_time_ms": round(avg_time, 3),
             "max_time_ms": round(max_time, 3),
             "min_time_ms": round(min_time, 3),
-            "median_time_ms": round(sorted([op["compute_time_ms"] for op in ops])[count // 2], 3) if count > 0 else 0,
-            "mode": max(set(op["mode"] for op in ops), key=lambda m: ops.count({"op_type": op_type, "mode": m})),
+            "median_time_ms": round(
+                sorted([op["compute_time_ms"] for op in ops])[count // 2], 3
+            )
+            if count > 0
+            else 0,
+            "mode": max(
+                set(op["mode"] for op in ops),
+                key=lambda m: ops.count({"op_type": op_type, "mode": m}),
+            ),
             "backend": ops[0]["backend"] if ops else None,
             "by_shape": {},
-            "by_attrs": defaultdict(int)
+            "by_attrs": defaultdict(int),
         }
 
         # Group by shape
@@ -64,7 +72,7 @@ def analyze_records(records):
                 "shape": shape_key,
                 "count": d["count"],
                 "total_time_ms": round(d["total_time"], 3),
-                "avg_time_ms": round(d["total_time"] / d["count"], 3)
+                "avg_time_ms": round(d["total_time"] / d["count"], 3),
             }
             for shape_key, d in shape_data.items()
         ]
@@ -77,6 +85,7 @@ def analyze_records(records):
 
     return analysis
 
+
 def print_analysis(analysis):
     """Print formatted analysis."""
     print("\n" + "=" * 80)
@@ -88,40 +97,58 @@ def print_analysis(analysis):
         return
 
     # Sort by total time (descending)
-    sorted_ops = sorted(analysis.items(), key=lambda x: x[1]["total_time_ms"], reverse=True)
+    sorted_ops = sorted(
+        analysis.items(), key=lambda x: x[1]["total_time_ms"], reverse=True
+    )
 
     for op_type, data in sorted_ops:
         print(f"\n{op_type}:")
         print(f"  Total executions: {data['count']}")
         print(f"  Total time: {data['total_time_ms']:.3f} ms")
         print(f"  Average time: {data['avg_time_ms']:.3f} ms")
-        print(f"  Min/Max time: {data['min_time_ms']:.3f} ms / {data['max_time_ms']:.3f} ms")
+        print(
+            f"  Min/Max time: {data['min_time_ms']:.3f} ms / {data['max_time_ms']:.3f} ms"
+        )
         print(f"  Median time: {data['median_time_ms']:.3f} ms")
         print(f"  Mode: {data['mode']}")
         print(f"  Backend: {data['backend']}")
 
         if data["by_shape_sorted"]:
-            print(f"  Top input shapes BY TIME (total):")
-            for item in sorted(data["by_shape_sorted"], key=lambda x: x["total_time_ms"], reverse=True)[:5]:
-                print(f"    {item['shape']} - {item['total_time_ms']:.3f} ms (avg: {item['avg_time_ms']:.3f} ms, count: {item['count']})")
+            print("  Top input shapes BY TIME (total):")
+            for item in sorted(
+                data["by_shape_sorted"], key=lambda x: x["total_time_ms"], reverse=True
+            )[:5]:
+                print(
+                    f"    {item['shape']} - {item['total_time_ms']:.3f} ms (avg: {item['avg_time_ms']:.3f} ms, count: {item['count']})"
+                )
             if len(data["by_shape_sorted"]) > 5:
                 print(f"    ... and {len(data['by_shape_sorted']) - 5} more")
 
         if data["by_shape"]:
-            print(f"  Top input shapes BY COUNT:")
-            for shape, shape_data in sorted(data["by_shape"].items(), key=lambda x: x[1]["count"], reverse=True)[:5]:
+            print("  Top input shapes BY COUNT:")
+            for shape, shape_data in sorted(
+                data["by_shape"].items(), key=lambda x: x[1]["count"], reverse=True
+            )[:5]:
                 print(f"    {shape} x {shape_data['count']}")
 
         if data["by_attrs"]:
-            print(f"  Top attribute combinations:")
-            for attrs, count in sorted(data["by_attrs"].items(), key=lambda x: x[1], reverse=True)[:5]:
+            print("  Top attribute combinations:")
+            for attrs, count in sorted(
+                data["by_attrs"].items(), key=lambda x: x[1], reverse=True
+            )[:5]:
                 print(f"    {json.loads(attrs)} x {count}")
 
     print("\n" + "=" * 80)
 
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze kernel launch recordings.")
-    parser.add_argument("--file", nargs="?", help="Path to .jsonl file. Defaults to newest file.", default="kernel_launches/0.jsonl")
+    parser.add_argument(
+        "--file",
+        nargs="?",
+        help="Path to .jsonl file. Defaults to newest file.",
+        default="kernel_launches/0.jsonl",
+    )
     args = parser.parse_args()
 
     if args.file:
@@ -143,6 +170,7 @@ def main():
     records = load_jsonl(filepath)
     analysis = analyze_records(records)
     print_analysis(analysis)
+
 
 if __name__ == "__main__":
     main()

@@ -18,6 +18,18 @@ class KernelRegistry:
         return cls._kernels
 
     @classmethod
+    def has_kernel(cls, op_type: str, backend: Backend) -> bool:
+        """
+        Checks if a kernel exists for the given OpType on the specific Backend.
+        Used by the Planner to prune search space.
+        """
+        if op_type not in cls._kernels:
+            return False
+        if backend not in cls._kernels[op_type]:
+            return False
+        return len(cls._kernels[op_type][backend]) > 0
+
+    @classmethod
     def register(
         cls,
         op_type: str,
