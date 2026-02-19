@@ -1,4 +1,6 @@
-- Offline bucket graph compilation
+- [ ] Add general fusion during planning based on decomposition functions
+- [ ] Offline bucket graph compilation
+- [ ] Add in-place kernels
 - [ ] Add explicitly view-only (reshape) operations
 - [ ] Make it so multiple graphs can share memory so we don't have max_bytes * 3 (examples/flux-klein-4b.py: vae, qwen3, flux transformer) memory
 - [ ] add cuda kernels to make gemma-3-270m go fast on gpu
