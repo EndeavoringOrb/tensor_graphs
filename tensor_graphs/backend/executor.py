@@ -28,7 +28,7 @@ class Executor:
         self.graph = compiled_graph
         self.mem = memory_manager
         self.last_inputs: Dict[str, Any] = {}
-        # Persistent cache across runs: Key = (node_name, shape_tuple) -> Kernel
+        # Persistent cache across runs: Key = (node_name, shape_tuple) -> (Kernel, is_inplace)
         self._kernel_cache: Dict[Tuple[str, Tuple[Tuple[int, ...], ...]], Any] = {}
 
         # Determine output directory
@@ -308,6 +308,7 @@ class Executor:
                 # Check for in-place signal from compiler
                 is_inplace = inst.inplace_input_index is not None
                 compute_regions: List[Tuple[slice, ...]] = []
+                pending_output_allocation = False
 
                 # Determine Computation Mode
                 if state["is_dirty"] and actually_in_cache:
@@ -327,31 +328,12 @@ class Executor:
                     )
 
                 elif not actually_in_cache:
-                    if is_inplace:
-                        # IN-PLACE EXECUTION
-                        counters["inplace"] += 1
-                        src_name = inst.input_node_names[inst.inplace_input_index]
+                    counters["full"] += 1
+                    # DEFER ALLOCATION: We don't know if we can do in-place or need new allocation
+                    # until we resolve the kernel (which depends on concrete input shapes).
+                    pending_output_allocation = True
+                    compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
 
-                        # LOGICAL SHIFT: Move the buffer ownership from input to output.
-                        # This avoids a new allocation and copies.
-                        self.mem.transfer_ownership(src_name, name)
-
-                        # In-place kernels are treated as full compute for the destination
-                        compute_regions = [
-                            tuple(slice(None) for _ in (node.shape or ()))
-                        ]
-                    else:
-                        # STANDARD FULL COMPUTE
-                        counters["full"] += 1
-                        self.mem.prepare_allocation(
-                            node, node.size_bytes, initial_refs=static_refs[name]
-                        )
-                        compute_regions = [
-                            tuple(slice(None) for _ in (node.shape or ()))
-                        ]
-
-                    if not state["is_dirty"]:
-                        node.dirty_region = None
                 else:
                     counters["skip"] += 1
                     self.mem.prepare_allocation(
@@ -394,12 +376,16 @@ class Executor:
 
                         # Kernel selection (Handle potential shape-specific kernels)
                         selected_kernel = inst.kernel
+                        current_inplace = is_inplace
+
                         if not is_full_region or (
                             concrete_shapes and concrete_shapes[0] != node.shape
                         ):
                             cache_key = (name, tuple(concrete_shapes))
                             if cache_key in self._kernel_cache:
-                                selected_kernel = self._kernel_cache[cache_key]
+                                selected_kernel, current_inplace = self._kernel_cache[
+                                    cache_key
+                                ]
                             else:
                                 input_sigs = []
                                 for idx, shape in enumerate(concrete_shapes):
@@ -412,12 +398,42 @@ class Executor:
                                     input_sigs.append(sig)
 
                                 better_kernel = KernelRegistry.select_best_kernel(
-                                    node.op_type, input_sigs, node.backend, node.dtype, inst.inplace_input_index is not None
+                                    node.op_type,
+                                    input_sigs,
+                                    node.backend,
+                                    node.dtype,
+                                    inst.inplace_input_index is not None,
                                 )
                                 if better_kernel:
-                                    selected_kernel, inplace = better_kernel
+                                    selected_kernel, current_inplace = better_kernel
                                     counters["kernel_switch"] += 1
-                                self._kernel_cache[cache_key] = selected_kernel
+                                self._kernel_cache[cache_key] = (
+                                    selected_kernel,
+                                    current_inplace,
+                                )
+
+                        # LATE BINDING MEMORY ALLOCATION
+                        # Now that we know the exact kernel and if it supports in-place
+                        if pending_output_allocation:
+                            if current_inplace:
+                                src_name = inst.input_node_names[
+                                    inst.inplace_input_index
+                                ]
+                                self.mem.transfer_ownership(src_name, name)
+                            else:
+                                self.mem.prepare_allocation(
+                                    node,
+                                    node.size_bytes,
+                                    initial_refs=static_refs[name],
+                                )
+
+                            if not state["is_dirty"]:
+                                node.dirty_region = None
+
+                            pending_output_allocation = False
+
+                        if current_inplace:
+                            counters["inplace"] += 1
 
                         # Run Kernel
                         out_view = self.mem.get_view(node)
