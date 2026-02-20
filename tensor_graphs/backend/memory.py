@@ -55,8 +55,6 @@ class DeviceBuffer:
         self.allocations: Dict[str, MemoryBlock] = {}
         self.free_segments: List[Tuple[int, int]] = [(0, size_bytes)]
         self.views: Dict[str, Any] = {}
-        # Pre-sliced static views for AOT execution (populated by plan_static_memory)
-        self.static_views: Dict[str, Any] = {}
 
     def register_external_region(self, data: Any) -> int:
         """Registers an external array (e.g., mmap) as a new region. Returns region_id."""
@@ -350,8 +348,6 @@ class MemoryManager:
             buf.allocate_external(
                 node.name, data, step=0, storage_type=StorageType.PERSISTENT
             )
-            # Register into static_views for AOT access
-            buf.static_views[node.name] = data
         else:
             # --- Standard Copy Path (GPU) ---
             offset = buf.allocate(
@@ -551,156 +547,3 @@ class MemoryManager:
         raise RuntimeError(
             f"Cannot transfer ownership: {src_name} not found in any device buffer."
         )
-
-    def plan_static_memory(self, compiled_graph: 'CompiledGraph'):
-        """
-        Simulates execution to assign fixed memory offsets, then allocates the arena.
-        After this call, all transient nodes have pre-sliced views in buf.static_views.
-        Persistent nodes (weights) should already be in static_views from allocate_persistent.
-        """
-        from ..compiler.compiled_graph import CompiledGraph as _CG  # avoid circular
-
-        # 1. Setup simulation state
-        ref_counts = compiled_graph.ref_counts.copy()
-        peak_offsets: Dict[str, int] = {}  # device -> peak offset
-        # Record ALL allocations made during simulation (including those freed)
-        # to ensure we can create static views for every node.
-        static_allocs: Dict[str, MemoryBlock] = {}
-
-        for device in list(self.buffers.keys()):
-            buf = self.buffers[device]
-            # Reset Region 0 allocator to full capacity (keep external regions intact)
-            buf.free_segments = [(0, buf.size_bytes)]
-            # Remove only transient allocations (keep persistent weight allocations)
-            transient_names = [
-                name for name, blk in buf.allocations.items()
-                if blk.storage_type == StorageType.TRANSIENT
-            ]
-            for name in transient_names:
-                if name in buf.allocations:
-                    del buf.allocations[name]
-                if name in buf.views:
-                    del buf.views[name]
-            
-            # Initial static_allocs with persistent nodes already in the buffer
-            for name, block in buf.allocations.items():
-                static_allocs[name] = block
-                
-            peak_offsets[device] = 0
-
-        # 1.5 Allocate transient INPUT nodes (not in instructions but need space)
-        for node_name, node in compiled_graph.nodes_map.items():
-            if node.op_type == OpType.INPUT and node.storage_type == StorageType.TRANSIENT:
-                device = self._resolve_device(node)
-                self._ensure_device(device)
-                buf = self.buffers[device]
-                offset = buf.allocate(
-                    node.name, node.size_bytes, step=0,
-                    storage_type=StorageType.TRANSIENT,
-                    initial_refs=ref_counts.get(node.name, 0),
-                )
-                if offset is None:
-                    raise MemoryError(f"Static planning OOM for input {node.name}")
-                static_allocs[node.name] = buf.allocations[node.name]
-                peak_offsets[device] = max(peak_offsets[device], offset + node.size_bytes)
-
-        # 2. Simulate allocation/free in topological order
-        for inst in compiled_graph.instructions:
-            node = compiled_graph.nodes_map[inst.node_name]
-            if node.op_type in (OpType.INPUT, OpType.CONSTANT):
-                continue
-
-            device = self._resolve_device(node)
-            self._ensure_device(device)
-            buf = self.buffers[device]
-
-            # Handle in-place memory sharing
-            if inst.inplace_input_index is not None:
-                src_name = inst.input_node_names[inst.inplace_input_index]
-                if src_name in buf.allocations:
-                    block = buf.allocations[src_name]
-                    new_block = MemoryBlock(
-                        offset=block.offset,
-                        size=node.size_bytes,
-                        node_name=node.name,
-                        storage_type=StorageType.TRANSIENT,
-                        region_id=0,
-                        is_free=False,
-                        is_locked=True,
-                        ref_count=ref_counts.get(node.name, 0),
-                    )
-                    buf.allocations[node.name] = new_block
-                    static_allocs[node.name] = new_block
-                else:
-                    # Fallback: allocate new if source not found
-                    offset = buf.allocate(
-                        node.name, node.size_bytes, step=0,
-                        storage_type=StorageType.TRANSIENT,
-                        initial_refs=ref_counts.get(node.name, 0),
-                    )
-                    if offset is None:
-                        raise MemoryError(f"Static planning OOM for {node.name}")
-                    static_allocs[node.name] = buf.allocations[node.name]
-                    peak_offsets[device] = max(peak_offsets[device], offset + node.size_bytes)
-            else:
-                # Allocate new space from free segments
-                offset = buf.allocate(
-                    node.name, node.size_bytes, step=0,
-                    storage_type=StorageType.TRANSIENT,
-                    initial_refs=ref_counts.get(node.name, 0),
-                )
-                if offset is None:
-                    raise MemoryError(f"Static planning OOM for {node.name}")
-                static_allocs[node.name] = buf.allocations[node.name]
-                peak_offsets[device] = max(peak_offsets[device], offset + node.size_bytes)
-
-            # Simulate freeing parents
-            for p_name in inst.input_node_names:
-                if p_name in ref_counts and ref_counts[p_name] > 0:
-                    ref_counts[p_name] -= 1
-                    if ref_counts[p_name] == 0:
-                        if p_name in buf.allocations:
-                            blk = buf.allocations[p_name]
-                            # Only free transient, Region 0 blocks
-                            if blk.storage_type == StorageType.TRANSIENT and blk.region_id == 0:
-                                buf.free(p_name)
-
-        # 3. Finalize: Shrink Region 0 to peak and pre-slice all views
-        for device, buf in self.buffers.items():
-            peak = peak_offsets.get(device, 0)
-            if peak > 0:
-                # Shrink Region 0 to exactly peak_offset bytes
-                if buf.is_torch:
-                    buf.regions[0] = torch.zeros(peak, dtype=torch.uint8, device=device)
-                else:
-                    buf.regions[0] = np.zeros(peak, dtype=np.uint8)
-                buf.size_bytes = peak
-
-                if DEBUG:
-                    print(f"[MemoryManager.plan_static_memory] {device}: arena shrunk to {peak} bytes")
-
-            # Create static views for all nodes (including those freed) based on simulated offsets
-            for node_name, node in compiled_graph.nodes_map.items():
-                if node_name in static_allocs and static_allocs[node_name].region_id == 0:
-                    block = static_allocs[node_name]
-                    shape = tuple(node.shape) if node.shape else ()
-                    if not shape:
-                        continue
-
-                    if buf.is_torch:
-                        t_dtype = buf._map_dtype_torch(node.dtype)
-                        raw = buf.regions[0][block.offset: block.offset + block.size]
-                        req_bytes = get_size_bytes(shape, node.dtype)
-                        sliced = raw[:req_bytes]
-                        buf.static_views[node_name] = sliced.view(t_dtype).reshape(shape)
-                    else:
-                        np_dtype = buf._map_dtype_np(node.dtype)
-                        buf.static_views[node_name] = np.ndarray(
-                            shape, dtype=np_dtype,
-                            buffer=buf.regions[0].data, offset=block.offset,
-                        )
-
-
-        if DEBUG:
-            total_views = sum(len(b.static_views) for b in self.buffers.values())
-            print(f"[MemoryManager.plan_static_memory] Created {total_views} static views")

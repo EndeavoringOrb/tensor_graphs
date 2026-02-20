@@ -26,7 +26,6 @@ class GraphSession:
         self.is_compiled = False
 
     def compile(self, sample_inputs: Dict[str, Any]):
-        """Plan the graph and create the executor. Call load_weights() next."""
         if DEBUG_EXECUTION:
             print("[Session] Planning & Compiling graph...")
 
@@ -35,29 +34,12 @@ class GraphSession:
 
         self.executor = Executor(compiled_graph, memory_manager=self.mem_manager)
         self.is_compiled = True
-        self._aot_ready = False
 
         # Automatically load internal constants defined in the graph
         self._load_internal_constants()
 
         if DEBUG_EXECUTION:
             print("[Session] Compilation complete")
-
-    def _ensure_aot(self):
-        """Triggers AOT bucket compilation if not already done."""
-        if self._aot_ready:
-            return
-        if not self.is_compiled or not self.executor:
-            raise RuntimeError("Session must be compiled before running.")
-
-        if DEBUG_EXECUTION:
-            print("[Session] Compiling AOT buckets...")
-
-        self.executor.compile()
-        self._aot_ready = True
-
-        if DEBUG_EXECUTION:
-            print("[Session] AOT compilation complete")
 
     def _load_internal_constants(self):
         """Loads constants (scalars/vectors) stored in graph attributes into memory."""
@@ -159,5 +141,4 @@ class GraphSession:
         if not self.is_compiled:
             self.compile(inputs)
 
-        self._ensure_aot()
         return self.executor.run(inputs)
