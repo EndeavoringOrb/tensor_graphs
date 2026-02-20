@@ -24,6 +24,7 @@ from ..ops.atomic_types import OpType
 from ..ops.registry import get_reference_factory
 from ..backend.registry import KernelRegistry
 from ..config import DEBUG_EXECUTION, DEBUG_DETAILED, USE_CONTIGUOUS_APPROXIMATION
+from line_profiler import profile
 
 # ---------------------------------------------------------------------------
 # Types
@@ -464,6 +465,7 @@ class GraphPropagator:
 
     # -- backward dirty propagation ------------------------------------------
 
+    @profile
     @classmethod
     def get_input_slices(
         cls,

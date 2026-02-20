@@ -17,11 +17,12 @@ from ..config import (
     RECORD_KERNEL_LAUNCHES,
     RECORD_KERNEL_LAUNCHES_FOLDER,
 )
+from ..tools.timer import Timer
 from tqdm import tqdm
 import os
 import json
 from datetime import datetime
-
+from line_profiler import profile
 
 class Executor:
     def __init__(self, compiled_graph: CompiledGraph, memory_manager: MemoryManager):
@@ -195,76 +196,79 @@ class Executor:
             else:
                 self.last_inputs[name] = data
 
+    @profile
     def run(self, inputs: Dict[str, Any]) -> Any:
         self.mem.step()
-        self._update_inputs(inputs)
+        with Timer("[Executor.run] update inputs"):
+            self._update_inputs(inputs)
 
-        # Initial reference counts calculated during compilation
-        static_refs = self.graph.ref_counts
+        with Timer("[Executor.run] initializing"):
+            # Initial reference counts calculated during compilation
+            static_refs = self.graph.ref_counts
 
-        # --- Pass 1: Forward Propagation & Cache Check ---
-        # Determine the state of every node before we decide what to run
-        node_states = {}  # name -> {'is_dirty': bool, 'in_cache': bool}
+            # --- Pass 1: Forward Propagation & Cache Check ---
+            # Determine the state of every node before we decide what to run
+            node_states = {}  # name -> {'is_dirty': bool, 'in_cache': bool}
 
-        for inst in self.graph.instructions:
-            node = self.graph.nodes_map[inst.node_name]
+            for inst in self.graph.instructions:
+                node = self.graph.nodes_map[inst.node_name]
 
-            if node.op_type in (OpType.INPUT, OpType.CONSTANT):
-                continue
+                if node.op_type in (OpType.INPUT, OpType.CONSTANT):
+                    continue
 
-            # Propagate dirty region from parents to see if this node needs recomputation
-            node.dirty_region = DirtyPropagator.propagate(node, inputs)
-            is_dirty = node.dirty_region is not None
+                # Propagate dirty region from parents to see if this node needs recomputation
+                node.dirty_region = DirtyPropagator.propagate(node, inputs)
+                is_dirty = node.dirty_region is not None
 
-            # Check if the buffer currently exists on the assigned device
-            dev_hint = node.backend.value if node.backend else "cpu"
-            in_cache = self.mem.has(node.name, dev_hint)
+                # Check if the buffer currently exists on the assigned device
+                dev_hint = node.backend.value if node.backend else "cpu"
+                in_cache = self.mem.has(node.name, dev_hint)
 
-            node_states[node.name] = {"is_dirty": is_dirty, "in_cache": in_cache}
+                node_states[node.name] = {"is_dirty": is_dirty, "in_cache": in_cache}
 
-        # --- Pass 2: Backward Liveness Analysis ---
-        # Determine which nodes are actually "needed" to produce the root output.
-        # This allows us to "prune" nodes that don't contribute to the current result.
-        needed_nodes = set()
+            # --- Pass 2: Backward Liveness Analysis ---
+            # Determine which nodes are actually "needed" to produce the root output.
+            # This allows us to "prune" nodes that don't contribute to the current result.
+            needed_nodes = set()
 
-        if self.graph.instructions:
-            root_name = self.graph.instructions[-1].node_name
-            needed_nodes.add(root_name)
+            if self.graph.instructions:
+                root_name = self.graph.instructions[-1].node_name
+                needed_nodes.add(root_name)
 
-        for inst in reversed(self.graph.instructions):
-            name = inst.node_name
-            if name not in node_states:
-                continue
+            for inst in reversed(self.graph.instructions):
+                name = inst.node_name
+                if name not in node_states:
+                    continue
 
-            state = node_states[name]
+                state = node_states[name]
 
-            if name in needed_nodes:
-                # If a node is dirty or not in cache, we MUST compute it.
-                # To compute it, we need all of its parents.
-                must_compute = state["is_dirty"] or not state["in_cache"]
+                if name in needed_nodes:
+                    # If a node is dirty or not in cache, we MUST compute it.
+                    # To compute it, we need all of its parents.
+                    must_compute = state["is_dirty"] or not state["in_cache"]
 
-                if must_compute:
-                    for p_name in inst.input_node_names:
-                        needed_nodes.add(p_name)
+                    if must_compute:
+                        for p_name in inst.input_node_names:
+                            needed_nodes.add(p_name)
 
-        # --- Pre-Pass: Lock Expected Cache Hits ---
-        # Ensure that nodes we plan to Skip (reuse from cache) are not evicted
-        # by intermediate allocations before we reach them.
-        for inst in self.graph.instructions:
-            name = inst.node_name
-            if name not in needed_nodes:
-                continue
+            # --- Pre-Pass: Lock Expected Cache Hits ---
+            # Ensure that nodes we plan to Skip (reuse from cache) are not evicted
+            # by intermediate allocations before we reach them.
+            for inst in self.graph.instructions:
+                name = inst.node_name
+                if name not in needed_nodes:
+                    continue
 
-            node = self.graph.nodes_map[name]
-            if node.op_type in (OpType.INPUT, OpType.CONSTANT):
-                continue
+                node = self.graph.nodes_map[name]
+                if node.op_type in (OpType.INPUT, OpType.CONSTANT):
+                    continue
 
-            state = node_states[name]
-            # Use same condition as main loop for Skip path
-            if not state["is_dirty"] and state["in_cache"]:
-                self.mem.prepare_allocation(
-                    node, node.size_bytes, initial_refs=static_refs[name]
-                )
+                state = node_states[name]
+                # Use same condition as main loop for Skip path
+                if not state["is_dirty"] and state["in_cache"]:
+                    self.mem.prepare_allocation(
+                        node, node.size_bytes, initial_refs=static_refs[name]
+                    )
 
         # --- Pass 3: Execution ---
         counters = {
@@ -343,8 +347,6 @@ class Executor:
                 # Execute Kernel
                 if compute_regions:
                     for region_slice in compute_regions:
-                        start_time = time.perf_counter()
-
                         is_full_region = all(s == slice(None) for s in region_slice)
                         input_slice_regions = []
 
@@ -443,6 +445,7 @@ class Executor:
                             else out_view[region_slice]
                         )
 
+                        start_time = time.perf_counter()
                         selected_kernel(kernel_inputs, [out_slice], inst.attrs)
                         node.compute_cost = (time.perf_counter() - start_time) * 1000
 

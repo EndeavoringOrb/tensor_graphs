@@ -1,5 +1,4 @@
 import os
-import time
 import numpy as np
 from typing import Dict
 
@@ -10,6 +9,7 @@ from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ir.graph import GraphBuilder
 from tensor_graphs.session import GraphSession
 from tensor_graphs.config import DEBUG_EXECUTION
+from tensor_graphs.tools.timer import Timer
 
 
 class Gemma3Model:
@@ -255,24 +255,6 @@ GEMMA3_CONFIG_270M = {
     "n_kv_groups": 1,
     "query_pre_attn_scalar": 256,
 }
-
-
-class Timer:
-    def __init__(self, name="Elapsed"):
-        if not DEBUG_EXECUTION:
-            return
-        self.name = name
-        self.start = time.perf_counter()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if not DEBUG_EXECUTION:
-            return
-        self.end = time.perf_counter()
-        self.elapsed = self.end - self.start
-        print(f"{self.name}: {self.elapsed:.2f} seconds")
 
 
 def main():
