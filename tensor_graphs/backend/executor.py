@@ -1,26 +1,14 @@
 # tensor_graphs/backend/executor.py
 import numpy as np
-import time
 from typing import Dict, Any, List, Tuple
-import math
 from ..compiler.compiled_graph import CompiledGraph
 from ..ir.buffer import StorageType
-from ..ir.dtypes import TensorSignature, get_buffer_size
-from ..ir.graph import GraphEncoder
+from ..ir.dtypes import TensorSignature
 from ..ops import OpType
 from ..compiler.dirty_propagation import DirtyPropagator
 from .memory import MemoryManager
 from .registry import KernelRegistry
-from ..config import (
-    DEBUG_EXECUTION,
-    DEBUG_DETAILED,
-    RECORD_KERNEL_LAUNCHES,
-    RECORD_KERNEL_LAUNCHES_FOLDER,
-)
-from tqdm import tqdm
-import os
-import json
-from datetime import datetime
+from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
 
 
 class Executor:
@@ -28,453 +16,271 @@ class Executor:
         self.graph = compiled_graph
         self.mem = memory_manager
         self.last_inputs: Dict[str, Any] = {}
-        # Persistent cache across runs: Key = (node_name, shape_tuple) -> (Kernel, is_inplace)
-        self._kernel_cache: Dict[Tuple[str, Tuple[Tuple[int, ...], ...]], Any] = {}
 
-        # Determine output directory
-        output_dir = RECORD_KERNEL_LAUNCHES_FOLDER
-        os.makedirs(output_dir, exist_ok=True)
+        # AOT Bucket storage: (start, stop) -> list of (kernel, inputs, outputs, attrs)
+        self.buckets: Dict[Tuple[int, int], List[Tuple[Any, List, List, Dict]]] = {}
+        self._primary_input: str = ""  # Auto-detected primary input name
+        self._bucket_dim: int = -1  # Auto-detected dimension to bucket on
 
-        # Find next available .jsonl file
-        run_num = 0
-        while os.path.exists(os.path.join(output_dir, f"{run_num}.jsonl")):
-            run_num += 1
-
-        self.kernel_launch_filename = os.path.join(output_dir, f"{run_num}.jsonl")
-
-    def _calculate_dirty_ratio(
-        self, regions: List[Tuple[slice, ...]], shape: Tuple[int, ...]
-    ) -> float:
+    def compile(self):
         """
-        Calculates the ratio of the dirty volume to the total tensor volume,
-        correctly handling overlapping regions using coordinate compression.
+        Pre-compiles execution plans for power-of-2 intervals.
+        Auto-detects the primary varying input by scanning the graph's transient
+        INPUT nodes and selecting the one with the largest non-batch dimension.
         """
-        if not regions or not shape:
-            return 0.0
+        # --- Auto-detect primary input and bucket dimension ---
+        best_input_name = None
+        best_dim_idx = -1
+        best_dim_size = 0
 
-        # 1. Normalize and Validate Regions
-        clean_regions = []
-        for reg in regions:
-            if len(reg) != len(shape):
+        for node_name, node in self.graph.nodes_map.items():
+            if node.op_type != OpType.INPUT:
                 continue
-
-            norm_slices = []
-            valid = True
-            for i, s in enumerate(reg):
-                start = s.start if s.start is not None else 0
-                stop = s.stop if s.stop is not None else shape[i]
-
-                # Clamp to shape bounds
-                start = max(0, start)
-                stop = min(shape[i], stop)
-
-                if start >= stop:
-                    valid = False
-                    break
-                norm_slices.append(slice(start, stop))
-
-            if valid:
-                clean_regions.append(tuple(norm_slices))
-
-        if not clean_regions:
-            return 0.0
-
-        total_vol = math.prod(shape)
-
-        # Optimization: If single region, no overlap possible
-        if len(clean_regions) == 1:
-            r = clean_regions[0]
-            vol = math.prod(s.stop - s.start for s in r)
-            return vol / total_vol
-
-        # 2. Coordinate Compression for N-Dimensional Overlap Handling
-        # Collect all unique boundaries per dimension
-        dim = len(shape)
-        dim_coords = [set() for _ in range(dim)]
-
-        for reg in clean_regions:
-            for d, s in enumerate(reg):
-                dim_coords[d].add(s.start)
-                dim_coords[d].add(s.stop)
-
-        # Sort coordinates to establish the compressed grid
-        sorted_coords = [sorted(list(s)) for s in dim_coords]
-        grid_shape = tuple(len(c) - 1 for c in sorted_coords)
-
-        if any(g <= 0 for g in grid_shape):
-            return 0.0
-
-        # Map coordinate value to index in the compressed grid
-        coord_to_idx = [{v: i for i, v in enumerate(c)} for c in sorted_coords]
-
-        # Create a boolean grid representing the compressed space
-        occupied = np.zeros(grid_shape, dtype=bool)
-
-        # Map each region to the compressed grid and mark occupied cells
-        for reg in clean_regions:
-            grid_slices = []
-            for d, s in enumerate(reg):
-                s_idx = coord_to_idx[d][s.start]
-                e_idx = coord_to_idx[d][s.stop]
-                grid_slices.append(slice(s_idx, e_idx))
-            occupied[tuple(grid_slices)] = True
-
-        # 3. Calculate Union Volume
-        # Find indices of all occupied cells in the compressed grid
-        indices = np.argwhere(occupied)
-        if indices.size == 0:
-            return 0.0
-
-        # Calculate the size of each segment in each dimension
-        intervals = [np.diff(c) for c in sorted_coords]
-
-        # Vectorized volume calculation:
-        # For every occupied cell (index), look up the segment lengths and multiply them.
-        # gathered_lengths[d] contains the lengths of the segments for that dimension
-        # corresponding to the occupied cells.
-        gathered_lengths = [intervals[d][indices[:, d]] for d in range(dim)]
-
-        # Product of lengths across dimensions for each cell
-        cell_volumes = np.prod(gathered_lengths, axis=0)
-        dirty_vol = np.sum(cell_volumes)
-
-        return dirty_vol / total_vol
-
-    def _record_kernel_launch(
-        self,
-        node_name: str,
-        op_type: str,
-        input_shapes: List[Tuple[int, ...]],
-        output_shape: Tuple[int, ...],
-        compute_time_ms: float,
-        is_partial: bool,
-        backend: str,
-        attrs: Dict[str, Any],
-    ):
-        """Record kernel launch details to a .jsonl file."""
-
-        # Create record
-        record = {
-            "timestamp": datetime.now().isoformat(),
-            "node_name": node_name,
-            "op_type": op_type,
-            "mode": "PARTIAL" if is_partial else "FULL",
-            "backend": backend,
-            "input_shapes": input_shapes,
-            "output_shape": output_shape,
-            "compute_time_ms": round(compute_time_ms, 6),
-            "attrs": attrs if attrs else {},
-        }
-
-        # Append to .jsonl file
-        with open(self.kernel_launch_filename, "a") as f:
-            f.write(json.dumps(record, cls=GraphEncoder) + "\n")
-
-    def _update_inputs(self, inputs: Dict[str, Any]) -> None:
-        for name, data in inputs.items():
-            node = self.graph.nodes_map.get(name)
-            if not node:
-                continue
-
             if node.storage_type == StorageType.PERSISTENT:
                 continue
+            if not node.shape or len(node.shape) < 2:
+                continue
 
-            size = get_buffer_size(node.dtype, data=data)
-            initial_refs = self.graph.ref_counts.get(node.name, 0)
-            self.mem.prepare_allocation(node, size, initial_refs=initial_refs)
+            # Find the largest non-batch dimension (skip dim 0 = batch)
+            for d in range(1, len(node.shape)):
+                dim_size = node.shape[d]
+                if dim_size is not None and dim_size > best_dim_size:
+                    best_dim_size = dim_size
+                    best_dim_idx = d
+                    best_input_name = node_name
 
+        if best_input_name is None or best_dim_size <= 1:
+            if DEBUG_EXECUTION:
+                print("[Executor] No suitable input found for AOT bucketing, skipping.")
+            return
+
+        self._primary_input = best_input_name
+        self._bucket_dim = best_dim_idx
+        max_dim_size = best_dim_size
+
+        if DEBUG_EXECUTION:
+            print(f"[Executor] Auto-detected primary input: '{best_input_name}' dim={best_dim_idx} size={max_dim_size}")
+
+        # 1. Lock in the memory arena
+        self.mem.plan_static_memory(self.graph)
+
+        # Generate intervals: power-of-2 chunks covering [0, max_dim_size)
+        intervals = set()
+        chunk_size = max_dim_size
+        while chunk_size >= 1:
+            for start in range(0, max_dim_size, chunk_size):
+                stop = min(start + chunk_size, max_dim_size)
+                intervals.add((start, stop))
+            chunk_size //= 2
+
+        if DEBUG_EXECUTION:
+            print(f"[Executor] Compiling {len(intervals)} AOT buckets...")
+
+        for start, stop in sorted(intervals):
+            flat_plan = []
+
+            # A. Reset dirty state on all graph nodes
+            for node in self.graph.nodes_map.values():
+                node.dirty_region = None
+
+            # B. Mock dirty region on the primary input
+            for node_name, node in self.graph.nodes_map.items():
+                if node.op_type != OpType.INPUT:
+                    continue
+                if node.storage_type == StorageType.PERSISTENT:
+                    continue
+                if not node.shape:
+                    continue
+
+                ndim = len(node.shape)
+                if node_name == best_input_name:
+                    # Apply the interval to the bucket dimension
+                    mock_slices = []
+                    for d in range(ndim):
+                        if d == best_dim_idx:
+                            mock_slices.append(slice(start, stop))
+                        else:
+                            mock_slices.append(slice(0, node.shape[d]) if node.shape[d] else slice(None))
+                    node.dirty_region = [tuple(mock_slices)]
+                # Non-primary inputs: leave clean (None)
+
+            # C. Forward Propagation: compute dirty regions for all nodes
+            for inst in self.graph.instructions:
+                node = self.graph.nodes_map[inst.node_name]
+                if node.op_type in (OpType.INPUT, OpType.CONSTANT):
+                    continue
+                node.dirty_region = DirtyPropagator.propagate(node, None)
+
+            # D. Backward Liveness Pruning
+            needed_nodes = set()
+            if self.graph.instructions:
+                needed_nodes.add(self.graph.instructions[-1].node_name)
+
+            for inst in reversed(self.graph.instructions):
+                if inst.node_name in needed_nodes:
+                    node = self.graph.nodes_map[inst.node_name]
+                    if node.dirty_region is not None:
+                        for p_name in inst.input_node_names:
+                            needed_nodes.add(p_name)
+
+            # E. Build Flat Plan with pre-sliced static views
+            for inst in self.graph.instructions:
+                node = self.graph.nodes_map[inst.node_name]
+                if node.op_type in (OpType.INPUT, OpType.CONSTANT):
+                    continue
+                if inst.node_name not in needed_nodes or node.dirty_region is None:
+                    continue
+
+                # Get input slices from backward propagation
+                req_in_slices = DirtyPropagator.get_input_slices(
+                    node, node.dirty_region, None
+                )
+
+                kernel_inputs = []
+                concrete_shapes = []
+                for i, p_name in enumerate(inst.input_node_names):
+                    p_node = self.graph.nodes_map[p_name]
+                    dev = self.mem._resolve_device(p_node)
+                    buf = self.mem.buffers[dev]
+
+                    full_view = buf.static_views.get(p_name)
+                    if full_view is None:
+                        full_view = self.mem.get_view(p_node)
+
+                    in_region = req_in_slices[i] if i < len(req_in_slices) else None
+
+                    if in_region is None or node.op_type in (OpType.RESHAPE,):
+                        kernel_inputs.append(full_view)
+                    else:
+                        sl = in_region[0] if in_region else None
+                        if sl is not None:
+                            kernel_inputs.append(full_view[sl])
+                        else:
+                            kernel_inputs.append(full_view)
+                    concrete_shapes.append(kernel_inputs[-1].shape)
+
+                # Slice Output View
+                dev = self.mem._resolve_device(node)
+                buf = self.mem.buffers[dev]
+                out_full_view = buf.static_views.get(inst.node_name)
+                if out_full_view is None:
+                    out_full_view = self.mem.get_view(node)
+
+                if node.op_type in (OpType.RESHAPE,):
+                    kernel_outputs = [out_full_view]
+                else:
+                    out_sl = node.dirty_region[0] if node.dirty_region else None
+                    if out_sl is not None:
+                        kernel_outputs = [out_full_view[out_sl]]
+                    else:
+                        kernel_outputs = [out_full_view]
+
+                # Select Kernel based on pre-sliced shapes
+                input_sigs = [
+                    TensorSignature(self.graph.nodes_map[n].dtype, inp.shape, node.backend)
+                    for n, inp in zip(inst.input_node_names, kernel_inputs)
+                ]
+
+                result = KernelRegistry.select_best_kernel(
+                    node.op_type, input_sigs, node.backend, node.dtype,
+                    inst.inplace_input_index is not None,
+                )
+                kernel = result[0] if result else inst.kernel
+
+                flat_plan.append((kernel, kernel_inputs, kernel_outputs, inst.attrs))
+
+            self.buckets[(start, stop)] = flat_plan
+
+        if DEBUG_EXECUTION:
+            total_ops = sum(len(plan) for plan in self.buckets.values())
+            print(f"[Executor] AOT compilation complete: {len(self.buckets)} buckets, {total_ops} total ops")
+
+    def run(self, inputs: Dict[str, Any]) -> Any:
+        """Execute with pre-compiled AOT buckets."""
+        # 1. Write inputs to the static arena and find the dirty interval
+        actual_start = float('inf')
+        actual_stop = -1
+
+        for name, data in inputs.items():
+            node = self.graph.nodes_map.get(name)
+            if not node or node.storage_type == StorageType.PERSISTENT:
+                continue
+
+            # Diff against last input for bucket selection
             old_data = self.last_inputs.get(name)
-            node.dirty_region = DirtyPropagator.get_diff(old_data, data)
+            diff_regions = DirtyPropagator.get_diff(old_data, data)
 
-            self.mem.write(node, data)
+            # Only the primary input's bucket dimension drives bucket selection
+            if diff_regions and name == self._primary_input and self._bucket_dim >= 0:
+                box = diff_regions[0]
+                if self._bucket_dim < len(box):
+                    sl = box[self._bucket_dim]
+                    s = sl.start if sl.start is not None else 0
+                    e = sl.stop if sl.stop is not None else (
+                        data.shape[self._bucket_dim] if hasattr(data, 'shape') else 0
+                    )
+                    actual_start = min(actual_start, s)
+                    actual_stop = max(actual_stop, e)
 
-            if hasattr(data, "clone"):
+            # Write to static memory
+            dev = self.mem._resolve_device(node)
+            buf = self.mem.buffers.get(dev)
+            if buf and name in buf.static_views:
+                view = buf.static_views[name]
+                if isinstance(view, np.ndarray):
+                    src = data.cpu().numpy() if hasattr(data, 'cpu') else np.asarray(data)
+                    if src.shape == view.shape:
+                        view[...] = src
+                    else:
+                        view[...] = src.reshape(view.shape)
+                elif hasattr(view, 'copy_'):
+                    import torch
+                    src = data if isinstance(data, torch.Tensor) else torch.from_numpy(data)
+                    view.copy_(src.to(view.device, dtype=view.dtype).reshape(view.shape))
+            else:
+                self.mem.write(node, data)
+
+            # Cache for next diff
+            if hasattr(data, 'clone'):
                 self.last_inputs[name] = data.clone()
             elif isinstance(data, np.ndarray):
                 self.last_inputs[name] = data.copy()
             else:
                 self.last_inputs[name] = data
 
-    def run(self, inputs: Dict[str, Any]) -> Any:
-        self.mem.step()
-        self._update_inputs(inputs)
-
-        # Initial reference counts calculated during compilation
-        static_refs = self.graph.ref_counts
-
-        # --- Pass 1: Forward Propagation & Cache Check ---
-        # Determine the state of every node before we decide what to run
-        node_states = {}  # name -> {'is_dirty': bool, 'in_cache': bool}
-
-        for inst in self.graph.instructions:
-            node = self.graph.nodes_map[inst.node_name]
-
-            if node.op_type in (OpType.INPUT, OpType.CONSTANT):
-                continue
-
-            # Propagate dirty region from parents to see if this node needs recomputation
-            node.dirty_region = DirtyPropagator.propagate(node, inputs)
-            is_dirty = node.dirty_region is not None
-
-            # Check if the buffer currently exists on the assigned device
-            dev_hint = node.backend.value if node.backend else "cpu"
-            in_cache = self.mem.has(node.name, dev_hint)
-
-            node_states[node.name] = {"is_dirty": is_dirty, "in_cache": in_cache}
-
-        # --- Pass 2: Backward Liveness Analysis ---
-        # Determine which nodes are actually "needed" to produce the root output.
-        # This allows us to "prune" nodes that don't contribute to the current result.
-        needed_nodes = set()
-
-        if self.graph.instructions:
-            root_name = self.graph.instructions[-1].node_name
-            needed_nodes.add(root_name)
-
-        for inst in reversed(self.graph.instructions):
-            name = inst.node_name
-            if name not in node_states:
-                continue
-
-            state = node_states[name]
-
-            if name in needed_nodes:
-                # If a node is dirty or not in cache, we MUST compute it.
-                # To compute it, we need all of its parents.
-                must_compute = state["is_dirty"] or not state["in_cache"]
-
-                if must_compute:
-                    for p_name in inst.input_node_names:
-                        needed_nodes.add(p_name)
-
-        # --- Pre-Pass: Lock Expected Cache Hits ---
-        # Ensure that nodes we plan to Skip (reuse from cache) are not evicted
-        # by intermediate allocations before we reach them.
-        for inst in self.graph.instructions:
-            name = inst.node_name
-            if name not in needed_nodes:
-                continue
-
-            node = self.graph.nodes_map[name]
-            if node.op_type in (OpType.INPUT, OpType.CONSTANT):
-                continue
-
-            state = node_states[name]
-            # Use same condition as main loop for Skip path
-            if not state["is_dirty"] and state["in_cache"]:
-                self.mem.prepare_allocation(
-                    node, node.size_bytes, initial_refs=static_refs[name]
-                )
-
-        # --- Pass 3: Execution ---
-        counters = {
-            "no_op": 0,
-            "skip": 0,
-            "full": 0,
-            "part": 0,
-            "pruned": 0,
-            "kernel_switch": 0,
-            "inplace": 0,
-        }
-        partial_ratio_sum = 0
-
-        with tqdm(
-            self.graph.instructions,
-            desc="graph inst",
-            disable=not DEBUG_EXECUTION,
-        ) as pbar:
-            for inst in pbar:
-                if DEBUG_EXECUTION and DEBUG_DETAILED:
-                    print(f"[Executor.run] Executing {inst}")
-                node = self.graph.nodes_map[inst.node_name]
-
-                if node.op_type in (OpType.INPUT, OpType.CONSTANT):
-                    counters["no_op"] += 1
-                    continue
-
-                name = node.name
-                state = node_states[name]
-                is_needed = name in needed_nodes
-
-                if not is_needed:
-                    counters["pruned"] += 1
-                    for p_name in inst.input_node_names:
-                        self.mem.release(p_name)
-                    continue
-
-                dev_hint = node.backend.value if node.backend else "cpu"
-                actually_in_cache = self.mem.has(name, dev_hint)
-
-                # Check for in-place signal from compiler
-                is_inplace = inst.inplace_input_index is not None
-                compute_regions: List[Tuple[slice, ...]] = []
-                pending_output_allocation = False
-
-                # Determine Computation Mode
-                if state["is_dirty"] and actually_in_cache:
-                    counters["part"] += 1
-                    if DEBUG_EXECUTION:
-                        partial_ratio = (
-                            self._calculate_dirty_ratio(node.dirty_region, node.shape)
-                            if node.dirty_region and node.shape
-                            else 1.0
-                        )
-                        partial_ratio_sum += partial_ratio
-                    compute_regions = [
-                        r for r in node.dirty_region if any(s.stop > s.start for s in r)
-                    ]
-                    self.mem.prepare_allocation(
-                        node, node.size_bytes, initial_refs=static_refs[name]
-                    )
-
-                elif not actually_in_cache:
-                    counters["full"] += 1
-                    # DEFER ALLOCATION: We don't know if we can do in-place or need new allocation
-                    # until we resolve the kernel (which depends on concrete input shapes).
-                    pending_output_allocation = True
-                    compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
-
-                else:
-                    counters["skip"] += 1
-                    self.mem.prepare_allocation(
-                        node, node.size_bytes, initial_refs=static_refs[name]
-                    )
-
-                # Execute Kernel
-                if compute_regions:
-                    for region_slice in compute_regions:
-                        start_time = time.perf_counter()
-
-                        is_full_region = all(s == slice(None) for s in region_slice)
-                        input_slice_regions = []
-
-                        if is_full_region:
-                            input_slice_regions = [None] * len(inst.input_node_names)
-                        else:
-                            query_region = [region_slice]
-                            reqs = DirtyPropagator.get_input_slices(
-                                node, query_region, inputs
-                            )
-                            for req in reqs:
-                                input_slice_regions.append(req[0] if req else None)
-
-                        kernel_inputs = []
-                        concrete_shapes = []
-
-                        for i, p_name in enumerate(inst.input_node_names):
-                            p_node = self.graph.nodes_map[p_name]
-                            full_view = self.mem.get_view(p_node)
-                            sl = input_slice_regions[i]
-
-                            if sl is None or node.op_type in (OpType.RESHAPE,):
-                                view = full_view
-                            else:
-                                view = full_view[sl]
-
-                            kernel_inputs.append(view)
-                            concrete_shapes.append(view.shape)
-
-                        # Kernel selection (Handle potential shape-specific kernels)
-                        selected_kernel = inst.kernel
-                        current_inplace = is_inplace
-
-                        if not is_full_region or (
-                            concrete_shapes and concrete_shapes[0] != node.shape
-                        ):
-                            cache_key = (name, tuple(concrete_shapes))
-                            if cache_key in self._kernel_cache:
-                                selected_kernel, current_inplace = self._kernel_cache[
-                                    cache_key
-                                ]
-                            else:
-                                input_sigs = []
-                                for idx, shape in enumerate(concrete_shapes):
-                                    p_node = self.graph.nodes_map[
-                                        inst.input_node_names[idx]
-                                    ]
-                                    sig = TensorSignature(
-                                        p_node.dtype, shape, node.backend
-                                    )
-                                    input_sigs.append(sig)
-
-                                better_kernel = KernelRegistry.select_best_kernel(
-                                    node.op_type,
-                                    input_sigs,
-                                    node.backend,
-                                    node.dtype,
-                                    inst.inplace_input_index is not None,
-                                )
-                                if better_kernel:
-                                    selected_kernel, current_inplace = better_kernel
-                                    counters["kernel_switch"] += 1
-                                self._kernel_cache[cache_key] = (
-                                    selected_kernel,
-                                    current_inplace,
-                                )
-
-                        # LATE BINDING MEMORY ALLOCATION
-                        # Now that we know the exact kernel and if it supports in-place
-                        if pending_output_allocation:
-                            if current_inplace:
-                                src_name = inst.input_node_names[
-                                    inst.inplace_input_index
-                                ]
-                                self.mem.transfer_ownership(src_name, name)
-                            else:
-                                self.mem.prepare_allocation(
-                                    node,
-                                    node.size_bytes,
-                                    initial_refs=static_refs[name],
-                                )
-
-                            if not state["is_dirty"]:
-                                node.dirty_region = None
-
-                            pending_output_allocation = False
-
-                        if current_inplace:
-                            counters["inplace"] += 1
-
-                        # Run Kernel
-                        out_view = self.mem.get_view(node)
-                        out_slice = (
-                            out_view
-                            if node.op_type in (OpType.RESHAPE,)
-                            else out_view[region_slice]
-                        )
-
-                        selected_kernel(kernel_inputs, [out_slice], inst.attrs)
-                        node.compute_cost = (time.perf_counter() - start_time) * 1000
-
-                        # Record kernel launch if enabled
-                        if RECORD_KERNEL_LAUNCHES:
-                            self._record_kernel_launch(
-                                node_name=name,
-                                op_type=node.op_type,
-                                input_shapes=concrete_shapes,
-                                output_shape=node.shape or (0,),
-                                compute_time_ms=node.compute_cost,
-                                is_partial=not is_full_region,
-                                backend=dev_hint,
-                                attrs=inst.attrs,
-                            )
-
-                # Release Parents
-                for p_name in inst.input_node_names:
-                    self.mem.release(p_name)
-
-                # Update Progress Bar Stats
-                if DEBUG_EXECUTION:
-                    total_ops = counters["skip"] + counters["part"] + counters["full"]
-                    counters["p_sum"] = (
-                        f"{partial_ratio_sum / counters['part']:.2f}"
-                        if counters["part"] > 0
-                        else "N/A"
-                    )
-                    counters["p_cache"] = (
-                        f"{(counters['skip'] + (counters['part'] - partial_ratio_sum)) / (total_ops if total_ops > 0 else 1):.2f}"
-                    )
-                    pbar.set_postfix(counters)
-
+        # 2. Find Smallest Enclosing Bucket
         root_name = self.graph.instructions[-1].node_name
-        return self.mem.get_view(self.graph.nodes_map[root_name])
+        root_node = self.graph.nodes_map[root_name]
+        dev = self.mem._resolve_device(root_node)
+        buf = self.mem.buffers[dev]
+
+        if actual_start == float('inf'):
+            # Inputs didn't change, return cached output
+            if root_name in buf.static_views:
+                return buf.static_views[root_name]
+            return self.mem.get_view(root_node)
+
+        best_plan = None
+        min_size = float('inf')
+
+        for (b_start, b_stop), plan in self.buckets.items():
+            if b_start <= actual_start and b_stop >= actual_stop:
+                size = b_stop - b_start
+                if size < min_size:
+                    min_size = size
+                    best_plan = plan
+
+        if best_plan is None:
+            raise RuntimeError(
+                f"No AOT bucket covers dirty region ({actual_start}, {actual_stop}). "
+                f"Available buckets: {sorted(self.buckets.keys())}"
+            )
+
+        # 3. Execute Flat Plan
+        for kernel, kernel_inputs, kernel_outputs, attrs in best_plan:
+            kernel(kernel_inputs, kernel_outputs, attrs)
+
+        # 4. Return Output
+        if root_name in buf.static_views:
+            return buf.static_views[root_name]
+        return self.mem.get_view(root_node)
