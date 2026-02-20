@@ -14,3 +14,4 @@ out.log
 kernel_launches
 benchmarks.db
 profile_output*
+dirty_region_caches

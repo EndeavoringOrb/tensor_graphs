@@ -1,3 +1,4 @@
+- [ ] in GraphSession._ensure_cache_coverage make all_permutations iterate in order from largest slices to smallest slices. and allow user to stop compilation early to decrease startup time at the cost of speed
 - [ ] Improve handling of multiple non-contiguous regions (like DOT output)
 - [ ] Add general fusion during planning based on decomposition functions
 - [ ] Offline bucket graph compilation

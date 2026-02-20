@@ -1,10 +1,8 @@
 import os
 import numpy as np
-from typing import Dict
 
 from tokenizers import Tokenizer
 
-from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ir.graph import GraphBuilder
 from tensor_graphs.session import GraphSession
@@ -70,11 +68,24 @@ class Gemma3Model:
         scale = b.add(weight, b.const([1.0], DType.FP32))
         return b.rms_norm(x, scale, eps)
 
-    def forward(
-        self, input_ids_node, seq_len_node, max_seq_len, shapes: Dict[str, TensorNode]
-    ):
+    def forward(self, input_ids_node, max_seq_len, n_heads, head_dim, n_kv_groups):
         cfg = self.cfg
         b = self.builder
+
+        # Shapes constants
+        seq_len_node = b.const([max_seq_len])
+        n_heads_node = b.const([n_heads])
+        head_dim_node = b.const([head_dim])
+        n_kv_groups_node = b.const([n_kv_groups])
+        q_shape = b.concat(
+            [b.const([1]), seq_len_node, n_heads_node, head_dim_node], axis=0
+        )
+        kv_shape = b.concat(
+            [b.const([1]), seq_len_node, n_kv_groups_node, head_dim_node], axis=0
+        )
+        flat_shape = b.concat(
+            [b.const([1]), seq_len_node, b.mul(n_heads_node, head_dim_node)], axis=0
+        )
 
         w_emb = b.param(
             "model.embed_tokens.weight", (cfg["vocab_size"], cfg["emb_dim"])
@@ -86,7 +97,9 @@ class Gemma3Model:
         mask = self.compute_causal_mask(seq_len_node, max_seq_len)
 
         for i in range(cfg["n_layers"]):
-            x = self._transformer_block(x, i, cos, sin, mask, shapes)
+            x = self._transformer_block(
+                x, i, cos, sin, mask, q_shape, kv_shape, flat_shape
+            )
 
         x = self.rms_norm_gemma(
             x, b.param("model.norm.weight", (cfg["emb_dim"],)), self.eps
@@ -96,7 +109,9 @@ class Gemma3Model:
 
         return logits
 
-    def _transformer_block(self, x, layer_idx, cos, sin, mask, shapes):
+    def _transformer_block(
+        self, x, layer_idx, cos, sin, mask, q_shape, kv_shape, flat_shape
+    ):
         b = self.builder
         prefix = f"model.layers.{layer_idx}"
 
@@ -106,7 +121,9 @@ class Gemma3Model:
             b.param(f"{prefix}.input_layernorm.weight", (self.cfg["emb_dim"],)),
             self.eps,
         )
-        x_attn = self._attention(x_norm, layer_idx, cos, sin, mask, shapes)
+        x_attn = self._attention(
+            x_norm, layer_idx, cos, sin, mask, q_shape, kv_shape, flat_shape
+        )
         x_attn = self.rms_norm_gemma(
             x_attn,
             b.param(
@@ -134,7 +151,7 @@ class Gemma3Model:
         )
         return b.add(residual, x_ff)
 
-    def _attention(self, x, layer_idx, cos, sin, mask, shapes):
+    def _attention(self, x, layer_idx, cos, sin, mask, q_shape, kv_shape, flat_shape):
         cfg = self.cfg
         b = self.builder
         prefix = f"model.layers.{layer_idx}.self_attn"
@@ -170,9 +187,9 @@ class Gemma3Model:
             ),
         )
 
-        q = b.permute(b.reshape(q, shapes["q_shape"]), [0, 2, 1, 3])
-        k = b.permute(b.reshape(k, shapes["kv_shape"]), [0, 2, 1, 3])
-        v = b.permute(b.reshape(v, shapes["kv_shape"]), [0, 2, 1, 3])
+        q = b.permute(b.reshape(q, q_shape), [0, 2, 1, 3])
+        k = b.permute(b.reshape(k, kv_shape), [0, 2, 1, 3])
+        v = b.permute(b.reshape(v, kv_shape), [0, 2, 1, 3])
 
         q = b.rope(
             self.rms_norm_gemma(
@@ -197,9 +214,7 @@ class Gemma3Model:
         scores = b.dot(q, b.permute(k, [0, 1, 3, 2]))
         probs = b.softmax(b.add(scores, mask))
 
-        context = b.reshape(
-            b.permute(b.dot(probs, v), [0, 2, 1, 3]), shapes["flat_shape"]
-        )
+        context = b.reshape(b.permute(b.dot(probs, v), [0, 2, 1, 3]), flat_shape)
         return b.dot(
             context,
             b.permute(
@@ -284,54 +299,19 @@ def main():
 
     # Define Input Nodes
     in_node = model.builder.input("input_ids", (1, MAX_SEQ_LEN), DType.INT32)
-    seq_len_node = model.builder.input("seq_len", (1,), DType.INT32)
-
-    q_shape_node = model.builder.input("q_shape", (4,), DType.INT32)
-    kv_shape_node = model.builder.input("kv_shape", (4,), DType.INT32)
-    flat_shape_node = model.builder.input("flat_shape", (3,), DType.INT32)
-
-    shapes = {
-        "q_shape": q_shape_node,
-        "kv_shape": kv_shape_node,
-        "flat_shape": flat_shape_node,
-    }
 
     # Build the computational graph
     with Timer("Building graph"):
-        logits_node = model.forward(in_node, seq_len_node, MAX_SEQ_LEN, shapes)
+        logits_node = model.forward(
+            in_node, MAX_SEQ_LEN, cfg["n_heads"], cfg["head_dim"], cfg["n_kv_groups"]
+        )
 
     # Initialize Session
-    session = GraphSession(logits_node)
-
-    # Shapes constants
-    q_shape = np.array(
-        [1, MAX_SEQ_LEN, cfg["n_heads"], cfg["head_dim"]], dtype=np.int32
+    session = GraphSession(
+        logits_node,
+        weights_path=weights_path,
+        cache_path="dirty_region_caches/gemma-3-270m.jsonl",
     )
-    kv_shape = np.array(
-        [1, MAX_SEQ_LEN, cfg["n_kv_groups"], cfg["head_dim"]], dtype=np.int32
-    )
-    flat_shape = np.array(
-        [1, MAX_SEQ_LEN, cfg["n_heads"] * cfg["head_dim"]], dtype=np.int32
-    )
-
-    # --- COMPILE & LOAD WEIGHTS ---
-
-    # 1. Compile (Required to resolve backends/placement)
-    # We use a dummy input for shape inference
-    dummy_inputs = {
-        "input_ids": np.zeros((1, MAX_SEQ_LEN), dtype=np.int32),
-        "seq_len": np.array([MAX_SEQ_LEN], dtype=np.int32),
-        "q_shape": q_shape,
-        "kv_shape": kv_shape,
-        "flat_shape": flat_shape,
-    }
-
-    with Timer("Compiling"):
-        session.compile(dummy_inputs)
-
-    # 2. Load Weights (Zero-Copy if CPU)
-    with Timer("Loading weights (Zero-Copy)"):
-        session.load_weights(weights_path)
 
     while True:
         prompt = input("Enter prompt: ")
@@ -346,14 +326,9 @@ def main():
 
             input_ids_padded = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
             input_ids_padded[0, :seq_len] = input_ids
-            seq_len_val = np.array([MAX_SEQ_LEN], dtype=np.int32)
 
             step_inputs = {
                 "input_ids": input_ids_padded,
-                "seq_len": seq_len_val,
-                "q_shape": q_shape,
-                "kv_shape": kv_shape,
-                "flat_shape": flat_shape,
             }
 
             # USE SESSION

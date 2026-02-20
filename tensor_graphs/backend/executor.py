@@ -1,7 +1,7 @@
 # tensor_graphs/backend/executor.py
 import numpy as np
 import time
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import math
 from ..compiler.compiled_graph import CompiledGraph
 from ..ir.buffer import StorageType
@@ -24,10 +24,17 @@ import json
 from datetime import datetime
 from line_profiler import profile
 
+
 class Executor:
-    def __init__(self, compiled_graph: CompiledGraph, memory_manager: MemoryManager):
+    def __init__(
+        self,
+        compiled_graph: CompiledGraph,
+        memory_manager: MemoryManager,
+        dirty_cache: Optional[Dict[str, Any]] = None,
+    ):
         self.graph = compiled_graph
         self.mem = memory_manager
+        self.dirty_cache = dirty_cache or {}
         self.last_inputs: Dict[str, Any] = {}
         # Persistent cache across runs: Key = (node_name, shape_tuple) -> (Kernel, is_inplace)
         self._kernel_cache: Dict[Tuple[str, Tuple[Tuple[int, ...], ...]], Any] = {}
@@ -171,7 +178,13 @@ class Executor:
         with open(self.kernel_launch_filename, "a") as f:
             f.write(json.dumps(record, cls=GraphEncoder) + "\n")
 
-    def _update_inputs(self, inputs: Dict[str, Any]) -> None:
+    def _update_inputs(
+        self, inputs: Dict[str, Any]
+    ) -> Dict[str, List[Tuple[slice, ...]]]:
+        """
+        Updates input buffers and returns the detected dirty regions (bounding boxes) for each input.
+        """
+        input_diffs = {}
         for name, data in inputs.items():
             node = self.graph.nodes_map.get(name)
             if not node:
@@ -185,7 +198,12 @@ class Executor:
             self.mem.prepare_allocation(node, size, initial_refs=initial_refs)
 
             old_data = self.last_inputs.get(name)
-            node.dirty_region = DirtyPropagator.get_diff(old_data, data)
+
+            # Compute actual dirty regions
+            dirty_region = DirtyPropagator.get_diff(old_data, data)
+            node.dirty_region = dirty_region
+            if dirty_region:
+                input_diffs[name] = dirty_region
 
             self.mem.write(node, data)
 
@@ -196,11 +214,74 @@ class Executor:
             else:
                 self.last_inputs[name] = data
 
+        return input_diffs
+
+    def _next_power_of_2(self, x):
+        return 1 if x == 0 else 2 ** (x - 1).bit_length()
+
+    def _find_best_bucket(self, input_diffs: Dict[str, List[Tuple[slice, ...]]]):
+        if not input_diffs:
+            return None, None
+
+        key_items = {}
+        for name, region_list in input_diffs.items():
+            node = self.graph.nodes_map.get(name)
+            if not node or not region_list:
+                continue
+
+            box = region_list[0]  # Bounding box
+            canonical_box = []
+            shape = node.shape or ()
+
+            for d, sl in enumerate(box):
+                start = sl.start if sl.start is not None else 0
+                stop = sl.stop if sl.stop is not None else shape[d]
+                dim_len = shape[d]
+
+                # Start searching from the smallest possible power-of-2 length
+                target_len = self._next_power_of_2(stop - start)
+
+                found = False
+                while target_len <= self._next_power_of_2(dim_len):
+                    # Calculate the aligned start position for this zoom level
+                    # This aligns with 0, target_len, 2*target_len...
+                    bucket_start = (start // target_len) * target_len
+                    bucket_end = min(bucket_start + target_len, dim_len)
+
+                    # Check if the dirty region [start:stop] fits inside this aligned bucket
+                    if bucket_start <= start and bucket_end >= stop:
+                        canonical_box.append((bucket_start, bucket_end))
+                        found = True
+                        break
+
+                    # If it doesn't fit (e.g. spans across a tile boundary),
+                    # we must zoom out to the next power of 2.
+                    target_len *= 2
+
+                if not found:
+                    # Fallback to full dimension if something went wrong
+                    canonical_box.append((0, dim_len))
+
+            key_items[name] = (tuple(canonical_box),)
+
+        sorted_items = sorted(key_items.items())
+        key = tuple(sorted_items)
+        return self.dirty_cache.get(key)
+
     @profile
     def run(self, inputs: Dict[str, Any]) -> Any:
         self.mem.step()
         with Timer("[Executor.run] update inputs"):
-            self._update_inputs(inputs)
+            # Update inputs and get actual dirty diffs
+            input_diffs = self._update_inputs(inputs)
+
+        bucket = None
+        if self.dirty_cache:
+            with Timer("[Executor.run] cache lookup"):
+                bucket = self._find_best_bucket(input_diffs)
+
+        cached_regions = bucket["regions"] if bucket else {}
+        cached_input_slices = bucket["input_slices"] if bucket else {}
 
         with Timer("[Executor.run] initializing"):
             # Initial reference counts calculated during compilation
@@ -216,8 +297,33 @@ class Executor:
                 if node.op_type in (OpType.INPUT, OpType.CONSTANT):
                     continue
 
-                # Propagate dirty region from parents to see if this node needs recomputation
-                node.dirty_region = DirtyPropagator.propagate(node, inputs)
+                if bucket and node.name in cached_regions:
+                    # Use cached dirty region
+                    reg_data = cached_regions[node.name]
+                    if reg_data:
+                        # Deserialize: List[List[(s,e)]] -> List[Tuple[slice...]]
+                        deserialized_reg = []
+                        for box in reg_data:
+                            slices = tuple(slice(s, e) for s, e in box)
+                            deserialized_reg.append(slices)
+                        node.dirty_region = deserialized_reg
+                    else:
+                        node.dirty_region = None
+                else:
+                    # Fallback if no bucket or node not in bucket (e.g. auto_copy)
+                    # For auto_copy nodes, we can try to inherit from parent
+                    if node.op_type == OpType.COPY_TO and node.name.startswith(
+                        "auto_copy"
+                    ):
+                        p_name = inst.input_node_names[0]
+                        p_node = self.graph.nodes_map.get(p_name)
+                        if p_node:
+                            node.dirty_region = p_node.dirty_region
+                        else:
+                            node.dirty_region = DirtyPropagator.propagate(node, inputs)
+                    else:
+                        node.dirty_region = DirtyPropagator.propagate(node, inputs)
+
                 is_dirty = node.dirty_region is not None
 
                 # Check if the buffer currently exists on the assigned device
@@ -272,7 +378,6 @@ class Executor:
 
         # --- Pass 3: Execution ---
         counters = {
-            "no_op": 0,
             "skip": 0,
             "full": 0,
             "part": 0,
@@ -293,7 +398,6 @@ class Executor:
                 node = self.graph.nodes_map[inst.node_name]
 
                 if node.op_type in (OpType.INPUT, OpType.CONSTANT):
-                    counters["no_op"] += 1
                     continue
 
                 name = node.name
@@ -307,7 +411,6 @@ class Executor:
                     continue
 
                 dev_hint = node.backend.value if node.backend else "cpu"
-                actually_in_cache = self.mem.has(name, dev_hint)
 
                 # Check for in-place signal from compiler
                 is_inplace = inst.inplace_input_index is not None
@@ -315,7 +418,7 @@ class Executor:
                 pending_output_allocation = False
 
                 # Determine Computation Mode
-                if state["is_dirty"] and actually_in_cache:
+                if state["is_dirty"] and state["in_cache"]:
                     counters["part"] += 1
                     if DEBUG_EXECUTION:
                         partial_ratio = (
@@ -331,14 +434,14 @@ class Executor:
                         node, node.size_bytes, initial_refs=static_refs[name]
                     )
 
-                elif not actually_in_cache:
+                elif not state["in_cache"]:
                     counters["full"] += 1
                     # DEFER ALLOCATION: We don't know if we can do in-place or need new allocation
                     # until we resolve the kernel (which depends on concrete input shapes).
                     pending_output_allocation = True
                     compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
 
-                else:
+                else:  # clean and in cache
                     counters["skip"] += 1
                     self.mem.prepare_allocation(
                         node, node.size_bytes, initial_refs=static_refs[name]
@@ -346,27 +449,72 @@ class Executor:
 
                 # Execute Kernel
                 if compute_regions:
-                    for region_slice in compute_regions:
+                    # Get cached input slices if available
+                    node_cached_input_slices = cached_input_slices.get(name)
+
+                    for i, region_slice in enumerate(compute_regions):
                         is_full_region = all(s == slice(None) for s in region_slice)
                         input_slice_regions = []
 
                         if is_full_region:
                             input_slice_regions = [None] * len(inst.input_node_names)
                         else:
-                            query_region = [region_slice]
-                            reqs = DirtyPropagator.get_input_slices(
-                                node, query_region, inputs
-                            )
-                            for req in reqs:
-                                input_slice_regions.append(req[0] if req else None)
+                            # Try to use cached input requirements for this box index
+                            if node_cached_input_slices and i < len(
+                                node_cached_input_slices
+                            ):
+                                cached_reqs = node_cached_input_slices[i]
+                                # Deserialize: List[List[(s,e)]] or None
+                                if cached_reqs:
+                                    for req in cached_reqs:
+                                        if req:
+                                            # box is a single list of (s,e) tuples
+                                            # get_input_slices returns List[NumericRegion], where NumericRegion is List[Box]
+                                            # We serialized List[Box] as List[List[(s,e)]]
+                                            # Wait, bucket logic stored reqs as: List[NumericRegion] per box.
+                                            # NumericRegion = List[Box]. Box = List[(s,e)].
+                                            # serialized: List[List[List[(s,e)]]]
+                                            # Actually in code above: ser_reqs.append(ser_req) where ser_req is List[List[(s,e)]] (List[Box])
+                                            # So `req` here is List[Box]
+                                            if len(req) > 0:
+                                                # Take first box for slice
+                                                # _from_slices logic expects NumericRegion
+                                                # Construct slice tuple
+                                                box_data = req[0]
+                                                slices = tuple(
+                                                    slice(s, e) for s, e in box_data
+                                                )
+                                                input_slice_regions.append(slices)
+                                            else:
+                                                input_slice_regions.append(None)
+                                        else:
+                                            input_slice_regions.append(None)
+                                else:
+                                    # Fallback if cache structure mismatch (should not happen if key matched)
+                                    query_region = [region_slice]
+                                    reqs = DirtyPropagator.get_input_slices(
+                                        node, query_region, inputs
+                                    )
+                                    for req in reqs:
+                                        input_slice_regions.append(
+                                            req[0] if req else None
+                                        )
+                            else:
+                                # Fallback (e.g. auto_copy node not in cache)
+                                query_region = [region_slice]
+                                reqs = DirtyPropagator.get_input_slices(
+                                    node, query_region, inputs
+                                )
+                                for req in reqs:
+                                    input_slice_regions.append(req[0] if req else None)
 
                         kernel_inputs = []
                         concrete_shapes = []
 
-                        for i, p_name in enumerate(inst.input_node_names):
+                        for inp_idx, p_name in enumerate(inst.input_node_names):
                             p_node = self.graph.nodes_map[p_name]
                             full_view = self.mem.get_view(p_node)
-                            sl = input_slice_regions[i]
+                            sl = input_slice_regions[inp_idx]
 
                             if sl is None or node.op_type in (OpType.RESHAPE,):
                                 view = full_view

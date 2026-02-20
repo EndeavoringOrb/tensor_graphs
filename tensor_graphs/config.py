@@ -1,4 +1,4 @@
-DEBUG_EXECUTION = False
+DEBUG_EXECUTION = True
 DEBUG_DETAILED = False
 
 # If True, non-contiguous regions (lists of boxes) are merged into a single bounding box.
@@ -12,4 +12,5 @@ RECORD_KERNEL_LAUNCHES_FOLDER = "kernel_launches"
 PLANNER_BEAM_WIDTH = 3  # Number of top strategies to keep per node
 
 import os
+
 os.environ["LINE_PROFILE"] = "0"
