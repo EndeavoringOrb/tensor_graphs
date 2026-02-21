@@ -1,3 +1,4 @@
+# tensor_graphs/benchmark/db.py
 import sqlite3
 import json
 import math
@@ -177,7 +178,6 @@ class BenchmarkDB:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             # Kernel Benchmarks Table
-            # Stores raw timing for specific op/backend/shape configurations
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS kernel_benchmarks (
                     id TEXT PRIMARY KEY,
@@ -187,9 +187,11 @@ class BenchmarkDB:
                     shape_json TEXT, -- List of ints
                     attrs_json TEXT, -- Dict
                     latency_ms REAL,
-                    timestamp TEXT
+                    timestamp TEXT,
+                    inplace INTEGER DEFAULT 0
                 )
             """)
+
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_op_backend ON kernel_benchmarks(op_type, backend)"
             )
@@ -209,13 +211,14 @@ class BenchmarkDB:
         shape: list,
         attrs: dict,
         latency_ms: float,
+        inplace: bool = False,
     ):
         import datetime
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO kernel_benchmarks VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO kernel_benchmarks (id, op_type, backend, dtype, shape_json, attrs_json, latency_ms, timestamp, inplace) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(uuid.uuid4()),
                     op_type,
@@ -225,6 +228,7 @@ class BenchmarkDB:
                     self._serialize_attrs(attrs),
                     latency_ms,
                     datetime.datetime.utcnow().isoformat(),
+                    1 if inplace else 0,
                 ),
             )
             conn.commit()
@@ -236,14 +240,16 @@ class BenchmarkDB:
         dtype: str,
         shape: tuple,
         attrs: Optional[dict] = None,
+        inplace: bool = False,
     ) -> Optional[float]:
         """
         Estimates latency.
-        1. Exact Match
+        1. Exact Match (with inplace)
         2. Nearest Neighbor (Log-Space Euclidean Distance on Shape) + Complexity Scaling
         """
         shape_list = list(shape) if shape else []
         attrs_json = self._serialize_attrs(attrs)
+        inplace_val = 1 if inplace else 0
 
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
@@ -254,29 +260,23 @@ class BenchmarkDB:
             cursor.execute(
                 """
                 SELECT latency_ms FROM kernel_benchmarks 
-                WHERE op_type=? AND backend=? AND dtype=? AND shape_json=? AND attrs_json=?
+                WHERE op_type=? AND backend=? AND dtype=? AND shape_json=? AND attrs_json=? AND inplace=?
                 ORDER BY timestamp DESC LIMIT 1
             """,
-                (
-                    op_type,
-                    backend,
-                    dtype,
-                    json_str,
-                    attrs_json,
-                ),
+                (op_type, backend, dtype, json_str, attrs_json, inplace_val),
             )
             row = cursor.fetchone()
             if row:
                 return row["latency_ms"]
 
             # 2. Heuristic Interpolation (Fallback)
-            # Fetch all entries for this op/backend/dtype
+            # Fetch all entries for this op/backend/dtype/inplace state
             cursor.execute(
                 """
                 SELECT shape_json, latency_ms FROM kernel_benchmarks 
-                WHERE op_type=? AND backend=? AND dtype=?
+                WHERE op_type=? AND backend=? AND dtype=? AND inplace=?
             """,
-                (op_type, backend, dtype),
+                (op_type, backend, dtype, inplace_val),
             )
 
             rows = cursor.fetchall()
@@ -312,3 +312,29 @@ class BenchmarkDB:
                 return ref_latency * (target_vol / ref_vol)
 
             return None
+
+    def exists(
+        self,
+        op_type: str,
+        backend: str,
+        dtype: str,
+        shape: list,
+        attrs: dict,
+        inplace: bool = False,
+    ) -> bool:
+        """Checks if a specific benchmark configuration already exists in the DB."""
+        shape_json = json.dumps(shape)
+        attrs_json = self._serialize_attrs(attrs)
+        inplace_val = 1 if inplace else 0
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT 1 FROM kernel_benchmarks 
+                WHERE op_type=? AND backend=? AND dtype=? AND shape_json=? AND attrs_json=? AND inplace=?
+                LIMIT 1
+            """,
+                (op_type, backend, dtype, shape_json, attrs_json, inplace_val),
+            )
+            return cursor.fetchone() is not None

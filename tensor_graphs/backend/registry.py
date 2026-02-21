@@ -1,3 +1,4 @@
+# tensor_graphs/backend/registry.py
 from typing import Dict, List, Callable, Optional, Tuple
 from ..ir.dtypes import DType, TensorSignature, Backend
 from ..ops.registry import register_reference_factory, get_reference_factory
@@ -120,6 +121,12 @@ class KernelRegistry:
 
             # 4. Input Signature Scoring
             score = cls._score_candidate(pattern_sigs, concrete_inputs)
+            if score < 0:
+                continue
+
+            # Prefer inplace if it's allowed and available
+            if cand_inplace and allow_inplace:
+                score += 1
 
             if score > best_score:
                 best_score = score

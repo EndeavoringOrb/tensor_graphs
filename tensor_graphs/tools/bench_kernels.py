@@ -1,3 +1,4 @@
+# tensor_graphs/tools/bench_kernels.py
 import json
 import glob
 import os
@@ -34,8 +35,13 @@ def load_launch_records(folder):
                     rec = json.loads(line)
                     # Key: (op_type, backend)
                     key = (rec["op_type"], rec["backend"])
-                    # Store tuple of (input_shapes, output_shape, attrs)
-                    item = (rec["input_shapes"], rec["output_shape"], rec["attrs"])
+                    # Store tuple of (input_shapes, output_shape, attrs, inplace)
+                    item = (
+                        rec["input_shapes"],
+                        rec["output_shape"],
+                        rec["attrs"],
+                        rec.get("inplace", False),
+                    )
                     records[key].append(item)
                 except:
                     pass
@@ -63,12 +69,13 @@ def bench_all(db_path="benchmarks.db"):
             if recorded:
                 print(f"  Found {len(recorded)} recorded launches.")
                 seen = set()
-                for inp_shapes, out_shape, attrs in recorded:
+                for inp_shapes, out_shape, attrs, inplace in recorded:
                     # Create a canonical key for deduplication
                     sig_key = (
                         str(inp_shapes),
                         str(out_shape),
                         json.dumps(attrs, sort_keys=True),
+                        inplace,
                     )
                     if sig_key not in seen:
                         seen.add(sig_key)
@@ -78,19 +85,35 @@ def bench_all(db_path="benchmarks.db"):
                                 "input_shapes": inp_shapes,
                                 "recorded_output_shape": out_shape,
                                 "attrs": attrs,
+                                "inplace": inplace,
+                            }
+                        )
+                        configs_to_run.append(
+                            {
+                                "source": "record",
+                                "input_shapes": inp_shapes,
+                                "recorded_output_shape": out_shape,
+                                "attrs": attrs,
+                                "inplace": not inplace,
                             }
                         )
             else:
                 # Fallback to random generation based on registered signatures
                 for entry in kernels:
-                    _, sigs, _, inplace, func = entry
+                    _, sigs, _, cand_inplace, func = entry
                     configs_to_run.append(
-                        {"source": "random", "sigs": sigs, "func": func}
+                        {
+                            "source": "random",
+                            "sigs": sigs,
+                            "func": func,
+                            "inplace": cand_inplace,
+                        }
                     )
 
             for config in configs_to_run:
                 try:
                     target_dtype = DType.FP32
+                    is_inplace = False
 
                     if config["source"] == "record":
                         # --- RECORDED CASE ---
@@ -108,9 +131,15 @@ def bench_all(db_path="benchmarks.db"):
                         for s, dt in zip(config["input_shapes"], input_dtypes):
                             concrete_sigs.append(TensorSignature(dt, tuple(s), backend))
 
+                        is_inplace = config.get("inplace", False)
+
                         # Find matching kernel
                         kernel_result = KernelRegistry.select_best_kernel(
-                            op_type, concrete_sigs, backend, DType.FP32
+                            op_type,
+                            concrete_sigs,
+                            backend,
+                            DType.FP32,
+                            allow_inplace=is_inplace,
                         )
 
                         if not kernel_result:
@@ -119,7 +148,11 @@ def bench_all(db_path="benchmarks.db"):
                                 for s in config["input_shapes"]
                             ]
                             kernel_result = KernelRegistry.select_best_kernel(
-                                op_type, concrete_sigs_int, backend, DType.INT32
+                                op_type,
+                                concrete_sigs_int,
+                                backend,
+                                DType.INT32,
+                                allow_inplace=is_inplace,
                             )
                             if kernel_result:
                                 concrete_sigs = concrete_sigs_int
@@ -127,7 +160,7 @@ def bench_all(db_path="benchmarks.db"):
                             else:
                                 continue
 
-                        func, _ = kernel_result
+                        func, is_inplace = kernel_result
 
                         # Generate Inputs
                         inputs = []
@@ -191,6 +224,8 @@ def bench_all(db_path="benchmarks.db"):
                         # --- RANDOM CASE ---
                         sigs = config["sigs"]
                         func = config["func"]
+                        is_inplace = config.get("inplace", False)
+
                         real_inputs, attrs = DataGenerator.generate(
                             op_type, tuple(sigs), backend
                         )
@@ -230,6 +265,30 @@ def bench_all(db_path="benchmarks.db"):
                             else:
                                 out_shape = (1,)
                             target_dtype = DType.FP32
+
+                    # --- RESOLVE PRIMARY SHAPE FOR DB CHECK ---
+                    if op_type == "Fill" and attrs and "target_shape" in attrs:
+                        primary_shape = list(attrs["target_shape"])
+                    elif real_inputs and hasattr(real_inputs[0], "shape"):
+                        primary_shape = list(real_inputs[0].shape)
+                    else:
+                        # Fallback to output shape
+                        safe_out_shape = tuple(
+                            int(d) if d is not None else 1 for d in out_shape
+                        )
+                        primary_shape = list(safe_out_shape)
+
+                    # --- NEW SKIP LOGIC ---
+                    if db.exists(
+                        op_type,
+                        backend.value,
+                        target_dtype.value,
+                        primary_shape,
+                        attrs,
+                        inplace=is_inplace,
+                    ):
+                        # print(f"  [SKIP] {op_type} {primary_shape} already in DB.")
+                        continue
 
                     # --- ALLOCATE OUTPUT ---
                     if backend == Backend.GPU_TORCH:
@@ -285,10 +344,13 @@ def bench_all(db_path="benchmarks.db"):
                         primary_shape,
                         attrs,
                         avg_ms,
+                        inplace=is_inplace,
                     )
 
                     src_tag = "REC" if config["source"] == "record" else "RND"
-                    print(f"  [{src_tag}] Shape {primary_shape}: {avg_ms:.4f} ms")
+                    print(
+                        f"  [{src_tag}] Shape {primary_shape} {'(inplace)' if is_inplace else ''}: {avg_ms:.4f} ms"
+                    )
 
                 except KernelUnavailableError:
                     pass

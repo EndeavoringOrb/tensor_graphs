@@ -1616,7 +1616,7 @@ def main():
             seed=42,
         )
 
-        output_path = "flux_output.png"
+        output_path = f"images/{len(os.listdir('images')):05}.png"
         Image.fromarray(image).save(output_path)
         print(f"\nSaved to {output_path}")
 

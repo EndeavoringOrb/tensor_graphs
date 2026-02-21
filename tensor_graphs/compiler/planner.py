@@ -1,3 +1,4 @@
+# tensor_graphs/compiler/planner.py
 import copy
 from typing import Dict, Optional, List, Any, Set
 from dataclasses import dataclass
@@ -357,25 +358,20 @@ class Planner:
                     available_backends.append(Backend.GPU_TORCH)
 
         for backend in available_backends:
-            # STRICT KERNEL CHECKING:
-            # Instead of generic has_kernel, we verify if a kernel exists
-            # for the *specific* shapes/dtypes of the inputs.
-            # We reconstruct the input signatures for this check.
-
-            # Since parents might have different backends in their strategies,
-            # we check if *this* backend can support the op assuming inputs are converted.
-            # The signatures passed to select_best_kernel should reflect the *target* backend
-            # because we insert copies if needed.
-
+            # STRICT KERNEL CHECKING
             dummy_sigs = []
             for p in node.parents:
                 dummy_sigs.append(TensorSignature(p.dtype, p.shape, backend))
 
             # Check if kernel exists
-            if not KernelRegistry.select_best_kernel(
+            kernel_result = KernelRegistry.select_best_kernel(
                 node.op_type, dummy_sigs, backend, node.dtype
-            ):
+            )
+
+            if not kernel_result:
                 continue
+
+            _, cand_inplace = kernel_result
 
             for p_strat_combo in itertools.product(*parent_strats):
                 current_cost = 0.0
@@ -409,7 +405,12 @@ class Planner:
                         new_parents.append(p_strat.node)
 
                 exec_cost = self.cost_model.estimate_kernel_cost(
-                    node.op_type, backend, node.dtype, node.shape, node.attrs
+                    node.op_type,
+                    backend,
+                    node.dtype,
+                    node.shape,
+                    node.attrs,
+                    inplace=cand_inplace,
                 )
                 current_cost += exec_cost
                 new_node = copy.copy(node)

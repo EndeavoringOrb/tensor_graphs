@@ -158,6 +158,7 @@ class Executor:
         is_partial: bool,
         backend: str,
         attrs: Dict[str, Any],
+        is_inplace: bool,
     ):
         """Record kernel launch details to a .jsonl file."""
 
@@ -172,6 +173,7 @@ class Executor:
             "output_shape": output_shape,
             "compute_time_ms": round(compute_time_ms, 6),
             "attrs": attrs if attrs else {},
+            "inplace": is_inplace,
         }
 
         # Append to .jsonl file
@@ -468,18 +470,7 @@ class Executor:
                                 if cached_reqs:
                                     for req in cached_reqs:
                                         if req:
-                                            # box is a single list of (s,e) tuples
-                                            # get_input_slices returns List[NumericRegion], where NumericRegion is List[Box]
-                                            # We serialized List[Box] as List[List[(s,e)]]
-                                            # Wait, bucket logic stored reqs as: List[NumericRegion] per box.
-                                            # NumericRegion = List[Box]. Box = List[(s,e)].
-                                            # serialized: List[List[List[(s,e)]]]
-                                            # Actually in code above: ser_reqs.append(ser_req) where ser_req is List[List[(s,e)]] (List[Box])
-                                            # So `req` here is List[Box]
                                             if len(req) > 0:
-                                                # Take first box for slice
-                                                # _from_slices logic expects NumericRegion
-                                                # Construct slice tuple
                                                 box_data = req[0]
                                                 slices = tuple(
                                                     slice(s, e) for s, e in box_data
@@ -608,6 +599,7 @@ class Executor:
                                 is_partial=not is_full_region,
                                 backend=dev_hint,
                                 attrs=inst.attrs,
+                                is_inplace=current_inplace,
                             )
 
                 # Release Parents

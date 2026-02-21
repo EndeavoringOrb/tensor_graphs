@@ -1,0 +1,25 @@
+This caches the dirty region propagation on GraphSession. I would like it to also cache the instructions and memory offsets so that there is no allocation logic at runtime. For the memory caching, the weights (persistent storage) will not change. The maximum size for the buffer will be known, we will allocate memory for the maximum possible bucket shape and then just pass a sliced view to the kernel. The maximum bucket shape just spans the whole user input, because the user input shapes will be constant every run() call, just different dirty slices. I think I want a global static map where each node has a unique fixed offset, with the added constraint of a maximum memory size. So it is "what is the fastest I can make this run given I have this much memory". So maybe some memory regions will be overwritten, which means nodes may need to be recomputed even if they are clean, but it allows us to stay under the memory limit because we reuse that memory. Different buckets can just slice into a node's cache memory differently based on the dirty region (but each bucket will know the memory views it needs, so we don't need to slice memory dynamically at runtime).
+In the end, the use case (at least for LLMs) is likely to be (prefill bucket -> 1 tok bucket -> 1 tok bucket -> ...) so perhaps the framework can measure runs over time (like have a counter for which buckets are run the most) and adjust to optimize the sum of the runtimes? So the cached instruction/memory sets could be conditional, like "if node X still in memory, skip to instruction 5" but over time, we optimize which nodes get cached and the overall average runtime decreases?
+For tracking memory validity, for each bucket we can keep a boolean array is_valid for each node. We also store an invalidates index for each node (which other nodes share the same space) that indexes into a list of sets. is_valid should be a global state though, like buckets should be able to re-use cached computation from each other so somehow setting is_valid = True needs to affect other bucket is_valid, but we can't just have one single is_valid for all buckets because we need to somehow invalidate if buckets share a node and it is overwritten.
+for op in precompiled_bucket_plan:
+    if is_valid[bucket][op.id]:
+        continue # op is cached, skip computation!
+    
+    op.kernel(*op.args)
+    
+    is_valid[bucket][op.id] = True
+    for other_bucket, aliased_id in invalidates_ids[op.invalidates]:
+        is_valid[other_bucket][aliased_id] = False
+
+There can be an offline global optimizer where the more time the user runs it, the better solutions it will find. It will know what to optimize based on the runtime bucket trace log from the current runtime plans (list of all bucket calls so we can measure transition probabilities). Like the user calls session.optimize or something. It should be purely offline, save plan to json or something. If session.optimize hasn't been called yet (so there is no history of bucket transitions), session.run should call optimize just to get a functioning instruction set, even though it will not be optimized because there are no transition probabilities. I don't like having legacy/fallback code.
+parse transition logs
+for each bucket:
+    for each node:
+        cost = calc_recompute_cost(node, bucket)
+        reuse_cost = sum(prob * calc_recompute_cost(node, other_bucket) for prob, other_bucket in transitions)
+        final_node_score = cost + reuse_score
+When packing memory, sort nodes by final_node_score desc, then once you only have scratch_size memory remaining, the remaining low score nodes are forced to share/alias memory which will trigger the is_valid invalidations. If it is not possible to figure out a plan given scratch_size, error and tell the user they need to increase scratch size.
+
+Maybe we can switch memory from LRU to cost-aware priority where cost of a node is recursive cost of all dirty slices of parents (basically how much time it will take to recompute this node).
+For now, don't worry about multi-graph memory sharing.
+For now, I want to stay in Python but avoid dictionary lookups and logic inside the hot loop.

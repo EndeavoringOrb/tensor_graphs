@@ -1,3 +1,4 @@
+# tensor_graphs/compiler/cost_model.py
 from ..benchmark.db import BenchmarkDB
 from ..ir.dtypes import Backend, get_size_bytes
 
@@ -12,12 +13,22 @@ class CostModel:
         }
         self.default_kernel_cost = 0.01
 
-    def estimate_kernel_cost(self, op_type, backend, dtype, shape, attrs) -> float:
+    def estimate_kernel_cost(
+        self, op_type, backend, dtype, shape, attrs, inplace=False
+    ) -> float:
         est = self.db.estimate_latency(
-            op_type, backend.value, dtype.value, shape, attrs
+            op_type, backend.value, dtype.value, shape, attrs, inplace=inplace
         )
         if est is not None:
             return est
+
+        # Fallback: If inplace is requested but missing, try standard out-of-place cost
+        if inplace:
+            est = self.db.estimate_latency(
+                op_type, backend.value, dtype.value, shape, attrs, inplace=False
+            )
+            if est is not None:
+                return est
 
         # Heuristic fallback if DB is empty
         # Assume generic cost based on shape volume

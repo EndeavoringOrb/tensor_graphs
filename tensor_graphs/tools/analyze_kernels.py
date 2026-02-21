@@ -38,9 +38,11 @@ def analyze_records(records):
         max_time = max((op["compute_time_ms"] for op in ops), default=0)
         min_time = min((op["compute_time_ms"] for op in ops), default=0)
 
+        inplace_count = sum(1 for op in ops if op.get("inplace", False))
         analysis[op_type] = {
             "total_time_ms": round(total_time, 3),
             "count": count,
+            "inplace_count": inplace_count,
             "avg_time_ms": round(avg_time, 3),
             "max_time_ms": round(max_time, 3),
             "min_time_ms": round(min_time, 3),
@@ -51,7 +53,7 @@ def analyze_records(records):
             else 0,
             "mode": max(
                 set(op["mode"] for op in ops),
-                key=lambda m: ops.count({"op_type": op_type, "mode": m}),
+                key=lambda m: sum(1 for op in ops if op["mode"] == m),
             ),
             "backend": ops[0]["backend"] if ops else None,
             "by_shape": {},
@@ -61,7 +63,8 @@ def analyze_records(records):
         # Group by shape
         shape_data = defaultdict(lambda: {"count": 0, "total_time": 0, "times": []})
         for op in ops:
-            shape_key = json.dumps(op["input_shapes"])
+            inplace_str = " (inplace)" if op.get("inplace", False) else ""
+            shape_key = json.dumps(op["input_shapes"]) + inplace_str
             shape_data[shape_key]["count"] += 1
             shape_data[shape_key]["total_time"] += op["compute_time_ms"]
             shape_data[shape_key]["times"].append(op["compute_time_ms"])
@@ -111,6 +114,7 @@ def print_analysis(analysis):
         )
         print(f"  Median time: {data['median_time_ms']:.3f} ms")
         print(f"  Mode: {data['mode']}")
+        print(f"  Inplace: {data['inplace_count']} / {data['count']}")
         print(f"  Backend: {data['backend']}")
 
         if data["by_shape_sorted"]:
