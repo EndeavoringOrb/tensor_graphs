@@ -204,9 +204,7 @@ def bench_all(db_path="benchmarks.db"):
                         # For Reshape, we need values. Construct dict.
                         known = {}
                         if op_type == "Reshape":
-                            known[dummy_parents[1].name] = inputs[
-                                1
-                            ]  # Use numpy array
+                            known[dummy_parents[1].name] = inputs[1]  # Use numpy array
 
                         GraphPropagator.infer_shapes(
                             [op_node], known, disable_pbar=True
@@ -246,9 +244,7 @@ def bench_all(db_path="benchmarks.db"):
                         op_node = TensorNode(
                             op_type, out_dtype, dummy_parents, name="bench", attrs=attrs
                         )
-                        GraphPropagator.infer_shapes(
-                            [op_node], {}, disable_pbar=True
-                        )
+                        GraphPropagator.infer_shapes([op_node], {}, disable_pbar=True)
                         out_shape = op_node.shape
                         target_dtype = op_node.dtype
 

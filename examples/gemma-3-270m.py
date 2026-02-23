@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 
 from tokenizers import Tokenizer
@@ -291,8 +292,6 @@ def main():
     max_new_tokens = 128
     MAX_SEQ_LEN = 128
 
-    print("Generating...", end="", flush=True)
-
     # --- BUILD GRAPH ---
     cfg = GEMMA3_CONFIG_270M
     model = Gemma3Model(cfg)
@@ -318,6 +317,11 @@ def main():
         prompt = "Explain Quantum Mechanics to a 5 year old."
         prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
         input_ids = tokenizer.encode(prompt).ids
+        initial_len = len(input_ids)
+
+        # Track timing for performance measurement
+        total_start = time.perf_counter()
+
         # --- RUN LOOP ---
         for _ in range(max_new_tokens):
             seq_len = len(input_ids)
@@ -344,6 +348,15 @@ def main():
 
             if next_token_id == tokenizer.token_to_id("<end_of_turn>"):
                 break
+
+        total_end = time.perf_counter()
+        total_time = total_end - total_start
+        tokens_generated = len(input_ids) - initial_len
+        print("\n--- Performance ---")
+        print(f"Total time: {total_time:.2f}s")
+        print(f"Tokens generated: {tokens_generated}")
+        print(f"Tokens/sec: {tokens_generated / total_time:.2f}")
+        break
 
 
 if __name__ == "__main__":

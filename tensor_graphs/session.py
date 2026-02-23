@@ -54,9 +54,42 @@ class GraphSession:
                     (k, tuple(tuple(tuple(item) for item in box) for box in regions))
                     for k, regions in key_list
                 )
+                # Pre-convert regions to tuple format at load time
+                # reg_data is List[List[(s,e)]] -> convert to List[Tuple[slice...]]
+                precomputed_regions = {}
+                for node_name, reg_data in entry["regions"].items():
+                    if reg_data:
+                        converted = []
+                        for box in reg_data:
+                            slices = tuple(slice(s, e) for s, e in box)
+                            converted.append(slices)
+                        precomputed_regions[node_name] = converted
+                    else:
+                        precomputed_regions[node_name] = reg_data
+
+                # Pre-convert input_slices as well
+                # input_slices is List[List[List[(s,e)]]] -> List[List[Tuple[slice...]]]
+                precomputed_input_slices = {}
+                for node_name, slices_data in entry["input_slices"].items():
+                    if slices_data:
+                        converted = []
+                        for box_reqs in slices_data:
+                            box_converted = []
+                            for req in box_reqs:
+                                if req is not None:
+                                    # req is List[(s,e)] - convert to Tuple[slice]
+                                    req_slices = tuple(slice(s, e) for s, e in req[0])
+                                    box_converted.append(req_slices)
+                                else:
+                                    box_converted.append(req)
+                            converted.append(box_converted)
+                        precomputed_input_slices[node_name] = converted
+                    else:
+                        precomputed_input_slices[node_name] = slices_data
+
                 self.dirty_cache[key] = {
-                    "regions": entry["regions"],
-                    "input_slices": entry["input_slices"],
+                    "regions": precomputed_regions,
+                    "input_slices": precomputed_input_slices,
                 }
 
     def _save_cache_entry(self, key, regions, input_slices):
@@ -196,7 +229,7 @@ class GraphSession:
 
                 # Store serialized region
                 # node.dirty_region is List[Tuple[slice...]]
-                # Serialize to List[List[(start, stop)]]
+                # Serialize to List[List[(start, stop)]] - same format _load_cache expects
                 if node.dirty_region:
                     ser_region = []
                     for box in node.dirty_region:

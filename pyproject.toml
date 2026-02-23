@@ -40,4 +40,4 @@ python_files = "test_*.py"
 addopts = "--cov=tensor_graphs"
 
 [tool.ruff.lint]
-ignore = ["E402", "F403"]
+ignore = ["E402", "F403", "E741"]

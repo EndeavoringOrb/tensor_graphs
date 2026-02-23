@@ -289,8 +289,7 @@ class Executor:
             # Initial reference counts calculated during compilation
             static_refs = self.graph.ref_counts
 
-            # --- Pass 1: Forward Propagation & Cache Check ---
-            # Determine the state of every node before we decide what to run
+            # --- Pass 1: Forward Propagation ---
             node_states = {}  # name -> {'is_dirty': bool, 'in_cache': bool}
 
             for inst in self.graph.instructions:
@@ -300,20 +299,10 @@ class Executor:
                     continue
 
                 if bucket and node.name in cached_regions:
-                    # Use cached dirty region
-                    reg_data = cached_regions[node.name]
-                    if reg_data:
-                        # Deserialize: List[List[(s,e)]] -> List[Tuple[slice...]]
-                        deserialized_reg = []
-                        for box in reg_data:
-                            slices = tuple(slice(s, e) for s, e in box)
-                            deserialized_reg.append(slices)
-                        node.dirty_region = deserialized_reg
-                    else:
-                        node.dirty_region = None
+                    # Use pre-computed regions directly (already tuples!)
+                    node.dirty_region = cached_regions[node.name]
                 else:
-                    # Fallback if no bucket or node not in bucket (e.g. auto_copy)
-                    # For auto_copy nodes, we can try to inherit from parent
+                    # Fallback for auto_copy nodes
                     if node.op_type == OpType.COPY_TO and node.name.startswith(
                         "auto_copy"
                     ):
@@ -327,14 +316,12 @@ class Executor:
                         node.dirty_region = DirtyPropagator.propagate(node, inputs)
 
                 is_dirty = node.dirty_region is not None
+                node_states[node.name] = {
+                    "is_dirty": is_dirty,
+                    "in_cache": None,
+                }  # in_cache filled in Pass 2
 
-                # Check if the buffer currently exists on the assigned device
-                dev_hint = node.backend.value if node.backend else "cpu"
-                in_cache = self.mem.has(node.name, dev_hint)
-
-                node_states[node.name] = {"is_dirty": is_dirty, "in_cache": in_cache}
-
-            # --- Pass 2: Backward Liveness Analysis ---
+            # --- Pass 2: Backward Liveness Analysis + in_cache calculation ---
             # Determine which nodes are actually "needed" to produce the root output.
             # This allows us to "prune" nodes that don't contribute to the current result.
             needed_nodes = set()
@@ -351,6 +338,12 @@ class Executor:
                 state = node_states[name]
 
                 if name in needed_nodes:
+                    # Calculate in_cache on-demand when we know the node is needed
+                    if state["in_cache"] is None:
+                        node = self.graph.nodes_map[name]
+                        dev_hint = node.backend.value if node.backend else "cpu"
+                        state["in_cache"] = self.mem.has(name, dev_hint)
+
                     # If a node is dirty or not in cache, we MUST compute it.
                     # To compute it, we need all of its parents.
                     must_compute = state["is_dirty"] or not state["in_cache"]
@@ -462,26 +455,21 @@ class Executor:
                             input_slice_regions = [None] * len(inst.input_node_names)
                         else:
                             # Try to use cached input requirements for this box index
+                            # Pre-converted format: List[List[Tuple[slice...]]]
                             if node_cached_input_slices and i < len(
                                 node_cached_input_slices
                             ):
                                 cached_reqs = node_cached_input_slices[i]
-                                # Deserialize: List[List[(s,e)]] or None
+                                # Use directly - already pre-converted to Tuple[slice...]
                                 if cached_reqs:
                                     for req in cached_reqs:
                                         if req:
-                                            if len(req) > 0:
-                                                box_data = req[0]
-                                                slices = tuple(
-                                                    slice(s, e) for s, e in box_data
-                                                )
-                                                input_slice_regions.append(slices)
-                                            else:
-                                                input_slice_regions.append(None)
+                                            # req is already Tuple[slice...] - use directly
+                                            input_slice_regions.append(req)
                                         else:
                                             input_slice_regions.append(None)
                                 else:
-                                    # Fallback if cache structure mismatch (should not happen if key matched)
+                                    # Fallback if cache structure mismatch
                                     query_region = [region_slice]
                                     reqs = DirtyPropagator.get_input_slices(
                                         node, query_region, inputs
