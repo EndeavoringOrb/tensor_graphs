@@ -23,3 +23,37 @@ When packing memory, sort nodes by final_node_score desc, then once you only hav
 Maybe we can switch memory from LRU to cost-aware priority where cost of a node is recursive cost of all dirty slices of parents (basically how much time it will take to recompute this node).
 For now, don't worry about multi-graph memory sharing.
 For now, I want to stay in Python but avoid dictionary lookups and logic inside the hot loop.
+
+MAKE MEMORY AN INSTRUCTION
+d=b*c
+x=a+d
+x=a+b*c
+
+runA0 a=dirty,b=dirty,c=clean
+alloc a 0:1
+a = inp a
+alloc b 1:2
+b = inp b
+alloc c 2:3
+c = inp c
+alloc d 3:4
+d=b*c
+alloc x 4:5
+x=a+d
+
+runA1 a=dirty,b=clean,c=clean
+alloc a 0:1 CACHED
+a = inp a
+alloc b 1:2 CACHED
+b = inp b CACHED
+alloc c 2:3 CACHED
+c = inp c CACHED
+alloc d 3:4 CACHED
+d=b*c CACHED
+alloc x 4:5 CACHED
+x=a+d
+
+for inst in instructions:
+    if cached:
+        continue
+    compute(inputs, outputs)
