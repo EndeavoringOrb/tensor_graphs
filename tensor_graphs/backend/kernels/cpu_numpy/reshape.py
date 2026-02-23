@@ -1,5 +1,4 @@
 # tensor_graphs/backend/kernels/cpu_numpy/reshape.py
-import numpy as np
 from ....backend.registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature, Backend
 from ....ops.atomic_types import OpType

@@ -12,9 +12,6 @@ def rope_2d_consecutive_decomposition(inputs, attrs={}):
     """
     x, cos, sin = inputs
 
-    # Check for static shape if possible, though TensorNode handles dynamic slices gracefully
-    D = x.shape[-1] if x.shape else None
-
     # 1. Slice consecutive pairs: even and odd indices
     # x_even = x[..., 0::2]
     # x_odd  = x[..., 1::2]

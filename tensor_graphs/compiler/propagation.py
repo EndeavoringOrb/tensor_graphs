@@ -1121,7 +1121,6 @@ def _fwd_dot(
     if _is_clean(rA) and _is_clean(rB):
         return None
 
-    out_rank = len(output_shape)
     out_boxes = []
 
     # Helper to extract specific dims from a potentially non-contiguous input
@@ -1889,7 +1888,6 @@ def _bwd_im2col(output_region, input_shapes, output_shape, attrs):
     if H is None or W is None:
         return [(in_n_r, in_c_r, (0, H), (0, W))]
 
-    H_out = (H + 2 * p - k) // s + 1
     W_out = (W + 2 * p - k) // s + 1
 
     out_l_start, out_l_stop = out_l_r

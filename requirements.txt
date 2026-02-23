@@ -10,3 +10,6 @@ torch
 safetensors
 hf_xet
 pillow
+line-profiler
+ruff
+pyright

@@ -31,20 +31,17 @@ def load_launch_records(folder):
     for f in files:
         with open(f, "r") as fd:
             for line in fd:
-                try:
-                    rec = json.loads(line)
-                    # Key: (op_type, backend)
-                    key = (rec["op_type"], rec["backend"])
-                    # Store tuple of (input_shapes, output_shape, attrs, inplace)
-                    item = (
-                        rec["input_shapes"],
-                        rec["output_shape"],
-                        rec["attrs"],
-                        rec.get("inplace", False),
-                    )
-                    records[key].append(item)
-                except:
-                    pass
+                rec = json.loads(line)
+                # Key: (op_type, backend)
+                key = (rec["op_type"], rec["backend"])
+                # Store tuple of (input_shapes, output_shape, attrs, inplace)
+                item = (
+                    rec["input_shapes"],
+                    rec["output_shape"],
+                    rec["attrs"],
+                    rec.get("inplace", False),
+                )
+                records[key].append(item)
     return records
 
 
@@ -204,21 +201,17 @@ def bench_all(db_path="benchmarks.db"):
                             attrs=attrs,
                         )
 
-                        try:
-                            # For Reshape, we need values. Construct dict.
-                            known = {}
-                            if op_type == "Reshape":
-                                known[dummy_parents[1].name] = inputs[
-                                    1
-                                ]  # Use numpy array
+                        # For Reshape, we need values. Construct dict.
+                        known = {}
+                        if op_type == "Reshape":
+                            known[dummy_parents[1].name] = inputs[
+                                1
+                            ]  # Use numpy array
 
-                            GraphPropagator.infer_shapes(
-                                [op_node], known, disable_pbar=True
-                            )
-                            out_shape = op_node.shape
-                        except:
-                            # Fallback to recorded shape if inference fails (e.g. Reshape without value)
-                            out_shape = tuple(config["recorded_output_shape"])
+                        GraphPropagator.infer_shapes(
+                            [op_node], known, disable_pbar=True
+                        )
+                        out_shape = op_node.shape
 
                     else:
                         # --- RANDOM CASE ---
@@ -253,18 +246,11 @@ def bench_all(db_path="benchmarks.db"):
                         op_node = TensorNode(
                             op_type, out_dtype, dummy_parents, name="bench", attrs=attrs
                         )
-                        try:
-                            GraphPropagator.infer_shapes(
-                                [op_node], {}, disable_pbar=True
-                            )
-                            out_shape = op_node.shape
-                            target_dtype = op_node.dtype
-                        except:
-                            if hasattr(real_inputs[0], "shape"):
-                                out_shape = real_inputs[0].shape
-                            else:
-                                out_shape = (1,)
-                            target_dtype = DType.FP32
+                        GraphPropagator.infer_shapes(
+                            [op_node], {}, disable_pbar=True
+                        )
+                        out_shape = op_node.shape
+                        target_dtype = op_node.dtype
 
                     # --- RESOLVE PRIMARY SHAPE FOR DB CHECK ---
                     if op_type == "Fill" and attrs and "target_shape" in attrs:

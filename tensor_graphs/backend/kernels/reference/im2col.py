@@ -70,31 +70,6 @@ def im2col_np(inputs, outputs, attrs):
     # We iterate over N
     cols = []
     for n in range(N):
-        # Select all channels, at indices i, j
-        # x_padded[n] shape (C, Hp, Wp)
-        # We need to select k pixels for each output position.
-        # x_padded[n][:, i, j] -> (C, C*kH*kW, H_out*W_out) -> wrong
-        # Need to reshape x to (C, -1) or iterate channels?
-
-        # Optimization: Reshape x[n] to (C, H_padded * W_padded)
-        x_flat = x_padded[n].reshape(C, -1)
-
-        # Calculate linear indices
-        # i is (C*kH*kW, H_out*W_out). It represents row indices in H_padded
-        # j is (C*kH*kW, H_out*W_out). It represents col indices in W_padded
-
-        # We need linear indices: row * W_padded + col
-        # W_padded = W + 2*padding
-        W_p = W + 2 * padding
-
-        linear_indices = i * W_p + j  # (C*kH*kW, H_out*W_out)
-
-        # We want to select for each channel in x_flat
-        # channel k corresponds to indices in i and j starting at k*(kH*kW)
-
-        # Actually, simpler way with im2col logic:
-        # The output col should be (C*kH*kW, H_out*W_out)
-
         col = np.zeros((C * kH * kW, H_out * W_out), dtype=x.dtype)
 
         for c in range(C):

@@ -16,3 +16,6 @@ benchmarks.db
 profile_output*
 dirty_region_caches
 images
+wsl_venv
+.claude
+CLAUDE.md
