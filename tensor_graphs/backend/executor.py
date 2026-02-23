@@ -302,18 +302,7 @@ class Executor:
                     # Use pre-computed regions directly (already tuples!)
                     node.dirty_region = cached_regions[node.name]
                 else:
-                    # Fallback for auto_copy nodes
-                    if node.op_type == OpType.COPY_TO and node.name.startswith(
-                        "auto_copy"
-                    ):
-                        p_name = inst.input_node_names[0]
-                        p_node = self.graph.nodes_map.get(p_name)
-                        if p_node:
-                            node.dirty_region = p_node.dirty_region
-                        else:
-                            node.dirty_region = DirtyPropagator.propagate(node, inputs)
-                    else:
-                        node.dirty_region = DirtyPropagator.propagate(node, inputs)
+                    raise ValueError("dirty region not cached")
 
                 is_dirty = node.dirty_region is not None
                 node_states[node.name] = {
@@ -479,13 +468,7 @@ class Executor:
                                             req[0] if req else None
                                         )
                             else:
-                                # Fallback (e.g. auto_copy node not in cache)
-                                query_region = [region_slice]
-                                reqs = DirtyPropagator.get_input_slices(
-                                    node, query_region, inputs
-                                )
-                                for req in reqs:
-                                    input_slice_regions.append(req[0] if req else None)
+                                raise ValueError("input slices not cached")
 
                         kernel_inputs = []
                         concrete_shapes = []
