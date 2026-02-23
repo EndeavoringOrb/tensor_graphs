@@ -1,9 +1,10 @@
 from typing import Dict, Any, Optional, Union, List
 from .ir.node import TensorNode
 from .compiler.planner import Planner
+from .compiler.compiled_graph import CompiledGraph
 from .backend.executor import Executor
 from .backend.memory import MemoryManager
-from .ir.graph import topological_sort
+from .ir.graph import topological_sort, GraphEncoder
 from .ops.atomic_types import OpType
 from .config import DEBUG_EXECUTION
 from .ir.dtypes import Backend
@@ -34,6 +35,7 @@ class GraphSession:
         self.weights_path = weights_path
         self.cache_path = cache_path
         self.dirty_cache: Dict[str, Any] = {}
+        self.cached_compiled_graph: Optional[CompiledGraph] = None
 
         if self.cache_path and os.path.exists(self.cache_path):
             self._load_cache()
@@ -46,14 +48,27 @@ class GraphSession:
                 if not line.strip():
                     continue
                 entry = json.loads(line)
+
+                # Check if this is a compiled graph entry
+                if entry.get("type") == "compiled_graph":
+                    if DEBUG_EXECUTION:
+                        print("[Session] Loading compiled graph from cache...")
+                    self.cached_compiled_graph = CompiledGraph.from_dict(entry["data"])
+                    continue
+
                 # Reconstruct key tuple structure for dictionary lookup
                 # Key format in JSON: [ [input_name, [ [start, stop], ... ]], ... ]
                 key_list = entry["key"]
                 # Convert lists back to tuples for hashability
-                key = tuple(
-                    (k, tuple(tuple(tuple(item) for item in box) for box in regions))
-                    for k, regions in key_list
-                )
+                # Note: must materialize all generators into tuples
+                key_parts = []
+                for k, regions in key_list:
+                    region_parts = []
+                    for box in regions:
+                        box_tuple = tuple(tuple(item) for item in box)
+                        region_parts.append(box_tuple)
+                    key_parts.append((k, tuple(region_parts)))
+                key = tuple(key_parts)
                 # Pre-convert regions to tuple format at load time
                 # reg_data is List[List[(s,e)]] -> convert to List[Tuple[slice...]]
                 precomputed_regions = {}
@@ -108,8 +123,26 @@ class GraphSession:
             "input_slices": input_slices,
         }
 
+        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
         with open(self.cache_path, "a") as f:
             f.write(json.dumps(entry) + "\n")
+
+    def _save_compiled_graph(self, compiled_graph: CompiledGraph):
+        """Save the compiled graph to the cache file."""
+        if not self.cache_path:
+            return
+
+        if DEBUG_EXECUTION:
+            print("[Session] Saving compiled graph to cache...")
+
+        entry = {
+            "type": "compiled_graph",
+            "data": compiled_graph.to_dict(),
+        }
+
+        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
+        with open(self.cache_path, "a") as f:
+            f.write(json.dumps(entry, cls=GraphEncoder) + "\n")
 
     def _next_power_of_2(self, x):
         return 1 if x == 0 else 2 ** (x - 1).bit_length()
@@ -132,7 +165,10 @@ class GraphSession:
         return list(set(slices))  # unique-ify in case dim_len is a power of 2
 
     def _ensure_cache_coverage(
-        self, input_nodes: List[TensorNode], sample_inputs: Dict[str, Any]
+        self,
+        input_nodes: List[TensorNode],
+        sample_inputs: Dict[str, Any],
+        compiled_graph,
     ):
         """
         Generates dirty region buckets for all permutations of input slice configurations.
@@ -184,7 +220,7 @@ class GraphSession:
         all_permutations = list(itertools.product(*option_lists))
 
         missing_count = 0
-        topo_nodes = topological_sort(self.root)
+        topo_nodes = list(compiled_graph.nodes_map.values())
         GraphPropagator.infer_shapes(topo_nodes, sample_inputs)
 
         for perm in tqdm(
@@ -274,6 +310,8 @@ class GraphSession:
             }
             self._save_cache_entry(key, node_regions_map, node_input_slices_map)
 
+        self._load_cache()
+
         # Clean up graph state
         for node in topo_nodes:
             node.dirty_region = None
@@ -284,20 +322,38 @@ class GraphSession:
             )
 
     def compile(self, sample_inputs: Dict[str, Any]):
-        # Run pre-planner dirty region caching
-        input_nodes = [
-            n
-            for n in topological_sort(self.root)
-            if n.op_type == OpType.INPUT and n.storage_type.name == "TRANSIENT"
-        ]
-        # Ensure sample_inputs covers these inputs to determine shapes
-        self._ensure_cache_coverage(input_nodes, sample_inputs)
-
         if DEBUG_EXECUTION:
             print("[Session] Planning & Compiling graph...")
 
-        planner = Planner(self.db_path)
-        compiled_graph = planner.plan(self.root, known_values=sample_inputs)
+        # Check if we have a cached compiled graph
+        if self.cached_compiled_graph is not None:
+            if DEBUG_EXECUTION:
+                print("[Session] Using cached compiled graph")
+            compiled_graph = self.cached_compiled_graph
+
+            # Still need to ensure cache coverage (node names should match)
+            input_nodes = [
+                n
+                for n in compiled_graph.nodes_map.values()
+                if n.op_type == OpType.INPUT and n.storage_type.name == "TRANSIENT"
+            ]
+            self._ensure_cache_coverage(input_nodes, sample_inputs, compiled_graph)
+        else:
+            # Plan first to expand the graph (decompose fused ops into atomic ops)
+            planner = Planner(self.db_path)
+            compiled_graph = planner.plan(self.root, known_values=sample_inputs)
+
+            # Generate dirty region cache AFTER planning using the expanded graph
+            input_nodes = [
+                n
+                for n in compiled_graph.nodes_map.values()
+                if n.op_type == OpType.INPUT and n.storage_type.name == "TRANSIENT"
+            ]
+
+            self._ensure_cache_coverage(input_nodes, sample_inputs, compiled_graph)
+
+            # Save the compiled graph for future runs
+            self._save_compiled_graph(compiled_graph)
 
         self.executor = Executor(
             compiled_graph,
