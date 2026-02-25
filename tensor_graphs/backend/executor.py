@@ -20,13 +20,7 @@ from tqdm import tqdm
 import os
 import json
 from datetime import datetime
-
-try:
-    from line_profiler import profile
-except ImportError:
-
-    def profile(func):
-        return func
+from line_profiler import profile
 
 
 class Executor:
