@@ -358,7 +358,6 @@ class Executor:
             # In-place status for FULL compute (default)
             is_inplace = inst.inplace_input_index is not None
             compute_regions: List[Tuple[slice, ...]] = []
-            pending_output_allocation = False
 
             # Determine Computation Mode
             if state["is_dirty"] and state["in_cache"]:
