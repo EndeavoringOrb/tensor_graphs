@@ -196,14 +196,34 @@ class Planner:
         )
 
     def _make_atomic(
-        self, root: TensorNode, known_values: Optional[Dict[str, Any]]
+        self,
+        root: TensorNode,
+        known_values: Optional[Dict[str, Any]],
+        atomic_map: Optional[Dict[TensorNode, TensorNode]] = None,
+        keep_cut_parent_shapes=False,
     ) -> TensorNode:
         nodes = topological_sort(root)
-        GraphPropagator.infer_shapes(nodes, known_values, disable_pbar=True)
-        atomic_map = {}
-        for node in tqdm(
-            nodes, disable=not DEBUG_EXECUTION, desc="making atomic graph"
-        ):
+        GraphPropagator.infer_shapes(
+            nodes,
+            known_values,
+            keep_cut_parent_shapes=keep_cut_parent_shapes,
+            disable_pbar=True,
+        )
+
+        is_top_level = atomic_map is None
+        if is_top_level:
+            atomic_map = {}
+
+        iterable = (
+            tqdm(nodes, disable=not DEBUG_EXECUTION, desc="making atomic graph")
+            if is_top_level
+            else nodes
+        )
+
+        for node in iterable:
+            if node in atomic_map:
+                continue
+
             if node.op_type in (OpType.INPUT, OpType.CONSTANT):
                 atomic_map[node] = node
                 continue
@@ -213,8 +233,27 @@ class Planner:
             if not OpType.is_atomic(node.op_type):
                 ref_factory = get_reference_factory(node.op_type)
                 if ref_factory:
-                    subgraph_root = ref_factory(atomic_parents, node.attrs)
-                    atomic_map[node] = self._make_atomic(subgraph_root, known_values)
+                    proxy_parents = [
+                        TensorNode(
+                            op_type=p.op_type,
+                            dtype=p.dtype,
+                            parents=[],  # Cut off history
+                            shape=p.shape,
+                            name=p.name,
+                            attrs=p.attrs,
+                            backend=p.backend,
+                            storage_type=p.storage_type,
+                        )
+                        for p in atomic_parents
+                    ]
+                    subgraph_root = ref_factory(proxy_parents, node.attrs)
+                    sub_atomic_map = {
+                        proxy: actual
+                        for proxy, actual in zip(proxy_parents, atomic_parents)
+                    }
+                    atomic_map[node] = self._make_atomic(
+                        subgraph_root, known_values, sub_atomic_map, True
+                    )
                 else:
                     raise ValueError(
                         f"No reference factory for fused op {node.op_type}"
@@ -275,7 +314,7 @@ class Planner:
 
                 dummy_inputs = []
                 for i, sig in enumerate(signatures):
-                    shape = sig.shape if sig.shape is not None else (2, 2, 2, 2)
+                    shape = sig.shape if sig.shape else (2, 2, 2, 2)
                     dummy = TensorNode(
                         OpType.INPUT, sig.dtype, [], shape, name=f"dummy_{i}"
                     )
