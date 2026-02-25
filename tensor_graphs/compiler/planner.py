@@ -1,6 +1,5 @@
-# tensor_graphs/compiler/planner.py
 import copy
-from typing import Dict, Optional, List, Any, Set
+from typing import Dict, Optional, List, Any
 from dataclasses import dataclass
 import itertools
 from tqdm import tqdm
@@ -19,6 +18,12 @@ from .propagation import GraphPropagator
 from ..config import DEBUG_EXECUTION, PLANNER_BEAM_WIDTH
 from .compiled_graph import CompiledGraph, OpInstruction
 from ..ir.buffer import StorageType
+from ..ir.rewrite import (
+    CommutativeRule,
+    DistributiveRule,
+    generate_all_equivalents,
+    match_pattern,
+)
 
 
 @dataclass
@@ -38,7 +43,6 @@ class Planner:
         self.memo: Dict[str, List[BeamStrategy]] = {}
         self.hash_memo: Dict[TensorNode, str] = {}
         self.beam_width = PLANNER_BEAM_WIDTH
-        self.decomp_map: Dict[str, TensorNode] = {}
         self.fusion_map: Dict[str, List[TensorNode]] = {}
 
     def plan(
@@ -51,29 +55,35 @@ class Planner:
         # ---------------------------------------------------------------------
         # PHASE 1: Expansion & Shape Inference
         # ---------------------------------------------------------------------
-        all_potential_nodes = self._expand_and_infer(root, known_values)
+        atomic_root = self._expand_and_infer(root, known_values)
+        atomic_nodes_topo = topological_sort(atomic_root)
 
         # ---------------------------------------------------------------------
-        # PHASE 2: Kernel Selection (Beam Search)
+        # PHASE 2: Pattern Matching & Fusion
         # ---------------------------------------------------------------------
-        sorted_nodes = self._get_augmented_topological_sort(all_potential_nodes)
+        self._populate_fusion_map_generalized(atomic_nodes_topo)
+
+        # ---------------------------------------------------------------------
+        # PHASE 3: Kernel Selection (Beam Search)
+        # ---------------------------------------------------------------------
+        sorted_nodes = self._get_augmented_topological_sort(atomic_nodes_topo)
 
         for node in tqdm(sorted_nodes, disable=not DEBUG_EXECUTION, desc="Planning"):
             self._plan_node_iterative(node, known_values)
 
         # ---------------------------------------------------------------------
-        # PHASE 3: Graph Reconstruction
+        # PHASE 4: Graph Reconstruction
         # ---------------------------------------------------------------------
-        root_hash = get_structural_hash(root)
+        root_hash = get_structural_hash(atomic_root, memo=self.hash_memo)
         strategies = self.memo.get(root_hash)
 
         if not strategies:
             raise RuntimeError(
-                f"Planner failed to find any execution strategy for {root}"
+                f"Planner failed to find any execution strategy for {atomic_root}"
             )
 
         # Select the best strategy overall
-        target_backend = root.backend
+        target_backend = atomic_root.backend
         candidates = []
         for strat in strategies:
             if strat.node.backend == target_backend:
@@ -103,7 +113,7 @@ class Planner:
         best_recipe = min(candidates, key=lambda s: s.cost)
 
         # ---------------------------------------------------------------------
-        # PHASE 4: Compilation & Instruction Generation
+        # PHASE 5: Compilation & Instruction Generation
         # ---------------------------------------------------------------------
         final_root = best_recipe.node
         nodes = topological_sort(final_root)
@@ -131,24 +141,12 @@ class Planner:
             input_sigs = [p.signature for p in node.parents]
 
             # -----------------------------------------------------------------
-            # PHASE 5: In-Place Optimization
+            # PHASE 6: In-Place Optimization
             # -----------------------------------------------------------------
-            # Check if we can enable in-place execution safely
-
-            # Criteria for In-Place Safety on Input 0 (Standard convention):
-            # 1. Input 0 exists.
-            # 2. This node is the *last* consumer of Input 0 (ref_count == 1).
-            # 3. Input 0 is TRANSIENT (not a persistent weight/constant).
-            # 4. Sizes match exactly.
-
             is_inplace_safe = False
             if node.parents:
                 p0 = node.parents[0]
-                # Check if p0 is in our current graph (it should be)
                 if p0.name in ref_counts:
-                    # Note: We check ref_counts[p0.name] == 1.
-                    # Since we are processing in topological order, if ref_count is 1,
-                    # it means this current node is the ONLY remaining consumer.
                     if (
                         ref_counts[p0.name] == 1
                         and p0.storage_type == StorageType.TRANSIENT
@@ -156,7 +154,6 @@ class Planner:
                     ):
                         is_inplace_safe = True
 
-            # Initial Selection: Allow any kernel (inplace or not) to ensure we find *something*
             kernel_result = KernelRegistry.select_best_kernel(
                 node.op_type,
                 input_sigs,
@@ -175,7 +172,6 @@ class Planner:
 
             if kernel_is_inplace:
                 if is_inplace_safe:
-                    # Safe to use the inplace kernel in inplace mode
                     inplace_input_index = 0
                 else:
                     raise ValueError(
@@ -199,248 +195,296 @@ class Planner:
             nodes_map=nodes_map,
         )
 
+    def _make_atomic(
+        self, root: TensorNode, known_values: Optional[Dict[str, Any]]
+    ) -> TensorNode:
+        nodes = topological_sort(root)
+        GraphPropagator.infer_shapes(nodes, known_values, disable_pbar=True)
+        atomic_map = {}
+        for node in tqdm(
+            nodes, disable=not DEBUG_EXECUTION, desc="making atomic graph"
+        ):
+            if node.op_type in (OpType.INPUT, OpType.CONSTANT):
+                atomic_map[node] = node
+                continue
+
+            atomic_parents = [atomic_map[p] for p in node.parents]
+
+            if not OpType.is_atomic(node.op_type):
+                ref_factory = get_reference_factory(node.op_type)
+                if ref_factory:
+                    subgraph_root = ref_factory(atomic_parents, node.attrs)
+                    atomic_map[node] = self._make_atomic(subgraph_root, known_values)
+                else:
+                    raise ValueError(
+                        f"No reference factory for fused op {node.op_type}"
+                    )
+            else:
+                new_node = copy.copy(node)
+                new_node.parents = atomic_parents
+                atomic_map[node] = new_node
+
+        return atomic_map[root]
+
     def _expand_and_infer(
         self, root: TensorNode, known_values: Optional[Dict[str, Any]]
-    ) -> List[TensorNode]:
+    ) -> TensorNode:
         """
-        Iteratively expands the graph and infers shapes.
-        Ensures parents have shapes before calling decomposition factories.
+        Decomposes the graph until all nodes are atomic.
+        Returns the root of the new fully atomic graph.
         """
-        all_nodes_discovered: Set[TensorNode] = set()
+        atomic_root = self._make_atomic(root, known_values)
+        atomic_nodes = topological_sort(atomic_root)
+        GraphPropagator.infer_shapes(atomic_nodes, known_values, disable_pbar=True)
+        return atomic_root
 
-        # Use a worklist starting with the original graph in topological order
-        worklist = topological_sort(root)
-        # Initial shape inference for the primary graph
-        GraphPropagator.infer_shapes(worklist, known_values, disable_pbar=True)
+    def _populate_fusion_map_generalized(self, atomic_nodes_topo: List[TensorNode]):
+        rules = [CommutativeRule(), DistributiveRule()]
 
-        index = 0
-        with tqdm(
-            disable=not DEBUG_EXECUTION, total=len(worklist), desc="expand&infer"
-        ) as pbar:
-            while index < len(worklist):
-                node = worklist[index]
-                index += 1
-                if DEBUG_EXECUTION:
-                    pbar.update(1)
-                    pbar.set_description_str(f"expand&infer [{index}/{len(worklist)}]")
+        class DummyAttrs(dict):
+            def __missing__(self, key):
+                return 1
 
-                node_hash = get_structural_hash(node, memo=self.hash_memo)
-                if node in all_nodes_discovered:
+        def collect_attrs(concrete_node, pattern_node, collected_attrs):
+            if pattern_node.op_type == OpType.INPUT:
+                return
+            for k, v in concrete_node.attrs.items():
+                if k not in collected_attrs:
+                    collected_attrs[k] = v
+            for c_p, p_p in zip(concrete_node.parents, pattern_node.parents):
+                collect_attrs(c_p, p_p, collected_attrs)
+
+        # --- 1. PRE-COMPUTE FUSED PATTERNS ---
+        fused_patterns = []
+        for op_type in tqdm(
+            KernelRegistry.get_all_kernels().keys(),
+            disable=not DEBUG_EXECUTION,
+            desc="populating fused patterns",
+        ):
+            if not OpType.is_atomic(op_type):
+                ref_factory = get_reference_factory(op_type)
+                if not ref_factory:
                     continue
-                all_nodes_discovered.add(node)
 
-                # --- 1. Handle Decompositions ---
-                if not OpType.is_atomic(node.op_type):
-                    ref_factory = get_reference_factory(node.op_type)
-                    if ref_factory:
-                        # Because worklist is sorted, node.parents already have shapes.
-                        subgraph_root = ref_factory(node.parents, node.attrs)
-                        self.decomp_map[node_hash] = subgraph_root
+                first_backend = list(KernelRegistry.get_all_kernels()[op_type].keys())[
+                    0
+                ]
+                signatures = KernelRegistry.get_all_kernels()[op_type][first_backend][
+                    0
+                ][1]
 
-                        # Discover sub-graph nodes and infer their shapes
-                        sub_nodes = topological_sort(subgraph_root)
-                        GraphPropagator.infer_shapes(
-                            sub_nodes, known_values, disable_pbar=True
+                dummy_inputs = []
+                for i, sig in enumerate(signatures):
+                    shape = sig.shape if sig.shape is not None else (2, 2, 2, 2)
+                    dummy = TensorNode(
+                        OpType.INPUT, sig.dtype, [], shape, name=f"dummy_{i}"
+                    )
+                    dummy_inputs.append(dummy)
+
+                pattern_root = ref_factory(dummy_inputs, DummyAttrs())
+
+                pattern_atomic_root = self._make_atomic(pattern_root, {})
+
+                fused_patterns.append(
+                    {
+                        "op_type": op_type,
+                        "variables": dummy_inputs,
+                        "root": pattern_atomic_root,
+                    }
+                )
+
+        # --- 2. MATCH IN MAIN GRAPH ---
+        for node in reversed(
+            tqdm(
+                atomic_nodes_topo,
+                disable=not DEBUG_EXECUTION,
+                desc="matching fused patterns",
+            )
+        ):
+            node_hash = get_structural_hash(node, memo=self.hash_memo)
+
+            equivalents = generate_all_equivalents(node, rules)
+
+            for eq_node in equivalents:
+                if eq_node is not node:
+                    self.fusion_map.setdefault(node_hash, []).append(eq_node)
+
+                for fp in fused_patterns:
+                    binding = {}
+                    if match_pattern(eq_node, fp["root"], fp["variables"], binding):
+                        if not all(var in binding for var in fp["variables"]):
+                            continue
+
+                        concrete_inputs = [binding[var] for var in fp["variables"]]
+                        collected_attrs = {}
+                        collect_attrs(eq_node, fp["root"], collected_attrs)
+
+                        fused_candidate = TensorNode(
+                            op_type=fp["op_type"],
+                            dtype=node.dtype,
+                            parents=concrete_inputs,
+                            shape=node.shape,
+                            backend=node.backend,
+                            attrs=collected_attrs,
                         )
+                        fused_candidate.shape = node.shape
 
-                        # Add new nodes to worklist to check if THEY need decomposition
-                        for sn in sub_nodes:
-                            if sn not in all_nodes_discovered:
-                                worklist.append(sn)
-
-                # --- 2. Handle Fusions ---
-                if node.op_type == OpType.ADD and len(node.parents) == 2:
-                    for i, p in enumerate(node.parents):
-                        if p.op_type == OpType.MUL and len(p.parents) == 2:
-                            fma_parents = p.parents + [node.parents[1 - i]]
-
-                            # 1. Create a temporary node to check signatures
-                            fma_node = TensorNode(
-                                "FusedMulAdd",
-                                node.dtype,
-                                fma_parents,
-                                node.shape,
-                                f"fused_{node.name}",
-                                backend=node.backend,
-                            )
-                            fma_node.shape = node.shape
-
-                            # 2. Verify if ANY backend has a kernel for this OpType + DType
-                            # This ensures we don't fuse INT32 patterns if we only have FP32 kernels
-                            has_valid_kernel = False
-                            for b in [Backend.CPU_NUMPY, Backend.GPU_TORCH]:
-                                # Construct signatures assuming this backend
-                                input_sigs = [
-                                    TensorSignature(pn.dtype, pn.shape, b)
-                                    for pn in fma_parents
-                                ]
-                                if KernelRegistry.select_best_kernel(
-                                    "FusedMulAdd", input_sigs, b, fma_node.dtype
-                                ):
-                                    has_valid_kernel = True
-                                    break
-
-                            if not has_valid_kernel:
-                                continue  # Skip this fusion if no implementation exists
-
-                            # 3. If valid, proceed with adding to fusion maps
-                            if node_hash not in self.fusion_map:
-                                self.fusion_map[node_hash] = []
-                            self.fusion_map[node_hash].append(fma_node)
-
-                            if fma_node not in all_nodes_discovered:
-                                all_nodes_discovered.add(fma_node)
-                            break
-
-        return list(all_nodes_discovered)
+                        self.fusion_map.setdefault(node_hash, []).append(
+                            fused_candidate
+                        )
 
     def _get_augmented_topological_sort(
         self, nodes: List[TensorNode]
     ) -> List[TensorNode]:
+        """
+        Returns a topological sort that includes the primary atomic graph
+        as well as all alternative fusion/rewrite candidates.
+        """
         visited = set()
         sort = []
 
-        def visit(n):
+        def visit(n: TensorNode):
             n_hash = get_structural_hash(n, memo=self.hash_memo)
             if n_hash in visited:
                 return
             visited.add(n_hash)
 
-            # 1. Depend on parents
+            # 1. Depend on parents of the current node
             for p in n.parents:
                 visit(p)
 
-            # 2. Depend on decomposition sub-roots (must plan impl before container)
-            if n_hash in self.decomp_map:
-                visit(self.decomp_map[n_hash])
-
-            # 3. Depend on fusion candidates
+            # 2. Depend on parents of all alternative fusion/topology candidates
+            # This ensures that if we choose a fused op, its dependencies are already planned.
             if n_hash in self.fusion_map:
-                for fused_node in self.fusion_map[n_hash]:
-                    visit(fused_node)
+                for alt_node in self.fusion_map[n_hash]:
+                    for p in alt_node.parents:
+                        visit(p)
 
             sort.append(n)
 
-        for node in tqdm(nodes, disable=not DEBUG_EXECUTION, desc="topo sort"):
+        # Start from the root(s) of the atomic graph
+        for node in nodes:
             visit(node)
+
         return sort
 
     def _plan_node_iterative(
         self, node: TensorNode, known_values: Optional[Dict[str, Any]]
     ):
+        """
+        Evaluates all possible execution strategies for a node (and its fusions).
+        Stores the top K strategies in self.memo[node_hash].
+        """
         node_hash = get_structural_hash(node, self.hash_memo)
         if node_hash in self.memo:
             return
 
         candidates: List[BeamStrategy] = []
 
-        # --- 1. Base Cases ---
+        # --- 1. Base Cases: Inputs & Constants ---
         if node.op_type in (OpType.INPUT, OpType.CONSTANT):
             self.memo[node_hash] = [
                 BeamStrategy(cost=0.0, node=node, assignments={node: node.backend})
             ]
             return
 
-        # --- 2. Direct Kernel Execution ---
-        # Note: All parents guaranteed to be in memo due to augmented sort
-        parent_hashes = [get_structural_hash(p, self.hash_memo) for p in node.parents]
-        parent_strats = [self.memo[ph] for ph in parent_hashes]
-
-        available_backends = [Backend.CPU_NUMPY]
-
-        # Check if GPU is available in BOTH registry AND hardware
-        if torch.cuda.is_available():
-            if KernelRegistry.has_kernel(node.op_type, Backend.GPU_TORCH) or any(
-                KernelRegistry.has_kernel(op, Backend.GPU_TORCH)
-                for op in KernelRegistry.get_all_kernels().keys()
-            ):
-                if Backend.GPU_TORCH not in available_backends:
-                    available_backends.append(Backend.GPU_TORCH)
-
-        for backend in available_backends:
-            # STRICT KERNEL CHECKING
-            dummy_sigs = []
-            for p in node.parents:
-                dummy_sigs.append(TensorSignature(p.dtype, p.shape, backend))
-
-            # Check if kernel exists
-            kernel_result = KernelRegistry.select_best_kernel(
-                node.op_type, dummy_sigs, backend, node.dtype
-            )
-
-            if not kernel_result:
-                continue
-
-            _, cand_inplace = kernel_result
-
-            for p_strat_combo in itertools.product(*parent_strats):
-                current_cost = 0.0
-                new_parents = []
-                current_assigns = {}
-
-                for p_strat in p_strat_combo:
-                    current_cost += p_strat.cost
-                    current_assigns.update(p_strat.assignments)
-
-                    if p_strat.node.backend != backend:
-                        t_cost = self.cost_model.estimate_transfer_cost(
-                            p_strat.node.backend,
-                            backend,
-                            p_strat.node.shape,
-                            p_strat.node.dtype,
-                        )
-                        current_cost += t_cost
-                        copy_node = TensorNode(
-                            OpType.COPY_TO,
-                            p_strat.node.dtype,
-                            [p_strat.node],
-                            p_strat.node.shape,
-                            f"auto_copy_{p_strat.node.name}",
-                            attrs={"target_backend": backend.value},
-                            backend=backend,
-                        )
-                        new_parents.append(copy_node)
-                        current_assigns[copy_node] = backend
-                    else:
-                        new_parents.append(p_strat.node)
-
-                exec_cost = self.cost_model.estimate_kernel_cost(
-                    node.op_type,
-                    backend,
-                    node.dtype,
-                    node.shape,
-                    node.attrs,
-                    inplace=cand_inplace,
-                )
-                current_cost += exec_cost
-                new_node = copy.copy(node)
-                new_node.parents = new_parents
-                new_node.backend = backend
-                current_assigns[new_node] = backend
-                candidates.append(BeamStrategy(current_cost, new_node, current_assigns))
-
-        # --- 3. Decomposition Strategies ---
-        if node_hash in self.decomp_map:
-            decomp_root_hash = get_structural_hash(self.decomp_map[node_hash])
-            if decomp_root_hash in self.memo:
-                candidates.extend(self.memo[decomp_root_hash])
-
-        # --- 4. Fusion Strategies ---
+        # --- 2. Collection of Implementation Targets ---
+        # We evaluate the "original" atomic node AND all fused/permuted alternatives
+        targets = [node]
         if node_hash in self.fusion_map:
-            for fused_node in self.fusion_map[node_hash]:
-                fused_hash = get_structural_hash(fused_node)
-                if fused_hash in self.memo:
-                    candidates.extend(self.memo[fused_hash])
+            targets.extend(self.fusion_map[node_hash])
 
-        # --- 5. Pruning ---
+        # --- 3. Evaluate each Target on available backends ---
+        available_backends = [Backend.CPU_NUMPY]
+        if torch.cuda.is_available():
+            available_backends.append(Backend.GPU_TORCH)
+
+        for target in targets:
+            parent_hashes = [
+                get_structural_hash(p, self.hash_memo) for p in target.parents
+            ]
+            # Get the beam strategies for every parent
+            parent_beam_sets = [self.memo[ph] for ph in parent_hashes]
+
+            for backend in available_backends:
+                # Signature check for the kernel
+                dummy_sigs = [
+                    TensorSignature(p.dtype, p.shape, backend) for p in target.parents
+                ]
+
+                # Check if a kernel exists for this OpType/Backend/DType
+                kernel_result = KernelRegistry.select_best_kernel(
+                    target.op_type, dummy_sigs, backend, target.dtype
+                )
+                if not kernel_result:
+                    continue
+
+                _, kernel_inplace = kernel_result
+
+                # Combine parent strategies (Cartesian product of parent beams)
+                for p_strat_combo in itertools.product(*parent_beam_sets):
+                    current_cost = 0.0
+                    new_parents = []
+                    current_assigns = {}
+
+                    for i, p_strat in enumerate(p_strat_combo):
+                        current_cost += p_strat.cost
+                        current_assigns.update(p_strat.assignments)
+
+                        # Logic for cross-backend data transfer
+                        if p_strat.node.backend != backend:
+                            t_cost = self.cost_model.estimate_transfer_cost(
+                                p_strat.node.backend,
+                                backend,
+                                p_strat.node.shape,
+                                p_strat.node.dtype,
+                            )
+                            current_cost += t_cost
+
+                            # Insert an implicit CopyTo node
+                            copy_node = TensorNode(
+                                OpType.COPY_TO,
+                                p_strat.node.dtype,
+                                [p_strat.node],
+                                p_strat.node.shape,
+                                name=f"auto_copy_{p_strat.node.name}_to_{backend.value}",
+                                attrs={"target_backend": backend.value},
+                                backend=backend,
+                            )
+                            new_parents.append(copy_node)
+                            current_assigns[copy_node] = backend
+                        else:
+                            new_parents.append(p_strat.node)
+
+                    # Estimate the kernel execution cost
+                    exec_cost = self.cost_model.estimate_kernel_cost(
+                        target.op_type,
+                        backend,
+                        target.dtype,
+                        target.shape,
+                        target.attrs,
+                        inplace=kernel_inplace,
+                    )
+                    current_cost += exec_cost
+
+                    # Create a concrete implementation node for this strategy
+                    impl_node = copy.copy(target)
+                    impl_node.parents = new_parents
+                    impl_node.backend = backend
+                    current_assigns[impl_node] = backend
+
+                    candidates.append(
+                        BeamStrategy(current_cost, impl_node, current_assigns)
+                    )
+
+        # --- 4. Pruning (Keep Top K) ---
         candidates.sort()
         best_k = candidates[: self.beam_width]
 
         if not best_k:
-            # Final fallback: if no kernel exists and no decomposition worked,
-            # the graph is technically un-executable.
-            raise ValueError(
-                f"No execution path found for node {node} ({node.op_type}) with shape {node.shape}"
-            )
+            # Fallback for debugging: help identify which nodes fail planning
+            print(f"FAILED TO PLAN NODE: {node.op_type} ({node_hash[:8]})")
+            print(f"Parents: {[p.op_type for p in node.parents]}")
+            raise ValueError(f"No execution path found for node {node.op_type}")
 
         self.memo[node_hash] = best_k

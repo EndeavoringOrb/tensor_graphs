@@ -39,7 +39,7 @@ def normalize_graph(root: TensorNode):
     Recursively normalizes the graph in-place by sorting commutative inputs (Add, Mul)
     based on their structural hashes.
     """
-    from .hashing import compute_structural_hash
+    from .hashing import get_structural_hash
     from ..ops.atomic_types import OpType
 
     visited = set()
@@ -56,7 +56,7 @@ def normalize_graph(root: TensorNode):
         if node.op_type in (OpType.ADD, OpType.MUL):
             # Sort parents by their structural hash
             # Note: We need to compute hashes *after* parents are normalized
-            node.parents.sort(key=lambda n: compute_structural_hash(n))
+            node.parents.sort(key=lambda n: get_structural_hash(n))
 
     _normalize(root)
 
@@ -66,10 +66,10 @@ def find_subgraph(large_graph: TensorNode, subgraph: TensorNode) -> List[TensorN
     Finds all nodes in large_graph that are roots of a subgraph structurally
     identical to 'subgraph'.
     """
-    from .hashing import compute_structural_hash
+    from .hashing import get_structural_hash
     from .graph import topological_sort
 
-    sub_hash = compute_structural_hash(subgraph)
+    sub_hash = get_structural_hash(subgraph)
     matches = []
 
     # Important: Both graphs should be normalized for this to be reliable
@@ -77,7 +77,7 @@ def find_subgraph(large_graph: TensorNode, subgraph: TensorNode) -> List[TensorN
     # or expects exact structural match as is.
 
     for node in topological_sort(large_graph):
-        if compute_structural_hash(node) == sub_hash:
+        if get_structural_hash(node) == sub_hash:
             matches.append(node)
 
     return matches

@@ -5,8 +5,10 @@
 - [ ] Make it so multiple graphs can share memory so we don't have max_bytes * 3 (examples/flux-klein-4b.py: vae, qwen3, flux transformer) memory
 - [ ] add cuda kernels to make gemma-3-270m go fast on gpu
 - [ ] Graph parallel execution
+  - look at ik_llama.cpp implementation
 - [ ] Graph rewriting $(a*(b+c))$ -> $(a*b+a*c)$
 - [ ] Make tests pass
+- [ ] Remove attrs in favor of constant/input nodes. copyto dtype can determine which kernel is used
 
 - [ ] ?? monte carlo tree search (SEARCH mode) or greedy (GREEDY mode) for caching
 - [ ] minimize memory usage (make sure no duplicate weights or anything)

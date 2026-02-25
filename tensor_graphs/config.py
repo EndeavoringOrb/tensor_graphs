@@ -1,4 +1,4 @@
-DEBUG_EXECUTION = False
+DEBUG_EXECUTION = True
 DEBUG_DETAILED = False
 
 # If True, non-contiguous regions (lists of boxes) are merged into a single bounding box.
