@@ -249,28 +249,9 @@ class Executor:
         with Timer("[Executor.run] initializing"):
             static_refs = self.graph.ref_counts
 
-            # --- Pass 1: Forward Propagation ---
-            node_states = {}
-
-            for inst in self.graph.instructions:
-                node = self.graph.nodes_map[inst.node_name]
-
-                if node.op_type in (OpType.INPUT, OpType.CONSTANT):
-                    continue
-
-                if bucket and node.name in cached_regions:
-                    node.dirty_region = cached_regions[node.name]
-                else:
-                    raise ValueError("dirty region not cached")
-
-                is_dirty = node.dirty_region is not None
-                node_states[node.name] = {
-                    "is_dirty": is_dirty,
-                    "in_cache": None,
-                }
-
-            # --- Pass 2: Backward Liveness + in_cache ---
+            # --- Pass 1: Backward Liveness + in_cache ---
             needed_nodes = set()
+            node_states = {}
 
             if self.graph.instructions:
                 root_name = self.graph.instructions[-1].node_name
@@ -279,7 +260,10 @@ class Executor:
             for inst in reversed(self.graph.instructions):
                 name = inst.node_name
                 if name not in node_states:
-                    continue
+                    node_states[name] = {
+                        "is_dirty": None,
+                        "in_cache": None,
+                    }
 
                 state = node_states[name]
 
@@ -289,147 +273,138 @@ class Executor:
                         dev_hint = node.backend.value if node.backend else "cpu"
                         state["in_cache"] = self.mem.has(name, dev_hint)
 
+                    state["is_dirty"] = cached_regions[name] is not None
                     must_compute = state["is_dirty"] or not state["in_cache"]
 
                     if must_compute:
                         for p_name in inst.input_node_names:
                             needed_nodes.add(p_name)
 
-            # --- Pre-Pass: Lock Expected Cache Hits ---
-            for inst in self.graph.instructions:
-                name = inst.node_name
-                if name not in needed_nodes:
-                    continue
+            # --- Pass 2: Dry Run ---
+            execution_plan = []
+            counters = {
+                "skip": 0,
+                "full": 0,
+                "part": 0,
+                "pruned": 0,
+                "kernel_switch": 0,
+                "inplace": 0,
+            }
+            partial_ratio_sum = 0
 
-                node = self.graph.nodes_map[name]
+            for inst in self.graph.instructions:
+                node = self.graph.nodes_map[inst.node_name]
+
                 if node.op_type in (OpType.INPUT, OpType.CONSTANT):
                     continue
 
+                name = node.name
                 state = node_states[name]
+                is_needed = name in needed_nodes
+
+                plan = {
+                    "inst": inst,
+                    "node": node,
+                    "is_needed": is_needed,
+                    "mem_action": None,
+                    "transfer_src": None,
+                    "tasks": [],
+                }
+
+                if not is_needed:
+                    counters["pruned"] += 1
+                    execution_plan.append(plan)
+                    continue
+
+                dev_hint = node.backend.value if node.backend else "cpu"
+
+                # In-place status for FULL compute (default)
+                is_inplace = inst.inplace_input_index is not None
+                compute_regions = []
+
+                # Determine Computation Mode
+                if state["is_dirty"] and state["in_cache"]:
+                    counters["part"] += 1
+                    if DEBUG_EXECUTION:
+                        partial_ratio = (
+                            self._calculate_dirty_ratio(cached_regions[name], node.shape)
+                            if cached_regions[name] and node.shape
+                            else 1.0
+                        )
+                        partial_ratio_sum += partial_ratio
+                    compute_regions = [
+                        r
+                        for r in cached_regions[name]
+                        if any(stop > start for start, stop in r)
+                    ]
+                    plan["mem_action"] = "prepare"
+
+                elif not state["in_cache"]:
+                    counters["full"] += 1
+                    if is_inplace:
+                        plan["mem_action"] = "transfer"
+                        plan["transfer_src"] = inst.input_node_names[
+                            inst.inplace_input_index
+                        ]
+                        counters["inplace"] += 1
+                    else:
+                        plan["mem_action"] = "prepare"
+                    compute_regions = [tuple((0, dim) for dim in (node.shape or ()))]
+
+                else:  # clean and in cache
+                    counters["skip"] += 1
+                    plan["mem_action"] = "prepare"
+
+                # Lock Cache Hits
                 if not state["is_dirty"] and state["in_cache"]:
                     self.mem.prepare_allocation(
                         node, node.size_bytes, initial_refs=static_refs[name]
                     )
 
-        # --- Pass 3: Dry Run ---
-        execution_plan = []
-        counters = {
-            "skip": 0,
-            "full": 0,
-            "part": 0,
-            "pruned": 0,
-            "kernel_switch": 0,
-            "inplace": 0,
-        }
-        partial_ratio_sum = 0
+                # Execute Kernel Dry Run
+                if compute_regions:
+                    # Retrieve pre-cached data for this node
+                    node_cached_input_slices = cached_input_slices.get(name)
+                    node_cached_kernels = cached_kernels.get(name)
 
-        for inst in self.graph.instructions:
-            node = self.graph.nodes_map[inst.node_name]
+                    for i, region_slice in enumerate(compute_regions):
+                        is_full_region = all(
+                            start == 0 and stop == dim
+                            for (start, stop), dim in zip(region_slice, node.shape or ())
+                        )
+                        input_slice_regions = []
 
-            if node.op_type in (OpType.INPUT, OpType.CONSTANT):
-                continue
-
-            name = node.name
-            state = node_states[name]
-            is_needed = name in needed_nodes
-
-            plan = {
-                "inst": inst,
-                "node": node,
-                "is_needed": is_needed,
-                "mem_action": None,
-                "transfer_src": None,
-                "tasks": [],
-            }
-
-            if not is_needed:
-                counters["pruned"] += 1
-                execution_plan.append(plan)
-                continue
-
-            dev_hint = node.backend.value if node.backend else "cpu"
-
-            # In-place status for FULL compute (default)
-            is_inplace = inst.inplace_input_index is not None
-            compute_regions = []
-
-            # Determine Computation Mode
-            if state["is_dirty"] and state["in_cache"]:
-                counters["part"] += 1
-                if DEBUG_EXECUTION:
-                    partial_ratio = (
-                        self._calculate_dirty_ratio(node.dirty_region, node.shape)
-                        if node.dirty_region and node.shape
-                        else 1.0
-                    )
-                    partial_ratio_sum += partial_ratio
-                compute_regions = [
-                    r
-                    for r in node.dirty_region
-                    if any(stop > start for start, stop in r)
-                ]
-                plan["mem_action"] = "prepare"
-
-            elif not state["in_cache"]:
-                counters["full"] += 1
-                if is_inplace:
-                    plan["mem_action"] = "transfer"
-                    plan["transfer_src"] = inst.input_node_names[
-                        inst.inplace_input_index
-                    ]
-                    counters["inplace"] += 1
-                else:
-                    plan["mem_action"] = "prepare"
-                compute_regions = [tuple((0, dim) for dim in (node.shape or ()))]
-
-            else:  # clean and in cache
-                counters["skip"] += 1
-                plan["mem_action"] = "prepare"
-
-            # Execute Kernel Dry Run
-            if compute_regions:
-                # Retrieve pre-cached data for this node
-                node_cached_input_slices = cached_input_slices.get(name)
-                node_cached_kernels = cached_kernels.get(name)
-
-                for i, region_slice in enumerate(compute_regions):
-                    is_full_region = all(
-                        start == 0 and stop == dim
-                        for (start, stop), dim in zip(region_slice, node.shape or ())
-                    )
-                    input_slice_regions = []
-
-                    # Initialize with defaults from instruction
-                    selected_kernel = inst.kernel
-                    current_inplace = is_inplace
-
-                    if is_full_region:
-                        input_slice_regions = [None] * len(inst.input_node_names)
-                    else:
-                        # PARTIAL COMPUTE PATH
-                        # 1. Get Input Slices
-                        input_slice_regions = node_cached_input_slices[i]
-
-                        # 2. Select Kernel
-                        # Use pre-cached kernel if available
-                        selected_kernel = node_cached_kernels[i]
-                        # We assume the inplace constraint was handled during compilation
+                        # Initialize with defaults from instruction
+                        selected_kernel = inst.kernel
                         current_inplace = is_inplace
 
-                    plan["tasks"].append(
-                        {
-                            "region_slice": region_slice,
-                            "is_full_region": is_full_region,
-                            "input_slice_regions": input_slice_regions,
-                            "selected_kernel": selected_kernel,
-                            "current_inplace": current_inplace,
-                            "backend": dev_hint,
-                        }
-                    )
+                        if is_full_region:
+                            input_slice_regions = [None] * len(inst.input_node_names)
+                        else:
+                            # PARTIAL COMPUTE PATH
+                            # 1. Get Input Slices
+                            input_slice_regions = node_cached_input_slices[i]
 
-            execution_plan.append(plan)
+                            # 2. Select Kernel
+                            # Use pre-cached kernel if available
+                            selected_kernel = node_cached_kernels[i]
+                            # We assume the inplace constraint was handled during compilation
+                            current_inplace = is_inplace
 
-        # --- Pass 4: Execution ---
+                        plan["tasks"].append(
+                            {
+                                "region_slice": region_slice,
+                                "is_full_region": is_full_region,
+                                "input_slice_regions": input_slice_regions,
+                                "selected_kernel": selected_kernel,
+                                "current_inplace": current_inplace,
+                                "backend": dev_hint,
+                            }
+                        )
+
+                execution_plan.append(plan)
+
+        # --- Pass 3: Execution ---
         with tqdm(
             execution_plan,
             desc="graph inst",

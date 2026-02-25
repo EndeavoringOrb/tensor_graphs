@@ -356,7 +356,6 @@ def main():
         print(f"Total time: {total_time:.2f}s")
         print(f"Tokens generated: {tokens_generated}")
         print(f"Tokens/sec: {tokens_generated / total_time:.2f}")
-        break
 
 
 if __name__ == "__main__":
