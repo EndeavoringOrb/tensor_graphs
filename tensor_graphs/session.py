@@ -7,10 +7,11 @@ from .backend.memory import MemoryManager
 from .ir.graph import topological_sort, GraphEncoder
 from .ops.atomic_types import OpType
 from .config import DEBUG_EXECUTION
-from .ir.dtypes import Backend
+from .ir.dtypes import Backend, TensorSignature
 from .weights import SafetensorsSource, WeightSource
 from .compiler.dirty_propagation import DirtyPropagator
 from .compiler.propagation import _from_slices, _to_slices, GraphPropagator
+from .backend.registry import KernelRegistry
 import os
 import json
 import itertools
@@ -57,10 +58,7 @@ class GraphSession:
                     continue
 
                 # Reconstruct key tuple structure for dictionary lookup
-                # Key format in JSON: [ [input_name, [ [start, stop], ... ]], ... ]
                 key_list = entry["key"]
-                # Convert lists back to tuples for hashability
-                # Note: must materialize all generators into tuples
                 key_parts = []
                 for k, regions in key_list:
                     region_parts = []
@@ -69,8 +67,8 @@ class GraphSession:
                         region_parts.append(box_tuple)
                     key_parts.append((k, tuple(region_parts)))
                 key = tuple(key_parts)
+
                 # Pre-convert regions to tuple format at load time
-                # reg_data is List[List[(s,e)]] -> convert to List[Tuple[slice...]]
                 precomputed_regions = {}
                 for node_name, reg_data in entry["regions"].items():
                     if reg_data:
@@ -82,8 +80,7 @@ class GraphSession:
                     else:
                         precomputed_regions[node_name] = reg_data
 
-                # Pre-convert input_slices as well
-                # input_slices is List[List[List[(s,e)]]] -> List[List[Tuple[slice...]]]
+                # Pre-convert input_slices
                 precomputed_input_slices = {}
                 for node_name, slices_data in entry["input_slices"].items():
                     if slices_data:
@@ -92,7 +89,6 @@ class GraphSession:
                             box_converted = []
                             for req in box_reqs:
                                 if req is not None:
-                                    # req is List[(s,e)] - convert to Tuple[slice]
                                     req_slices = tuple(slice(s, e) for s, e in req[0])
                                     box_converted.append(req_slices)
                                 else:
@@ -102,17 +98,21 @@ class GraphSession:
                     else:
                         precomputed_input_slices[node_name] = slices_data
 
+                # Load concrete shapes (new)
+                precomputed_shapes = entry.get("concrete_shapes", {})
+
                 self.dirty_cache[key] = {
                     "regions": precomputed_regions,
                     "input_slices": precomputed_input_slices,
+                    "concrete_shapes": precomputed_shapes,
+                    # Kernels are not serialized, will be resolved in _ensure_cache_coverage or on demand
+                    "kernels": {},
                 }
 
-    def _save_cache_entry(self, key, regions, input_slices):
+    def _save_cache_entry(self, key, regions, input_slices, concrete_shapes):
         if not self.cache_path:
             return
 
-        # Serialize structure
-        # Key: tuple((name, tuple(tuple(box)))) -> list([name, list([list(box)])])
         serialized_key = []
         for name, region_tuple in key:
             serialized_key.append([name, [list(box) for box in region_tuple]])
@@ -121,11 +121,12 @@ class GraphSession:
             "key": serialized_key,
             "regions": regions,
             "input_slices": input_slices,
+            "concrete_shapes": concrete_shapes,
         }
 
         os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
         with open(self.cache_path, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+            f.write(json.dumps(entry, cls=GraphEncoder) + "\n")
 
     def _save_compiled_graph(self, compiled_graph: CompiledGraph):
         """Save the compiled graph to the cache file."""
@@ -151,18 +152,64 @@ class GraphSession:
         """Generates non-overlapping aligned power-of-2 tiles."""
         slices = []
         size = 1
-        # Go up to the smallest power of 2 that covers the dimension
         max_size = self._next_power_of_2(dim_len)
 
         while size <= max_size:
-            # Step by 'size' to ensure no overlaps within the same zoom level
             for i in range(0, dim_len, size):
-                # i + size might exceed dim_len, so we clamp it
                 end = min(i + size, dim_len)
                 slices.append((i, end))
             size *= 2
 
-        return list(set(slices))  # unique-ify in case dim_len is a power of 2
+        return list(set(slices))
+
+    def _resolve_kernels_for_cache_entry(self, entry, compiled_graph):
+        """Resolve kernel objects for a cache entry based on stored concrete shapes."""
+        if "kernels" not in entry:
+            entry["kernels"] = {}
+
+        # If kernels already resolved (in-memory) or shapes missing, return
+        if entry["kernels"] or not entry.get("concrete_shapes"):
+            return
+
+        for node_name, shape_options in entry["concrete_shapes"].items():
+            node = compiled_graph.nodes_map.get(node_name)
+            instr = compiled_graph.get_instruction(node_name)
+            if not node or not instr:
+                continue
+
+            # Determine inplace constraint from the full compute instruction
+            allow_inplace = instr.inplace_input_index is not None
+
+            kernels_for_node = []
+            for concrete_shape_tuple in shape_options:
+                # concrete_shape_tuple is a list of shapes (one per input), serialized as lists
+                # Convert back to tuples
+                input_shapes = [tuple(s) if s else None for s in concrete_shape_tuple]
+
+                # Build signatures
+                input_sigs = []
+                for idx, shape in enumerate(input_shapes):
+                    p_node = compiled_graph.nodes_map.get(instr.input_node_names[idx])
+                    if p_node:
+                        sig = TensorSignature(p_node.dtype, shape, node.backend)
+                        input_sigs.append(sig)
+
+                # Select best kernel
+                kernel_result = KernelRegistry.select_best_kernel(
+                    node.op_type,
+                    input_sigs,
+                    node.backend,
+                    node.dtype,
+                    allow_inplace=allow_inplace,
+                )
+
+                if kernel_result:
+                    kernels_for_node.append(kernel_result[0])  # (kernel, is_inplace)
+                else:
+                    # Fallback to full kernel if specific partial kernel not found
+                    kernels_for_node.append(instr.kernel)
+
+            entry["kernels"][node_name] = kernels_for_node
 
     def _ensure_cache_coverage(
         self,
@@ -172,6 +219,7 @@ class GraphSession:
     ):
         """
         Generates dirty region buckets for all permutations of input slice configurations.
+        Pre-calculates concrete shapes and selects partial kernels.
         """
         if not self.cache_path:
             return
@@ -180,7 +228,7 @@ class GraphSession:
             print("[Session] verifying dirty region cache coverage...")
 
         # 1. Generate options per input
-        input_options = []  # List of (input_name, list_of_region_tuples)
+        input_options = []
 
         for node in input_nodes:
             if node.name not in sample_inputs:
@@ -194,31 +242,14 @@ class GraphSession:
                 dim_slices = self._generate_slices_for_dim(dim_len)
                 dim_options_list.append(dim_slices)
 
-            # Cartesian product of dimensions for this single input -> List[RegionTuple]
-            # RegionTuple is ((start, stop), (start, stop), ...)
             input_regions = list(itertools.product(*dim_options_list))
-
-            # Filter? We treat each as a separate dirty configuration [box]
-            # We assume 1 dirty box per input for the permutation basis
-            # Wrap as a single-box list for consistency with Propagator: [(box)]
             input_regions_wrapped = [(r,) for r in input_regions]
-
-            # Add "Clean" state (None)?
-            # Prompt implies inputs are dirty. We stick to dirty permutations.
-
             input_options.append((node.name, input_regions_wrapped))
 
-        # 2. Cartesian product across all inputs
-        # names: [A, B], options: [ [rA1, rA2], [rB1, rB2] ]
         names = [x[0] for x in input_options]
         option_lists = [x[1] for x in input_options]
 
-        # We need to temporarily set dirty regions on the graph nodes
-        # To avoid messing up state, we can just set them, propagate, read, and clear.
-        # Since we are before planner, it's safe.
-
         all_permutations = list(itertools.product(*option_lists))
-
         missing_count = 0
         topo_nodes = list(compiled_graph.nodes_map.values())
         GraphPropagator.infer_shapes(topo_nodes, sample_inputs)
@@ -228,26 +259,23 @@ class GraphSession:
             disable=not DEBUG_EXECUTION,
             desc="Ensuring cache coverage",
         ):
-            # Construct Key
-            # perm is ( region_tuple_A, region_tuple_B, ... )
-            # Key must be sorted by name to be canonical
             key_map = {name: reg for name, reg in zip(names, perm)}
-            # Sort by name
             sorted_items = sorted(key_map.items())
             key = tuple(sorted_items)
 
+            # Check cache existence
             if key in self.dirty_cache:
+                # Ensure kernels are resolved for loaded entries
+                self._resolve_kernels_for_cache_entry(
+                    self.dirty_cache[key], compiled_graph
+                )
                 continue
 
             missing_count += 1
 
-            # 3. Propagate
             # Set inputs
             for name, region_tuple in key_map.items():
-                # Find node
                 node = next(n for n in input_nodes if n.name == name)
-                # region_tuple is (box, ) where box is ((s,e), ...)
-                # Convert to slices for propagator
                 node.dirty_region = _to_slices(region_tuple)
 
             # Reset others
@@ -258,14 +286,14 @@ class GraphSession:
             # Propagate Forward
             node_regions_map = {}
             node_input_slices_map = {}
+            node_concrete_shapes_map = {}  # New: Stores concrete shapes for partial kernels
+            node_kernels_map = {}  # New: Stores selected partial kernels
 
             for node in topo_nodes:
                 if node.op_type != OpType.INPUT:
                     node.dirty_region = DirtyPropagator.propagate(node)
 
-                # Store serialized region
-                # node.dirty_region is List[Tuple[slice...]]
-                # Serialize to List[List[(start, stop)]] - same format _load_cache expects
+                # Serialize region
                 if node.dirty_region:
                     ser_region = []
                     for box in node.dirty_region:
@@ -278,39 +306,121 @@ class GraphSession:
                     if node.op_type in (OpType.INPUT, OpType.CONSTANT):
                         continue
 
-                    # Compute Backward Input Slices for each box
-                    # This is needed to avoid calling get_input_slices at runtime
+                    # Compute Backward Input Slices
                     input_slices_per_box = []
+                    concrete_shapes_per_box = []  # New
+                    partial_kernels_per_box = []  # New
+
+                    instr = compiled_graph.get_instruction(node.name)
+                    allow_inplace = (
+                        instr.inplace_input_index is not None if instr else False
+                    )
+
                     for box in node.dirty_region:
                         reqs = DirtyPropagator.get_input_slices(node, [box])
 
-                        # Serialize requirements (List of NumericRegions, one per parent)
+                        # Serialize requirements
                         ser_reqs = []
+                        box_concrete_shapes = []
+                        box_kernels = []
+
                         for req_idx, req in enumerate(reqs):
                             if req:
                                 ser_req = []
                                 for r_box in req:
-                                    ser_req.append(list(r_box))  # tuple -> list
+                                    ser_req.append(list(r_box))
                                 ser_reqs.append(
                                     _from_slices(ser_req, node.parents[req_idx].shape)
                                 )
+
+                                # --- NEW: Calculate Concrete Shape ---
+                                # req is List[Tuple[slice...]]
+                                p_node = node.parents[req_idx]
+                                p_shape = p_node.shape or ()
+                                # Use first box in req (usually one box in this logic)
+                                sl = req[0]
+                                # Calculate shape from slice
+                                if sl:
+                                    c_shape = []
+                                    for s, dim in zip(sl, p_shape):
+                                        start, stop, _ = s.indices(dim)
+                                        c_shape.append(stop - start)
+                                    box_concrete_shapes.append(tuple(c_shape))
+                                else:
+                                    box_concrete_shapes.append(p_shape)
                             else:
                                 ser_reqs.append(None)
+                                # Full shape if no slice
+                                box_concrete_shapes.append(
+                                    node.parents[req_idx].shape or ()
+                                )
+
                         input_slices_per_box.append(ser_reqs)
+                        concrete_shapes_per_box.append(box_concrete_shapes)
+
+                        # --- NEW: Select Partial Kernel ---
+                        if instr:
+                            input_sigs = []
+                            for idx, shape in enumerate(box_concrete_shapes):
+                                p_node = node.parents[idx]
+                                sig = TensorSignature(p_node.dtype, shape, node.backend)
+                                input_sigs.append(sig)
+
+                            kernel_result = KernelRegistry.select_best_kernel(
+                                node.op_type,
+                                input_sigs,
+                                node.backend,
+                                node.dtype,
+                                allow_inplace=allow_inplace,
+                            )
+
+                            if kernel_result:
+                                # Verify constraint
+                                _, kernel_is_inplace = kernel_result
+                                if allow_inplace != kernel_is_inplace:
+                                    # Constraint violation: Fallback or raise error
+                                    # For safety, we fallback to standard kernel instruction
+                                    # Ideally, this shouldn't happen if registry is consistent
+                                    box_kernels.append(instr.kernel)
+                                else:
+                                    box_kernels.append(kernel_result[0])
+                            else:
+                                # Fallback to full kernel
+                                box_kernels.append(instr.kernel)
+
+                        partial_kernels_per_box.append(box_kernels)
 
                     node_input_slices_map[node.name] = input_slices_per_box
+                    node_concrete_shapes_map[node.name] = concrete_shapes_per_box
+                    node_kernels_map[node.name] = partial_kernels_per_box
                 else:
                     node_regions_map[node.name] = None
                     node_input_slices_map[node.name] = None
+                    node_concrete_shapes_map[node.name] = None
+                    node_kernels_map[node.name] = None
 
             # 4. Save
-            self.dirty_cache[key] = {
+            entry = {
                 "regions": node_regions_map,
                 "input_slices": node_input_slices_map,
+                "concrete_shapes": node_concrete_shapes_map,  # Save shapes
+                "kernels": node_kernels_map,  # In-memory kernels
             }
-            self._save_cache_entry(key, node_regions_map, node_input_slices_map)
 
-        self._load_cache()
+            self.dirty_cache[key] = entry
+
+            # Save to disk (kernels are not serialized, will be resolved on load)
+            # We need to convert tuples in concrete_shapes to lists for JSON
+            ser_shapes = {}
+            for n, shapes in node_concrete_shapes_map.items():
+                if shapes:
+                    ser_shapes[n] = [list(s) for s in shapes]
+
+            self._save_cache_entry(
+                key, node_regions_map, node_input_slices_map, ser_shapes
+            )
+
+        # self._load_cache()  # Reload to ensure structure consistency (optional optimization: just update memory)
 
         # Clean up graph state
         for node in topo_nodes:
@@ -325,13 +435,11 @@ class GraphSession:
         if DEBUG_EXECUTION:
             print("[Session] Planning & Compiling graph...")
 
-        # Check if we have a cached compiled graph
         if self.cached_compiled_graph is not None:
             if DEBUG_EXECUTION:
                 print("[Session] Using cached compiled graph")
             compiled_graph = self.cached_compiled_graph
 
-            # Still need to ensure cache coverage (node names should match)
             input_nodes = [
                 n
                 for n in compiled_graph.nodes_map.values()
@@ -339,11 +447,9 @@ class GraphSession:
             ]
             self._ensure_cache_coverage(input_nodes, sample_inputs, compiled_graph)
         else:
-            # Plan first to expand the graph (decompose fused ops into atomic ops)
             planner = Planner(self.db_path)
             compiled_graph = planner.plan(self.root, known_values=sample_inputs)
 
-            # Generate dirty region cache AFTER planning using the expanded graph
             input_nodes = [
                 n
                 for n in compiled_graph.nodes_map.values()
@@ -351,8 +457,6 @@ class GraphSession:
             ]
 
             self._ensure_cache_coverage(input_nodes, sample_inputs, compiled_graph)
-
-            # Save the compiled graph for future runs
             self._save_compiled_graph(compiled_graph)
 
         self.executor = Executor(
@@ -362,7 +466,6 @@ class GraphSession:
         )
         self.is_compiled = True
 
-        # Automatically load internal constants defined in the graph
         self._load_internal_constants()
 
         if DEBUG_EXECUTION:
@@ -379,11 +482,9 @@ class GraphSession:
                 if val is None:
                     continue
 
-                # Ensure it's a numpy array
                 if not isinstance(val, np.ndarray):
                     val = np.array(val)
 
-                # Allocate if not already present
                 device = node.backend.value if node.backend else "cpu"
                 if "numpy" in device:
                     device = "cpu"
@@ -418,12 +519,9 @@ class GraphSession:
         all_nodes = topological_sort(self.root)
 
         for node in all_nodes:
-            # Only load persistent INPUT nodes (Weights/Parameters)
-            # Constants are handled by _load_internal_constants
             if node.op_type != OpType.INPUT or node.storage_type.name != "PERSISTENT":
                 continue
 
-            # Check if already loaded (e.g. by constants loader or previous call)
             device = node.backend.value if node.backend else "cpu"
             if "numpy" in device:
                 device = "cpu"
@@ -442,22 +540,16 @@ class GraphSession:
 
             data = source.get_tensor(node.name)
 
-            # Determine placement
-            # We must use the node instance from the *compiled* graph (in executor)
-            # because that's where the backend is finalized.
             if self.executor and node.name in self.executor.graph.nodes_map:
                 assigned_backend = self.executor.graph.nodes_map[node.name].backend
             else:
                 assigned_backend = backend_hint
 
-            # Update the node backend if we found it in the compiled graph
             if self.executor and node.name in self.executor.graph.nodes_map:
-                # The executor graph nodes are copies/modified, so we use them
                 exec_node = self.executor.graph.nodes_map[node.name]
                 exec_node.backend = assigned_backend
                 self.mem_manager.allocate_persistent(exec_node, data)
             else:
-                # Fallback if not compiled yet (shouldn't happen due to check above)
                 node.backend = assigned_backend
                 self.mem_manager.allocate_persistent(node, data)
 

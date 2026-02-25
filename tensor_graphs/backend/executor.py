@@ -1,16 +1,14 @@
-# tensor_graphs/backend/executor.py
 import numpy as np
 import time
 from typing import Dict, Any, List, Tuple, Optional
 import math
 from ..compiler.compiled_graph import CompiledGraph
 from ..ir.buffer import StorageType
-from ..ir.dtypes import TensorSignature, get_buffer_size
+from ..ir.dtypes import get_buffer_size
 from ..ir.graph import GraphEncoder
 from ..ops import OpType
 from ..compiler.dirty_propagation import DirtyPropagator
 from .memory import MemoryManager
-from .registry import KernelRegistry
 from ..config import (
     DEBUG_EXECUTION,
     DEBUG_DETAILED,
@@ -42,14 +40,11 @@ class Executor:
         self.mem = memory_manager
         self.dirty_cache = dirty_cache or {}
         self.last_inputs: Dict[str, Any] = {}
-        # Persistent cache across runs: Key = (node_name, shape_tuple) -> (Kernel, is_inplace)
-        self._kernel_cache: Dict[Tuple[str, Tuple[Tuple[int, ...], ...]], Any] = {}
+        # Removed _kernel_cache as we now rely on pre-computed kernels in dirty_cache
 
-        # Determine output directory
         output_dir = RECORD_KERNEL_LAUNCHES_FOLDER
         os.makedirs(output_dir, exist_ok=True)
 
-        # Find next available .jsonl file
         run_num = 0
         while os.path.exists(os.path.join(output_dir, f"{run_num}.jsonl")):
             run_num += 1
@@ -59,14 +54,9 @@ class Executor:
     def _calculate_dirty_ratio(
         self, regions: List[Tuple[slice, ...]], shape: Tuple[int, ...]
     ) -> float:
-        """
-        Calculates the ratio of the dirty volume to the total tensor volume,
-        correctly handling overlapping regions using coordinate compression.
-        """
         if not regions or not shape:
             return 0.0
 
-        # 1. Normalize and Validate Regions
         clean_regions = []
         for reg in regions:
             if len(reg) != len(shape):
@@ -78,7 +68,6 @@ class Executor:
                 start = s.start if s.start is not None else 0
                 stop = s.stop if s.stop is not None else shape[i]
 
-                # Clamp to shape bounds
                 start = max(0, start)
                 stop = min(shape[i], stop)
 
@@ -95,14 +84,11 @@ class Executor:
 
         total_vol = math.prod(shape)
 
-        # Optimization: If single region, no overlap possible
         if len(clean_regions) == 1:
             r = clean_regions[0]
             vol = math.prod(s.stop - s.start for s in r)
             return vol / total_vol
 
-        # 2. Coordinate Compression for N-Dimensional Overlap Handling
-        # Collect all unique boundaries per dimension
         dim = len(shape)
         dim_coords = [set() for _ in range(dim)]
 
@@ -111,20 +97,16 @@ class Executor:
                 dim_coords[d].add(s.start)
                 dim_coords[d].add(s.stop)
 
-        # Sort coordinates to establish the compressed grid
         sorted_coords = [sorted(list(s)) for s in dim_coords]
         grid_shape = tuple(len(c) - 1 for c in sorted_coords)
 
         if any(g <= 0 for g in grid_shape):
             return 0.0
 
-        # Map coordinate value to index in the compressed grid
         coord_to_idx = [{v: i for i, v in enumerate(c)} for c in sorted_coords]
 
-        # Create a boolean grid representing the compressed space
         occupied = np.zeros(grid_shape, dtype=bool)
 
-        # Map each region to the compressed grid and mark occupied cells
         for reg in clean_regions:
             grid_slices = []
             for d, s in enumerate(reg):
@@ -133,22 +115,12 @@ class Executor:
                 grid_slices.append(slice(s_idx, e_idx))
             occupied[tuple(grid_slices)] = True
 
-        # 3. Calculate Union Volume
-        # Find indices of all occupied cells in the compressed grid
         indices = np.argwhere(occupied)
         if indices.size == 0:
             return 0.0
 
-        # Calculate the size of each segment in each dimension
         intervals = [np.diff(c) for c in sorted_coords]
-
-        # Vectorized volume calculation:
-        # For every occupied cell (index), look up the segment lengths and multiply them.
-        # gathered_lengths[d] contains the lengths of the segments for that dimension
-        # corresponding to the occupied cells.
         gathered_lengths = [intervals[d][indices[:, d]] for d in range(dim)]
-
-        # Product of lengths across dimensions for each cell
         cell_volumes = np.prod(gathered_lengths, axis=0)
         dirty_vol = np.sum(cell_volumes)
 
@@ -166,9 +138,6 @@ class Executor:
         attrs: Dict[str, Any],
         is_inplace: bool,
     ):
-        """Record kernel launch details to a .jsonl file."""
-
-        # Create record
         record = {
             "timestamp": datetime.now().isoformat(),
             "node_name": node_name,
@@ -182,16 +151,12 @@ class Executor:
             "inplace": is_inplace,
         }
 
-        # Append to .jsonl file
         with open(self.kernel_launch_filename, "a") as f:
             f.write(json.dumps(record, cls=GraphEncoder) + "\n")
 
     def _update_inputs(
         self, inputs: Dict[str, Any]
     ) -> Dict[str, List[Tuple[slice, ...]]]:
-        """
-        Updates input buffers and returns the detected dirty regions (bounding boxes) for each input.
-        """
         input_diffs = {}
         for name, data in inputs.items():
             node = self.graph.nodes_map.get(name)
@@ -207,7 +172,6 @@ class Executor:
 
             old_data = self.last_inputs.get(name)
 
-            # Compute actual dirty regions
             dirty_region = DirtyPropagator.get_diff(old_data, data)
             node.dirty_region = dirty_region
             if dirty_region:
@@ -237,7 +201,7 @@ class Executor:
             if not node or not region_list:
                 continue
 
-            box = region_list[0]  # Bounding box
+            box = region_list[0]
             canonical_box = []
             shape = node.shape or ()
 
@@ -246,28 +210,21 @@ class Executor:
                 stop = sl.stop if sl.stop is not None else shape[d]
                 dim_len = shape[d]
 
-                # Start searching from the smallest possible power-of-2 length
                 target_len = self._next_power_of_2(stop - start)
 
                 found = False
                 while target_len <= self._next_power_of_2(dim_len):
-                    # Calculate the aligned start position for this zoom level
-                    # This aligns with 0, target_len, 2*target_len...
                     bucket_start = (start // target_len) * target_len
                     bucket_end = min(bucket_start + target_len, dim_len)
 
-                    # Check if the dirty region [start:stop] fits inside this aligned bucket
                     if bucket_start <= start and bucket_end >= stop:
                         canonical_box.append((bucket_start, bucket_end))
                         found = True
                         break
 
-                    # If it doesn't fit (e.g. spans across a tile boundary),
-                    # we must zoom out to the next power of 2.
                     target_len *= 2
 
                 if not found:
-                    # Fallback to full dimension if something went wrong
                     canonical_box.append((0, dim_len))
 
             key_items[name] = (tuple(canonical_box),)
@@ -280,23 +237,26 @@ class Executor:
     def run(self, inputs: Dict[str, Any]) -> Any:
         self.mem.step()
         with Timer("[Executor.run] update inputs"):
-            # Update inputs and get actual dirty diffs
             input_diffs = self._update_inputs(inputs)
 
         bucket = None
         if self.dirty_cache:
             with Timer("[Executor.run] cache lookup"):
                 bucket = self._find_best_bucket(input_diffs)
+        if bucket is None:
+            raise ValueError("[Executor.run] Could not find bucket")
 
-        cached_regions = bucket["regions"] if bucket else {}
-        cached_input_slices = bucket["input_slices"] if bucket else {}
+        cached_regions = bucket["regions"]
+        cached_input_slices = bucket["input_slices"]
+        # New cached data
+        cached_concrete_shapes = bucket["concrete_shapes"]
+        cached_kernels = bucket["kernels"]
 
         with Timer("[Executor.run] initializing"):
-            # Initial reference counts calculated during compilation
             static_refs = self.graph.ref_counts
 
             # --- Pass 1: Forward Propagation ---
-            node_states = {}  # name -> {'is_dirty': bool, 'in_cache': bool}
+            node_states = {}
 
             for inst in self.graph.instructions:
                 node = self.graph.nodes_map[inst.node_name]
@@ -305,7 +265,6 @@ class Executor:
                     continue
 
                 if bucket and node.name in cached_regions:
-                    # Use pre-computed regions directly (already tuples!)
                     node.dirty_region = cached_regions[node.name]
                 else:
                     raise ValueError("dirty region not cached")
@@ -314,11 +273,9 @@ class Executor:
                 node_states[node.name] = {
                     "is_dirty": is_dirty,
                     "in_cache": None,
-                }  # in_cache filled in Pass 2
+                }
 
-            # --- Pass 2: Backward Liveness Analysis + in_cache calculation ---
-            # Determine which nodes are actually "needed" to produce the root output.
-            # This allows us to "prune" nodes that don't contribute to the current result.
+            # --- Pass 2: Backward Liveness + in_cache ---
             needed_nodes = set()
 
             if self.graph.instructions:
@@ -333,14 +290,11 @@ class Executor:
                 state = node_states[name]
 
                 if name in needed_nodes:
-                    # Calculate in_cache on-demand when we know the node is needed
                     if state["in_cache"] is None:
                         node = self.graph.nodes_map[name]
                         dev_hint = node.backend.value if node.backend else "cpu"
                         state["in_cache"] = self.mem.has(name, dev_hint)
 
-                    # If a node is dirty or not in cache, we MUST compute it.
-                    # To compute it, we need all of its parents.
                     must_compute = state["is_dirty"] or not state["in_cache"]
 
                     if must_compute:
@@ -348,8 +302,6 @@ class Executor:
                             needed_nodes.add(p_name)
 
             # --- Pre-Pass: Lock Expected Cache Hits ---
-            # Ensure that nodes we plan to Skip (reuse from cache) are not evicted
-            # by intermediate allocations before we reach them.
             for inst in self.graph.instructions:
                 name = inst.node_name
                 if name not in needed_nodes:
@@ -360,7 +312,6 @@ class Executor:
                     continue
 
                 state = node_states[name]
-                # Use same condition as main loop for Skip path
                 if not state["is_dirty"] and state["in_cache"]:
                     self.mem.prepare_allocation(
                         node, node.size_bytes, initial_refs=static_refs[name]
@@ -404,7 +355,7 @@ class Executor:
 
             dev_hint = node.backend.value if node.backend else "cpu"
 
-            # Check for in-place signal from compiler
+            # In-place status for FULL compute (default)
             is_inplace = inst.inplace_input_index is not None
             compute_regions: List[Tuple[slice, ...]] = []
             pending_output_allocation = False
@@ -426,8 +377,6 @@ class Executor:
 
             elif not state["in_cache"]:
                 counters["full"] += 1
-                # DEFER ALLOCATION: We don't know if we can do in-place or need new allocation
-                # until we resolve the kernel (which depends on concrete input shapes).
                 pending_output_allocation = True
                 compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
 
@@ -437,94 +386,42 @@ class Executor:
 
             # Execute Kernel Dry Run
             if compute_regions:
-                # Get cached input slices if available
+                # Retrieve pre-cached data for this node
                 node_cached_input_slices = cached_input_slices.get(name)
+                node_cached_shapes = cached_concrete_shapes.get(name)
+                node_cached_kernels = cached_kernels.get(name)
 
                 for i, region_slice in enumerate(compute_regions):
                     is_full_region = all(s == slice(None) for s in region_slice)
                     input_slice_regions = []
 
-                    if is_full_region:
-                        input_slice_regions = [None] * len(inst.input_node_names)
-                    else:
-                        # Try to use cached input requirements for this box index
-                        # Pre-converted format: List[List[Tuple[slice...]]]
-                        if node_cached_input_slices and i < len(
-                            node_cached_input_slices
-                        ):
-                            cached_reqs = node_cached_input_slices[i]
-                            # Use directly - already pre-converted to Tuple[slice...]
-                            if cached_reqs:
-                                for req in cached_reqs:
-                                    if req:
-                                        # req is already Tuple[slice...] - use directly
-                                        input_slice_regions.append(req)
-                                    else:
-                                        input_slice_regions.append(None)
-                            else:
-                                # Fallback if cache structure mismatch
-                                query_region = [region_slice]
-                                reqs = DirtyPropagator.get_input_slices(
-                                    node, query_region, inputs
-                                )
-                                for req in reqs:
-                                    input_slice_regions.append(req[0] if req else None)
-                        else:
-                            raise ValueError("input slices not cached")
-
-                    concrete_shapes = []
-
-                    for inp_idx, p_name in enumerate(inst.input_node_names):
-                        p_node = self.graph.nodes_map[p_name]
-                        sl = input_slice_regions[inp_idx]
-
-                        if sl is None or node.op_type in (OpType.RESHAPE,):
-                            c_shape = p_node.shape or ()
-                        else:
-                            # Use broadcasted dummy to calculate shapes without memory allocation overhead
-                            dummy = np.broadcast_to(np.int8(0), p_node.shape or ())
-                            c_shape = dummy[sl].shape
-
-                        concrete_shapes.append(c_shape)
-
-                    # Kernel selection (Handle potential shape-specific kernels)
+                    # Initialize with defaults from instruction
                     selected_kernel = inst.kernel
                     current_inplace = is_inplace
+                    concrete_shapes = []
 
-                    if not is_full_region or (
-                        concrete_shapes and concrete_shapes[0] != node.shape
-                    ):
-                        cache_key = (name, tuple(concrete_shapes))
-                        if cache_key in self._kernel_cache:
-                            selected_kernel, current_inplace = self._kernel_cache[
-                                cache_key
-                            ]
-                        else:
-                            input_sigs = []
-                            for idx, shape in enumerate(concrete_shapes):
-                                p_node = self.graph.nodes_map[
-                                    inst.input_node_names[idx]
-                                ]
-                                sig = TensorSignature(p_node.dtype, shape, node.backend)
-                                input_sigs.append(sig)
+                    if is_full_region:
+                        input_slice_regions = [None] * len(inst.input_node_names)
+                        # Concrete shapes are just the full node shapes
+                        concrete_shapes = [
+                            self.graph.nodes_map[pn].shape
+                            for pn in inst.input_node_names
+                        ]
+                    else:
+                        # PARTIAL COMPUTE PATH
+                        # 1. Get Input Slices
+                        input_slice_regions = node_cached_input_slices[i]
 
-                            better_kernel = KernelRegistry.select_best_kernel(
-                                node.op_type,
-                                input_sigs,
-                                node.backend,
-                                node.dtype,
-                                inst.inplace_input_index is not None,
-                            )
-                            if better_kernel:
-                                selected_kernel, current_inplace = better_kernel
-                                counters["kernel_switch"] += 1
-                            self._kernel_cache[cache_key] = (
-                                selected_kernel,
-                                current_inplace,
-                            )
+                        # 2. Get Concrete Shapes and Kernel
+                        concrete_shapes = node_cached_shapes[i]
+
+                        # 3. Select Kernel
+                        # Use pre-cached kernel if available
+                        selected_kernel = node_cached_kernels[i]
+                        # We assume the inplace constraint was handled during compilation
+                        current_inplace = is_inplace
 
                     # LATE BINDING MEMORY ALLOCATION
-                    # Now that we know the exact kernel and if it supports in-place
                     if pending_output_allocation:
                         if current_inplace:
                             plan["mem_action"] = "transfer"
@@ -576,7 +473,6 @@ class Executor:
                     continue
 
                 if not plan["tasks"]:
-                    # No compute tasks (skip mode)
                     if plan["mem_action"] == "prepare":
                         self.mem.prepare_allocation(
                             node,
@@ -592,7 +488,7 @@ class Executor:
                         selected_kernel = task["selected_kernel"]
                         concrete_shapes = task["concrete_shapes"]
 
-                        # get computed input views FIRST before any buffer renaming
+                        # get computed input views (must happen before transfer_ownership)
                         kernel_inputs = []
                         for inp_idx, p_name in enumerate(inst.input_node_names):
                             p_node = self.graph.nodes_map[p_name]
@@ -606,7 +502,7 @@ class Executor:
 
                             kernel_inputs.append(view)
 
-                        # perform allocation/transfer now that input memory views are secured
+                        # perform allocation/transfer
                         if pending_mem_action:
                             if pending_mem_action == "transfer":
                                 self.mem.transfer_ownership(plan["transfer_src"], name)

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Dict, Callable, Any, Optional
 from ..ir.node import TensorNode
 from ..ir.dtypes import Backend
@@ -34,6 +34,18 @@ class CompiledGraph:
     # Liveness: Map node_name -> number of consumers
     ref_counts: Dict[str, int]
     nodes_map: Dict[str, TensorNode]
+    # Cache for instruction lookup
+    _instructions_map: Dict[str, OpInstruction] = field(
+        default_factory=dict, repr=False
+    )
+
+    def __post_init__(self):
+        if not self._instructions_map:
+            for instr in self.instructions:
+                self._instructions_map[instr.node_name] = instr
+
+    def get_instruction(self, node_name: str) -> Optional[OpInstruction]:
+        return self._instructions_map.get(node_name)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize compiled graph to a dictionary for caching."""
