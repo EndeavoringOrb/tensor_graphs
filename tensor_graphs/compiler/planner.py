@@ -312,9 +312,13 @@ class Planner:
                     0
                 ][1]
 
+                # TODO: do this better somehow, this feels finicky
                 dummy_inputs = []
                 for i, sig in enumerate(signatures):
-                    shape = sig.shape if sig.shape else (2, 2, 2, 2)
+                    if sig.shape is None:
+                        shape = (1, 32)
+                    else:
+                        shape = (d if d is not None else 32 for d in sig.shape)
                     dummy = TensorNode(
                         OpType.INPUT, sig.dtype, [], shape, name=f"dummy_{i}"
                     )
@@ -333,12 +337,12 @@ class Planner:
                 )
 
         # --- 2. MATCH IN MAIN GRAPH ---
-        for node in reversed(
-            tqdm(
-                atomic_nodes_topo,
-                disable=not DEBUG_EXECUTION,
-                desc="matching fused patterns",
-            )
+        n_fused = 0
+        for node in tqdm(
+            reversed(atomic_nodes_topo),
+            disable=not DEBUG_EXECUTION,
+            desc="matching fused patterns",
+            total=len(atomic_nodes_topo),
         ):
             node_hash = get_structural_hash(node, memo=self.hash_memo)
 
@@ -371,6 +375,9 @@ class Planner:
                         self.fusion_map.setdefault(node_hash, []).append(
                             fused_candidate
                         )
+                        n_fused += 1
+        if DEBUG_EXECUTION:
+            print(f"# Fused operation matches: {n_fused}")
 
     def _get_augmented_topological_sort(
         self, nodes: List[TensorNode]

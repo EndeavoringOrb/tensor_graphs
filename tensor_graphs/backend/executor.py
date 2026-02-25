@@ -85,8 +85,8 @@ class Executor:
 
         for reg in clean_regions:
             for d, s in enumerate(reg):
-                dim_coords[d].add(s.start)
-                dim_coords[d].add(s.stop)
+                dim_coords[d].add(s[0])
+                dim_coords[d].add(s[1])
 
         sorted_coords = [sorted(list(s)) for s in dim_coords]
         grid_shape = tuple(len(c) - 1 for c in sorted_coords)
@@ -101,8 +101,8 @@ class Executor:
         for reg in clean_regions:
             grid_slices = []
             for d, s in enumerate(reg):
-                s_idx = coord_to_idx[d][s.start]
-                e_idx = coord_to_idx[d][s.stop]
+                s_idx = coord_to_idx[d][s[0]]
+                e_idx = coord_to_idx[d][s[1]]
                 grid_slices.append(slice(s_idx, e_idx))
             occupied[tuple(grid_slices)] = True
 
