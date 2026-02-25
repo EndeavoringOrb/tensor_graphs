@@ -377,7 +377,14 @@ class Executor:
 
             elif not state["in_cache"]:
                 counters["full"] += 1
-                pending_output_allocation = True
+                if is_inplace:
+                    plan["mem_action"] = "transfer"
+                    plan["transfer_src"] = inst.input_node_names[
+                        inst.inplace_input_index
+                    ]
+                    counters["inplace"] += 1
+                else:
+                    plan["mem_action"] = "prepare"
                 compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
 
             else:  # clean and in cache
@@ -420,24 +427,6 @@ class Executor:
                         selected_kernel = node_cached_kernels[i]
                         # We assume the inplace constraint was handled during compilation
                         current_inplace = is_inplace
-
-                    # LATE BINDING MEMORY ALLOCATION
-                    if pending_output_allocation:
-                        if current_inplace:
-                            plan["mem_action"] = "transfer"
-                            plan["transfer_src"] = inst.input_node_names[
-                                inst.inplace_input_index
-                            ]
-                        else:
-                            plan["mem_action"] = "prepare"
-
-                        if not state["is_dirty"]:
-                            node.dirty_region = None
-
-                        pending_output_allocation = False
-
-                    if current_inplace:
-                        counters["inplace"] += 1
 
                     plan["tasks"].append(
                         {
