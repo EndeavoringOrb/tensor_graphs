@@ -28,7 +28,7 @@ class TensorNode:
 
     # Runtime flags (Reset by Session/Executor usually, but stored here for graph connectivity)
     # dirty_region: None means CLEAN.
-    dirty_region: Optional[Tuple[slice, ...]] = None
+    dirty_region: Optional[List[Tuple[Tuple[int, int], ...]]] = None
 
     # Statistics for Cache Eviction (AUTO policy)
     execution_count: int = 0

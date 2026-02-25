@@ -52,7 +52,7 @@ class Executor:
         self.kernel_launch_filename = os.path.join(output_dir, f"{run_num}.jsonl")
 
     def _calculate_dirty_ratio(
-        self, regions: List[Tuple[slice, ...]], shape: Tuple[int, ...]
+        self, regions: List[Tuple[Tuple[int, int], ...]], shape: Tuple[int, ...]
     ) -> float:
         if not regions or not shape:
             return 0.0
@@ -64,17 +64,14 @@ class Executor:
 
             norm_slices = []
             valid = True
-            for i, s in enumerate(reg):
-                start = s.start if s.start is not None else 0
-                stop = s.stop if s.stop is not None else shape[i]
-
+            for i, (start, stop) in enumerate(reg):
                 start = max(0, start)
                 stop = min(shape[i], stop)
 
                 if start >= stop:
                     valid = False
                     break
-                norm_slices.append(slice(start, stop))
+                norm_slices.append((start, stop))
 
             if valid:
                 clean_regions.append(tuple(norm_slices))
@@ -86,8 +83,8 @@ class Executor:
 
         if len(clean_regions) == 1:
             r = clean_regions[0]
-            vol = math.prod(s.stop - s.start for s in r)
-            return vol / total_vol
+            vol = math.prod(stop - start for start, stop in r)
+            return float(vol / total_vol)
 
         dim = len(shape)
         dim_coords = [set() for _ in range(dim)]
@@ -156,7 +153,7 @@ class Executor:
 
     def _update_inputs(
         self, inputs: Dict[str, Any]
-    ) -> Dict[str, List[Tuple[slice, ...]]]:
+    ) -> Dict[str, List[Tuple[Tuple[int, int], ...]]]:
         input_diffs = {}
         for name, data in inputs.items():
             node = self.graph.nodes_map.get(name)
@@ -191,7 +188,9 @@ class Executor:
     def _next_power_of_2(self, x):
         return 1 if x == 0 else 2 ** (x - 1).bit_length()
 
-    def _find_best_bucket(self, input_diffs: Dict[str, List[Tuple[slice, ...]]]):
+    def _find_best_bucket(
+        self, input_diffs: Dict[str, List[Tuple[Tuple[int, int], ...]]]
+    ):
         if not input_diffs:
             return None, None
 
@@ -205,9 +204,7 @@ class Executor:
             canonical_box = []
             shape = node.shape or ()
 
-            for d, sl in enumerate(box):
-                start = sl.start if sl.start is not None else 0
-                stop = sl.stop if sl.stop is not None else shape[d]
+            for d, (start, stop) in enumerate(box):
                 dim_len = shape[d]
 
                 target_len = self._next_power_of_2(stop - start)
@@ -221,7 +218,6 @@ class Executor:
                         canonical_box.append((bucket_start, bucket_end))
                         found = True
                         break
-
                     target_len *= 2
 
                 if not found:
@@ -248,8 +244,6 @@ class Executor:
 
         cached_regions = bucket["regions"]
         cached_input_slices = bucket["input_slices"]
-        # New cached data
-        cached_concrete_shapes = bucket["concrete_shapes"]
         cached_kernels = bucket["kernels"]
 
         with Timer("[Executor.run] initializing"):
@@ -357,7 +351,7 @@ class Executor:
 
             # In-place status for FULL compute (default)
             is_inplace = inst.inplace_input_index is not None
-            compute_regions: List[Tuple[slice, ...]] = []
+            compute_regions = []
 
             # Determine Computation Mode
             if state["is_dirty"] and state["in_cache"]:
@@ -370,7 +364,9 @@ class Executor:
                     )
                     partial_ratio_sum += partial_ratio
                 compute_regions = [
-                    r for r in node.dirty_region if any(s.stop > s.start for s in r)
+                    r
+                    for r in node.dirty_region
+                    if any(stop > start for start, stop in r)
                 ]
                 plan["mem_action"] = "prepare"
 
@@ -384,7 +380,7 @@ class Executor:
                     counters["inplace"] += 1
                 else:
                     plan["mem_action"] = "prepare"
-                compute_regions = [tuple(slice(None) for _ in (node.shape or ()))]
+                compute_regions = [tuple((0, dim) for dim in (node.shape or ()))]
 
             else:  # clean and in cache
                 counters["skip"] += 1
@@ -394,34 +390,27 @@ class Executor:
             if compute_regions:
                 # Retrieve pre-cached data for this node
                 node_cached_input_slices = cached_input_slices.get(name)
-                node_cached_shapes = cached_concrete_shapes.get(name)
                 node_cached_kernels = cached_kernels.get(name)
 
                 for i, region_slice in enumerate(compute_regions):
-                    is_full_region = all(s == slice(None) for s in region_slice)
+                    is_full_region = all(
+                        start == 0 and stop == dim
+                        for (start, stop), dim in zip(region_slice, node.shape or ())
+                    )
                     input_slice_regions = []
 
                     # Initialize with defaults from instruction
                     selected_kernel = inst.kernel
                     current_inplace = is_inplace
-                    concrete_shapes = []
 
                     if is_full_region:
                         input_slice_regions = [None] * len(inst.input_node_names)
-                        # Concrete shapes are just the full node shapes
-                        concrete_shapes = [
-                            self.graph.nodes_map[pn].shape
-                            for pn in inst.input_node_names
-                        ]
                     else:
                         # PARTIAL COMPUTE PATH
                         # 1. Get Input Slices
                         input_slice_regions = node_cached_input_slices[i]
 
-                        # 2. Get Concrete Shapes and Kernel
-                        concrete_shapes = node_cached_shapes[i]
-
-                        # 3. Select Kernel
+                        # 2. Select Kernel
                         # Use pre-cached kernel if available
                         selected_kernel = node_cached_kernels[i]
                         # We assume the inplace constraint was handled during compilation
@@ -432,7 +421,6 @@ class Executor:
                             "region_slice": region_slice,
                             "is_full_region": is_full_region,
                             "input_slice_regions": input_slice_regions,
-                            "concrete_shapes": concrete_shapes,
                             "selected_kernel": selected_kernel,
                             "current_inplace": current_inplace,
                             "backend": dev_hint,
@@ -474,19 +462,20 @@ class Executor:
                         region_slice = task["region_slice"]
                         input_slice_regions = task["input_slice_regions"]
                         selected_kernel = task["selected_kernel"]
-                        concrete_shapes = task["concrete_shapes"]
 
                         # get computed input views (must happen before transfer_ownership)
                         kernel_inputs = []
                         for inp_idx, p_name in enumerate(inst.input_node_names):
                             p_node = self.graph.nodes_map[p_name]
                             full_view = self.mem.get_view(p_node)
-                            sl = input_slice_regions[inp_idx]
+                            sl_list = input_slice_regions[inp_idx]
 
-                            if sl is None or node.op_type in (OpType.RESHAPE,):
+                            if sl_list is None or node.op_type in (OpType.RESHAPE,):
                                 view = full_view
                             else:
-                                view = full_view[sl]
+                                sl = sl_list[0]
+                                view_slices = tuple(slice(s, e) for s, e in sl)
+                                view = full_view[view_slices]
 
                             kernel_inputs.append(view)
 
@@ -504,11 +493,13 @@ class Executor:
 
                         # get output view
                         out_view = self.mem.get_view(node)
-                        out_slice = (
-                            out_view
-                            if node.op_type in (OpType.RESHAPE,)
-                            else out_view[region_slice]
-                        )
+                        if node.op_type in (OpType.RESHAPE,):
+                            out_slice = out_view
+                        else:
+                            out_view_slices = tuple(
+                                slice(s, e) for s, e in region_slice
+                            )
+                            out_slice = out_view[out_view_slices]
 
                         # run kernel
                         start_time = time.perf_counter()
@@ -519,7 +510,7 @@ class Executor:
                             self._record_kernel_launch(
                                 node_name=name,
                                 op_type=node.op_type,
-                                input_shapes=concrete_shapes,
+                                input_shapes=[inp.shape for inp in kernel_inputs],
                                 output_shape=node.shape or (0,),
                                 compute_time_ms=node.compute_cost,
                                 is_partial=not task["is_full_region"],

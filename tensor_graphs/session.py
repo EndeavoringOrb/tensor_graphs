@@ -10,7 +10,7 @@ from .config import DEBUG_EXECUTION
 from .ir.dtypes import Backend, TensorSignature
 from .weights import SafetensorsSource, WeightSource
 from .compiler.dirty_propagation import DirtyPropagator
-from .compiler.propagation import _from_slices, _to_slices, GraphPropagator
+from .compiler.propagation import GraphPropagator
 from .backend.registry import KernelRegistry
 import os
 import json
@@ -74,8 +74,7 @@ class GraphSession:
                     if reg_data:
                         converted = []
                         for box in reg_data:
-                            slices = tuple(slice(s, e) for s, e in box)
-                            converted.append(slices)
+                            converted.append(tuple(tuple(dim) for dim in box))
                         precomputed_regions[node_name] = converted
                     else:
                         precomputed_regions[node_name] = reg_data
@@ -89,8 +88,9 @@ class GraphSession:
                             box_converted = []
                             for req in box_reqs:
                                 if req is not None:
-                                    req_slices = tuple(slice(s, e) for s, e in req[0])
-                                    box_converted.append(req_slices)
+                                    box_converted.append(
+                                        [tuple(tuple(d) for d in box) for box in req]
+                                    )
                                 else:
                                     box_converted.append(req)
                             converted.append(box_converted)
@@ -181,6 +181,8 @@ class GraphSession:
             allow_inplace = instr.inplace_input_index is not None
 
             kernels_for_node = []
+            if shape_options is None:
+                shape_options = [[pn.shape for pn in node.parents]]
             for concrete_shape_tuple in shape_options:
                 # concrete_shape_tuple is a list of shapes (one per input), serialized as lists
                 # Convert back to tuples
@@ -209,6 +211,8 @@ class GraphSession:
                     # Fallback to full kernel if specific partial kernel not found
                     kernels_for_node.append(instr.kernel)
 
+            if isinstance(kernels_for_node[0], list):
+                print("uhoh")
             entry["kernels"][node_name] = kernels_for_node
 
     def _ensure_cache_coverage(
@@ -273,10 +277,10 @@ class GraphSession:
 
             missing_count += 1
 
-            # Set inputs
+            # Set inputs (directly assign lists of tuples)
             for name, region_tuple in key_map.items():
                 node = next(n for n in input_nodes if n.name == name)
-                node.dirty_region = _to_slices(region_tuple)
+                node.dirty_region = list(region_tuple)
 
             # Reset others
             for node in topo_nodes:
@@ -284,78 +288,70 @@ class GraphSession:
                     node.dirty_region = None
 
             # Propagate Forward
-            node_regions_map = {}
-            node_input_slices_map = {}
-            node_concrete_shapes_map = {}  # New: Stores concrete shapes for partial kernels
-            node_kernels_map = {}  # New: Stores selected partial kernels
+            node_regions_live = {}  # For in-memory (slices)
+            node_regions_ser = {}  # For disk (tuples)
+            node_input_slices_live = {}
+            node_input_slices_ser = {}
+            node_concrete_shapes_map = {}
+            node_kernels_map = {}
 
             for node in topo_nodes:
                 if node.op_type != OpType.INPUT:
                     node.dirty_region = DirtyPropagator.propagate(node)
 
-                # Serialize region
                 if node.dirty_region:
+                    # 1. Store Live Slices
+                    node_regions_live[node.name] = node.dirty_region
+
+                    # 2. Prepare Serialized Tuples for Disk
                     ser_region = []
                     for box in node.dirty_region:
-                        ser_box = []
-                        for s in box:
-                            ser_box.append((s.start, s.stop))
-                        ser_region.append(ser_box)
-                    node_regions_map[node.name] = ser_region
+                        ser_region.append(list(box))
+                    node_regions_ser[node.name] = ser_region
 
                     if node.op_type in (OpType.INPUT, OpType.CONSTANT):
                         continue
 
-                    # Compute Backward Input Slices
-                    input_slices_per_box = []
-                    concrete_shapes_per_box = []  # New
-                    partial_kernels_per_box = []  # New
+                    input_slices_live = []
+                    input_slices_ser = []
+                    concrete_shapes_per_box = []
+                    partial_kernels_per_box = []
 
                     instr = compiled_graph.get_instruction(node.name)
                     allow_inplace = (
                         instr.inplace_input_index is not None if instr else False
                     )
 
-                    for box in node.dirty_region:
-                        reqs = DirtyPropagator.get_input_slices(node, [box])
+                    for box_slice in node.dirty_region:
+                        reqs = DirtyPropagator.get_input_slices(node, [box_slice])
 
-                        # Serialize requirements
+                        # Store live slices for execution
+                        input_slices_live.append(reqs)
+
+                        # Prepare serialized requirements for disk
                         ser_reqs = []
                         box_concrete_shapes = []
-                        box_kernels = []
 
                         for req_idx, req in enumerate(reqs):
                             if req:
-                                ser_req = []
-                                for r_box in req:
-                                    ser_req.append(list(r_box))
-                                ser_reqs.append(
-                                    _from_slices(ser_req, node.parents[req_idx].shape)
-                                )
+                                ser_reqs.append(req)
 
-                                # --- NEW: Calculate Concrete Shape ---
-                                # req is List[Tuple[slice...]]
-                                p_node = node.parents[req_idx]
-                                p_shape = p_node.shape or ()
-                                # Use first box in req (usually one box in this logic)
-                                sl = req[0]
-                                # Calculate shape from slice
-                                if sl:
-                                    c_shape = []
-                                    for s, dim in zip(sl, p_shape):
-                                        start, stop, _ = s.indices(dim)
-                                        c_shape.append(stop - start)
-                                    box_concrete_shapes.append(tuple(c_shape))
-                                else:
-                                    box_concrete_shapes.append(p_shape)
+                                # Calculate Concrete Shape for kernel selection
+                                sl = req[
+                                    0
+                                ]  # Just take the first bounding box constraint
+                                p_shape = node.parents[req_idx].shape or ()
+                                c_shape = []
+                                for (start, stop), dim in zip(sl, p_shape):
+                                    c_shape.append(stop - start)
+                                box_concrete_shapes.append(tuple(c_shape))
                             else:
                                 ser_reqs.append(None)
-                                # Full shape if no slice
                                 box_concrete_shapes.append(
                                     node.parents[req_idx].shape or ()
                                 )
 
-                        input_slices_per_box.append(ser_reqs)
+                        input_slices_ser.append(ser_reqs)
                         concrete_shapes_per_box.append(box_concrete_shapes)
 
                         # --- NEW: Select Partial Kernel ---
@@ -375,52 +371,39 @@ class GraphSession:
                             )
 
                             if kernel_result:
-                                # Verify constraint
-                                _, kernel_is_inplace = kernel_result
-                                if allow_inplace != kernel_is_inplace:
-                                    # Constraint violation: Fallback or raise error
-                                    # For safety, we fallback to standard kernel instruction
-                                    # Ideally, this shouldn't happen if registry is consistent
-                                    box_kernels.append(instr.kernel)
-                                else:
-                                    box_kernels.append(kernel_result[0])
+                                partial_kernels_per_box.append(kernel_result[0])
                             else:
                                 # Fallback to full kernel
-                                box_kernels.append(instr.kernel)
+                                partial_kernels_per_box.append(instr.kernel)
 
-                        partial_kernels_per_box.append(box_kernels)
-
-                    node_input_slices_map[node.name] = input_slices_per_box
+                    node_input_slices_live[node.name] = input_slices_live
+                    node_input_slices_ser[node.name] = input_slices_ser
                     node_concrete_shapes_map[node.name] = concrete_shapes_per_box
                     node_kernels_map[node.name] = partial_kernels_per_box
                 else:
-                    node_regions_map[node.name] = None
-                    node_input_slices_map[node.name] = None
+                    node_regions_live[node.name] = None
+                    node_regions_ser[node.name] = None
+                    node_input_slices_live[node.name] = None
+                    node_input_slices_ser[node.name] = None
                     node_concrete_shapes_map[node.name] = None
                     node_kernels_map[node.name] = None
 
-            # 4. Save
-            entry = {
-                "regions": node_regions_map,
-                "input_slices": node_input_slices_map,
-                "concrete_shapes": node_concrete_shapes_map,  # Save shapes
-                "kernels": node_kernels_map,  # In-memory kernels
+            # 4. Save Live version to in-memory cache
+            self.dirty_cache[key] = {
+                "regions": node_regions_live,
+                "input_slices": node_input_slices_live,
+                "concrete_shapes": node_concrete_shapes_map,
+                "kernels": node_kernels_map,
             }
 
-            self.dirty_cache[key] = entry
-
-            # Save to disk (kernels are not serialized, will be resolved on load)
-            # We need to convert tuples in concrete_shapes to lists for JSON
-            ser_shapes = {}
-            for n, shapes in node_concrete_shapes_map.items():
-                if shapes:
-                    ser_shapes[n] = [list(s) for s in shapes]
-
+            # 5. Save Serialized version to Disk
+            ser_shapes = {
+                n: [list(s) for s in shapes] if shapes else None
+                for n, shapes in node_concrete_shapes_map.items()
+            }
             self._save_cache_entry(
-                key, node_regions_map, node_input_slices_map, ser_shapes
+                key, node_regions_ser, node_input_slices_ser, ser_shapes
             )
-
-        # self._load_cache()  # Reload to ensure structure consistency (optional optimization: just update memory)
 
         # Clean up graph state
         for node in topo_nodes:

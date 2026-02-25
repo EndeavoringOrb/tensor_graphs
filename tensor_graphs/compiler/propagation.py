@@ -53,12 +53,10 @@ class PropagationHandler(NamedTuple):
 
 
 def _is_clean(region: NumericRegion) -> bool:
-    if region is None:
+    if region is None or not region:
         return True
-    if not region:  # Empty list
-        return True
-    # Check if all boxes are empty or invalid
     for box in region:
+        # A box is dirty if any dimension has a non-zero range
         if any(start < stop for start, stop in box):
             return False
     return True
@@ -98,36 +96,6 @@ def _merge_regions(
         return [tuple((mins[i], maxs[i]) for i in range(rank))]
 
     return merged_list
-
-
-def _to_slices(region: NumericRegion) -> Optional[List[Tuple[slice, ...]]]:
-    if _is_clean(region):
-        return None
-
-    slices_list = []
-    for box in region:
-        # Skip empty boxes
-        if any(start >= stop for start, stop in box):
-            continue
-        slices_list.append(tuple(slice(start, stop) for start, stop in box))
-
-    return slices_list if slices_list else None
-
-
-def _from_slices(
-    slices: Optional[List[Tuple[slice, ...]]], shape: Tuple[int, ...]
-) -> NumericRegion:
-    if slices is None:
-        return None
-    result = []
-    for sl_tuple in slices:
-        box = []
-        for i, s in enumerate(sl_tuple):
-            dim = shape[i] if i < len(shape) else 1
-            start, stop, _ = s.indices(dim)
-            box.append((start, stop))
-        result.append(tuple(box))
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -385,11 +353,9 @@ class GraphPropagator:
         known_values: Optional[dict] = None,
     ) -> NumericRegion:
         if not node.parents:
-            return _from_slices(node.dirty_region, node.shape or ())
+            return node.dirty_region  # Direct assignment now
 
-        input_regions = [
-            _from_slices(p.dirty_region, p.shape or ()) for p in node.parents
-        ]
+        input_regions = [p.dirty_region for p in node.parents]
         input_shapes = [p.shape or () for p in node.parents]
         output_shape = node.shape or ()
 
