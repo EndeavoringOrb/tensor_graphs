@@ -1,10 +1,7 @@
-- [ ] Clean-up/unify DirtyRegion vs NumericRegion vs tuple vs slice vs list
 - [ ] in GraphSession._ensure_cache_coverage make all_permutations iterate in order from largest slices to smallest slices. and allow user to stop compilation early to decrease startup time at the cost of speed
 - [ ] Improve handling of multiple non-contiguous regions (like DOT output)
 - [ ] Add general fusion during planning based on decomposition functions
-- [ ] Offline bucket graph compilation
-- [ ] Add in-place kernels
-- [ ] Add explicitly view-only (reshape) operations
+- [ ] Add better handling for view-only (reshape) operations (right now we just `pass` in the kernel)
 - [ ] Make it so multiple graphs can share memory so we don't have max_bytes * 3 (examples/flux-klein-4b.py: vae, qwen3, flux transformer) memory
 - [ ] add cuda kernels to make gemma-3-270m go fast on gpu
 - [ ] Graph parallel execution

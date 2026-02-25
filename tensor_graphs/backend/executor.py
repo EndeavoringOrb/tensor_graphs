@@ -327,7 +327,9 @@ class Executor:
                     counters["part"] += 1
                     if DEBUG_EXECUTION:
                         partial_ratio = (
-                            self._calculate_dirty_ratio(cached_regions[name], node.shape)
+                            self._calculate_dirty_ratio(
+                                cached_regions[name], node.shape
+                            )
                             if cached_regions[name] and node.shape
                             else 1.0
                         )
@@ -355,7 +357,7 @@ class Executor:
                     counters["skip"] += 1
                     plan["mem_action"] = "prepare"
 
-                # Lock Cache Hits
+                # Lock Clean Cache Hits
                 if not state["is_dirty"] and state["in_cache"]:
                     self.mem.prepare_allocation(
                         node, node.size_bytes, initial_refs=static_refs[name]
@@ -370,13 +372,14 @@ class Executor:
                     for i, region_slice in enumerate(compute_regions):
                         is_full_region = all(
                             start == 0 and stop == dim
-                            for (start, stop), dim in zip(region_slice, node.shape or ())
+                            for (start, stop), dim in zip(
+                                region_slice, node.shape or ()
+                            )
                         )
                         input_slice_regions = []
 
                         # Initialize with defaults from instruction
                         selected_kernel = inst.kernel
-                        current_inplace = is_inplace
 
                         if is_full_region:
                             input_slice_regions = [None] * len(inst.input_node_names)
@@ -388,8 +391,6 @@ class Executor:
                             # 2. Select Kernel
                             # Use pre-cached kernel if available
                             selected_kernel = node_cached_kernels[i]
-                            # We assume the inplace constraint was handled during compilation
-                            current_inplace = is_inplace
 
                         plan["tasks"].append(
                             {
@@ -397,7 +398,7 @@ class Executor:
                                 "is_full_region": is_full_region,
                                 "input_slice_regions": input_slice_regions,
                                 "selected_kernel": selected_kernel,
-                                "current_inplace": current_inplace,
+                                "current_inplace": is_inplace,
                                 "backend": dev_hint,
                             }
                         )
