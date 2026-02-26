@@ -9,7 +9,7 @@ RECORD_KERNEL_LAUNCHES = False
 RECORD_KERNEL_LAUNCHES_FOLDER = "kernel_launches"
 
 # Planner Configuration
-PLANNER_BEAM_WIDTH = 3  # Number of top strategies to keep per node
+PLANNER_BEAM_WIDTH = 10  # Number of top strategies to keep per node
 
 import os
 

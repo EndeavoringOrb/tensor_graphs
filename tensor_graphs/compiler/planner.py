@@ -21,6 +21,14 @@ from ..ir.buffer import StorageType
 from ..ir.rewrite import (
     CommutativeRule,
     DistributiveRule,
+    FactoringRule,
+    AssociativeRule,
+    DoubleNegationRule,
+    NegateAddRule,
+    DivMulRule,
+    DivAddRule,
+    ExpAddRule,
+    ExpAddReverseRule,
     generate_all_equivalents,
     match_pattern,
 )
@@ -278,7 +286,18 @@ class Planner:
         return atomic_root
 
     def _populate_fusion_map_generalized(self, atomic_nodes_topo: List[TensorNode]):
-        rules = [CommutativeRule(), DistributiveRule()]
+        rules = [
+            CommutativeRule(),
+            DistributiveRule(),
+            FactoringRule(),
+            AssociativeRule(),
+            DoubleNegationRule(),
+            NegateAddRule(),
+            DivMulRule(),
+            DivAddRule(),
+            ExpAddRule(),
+            ExpAddReverseRule(),
+        ]
 
         class DummyAttrs(dict):
             def __missing__(self, key):
