@@ -19,6 +19,16 @@ from ..config import DEBUG_EXECUTION, PLANNER_BEAM_WIDTH
 from .compiled_graph import CompiledGraph, OpInstruction
 from ..ir.buffer import StorageType
 from ..ir.rewrite import (
+    CommutativeRule,
+    DistributiveRule,
+    FactoringRule,
+    AssociativeRule,
+    DoubleNegationRule,
+    NegateAddRule,
+    DivMulRule,
+    DivAddRule,
+    ExpAddRule,
+    ExpAddReverseRule,
     generate_all_equivalents,
     match_pattern,
 )
@@ -284,16 +294,16 @@ class Planner:
 
     def _populate_fusion_map_generalized(self, atomic_nodes_topo: List[TensorNode]):
         rules = [
-            # CommutativeRule(),
-            # DistributiveRule(),
-            # FactoringRule(),
-            # AssociativeRule(),
-            # DoubleNegationRule(),
-            # NegateAddRule(),
-            # DivMulRule(),
-            # DivAddRule(),
-            # ExpAddRule(),
-            # ExpAddReverseRule(),
+            CommutativeRule(),
+            DistributiveRule(),
+            FactoringRule(),
+            AssociativeRule(),
+            DoubleNegationRule(),
+            NegateAddRule(),
+            DivMulRule(),
+            DivAddRule(),
+            ExpAddRule(),
+            ExpAddReverseRule(),
         ]
 
         class DummyAttrs(dict):
