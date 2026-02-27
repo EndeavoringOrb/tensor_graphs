@@ -1,4 +1,3 @@
-- [ ] Add constant folding to planner. In order to do this, also need to make planner memory-aware. Like if folding a constant saves N seconds of computation, but that plan goes over the memory limit (maybe we folded 1 constant weight into 3 permutations) then we don't want to use that constant folding.
 - [ ] in GraphSession._ensure_cache_coverage make all_permutations iterate in order from largest slices to smallest slices. and allow user to stop compilation early to decrease startup time at the cost of speed
 - [ ] Improve handling of multiple non-contiguous regions (like DOT output)
 - [ ] Add general fusion during planning based on decomposition functions

@@ -47,8 +47,10 @@ class CompiledGraph:
     def get_instruction(self, node_name: str) -> Optional[OpInstruction]:
         return self._instructions_map.get(node_name)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, tensor_store: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Serialize compiled graph to a dictionary for caching."""
+        import numpy as np
+
         # Serialize instructions (kernel metadata only, not the callable)
         serialized_instructions = []
         for instr in self.instructions:
@@ -61,12 +63,22 @@ class CompiledGraph:
                     backend_str = node.backend.value if node.backend else None
                     break
 
+            attrs_copy = {}
+            for k, v in instr.attrs.items():
+                if isinstance(v, np.ndarray) and v.size > 128:
+                    tensor_name = f"tensor_{instr.node_name}_{k}"
+                    if tensor_store is not None:
+                        tensor_store[tensor_name] = v
+                    attrs_copy[k] = {"__tensor_name__": tensor_name}
+                else:
+                    attrs_copy[k] = v
+
             serialized_instr = SerializedInstruction(
                 node_name=instr.node_name,
                 op_type=op_type or "UNKNOWN",
                 backend=backend_str or Backend.CPU_NUMPY.value,
                 input_node_names=instr.input_node_names,
-                attrs=instr.attrs,
+                attrs=attrs_copy,
                 inplace_input_index=instr.inplace_input_index,
             )
             serialized_instructions.append(serialized_instr)
@@ -84,16 +96,18 @@ class CompiledGraph:
                 for si in serialized_instructions
             ],
             "ref_counts": self.ref_counts,
-            "nodes_json": graph_to_json(self.root),
+            "nodes_json": graph_to_json(self.root, tensor_store),
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "CompiledGraph":
+    def from_dict(
+        cls, data: Dict[str, Any], tensor_store: Optional[Dict[str, Any]] = None
+    ) -> "CompiledGraph":
         """Reconstruct compiled graph from a dictionary."""
         from ..ir.graph import graph_from_json
 
         # Reconstruct nodes from JSON
-        root = graph_from_json(data["nodes_json"])
+        root = graph_from_json(data["nodes_json"], tensor_store)
         nodes_map = {}
         all_nodes = []
         from ..ir.graph import topological_sort
@@ -109,7 +123,18 @@ class CompiledGraph:
             op_type = instr_data["op_type"]
             backend = Backend(instr_data["backend"])
             input_node_names = instr_data["input_node_names"]
-            attrs = instr_data["attrs"]
+
+            attrs = {}
+            for k, v in instr_data["attrs"].items():
+                if (
+                    isinstance(v, dict)
+                    and "__tensor_name__" in v
+                    and tensor_store is not None
+                ):
+                    attrs[k] = tensor_store[v["__tensor_name__"]]
+                else:
+                    attrs[k] = v
+
             inplace_input_index = instr_data.get("inplace_input_index")
 
             # Look up the kernel from registry

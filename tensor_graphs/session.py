@@ -44,6 +44,15 @@ class GraphSession:
     def _load_cache(self):
         if DEBUG_EXECUTION:
             print(f"[Session] Loading dirty region cache from {self.cache_path}...")
+
+        tensor_store = None
+        if self.cache_path:
+            st_path = self.cache_path + ".tensors.safetensors"
+            if os.path.exists(st_path):
+                from safetensors.numpy import load_file
+
+                tensor_store = load_file(st_path)
+
         with open(self.cache_path, "r") as f:
             for line in f:
                 if not line.strip():
@@ -54,7 +63,9 @@ class GraphSession:
                 if entry.get("type") == "compiled_graph":
                     if DEBUG_EXECUTION:
                         print("[Session] Loading compiled graph from cache...")
-                    self.cached_compiled_graph = CompiledGraph.from_dict(entry["data"])
+                    self.cached_compiled_graph = CompiledGraph.from_dict(
+                        entry["data"], tensor_store
+                    )
                     continue
 
                 # Reconstruct key tuple structure for dictionary lookup
@@ -132,16 +143,25 @@ class GraphSession:
         """Save the compiled graph to the cache file."""
         if not self.cache_path:
             return
+        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
 
         if DEBUG_EXECUTION:
-            print("[Session] Saving compiled graph to cache...")
+            print(f"[Session] Saving compiled graph to cache at {self.cache_path}...")
+
+        tensor_store = {}
+        data_dict = compiled_graph.to_dict(tensor_store)
+
+        if tensor_store:
+            from safetensors.numpy import save_file
+
+            st_path = self.cache_path + ".tensors.safetensors"
+            save_file(tensor_store, st_path)
 
         entry = {
             "type": "compiled_graph",
-            "data": compiled_graph.to_dict(),
+            "data": data_dict,
         }
 
-        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
         with open(self.cache_path, "a") as f:
             f.write(json.dumps(entry, cls=GraphEncoder) + "\n")
 
@@ -482,11 +502,7 @@ class GraphSession:
     ):
         """
         Loads weights from a file path or WeightSource object.
-        Must be called after compile().
         """
-        if not self.is_compiled:
-            raise RuntimeError("Session must be compiled before loading weights.")
-
         if isinstance(source, str):
             if not os.path.exists(source):
                 raise FileNotFoundError(f"Weight file not found: {source}")
@@ -502,46 +518,50 @@ class GraphSession:
         all_nodes = topological_sort(self.root)
 
         for node in all_nodes:
-            if node.op_type != OpType.INPUT or node.storage_type.name != "PERSISTENT":
+            if (
+                node.op_type != OpType.CONSTANT
+                or node.storage_type.name != "PERSISTENT"
+            ):
                 continue
 
-            device = node.backend.value if node.backend else "cpu"
-            if "numpy" in device:
-                device = "cpu"
-            if self.mem_manager.has(node.name, device):
-                continue
+            if "value" not in node.attrs:
+                if source is None:
+                    continue
 
-            if source is None:
-                raise RuntimeError(
-                    f"Node {node.name} is a persistent weight but no weight source provided."
-                )
+                if node.name not in source.keys():
+                    raise KeyError(
+                        f"Weight '{node.name}' expected by graph but not found in source."
+                    )
 
-            if node.name not in source.keys():
-                raise KeyError(
-                    f"Weight '{node.name}' expected by graph but not found in source."
-                )
+                data = source.get_tensor(node.name)
+                node.attrs["value"] = data
 
-            data = source.get_tensor(node.name)
+            if self.is_compiled:
+                device = node.backend.value if node.backend else "cpu"
+                if "numpy" in device:
+                    device = "cpu"
+                if self.mem_manager.has(node.name, device):
+                    continue
 
-            if self.executor and node.name in self.executor.graph.nodes_map:
-                assigned_backend = self.executor.graph.nodes_map[node.name].backend
-            else:
-                assigned_backend = backend_hint
+                if self.executor and node.name in self.executor.graph.nodes_map:
+                    assigned_backend = self.executor.graph.nodes_map[node.name].backend
+                else:
+                    assigned_backend = backend_hint
 
-            if self.executor and node.name in self.executor.graph.nodes_map:
-                exec_node = self.executor.graph.nodes_map[node.name]
-                exec_node.backend = assigned_backend
-                self.mem_manager.allocate_persistent(exec_node, data)
-            else:
-                node.backend = assigned_backend
-                self.mem_manager.allocate_persistent(node, data)
+                if self.executor and node.name in self.executor.graph.nodes_map:
+                    exec_node = self.executor.graph.nodes_map[node.name]
+                    exec_node.backend = assigned_backend
+                    self.mem_manager.allocate_persistent(exec_node, node.attrs["value"])
+                else:
+                    node.backend = assigned_backend
+                    self.mem_manager.allocate_persistent(node, node.attrs["value"])
 
         if DEBUG_EXECUTION:
             print("[Session] Weights loaded.")
 
     def run(self, inputs: Dict[str, Any]) -> Any:
         if not self.is_compiled:
-            self.compile(inputs)
             self.load_weights(self.weights_path)
+            self.compile(inputs)
 
         return self.executor.run(inputs)

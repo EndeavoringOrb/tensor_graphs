@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from ..ir.buffer import StorageType
 from ..ir.node import TensorNode
 from ..ir.dtypes import DType, get_buffer_size, get_size_bytes
-from ..ops.atomic_types import OpType
 from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
 
 DEBUG = DEBUG_EXECUTION and DEBUG_DETAILED
@@ -340,8 +339,10 @@ class MemoryManager:
         self._ensure_device(device)
         buf = self.buffers[device]
 
+        is_large = size > 1024
+
         # Strategy: Zero-Copy for CPU, Copy for GPU
-        if device == "cpu" and node.op_type != OpType.CONSTANT:
+        if device == "cpu" and is_large:
             # --- Zero-Copy Path ---
             # Register the external memory region
             # We assume data is passed as a memory-backed object (Torch Tensor or Numpy Array)

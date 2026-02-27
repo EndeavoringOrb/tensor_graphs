@@ -3,7 +3,7 @@ from .dtypes import DType
 from ..ops.atomic_types import OpType
 from .buffer import StorageType
 import numpy as np
-from typing import Set, Dict, List
+from typing import Set, Dict, List, Optional
 from .dtypes import Backend
 import json
 from enum import Enum
@@ -102,7 +102,9 @@ class GraphEncoder(json.JSONEncoder):
         return super().default(o)
 
 
-def graph_to_json(root: TensorNode) -> str:
+def graph_to_json(
+    root: TensorNode, tensor_store: Optional[Dict[str, np.ndarray]] = None
+) -> str:
     """
     Serializes a graph to a JSON string representation.
     Format: Flat list of nodes in topological order.
@@ -114,6 +116,17 @@ def graph_to_json(root: TensorNode) -> str:
     serialized_nodes = []
     for node in nodes:
         parent_ids = [node_to_id[p] for p in node.parents]
+
+        attrs_copy = {}
+        for k, v in node.attrs.items():
+            if isinstance(v, np.ndarray) and v.size > 128:
+                tensor_name = f"tensor_{node.name}_{k}"
+                if tensor_store is not None:
+                    tensor_store[tensor_name] = v
+                attrs_copy[k] = {"__tensor_name__": tensor_name}
+            else:
+                attrs_copy[k] = v
+
         serialized_nodes.append(
             {
                 "id": node_to_id[node],
@@ -123,14 +136,16 @@ def graph_to_json(root: TensorNode) -> str:
                 "dtype": node.dtype.value,
                 "backend": node.backend.value,
                 "parents": parent_ids,
-                "attrs": node.attrs,
+                "attrs": attrs_copy,
             }
         )
 
     return json.dumps(serialized_nodes, cls=GraphEncoder)
 
 
-def graph_from_json(json_str: str) -> TensorNode:
+def graph_from_json(
+    json_str: str, tensor_store: Optional[Dict[str, np.ndarray]] = None
+) -> TensorNode:
     """
     Reconstructs a graph from a JSON string. Returns the root node.
     """
@@ -153,13 +168,24 @@ def graph_from_json(json_str: str) -> TensorNode:
         # Handle shape (convert list back to tuple)
         shape = tuple(node_data["shape"]) if node_data["shape"] is not None else ()
 
+        attrs = {}
+        for k, v in node_data.get("attrs", {}).items():
+            if (
+                isinstance(v, dict)
+                and "__tensor_name__" in v
+                and tensor_store is not None
+            ):
+                attrs[k] = tensor_store[v["__tensor_name__"]]
+            else:
+                attrs[k] = v
+
         node = TensorNode(
             op_type=node_data["op_type"],
             shape=shape,
             dtype=dtype,
             parents=parents,
             name=node_data["name"],
-            attrs=node_data.get("attrs", {}),
+            attrs=attrs,
             backend=backend,
         )
         id_to_node[node_data["id"]] = node
@@ -233,7 +259,7 @@ class GraphBuilder:
 
     def param(self, name, shape, dtype=DType.FP32):
         node = TensorNode(
-            OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.PERSISTENT
+            OpType.CONSTANT, dtype, [], shape, name, storage_type=StorageType.PERSISTENT
         )
         return node
 

@@ -1,6 +1,6 @@
 from .node import TensorNode
 from ..ops.atomic_types import OpType
-from typing import List, Set
+from typing import List, Set, Dict
 from .hashing import get_pattern_hash
 import numpy as np
 
@@ -195,11 +195,11 @@ class ExpAddReverseRule(RewriteRule):
 
 
 def generate_all_equivalents(
-    root: TensorNode, rules: List[RewriteRule]
+    root: TensorNode, rules: List[RewriteRule], memo: Dict = {}
 ) -> Set[TensorNode]:
     equivalents = {root}
     worklist = [root]
-    seen_hashes = {get_pattern_hash(root)}
+    seen_hashes = {get_pattern_hash(root, memo)}
 
     while worklist:
         current = worklist.pop(0)
@@ -207,7 +207,7 @@ def generate_all_equivalents(
         for rule in rules:
             new_nodes = rule.apply(current)
             for new_node in new_nodes:
-                new_hash = get_pattern_hash(new_node)
+                new_hash = get_pattern_hash(new_node, memo)
 
                 # Check hash to prevent infinite loops (e.g., from Commutativity)
                 if new_hash not in seen_hashes:

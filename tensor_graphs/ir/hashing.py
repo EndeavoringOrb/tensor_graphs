@@ -55,7 +55,7 @@ def get_structural_hash(node, memo=None) -> str:
             val_content = compute_content_hash(val)
             h = _hash_string(f"CONST|{node.dtype.value}|{node.shape}|{val_content}")
         else:
-            h = _hash_string(f"CONST|{node.dtype.value}|{node.shape}")
+            h = _hash_string(f"CONST|{node.name}|{node.dtype.value}|{node.shape}")
 
         memo[node] = h
         return h
@@ -78,26 +78,25 @@ def get_structural_hash(node, memo=None) -> str:
     return h
 
 
-def get_pattern_hash(node, memo=None) -> str:
-    if memo is None:
-        memo = {}
+def get_pattern_hash(node, memo={}) -> str:
     if node in memo:
         return memo[node]
 
     if node.op_type == OpType.CONSTANT:
         val = node.attrs.get("value")
         if val is None:
-            raise ValueError(f"Constant node {node} has no value.")
-        # Use the full content hash to ensure uniqueness,
-        # especially for shape tensors which often share the same first element.
-        val_content = compute_content_hash(val)
-        h = _hash_string(f"CONST|{val_content}")
+            h = _hash_string(f"CONST|{node.name}")
+        else:
+            # Use the full content hash to ensure uniqueness,
+            # especially for shape tensors which often share the same first element.
+            val_content = compute_content_hash(val)
+            h = _hash_string(f"CONST|{val_content}")
 
         memo[node] = h
         return h
 
     # 2. Recurse
-    parent_hashes = [get_structural_hash(p, memo) for p in node.parents]
+    parent_hashes = [get_pattern_hash(p, memo) for p in node.parents]
 
     # 3. Compute
     content = f"{node.op_type}|{','.join(parent_hashes)}"

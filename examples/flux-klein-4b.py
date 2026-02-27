@@ -1393,6 +1393,7 @@ class FluxPipeline:
             "rope_sin": dummy_rope_sin,
         }
 
+        self.transformer_session.load_weights(self.transformer_weights)
         self.transformer_session.compile(sample_inputs)
         print("Transformer ready!")
 
@@ -1426,6 +1427,7 @@ class FluxPipeline:
             "input_ids": np.zeros((1, self.cfg.text_max_seq), dtype=np.int32),
             "seq_len": np.array([self.cfg.text_max_seq], dtype=np.int32),
         }
+        self.text_encoder_session.load_weights(self.text_encoder_weights)
         self.text_encoder_session.compile(sample_inputs)
         print("Text encoder ready!")
 
@@ -1455,6 +1457,7 @@ class FluxPipeline:
         sample_latent = np.zeros(
             (1, self.cfg.vae_channels, latent_h, latent_w), dtype=np.float32
         )
+        self.vae_session.load_weights(self.vae_weights)
         self.vae_session.compile(
             {
                 "latent": sample_latent,
@@ -1480,7 +1483,6 @@ class FluxPipeline:
 
         self.build_text_encoder()
         if self.text_encoder_session:
-            self.text_encoder_session.load_weights(self.text_encoder_weights)
             inputs = {
                 "input_ids": input_ids,
                 "seq_len": np.array([self.cfg.text_max_seq], dtype=np.int32),
@@ -1495,7 +1497,6 @@ class FluxPipeline:
         if self.vae_session:
             h_val = latent.shape[2]
             w_val = latent.shape[3]
-            self.vae_session.load_weights(self.vae_weights)
             image_tensor = self.vae_session.run(
                 {
                     "latent": latent,
@@ -1538,7 +1539,6 @@ class FluxPipeline:
         schedule = sampler.get_schedule(img_seq_len)
 
         self.build_transformer(latent_h, latent_w)
-        self.transformer_session.load_weights(self.transformer_weights)
 
         txt_seq = text_emb.shape[1]
         rope_cos, rope_sin = self.compute_rope(

@@ -19,16 +19,6 @@ from ..config import DEBUG_EXECUTION, PLANNER_BEAM_WIDTH
 from .compiled_graph import CompiledGraph, OpInstruction
 from ..ir.buffer import StorageType
 from ..ir.rewrite import (
-    CommutativeRule,
-    DistributiveRule,
-    FactoringRule,
-    AssociativeRule,
-    DoubleNegationRule,
-    NegateAddRule,
-    DivMulRule,
-    DivAddRule,
-    ExpAddRule,
-    ExpAddReverseRule,
     generate_all_equivalents,
     match_pattern,
 )
@@ -294,16 +284,16 @@ class Planner:
 
     def _populate_fusion_map_generalized(self, atomic_nodes_topo: List[TensorNode]):
         rules = [
-            CommutativeRule(),
-            DistributiveRule(),
-            FactoringRule(),
-            AssociativeRule(),
-            DoubleNegationRule(),
-            NegateAddRule(),
-            DivMulRule(),
-            DivAddRule(),
-            ExpAddRule(),
-            ExpAddReverseRule(),
+            # CommutativeRule(),
+            # DistributiveRule(),
+            # FactoringRule(),
+            # AssociativeRule(),
+            # DoubleNegationRule(),
+            # NegateAddRule(),
+            # DivMulRule(),
+            # DivAddRule(),
+            # ExpAddRule(),
+            # ExpAddReverseRule(),
         ]
 
         class DummyAttrs(dict):
@@ -363,6 +353,7 @@ class Planner:
                 )
 
         # --- 2. MATCH IN MAIN GRAPH ---
+        equivalents_memo = {}
         n_fused = 0
         for node in tqdm(
             reversed(atomic_nodes_topo),
@@ -372,7 +363,7 @@ class Planner:
         ):
             node_hash = get_structural_hash(node, memo=self.hash_memo)
 
-            equivalents = generate_all_equivalents(node, rules)
+            equivalents = generate_all_equivalents(node, rules, equivalents_memo)
 
             for eq_node in equivalents:
                 if eq_node is not node:
@@ -547,39 +538,40 @@ class Planner:
                             elif target.dtype == DType.BOOL:
                                 out_dtype_np = bool
 
-                            try:
-                                out_np = np.zeros(target.shape, dtype=out_dtype_np)
-                                kernel_np(parent_vals, [out_np], target.attrs)
+                            out_np = np.zeros(target.shape, dtype=out_dtype_np)
+                            kernel_np(parent_vals, [out_np], target.attrs)
 
-                                folded_node = TensorNode(
-                                    OpType.CONSTANT,
-                                    target.dtype,
-                                    [],
-                                    target.shape,
-                                    name=f"folded_{target.name}_{backend.value}",
-                                    attrs={"value": out_np},
-                                    backend=backend,
-                                    storage_type=StorageType.PERSISTENT,
+                            folded_node = TensorNode(
+                                OpType.CONSTANT,
+                                target.dtype,
+                                [],
+                                target.shape,
+                                name=f"folded_{target.name}_{backend.value}",
+                                attrs={"value": out_np},
+                                backend=backend,
+                                storage_type=StorageType.PERSISTENT,
+                            )
+                            folded_hash = get_structural_hash(
+                                folded_node, self.hash_memo
+                            )
+                            folded_size = folded_node.size_bytes
+
+                            pm_dict = {folded_hash: folded_size}
+                            pm_total = folded_size
+                            if DEBUG_EXECUTION:
+                                tqdm.write(
+                                    f"Folded (mem {pm_total}/{self.max_memory_bytes}): {node}"
                                 )
-                                folded_hash = get_structural_hash(
-                                    folded_node, self.hash_memo
-                                )
-                                folded_size = folded_node.size_bytes
 
-                                pm_dict = {folded_hash: folded_size}
-                                pm_total = folded_size
-
-                                if pm_total <= self.max_memory_bytes:
-                                    candidates.append(
-                                        BeamStrategy(
-                                            0.0,
-                                            folded_node,
-                                            {folded_node: backend},
-                                            pm_dict,
-                                        )
+                            if pm_total <= self.max_memory_bytes:
+                                candidates.append(
+                                    BeamStrategy(
+                                        0.0,
+                                        folded_node,
+                                        {folded_node: backend},
+                                        pm_dict,
                                     )
-                            except Exception:
-                                pass
+                                )
 
                     for i, p_strat in enumerate(p_strat_combo):
                         current_cost += p_strat.cost
