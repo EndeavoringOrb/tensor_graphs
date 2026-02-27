@@ -1,8 +1,4 @@
-1. refactor all decomposition functions to take in tensornodes for shapes instead of using x.shape
-2. refactor examples/* to use new decomposition args
-3. add flag to make_atomic to skip graph infer (used for populating fusion patterns)
-
-
+- [ ] Add constant folding to planner. In order to do this, also need to make planner memory-aware. Like if folding a constant saves N seconds of computation, but that plan goes over the memory limit (maybe we folded 1 constant weight into 3 permutations) then we don't want to use that constant folding.
 - [ ] in GraphSession._ensure_cache_coverage make all_permutations iterate in order from largest slices to smallest slices. and allow user to stop compilation early to decrease startup time at the cost of speed
 - [ ] Improve handling of multiple non-contiguous regions (like DOT output)
 - [ ] Add general fusion during planning based on decomposition functions
@@ -13,7 +9,6 @@
   - look at ik_llama.cpp implementation
 - [ ] Graph rewriting $(a*(b+c))$ -> $(a*b+a*c)$
 - [ ] Make tests pass
-- [ ] Remove attrs in favor of constant/input nodes. copyto dtype can determine which kernel is used
 
 - [ ] ?? monte carlo tree search (SEARCH mode) or greedy (GREEDY mode) for caching
 - [ ] minimize memory usage (make sure no duplicate weights or anything)

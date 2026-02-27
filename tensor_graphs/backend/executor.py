@@ -505,6 +505,16 @@ class Executor:
                         f"{(counters['skip'] + (counters['part'] - partial_ratio_sum)) / (total_ops if total_ops > 0 else 1):.2f}"
                     )
                     pbar.set_postfix(counters)
+        
+            if DEBUG_EXECUTION:
+                print("\n--- Transient Memory Arena State ---")
+                device_buf = self.mem.buffers["cpu"] # or "cuda"
+                allocated = sorted([b for b in device_buf.allocations.values() if b.region_id == 0], 
+                    key=lambda x: x.size, 
+                    reverse=True
+                )
+                for b in allocated[:20]: # Top 10 memory hogs
+                    print(f"Node: {b.node_name:25} | Size: {b.size / 1024**2:6.2f} MB | Locked: {b.is_locked}")
 
         root_name = self.graph.instructions[-1].node_name
         return self.mem.get_view(self.graph.nodes_map[root_name])
