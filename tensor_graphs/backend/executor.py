@@ -507,14 +507,14 @@ class Executor:
                     pbar.set_postfix(counters)
 
             if DEBUG_EXECUTION:
-                print("\n--- Transient Memory Arena State ---")
+                print("\n--- Memory Arena State ---")
                 device_buf = self.mem.buffers["cpu"]  # or "cuda"
                 allocated = sorted(
-                    [b for b in device_buf.allocations.values() if b.region_id == 0],
+                    [b for b in device_buf.allocations.values()],
                     key=lambda x: x.size,
                     reverse=True,
                 )
-                for b in allocated[:20]:  # Top 10 memory hogs
+                for b in allocated[:20]:  # Top memory hogs
                     print(
                         f"Node: {b.node_name:25} | Size: {b.size / 1024**2:6.2f} MB | Locked: {b.is_locked}"
                     )

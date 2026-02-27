@@ -515,7 +515,12 @@ class GraphSession:
         if DEBUG_EXECUTION:
             print(f"[Session] Loading weights from {type(source).__name__}...")
 
-        all_nodes = topological_sort(self.root)
+        # If already compiled, only iterate over nodes actually present in the execution plan.
+        # This prevents loading original weights that were folded or optimized away.
+        if self.is_compiled and self.executor:
+            all_nodes = list(self.executor.graph.nodes_map.values())
+        else:
+            all_nodes = topological_sort(self.root)
 
         for node in all_nodes:
             if (
