@@ -1,6 +1,6 @@
 import copy
 from typing import Dict, Optional, List, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import itertools
 from tqdm import tqdm
 import torch  # Import torch to check for CUDA availability
@@ -39,19 +39,21 @@ class BeamStrategy:
     cost: float
     node: TensorNode
     assignments: Dict[TensorNode, Backend]
+    persistent_nodes: Dict[str, int] = field(default_factory=dict)
 
     def __lt__(self, other):
         return self.cost < other.cost
 
 
 class Planner:
-    def __init__(self, db_path="benchmarks.db"):
+    def __init__(self, db_path="benchmarks.db", max_memory_bytes: int = 4 * 1024**3):
         self.db = BenchmarkDB(db_path)
         self.cost_model = CostModel(self.db)
         self.memo: Dict[str, List[BeamStrategy]] = {}
         self.hash_memo: Dict[TensorNode, str] = {}
         self.beam_width = PLANNER_BEAM_WIDTH
         self.fusion_map: Dict[str, List[TensorNode]] = {}
+        self.max_memory_bytes = max_memory_bytes
 
     def plan(
         self, root: TensorNode, known_values: Optional[Dict[str, Any]] = None
@@ -115,7 +117,12 @@ class Planner:
                 new_assigns = strat.assignments.copy()
                 new_assigns[copy_node] = target_backend
                 candidates.append(
-                    BeamStrategy(strat.cost + transfer_cost, copy_node, new_assigns)
+                    BeamStrategy(
+                        strat.cost + transfer_cost,
+                        copy_node,
+                        new_assigns,
+                        strat.persistent_nodes,
+                    )
                 )
 
         best_recipe = min(candidates, key=lambda s: s.cost)
@@ -448,8 +455,16 @@ class Planner:
 
         # --- 1. Base Cases: Inputs & Constants ---
         if node.op_type in (OpType.INPUT, OpType.CONSTANT):
+            pm_dict = {}
+            if node.storage_type == StorageType.PERSISTENT:
+                pm_dict[node_hash] = node.size_bytes
             self.memo[node_hash] = [
-                BeamStrategy(cost=0.0, node=node, assignments={node: node.backend})
+                BeamStrategy(
+                    cost=0.0,
+                    node=node,
+                    assignments={node: node.backend},
+                    persistent_nodes=pm_dict,
+                )
             ]
             return
 
@@ -491,10 +506,85 @@ class Planner:
                     current_cost = 0.0
                     new_parents = []
                     current_assigns = {}
+                    current_persistent = {}
+
+                    # --- Constant Folding Opportunity ---
+                    can_fold = True
+                    parent_vals = []
+                    for p_strat in p_strat_combo:
+                        if p_strat.node.op_type != OpType.CONSTANT:
+                            can_fold = False
+                            break
+                        val = p_strat.node.attrs.get("value")
+                        if val is None:
+                            can_fold = False
+                            break
+                        parent_vals.append(val)
+
+                    if can_fold:
+                        from ..ir.dtypes import DType
+
+                        dummy_sigs_np = [
+                            TensorSignature(
+                                p.node.dtype, p.node.shape, Backend.CPU_NUMPY
+                            )
+                            for p in p_strat_combo
+                        ]
+                        kernel_result_np = KernelRegistry.select_best_kernel(
+                            target.op_type,
+                            dummy_sigs_np,
+                            Backend.CPU_NUMPY,
+                            target.dtype,
+                            allow_inplace=False,
+                        )
+                        if kernel_result_np:
+                            kernel_np, _ = kernel_result_np
+                            import numpy as np
+
+                            out_dtype_np = np.float32
+                            if target.dtype == DType.INT32:
+                                out_dtype_np = np.int32
+                            elif target.dtype == DType.BOOL:
+                                out_dtype_np = bool
+
+                            try:
+                                out_np = np.zeros(target.shape, dtype=out_dtype_np)
+                                kernel_np(parent_vals, [out_np], target.attrs)
+
+                                folded_node = TensorNode(
+                                    OpType.CONSTANT,
+                                    target.dtype,
+                                    [],
+                                    target.shape,
+                                    name=f"folded_{target.name}_{backend.value}",
+                                    attrs={"value": out_np},
+                                    backend=backend,
+                                    storage_type=StorageType.PERSISTENT,
+                                )
+                                folded_hash = get_structural_hash(
+                                    folded_node, self.hash_memo
+                                )
+                                folded_size = folded_node.size_bytes
+
+                                pm_dict = {folded_hash: folded_size}
+                                pm_total = folded_size
+
+                                if pm_total <= self.max_memory_bytes:
+                                    candidates.append(
+                                        BeamStrategy(
+                                            0.0,
+                                            folded_node,
+                                            {folded_node: backend},
+                                            pm_dict,
+                                        )
+                                    )
+                            except Exception:
+                                pass
 
                     for i, p_strat in enumerate(p_strat_combo):
                         current_cost += p_strat.cost
                         current_assigns.update(p_strat.assignments)
+                        current_persistent.update(p_strat.persistent_nodes)
 
                         # Logic for cross-backend data transfer
                         if p_strat.node.backend != backend:
@@ -539,7 +629,9 @@ class Planner:
                     current_assigns[impl_node] = backend
 
                     candidates.append(
-                        BeamStrategy(current_cost, impl_node, current_assigns)
+                        BeamStrategy(
+                            current_cost, impl_node, current_assigns, current_persistent
+                        )
                     )
 
         # --- 4. Pruning (Keep Top K) ---

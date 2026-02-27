@@ -430,7 +430,7 @@ class GraphSession:
             ]
             self._ensure_cache_coverage(input_nodes, sample_inputs, compiled_graph)
         else:
-            planner = Planner(self.db_path)
+            planner = Planner(self.db_path, max_memory_bytes=self.mem_manager.max_bytes)
             compiled_graph = planner.plan(self.root, known_values=sample_inputs)
 
             input_nodes = [
@@ -439,8 +439,8 @@ class GraphSession:
                 if n.op_type == OpType.INPUT and n.storage_type.name == "TRANSIENT"
             ]
 
-            self._ensure_cache_coverage(input_nodes, sample_inputs, compiled_graph)
             self._save_compiled_graph(compiled_graph)
+            self._ensure_cache_coverage(input_nodes, sample_inputs, compiled_graph)
 
         self.executor = Executor(
             compiled_graph,
