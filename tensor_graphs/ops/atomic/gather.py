@@ -22,5 +22,4 @@ def gather_ref(
         [data, indices],
         name=f"gather_{data.name}_{indices.name}",
         backend=data.backend,
-        cache_policy=CachePolicy.NEVER,
     )

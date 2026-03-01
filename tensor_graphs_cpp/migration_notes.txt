@@ -1,0 +1,3 @@
+TensorNode.id is replacing TensorNode.name
+OpType CONSTANT is now just OpType INPUT with StorageType PERSISTENT
+Only one buffer per device, only one region per buffer
