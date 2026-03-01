@@ -10,6 +10,7 @@ Misc:
 -OpType CONSTANT is now just OpType INPUT with StorageType PERSISTENT
 -attrs will be replaced with explicit input nodes
 -add view only ops
+-remove sqrt and exp, they are just special cases of power
 
 Kernels:
 -Kernel registry should have explicit matching function for each registered kernel. Kernel matching may be complex, like it needs contiguous inputs, or a specific input dim must be a power of 2, etc.

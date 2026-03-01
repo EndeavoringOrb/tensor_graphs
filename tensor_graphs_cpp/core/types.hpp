@@ -27,6 +27,7 @@ enum class DType : uint32_t
     FLOAT32,
     INT32,
     BF16,
+    BOOL,
     _COUNT
 };
 
@@ -38,10 +39,8 @@ enum class OpType : uint32_t
     MUL,
     DIVIDE,
     DOT,
-    SQRT,
     SIN,
     COS,
-    EXP,
     NEGATE,
     POWER,
     SUM,
