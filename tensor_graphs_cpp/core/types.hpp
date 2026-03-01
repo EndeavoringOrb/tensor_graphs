@@ -243,14 +243,10 @@ inline const char *toString(OpType op)
         return "DIVIDE";
     case OpType::DOT:
         return "DOT";
-    case OpType::SQRT:
-        return "SQRT";
     case OpType::SIN:
         return "SIN";
     case OpType::COS:
         return "COS";
-    case OpType::EXP:
-        return "EXP";
     case OpType::NEGATE:
         return "NEGATE";
     case OpType::POWER:
