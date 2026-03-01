@@ -19,3 +19,4 @@ images
 wsl_venv
 .claude
 CLAUDE.md
+tensor_graphs_cpp/main.exe

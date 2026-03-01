@@ -3,14 +3,20 @@
 #include <iostream>
 #include <cstdint>
 #include <sstream>
+#include <fstream>
 #include <vector>
 #include <limits>
+#include <cctype>
 #include <list>
+#include <json.hpp>
+using json = nlohmann::json;
 
 enum class DType : uint32_t
 {
     FLOAT32,
-    INT32
+    INT32,
+    BF16,
+    _COUNT
 };
 
 enum class OpType : uint32_t
@@ -122,12 +128,25 @@ inline const char *toString(DType dtype)
     switch (dtype)
     {
     case DType::FLOAT32:
-        return "FLOAT32";
+        return "F32";
     case DType::INT32:
-        return "INT32";
+        return "I32";
+    case DType::BF16:
+        return "BF16";
     default:
         return "UNKNOWN_DTYPE";
     }
+}
+
+inline DType fromString(const std::string &str)
+{
+    for (uint32_t i = 0; i < static_cast<uint32_t>(DType::_COUNT); ++i)
+    {
+        DType dtype = static_cast<DType>(i);
+        if (toString(dtype) == str)
+            return dtype;
+    }
+    throw std::runtime_error("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for that instead of generic runtime_error
 }
 
 inline const char *toString(OpType op)
@@ -211,7 +230,7 @@ inline const char *toString(OpType op)
     case OpType::UPSAMPLE_NEAREST:
         return "UPSAMPLE_NEAREST";
     default:
-        return "UNKNOWN_OPS";
+        return "UNKNOWN_OP";
     }
 }
 
@@ -253,25 +272,10 @@ inline std::string toString(const std::vector<uint32_t> &shape)
     return ss.str();
 }
 
-inline std::ostream &operator<<(std::ostream &os, DType dtype)
-{
-    return os << toString(dtype);
-}
-
-inline std::ostream &operator<<(std::ostream &os, OpType op)
-{
-    return os << toString(op);
-}
-
-inline std::ostream &operator<<(std::ostream &os, Backend backend)
-{
-    return os << toString(backend);
-}
-
-inline std::ostream &operator<<(std::ostream &os, StorageType storage)
-{
-    return os << toString(storage);
-}
+inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << toString(dtype); }
+inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toString(op); }
+inline std::ostream &operator<<(std::ostream &os, Backend backend) { return os << toString(backend); }
+inline std::ostream &operator<<(std::ostream &os, StorageType storage) { return os << toString(storage); }
 
 struct MemBlock
 {
@@ -299,7 +303,7 @@ struct DeviceBuffer
     // O(1) lookup map pointing directly to the list node for fast updates
     std::unordered_map<uint32_t, std::list<MemBlock>::iterator> allocationMap;
 
-    DeviceBuffer(uint64_t _sizeBytes) : arena(_sizeBytes), sizeBytes(_sizeBytes)
+    DeviceBuffer(uint64_t _sizeBytes) : sizeBytes(_sizeBytes)
     {
         // Initialize with one massive free block
         MemBlock initialFree;
@@ -309,6 +313,12 @@ struct DeviceBuffer
         initialFree.cost = 0.0f;
         initialFree.isLocked = false;
         blocks.push_back(initialFree);
+    }
+
+    // Arena not resized at construction so we can do allocation planning without actually making arena huge.
+    void init()
+    {
+        arena.resize(sizeBytes);
     }
 
     std::list<MemBlock>::iterator findFreeSlot(uint64_t _sizeBytes)
@@ -382,7 +392,6 @@ struct DeviceBuffer
             uint64_t mergeOffset = bestLeft->offset;
             auto end_evict = std::next(bestRight);
 
-            // Unregister evicted blocks from O(1) map
             while (it != end_evict)
             {
                 if (!it->isFree())
@@ -392,7 +401,6 @@ struct DeviceBuffer
                 it++;
             }
 
-            // Replace the evicted sequence with a single continuous Free block
             MemBlock mergedFree;
             mergedFree.offset = mergeOffset;
             mergedFree.sizeBytes = bestSize;
@@ -478,7 +486,162 @@ struct DeviceBuffer
 struct MemoryManager
 {
     std::unordered_map<Backend, DeviceBuffer> buffers;
+
+    uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f)
+    {
+        auto it = buffers.find(backend);
+        if (it == buffers.end())
+        {
+            throw std::runtime_error("Backend buffer not initialized in MemoryManager");
+        }
+        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost);
+    }
 };
+
+// ---------------------------------------------------------
+// SAFETENSORS LOADER
+// ---------------------------------------------------------
+
+struct TensorMetadata
+{
+    DType dtype;
+    std::vector<uint32_t> shape;
+    uint64_t dataOffsetStart;
+    uint64_t dataOffsetEnd;
+
+    uint64_t sizeBytes() const
+    {
+        return dataOffsetEnd - dataOffsetStart;
+    }
+};
+
+class SafetensorsLoader
+{
+public:
+    SafetensorsLoader(const std::string &filepath) : filename(filepath)
+    {
+        std::ifstream file(filepath, std::ios::binary);
+        if (!file.is_open())
+        {
+            throw std::runtime_error("Could not open safetensors file: " + filepath);
+        }
+
+        // Read 8-byte header size (Safetensors spec relies on little-endian layout here)
+        uint64_t headerSize = 0;
+        if (!file.read(reinterpret_cast<char *>(&headerSize), sizeof(headerSize)))
+        {
+            throw std::runtime_error("Could not read safetensors header size.");
+        }
+
+        // Read JSON Header
+        jsonHeader.resize(headerSize);
+        if (!file.read(&jsonHeader[0], headerSize))
+        {
+            throw std::runtime_error("Could not read safetensors JSON header.");
+        }
+
+        dataStartOffset = 8 + headerSize;
+        parseJson(jsonHeader);
+    }
+
+    const TensorMetadata &getMetadata(const std::string &name) const
+    {
+        auto it = metadata.find(name);
+        if (it == metadata.end())
+        {
+            throw std::runtime_error("Tensor not found in safetensors: " + name);
+        }
+        return it->second;
+    }
+
+    bool hasTensor(const std::string &name) const
+    {
+        return metadata.find(name) != metadata.end();
+    }
+
+    void loadTensor(const std::string &name, void *dest, uint64_t destSize) const
+    {
+        const auto &meta = getMetadata(name);
+        if (meta.sizeBytes() > destSize)
+        {
+            throw std::runtime_error("Destination buffer too small for tensor: " + name);
+        }
+
+        std::ifstream file(filename, std::ios::binary);
+        if (!file.is_open())
+        {
+            throw std::runtime_error("Could not open safetensors file: " + filename);
+        }
+
+        file.seekg(dataStartOffset + meta.dataOffsetStart, std::ios::beg);
+        file.read(reinterpret_cast<char *>(dest), meta.sizeBytes());
+    }
+
+private:
+    std::string filename;
+    uint64_t dataStartOffset;
+    std::unordered_map<std::string, TensorMetadata> metadata;
+    std::string jsonHeader;
+
+    void parseJson(const std::string &json_str)
+    {
+        auto root = json::parse(json_str);
+
+        for (const auto &[key, val] : root.items())
+        {
+            if (key == "__metadata__")
+            {
+                continue; // Skip global metadata
+            }
+
+            // Expecting tensor definition object: { "dtype": "...", "shape": [], "data_offsets": [] }
+            if (!val.is_object())
+                continue;
+
+            TensorMetadata meta;
+            bool valid = true;
+
+            // 1. Parse DType
+            std::string dtype_str = val.at("dtype").get<std::string>();
+            try
+            {
+                meta.dtype = fromString(dtype_str);
+            }
+            catch (const std::runtime_error &)
+            {
+                valid = false;
+            }
+
+            // 2. Parse Shape
+            auto shapeArr = val.at("shape");
+            for (const auto &dim : shapeArr)
+            {
+                meta.shape.push_back(static_cast<uint32_t>(dim.get<int64_t>()));
+            }
+
+            // 3. Parse Data Offsets
+            auto offsetArr = val.at("data_offsets");
+            if (offsetArr.size() >= 2)
+            {
+                meta.dataOffsetStart = static_cast<uint64_t>(offsetArr[0].get<int64_t>());
+                meta.dataOffsetEnd = static_cast<uint64_t>(offsetArr[1].get<int64_t>());
+            }
+            else
+            {
+                valid = false;
+            }
+
+            if (valid)
+            {
+                metadata[key] = std::move(meta);
+            }
+        }
+    }
+};
+
+// ---------------------------------------------------------
+// GRAPH AND SHAPE PROPAGATOR
+// ---------------------------------------------------------
 
 struct Graph
 {
@@ -635,5 +798,32 @@ struct ShapePropagator
 
 int main()
 {
-    uint32_t maxSeqLen = 128;
+    // 1. Setup MemoryManager with buffer sizing
+    MemoryManager memManager;
+    memManager.buffers.emplace(Backend::CPU, DeviceBuffer(1024 * 1024 * 1024)); // 1GB buffer
+
+    // 2. Open and inspect SafeTensors without bringing data to memory yet
+    SafetensorsLoader loader("C:/Users/aaron/CODING/tensor_graphs/resources/model.safetensors");
+    std::string weightName = "model.embed_tokens.weight";
+
+    if (loader.hasTensor(weightName))
+    {
+        const auto &meta = loader.getMetadata(weightName);
+
+        // 3. Plan memory allocation (Graph building phase)
+        uint32_t dummyNodeId = 0;
+        uint64_t offset = memManager.allocate(Backend::CPU, dummyNodeId, meta.sizeBytes(), StorageType::PERSISTENT);
+        MemRecord record = {offset, meta.sizeBytes(), StorageType::PERSISTENT};
+
+        // 4. Initialize physical memory
+        memManager.buffers.at(Backend::CPU).init();
+
+        // 5. Tell the loader to blast bytes directly to the reserved section
+        uint8_t *targetPtr = memManager.buffers.at(Backend::CPU).arena.data() + offset;
+        loader.loadTensor(weightName, targetPtr, meta.sizeBytes());
+
+        std::cout << "Successfully loaded tensor '" << weightName << "' (" << meta.sizeBytes() << " bytes)." << std::endl;
+    }
+
+    return 0;
 }
