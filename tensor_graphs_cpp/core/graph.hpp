@@ -276,4 +276,97 @@ struct Graph
         nodes.push_back(node);
         return node.id;
     }
+
+    uint32_t cast(uint32_t id0, DType dtype) {
+        TensorNode node = TensorNode();
+        node.id = allocateId();
+        node.opType = OpType::CAST;
+        node.dtype = dtype;
+        node.parentIds = {id0};
+        nodes.push_back(node);
+        return node.id;
+    }
+
+    uint32_t repeat(uint32_t id0, uint32_t repeats_id, uint32_t axis_id) {
+        if (nodes[repeats_id].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.repeat] Expected " << DType::INT32 << " for input 1, got: " << nodes[repeats_id].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        if (nodes[axis_id].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.repeat] Expected " << DType::INT32 << " for input 2, got: " << nodes[axis_id].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        TensorNode node = TensorNode();
+        node.id = allocateId();
+        node.opType = OpType::REPEAT;
+        node.dtype = nodes[id0].dtype;
+        node.parentIds = {id0, repeats_id, axis_id};
+        nodes.push_back(node);
+        return node.id;
+    }
+
+    uint32_t arange(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3)
+    {
+        if (nodes[id1].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.arange] Expected " << DType::INT32 << " for input 1, got: " << nodes[id1].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        if (nodes[id2].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.arange] Expected " << DType::INT32 << " for input 2, got: " << nodes[id2].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        if (nodes[id3].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.arange] Expected " << DType::INT32 << " for input 3, got: " << nodes[id3].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        TensorNode node = TensorNode();
+        node.id = allocateId();
+        node.opType = OpType::ARANGE;
+        node.dtype = nodes[id0].dtype;
+        node.parentIds = {id0, id1, id2, id3};
+        nodes.push_back(node);
+        return node.id;
+    }
+
+    uint32_t triu(uint32_t id0, uint32_t k_id) {
+        if (nodes[k_id].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.triu] Expected " << DType::INT32 << " for input 1, got: " << nodes[k_id].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        TensorNode node = TensorNode();
+        node.id = allocateId();
+        node.opType = OpType::TRIU;
+        node.dtype = nodes[id0].dtype;
+        node.parentIds = {id0, k_id};
+        nodes.push_back(node);
+        return node.id;
+    }
+
+    uint32_t gather(uint32_t id0, uint32_t indices_id) {
+        if (nodes[indices_id].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.gather] Expected " << DType::INT32 << " for input 1, got: " << nodes[indices_id].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        TensorNode node = TensorNode();
+        node.id = allocateId();
+        node.opType = OpType::GATHER;
+        node.dtype = nodes[id0].dtype;
+        node.parentIds = {id0, indices_id};
+        nodes.push_back(node);
+        return node.id;
+    }
 };
