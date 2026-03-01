@@ -14,6 +14,9 @@ Misc:
 Kernels:
 -Kernel registry should have explicit matching function for each registered kernel. Kernel matching may be complex, like it needs contiguous inputs, or a specific input dim must be a power of 2, etc.
 
+Planner:
+-estimate transfer cost shouldn't exist, it should just use estimate kernel cost with a copyto kernel
+
 Memory:
 -Only one buffer per device, only one region per buffer
 -knapsack-style eviction instead of LRU

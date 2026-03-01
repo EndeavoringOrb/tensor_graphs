@@ -1,5 +1,5 @@
-#include <core.hpp>
-#include <kernels/kernels.hpp>
+#include "core/memory.hpp"
+#include "core/loaders/safetensors.hpp"
 
 int main()
 {
