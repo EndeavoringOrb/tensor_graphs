@@ -79,15 +79,25 @@ struct Dim
     uint32_t stop;
 };
 
-struct DirtyRegion
+struct Region
 {
     std::vector<Dim> region;
 };
 
-struct TensorValue
+inline bool regionsMatch(const Region &r1, const Region &r2)
 {
-    std::vector<uint8_t> bytes;
-};
+    if (r1.region.size() != r2.region.size())
+        return false;
+    for (size_t i = 0; i < r1.region.size(); ++i)
+    {
+        if (r1.region[i].start != r2.region[i].start ||
+            r1.region[i].stop != r2.region[i].stop)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 
 struct MemRecord
 {
@@ -104,7 +114,6 @@ struct TensorNode
     std::vector<uint32_t> parentIds;
     std::vector<uint32_t> shape;
     Backend backend = Backend::CPU;
-    std::vector<DirtyRegion> dirtyRegions;
     MemRecord mem;
 };
 
@@ -495,6 +504,94 @@ struct Graph
         node.parentIds = {id0, id1};
         nodes.push_back(node);
         return node.id;
+    }
+};
+
+bool shapesMatch(const std::vector<uint32_t> &shape1, const std::vector<uint32_t> &shape2)
+{
+    if (shape1.size() != shape2.size())
+        return false;
+    for (size_t i = 0; i < shape1.size(); ++i)
+    {
+        if (shape1[i] != shape2[i])
+            return false;
+    }
+    return true;
+}
+
+struct ShapePropagator
+{
+    std::vector<Region> forward(const TensorNode &node, const std::vector<TensorNode> &allNodes, const std::vector<std::vector<Region>> &parentRegions)
+    {
+        for (uint32_t pid : node.parentIds)
+        {
+            if (pid >= allNodes.size())
+            {
+                std::stringstream ss;
+                ss << "[ShapePropagator.forward] Invalid parent ID " << pid << " for OpType " << node.opType;
+                throw std::runtime_error(ss.str());
+            }
+        }
+        if (node.opType == OpType::ADD)
+        {
+            return forwardAdd(node, allNodes, parentRegions);
+        }
+        std::stringstream ss;
+        ss << "[ShapePropagator.forward] Unsupported OpType for ShapePropagator.forward: " << node.opType;
+        throw std::runtime_error(ss.str());
+    }
+
+    std::vector<Region> forwardAdd(const TensorNode &node, const std::vector<TensorNode> &allNodes, const std::vector<std::vector<Region>> &parentRegions)
+    {
+        // unique set of all parent regions
+        if (node.parentIds.size() != 2)
+        {
+            std::stringstream ss;
+            ss << "[ShapePropagator.forwardAdd] ADD requires exactly 2 parents, got "
+               << node.parentIds.size();
+            throw std::runtime_error(ss.str());
+        }
+
+        uint32_t pid0 = node.parentIds[0];
+        uint32_t pid1 = node.parentIds[1];
+        const auto &parent0 = allNodes[pid0];
+        const auto &parent1 = allNodes[pid1];
+
+        if (!shapesMatch(parent0.shape, parent1.shape))
+        {
+            std::stringstream ss;
+            ss << "[ShapePropagator.forwardAdd] Shape mismatch in ADD node "; // TODO: print shapes
+            throw std::runtime_error(ss.str());
+        }
+
+        std::vector<Region> outputRegions;
+
+        auto regionExists = [&](const Region &r)
+        {
+            for (const auto &existing : outputRegions)
+            {
+                if (regionsMatch(existing, r))
+                    return true;
+            }
+            return false;
+        };
+
+        for (const auto &region : parentRegions[0])
+        {
+            if (!regionExists(region))
+            {
+                outputRegions.push_back(region);
+            }
+        }
+        for (const auto &region : parentRegions[1])
+        {
+            if (!regionExists(region))
+            {
+                outputRegions.push_back(region);
+            }
+        }
+
+        return outputRegions;
     }
 };
 
