@@ -117,7 +117,6 @@ struct TensorNode
     MemRecord mem;
 };
 
-// DType conversion
 inline const char *toString(DType dtype)
 {
     switch (dtype)
@@ -131,7 +130,6 @@ inline const char *toString(DType dtype)
     }
 }
 
-// OpType conversion
 inline const char *toString(OpType op)
 {
     switch (op)
@@ -217,7 +215,6 @@ inline const char *toString(OpType op)
     }
 }
 
-// Backend conversion
 inline const char *toString(Backend backend)
 {
     switch (backend)
@@ -229,7 +226,6 @@ inline const char *toString(Backend backend)
     }
 }
 
-// StorageType conversion
 inline const char *toString(StorageType storage)
 {
     switch (storage)
@@ -241,6 +237,20 @@ inline const char *toString(StorageType storage)
     default:
         return "UNKNOWN_STORAGE";
     }
+}
+
+inline std::string toString(const std::vector<uint32_t> &shape)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << shape[i];
+    }
+    ss << "]";
+    return ss.str();
 }
 
 inline std::ostream &operator<<(std::ostream &os, DType dtype)
@@ -532,18 +542,20 @@ struct ShapePropagator
                 throw std::runtime_error(ss.str());
             }
         }
-        if (node.opType == OpType::ADD)
+        switch (node.opType)
         {
+        case OpType::ADD:
             return forwardAdd(node, allNodes, parentRegions);
+        default:
+            std::stringstream ss;
+            ss << "[ShapePropagator.forward] Unsupported OpType for ShapePropagator.forward: " << node.opType;
+            throw std::runtime_error(ss.str());
         }
-        std::stringstream ss;
-        ss << "[ShapePropagator.forward] Unsupported OpType for ShapePropagator.forward: " << node.opType;
-        throw std::runtime_error(ss.str());
     }
 
+    // Output regions are the unique set of all parent regions
     std::vector<Region> forwardAdd(const TensorNode &node, const std::vector<TensorNode> &allNodes, const std::vector<std::vector<Region>> &parentRegions)
     {
-        // unique set of all parent regions
         if (node.parentIds.size() != 2)
         {
             std::stringstream ss;
@@ -560,7 +572,7 @@ struct ShapePropagator
         if (!shapesMatch(parent0.shape, parent1.shape))
         {
             std::stringstream ss;
-            ss << "[ShapePropagator.forwardAdd] Shape mismatch in ADD node "; // TODO: print shapes
+            ss << "[ShapePropagator.forwardAdd] Shape mismatch in ADD node: " << toString(parent0.shape) << ", " << toString(parent1.shape);
             throw std::runtime_error(ss.str());
         }
 
@@ -592,6 +604,32 @@ struct ShapePropagator
         }
 
         return outputRegions;
+    }
+
+    // Dispatch to op-specific backward function
+    std::vector<std::vector<Region>> backward(const TensorNode &node, const std::vector<TensorNode> &allNodes, const std::vector<Region> &outputRegions)
+    {
+        switch (node.opType)
+        {
+        case OpType::ADD:
+            return backwardAdd(node, allNodes, outputRegions);
+        default:
+            std::stringstream ss;
+            ss << "[ShapePropagator.backward] Unsupported OpType for ShapePropagator.backward: " << node.opType;
+            throw std::runtime_error(ss.str());
+        }
+    }
+
+    // For every dirty region in the output, BOTH corresponding inputs are also dirty
+    std::vector<std::vector<Region>> backwardAdd(const TensorNode &node, const std::vector<TensorNode> &allNodes, const std::vector<Region> &outputRegions)
+    {
+        std::vector<std::vector<Region>> inputRegions(2);
+        for (size_t i = 0; i < 2; ++i)
+        {
+            inputRegions[i] = outputRegions;
+        }
+
+        return inputRegions;
     }
 };
 
