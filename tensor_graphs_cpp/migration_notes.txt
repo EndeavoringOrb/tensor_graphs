@@ -3,6 +3,7 @@ General:
 -Using C++ 17
 -don't use try-catch unless it is with a custom error type. don't want to hide genuine errors
 -mostly camelCase, PascalCase for struct names
+-main.cpp, and headers.hpp. .hpp files should have actual implementation, I don't want stubs + .cpp implementation file.
 
 Misc:
 -TensorNode.id is replacing TensorNode.name
