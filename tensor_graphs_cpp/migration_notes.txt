@@ -1,13 +1,17 @@
 General:
 -Aiming for performance & maintainability. The C++ code will not be a direct port, I will be cleaning up the code during migration.
 -Using C++ 17
--don't use try-catch
+-don't use try-catch unless it is with a custom error type. don't want to hide genuine errors
 -mostly camelCase, PascalCase for struct names
 
 Misc:
 -TensorNode.id is replacing TensorNode.name
 -OpType CONSTANT is now just OpType INPUT with StorageType PERSISTENT
 -attrs will be replaced with explicit input nodes
+-add view only ops
+
+Kernels:
+-Kernel registry should have explicit matching function for each registered kernel. Kernel matching may be complex, like it needs contiguous inputs, or a specific input dim must be a power of 2, etc.
 
 Memory:
 -Only one buffer per device, only one region per buffer

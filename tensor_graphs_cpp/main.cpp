@@ -11,6 +11,58 @@
 #include <json.hpp>
 using json = nlohmann::json;
 
+// ---------------------------------------------------------
+// CUSTOM ERROR TYPES
+// ---------------------------------------------------------
+
+struct TensorGraphError : public std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
+struct ViewOpValidationError : public TensorGraphError
+{
+    uint32_t nodeId = 0;
+    OpType opType;
+    std::vector<uint32_t> shape;
+    size_t dimIndex;
+
+    ViewOpValidationError(const std::string &msg, uint32_t nid, OpType op,
+                          const std::vector<uint32_t> &s, size_t dim = 0)
+        : TensorGraphError(msg), nodeId(nid), opType(op), shape(s), dimIndex(dim) {}
+};
+
+struct ShapeMismatchError : public TensorGraphError
+{
+    uint32_t nodeId = 0;
+    std::vector<uint32_t> expectedShape;
+    std::vector<uint32_t> actualShape;
+
+    ShapeMismatchError(const std::string &msg, uint32_t nid,
+                       const std::vector<uint32_t> &expected,
+                       const std::vector<uint32_t> &actual)
+        : TensorGraphError(msg), nodeId(nid),
+          expectedShape(expected), actualShape(actual) {}
+};
+
+struct MemoryAllocationError : public TensorGraphError
+{
+    uint64_t requestedSize = 0;
+
+    MemoryAllocationError(const std::string &msg, uint64_t size)
+        : TensorGraphError(msg), requestedSize(size) {}
+};
+
+uint64_t countElements(std::vector<uint32_t> shape)
+{
+    uint64_t count = 1;
+    for (uint32_t val : shape)
+    {
+        count *= val;
+    }
+    return count;
+}
+
 enum class DType : uint32_t
 {
     FLOAT32,
@@ -105,11 +157,177 @@ inline bool regionsMatch(const Region &r1, const Region &r2)
     return true;
 }
 
-struct MemRecord
+struct TensorView
 {
-    uint64_t offset;
-    uint64_t size;
-    StorageType storageType;
+    uint64_t baseOffset; // Offset into the MemoryManager's DeviceBuffer
+    std::vector<uint32_t> shape;
+    std::vector<int64_t> strides; // Strides in terms of elements, not bytes
+
+    // Check if the physical layout perfectly matches the logical layout
+    bool isContiguous() const
+    {
+        int64_t expectedStride = 1;
+        for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
+        {
+            if (shape[i] == 1)
+                continue; // Stride doesn't matter for size 1
+            if (strides[i] != expectedStride)
+                return false;
+            expectedStride *= shape[i];
+        }
+        return true;
+    }
+
+    // Helper to generate default contiguous strides for a given shape
+    static std::vector<int64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
+    {
+        std::vector<int64_t> newStrides(targetShape.size());
+        int64_t stride = 1;
+        for (int i = static_cast<int>(targetShape.size()) - 1; i >= 0; --i)
+        {
+            newStrides[i] = stride;
+            stride *= targetShape[i];
+        }
+        return newStrides;
+    }
+};
+
+struct ViewOps
+{
+    static TensorView repeat(uint32_t nodeId, const TensorView &input,
+                             uint32_t dim, uint32_t repeats)
+    {
+        if (dim >= input.shape.size())
+        {
+            std::stringstream ss;
+            ss << "[ViewOps.repeat] Dimension " << dim << " out of bounds for shape ";
+            ss << toString(input.shape) << " (node " << nodeId << ")";
+            throw ViewOpValidationError(ss.str(), nodeId, OpType::REPEAT,
+                                        input.shape, dim);
+        }
+
+        if (input.shape[dim] != 1)
+        {
+            std::stringstream ss;
+            ss << "[ViewOps.repeat] Can only broadcast dimension of size 1. "
+               << "Dimension " << dim << " has size " << input.shape[dim]
+               << ", requested repeats=" << repeats << " (node " << nodeId << ")";
+            throw ViewOpValidationError(ss.str(), nodeId, OpType::REPEAT,
+                                        input.shape, dim);
+        }
+
+        TensorView output = input;
+        output.shape[dim] = repeats;
+        output.strides[dim] = 0; // Broadcasting stride
+        return output;
+    }
+
+    static TensorView reshape(uint32_t nodeId, const TensorView &input,
+                              const std::vector<uint32_t> &newShape)
+    {
+        if (!input.isContiguous())
+        {
+            std::stringstream ss;
+            ss << "[ViewOps.reshape] Cannot reshape non-contiguous tensor. "
+               << "Current strides: [";
+            for (size_t i = 0; i < input.strides.size(); ++i)
+            {
+                if (i > 0)
+                    ss << ", ";
+                ss << input.strides[i];
+            }
+            ss << "] (node " << nodeId << ")";
+            throw ViewOpValidationError(ss.str(), nodeId, OpType::RESHAPE,
+                                        input.shape);
+        }
+
+        uint64_t inputElements = countElements(input.shape);
+        uint64_t outputElements = countElements(newShape);
+
+        if (inputElements != outputElements)
+        {
+            std::stringstream ss;
+            ss << "[ViewOps.reshape] Shape mismatch: expected "
+               << outputElements << " elements, got " << inputElements
+               << ". Reshaping " << toString(input.shape)
+               << " to " << toString(newShape) << " (node " << nodeId << ")";
+            throw ShapeMismatchError(ss.str(), nodeId, input.shape, newShape);
+        }
+
+        TensorView output = input;
+        output.shape = newShape;
+        output.strides = TensorView::calcContiguousStrides(newShape);
+        return output;
+    }
+
+    static TensorView permute(const TensorView &input, const std::vector<uint32_t> &dims)
+    {
+        if (dims.size() != input.shape.size())
+        {
+            throw ViewOpValidationError(
+                "[ViewOps.permute] Dimension count mismatch",
+                0, OpType::PERMUTE, input.shape);
+        }
+
+        for (uint32_t d : dims)
+        {
+            if (d >= input.shape.size())
+            {
+                std::stringstream ss;
+                ss << "[ViewOps.permute] Dimension " << d << " out of bounds for rank "
+                   << input.shape.size();
+                throw ViewOpValidationError(ss.str(), 0, OpType::PERMUTE,
+                                            input.shape);
+            }
+        }
+
+        TensorView output;
+        output.baseOffset = input.baseOffset;
+        output.shape.resize(dims.size());
+        output.strides.resize(dims.size());
+
+        for (size_t i = 0; i < dims.size(); ++i)
+        {
+            output.shape[i] = input.shape[dims[i]];
+            output.strides[i] = input.strides[dims[i]];
+        }
+        return output;
+    }
+
+    static TensorView slice(const TensorView &input, uint32_t dim,
+                            uint32_t start, uint32_t stop, uint32_t step)
+    {
+        if (dim >= input.shape.size())
+        {
+            throw ViewOpValidationError(
+                "[ViewOps.slice] Dimension out of bounds",
+                0, OpType::SLICE, input.shape, dim);
+        }
+
+        if (start > stop || stop > input.shape[dim])
+        {
+            std::stringstream ss;
+            ss << "[ViewOps.slice] Invalid slice range: [" << start << ", "
+               << stop << ") for dimension " << dim << " with size "
+               << input.shape[dim];
+            throw ViewOpValidationError(ss.str(), 0, OpType::SLICE,
+                                        input.shape, dim);
+        }
+
+        if (step == 0)
+        {
+            throw ViewOpValidationError(
+                "[ViewOps.slice] Step cannot be zero",
+                0, OpType::SLICE, input.shape, dim);
+        }
+
+        TensorView output = input;
+        output.baseOffset += start * input.strides[dim];
+        output.shape[dim] = (stop - start + step - 1) / step;
+        output.strides[dim] *= step;
+
+        return output;
+    }
 };
 
 struct TensorNode
@@ -120,7 +338,7 @@ struct TensorNode
     std::vector<uint32_t> parentIds;
     std::vector<uint32_t> shape;
     Backend backend = Backend::CPU;
-    MemRecord mem;
+    TensorView view;
 };
 
 inline const char *toString(DType dtype)
@@ -515,6 +733,7 @@ struct TensorMetadata
     }
 };
 
+// TODO: make safetensors loader handle multiple files
 class SafetensorsLoader
 {
 public:
@@ -650,14 +869,14 @@ struct Graph
 
     uint32_t allocateId() noexcept { return count++; }
 
-    uint32_t input(std::vector<uint32_t> shape, DType dtype, MemRecord source)
+    uint32_t input(std::vector<uint32_t> shape, DType dtype, TensorView view)
     {
         TensorNode node = TensorNode();
         node.id = allocateId();
         node.opType = OpType::INPUT;
         node.dtype = dtype;
         node.shape = shape;
-        node.mem = source;
+        node.view = view;
         nodes.push_back(node);
         return node.id;
     }
@@ -813,7 +1032,6 @@ int main()
         // 3. Plan memory allocation (Graph building phase)
         uint32_t dummyNodeId = 0;
         uint64_t offset = memManager.allocate(Backend::CPU, dummyNodeId, meta.sizeBytes(), StorageType::PERSISTENT);
-        MemRecord record = {offset, meta.sizeBytes(), StorageType::PERSISTENT};
 
         // 4. Initialize physical memory
         memManager.buffers.at(Backend::CPU).init();
