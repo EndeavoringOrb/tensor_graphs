@@ -1,6 +1,6 @@
 #pragma once
 #include "core/types.hpp"
-#include <kernels/add/F32_1D.hpp>
+#include "kernels/add/F32_1D.hpp"
 
 // A matching function checks the context of the requested operation to determine
 // if the kernel supports the specific layout, rank, dimensions, or dtypes.

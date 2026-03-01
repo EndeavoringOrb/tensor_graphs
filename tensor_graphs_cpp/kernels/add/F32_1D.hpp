@@ -1,6 +1,5 @@
 #pragma once
-
-#include "core.hpp"
+#include "core/types.hpp"
 
 // ---------------------------------------------------------
 // KERNEL: ADD F32 1D (Contiguous)
