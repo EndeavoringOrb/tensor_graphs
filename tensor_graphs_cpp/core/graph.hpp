@@ -1,5 +1,7 @@
 #pragma once
 #include "core/types.hpp"
+#include "core/loaders/safetensors.hpp"
+#include "core/memory.hpp"
 #include <vector>
 #include <stdexcept>
 #include <sstream>
@@ -10,7 +12,7 @@ struct Graph
 {
     uint32_t count = 0;
     std::vector<TensorNode> nodes;
-    std::unordered_map<std::string, std::unique_ptr<SafetensorsLoader>> loaders;     // Mapping of path -> Loader instance
+    std::unordered_map<std::string, std::shared_ptr<SafetensorsLoader>> loaders;     // Mapping of path -> Loader instance
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
 
     uint32_t allocateId() noexcept { return count++; }
@@ -19,8 +21,29 @@ struct Graph
     {
         if (loaders.find(path) == loaders.end())
         {
-            loaders[path] = std::make_unique<SafetensorsLoader>(path);
+            loaders[path] = std::make_shared<SafetensorsLoader>(path);
         }
+    }
+
+    uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype, MemoryManager &memManager)
+    {
+        // 1. Calculate size in bytes
+        uint64_t sizeBytes = getSizeBytes(shape, dtype);
+
+        // 2. Atomic ID generation
+        uint32_t id = allocateId();
+
+        // 3. Physical Allocation (PERSISTENT for constants)
+        memManager.allocate(Backend::CPU, id, sizeBytes, StorageType::PERSISTENT);
+
+        // 4. Write the data to memory
+        memManager.write(Backend::CPU, id, dataPtr, sizeBytes);
+
+        // 5. Get the view for this allocation
+        TensorView view = memManager.getView(Backend::CPU, id, shape);
+
+        // 6. Create the input node with this view
+        return inputWithId(id, shape, dtype, view);
     }
 
     uint32_t weight(const std::string &path, const std::string &name, MemoryManager &memManager)

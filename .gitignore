@@ -1,13 +1,13 @@
 .venv
 *__pycache__
-repomix-output.txt
+*repomix-output.txt
 .coverage
 commands.txt
 *.egg-info
 resources/*.safetensors
 resources/*.html
 resources/*.json
-pack.bat
+*pack.bat
 .vscode
 flux-klein-4b
 out.log
@@ -20,3 +20,4 @@ wsl_venv
 .claude
 CLAUDE.md
 tensor_graphs_cpp/main.exe
+*.pyd

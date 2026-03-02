@@ -133,14 +133,10 @@ namespace Hashing
             }
 
             bitlen += datalen * 8;
-            data[63] = bitlen;
-            data[62] = bitlen >> 8;
-            data[61] = bitlen >> 16;
-            data[60] = bitlen >> 24;
-            data[59] = bitlen >> 32;
-            data[58] = bitlen >> 40;
-            data[57] = bitlen >> 48;
-            data[56] = bitlen >> 56;
+            for (int i = 0; i < 8; ++i)
+            {
+                data[63 - i] = static_cast<uint8_t>(bitlen >> (i * 8));
+            }
             transform();
 
             std::stringstream ss;

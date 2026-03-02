@@ -187,7 +187,7 @@ public:
     {
         Planner planner(costModel, 4ULL * 1024 * 1024 * 1024);
 
-        compiled = planner.plan(rootId, graph);
+        compiled = planner.plan(rootId, graph, memManager);
 
         // Collect transient input node IDs
         std::vector<uint32_t> inputNodeIds;
