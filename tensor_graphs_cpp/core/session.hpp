@@ -14,21 +14,6 @@
 #include <set>
 
 // ---------------------------------------------------------------------------
-// DirtyBucket — one cached propagation result for a specific input region combo
-// ---------------------------------------------------------------------------
-
-struct DirtyBucket
-{
-    // Per-node output dirty regions (from forward propagation)
-    std::unordered_map<uint32_t, std::vector<Region>> regions;
-
-    // Per-node input slices (from backward propagation).
-    // Outer key is node ID. Inner vector is per-output-region, each entry
-    // is a vector of per-parent required regions.
-    std::unordered_map<uint32_t, std::vector<std::vector<std::vector<Region>>>> inputSlices;
-};
-
-// ---------------------------------------------------------------------------
 // JSON serialization helpers for Region / Dim / DirtyBucket
 // ---------------------------------------------------------------------------
 
@@ -186,22 +171,151 @@ public:
         }
     }
 
-    void compile()
+    static uint32_t nextPowerOf2(uint32_t x)
+    {
+        if (x == 0) return 1;
+        x--;
+        x |= x >> 1;
+        x |= x >> 2;
+        x |= x >> 4;
+        x |= x >> 8;
+        x |= x >> 16;
+        return x + 1;
+    }
+
+    void compile(const std::unordered_map<uint32_t, const void *> &sampleInputs)
     {
         Planner planner(costModel, 4ULL * 1024 * 1024 * 1024);
 
         compiled = planner.plan(rootId, graph);
+
+        // Collect transient input node IDs
+        std::vector<uint32_t> inputNodeIds;
+        for (const auto &pair : compiled.nodesMap)
+        {
+            if (pair.second.opType == OpType::INPUT)
+            {
+                inputNodeIds.push_back(pair.first);
+            }
+        }
+
+        ensureCacheCoverage(inputNodeIds);
+
         executor = std::make_unique<Executor>(compiled, memManager, graph);
         isCompiled = true;
+    }
+
+    // Snap a raw dirty region to the nearest power-of-2 aligned bucket
+    // and look up the cached bucket for these input diffs.
+    DirtyBucket findBestBucket(
+        const std::unordered_map<uint32_t, std::vector<Region>> &inputDiffs) const
+    {
+        if (inputDiffs.empty())
+        {
+            // No diffs — return an empty bucket (everything clean)
+            return DirtyBucket{};
+        }
+
+        std::unordered_map<uint32_t, std::vector<Region>> canonicalRegions;
+
+        for (const auto &pair : inputDiffs)
+        {
+            uint32_t nodeId = pair.first;
+            const auto &regionList = pair.second;
+            const TensorNode &node = graph.nodes[nodeId];
+
+            if (regionList.empty())
+                continue;
+
+            // Use the first region box for bucket snapping
+            const Region &box = regionList[0];
+            Region canonical;
+
+            for (size_t d = 0; d < box.region.size(); ++d)
+            {
+                uint32_t dimLen = node.shape[d];
+                uint32_t start = box.region[d].start;
+                uint32_t stop = box.region[d].stop;
+
+                uint32_t targetLen = nextPowerOf2(stop - start);
+                bool found = false;
+
+                while (targetLen <= nextPowerOf2(dimLen))
+                {
+                    uint32_t bucketStart = (start / targetLen) * targetLen;
+                    uint32_t bucketEnd = std::min(bucketStart + targetLen, dimLen);
+
+                    if (bucketStart <= start && bucketEnd >= stop)
+                    {
+                        canonical.region.push_back({bucketStart, bucketEnd});
+                        found = true;
+                        break;
+                    }
+                    targetLen *= 2;
+                }
+
+                if (!found)
+                {
+                    canonical.region.push_back({0, dimLen});
+                }
+            }
+
+            canonicalRegions[nodeId] = {canonical};
+        }
+
+        const DirtyBucket *cached = lookupCache(canonicalRegions);
+        if (cached)
+        {
+            return *cached;
+        }
+
+        // Fallback: return empty bucket (full recompute behavior)
+        return DirtyBucket{};
     }
 
     void run(const std::unordered_map<uint32_t, const void *> &inputs)
     {
         if (!isCompiled)
         {
-            compile();
+            compile(inputs);
         }
-        executor->run(inputs);
+
+        // Compute input diffs against previous data
+        std::unordered_map<uint32_t, std::vector<Region>> inputDiffs;
+
+        for (const auto &pair : inputs)
+        {
+            uint32_t nodeId = pair.first;
+            const void *newData = pair.second;
+            const TensorNode &node = graph.nodes[nodeId];
+
+            if (node.opType != OpType::INPUT)
+                continue;
+
+            const void *oldData = nullptr;
+            auto prevIt = previousInputData.find(nodeId);
+            if (prevIt != previousInputData.end())
+            {
+                oldData = prevIt->second.data();
+            }
+
+            auto diff = computeInputDiff(oldData, newData, node.shape, node.dtype);
+            if (!diff.empty())
+            {
+                inputDiffs[nodeId] = diff;
+            }
+
+            // Save a copy of the new input data
+            uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+            auto &stored = previousInputData[nodeId];
+            stored.resize(sizeBytes);
+            std::memcpy(stored.data(), newData, sizeBytes);
+        }
+
+        // Find the best matching bucket
+        DirtyBucket bucket = findBestBucket(inputDiffs);
+
+        executor->run(inputs, bucket);
     }
 
     const void *getOutput(uint32_t nodeId) const

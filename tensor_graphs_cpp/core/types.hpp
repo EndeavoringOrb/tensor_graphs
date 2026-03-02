@@ -377,3 +377,18 @@ inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << to
 inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toString(op); }
 inline std::ostream &operator<<(std::ostream &os, Backend backend) { return os << toString(backend); }
 inline std::ostream &operator<<(std::ostream &os, StorageType storage) { return os << toString(storage); }
+
+// ---------------------------------------------------------------------------
+// DirtyBucket — one cached propagation result for a specific input region combo
+// ---------------------------------------------------------------------------
+
+struct DirtyBucket
+{
+    // Per-node output dirty regions (from forward propagation)
+    std::unordered_map<uint32_t, std::vector<Region>> regions;
+
+    // Per-node input slices (from backward propagation).
+    // Outer key is node ID. Inner vector is per-output-region, each entry
+    // is a vector of per-parent required regions.
+    std::unordered_map<uint32_t, std::vector<std::vector<std::vector<Region>>>> inputSlices;
+};
