@@ -4,6 +4,7 @@ General:
 -don't use try-catch unless it is with a custom error type. don't want to hide genuine errors
 -mostly camelCase, PascalCase for struct names
 -main.cpp, and headers.hpp. .hpp files should have actual implementation, I don't want stubs + .cpp implementation file.
+-tensor_graphs/ is the old python framework, tensor_graphs_cpp/ is the new C++ framework
 
 Misc:
 -TensorNode.id is replacing TensorNode.name
@@ -24,6 +25,8 @@ Memory:
 -during graph construction, input nodes must obtain an allocation from MemoryManager before they can be added to the graph. This includes weights. There should be specialized (start with .safetensors, but eventually .gguf as well) loaders so user can 1. allocate, 2. (after device buffers have initialized with .init()) pass allocation + tensor name to loader and loader writes tensor to that memory
 
 Shape Propagation:
--should not use contiguous merging approximation, don't merge dirty regions
+-there is no need for concrete_shapes as we can just use parent shapes
+-as dirty propagation is just a thin wrapper, dirty propagation and graph propagation will be combined into a single shape propagation file
+-should not use contiguous merging approximation, don't merge dirty regions. the merge_regions function is not needed anymore
 -remove shape broadcasting. add(vec, scalar) should be a fused op replacing add(vec, repeat(scalar, vec size))
 -parent regions should be explicitly passed to forward, we don't want to use dirtyRegions so that we can use forward for shape inference as well

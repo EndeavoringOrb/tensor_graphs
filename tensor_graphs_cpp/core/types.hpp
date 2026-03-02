@@ -22,6 +22,7 @@ uint64_t countElements(std::vector<uint32_t> shape)
     return count;
 }
 
+// When you add a new DType, remember to update getDTypeSize and toString(DType dtype)
 enum class DType : uint32_t
 {
     FLOAT32,
@@ -30,6 +31,23 @@ enum class DType : uint32_t
     BOOL,
     _COUNT
 };
+
+inline uint64_t getDTypeSize(DType dtype)
+{
+    switch (dtype)
+    {
+    case DType::FLOAT32:
+        return 4;
+    case DType::INT32:
+        return 4;
+    case DType::BF16:
+        return 2;
+    case DType::BOOL:
+        return 1;
+    default:
+        throw std::runtime_error("Unknown DType size");
+    }
+}
 
 enum class OpType : uint32_t
 {
@@ -203,6 +221,11 @@ struct TensorNode
     TensorView view;
 };
 
+inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape, DType dtype)
+{
+    return countElements(shape) * getDTypeSize(dtype);
+}
+
 inline const char *toString(DType dtype)
 {
     switch (dtype)
@@ -213,6 +236,8 @@ inline const char *toString(DType dtype)
         return "I32";
     case DType::BF16:
         return "BF16";
+    case DType::BOOL:
+        return "BOOL";
     default:
         return "UNKNOWN_DTYPE";
     }

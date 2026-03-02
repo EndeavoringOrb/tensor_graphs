@@ -1,5 +1,6 @@
 #pragma once
 #include "core/types.hpp"
+#include "core/graph.hpp"
 
 bool shapesMatch(const std::vector<uint32_t> &shape1, const std::vector<uint32_t> &shape2)
 {
@@ -15,11 +16,11 @@ bool shapesMatch(const std::vector<uint32_t> &shape1, const std::vector<uint32_t
 
 struct ShapePropagator
 {
-    std::vector<Region> forward(const TensorNode &node, const std::vector<TensorNode> &allNodes, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forward(const TensorNode &node, const Graph& graph, const std::vector<std::vector<Region>> &parentRegions)
     {
         for (uint32_t pid : node.parentIds)
         {
-            if (pid >= allNodes.size())
+            if (pid >= graph.nodes.size())
             {
                 std::stringstream ss;
                 ss << "[ShapePropagator.forward] Invalid parent ID " << pid << " for OpType " << node.opType;
@@ -29,7 +30,7 @@ struct ShapePropagator
         switch (node.opType)
         {
         case OpType::ADD:
-            return forwardAdd(node, allNodes, parentRegions);
+            return forwardAdd(node, graph, parentRegions);
         default:
             std::stringstream ss;
             ss << "[ShapePropagator.forward] Unsupported OpType for ShapePropagator.forward: " << node.opType;
@@ -38,7 +39,7 @@ struct ShapePropagator
     }
 
     // Output regions are the unique set of all parent regions
-    std::vector<Region> forwardAdd(const TensorNode &node, const std::vector<TensorNode> &allNodes, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardAdd(const TensorNode &node, const Graph& graph, const std::vector<std::vector<Region>> &parentRegions)
     {
         if (node.parentIds.size() != 2)
         {
@@ -50,8 +51,8 @@ struct ShapePropagator
 
         uint32_t pid0 = node.parentIds[0];
         uint32_t pid1 = node.parentIds[1];
-        const auto &parent0 = allNodes[pid0];
-        const auto &parent1 = allNodes[pid1];
+        const auto &parent0 = graph.nodes[pid0];
+        const auto &parent1 = graph.nodes[pid1];
 
         if (!shapesMatch(parent0.shape, parent1.shape))
         {

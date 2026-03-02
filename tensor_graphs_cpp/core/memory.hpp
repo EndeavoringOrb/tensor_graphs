@@ -221,4 +221,44 @@ struct MemoryManager
         }
         return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost);
     }
+
+    void release(Backend backend, uint32_t nodeId)
+    {
+        auto &buf = buffers.at(backend);
+        auto it = buf.allocationMap.find(nodeId);
+        if (it != buf.allocationMap.end())
+        {
+            if (it->second->storageType == StorageType::TRANSIENT)
+            {
+                if (it->second->refCount > 0)
+                {
+                    it->second->refCount--;
+                    // If no one else needs this node, unlock it for eviction
+                    if (it->second->refCount == 0)
+                    {
+                        it->second->isLocked = false;
+                    }
+                }
+            }
+        }
+    }
+
+    void transferOwnership(Backend backend, uint32_t srcId, uint32_t dstId)
+    {
+        auto &buf = buffers.at(backend);
+        auto srcIt = buf.allocationMap.find(srcId);
+        if (srcIt != buf.allocationMap.end())
+        {
+            auto blockIt = srcIt->second;
+            buf.allocationMap.erase(srcIt);
+
+            // Update node identity
+            blockIt->nodeId = dstId;
+            buf.allocationMap[dstId] = blockIt;
+        }
+        else
+        {
+            throw std::runtime_error("[MemoryManager.transferOwnership] Source ID not found in allocation map");
+        }
+    }
 };

@@ -369,6 +369,4 @@ struct Graph
         nodes.push_back(node);
         return node.id;
     }
-
-    uint32_t 
 };
