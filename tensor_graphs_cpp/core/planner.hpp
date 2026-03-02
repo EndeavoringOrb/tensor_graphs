@@ -76,7 +76,7 @@ public:
                 pattern.variables.push_back(inId);
             }
 
-            pattern.rootId = factory(pattern.variables, pattern.graph);
+            pattern.rootId = factory(pattern.variables, pattern.graph); // TODO: pass memory manager here so constant inputs can be allocated
             fusedPatterns.push_back(std::move(pattern));
         }
 
