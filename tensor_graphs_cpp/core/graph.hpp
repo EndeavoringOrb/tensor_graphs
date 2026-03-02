@@ -1,5 +1,10 @@
 #pragma once
 #include "core/types.hpp"
+#include <vector>
+#include <stdexcept>
+#include <sstream>
+
+struct MemoryManager; // Forward declaration
 
 struct Graph
 {
@@ -10,8 +15,13 @@ struct Graph
 
     uint32_t input(std::vector<uint32_t> shape, DType dtype, TensorView view)
     {
+        return inputWithId(allocateId(), shape, dtype, view);
+    }
+
+    uint32_t inputWithId(uint32_t id, std::vector<uint32_t> shape, DType dtype, TensorView view)
+    {
         TensorNode node = TensorNode();
-        node.id = allocateId();
+        node.id = id;
         node.opType = OpType::INPUT;
         node.dtype = dtype;
         node.shape = shape;
@@ -21,6 +31,10 @@ struct Graph
         return node.id;
     }
 
+    // Builder function for fused operations resolving reference graph logic
+    uint32_t tanh(uint32_t id0, MemoryManager &memManager);
+
+    // Existing atomic mathematical ops ...
     uint32_t add(uint32_t id0, uint32_t id1)
     {
         if (nodes[id0].dtype != nodes[id1].dtype)
@@ -251,7 +265,7 @@ struct Graph
     uint32_t concat(std::vector<uint32_t> ids, uint32_t id1)
     {
         if (ids.size() == 0) {
-            throw std::runtime_error("[Graph.concat] Expected at least one input tensor, got None.");
+            throw std::runtime_error("[Graph.concat] Expected at least 1 input tensor, got 0.");
         }
         for (int i = 0; i < ids.size(); i++) {
             uint32_t id = ids[i];
@@ -278,7 +292,8 @@ struct Graph
         return node.id;
     }
 
-    uint32_t cast(uint32_t id0, DType dtype) {
+    uint32_t cast(uint32_t id0, DType dtype)
+    {
         TensorNode node = TensorNode();
         node.id = allocateId();
         node.opType = OpType::CAST;
@@ -341,7 +356,7 @@ struct Graph
 
     uint32_t triu(uint32_t id0, uint32_t k_id) {
         if (nodes[k_id].dtype != DType::INT32)
-        {
+    {
             std::stringstream ss;
             ss << "[Graph.triu] Expected " << DType::INT32 << " for input 1, got: " << nodes[k_id].dtype;
             throw std::runtime_error(ss.str());
@@ -357,7 +372,7 @@ struct Graph
 
     uint32_t gather(uint32_t id0, uint32_t indices_id) {
         if (nodes[indices_id].dtype != DType::INT32)
-        {
+    {
             std::stringstream ss;
             ss << "[Graph.gather] Expected " << DType::INT32 << " for input 1, got: " << nodes[indices_id].dtype;
             throw std::runtime_error(ss.str());

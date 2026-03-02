@@ -33,6 +33,7 @@ struct BeamStrategy
     uint32_t nodeId;
     std::unordered_map<uint32_t, Backend> assignments;
     std::unordered_map<uint32_t, uint32_t> kernelAssignments;
+    MemoryManager memManager; // Enforce distinct independent copy tracking global simulation
 
     bool operator<(const BeamStrategy &other) const
     {
@@ -46,9 +47,8 @@ public:
     Planner(CostModel &costModel, uint64_t maxMemoryBytes = 4ULL * 1024 * 1024 * 1024)
         : costModel(costModel), maxMemoryBytes(maxMemoryBytes) {}
 
-    CompiledGraph plan(uint32_t rootId, Graph &graph)
+    CompiledGraph plan(uint32_t rootId, Graph &graph, const MemoryManager &rootMemManager)
     {
-        // 1. Get topological sort
         std::vector<uint32_t> topo = topologicalSort(rootId, graph);
 
         // Build fused patterns from the Reference Graph Registry
@@ -58,6 +58,7 @@ public:
             std::vector<uint32_t> variables;
             uint32_t rootId;
             Graph graph;
+            MemoryManager memManager;
         };
         std::vector<FusedPattern> fusedPatterns;
 
@@ -69,18 +70,21 @@ public:
 
             FusedPattern pattern;
             pattern.opName = opName;
+            pattern.memManager.buffers.emplace(Backend::CPU, DeviceBuffer(1024 * 1024));
 
             for (size_t i = 0; i < numInputs; ++i)
             {
-                uint32_t inId = pattern.graph.input({1}, DType::FLOAT32, TensorView{});
+                uint32_t inId = pattern.graph.allocateId();
+                pattern.memManager.allocate(Backend::CPU, inId, 4, StorageType::TRANSIENT);
+                TensorView view; // TODO: implement MemoryManager.getView
+                pattern.graph.inputWithId(inId, {1}, DType::FLOAT32, view);
                 pattern.variables.push_back(inId);
             }
 
-            pattern.rootId = factory(pattern.variables, pattern.graph); // TODO: pass memory manager here so constant inputs can be allocated
+            pattern.rootId = factory(pattern.variables, pattern.graph, pattern.memManager);
             fusedPatterns.push_back(std::move(pattern));
         }
 
-        // 2. Pattern Matching & Graph Rewrites
         std::unordered_map<std::string, std::vector<uint32_t>> fusionMap;
 
         Rewrite::CommutativeRule cr;
@@ -97,7 +101,7 @@ public:
         for (auto it = topo.rbegin(); it != topo.rend(); ++it)
         {
             uint32_t nodeId = *it;
-            std::string hash = Hashing::getStructuralHash(nodeId, graph);
+            std::string hash = Hashing::getStructuralHash(nodeId, graph, rootMemManager);
 
             std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(nodeId, graph, rules);
             for (uint32_t eqId : equivalents)
@@ -107,7 +111,6 @@ public:
                     fusionMap[hash].push_back(eqId);
                 }
 
-                // Match fused patterns
                 for (const auto &fp : fusedPatterns)
                 {
                     std::unordered_map<uint32_t, uint32_t> binding;
@@ -148,19 +151,16 @@ public:
             }
         }
 
-        // Re-calculate topological sort because we added new nodes
-        std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, fusionMap, graph);
+        std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, fusionMap, graph, rootMemManager);
 
-        // 3. Kernel Selection (Beam Search)
         std::unordered_map<std::string, std::vector<BeamStrategy>> memo;
 
         for (uint32_t nodeId : sortedNodes)
         {
-            planNodeIterative(nodeId, graph, fusionMap, memo);
+            planNodeIterative(nodeId, graph, fusionMap, memo, rootMemManager);
         }
 
-        // 4. Graph Reconstruction
-        std::string rootHash = Hashing::getStructuralHash(rootId, graph);
+        std::string rootHash = Hashing::getStructuralHash(rootId, graph, rootMemManager);
         if (memo.find(rootHash) == memo.end() || memo[rootHash].empty())
         {
             throw std::runtime_error("Planner failed to find any execution strategy for root node.");
@@ -168,7 +168,6 @@ public:
 
         auto bestRecipe = memo[rootHash][0];
 
-        // 5. Compilation & Instruction Generation
         std::vector<uint32_t> finalTopo = topologicalSort(bestRecipe.nodeId, graph);
         CompiledGraph compiled;
 
@@ -179,22 +178,16 @@ public:
             {
                 compiled.refCounts[pid]++;
             }
-            compiled.refCounts[bestRecipe.nodeId] = 1; // Root
+            compiled.refCounts[bestRecipe.nodeId] = 1;
         }
 
         for (uint32_t id : finalTopo)
         {
             const auto &node = graph.nodes[id];
             if (node.opType == OpType::INPUT)
-                continue; // Inputs are not executed
+                continue;
 
             Backend assignedBackend = bestRecipe.assignments.count(id) ? bestRecipe.assignments[id] : node.backend;
-
-            std::vector<TensorNode> inputNodes;
-            for (uint32_t pid : node.parentIds)
-            {
-                inputNodes.push_back(graph.nodes[pid]);
-            }
 
             uint32_t assignedKernelId = 0;
             if (bestRecipe.kernelAssignments.count(id))
@@ -207,7 +200,6 @@ public:
                 throw std::runtime_error("No kernel assigned for node with OpType " + opStr);
             }
 
-            // Inplace Check logic (simplified evaluation)
             bool is_inplace_safe = false;
             if (!node.parentIds.empty())
             {
@@ -263,9 +255,6 @@ private:
             return false;
         if (cNode.parentIds.size() != pNode.parentIds.size())
             return false;
-        if (cNode.opType == OpType::INPUT && cNode.storageType == StorageType::PERSISTENT && pNode.opType == OpType::INPUT && pNode.storageType == StorageType::PERSISTENT) {
-            // TODO: hash values of both, if they don't match then return false. This means we need to have access to MemoryManager that was used to allocate() and write()
-        }
 
         for (size_t i = 0; i < cNode.parentIds.size(); ++i)
         {
@@ -299,13 +288,14 @@ private:
 
     std::vector<uint32_t> getAugmentedTopologicalSort(const std::vector<uint32_t> &baseNodes,
                                                       std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
-                                                      const Graph &graph)
+                                                      const Graph &graph,
+                                                      const MemoryManager &rootMemManager)
     {
         std::vector<uint32_t> order;
         std::unordered_set<std::string> visited;
         auto visit = [&](auto &self, uint32_t node) -> void
         {
-            std::string hash = Hashing::getStructuralHash(node, graph);
+            std::string hash = Hashing::getStructuralHash(node, graph, rootMemManager);
             if (visited.count(hash))
                 return;
             visited.insert(hash);
@@ -337,9 +327,10 @@ private:
 
     void planNodeIterative(uint32_t nodeId, const Graph &graph,
                            std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
-                           std::unordered_map<std::string, std::vector<BeamStrategy>> &memo)
+                           std::unordered_map<std::string, std::vector<BeamStrategy>> &memo,
+                           const MemoryManager &rootMemManager)
     {
-        std::string nodeHash = Hashing::getStructuralHash(nodeId, graph);
+        std::string nodeHash = Hashing::getStructuralHash(nodeId, graph, rootMemManager);
         if (memo.count(nodeHash))
             return;
 
@@ -350,6 +341,7 @@ private:
             strat.cost = 0.0f;
             strat.nodeId = nodeId;
             strat.assignments[nodeId] = node.backend;
+            strat.memManager = rootMemManager; // Initialize copy explicitly
             memo[nodeHash] = {strat};
             return;
         }
@@ -372,7 +364,7 @@ private:
             bool missingParents = false;
             for (uint32_t pid : target.parentIds)
             {
-                std::string phash = Hashing::getStructuralHash(pid, graph);
+                std::string phash = Hashing::getStructuralHash(pid, graph, rootMemManager);
                 if (memo.count(phash) == 0)
                 {
                     missingParents = true;
@@ -404,11 +396,22 @@ private:
                         assigns[targetId] = backend;
                         std::unordered_map<uint32_t, uint32_t> kAssigns;
                         kAssigns[targetId] = kernelId;
-                        candidates.push_back({cost, targetId, assigns, kAssigns});
+
+                        BeamStrategy strat{cost, targetId, assigns, kAssigns, rootMemManager};
+                        try
+                        {
+                            strat.memManager.allocate(backend, targetId, getSizeBytes(target.shape, target.dtype), StorageType::TRANSIENT, 1, cost);
+                            candidates.push_back(strat);
+                        }
+                        catch (MemoryAllocationError)
+                        {
+                            continue;
+                        }
+
+                        
                         continue;
                     }
 
-                    // Dynamic combinations iterating cross-product
                     std::vector<size_t> indices(parentBeamSets.size(), 0);
                     while (true)
                     {
@@ -431,7 +434,6 @@ private:
                                 kAssigns[pair.first] = pair.second;
                             }
 
-                            // Apply transfer penalty if mismatch. TODO: create copyto node and pass that to costModel.estimateCost
                             if (pStrat.assignments.at(pStrat.nodeId) != backend)
                             {
                                 cost += 0.05f;
@@ -440,7 +442,16 @@ private:
 
                         cost += costModel.estimateCost(target, graph, kernelId);
 
-                        candidates.push_back({cost, targetId, assigns, kAssigns});
+                        MemoryManager newMem = parentBeamSets[0][indices[0]].memManager;
+                        try
+                        {
+                            newMem.allocate(backend, targetId, getSizeBytes(target.shape, target.dtype), StorageType::TRANSIENT, 1, cost);
+                            candidates.push_back({cost, targetId, assigns, kAssigns, newMem});
+                        }
+                        catch (MemoryAllocationError)
+                        {
+                            // TODO: If OOM simulation fails, we legitimately discard this sequence path.
+                        }
 
                         int p = static_cast<int>(indices.size()) - 1;
                         while (p >= 0)

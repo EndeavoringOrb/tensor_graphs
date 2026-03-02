@@ -7,8 +7,6 @@
 #include <string>
 #include <unordered_map>
 
-struct Graph;
-
 // A matching function checks the context of the requested operation to determine
 // if the kernel supports the specific layout, rank, dimensions, or dtypes.
 using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
@@ -59,6 +57,15 @@ public:
 private:
     std::unordered_map<std::string, ReferenceGraphEntry> factories;
 };
+
+// Implement the Graph builder method here to resolve dependencies smoothly
+inline uint32_t Graph::tanh(uint32_t id0, MemoryManager &memManager)
+{
+    auto *entry = ReferenceGraphRegistry::get().getFactory("Tanh");
+    if (!entry)
+        throw std::runtime_error("No reference factory registered for Tanh");
+    return entry->factory({id0}, *this, memManager);
+}
 
 struct KernelEntry
 {
@@ -122,7 +129,6 @@ private:
     std::vector<KernelEntry> entries;
 };
 
-// Helper struct and macro for clean static-time kernel registration
 struct KernelRegistrar
 {
     KernelRegistrar(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory)

@@ -1,5 +1,10 @@
 #pragma once
 #include "core/types.hpp"
+#include <vector>
+#include <unordered_map>
+#include <list>
+#include <cstring>
+#include <stdexcept>
 
 struct MemBlock
 {
@@ -21,6 +26,10 @@ struct DeviceBuffer
 {
     std::vector<uint8_t> arena;
     uint64_t sizeBytes;
+    bool initialized = false;
+
+    // Sparse representation for writing weights/constants before huge physical memory allocation
+    std::unordered_map<uint32_t, std::vector<uint8_t>> sparseData;
 
     // Unified physical memory layout representation
     std::list<MemBlock> blocks;
@@ -39,10 +48,76 @@ struct DeviceBuffer
         blocks.push_back(initialFree);
     }
 
-    // Arena not resized at construction so we can do allocation planning without actually making arena huge.
     void init()
     {
+        if (initialized)
+            return;
         arena.resize(sizeBytes);
+        initialized = true;
+
+        // Copy over all sparse data to their allocated offsets in the arena
+        for (const auto &pair : sparseData)
+        {
+            uint32_t nodeId = pair.first;
+            auto it = allocationMap.find(nodeId);
+            if (it != allocationMap.end())
+            {
+                std::memcpy(arena.data() + it->second->offset, pair.second.data(), pair.second.size());
+            }
+        }
+        sparseData.clear(); // Free up redundant metadata storage
+    }
+
+    void write(uint32_t nodeId, const void *data, uint64_t size)
+    {
+        if (!initialized)
+        {
+            std::vector<uint8_t> buf(size);
+            std::memcpy(buf.data(), data, size);
+            sparseData[nodeId] = std::move(buf);
+        }
+        else
+        {
+            auto it = allocationMap.find(nodeId);
+            if (it != allocationMap.end())
+            {
+                std::memcpy(arena.data() + it->second->offset, data, size);
+            }
+            else
+            {
+                throw std::runtime_error("Cannot write to unallocated node");
+            }
+        }
+    }
+
+    const uint8_t *read(uint32_t nodeId) const
+    {
+        if (!initialized)
+        {
+            auto it = sparseData.find(nodeId);
+            if (it != sparseData.end())
+            {
+                return it->second.data();
+            }
+            return nullptr;
+        }
+        else
+        {
+            auto it = allocationMap.find(nodeId);
+            if (it != allocationMap.end())
+            {
+                return arena.data() + it->second->offset;
+            }
+            return nullptr;
+        }
+    }
+
+    void unload(uint32_t nodeId)
+    {
+        if (!initialized)
+        {
+            sparseData.erase(nodeId);
+        }
     }
 
     std::list<MemBlock>::iterator findFreeSlot(uint64_t _sizeBytes)
@@ -98,9 +173,7 @@ struct DeviceBuffer
 
                 // Break early if we've shrunk it to a single block
                 if (left == right)
-                {
                     break;
-                }
 
                 // Shrink from the left
                 currentSize -= left->sizeBytes;
@@ -170,7 +243,7 @@ struct DeviceBuffer
         // 4. If still no space, eviction failed.
         if (slotIt == blocks.end())
         {
-            throw std::runtime_error("Cannot allocate: Not enough contiguous space.");
+            throw MemoryAllocationError("Cannot allocate: Not enough contiguous space.", _sizeBytes);
         }
 
         // 5. Claim the free slot
@@ -216,10 +289,23 @@ struct MemoryManager
     {
         auto it = buffers.find(backend);
         if (it == buffers.end())
-        {
             throw std::runtime_error("Backend buffer not initialized in MemoryManager");
-        }
         return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost);
+    }
+
+    void write(Backend backend, uint32_t nodeId, const void *data, uint64_t size)
+    {
+        buffers.at(backend).write(nodeId, data, size);
+    }
+
+    const uint8_t *read(Backend backend, uint32_t nodeId) const
+    {
+        return buffers.at(backend).read(nodeId);
+    }
+
+    void unload(Backend backend, uint32_t nodeId)
+    {
+        buffers.at(backend).unload(nodeId);
     }
 
     void release(Backend backend, uint32_t nodeId)

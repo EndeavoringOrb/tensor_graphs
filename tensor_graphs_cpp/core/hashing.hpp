@@ -8,6 +8,7 @@
 #include <cstdint>
 #include "core/types.hpp"
 #include "core/graph.hpp"
+#include "core/memory.hpp"
 
 namespace Hashing
 {
@@ -157,8 +158,7 @@ namespace Hashing
     // ---------------------------------------------------------
     namespace detail
     {
-
-        inline std::string structuralHashImpl(uint32_t nodeId, const Graph &graph, std::unordered_map<uint32_t, std::string> &memo)
+        inline std::string structuralHashImpl(uint32_t nodeId, const Graph &graph, const MemoryManager &memManager, std::unordered_map<uint32_t, std::string> &memo)
         {
             if (memo.count(nodeId))
             {
@@ -172,7 +172,6 @@ namespace Hashing
             const TensorNode &node = graph.nodes[nodeId];
             SHA256 sha;
 
-            // Hash OpType (Fixed size)
             uint32_t opVal = static_cast<uint32_t>(node.opType);
             sha.update(reinterpret_cast<const uint8_t *>(&opVal), sizeof(opVal));
 
@@ -182,11 +181,9 @@ namespace Hashing
                 sha.update("|");
             }
 
-            // Hash DType (Fixed size)
             uint32_t dtypeVal = static_cast<uint32_t>(node.dtype);
             sha.update(reinterpret_cast<const uint8_t *>(&dtypeVal), sizeof(dtypeVal));
 
-            // Hash Shape Array (Rank length followed by strictly fixed-size integer components)
             uint32_t shapeRank = static_cast<uint32_t>(node.shape.size());
             sha.update(reinterpret_cast<const uint8_t *>(&shapeRank), sizeof(shapeRank));
             for (uint32_t dim : node.shape)
@@ -196,22 +193,38 @@ namespace Hashing
 
             if (node.opType == OpType::INPUT)
             {
-                // Hash ID (Fixed size)
-                uint32_t idVal = node.id;
-                sha.update(reinterpret_cast<const uint8_t *>(&idVal), sizeof(idVal));
+                if (node.storageType == StorageType::PERSISTENT)
+                {
+                    const uint8_t *data = memManager.read(node.backend, nodeId);
+                    if (data)
+                    {
+                        uint64_t size = getSizeBytes(node.shape, node.dtype);
+                        sha.update(data, size);
+                    }
+                    else
+                    {
+                        // TODO: should we throw error here?
+                        uint32_t idVal = node.id;
+                        sha.update(reinterpret_cast<const uint8_t *>(&idVal), sizeof(idVal));
+                    }
+                }
+                else
+                {
+                    uint32_t idVal = node.id;
+                    sha.update(reinterpret_cast<const uint8_t *>(&idVal), sizeof(idVal));
+                }
             }
             else
             {
-                // Hash the fixed Parent Length
                 uint32_t numParents = static_cast<uint32_t>(node.parentIds.size());
                 sha.update(reinterpret_cast<const uint8_t *>(&numParents), sizeof(numParents));
 
                 const std::string delim = "|";
                 for (uint32_t pid : node.parentIds)
                 {
-                    std::string ph = structuralHashImpl(pid, graph, memo);
+                    std::string ph = structuralHashImpl(pid, graph, memManager, memo);
                     sha.update(ph);
-                    sha.update(delim); // Delimiter added for variable length strings
+                    sha.update(delim);
                 }
             }
 
@@ -261,7 +274,7 @@ namespace Hashing
                 {
                     std::string ph = patternHashImpl(pid, graph, memo);
                     sha.update(ph);
-                    sha.update(delim); // Delimiter added for strings
+                    sha.update(delim);
                 }
             }
 
@@ -269,16 +282,12 @@ namespace Hashing
             memo[nodeId] = result;
             return result;
         }
-    } // namespace detail
+    }
 
-    // ---------------------------------------------------------
-    // PUBLIC API
-    // ---------------------------------------------------------
-
-    inline std::string getStructuralHash(uint32_t nodeId, const Graph &graph)
+    inline std::string getStructuralHash(uint32_t nodeId, const Graph &graph, const MemoryManager &memManager)
     {
         std::unordered_map<uint32_t, std::string> memo;
-        return detail::structuralHashImpl(nodeId, graph, memo);
+        return detail::structuralHashImpl(nodeId, graph, memManager, memo);
     }
 
     inline std::string getPatternHash(uint32_t nodeId, const Graph &graph)

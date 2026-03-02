@@ -63,7 +63,6 @@ namespace Rewrite
                 auto res1 = match(a, add_node_id);
                 if (!res1.empty())
                     return res1;
-
                 auto res2 = match(add_node_id, a);
                 if (!res2.empty())
                     return res2;
@@ -116,7 +115,6 @@ namespace Rewrite
             {
                 uint32_t a_id = node.parentIds[0];
                 uint32_t b_id = node.parentIds[1];
-
                 const auto &a = graph.nodes[a_id];
                 const auto &b = graph.nodes[b_id];
 
@@ -126,7 +124,6 @@ namespace Rewrite
                     uint32_t x = a.parentIds[0];
                     uint32_t y = a.parentIds[1];
                     uint32_t z = b_id;
-
                     uint32_t new_inner = (node.opType == OpType::ADD) ? graph.add(y, z) : graph.mul(y, z);
                     uint32_t new_outer = (node.opType == OpType::ADD) ? graph.add(x, new_inner) : graph.mul(x, new_inner);
                     results.push_back(new_outer);
@@ -138,7 +135,6 @@ namespace Rewrite
                     uint32_t x = a_id;
                     uint32_t y = b.parentIds[0];
                     uint32_t z = b.parentIds[1];
-
                     uint32_t new_inner = (node.opType == OpType::ADD) ? graph.add(x, y) : graph.mul(x, y);
                     uint32_t new_outer = (node.opType == OpType::ADD) ? graph.add(new_inner, z) : graph.mul(new_inner, z);
                     results.push_back(new_outer);
