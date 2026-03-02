@@ -141,6 +141,7 @@ struct DeviceBuffer
         return false;
     }
 
+    // float cost is the cumulative cost to recompute. TODO: when node is evicted, update its children's cost
     uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost)
     {
         // 1. If it's already cached, lock it and update
