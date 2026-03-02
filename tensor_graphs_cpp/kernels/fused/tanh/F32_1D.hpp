@@ -48,10 +48,7 @@ uint32_t refFactoryTanh(const std::vector<uint32_t> &inputs, Graph &graph, Memor
     uint32_t e_id = graph.allocateId();
     uint64_t offset = memManager.allocate(Backend::CPU, e_id, sizeof(float), StorageType::PERSISTENT);
 
-    TensorView e_view; // TODO: Use memManager.getView
-    e_view.baseOffset = offset;
-    e_view.shape = {1};
-    e_view.strides = {1};
+    TensorView e_view = memManager.getView(Backend::CPU, e_id, {1});
 
     uint32_t e_node = graph.inputWithId(e_id, {1}, DType::FLOAT32, e_view);
 

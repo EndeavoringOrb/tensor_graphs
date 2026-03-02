@@ -16,19 +16,6 @@ private:
     MemoryManager &memManager;
     const Graph &graph;
 
-    TensorView getEffectiveView(const TensorNode &node) const
-    {
-        if (!node.view.shape.empty())
-        {
-            return node.view;
-        }
-        TensorView v;
-        v.baseOffset = 0;
-        v.shape = node.shape;
-        v.strides = TensorView::calcContiguousStrides(node.shape);
-        return v;
-    }
-
 public:
     Executor(CompiledGraph cg, MemoryManager &mm, const Graph &g)
         : compiled(std::move(cg)), memManager(mm), graph(g) {}
@@ -168,8 +155,7 @@ public:
                         throw std::runtime_error("Input node not found in memory allocation map");
                     }
 
-                    uint64_t inOffset = it->second->offset;
-                    TensorView inView = getEffectiveView(inNode);
+                    TensorView inView = memManager.getView(inNode);
 
                     // Apply input slicing if partial and slices are available
                     if (!isFullRegion && slicesIt != bucket.inputSlices.end()
@@ -200,12 +186,12 @@ public:
                         // Recalculate strides for the sliced shape
                         slicedView.strides = TensorView::calcContiguousStrides(slicedView.shape);
 
-                        kernelInputs.push_back(inBuf.arena.data() + inOffset + slicedView.baseOffset);
+                        kernelInputs.push_back(inBuf.arena.data() + slicedView.baseOffset);
                         kernelInViews.push_back(slicedView);
                     }
                     else
                     {
-                        kernelInputs.push_back(inBuf.arena.data() + inOffset + inView.baseOffset);
+                        kernelInputs.push_back(inBuf.arena.data() + inView.baseOffset);
                         kernelInViews.push_back(inView);
                     }
                 }
@@ -214,8 +200,7 @@ public:
                 std::vector<void *> kernelOutputs;
                 std::vector<TensorView> kernelOutViews;
 
-                uint64_t outOffset = outBuf.allocationMap.at(node.id)->offset;
-                TensorView outView = getEffectiveView(node);
+                TensorView outView = memManager.getView(node);
 
                 if (!isFullRegion)
                 {
@@ -235,7 +220,7 @@ public:
                     outView.strides = TensorView::calcContiguousStrides(outView.shape);
                 }
 
-                kernelOutputs.push_back(outBuf.arena.data() + outOffset + outView.baseOffset);
+                kernelOutputs.push_back(outBuf.arena.data() + outView.baseOffset);
                 kernelOutViews.push_back(outView);
 
                 // Run the kernel

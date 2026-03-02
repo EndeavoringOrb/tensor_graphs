@@ -77,7 +77,7 @@ public:
             {
                 uint32_t inId = pattern.graph.allocateId();
                 pattern.memManager.allocate(Backend::CPU, inId, 4, StorageType::TRANSIENT);
-                TensorView view; // TODO: implement MemoryManager.getView
+                TensorView view = pattern.memManager.getView(Backend::CPU, inId, {1});
                 pattern.graph.inputWithId(inId, {1}, DType::FLOAT32, view);
                 pattern.variables.push_back(inId);
             }
