@@ -238,6 +238,7 @@ namespace Rewrite
         }
     };
 
+    // TODO: make generateAllEquivalents have a memo arg, pass memo to getPatternHash
     inline std::vector<uint32_t> generateAllEquivalents(uint32_t rootId, Graph &graph, const std::vector<const RewriteRule *> &rules)
     {
         std::vector<uint32_t> equivalents;
@@ -246,7 +247,7 @@ namespace Rewrite
 
         equivalents.push_back(rootId);
         worklist.push(rootId);
-        seenHashes.insert(Hashing::getStructuralHash(rootId, graph));
+        seenHashes.insert(Hashing::getPatternHash(rootId, graph));
 
         while (!worklist.empty())
         {
@@ -258,7 +259,7 @@ namespace Rewrite
                 std::vector<uint32_t> newNodes = rule->apply(current, graph);
                 for (uint32_t newNode : newNodes)
                 {
-                    std::string newHash = Hashing::getStructuralHash(newNode, graph);
+                    std::string newHash = Hashing::getPatternHash(newNode, graph);
                     if (seenHashes.find(newHash) == seenHashes.end())
                     {
                         seenHashes.insert(newHash);

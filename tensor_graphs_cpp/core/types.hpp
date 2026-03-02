@@ -208,6 +208,7 @@ struct TensorNode
     std::vector<uint32_t> shape;
     Backend backend = Backend::CPU;
     TensorView view;
+    StorageType storageType = StorageType::TRANSIENT;
 };
 
 inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape, DType dtype)
@@ -349,11 +350,17 @@ inline std::ostream &operator<<(std::ostream &os, StorageType storage) { return 
 
 struct DirtyBucket
 {
-    // Per-node output dirty regions (from forward propagation)
+    /*
+    cached forward
+    node id -> list of dirty output regions
+    */
     std::unordered_map<uint32_t, std::vector<Region>> regions;
 
-    // Per-node input slices (from backward propagation).
-    // Outer key is node ID. Inner vector is per-output-region, each entry
-    // is a vector of per-parent required regions.
+    /*
+    cached backward
+    Outer key is node ID. Inner vector is per-output-region, each entry is a vector of per-parent required regions.
+    node id -> input slices
+    input slices[output region idx][parent idx][dirty input region idx]
+    */
     std::unordered_map<uint32_t, std::vector<std::vector<std::vector<Region>>>> inputSlices;
 };

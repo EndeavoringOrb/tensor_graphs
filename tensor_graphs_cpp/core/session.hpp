@@ -17,7 +17,7 @@
 // JSON serialization helpers for Region / Dim / DirtyBucket
 // ---------------------------------------------------------------------------
 
-namespace dirty_cache_json
+namespace dirty_cache_json // TODO: change case? not sure camelCase or PascalCase
 {
     inline json dimToJson(const Dim &d)
     {

@@ -16,6 +16,7 @@ struct Graph
         node.dtype = dtype;
         node.shape = shape;
         node.view = view;
+        node.storageType = StorageType::PERSISTENT;
         nodes.push_back(node);
         return node.id;
     }

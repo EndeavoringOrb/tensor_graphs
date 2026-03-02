@@ -263,6 +263,9 @@ private:
             return false;
         if (cNode.parentIds.size() != pNode.parentIds.size())
             return false;
+        if (cNode.opType == OpType::INPUT && cNode.storageType == StorageType::PERSISTENT && pNode.opType == OpType::INPUT && pNode.storageType == StorageType::PERSISTENT) {
+            // TODO: hash values of both, if they don't match then return false. This means we need to have access to MemoryManager that was used to allocate() and write()
+        }
 
         for (size_t i = 0; i < cNode.parentIds.size(); ++i)
         {

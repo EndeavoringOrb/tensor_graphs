@@ -31,3 +31,12 @@ Shape Propagation:
 -should not use contiguous merging approximation, don't merge dirty regions. the merge_regions function is not needed anymore
 -remove shape broadcasting. add(vec, scalar) should be a fused op replacing add(vec, repeat(scalar, vec size))
 -parent regions should be explicitly passed to forward, we don't want to use dirtyRegions so that we can use forward for shape inference as well
+
+SLOP:
+core/hashing.hpp
+core/planner.hpp
+core/rewrite.hpp
+core/session.hpp
+
+TODO:
+add docstrings to functions
