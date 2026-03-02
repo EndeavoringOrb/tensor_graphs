@@ -49,6 +49,7 @@ public:
 
     CompiledGraph plan(uint32_t rootId, Graph &graph, const MemoryManager &rootMemManager)
     {
+        std::unordered_map<uint32_t, std::string> structHashMemo;
         std::vector<uint32_t> topo = topologicalSort(rootId, graph);
 
         // Build fused patterns from the Reference Graph Registry
@@ -101,7 +102,7 @@ public:
         for (auto it = topo.rbegin(); it != topo.rend(); ++it)
         {
             uint32_t nodeId = *it;
-            std::string hash = Hashing::getStructuralHash(nodeId, graph, rootMemManager);
+            std::string hash = Hashing::detail::structuralHashImpl(nodeId, graph, rootMemManager, structHashMemo);
 
             std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(nodeId, graph, rules);
             for (uint32_t eqId : equivalents)
@@ -151,16 +152,16 @@ public:
             }
         }
 
-        std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, fusionMap, graph, rootMemManager);
+        std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, fusionMap, graph, rootMemManager, structHashMemo);
 
         std::unordered_map<std::string, std::vector<BeamStrategy>> memo;
 
         for (uint32_t nodeId : sortedNodes)
         {
-            planNodeIterative(nodeId, graph, fusionMap, memo, rootMemManager);
+            planNodeIterative(nodeId, graph, fusionMap, memo, rootMemManager, structHashMemo);
         }
 
-        std::string rootHash = Hashing::getStructuralHash(rootId, graph, rootMemManager);
+        std::string rootHash = Hashing::detail::structuralHashImpl(rootId, graph, rootMemManager, structHashMemo);
         if (memo.find(rootHash) == memo.end() || memo[rootHash].empty())
         {
             throw std::runtime_error("Planner failed to find any execution strategy for root node.");
@@ -289,13 +290,14 @@ private:
     std::vector<uint32_t> getAugmentedTopologicalSort(const std::vector<uint32_t> &baseNodes,
                                                       std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
                                                       const Graph &graph,
-                                                      const MemoryManager &rootMemManager)
+                                                      const MemoryManager &rootMemManager,
+                                                      std::unordered_map<uint32_t, std::string> &structHashMemo)
     {
         std::vector<uint32_t> order;
         std::unordered_set<std::string> visited;
         auto visit = [&](auto &self, uint32_t node) -> void
         {
-            std::string hash = Hashing::getStructuralHash(node, graph, rootMemManager);
+            std::string hash = Hashing::detail::structuralHashImpl(node, graph, rootMemManager, structHashMemo);
             if (visited.count(hash))
                 return;
             visited.insert(hash);
@@ -328,9 +330,10 @@ private:
     void planNodeIterative(uint32_t nodeId, const Graph &graph,
                            std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
                            std::unordered_map<std::string, std::vector<BeamStrategy>> &memo,
-                           const MemoryManager &rootMemManager)
+                           const MemoryManager &rootMemManager,
+                           std::unordered_map<uint32_t, std::string> &structHashMemo)
     {
-        std::string nodeHash = Hashing::getStructuralHash(nodeId, graph, rootMemManager);
+        std::string nodeHash = Hashing::detail::structuralHashImpl(nodeId, graph, rootMemManager, structHashMemo);
         if (memo.count(nodeHash))
             return;
 
@@ -364,7 +367,7 @@ private:
             bool missingParents = false;
             for (uint32_t pid : target.parentIds)
             {
-                std::string phash = Hashing::getStructuralHash(pid, graph, rootMemManager);
+                std::string phash = Hashing::detail::structuralHashImpl(pid, graph, rootMemManager, structHashMemo);
                 if (memo.count(phash) == 0)
                 {
                     missingParents = true;
@@ -408,7 +411,6 @@ private:
                             continue;
                         }
 
-                        
                         continue;
                     }
 
