@@ -1,6 +1,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
+#include "core/planner.hpp"
 
 bool shapesMatch(const std::vector<uint32_t> &shape1, const std::vector<uint32_t> &shape2)
 {
@@ -16,7 +17,7 @@ bool shapesMatch(const std::vector<uint32_t> &shape1, const std::vector<uint32_t
 
 struct ShapePropagator
 {
-    std::vector<Region> forward(const TensorNode &node, const Graph& graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forward(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
     {
         for (uint32_t pid : node.parentIds)
         {
@@ -39,7 +40,7 @@ struct ShapePropagator
     }
 
     // Output regions are the unique set of all parent regions
-    std::vector<Region> forwardAdd(const TensorNode &node, const Graph& graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardAdd(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
     {
         if (node.parentIds.size() != 2)
         {
@@ -117,3 +118,71 @@ struct ShapePropagator
         return inputRegions;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Free functions for dirty region propagation (no DirtyPropagator class)
+// ---------------------------------------------------------------------------
+
+// Forward-propagate dirty regions through the compiled graph.
+// inputDirtyRegions maps input node IDs to their dirty regions.
+// Returns a map of every node ID to its propagated output regions.
+inline std::unordered_map<uint32_t, std::vector<Region>> propagateDirtyRegions(
+    const CompiledGraph &compiled,
+    const Graph &graph,
+    const std::unordered_map<uint32_t, std::vector<Region>> &inputDirtyRegions)
+{
+    ShapePropagator propagator;
+    std::unordered_map<uint32_t, std::vector<Region>> allRegions(inputDirtyRegions);
+
+    for (const OpInstruction &inst : compiled.instructions)
+    {
+        const TensorNode &node = graph.nodes[inst.nodeId];
+
+        // Gather parent regions
+        std::vector<std::vector<Region>> parentRegions;
+        bool anyParentDirty = false;
+        for (uint32_t pid : node.parentIds)
+        {
+            auto it = allRegions.find(pid);
+            if (it != allRegions.end() && !it->second.empty())
+            {
+                parentRegions.push_back(it->second);
+                anyParentDirty = true;
+            }
+            else
+            {
+                parentRegions.push_back({});
+            }
+        }
+
+        if (anyParentDirty)
+        {
+            allRegions[inst.nodeId] = propagator.forward(node, graph, parentRegions);
+        }
+        else
+        {
+            allRegions[inst.nodeId] = {};
+        }
+    }
+
+    return allRegions;
+}
+
+// Backward-propagate: given a node and its output dirty regions,
+// compute the required input regions per parent.
+// Returns one vector<Region> per parent (same order as node.parentIds).
+inline std::vector<std::vector<Region>> getInputSlices(
+    const Graph &graph,
+    uint32_t nodeId,
+    const std::vector<Region> &outputRegions)
+{
+    const TensorNode &node = graph.nodes[nodeId];
+
+    if (outputRegions.empty())
+    {
+        return std::vector<std::vector<Region>>(node.parentIds.size());
+    }
+
+    ShapePropagator propagator;
+    return propagator.backward(node, graph.nodes, outputRegions);
+}
