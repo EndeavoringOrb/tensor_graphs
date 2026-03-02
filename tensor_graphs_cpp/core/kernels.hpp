@@ -1,8 +1,12 @@
 #pragma once
 #include "core/types.hpp"
+#include "core/graph.hpp"
 #include <vector>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+
+struct Graph;
 
 // A matching function checks the context of the requested operation to determine
 // if the kernel supports the specific layout, rank, dimensions, or dtypes.
@@ -15,12 +19,55 @@ using KernelFunc = void (*)(const std::vector<const void *> &inputs,
                             const std::vector<TensorView> &inViews,
                             const std::vector<TensorView> &outViews);
 
+// Factory function type that builds an equivalent sub-graph given a set of input variables
+using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph);
+
+struct ReferenceGraphEntry
+{
+    size_t numInputs;
+    ReferenceFactory factory;
+};
+
+class ReferenceGraphRegistry
+{
+public:
+    static ReferenceGraphRegistry &get()
+    {
+        static ReferenceGraphRegistry instance;
+        return instance;
+    }
+
+    void registerFactory(const std::string &name, size_t numInputs, ReferenceFactory factory)
+    {
+        factories[name] = {numInputs, factory};
+    }
+
+    const ReferenceGraphEntry *getFactory(const std::string &name) const
+    {
+        auto it = factories.find(name);
+        if (it != factories.end())
+            return &it->second;
+        return nullptr;
+    }
+
+    const std::unordered_map<std::string, ReferenceGraphEntry> &getAll() const
+    {
+        return factories;
+    }
+
+private:
+    std::unordered_map<std::string, ReferenceGraphEntry> factories;
+};
+
 struct KernelEntry
 {
     OpType opType;
+    std::string opName;
+    size_t numInputs;
     Backend backend;
     MatchFunc match;
     KernelFunc run;
+    ReferenceFactory refFactory;
 };
 
 class KernelRegistry
@@ -32,12 +79,16 @@ public:
         return instance;
     }
 
-    void registerKernel(OpType op, Backend backend, MatchFunc match, KernelFunc run)
+    void registerKernel(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory)
     {
-        entries.push_back({op, backend, match, run});
+        entries.push_back({op, opName, numInputs, backend, match, run, refFactory});
+        if (refFactory && op == OpType::FUSED)
+        {
+            ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory);
+        }
     }
 
-    std::vector<uint32_t> findMatchingKernels(OpType op, Backend backend,
+    std::vector<uint32_t> findMatchingKernels(OpType op, const std::string &opName, Backend backend,
                                               const std::vector<TensorNode> &inputs,
                                               const TensorNode &output) const
     {
@@ -46,6 +97,8 @@ public:
         {
             if (entries[i].opType == op && entries[i].backend == backend)
             {
+                if (op == OpType::FUSED && entries[i].opName != opName)
+                    continue;
                 if (entries[i].match(inputs, output))
                 {
                     matches.push_back(i);
@@ -71,13 +124,17 @@ private:
 // Helper struct and macro for clean static-time kernel registration
 struct KernelRegistrar
 {
-    KernelRegistrar(OpType op, Backend backend, MatchFunc match, KernelFunc run)
+    KernelRegistrar(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory)
     {
-        KernelRegistry::get().registerKernel(op, backend, match, run);
+        KernelRegistry::get().registerKernel(op, opName, numInputs, backend, match, run, refFactory);
     }
 };
 
-#define REGISTER_KERNEL(op, backend, match, run) static KernelRegistrar _registrar_##run(op, backend, match, run)
+#define REGISTER_KERNEL(op, backend, match, run) \
+    static KernelRegistrar _registrar_##run(op, "", 0, backend, match, run, nullptr)
+
+#define REGISTER_FUSED_KERNEL(opName, numInputs, backend, match, run, refFactory) \
+    static KernelRegistrar _registrar_fused_##run(OpType::FUSED, opName, numInputs, backend, match, run, refFactory)
 
 // Include kernels here so they can use the registry and macro
 #include "kernels/add/F32_1D.hpp"

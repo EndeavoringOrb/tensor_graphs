@@ -77,23 +77,12 @@ enum class OpType : uint32_t
     COPY_TO,
     IM2COL,
 
-    CONV2D,
-    FMA,
-    GELU,
-    GROUPNORM,
-    RMS_NORM,
-    ROPE_2D_CONSECUTIVE,
-    ROPE,
-    SIGMOID,
-    SILU,
-    SOFTMAX,
-    TANH,
-    UPSAMPLE_NEAREST
+    FUSED
 };
 
 inline constexpr bool isAtomic(OpType type)
 {
-    return static_cast<uint32_t>(type) < static_cast<uint32_t>(OpType::CONV2D);
+    return type != OpType::FUSED;
 }
 
 enum class Backend : uint32_t
@@ -214,6 +203,7 @@ struct TensorNode
 {
     uint32_t id;
     OpType opType;
+    std::string opName; // Used if opType == OpType::FUSED
     DType dtype;
     std::vector<uint32_t> parentIds;
     std::vector<uint32_t> shape;
@@ -306,30 +296,8 @@ inline const char *toString(OpType op)
         return "COPY_TO";
     case OpType::IM2COL:
         return "IM2COL";
-    case OpType::CONV2D:
-        return "CONV2D";
-    case OpType::FMA:
-        return "FMA";
-    case OpType::GELU:
-        return "GELU";
-    case OpType::GROUPNORM:
-        return "GROUPNORM";
-    case OpType::RMS_NORM:
-        return "RMS_NORM";
-    case OpType::ROPE_2D_CONSECUTIVE:
-        return "ROPE_2D_CONSECUTIVE";
-    case OpType::ROPE:
-        return "ROPE";
-    case OpType::SIGMOID:
-        return "SIGMOID";
-    case OpType::SILU:
-        return "SILU";
-    case OpType::SOFTMAX:
-        return "SOFTMAX";
-    case OpType::TANH:
-        return "TANH";
-    case OpType::UPSAMPLE_NEAREST:
-        return "UPSAMPLE_NEAREST";
+    case OpType::FUSED:
+        return "FUSED";
     default:
         return "UNKNOWN_OP";
     }

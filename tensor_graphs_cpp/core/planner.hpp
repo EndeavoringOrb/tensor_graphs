@@ -51,6 +51,35 @@ public:
         // 1. Get topological sort
         std::vector<uint32_t> topo = topologicalSort(rootId, graph);
 
+        // Build fused patterns from the Reference Graph Registry
+        struct FusedPattern
+        {
+            std::string opName;
+            std::vector<uint32_t> variables;
+            uint32_t rootId;
+            Graph graph;
+        };
+        std::vector<FusedPattern> fusedPatterns;
+
+        for (const auto &pair : ReferenceGraphRegistry::get().getAll())
+        {
+            const std::string &opName = pair.first;
+            size_t numInputs = pair.second.numInputs;
+            ReferenceFactory factory = pair.second.factory;
+
+            FusedPattern pattern;
+            pattern.opName = opName;
+
+            for (size_t i = 0; i < numInputs; ++i)
+            {
+                uint32_t inId = pattern.graph.input({1}, DType::FLOAT32, TensorView{});
+                pattern.variables.push_back(inId);
+            }
+
+            pattern.rootId = factory(pattern.variables, pattern.graph);
+            fusedPatterns.push_back(std::move(pattern));
+        }
+
         // 2. Pattern Matching & Graph Rewrites
         std::unordered_map<std::string, std::vector<uint32_t>> fusionMap;
 
@@ -76,6 +105,45 @@ public:
                 if (eqId != nodeId)
                 {
                     fusionMap[hash].push_back(eqId);
+                }
+
+                // Match fused patterns
+                for (const auto &fp : fusedPatterns)
+                {
+                    std::unordered_map<uint32_t, uint32_t> binding;
+                    if (matchPattern(eqId, graph, fp.rootId, fp.graph, fp.variables, binding))
+                    {
+                        bool allBound = true;
+                        for (uint32_t var : fp.variables)
+                        {
+                            if (binding.find(var) == binding.end())
+                            {
+                                allBound = false;
+                                break;
+                            }
+                        }
+                        if (allBound)
+                        {
+                            std::vector<uint32_t> parentIds;
+                            for (uint32_t var : fp.variables)
+                            {
+                                parentIds.push_back(binding[var]);
+                            }
+
+                            TensorNode fusedNode;
+                            fusedNode.id = graph.allocateId();
+                            fusedNode.opType = OpType::FUSED;
+                            fusedNode.opName = fp.opName;
+                            fusedNode.dtype = graph.nodes[eqId].dtype;
+                            fusedNode.shape = graph.nodes[eqId].shape;
+                            fusedNode.parentIds = parentIds;
+                            fusedNode.backend = graph.nodes[eqId].backend;
+
+                            graph.nodes.push_back(fusedNode);
+
+                            fusionMap[hash].push_back(fusedNode.id);
+                        }
+                    }
                 }
             }
         }
@@ -135,7 +203,8 @@ public:
             }
             else
             {
-                throw std::runtime_error("No kernel assigned for node with OpType " + std::string(toString(node.opType))); // TODO: make toString for TensorNode
+                std::string opStr = (node.opType == OpType::FUSED) ? node.opName : toString(node.opType);
+                throw std::runtime_error("No kernel assigned for node with OpType " + opStr);
             }
 
             // Inplace Check logic (simplified evaluation)
@@ -166,6 +235,45 @@ private:
     CostModel &costModel;
     uint64_t maxMemoryBytes;
     size_t beamWidth = 3;
+
+    bool matchPattern(uint32_t concreteId, const Graph &mainGraph,
+                      uint32_t patternId, const Graph &patternGraph,
+                      const std::vector<uint32_t> &patternVariables,
+                      std::unordered_map<uint32_t, uint32_t> &binding)
+    {
+        if (std::find(patternVariables.begin(), patternVariables.end(), patternId) != patternVariables.end())
+        {
+            if (binding.count(patternId))
+            {
+                return binding[patternId] == concreteId;
+            }
+            else
+            {
+                binding[patternId] = concreteId;
+                return true;
+            }
+        }
+
+        const auto &cNode = mainGraph.nodes[concreteId];
+        const auto &pNode = patternGraph.nodes[patternId];
+
+        if (cNode.opType != pNode.opType)
+            return false;
+        if (cNode.opType == OpType::FUSED && cNode.opName != pNode.opName)
+            return false;
+        if (cNode.parentIds.size() != pNode.parentIds.size())
+            return false;
+
+        for (size_t i = 0; i < cNode.parentIds.size(); ++i)
+        {
+            if (!matchPattern(cNode.parentIds[i], mainGraph, pNode.parentIds[i], patternGraph, patternVariables, binding))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     std::vector<uint32_t> topologicalSort(uint32_t rootId, const Graph &graph)
     {
@@ -280,7 +388,7 @@ private:
                     inputNodes.push_back(graph.nodes[pid]);
                 }
 
-                std::vector<uint32_t> matchingKernels = KernelRegistry::get().findMatchingKernels(target.opType, backend, inputNodes, target);
+                std::vector<uint32_t> matchingKernels = KernelRegistry::get().findMatchingKernels(target.opType, target.opName, backend, inputNodes, target);
                 if (matchingKernels.empty())
                     continue;
 

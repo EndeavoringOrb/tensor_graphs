@@ -176,6 +176,12 @@ namespace Hashing
             uint32_t opVal = static_cast<uint32_t>(node.opType);
             sha.update(reinterpret_cast<const uint8_t *>(&opVal), sizeof(opVal));
 
+            if (node.opType == OpType::FUSED)
+            {
+                sha.update(node.opName);
+                sha.update("|");
+            }
+
             // Hash DType (Fixed size)
             uint32_t dtypeVal = static_cast<uint32_t>(node.dtype);
             sha.update(reinterpret_cast<const uint8_t *>(&dtypeVal), sizeof(dtypeVal));
@@ -231,6 +237,12 @@ namespace Hashing
             // Hash OpType (Fixed size)
             uint32_t opVal = static_cast<uint32_t>(node.opType);
             sha.update(reinterpret_cast<const uint8_t *>(&opVal), sizeof(opVal));
+
+            if (node.opType == OpType::FUSED)
+            {
+                sha.update(node.opName);
+                sha.update("|");
+            }
 
             if (node.opType == OpType::INPUT)
             {
