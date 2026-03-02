@@ -47,7 +47,7 @@ public:
     Planner(CostModel &costModel, uint64_t maxMemoryBytes = 4ULL * 1024 * 1024 * 1024)
         : costModel(costModel), maxMemoryBytes(maxMemoryBytes) {}
 
-    CompiledGraph plan(uint32_t rootId, Graph &graph, const MemoryManager &rootMemManager)
+    CompiledGraph plan(uint32_t rootId, Graph &graph, MemoryManager &rootMemManager)
     {
         std::unordered_map<uint32_t, std::string> structHashMemo;
         std::vector<uint32_t> topo = topologicalSort(rootId, graph);
@@ -102,7 +102,26 @@ public:
         for (auto it = topo.rbegin(); it != topo.rend(); ++it)
         {
             uint32_t nodeId = *it;
+            // LAZY WEIGHT LOADING FOR HASHING
+            bool isWeight = graph.weightSources.count(nodeId);
+            if (isWeight)
+            {
+                const auto &source = graph.weightSources.at(nodeId);
+                auto &loader = graph.loaders.at(source.first);
+                const auto &meta = loader->getMetadata(source.second);
+
+                std::vector<uint8_t> tempBuffer(meta.sizeBytes());
+                loader->loadTensor(source.second, tempBuffer.data(), tempBuffer.size());
+
+                // Write to sparse storage for Hashing::getStructuralHash to read
+                rootMemManager.write(Backend::CPU, nodeId, tempBuffer.data(), tempBuffer.size());
+            }
             std::string hash = Hashing::detail::structuralHashImpl(nodeId, graph, rootMemManager, structHashMemo);
+            // UNLOAD TO SAVE RAM DURING PLANNING
+            if (isWeight)
+            {
+                rootMemManager.unload(Backend::CPU, nodeId);
+            }
 
             std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(nodeId, graph, rules);
             for (uint32_t eqId : equivalents)

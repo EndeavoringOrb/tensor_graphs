@@ -10,8 +10,46 @@ struct Graph
 {
     uint32_t count = 0;
     std::vector<TensorNode> nodes;
+    std::unordered_map<std::string, std::unique_ptr<SafetensorsLoader>> loaders;     // Mapping of path -> Loader instance
+    std::unordered_map<uint32_t, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
 
     uint32_t allocateId() noexcept { return count++; }
+
+    void registerLoader(const std::string &path)
+    {
+        if (loaders.find(path) == loaders.end())
+        {
+            loaders[path] = std::make_unique<SafetensorsLoader>(path);
+        }
+    }
+
+    uint32_t weight(const std::string &path, const std::string &name, MemoryManager &memManager)
+    {
+        // 1. Ensure loader exists and tensor is present
+        registerLoader(path);
+        auto &loader = loaders.at(path);
+        if (!loader->hasTensor(name))
+        {
+            throw std::runtime_error("Tensor '" + name + "' not found in: " + path);
+        }
+
+        const auto &meta = loader->getMetadata(name);
+
+        // 2. Atomic ID generation
+        uint32_t id = allocateId();
+
+        // 3. Physical Allocation
+        // We do this BEFORE creating the node so that if it throws MemoryAllocationError,
+        // the graph remains in a valid state (though we've consumed an ID).
+        memManager.allocate(Backend::CPU, id, meta.sizeBytes(), StorageType::PERSISTENT);
+
+        // 4. Track source and get View
+        weightSources[id] = {path, name};
+        TensorView view = memManager.getView(Backend::CPU, id, meta.shape);
+
+        // 5. Finalize Node
+        return inputWithId(id, meta.shape, meta.dtype, view);
+    }
 
     uint32_t input(std::vector<uint32_t> shape, DType dtype, TensorView view)
     {
@@ -264,10 +302,12 @@ struct Graph
 
     uint32_t concat(std::vector<uint32_t> ids, uint32_t id1)
     {
-        if (ids.size() == 0) {
+        if (ids.size() == 0)
+        {
             throw std::runtime_error("[Graph.concat] Expected at least 1 input tensor, got 0.");
         }
-        for (int i = 0; i < ids.size(); i++) {
+        for (int i = 0; i < ids.size(); i++)
+        {
             uint32_t id = ids[i];
             if (nodes[ids[0]].dtype != nodes[id].dtype)
             {
@@ -303,7 +343,8 @@ struct Graph
         return node.id;
     }
 
-    uint32_t repeat(uint32_t id0, uint32_t repeats_id, uint32_t axis_id) {
+    uint32_t repeat(uint32_t id0, uint32_t repeats_id, uint32_t axis_id)
+    {
         if (nodes[repeats_id].dtype != DType::INT32)
         {
             std::stringstream ss;
@@ -354,9 +395,10 @@ struct Graph
         return node.id;
     }
 
-    uint32_t triu(uint32_t id0, uint32_t k_id) {
-        if (nodes[k_id].dtype != DType::INT32)
+    uint32_t triu(uint32_t id0, uint32_t k_id)
     {
+        if (nodes[k_id].dtype != DType::INT32)
+        {
             std::stringstream ss;
             ss << "[Graph.triu] Expected " << DType::INT32 << " for input 1, got: " << nodes[k_id].dtype;
             throw std::runtime_error(ss.str());
@@ -370,9 +412,10 @@ struct Graph
         return node.id;
     }
 
-    uint32_t gather(uint32_t id0, uint32_t indices_id) {
-        if (nodes[indices_id].dtype != DType::INT32)
+    uint32_t gather(uint32_t id0, uint32_t indices_id)
     {
+        if (nodes[indices_id].dtype != DType::INT32)
+        {
             std::stringstream ss;
             ss << "[Graph.gather] Expected " << DType::INT32 << " for input 1, got: " << nodes[indices_id].dtype;
             throw std::runtime_error(ss.str());
