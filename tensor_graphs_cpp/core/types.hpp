@@ -73,7 +73,6 @@ enum class OpType : uint32_t
     TRIU,
     GATHER,
     FILL,
-    WHERE,
     COPY_TO,
     IM2COL,
 
@@ -290,8 +289,6 @@ inline const char *toString(OpType op)
         return "GATHER";
     case OpType::FILL:
         return "FILL";
-    case OpType::WHERE:
-        return "WHERE";
     case OpType::COPY_TO:
         return "COPY_TO";
     case OpType::IM2COL:

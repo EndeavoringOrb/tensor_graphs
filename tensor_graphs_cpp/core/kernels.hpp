@@ -1,6 +1,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
+#include "core/memory.hpp"
 #include <vector>
 #include <stdexcept>
 #include <string>
@@ -20,7 +21,7 @@ using KernelFunc = void (*)(const std::vector<const void *> &inputs,
                             const std::vector<TensorView> &outViews);
 
 // Factory function type that builds an equivalent sub-graph given a set of input variables
-using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph);
+using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph, MemoryManager &memManager);
 
 struct ReferenceGraphEntry
 {
@@ -135,6 +136,3 @@ struct KernelRegistrar
 
 #define REGISTER_FUSED_KERNEL(opName, numInputs, backend, match, run, refFactory) \
     static KernelRegistrar _registrar_fused_##run(OpType::FUSED, opName, numInputs, backend, match, run, refFactory)
-
-// Include kernels here so they can use the registry and macro
-#include "kernels/add/F32_1D.hpp"

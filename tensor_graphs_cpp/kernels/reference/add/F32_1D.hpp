@@ -1,5 +1,6 @@
 #pragma once
 #include "core/types.hpp"
+#include "core/kernels.hpp"
 
 // ---------------------------------------------------------
 // KERNEL: ADD F32 1D (Contiguous)
@@ -47,5 +48,4 @@ void runAddF32_1D(const std::vector<const void *> &inputs, const std::vector<voi
     }
 }
 
-// Register into the global singleton registry using the Table Pattern
 REGISTER_KERNEL(OpType::ADD, Backend::CPU, matchAddF32_1D, runAddF32_1D);

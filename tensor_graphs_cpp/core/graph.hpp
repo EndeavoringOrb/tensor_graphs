@@ -369,4 +369,62 @@ struct Graph
         nodes.push_back(node);
         return node.id;
     }
+
+    uint32_t fill(uint32_t value_id, uint32_t shape_id)
+    {
+        if (nodes[shape_id].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.fill] Expected " << DType::INT32 << " for input 1, got: " << nodes[shape_id].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        TensorNode node = TensorNode();
+        node.id = allocateId();
+        node.opType = OpType::FILL;
+        node.dtype = nodes[value_id].dtype;
+        node.parentIds = {value_id, shape_id};
+        nodes.push_back(node);
+        return node.id;
+    }
+
+    uint32_t copyto(uint32_t id0, Backend backend)
+    {
+        TensorNode node = TensorNode();
+        node.id = allocateId();
+        node.opType = OpType::COPY_TO;
+        node.dtype = nodes[id0].dtype;
+        node.parentIds = {id0};
+        node.backend = backend;
+        nodes.push_back(node);
+        return node.id;
+    }
+
+    uint32_t im2col(uint32_t input_id, uint32_t kernel_size_id, uint32_t stride_id, uint32_t padding_id)
+    {
+        if (nodes[kernel_size_id].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.im2col] Expected " << DType::INT32 << " for input 1, got: " << nodes[kernel_size_id].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        if (nodes[stride_id].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.im2col] Expected " << DType::INT32 << " for input 2, got: " << nodes[stride_id].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        if (nodes[padding_id].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.im2col] Expected " << DType::INT32 << " for input 3, got: " << nodes[padding_id].dtype;
+            throw std::runtime_error(ss.str());
+        }
+        TensorNode node = TensorNode();
+        node.id = allocateId();
+        node.opType = OpType::IM2COL;
+        node.dtype = nodes[input_id].dtype;
+        node.parentIds = {input_id, kernel_size_id, stride_id, padding_id};
+        nodes.push_back(node);
+        return node.id;
+    }
 };
