@@ -14,7 +14,7 @@
 struct OpInstruction
 {
     uint32_t nodeId;
-    KernelFunc kernel;
+    uint32_t kernelId;
     std::vector<uint32_t> inputNodeIds;
     int32_t inplaceInputIndex; // -1 if not inplace
     Backend backend;
@@ -32,6 +32,7 @@ struct BeamStrategy
     float cost;
     uint32_t nodeId;
     std::unordered_map<uint32_t, Backend> assignments;
+    std::unordered_map<uint32_t, uint32_t> kernelAssignments;
 
     bool operator<(const BeamStrategy &other) const
     {
@@ -127,6 +128,16 @@ public:
                 inputNodes.push_back(graph.nodes[pid]);
             }
 
+            uint32_t assignedKernelId = 0;
+            if (bestRecipe.kernelAssignments.count(id))
+            {
+                assignedKernelId = bestRecipe.kernelAssignments[id];
+            }
+            else
+            {
+                throw std::runtime_error("No kernel assigned for node with OpType " + std::string(toString(node.opType))); // TODO: make toString for TensorNode
+            }
+
             // Inplace Check logic (simplified evaluation)
             bool is_inplace_safe = false;
             if (!node.parentIds.empty())
@@ -138,15 +149,9 @@ public:
                 }
             }
 
-            KernelFunc kernel = KernelRegistry::get().findKernel(node.opType, assignedBackend, inputNodes, node);
-            if (!kernel)
-            {
-                throw std::runtime_error("No kernel found for OpType " + std::string(toString(node.opType)));
-            }
-
             OpInstruction inst;
             inst.nodeId = id;
-            inst.kernel = kernel;
+            inst.kernelId = assignedKernelId;
             inst.inputNodeIds = node.parentIds;
             inst.backend = assignedBackend;
             inst.inplaceInputIndex = is_inplace_safe ? 0 : -1;
@@ -275,59 +280,69 @@ private:
                     inputNodes.push_back(graph.nodes[pid]);
                 }
 
-                // TODO: find all matching kernels and evaluate all as candidates
-                KernelFunc kernel = KernelRegistry::get().findKernel(target.opType, backend, inputNodes, target);
-                if (!kernel)
+                std::vector<uint32_t> matchingKernels = KernelRegistry::get().findMatchingKernels(target.opType, backend, inputNodes, target);
+                if (matchingKernels.empty())
                     continue;
 
-                if (parentBeamSets.empty())
+                for (uint32_t kernelId : matchingKernels)
                 {
-                    float cost = costModel.estimateCost(target, graph, ????);
-                    std::unordered_map<uint32_t, Backend> assigns;
-                    assigns[targetId] = backend;
-                    candidates.push_back({cost, targetId, assigns});
-                    continue;
-                }
-
-                // Dynamic combinations iterating cross-product
-                std::vector<size_t> indices(parentBeamSets.size(), 0);
-                while (true)
-                {
-                    float cost = 0.0f;
-                    std::unordered_map<uint32_t, Backend> assigns;
-                    assigns[targetId] = backend;
-
-                    for (size_t i = 0; i < parentBeamSets.size(); i++)
+                    if (parentBeamSets.empty())
                     {
-                        const auto &pStrat = parentBeamSets[i][indices[i]];
-                        cost += pStrat.cost;
-                        for (auto &pair : pStrat.assignments)
-                        {
-                            assigns[pair.first] = pair.second;
-                        }
-
-                        // Apply transfer penalty if mismatch. TODO: create copyto node and pass that to costModel.estimateCost
-                        if (pStrat.assignments.at(pStrat.nodeId) != backend)
-                        {
-                            cost += 0.05f;
-                        }
+                        float cost = costModel.estimateCost(target, graph, kernelId);
+                        std::unordered_map<uint32_t, Backend> assigns;
+                        assigns[targetId] = backend;
+                        std::unordered_map<uint32_t, uint32_t> kAssigns;
+                        kAssigns[targetId] = kernelId;
+                        candidates.push_back({cost, targetId, assigns, kAssigns});
+                        continue;
                     }
 
-                    cost += costModel.estimateCost(target, graph, ????);
-
-                    candidates.push_back({cost, targetId, assigns});
-
-                    int p = static_cast<int>(indices.size()) - 1;
-                    while (p >= 0)
+                    // Dynamic combinations iterating cross-product
+                    std::vector<size_t> indices(parentBeamSets.size(), 0);
+                    while (true)
                     {
-                        indices[p]++;
-                        if (indices[p] < parentBeamSets[p].size())
+                        float cost = 0.0f;
+                        std::unordered_map<uint32_t, Backend> assigns;
+                        assigns[targetId] = backend;
+                        std::unordered_map<uint32_t, uint32_t> kAssigns;
+                        kAssigns[targetId] = kernelId;
+
+                        for (size_t i = 0; i < parentBeamSets.size(); i++)
+                        {
+                            const auto &pStrat = parentBeamSets[i][indices[i]];
+                            cost += pStrat.cost;
+                            for (auto &pair : pStrat.assignments)
+                            {
+                                assigns[pair.first] = pair.second;
+                            }
+                            for (auto &pair : pStrat.kernelAssignments)
+                            {
+                                kAssigns[pair.first] = pair.second;
+                            }
+
+                            // Apply transfer penalty if mismatch. TODO: create copyto node and pass that to costModel.estimateCost
+                            if (pStrat.assignments.at(pStrat.nodeId) != backend)
+                            {
+                                cost += 0.05f;
+                            }
+                        }
+
+                        cost += costModel.estimateCost(target, graph, kernelId);
+
+                        candidates.push_back({cost, targetId, assigns, kAssigns});
+
+                        int p = static_cast<int>(indices.size()) - 1;
+                        while (p >= 0)
+                        {
+                            indices[p]++;
+                            if (indices[p] < parentBeamSets[p].size())
+                                break;
+                            indices[p] = 0;
+                            p--;
+                        }
+                        if (p < 0)
                             break;
-                        indices[p] = 0;
-                        p--;
                     }
-                    if (p < 0)
-                        break;
                 }
             }
         }

@@ -1,6 +1,8 @@
 #pragma once
 #include "core/types.hpp"
-#include "kernels/add/F32_1D.hpp"
+#include <vector>
+#include <stdexcept>
+#include <string>
 
 // A matching function checks the context of the requested operation to determine
 // if the kernel supports the specific layout, rank, dimensions, or dtypes.
@@ -35,21 +37,31 @@ public:
         entries.push_back({op, backend, match, run});
     }
 
-    KernelFunc findKernel(OpType op, Backend backend,
-                          const std::vector<TensorNode> &inputs,
-                          const TensorNode &output) const
+    std::vector<uint32_t> findMatchingKernels(OpType op, Backend backend,
+                                              const std::vector<TensorNode> &inputs,
+                                              const TensorNode &output) const
     {
-        for (const auto &entry : entries)
+        std::vector<uint32_t> matches;
+        for (uint32_t i = 0; i < entries.size(); ++i)
         {
-            if (entry.opType == op && entry.backend == backend)
+            if (entries[i].opType == op && entries[i].backend == backend)
             {
-                if (entry.match(inputs, output))
+                if (entries[i].match(inputs, output))
                 {
-                    return entry.run;
+                    matches.push_back(i);
                 }
             }
         }
-        return nullptr; // Kernel not found
+        return matches;
+    }
+
+    const KernelEntry &getKernel(uint32_t id) const
+    {
+        if (id >= entries.size())
+        {
+            throw std::runtime_error("Invalid kernel ID");
+        }
+        return entries[id];
     }
 
 private:
@@ -66,3 +78,6 @@ struct KernelRegistrar
 };
 
 #define REGISTER_KERNEL(op, backend, match, run) static KernelRegistrar _registrar_##run(op, backend, match, run)
+
+// Include kernels here so they can use the registry and macro
+#include "kernels/add/F32_1D.hpp"
