@@ -198,8 +198,11 @@ public:
         memManager.buffers.at(Backend::CPU).init();
 
         // 2. The Materialization Pass - allocate and load data ONCE after planning!
+        uint32_t nodeIdx = 0;
         for (const auto &pair : compiled.nodesMap)
         {
+            nodeIdx++;
+            std::cout << nodeIdx << "/" << compiled.nodesMap.size() << "\r";
             uint32_t nodeId = pair.first;
             TensorNode &node = graph.nodes[nodeId];
 
@@ -243,7 +246,7 @@ public:
         std::vector<uint32_t> inputNodeIds;
         for (const auto &pair : compiled.nodesMap)
         {
-            if (pair.second.opType == OpType::INPUT)
+            if (pair.second.opType == OpType::INPUT && pair.second.storageType == StorageType::TRANSIENT)
             {
                 inputNodeIds.push_back(pair.first);
             }
@@ -393,9 +396,8 @@ public:
     // -----------------------------------------------------------------------
 
     // Computes per-dimension bounding-box dirty regions between old and new data.
-    // Returns multiple non-overlapping regions (one per contiguous dirty span
-    // along the first dimension, with full extent on other dims).
-    // Returns empty vector if no diff.
+    // Returns a single bounding box Region that encompasses all dirty elements.
+    // Returns an empty vector if no diff.
     std::vector<Region> computeInputDiff(
         const void *oldData,
         const void *newData,
@@ -407,7 +409,6 @@ public:
 
         uint64_t totalElements = countElements(shape);
         uint64_t elementSize = getDTypeSize(dtype);
-        uint64_t totalBytes = totalElements * elementSize;
 
         // If no old data, everything is dirty
         if (oldData == nullptr)
@@ -420,74 +421,49 @@ public:
             return {full};
         }
 
-        // Element-wise comparison
-        // We work in terms of the first dimension's slices, each slice being
-        // the product of remaining dimensions
-        uint32_t dim0 = shape[0];
-        uint64_t sliceElements = (dim0 > 0) ? totalElements / dim0 : 0;
-        uint64_t sliceBytes = sliceElements * elementSize;
-
         const uint8_t *oldBytes = static_cast<const uint8_t *>(oldData);
         const uint8_t *newBytes = static_cast<const uint8_t *>(newData);
 
-        // Find which dim-0 indices have any difference
-        std::vector<bool> dim0Dirty(dim0, false);
-        bool anyDirty = false;
-        for (uint32_t i = 0; i < dim0; ++i)
+        // Calculate strides for coordinate decomposition
+        std::vector<uint64_t> strides(shape.size(), 1);
+        for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i)
         {
-            if (std::memcmp(oldBytes + i * sliceBytes, newBytes + i * sliceBytes, sliceBytes) != 0)
+            strides[i] = strides[i + 1] * shape[i + 1];
+        }
+
+        std::vector<uint32_t> minBounds(shape.size(), UINT32_MAX);
+        std::vector<uint32_t> maxBounds(shape.size(), 0);
+        bool anyDirty = false;
+
+        // Element-wise comparison across all elements
+        for (uint64_t i = 0; i < totalElements; ++i)
+        {
+            if (std::memcmp(oldBytes + i * elementSize, newBytes + i * elementSize, elementSize) != 0)
             {
-                dim0Dirty[i] = true;
                 anyDirty = true;
+                uint64_t temp = i;
+                for (size_t d = 0; d < shape.size(); ++d)
+                {
+                    uint32_t coord = static_cast<uint32_t>(temp / strides[d]);
+                    temp %= strides[d];
+
+                    minBounds[d] = std::min(minBounds[d], coord);
+                    maxBounds[d] = std::max(maxBounds[d], coord);
+                }
             }
         }
 
         if (!anyDirty)
             return {};
 
-        // Build separate regions for each contiguous dirty span along dim 0
-        std::vector<Region> results;
-        uint32_t spanStart = 0;
-        bool inSpan = false;
-
-        for (uint32_t i = 0; i < dim0; ++i)
+        // Build a single bounding box using the observed min/max extents per dimension
+        Region r;
+        for (size_t d = 0; d < shape.size(); ++d)
         {
-            if (dim0Dirty[i])
-            {
-                if (!inSpan)
-                {
-                    spanStart = i;
-                    inSpan = true;
-                }
-            }
-            else
-            {
-                if (inSpan)
-                {
-                    Region r;
-                    r.region.push_back({spanStart, i});
-                    for (size_t d = 1; d < shape.size(); ++d)
-                    {
-                        r.region.push_back({0, shape[d]});
-                    }
-                    results.push_back(r);
-                    inSpan = false;
-                }
-            }
-        }
-        // Close trailing span
-        if (inSpan)
-        {
-            Region r;
-            r.region.push_back({spanStart, dim0});
-            for (size_t d = 1; d < shape.size(); ++d)
-            {
-                r.region.push_back({0, shape[d]});
-            }
-            results.push_back(r);
+            r.region.push_back({minBounds[d], maxBounds[d] + 1});
         }
 
-        return results;
+        return {r};
     }
 
     // -----------------------------------------------------------------------
@@ -570,6 +546,7 @@ public:
 
     void ensureCacheCoverage(const std::vector<uint32_t> &inputNodeIds)
     {
+        std::cout << "Ensuring cache coverage" << std::endl;
         // 1. For each input, generate power-of-2 tile options per dimension
         struct InputOption
         {
@@ -597,11 +574,11 @@ public:
             return;
 
         // 2. Generate all region combinations for each input
-        //    Each input gets a list of possible single-box Regions
+        //    Each input gets a list of possible region lists (either empty for clean, or 1 box)
         struct InputRegionSet
         {
             uint32_t nodeId;
-            std::vector<Region> options; // each option is one bounding-box Region
+            std::vector<std::vector<Region>> options;
         };
 
         std::vector<InputRegionSet> perInput;
@@ -626,7 +603,17 @@ public:
                 }
                 current = std::move(next);
             }
-            irs.options = std::move(current);
+
+            // Add clean state (empty list of regions)
+            irs.options.push_back({});
+
+            // Add all dirty states (list containing one region box)
+            for (const auto &r : current)
+            {
+                irs.options.push_back({r});
+            }
+
+            std::cout << "input node " << irs.nodeId << " has " << irs.options.size() << " buckets (including clean state)." << std::endl;
             perInput.push_back(irs);
         }
 
@@ -639,48 +626,61 @@ public:
             sizes.push_back(irs.options.size());
         }
 
+        std::cout << "Caching dirty region propagation" << std::endl;
+        uint32_t cacheIdx = 0;
         while (true)
         {
+            cacheIdx++;
+            std::cout << cacheIdx << "\r";
             // Build input dirty regions for this permutation
             std::unordered_map<uint32_t, std::vector<Region>> inputRegions;
+            bool allClean = true;
             for (size_t i = 0; i < perInput.size(); ++i)
             {
-                inputRegions[perInput[i].nodeId] = {perInput[i].options[indices[i]]};
+                const auto &option = perInput[i].options[indices[i]];
+                if (!option.empty())
+                {
+                    inputRegions[perInput[i].nodeId] = option;
+                    allClean = false;
+                }
             }
 
-            std::string key = encodeCacheKey(inputRegions);
-
-            // Skip if already cached
-            if (dirtyCache.find(key) == dirtyCache.end())
+            if (!allClean)
             {
-                // Forward propagate
-                auto allRegions = propagateDirtyRegions(compiled, graph, inputRegions);
+                std::string key = encodeCacheKey(inputRegions);
 
-                // Build bucket
-                DirtyBucket bucket;
-                bucket.regions = allRegions;
-
-                // Backward propagate input slices for each dirty non-input node
-                for (const OpInstruction &inst : compiled.instructions)
+                // Skip if already cached
+                if (dirtyCache.find(key) == dirtyCache.end())
                 {
-                    auto regIt = allRegions.find(inst.nodeId);
-                    if (regIt == allRegions.end() || regIt->second.empty())
-                        continue;
+                    // Forward propagate
+                    auto allRegions = propagateDirtyRegions(compiled, graph, inputRegions);
 
-                    const auto &outputRegions = regIt->second;
-                    std::vector<std::vector<std::vector<Region>>> perOutputRegionSlices;
+                    // Build bucket
+                    DirtyBucket bucket;
+                    bucket.regions = allRegions;
 
-                    for (const Region &outRegion : outputRegions)
+                    // Backward propagate input slices for each dirty non-input node
+                    for (const OpInstruction &inst : compiled.instructions)
                     {
-                        auto parentSlices = getInputSlices(graph, inst.nodeId, {outRegion});
-                        perOutputRegionSlices.push_back(parentSlices);
+                        auto regIt = allRegions.find(inst.nodeId);
+                        if (regIt == allRegions.end() || regIt->second.empty())
+                            continue;
+
+                        const auto &outputRegions = regIt->second;
+                        std::vector<std::vector<std::vector<Region>>> perOutputRegionSlices;
+
+                        for (const Region &outRegion : outputRegions)
+                        {
+                            auto parentSlices = getInputSlices(graph, inst.nodeId, {outRegion});
+                            perOutputRegionSlices.push_back(parentSlices);
+                        }
+
+                        bucket.inputSlices[inst.nodeId] = perOutputRegionSlices;
                     }
 
-                    bucket.inputSlices[inst.nodeId] = perOutputRegionSlices;
+                    dirtyCache[key] = bucket;
+                    saveCacheEntry(key, bucket);
                 }
-
-                dirtyCache[key] = bucket;
-                saveCacheEntry(key, bucket);
             }
 
             // Advance indices (odometer-style)

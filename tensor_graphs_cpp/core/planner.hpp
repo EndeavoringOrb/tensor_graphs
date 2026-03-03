@@ -817,7 +817,7 @@ private:
 
                         cost += costModel.estimateCost(target, graph, kernelId);
 
-                        std::string targetHash = Hashing::detail::structuralHashImpl(targetId, graph, structHashMemo);
+                        // std::string targetHash = Hashing::detail::structuralHashImpl(targetId, graph, structHashMemo);
                         assigns[targetHash] = backend;
                         kAssigns[targetHash] = kernelId;
 
