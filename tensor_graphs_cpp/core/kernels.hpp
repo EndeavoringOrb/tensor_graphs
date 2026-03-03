@@ -18,7 +18,6 @@ using KernelFunc = void (*)(const std::vector<const void *> &inputs,
                             const std::vector<TensorView> &inViews,
                             const std::vector<TensorView> &outViews);
 
-// CHANGED: Removed MemoryManager - factories only need Graph for pattern construction
 using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph);
 
 struct ReferenceGraphEntry

@@ -29,7 +29,7 @@ Shape Propagation:
 -there is no need for concrete_shapes as we can just use parent shapes
 -as dirty propagation is just a thin wrapper, dirty propagation and graph propagation will be combined into a single shape propagation file
 -should not use contiguous merging approximation, don't merge dirty regions. the merge_regions function is not needed anymore
--remove shape broadcasting. add(vec, scalar) should be a fused op replacing add(vec, repeat(scalar, vec size))
+-remove shape broadcasting. add(vec, scalar) should be a fused op replacing add(vec, repeat(scalar, vec size)). Implicit expansion of size-1 dims is forbidden. Use Graph.reshape() and Graph.repeat() explicitly.
 -parent regions should be explicitly passed to forward, we don't want to use dirtyRegions so that we can use forward for shape inference as well
 
 SLOP:

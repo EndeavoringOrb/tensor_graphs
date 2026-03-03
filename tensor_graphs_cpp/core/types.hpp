@@ -168,6 +168,7 @@ struct TensorView
     uint64_t baseOffset; // Offset into the MemoryManager's DeviceBuffer
     std::vector<uint32_t> shape;
     std::vector<int64_t> strides; // Strides in terms of elements, not bytes
+    DType dtype;
 
     // Check if the physical layout perfectly matches the logical layout
     bool isContiguous() const

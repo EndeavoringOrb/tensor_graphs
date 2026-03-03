@@ -28,7 +28,6 @@ struct Graph
         }
     }
 
-    // CHANGED: Removed MemoryManager parameter - graph building is now pure IR construction
     uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype)
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
@@ -57,7 +56,6 @@ struct Graph
         return nodeId;
     }
 
-    // CHANGED: Removed MemoryManager parameter - graph building is now pure IR construction
     uint32_t weight(const std::string &path, const std::string &name)
     {
         // 1. Ensure loader exists and tensor is present

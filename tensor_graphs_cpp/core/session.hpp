@@ -184,7 +184,6 @@ public:
         return x + 1;
     }
 
-    // CHANGED: compile() now includes the Materialization Pass - allocate & load weights AFTER planning!
     void compile(const std::unordered_map<uint32_t, const void *> &sampleInputs)
     {
         std::cout << "[Session.compile] compiling..." << std::endl;

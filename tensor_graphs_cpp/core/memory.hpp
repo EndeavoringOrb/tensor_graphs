@@ -377,6 +377,7 @@ struct MemoryManager
             view.baseOffset = arenaOffset;
             view.shape = node.shape;
             view.strides = TensorView::calcContiguousStrides(node.shape);
+            view.dtype = node.dtype;
         }
         else
         {
@@ -399,7 +400,7 @@ struct MemoryManager
      * @param shape The desired shape for the view.
      * @return A TensorView containing the physical arena offset, shape, and contiguous strides.
      */
-    TensorView getView(Backend backend, const uint32_t nodeId, std::vector<uint32_t> shape) const
+    TensorView getView(Backend backend, const uint32_t nodeId, std::vector<uint32_t> shape, DType dtype) const
     {
         // 1. Find the device-specific buffer
         auto it = buffers.find(backend);
@@ -428,6 +429,7 @@ struct MemoryManager
         view.shape = std::move(shape);
         // Standard contiguous layout calculation (row-major)
         view.strides = TensorView::calcContiguousStrides(view.shape);
+        view.dtype = dtype;
 
         return view;
     }

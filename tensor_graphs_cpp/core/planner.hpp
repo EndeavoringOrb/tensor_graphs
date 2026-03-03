@@ -122,7 +122,6 @@ public:
             topoIdx++;
             std::cout << topoIdx << "/" << topo.size() << "\r";
             uint32_t nodeId = *it;
-            // CHANGED: Removed MemoryManager from hash call
             std::string hash = Hashing::detail::structuralHashImpl(nodeId, graph, structHashMemo);
 
             std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(nodeId, graph, rules);
@@ -346,7 +345,16 @@ private:
             {
                 auto s0 = graph.nodes[node.parentIds[0]].shape;
                 auto s1 = graph.nodes[node.parentIds[1]].shape;
-                node.shape = broadcastShapes(s0, s1);
+
+                if (s0 != s1)
+                {
+                    std::stringstream ss;
+                    ss << "[Planner.inferShapes] Atomic " << toString(node.opType)
+                       << " requires exact shape match. Got " << toString(s0)
+                       << " and " << toString(s1) << ". Use explicit repeat/reshape. (Node " << nodeId << ")";
+                    throw std::runtime_error(ss.str());
+                }
+                node.shape = s0;
                 break;
             }
             case OpType::DOT:
@@ -355,26 +363,50 @@ private:
                 auto s1 = graph.nodes[node.parentIds[1]].shape;
                 int r0 = s0.size();
                 int r1 = s1.size();
+
                 if (r0 == 1 && r1 == 2)
                 {
+                    // Vector-Matrix: [K] @ [K, N] -> [N]
+                    if (s0[0] != s1[0])
+                        throw std::runtime_error("DOT: K-dim mismatch");
                     node.shape = {s1[1]};
                 }
                 else if (r0 == 2 && r1 == 2)
                 {
+                    // Matrix-Matrix: [M, K] @ [K, N] -> [M, N]
+                    if (s0[1] != s1[0])
+                        throw std::runtime_error("DOT: K-dim mismatch");
                     node.shape = {s0[0], s1[1]};
                 }
                 else if (r0 >= 2 && r1 >= 2)
                 {
+                    // Batched MatMul: [B..., M, K] @ [B..., K, N]
+                    if (s0[r0 - 1] != s1[r1 - 2])
+                        throw std::runtime_error("DOT: K-dim mismatch");
+
                     std::vector<uint32_t> b0(s0.begin(), s0.end() - 2);
                     std::vector<uint32_t> b1(s1.begin(), s1.end() - 2);
-                    auto batch = broadcastShapes(b0, b1);
-                    batch.push_back(s0[r0 - 2]);
-                    batch.push_back(s1[r1 - 1]);
-                    node.shape = batch;
+
+                    if (b0 != b1)
+                    {
+                        if (!b0.empty() && !b1.empty())
+                        {
+                            std::stringstream ss;
+                            ss << "[Planner.inferShapes] DOT batch dims must match exactly. Got "
+                               << toString(b0) << " and " << toString(b1)
+                               << ". Broadcast is disabled; use explicit repeat nodes.";
+                            throw std::runtime_error(ss.str());
+                        }
+                    }
+
+                    std::vector<uint32_t> out_shape = b0.empty() ? b1 : b0;
+                    out_shape.push_back(s0[r0 - 2]); // M
+                    out_shape.push_back(s1[r1 - 1]); // N
+                    node.shape = out_shape;
                 }
                 else
                 {
-                    throw std::runtime_error("Unsupported shapes for DOT");
+                    throw std::runtime_error("Unsupported rank combination for DOT");
                 }
                 break;
             }
@@ -627,7 +659,6 @@ private:
         return order;
     }
 
-    // CHANGED: Removed MemoryManager parameter from sort function
     std::vector<uint32_t> getAugmentedTopologicalSort(const std::vector<uint32_t> &baseNodes,
                                                       std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
                                                       const Graph &graph,
@@ -827,7 +858,13 @@ private:
                << " has NO valid strategies (OpType: " << node.opType
                << ", DType: " << node.dtype
                << ", Shape: " << toString(node.shape)
-               << ", ParentCount: " << node.parentIds.size() << ")" << std::endl;
+               << ", ParentCount: " << node.parentIds.size() << ")";
+            for (int i = 0; i < node.parentIds.size(); i++)
+            {
+                uint32_t pid = node.parentIds[i];
+                ss << ", p" << i << " shape: " << toString(graph.nodes[pid].shape);
+            }
+            ss << std::endl;
             throw std::runtime_error(ss.str());
         }
 

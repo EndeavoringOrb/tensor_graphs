@@ -35,7 +35,8 @@ PYBIND11_MODULE(tg_cpp, m)
         .def(py::init<>())
         .def_readwrite("baseOffset", &TensorView::baseOffset)
         .def_readwrite("shape", &TensorView::shape)
-        .def_readwrite("strides", &TensorView::strides);
+        .def_readwrite("strides", &TensorView::strides)
+        .def_readwrite("dtype", &TensorView::dtype);
 
     // Memory Management
     py::class_<MemoryManager>(m, "MemoryManager")
@@ -46,15 +47,13 @@ PYBIND11_MODULE(tg_cpp, m)
              {
             for(auto& pair : self.buffers) pair.second.init(); });
 
-    // Graph Building - CHANGED: Removed MemoryManager parameters from constant and weight!
+    // Graph Building
     py::class_<Graph>(m, "Graph")
         .def(py::init<>())
         .def("allocateId", &Graph::allocateId)
-        // CHANGED: Removed mem parameter
         .def("constant", [](Graph &g, std::vector<uint32_t> shape,
                             py::array_t<float> data, DType dtype)
              { return g.constant(shape, data.data(), dtype); })
-        // CHANGED: Removed mem parameter
         .def("weight", [](Graph &g, const std::string &path, const std::string &name)
              { return g.weight(path, name); })
         .def("input", &Graph::input)
