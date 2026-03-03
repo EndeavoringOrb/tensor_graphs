@@ -75,6 +75,7 @@ struct KernelEntry
     MatchFunc match;
     KernelFunc run;
     ReferenceFactory refFactory;
+    bool supportsInplace;
 };
 
 class KernelRegistry
@@ -86,9 +87,9 @@ public:
         return instance;
     }
 
-    void registerKernel(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory)
+    void registerKernel(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool supportsInplace)
     {
-        entries.push_back({op, opName, numInputs, backend, match, run, refFactory});
+        entries.push_back({op, opName, numInputs, backend, match, run, refFactory, supportsInplace});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory);
@@ -130,14 +131,20 @@ private:
 
 struct KernelRegistrar
 {
-    KernelRegistrar(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory)
+    KernelRegistrar(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool supportsInplace)
     {
-        KernelRegistry::get().registerKernel(op, opName, numInputs, backend, match, run, refFactory);
+        KernelRegistry::get().registerKernel(op, opName, numInputs, backend, match, run, refFactory, supportsInplace);
     }
 };
 
 #define REGISTER_KERNEL(op, backend, match, run) \
-    static KernelRegistrar _registrar_##run(op, "", 0, backend, match, run, nullptr)
+    static KernelRegistrar _registrar_##run(op, "", 0, backend, match, run, nullptr, false)
+
+#define REGISTER_KERNEL_INPLACE(op, backend, match, run) \
+    static KernelRegistrar _registrar_##run(op, "", 0, backend, match, run, nullptr, true)
 
 #define REGISTER_FUSED_KERNEL(opName, numInputs, backend, match, run, refFactory) \
-    static KernelRegistrar _registrar_fused_##run(OpType::FUSED, opName, numInputs, backend, match, run, refFactory)
+    static KernelRegistrar _registrar_fused_##run(OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false)
+
+#define REGISTER_FUSED_KERNEL_INPLACE(opName, numInputs, backend, match, run, refFactory) \
+    static KernelRegistrar _registrar_fused_##run(OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true)

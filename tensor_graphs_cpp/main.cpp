@@ -11,9 +11,19 @@
 #include "core/session.hpp"
 #include "core/kernels.hpp"
 
-#include "kernels/reference/cast/BF16_F32_ND.hpp"
 #include "kernels/fused/tanh/F32_1D.hpp"
+#include "kernels/reference/add/F32_ND.hpp"
+#include "kernels/reference/cast/BF16_F32_ND.hpp"
+#include "kernels/reference/div/F32_ND.hpp"
+#include "kernels/reference/dot/F32_3D.hpp"
 #include "kernels/reference/gather/F32_I32_ND.hpp"
+#include "kernels/reference/mul/F32_ND.hpp"
+#include "kernels/reference/neg/F32_ND.hpp"
+#include "kernels/reference/permute/F32_ND.hpp"
+#include "kernels/reference/pow/F32_ND.hpp"
+#include "kernels/reference/repeat/F32_ND.hpp"
+#include "kernels/reference/reshape/ND.hpp"
+#include "kernels/reference/sum/F32_ND.hpp"
 
 struct ModelConfig
 {
@@ -135,10 +145,7 @@ public:
         int32_t axis_val = -1;
         uint32_t axis_node = g.constant({1}, &axis_val, DType::INT32);
 
-        bool keepdims_val = true;
-        uint32_t keepdims_node = g.constant({1}, &keepdims_val, DType::BOOL);
-
-        uint32_t sum_sq = g.sum(x_sq, axis_node, keepdims_node);
+        uint32_t sum_sq = g.sum(x_sq, axis_node);
 
         float n_val = (float)cfg.emb_dim;
         uint32_t n_node = g.constant({1}, &n_val, DType::FLOAT32);
@@ -161,8 +168,7 @@ public:
         uint32_t inv_std_expanded = repeat_3d_axis(inv_std, cfg.emb_dim, 2);
         uint32_t x_norm = g.mul(x_id, inv_std_expanded);
 
-        uint32_t weight_fp32 = g.cast(weight_id, DType::FLOAT32);
-        uint32_t weight_expanded = expand_1d_to_3d(weight_fp32, cfg.emb_dim, 1, seq_len);
+        uint32_t weight_expanded = expand_1d_to_3d(weight_id, cfg.emb_dim, 1, seq_len);
 
         uint32_t one_node_640 = expand_scalar_to_3d(one_fp32, 1, seq_len, cfg.emb_dim);
         uint32_t scale = g.add(weight_expanded, one_node_640);
@@ -215,61 +221,66 @@ public:
 
     std::tuple<uint32_t, uint32_t, uint32_t> attention_qkv_atomic(uint32_t x, const std::string &prefix)
     {
+        // Transpose logic remains 2D, then we reshape to 3D
         int32_t perm_dims[] = {1, 0};
         uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
 
-        uint32_t w_q = weight(w_path, prefix + ".self_attn.q_proj.weight");
-        uint32_t w_q_t = g.permute(w_q, dims_node);
-        uint32_t q = g.dot(x, w_q_t);
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
+        {
+            uint32_t w = weight(w_path, prefix + suffix);
+            uint32_t w_t = g.permute(w, dims_node);
+            int32_t s3[] = {1, (int32_t)in_d, (int32_t)out_d};
+            return g.dot(x, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
+        };
 
-        uint32_t w_k = weight(w_path, prefix + ".self_attn.k_proj.weight");
-        uint32_t w_k_t = g.permute(w_k, dims_node);
-        uint32_t k = g.dot(x, w_k_t);
-
-        uint32_t w_v = weight(w_path, prefix + ".self_attn.v_proj.weight");
-        uint32_t w_v_t = g.permute(w_v, dims_node);
-        uint32_t v = g.dot(x, w_v_t);
+        uint32_t q = project(".self_attn.q_proj.weight", cfg.emb_dim, cfg.n_heads * cfg.head_dim);
+        uint32_t k = project(".self_attn.k_proj.weight", cfg.emb_dim, cfg.n_kv_groups * cfg.head_dim);
+        uint32_t v = project(".self_attn.v_proj.weight", cfg.emb_dim, cfg.n_kv_groups * cfg.head_dim);
 
         return std::make_tuple(q, k, v);
     }
 
     uint32_t attention_output_atomic(std::tuple<uint32_t, uint32_t, uint32_t> qkv, const std::string &prefix)
     {
-        uint32_t q = std::get<0>(qkv); // Shape [1, 128, 1024]
-
+        uint32_t q = std::get<0>(qkv);
         float scale_val = 1.0f / std::sqrt((float)cfg.query_pre_attn_scalar);
         uint32_t scale_node = expand_scalar_to_3d(g.constant({1}, &scale_val, DType::FLOAT32), 1, seq_len, cfg.n_heads * cfg.head_dim);
         uint32_t scaled_q = g.mul(q, scale_node);
 
-        uint32_t w_o = weight(w_path, prefix + ".self_attn.o_proj.weight"); // Shape [640, 1024]
-
+        uint32_t w_o = weight(w_path, prefix + ".self_attn.o_proj.weight");
         int32_t perm_dims[] = {1, 0};
-        uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
-        uint32_t w_o_t = g.permute(w_o, dims_node); // Shape[1024, 640]
+        uint32_t w_o_t = g.permute(w_o, g.constant({2}, perm_dims, DType::INT32));
 
-        return g.dot(scaled_q, w_o_t);
+        int32_t s3[] = {1, (int32_t)(cfg.n_heads * cfg.head_dim), (int32_t)cfg.emb_dim};
+        uint32_t w_o_3d = g.reshape(w_o_t, g.constant({3}, s3, DType::INT32));
+
+        return g.dot(scaled_q, w_o_3d);
     }
 
     uint32_t mlp_atomic(uint32_t x, const std::string &prefix)
     {
         int32_t perm_dims[] = {1, 0};
-        uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
+        uint32_t p_node = g.constant({2}, perm_dims, DType::INT32);
 
-        uint32_t w_gate = weight(w_path, prefix + ".mlp.gate_proj.weight");
-        uint32_t w_gate_t = g.permute(w_gate, dims_node);
-        uint32_t gate = g.dot(x, w_gate_t);
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
+        {
+            uint32_t w = weight(w_path, prefix + suffix);
+            uint32_t w_t = g.permute(w, p_node);
+            int32_t s3[] = {1, (int32_t)in_d, (int32_t)out_d};
+            return g.dot(x, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
+        };
+
+        uint32_t gate = project(".mlp.gate_proj.weight", cfg.emb_dim, cfg.hidden_dim);
         gate = gelu_atomic(gate, cfg.hidden_dim);
 
-        uint32_t w_up = weight(w_path, prefix + ".mlp.up_proj.weight");
-        uint32_t w_up_t = g.permute(w_up, dims_node);
-        uint32_t up = g.dot(x, w_up_t);
-
+        uint32_t up = project(".mlp.up_proj.weight", cfg.emb_dim, cfg.hidden_dim);
         uint32_t gate_up = g.mul(gate, up);
 
         uint32_t w_down = weight(w_path, prefix + ".mlp.down_proj.weight");
-        uint32_t w_down_t = g.permute(w_down, dims_node);
+        uint32_t w_down_t = g.permute(w_down, p_node);
+        int32_t s3[] = {1, (int32_t)cfg.hidden_dim, (int32_t)cfg.emb_dim};
 
-        return g.dot(gate_up, w_down_t);
+        return g.dot(gate_up, g.reshape(w_down_t, g.constant({3}, s3, DType::INT32)));
     }
 
     uint32_t build_graph(uint32_t input_ids_id)
@@ -308,7 +319,11 @@ public:
         int32_t perm_dims[] = {1, 0};
         uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
         uint32_t w_emb_t = g.permute(w_emb, dims_node);
-        uint32_t logits = g.dot(x, w_emb_t);
+
+        int32_t s3[] = {1, (int32_t)cfg.emb_dim, (int32_t)cfg.vocab_size};
+        uint32_t w_emb_3d = g.reshape(w_emb_t, g.constant({3}, s3, DType::INT32));
+
+        uint32_t logits = g.dot(x, w_emb_3d);
 
         return logits;
     }

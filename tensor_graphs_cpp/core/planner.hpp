@@ -34,9 +34,8 @@ struct BeamStrategy
 {
     float cost;
     uint32_t nodeId;
-    std::unordered_map<uint32_t, Backend> assignments;
-    std::unordered_map<uint32_t, uint32_t> kernelAssignments;
-    // DELETED: MemoryManager memManager;
+    std::unordered_map<std::string, Backend> assignments;
+    std::unordered_map<std::string, uint32_t> kernelAssignments;
 
     bool operator<(const BeamStrategy &other) const
     {
@@ -113,7 +112,8 @@ public:
         Rewrite::DivMulRule dmr;
         Rewrite::DivAddRule dar;
 
-        std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr, &fr, &ar, &dnr, &nar, &dmr, &dar};
+        // std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr, &fr, &ar, &dnr, &nar, &dmr, &dar};
+        std::vector<const Rewrite::RewriteRule *> rules = {}; // TODO: remove this line, this is just so the matching phase is fast while debugging planning phase
 
         std::cout << "[Planner.plan] matching fusion patterns..." << std::endl;
         uint32_t topoIdx = 0;
@@ -240,24 +240,31 @@ public:
             if (node.opType == OpType::INPUT)
                 continue;
 
-            Backend assignedBackend = bestRecipe.assignments.count(id) ? bestRecipe.assignments[id] : node.backend;
+            std::string h = Hashing::detail::structuralHashImpl(id, graph, structHashMemo);
+            Backend assignedBackend = node.backend;
+            if (bestRecipe.assignments.count(h))
+            {
+                assignedBackend = bestRecipe.assignments.at(h);
+            }
 
             uint32_t assignedKernelId = 0;
-            if (bestRecipe.kernelAssignments.count(id))
+            if (bestRecipe.kernelAssignments.count(h))
             {
-                assignedKernelId = bestRecipe.kernelAssignments[id];
+                assignedKernelId = bestRecipe.kernelAssignments.at(h);
             }
             else
             {
                 std::string opStr = (node.opType == OpType::FUSED) ? node.opName : toString(node.opType);
-                throw std::runtime_error("No kernel assigned for node with OpType " + opStr);
+                throw std::runtime_error("No kernel assigned for node with OpType " + opStr + " (ID " + std::to_string(id) + ")");
             }
 
             bool is_inplace_safe = false;
             if (!node.parentIds.empty())
             {
                 uint32_t p0 = node.parentIds[0];
-                if (compiled.refCounts[p0] == 1 && countElements(graph.nodes[p0].shape) == countElements(node.shape))
+                if (compiled.refCounts[p0] == 1 &&
+                    countElements(graph.nodes[p0].shape) == countElements(node.shape) &&
+                    getDTypeSize(graph.nodes[p0].dtype) == getDTypeSize(node.dtype))
                 {
                     is_inplace_safe = true;
                 }
@@ -268,7 +275,9 @@ public:
             inst.kernelId = assignedKernelId;
             inst.inputNodeIds = node.parentIds;
             inst.backend = assignedBackend;
-            inst.inplaceInputIndex = is_inplace_safe ? 0 : -1;
+
+            const KernelEntry &kEntry = KernelRegistry::get().getKernel(assignedKernelId);
+            inst.inplaceInputIndex = (is_inplace_safe && kEntry.supportsInplace) ? 0 : -1;
 
             compiled.instructions.push_back(inst);
         }
@@ -321,6 +330,7 @@ private:
         throw std::runtime_error(ss.str());
     }
 
+    // TODO: move this to ShapePropagator and use ShapePropagator.forward/ShapePropagator.backward
     void inferShapes(const std::vector<uint32_t> &topo, Graph &graph)
     {
         for (uint32_t nodeId : topo)
@@ -359,54 +369,36 @@ private:
             }
             case OpType::DOT:
             {
-                auto s0 = graph.nodes[node.parentIds[0]].shape;
-                auto s1 = graph.nodes[node.parentIds[1]].shape;
-                int r0 = s0.size();
-                int r1 = s1.size();
+                const auto &s0 = graph.nodes[node.parentIds[0]].shape;
+                const auto &s1 = graph.nodes[node.parentIds[1]].shape;
+                size_t r0 = s0.size();
+                size_t r1 = s1.size();
 
-                if (r0 == 1 && r1 == 2)
+                if (r0 != r1)
                 {
-                    // Vector-Matrix: [K] @ [K, N] -> [N]
-                    if (s0[0] != s1[0])
-                        throw std::runtime_error("DOT: K-dim mismatch");
-                    node.shape = {s1[1]};
+                    std::stringstream ss;
+                    ss << "[Planner.inferShapes] DOT requires equal ranks. Got " << r0 << " and " << r1
+                       << ". Implicit broadcasting is disabled; use explicit reshape to align ranks.";
+                    throw std::runtime_error(ss.str());
                 }
-                else if (r0 == 2 && r1 == 2)
+
+                if (r0 == 2)
                 {
-                    // Matrix-Matrix: [M, K] @ [K, N] -> [M, N]
                     if (s0[1] != s1[0])
-                        throw std::runtime_error("DOT: K-dim mismatch");
+                        throw std::runtime_error("DOT: K-dim mismatch [M,K] @ [K,N]");
                     node.shape = {s0[0], s1[1]};
                 }
-                else if (r0 >= 2 && r1 >= 2)
+                else if (r0 == 3)
                 {
-                    // Batched MatMul: [B..., M, K] @ [B..., K, N]
-                    if (s0[r0 - 1] != s1[r1 - 2])
-                        throw std::runtime_error("DOT: K-dim mismatch");
-
-                    std::vector<uint32_t> b0(s0.begin(), s0.end() - 2);
-                    std::vector<uint32_t> b1(s1.begin(), s1.end() - 2);
-
-                    if (b0 != b1)
-                    {
-                        if (!b0.empty() && !b1.empty())
-                        {
-                            std::stringstream ss;
-                            ss << "[Planner.inferShapes] DOT batch dims must match exactly. Got "
-                               << toString(b0) << " and " << toString(b1)
-                               << ". Broadcast is disabled; use explicit repeat nodes.";
-                            throw std::runtime_error(ss.str());
-                        }
-                    }
-
-                    std::vector<uint32_t> out_shape = b0.empty() ? b1 : b0;
-                    out_shape.push_back(s0[r0 - 2]); // M
-                    out_shape.push_back(s1[r1 - 1]); // N
-                    node.shape = out_shape;
+                    if (s0[0] != s1[0])
+                        throw std::runtime_error("DOT: Batch dim mismatch [B,M,K] @ [B,K,N]");
+                    if (s0[2] != s1[1])
+                        throw std::runtime_error("DOT: K-dim mismatch [B,M,K] @ [B,K,N]");
+                    node.shape = {s0[0], s0[1], s1[2]};
                 }
                 else
                 {
-                    throw std::runtime_error("Unsupported rank combination for DOT");
+                    throw std::runtime_error("DOT: Only Rank 2 and Rank 3 are currently supported in this framework.");
                 }
                 break;
             }
@@ -426,8 +418,6 @@ private:
                 auto s0 = graph.nodes[node.parentIds[0]].shape;
                 auto axis_vec = getConstantInt32(node.parentIds[1], graph);
                 int32_t axis = axis_vec[0];
-                const auto &keepdims_data = graph.constantStaging.at(node.parentIds[2]);
-                bool keepdims = keepdims_data[0] != 0;
 
                 if (axis < 0)
                     axis += s0.size();
@@ -437,8 +427,7 @@ private:
                 {
                     if (i == (size_t)axis)
                     {
-                        if (keepdims)
-                            new_shape.push_back(1);
+                        new_shape.push_back(1);
                     }
                     else
                     {
@@ -713,7 +702,7 @@ private:
             BeamStrategy strat;
             strat.cost = 0.0f;
             strat.nodeId = nodeId;
-            strat.assignments[nodeId] = node.backend;
+            strat.assignments[nodeHash] = node.backend;
             memo[nodeHash] = {strat};
             return;
         }
@@ -781,18 +770,18 @@ private:
 
                 for (uint32_t kernelId : matchingKernels)
                 {
+                    std::string targetHash = Hashing::detail::structuralHashImpl(targetId, graph, structHashMemo);
+
                     if (parentBeamSets.empty())
                     {
                         float cost = costModel.estimateCost(target, graph, kernelId);
-                        std::unordered_map<uint32_t, Backend> assigns;
-                        assigns[targetId] = backend;
-                        std::unordered_map<uint32_t, uint32_t> kAssigns;
-                        kAssigns[targetId] = kernelId;
+                        std::unordered_map<std::string, Backend> assigns;
+                        assigns[targetHash] = backend;
+                        std::unordered_map<std::string, uint32_t> kAssigns;
+                        kAssigns[targetHash] = kernelId;
 
                         BeamStrategy strat{cost, targetId, assigns, kAssigns};
-
                         candidates.push_back(strat);
-
                         continue;
                     }
 
@@ -800,10 +789,10 @@ private:
                     while (true)
                     {
                         float cost = 0.0f;
-                        std::unordered_map<uint32_t, Backend> assigns;
-                        assigns[targetId] = backend;
-                        std::unordered_map<uint32_t, uint32_t> kAssigns;
-                        kAssigns[targetId] = kernelId;
+                        std::unordered_map<std::string, Backend> assigns;
+                        assigns[targetHash] = backend;
+                        std::unordered_map<std::string, uint32_t> kAssigns;
+                        kAssigns[targetHash] = kernelId;
 
                         for (size_t i = 0; i < parentBeamSets.size(); i++)
                         {
@@ -811,20 +800,26 @@ private:
                             cost += pStrat.cost;
                             for (auto &pair : pStrat.assignments)
                             {
-                                assigns[pair.first] = pair.second;
+                                assigns[pair.first] = pair.second; // pair.first is now a hash string
                             }
                             for (auto &pair : pStrat.kernelAssignments)
                             {
                                 kAssigns[pair.first] = pair.second;
                             }
 
-                            if (pStrat.assignments.at(pStrat.nodeId) != backend)
+                            // Check transfer cost using parent's hash
+                            std::string phash = Hashing::detail::structuralHashImpl(pStrat.nodeId, graph, structHashMemo);
+                            if (pStrat.assignments.at(phash) != backend)
                             {
                                 cost += 0.05f;
                             }
                         }
 
                         cost += costModel.estimateCost(target, graph, kernelId);
+
+                        std::string targetHash = Hashing::detail::structuralHashImpl(targetId, graph, structHashMemo);
+                        assigns[targetHash] = backend;
+                        kAssigns[targetHash] = kernelId;
 
                         candidates.push_back({cost, targetId, assigns, kAssigns});
 
@@ -862,7 +857,7 @@ private:
             for (int i = 0; i < node.parentIds.size(); i++)
             {
                 uint32_t pid = node.parentIds[i];
-                ss << ", p" << i << " shape: " << toString(graph.nodes[pid].shape);
+                ss << ", p" << i << ": " << toString(graph.nodes[pid].shape) << " | " << graph.nodes[pid].dtype;
             }
             ss << std::endl;
             throw std::runtime_error(ss.str());

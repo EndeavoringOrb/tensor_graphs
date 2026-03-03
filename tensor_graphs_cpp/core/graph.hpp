@@ -228,7 +228,7 @@ struct Graph
         return node.id;
     }
 
-    uint32_t sum(uint32_t id0, uint32_t id1, uint32_t id2)
+    uint32_t sum(uint32_t id0, uint32_t id1)
     {
         if (nodes[id1].dtype != DType::INT32)
         {
@@ -236,22 +236,16 @@ struct Graph
             ss << "[Graph.sum] Expected " << DType::INT32 << " for input 1, got: " << nodes[id1].dtype;
             throw std::runtime_error(ss.str());
         }
-        if (nodes[id2].dtype != DType::BOOL)
-        {
-            std::stringstream ss;
-            ss << "[Graph.sum] Expected " << DType::BOOL << " for input 2, got: " << nodes[id2].dtype;
-            throw std::runtime_error(ss.str());
-        }
         TensorNode node = TensorNode();
         node.id = allocateId();
         node.opType = OpType::SUM;
         node.dtype = nodes[id0].dtype;
-        node.parentIds = {id0, id1, id2};
+        node.parentIds = {id0, id1};
         nodes.push_back(node);
         return node.id;
     }
 
-    uint32_t max(uint32_t id0, uint32_t id1, uint32_t id2)
+    uint32_t max(uint32_t id0, uint32_t id1)
     {
         if (nodes[id1].dtype != DType::INT32)
         {
@@ -259,17 +253,11 @@ struct Graph
             ss << "[Graph.max] Expected " << DType::INT32 << " for input 1, got: " << nodes[id1].dtype;
             throw std::runtime_error(ss.str());
         }
-        if (nodes[id2].dtype != DType::BOOL)
-        {
-            std::stringstream ss;
-            ss << "[Graph.max] Expected " << DType::BOOL << " for input 2, got: " << nodes[id2].dtype;
-            throw std::runtime_error(ss.str());
-        }
         TensorNode node = TensorNode();
         node.id = allocateId();
         node.opType = OpType::MAX;
         node.dtype = nodes[id0].dtype;
-        node.parentIds = {id0, id1, id2};
+        node.parentIds = {id0, id1};
         nodes.push_back(node);
         return node.id;
     }
