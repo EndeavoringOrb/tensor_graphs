@@ -1,6 +1,6 @@
 .venv
 *__pycache__
-*repomix-output.txt
+repomix-output*.txt
 .coverage
 commands.txt
 *.egg-info

@@ -44,21 +44,23 @@ class Gemma3ModelCPP:
         x_sq = self.g.mul(x_id, x_id)
 
         # 2. sum(x^2, axis=-1, keepdims=True)
-        axis_val = np.array([-1], dtype=np.int32)
         axis_node = self.g.constant(
-            [1], axis_val.ctypes.data, tg_cpp.DType.INT32, self.mem
+            [1], np.array([-1], dtype=np.int32), tg_cpp.DType.INT32, self.mem
         )
 
-        keepdims_val = np.array([1], dtype=np.int32)  # 1 = True
         keepdims_node = self.g.constant(
-            [1], keepdims_val.ctypes.data, tg_cpp.DType.INT32, self.mem
+            [1], np.array([True], dtype=np.bool_), tg_cpp.DType.BOOL, self.mem
         )
 
         sum_sq = self.g.sum(x_sq, axis_node, keepdims_node)
 
         # 3. mean = sum / n (where n = shape[-1])
-        n_val = np.array([float(self.cfg["emb_dim"])], dtype=np.float32)
-        n_node = self.g.constant([1], n_val.ctypes.data, tg_cpp.DType.FLOAT32, self.mem)
+        n_node = self.g.constant(
+            [1],
+            np.array([float(self.cfg["emb_dim"])], dtype=np.float32),
+            tg_cpp.DType.FLOAT32,
+            self.mem,
+        )
 
         mean_sq = self.g.div(sum_sq, n_node)
 
@@ -66,9 +68,8 @@ class Gemma3ModelCPP:
         mean_sq_plus_eps = self.g.add(mean_sq, self.eps_fp32)
 
         # 5. sqrt(mean_sq + eps) using pow(x, 0.5)
-        sqrt_val = np.array([0.5], dtype=np.float32)
         sqrt_node = self.g.constant(
-            [1], sqrt_val.ctypes.data, tg_cpp.DType.FLOAT32, self.mem
+            [1], np.array([0.5], dtype=np.float32), tg_cpp.DType.FLOAT32, self.mem
         )
 
         std = self.g.pow(mean_sq_plus_eps, sqrt_node)
@@ -93,11 +94,16 @@ class Gemma3ModelCPP:
         GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
         """
         # Constants
-        c1 = np.array([0.044715], dtype=np.float32)
-        c1_node = self.g.constant([1], c1.ctypes.data, tg_cpp.DType.FLOAT32, self.mem)
+        c1_node = self.g.constant(
+            [1], np.array([0.044715], dtype=np.float32), tg_cpp.DType.FLOAT32, self.mem
+        )
 
-        c2 = np.array([0.79788456], dtype=np.float32)  # sqrt(2/pi)
-        c2_node = self.g.constant([1], c2.ctypes.data, tg_cpp.DType.FLOAT32, self.mem)
+        c2_node = self.g.constant(
+            [1],
+            np.array([0.79788456], dtype=np.float32),
+            tg_cpp.DType.FLOAT32,
+            self.mem,
+        )
 
         # x^2
         x_sq = self.g.mul(x_id, x_id)
@@ -135,8 +141,12 @@ class Gemma3ModelCPP:
         neg_x = self.g.neg(x_id)
 
         # e^x using pow(e, x)
-        e_val = np.array([2.718281828459045], dtype=np.float32)
-        e_node = self.g.constant([1], e_val.ctypes.data, tg_cpp.DType.FLOAT32, self.mem)
+        e_node = self.g.constant(
+            [1],
+            np.array([2.718281828459045], dtype=np.float32),
+            tg_cpp.DType.FLOAT32,
+            self.mem,
+        )
 
         exp_x = self.g.pow(e_node, x_id)
         exp_neg_x = self.g.pow(e_node, neg_x)
@@ -162,9 +172,11 @@ class Gemma3ModelCPP:
         x = self.g.gather(w_emb, input_ids_id)
 
         # Scale by sqrt(emb_dim)
-        scale_val = np.array([float(cfg["emb_dim"] ** 0.5)], dtype=np.float32)
         scale_node = self.g.constant(
-            [1], scale_val.ctypes.data, tg_cpp.DType.FLOAT32, self.mem
+            [1],
+            np.array([float(cfg["emb_dim"] ** 0.5)], dtype=np.float32),
+            tg_cpp.DType.FLOAT32,
+            self.mem,
         )
         x = self.g.mul(x, scale_node)
 
@@ -197,7 +209,10 @@ class Gemma3ModelCPP:
         x = self.rms_norm_gemma_atomic(x, w_final_ln)
 
         # Weight tying - transpose embedding weights
-        w_emb_t = self.g.permute(w_emb, self.g.allocateId())
+        dims_node = self.g.constant(
+            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32, self.mem
+        )
+        w_emb_t = self.g.permute(w_emb, dims_node)
         logits = self.g.dot(x, w_emb_t)
 
         return logits
@@ -208,17 +223,26 @@ class Gemma3ModelCPP:
 
         # Q projection - use weight helper for FP32 casting
         w_q = self.weight(w_path, f"{prefix}.self_attn.q_proj.weight")
-        w_q_t = self.g.permute(w_q, self.g.allocateId())
+        dims_node = self.g.constant(
+            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32, self.mem
+        )
+        w_q_t = self.g.permute(w_q, dims_node)
         q = self.g.dot(x, w_q_t)
 
         # K projection
         w_k = self.weight(w_path, f"{prefix}.self_attn.k_proj.weight")
-        w_k_t = self.g.permute(w_k, self.g.allocateId())
+        dims_node = self.g.constant(
+            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32, self.mem
+        )
+        w_k_t = self.g.permute(w_k, dims_node)
         k = self.g.dot(x, w_k_t)
 
         # V projection
         w_v = self.weight(w_path, f"{prefix}.self_attn.v_proj.weight")
-        w_v_t = self.g.permute(w_v, self.g.allocateId())
+        dims_node = self.g.constant(
+            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32, self.mem
+        )
+        w_v_t = self.g.permute(w_v, dims_node)
         v = self.g.dot(x, w_v_t)
 
         return q, k, v
@@ -228,11 +252,13 @@ class Gemma3ModelCPP:
         q, k, v = qkv
 
         # For simplicity, just return a scaled version of the input
-        scale_val = np.array(
-            [1.0 / float(cfg["query_pre_attn_scalar"] ** 0.5)], dtype=np.float32
-        )
         scale_node = self.g.constant(
-            [1], scale_val.ctypes.data, tg_cpp.DType.FLOAT32, self.mem
+            [1],
+            np.array(
+                [1.0 / float(cfg["query_pre_attn_scalar"] ** 0.5)], dtype=np.float32
+            ),
+            tg_cpp.DType.FLOAT32,
+            self.mem,
         )
 
         return self.g.mul(q, scale_node)
@@ -243,13 +269,19 @@ class Gemma3ModelCPP:
 
         # Gate projection - use weight helper for FP32 casting
         w_gate = self.weight(w_path, f"{prefix}.mlp.gate_proj.weight")
-        w_gate_t = self.g.permute(w_gate, self.g.allocateId())
+        dims_node = self.g.constant(
+            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32, self.mem
+        )
+        w_gate_t = self.g.permute(w_gate, dims_node)
         gate = self.g.dot(x, w_gate_t)
         gate = self.gelu_atomic(gate)
 
         # Up projection
         w_up = self.weight(w_path, f"{prefix}.mlp.up_proj.weight")
-        w_up_t = self.g.permute(w_up, self.g.allocateId())
+        dims_node = self.g.constant(
+            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32, self.mem
+        )
+        w_up_t = self.g.permute(w_up, dims_node)
         up = self.g.dot(x, w_up_t)
 
         # Gate * Up
@@ -257,7 +289,10 @@ class Gemma3ModelCPP:
 
         # Down projection
         w_down = self.weight(w_path, f"{prefix}.mlp.down_proj.weight")
-        w_down_t = self.g.permute(w_down, self.g.allocateId())
+        dims_node = self.g.constant(
+            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32, self.mem
+        )
+        w_down_t = self.g.permute(w_down, dims_node)
 
         return self.g.dot(gate_up, w_down_t)
 

@@ -185,6 +185,7 @@ public:
 
     void compile(const std::unordered_map<uint32_t, const void *> &sampleInputs)
     {
+        std::cout << "[Session.compile] compiling..." << std::endl;
         Planner planner(costModel, 4ULL * 1024 * 1024 * 1024);
 
         compiled = planner.plan(rootId, graph, memManager);

@@ -49,6 +49,7 @@ public:
 
     CompiledGraph plan(uint32_t rootId, Graph &graph, MemoryManager &rootMemManager)
     {
+        std::cout << "[Planner.plan] initial sort..." << std::endl;
         std::unordered_map<uint32_t, std::string> structHashMemo;
         std::vector<uint32_t> topo = topologicalSort(rootId, graph);
 
@@ -63,8 +64,13 @@ public:
         };
         std::vector<FusedPattern> fusedPatterns;
 
-        for (const auto &pair : ReferenceGraphRegistry::get().getAll())
+        std::cout << "[Planner.plan] generating fusedPatterns..." << std::endl;
+        const std::unordered_map<std::string, ReferenceGraphEntry> &refGraphs = ReferenceGraphRegistry::get().getAll();
+        uint32_t pairIdx = 0;
+        for (const auto &pair : refGraphs)
         {
+            pairIdx++;
+            std::cout << pairIdx << "/" << refGraphs.size() << "\r";
             const std::string &opName = pair.first;
             size_t numInputs = pair.second.numInputs;
             ReferenceFactory factory = pair.second.factory;
@@ -99,8 +105,12 @@ public:
 
         std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr, &fr, &ar, &dnr, &nar, &dmr, &dar};
 
+        std::cout << "[Planner.plan] matching fusion patterns..." << std::endl;
+        uint32_t topoIdx = 0;
         for (auto it = topo.rbegin(); it != topo.rend(); ++it)
         {
+            topoIdx++;
+            std::cout << topoIdx << "/" << topo.size() << "\r";
             uint32_t nodeId = *it;
             // LAZY WEIGHT LOADING FOR HASHING
             bool isWeight = graph.weightSources.count(nodeId);
@@ -171,12 +181,17 @@ public:
             }
         }
 
+        std::cout << "[Planner.plan] doing augmented topo sort..." << std::endl;
         std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, fusionMap, graph, rootMemManager, structHashMemo);
 
         std::unordered_map<std::string, std::vector<BeamStrategy>> memo;
 
+        std::cout << "[Planner.plan] planning nodes..." << std::endl;
+        uint32_t nodeIdx = 0;
         for (uint32_t nodeId : sortedNodes)
         {
+            nodeIdx++;
+            std::cout << nodeIdx << "/" << sortedNodes.size() << "\r";
             planNodeIterative(nodeId, graph, fusionMap, memo, rootMemManager, structHashMemo);
         }
 
@@ -188,6 +203,7 @@ public:
 
         auto bestRecipe = memo[rootHash][0];
 
+        std::cout << "[Planner.plan] final topo sort..." << std::endl;
         std::vector<uint32_t> finalTopo = topologicalSort(bestRecipe.nodeId, graph);
         CompiledGraph compiled;
 
