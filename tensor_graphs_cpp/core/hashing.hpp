@@ -154,7 +154,7 @@ namespace Hashing
     // ---------------------------------------------------------
     namespace detail
     {
-        inline std::string structuralHashImpl(uint32_t nodeId, const Graph &graph, const MemoryManager &memManager, std::unordered_map<uint32_t, std::string> &memo)
+        inline std::string structuralHashImpl(uint32_t nodeId, const Graph &graph, MemoryManager &memManager, std::unordered_map<uint32_t, std::string> &memo)
         {
             if (memo.count(nodeId))
             {
@@ -191,6 +191,19 @@ namespace Hashing
             {
                 if (node.storageType == StorageType::PERSISTENT)
                 {
+                    bool loadedInternally = false;
+                    if (graph.weightSources.count(nodeId) && memManager.read(node.backend, nodeId) == nullptr)
+                    {
+                        const auto &source = graph.weightSources.at(nodeId);
+                        auto &loader = graph.loaders.at(source.first);
+                        const auto &meta = loader->getMetadata(source.second);
+
+                        std::vector<uint8_t> tempBuffer(meta.sizeBytes());
+                        loader->loadTensor(source.second, tempBuffer.data(), tempBuffer.size());
+                        memManager.write(node.backend, nodeId, tempBuffer.data(), tempBuffer.size());
+                        loadedInternally = true;
+                    }
+
                     const uint8_t *data = memManager.read(node.backend, nodeId);
                     if (data)
                     {
@@ -199,9 +212,13 @@ namespace Hashing
                     }
                     else
                     {
-                        // TODO: should we throw error here?
-                        uint32_t idVal = node.id;
-                        sha.update(reinterpret_cast<const uint8_t *>(&idVal), sizeof(idVal));
+                        throw std::runtime_error("[Hashing::detail::structuralHashImpl no data returned from MemoryManager.read]");
+                    }
+
+                    // Unload if we were the ones to bring it into RAM
+                    if (loadedInternally)
+                    {
+                        memManager.unload(node.backend, nodeId);
                     }
                 }
                 else
@@ -280,7 +297,7 @@ namespace Hashing
         }
     }
 
-    inline std::string getStructuralHash(uint32_t nodeId, const Graph &graph, const MemoryManager &memManager)
+    inline std::string getStructuralHash(uint32_t nodeId, const Graph &graph, MemoryManager &memManager)
     {
         std::unordered_map<uint32_t, std::string> memo;
         return detail::structuralHashImpl(nodeId, graph, memManager, memo);

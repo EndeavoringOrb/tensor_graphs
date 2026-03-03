@@ -112,26 +112,7 @@ public:
             topoIdx++;
             std::cout << topoIdx << "/" << topo.size() << "\r";
             uint32_t nodeId = *it;
-            // LAZY WEIGHT LOADING FOR HASHING
-            bool isWeight = graph.weightSources.count(nodeId);
-            if (isWeight)
-            {
-                const auto &source = graph.weightSources.at(nodeId);
-                auto &loader = graph.loaders.at(source.first);
-                const auto &meta = loader->getMetadata(source.second);
-
-                std::vector<uint8_t> tempBuffer(meta.sizeBytes());
-                loader->loadTensor(source.second, tempBuffer.data(), tempBuffer.size());
-
-                // Write to sparse storage for Hashing::getStructuralHash to read
-                rootMemManager.write(Backend::CPU, nodeId, tempBuffer.data(), tempBuffer.size());
-            }
             std::string hash = Hashing::detail::structuralHashImpl(nodeId, graph, rootMemManager, structHashMemo);
-            // UNLOAD TO SAVE RAM DURING PLANNING
-            if (isWeight)
-            {
-                rootMemManager.unload(Backend::CPU, nodeId);
-            }
 
             std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(nodeId, graph, rules);
             for (uint32_t eqId : equivalents)
@@ -207,8 +188,11 @@ public:
         std::vector<uint32_t> finalTopo = topologicalSort(bestRecipe.nodeId, graph);
         CompiledGraph compiled;
 
+        uint32_t mapIdx = 0;
         for (uint32_t id : finalTopo)
         {
+            mapIdx++;
+            std::cout << "Map: " << mapIdx << "/" << finalTopo.size() << "\r";
             compiled.nodesMap[id] = graph.nodes[id];
             for (uint32_t pid : graph.nodes[id].parentIds)
             {
@@ -217,8 +201,11 @@ public:
             compiled.refCounts[bestRecipe.nodeId] = 1;
         }
 
+        uint32_t instIdx = 0;
         for (uint32_t id : finalTopo)
         {
+            instIdx++;
+            std::cout << "Inst: " << instIdx << "/" << finalTopo.size() << "\r";
             const auto &node = graph.nodes[id];
             if (node.opType == OpType::INPUT)
                 continue;
@@ -325,7 +312,7 @@ private:
     std::vector<uint32_t> getAugmentedTopologicalSort(const std::vector<uint32_t> &baseNodes,
                                                       std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
                                                       const Graph &graph,
-                                                      const MemoryManager &rootMemManager,
+                                                      MemoryManager &rootMemManager,
                                                       std::unordered_map<uint32_t, std::string> &structHashMemo)
     {
         std::vector<uint32_t> order;
@@ -365,7 +352,7 @@ private:
     void planNodeIterative(uint32_t nodeId, const Graph &graph,
                            std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
                            std::unordered_map<std::string, std::vector<BeamStrategy>> &memo,
-                           const MemoryManager &rootMemManager,
+                           MemoryManager &rootMemManager,
                            std::unordered_map<uint32_t, std::string> &structHashMemo)
     {
         std::string nodeHash = Hashing::detail::structuralHashImpl(nodeId, graph, rootMemManager, structHashMemo);

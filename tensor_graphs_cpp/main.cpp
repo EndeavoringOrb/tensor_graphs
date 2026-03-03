@@ -306,7 +306,7 @@ int main()
 
     // 2. Define Input Node
     TensorView inputView;
-    uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32, inputView);
+    uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32, inputView, StorageType::TRANSIENT);
 
     // 3. Build Model Graph (using class)
     std::cout << "Building Graph..." << std::endl;

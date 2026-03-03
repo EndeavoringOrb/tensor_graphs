@@ -74,12 +74,12 @@ struct Graph
         return inputWithId(id, meta.shape, meta.dtype, view);
     }
 
-    uint32_t input(std::vector<uint32_t> shape, DType dtype, TensorView view)
+    uint32_t input(std::vector<uint32_t> shape, DType dtype, TensorView view, StorageType storageType = StorageType::PERSISTENT)
     {
-        return inputWithId(allocateId(), shape, dtype, view);
+        return inputWithId(allocateId(), shape, dtype, view, storageType);
     }
 
-    uint32_t inputWithId(uint32_t id, std::vector<uint32_t> shape, DType dtype, TensorView view)
+    uint32_t inputWithId(uint32_t id, std::vector<uint32_t> shape, DType dtype, TensorView view, StorageType storageType = StorageType::PERSISTENT)
     {
         TensorNode node = TensorNode();
         node.id = id;
@@ -87,7 +87,7 @@ struct Graph
         node.dtype = dtype;
         node.shape = shape;
         node.view = view;
-        node.storageType = StorageType::PERSISTENT;
+        node.storageType = storageType;
         nodes.push_back(node);
         return node.id;
     }
