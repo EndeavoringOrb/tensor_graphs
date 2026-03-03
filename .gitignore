@@ -21,3 +21,6 @@ wsl_venv
 CLAUDE.md
 tensor_graphs_cpp/main.exe
 *.pyd
+*.ilk
+*.pdb
+*.obj

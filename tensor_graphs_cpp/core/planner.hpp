@@ -5,6 +5,7 @@
 #include "core/kernels.hpp"
 #include "core/rewrite.hpp"
 #include "core/hashing.hpp"
+#include "core/shapes.hpp"
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -14,34 +15,7 @@
 #include <sstream>
 #include <cstring>
 
-struct OpInstruction
-{
-    uint32_t nodeId;
-    uint32_t kernelId;
-    std::vector<uint32_t> inputNodeIds;
-    int32_t inplaceInputIndex; // -1 if not inplace
-    Backend backend;
-};
 
-struct CompiledGraph
-{
-    std::vector<OpInstruction> instructions;
-    std::unordered_map<uint32_t, uint32_t> refCounts;
-    std::unordered_map<uint32_t, TensorNode> nodesMap;
-};
-
-struct BeamStrategy
-{
-    float cost;
-    uint32_t nodeId;
-    std::unordered_map<std::string, Backend> assignments;
-    std::unordered_map<std::string, uint32_t> kernelAssignments;
-
-    bool operator<(const BeamStrategy &other) const
-    {
-        return cost < other.cost;
-    }
-};
 
 class Planner
 {
@@ -89,6 +63,7 @@ public:
                 view.shape = {1};
                 view.strides = TensorView::calcContiguousStrides({1});
                 view.baseOffset = 0;
+                view.dtype = DType::FLOAT32;
                 pattern.graph.inputWithId(inId, {1}, DType::FLOAT32, view);
                 pattern.variables.push_back(inId);
             }
@@ -262,7 +237,8 @@ public:
             if (!node.parentIds.empty())
             {
                 uint32_t p0 = node.parentIds[0];
-                if (compiled.refCounts[p0] == 1 &&
+                if (graph.nodes[p0].storageType == StorageType::TRANSIENT &&
+                    compiled.refCounts[p0] == 1 &&
                     countElements(graph.nodes[p0].shape) == countElements(node.shape) &&
                     getDTypeSize(graph.nodes[p0].dtype) == getDTypeSize(node.dtype))
                 {
@@ -290,298 +266,13 @@ private:
     uint64_t maxMemoryBytes;
     size_t beamWidth = 3;
 
-    std::vector<uint32_t> broadcastShapes(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b)
-    {
-        int rankA = a.size();
-        int rankB = b.size();
-        int outRank = std::max(rankA, rankB);
-        std::vector<uint32_t> out(outRank);
-        for (int i = 0; i < outRank; ++i)
-        {
-            uint32_t dimA = (i < outRank - rankA) ? 1 : a[i - (outRank - rankA)];
-            uint32_t dimB = (i < outRank - rankB) ? 1 : b[i - (outRank - rankB)];
-            if (dimA == 1)
-                out[i] = dimB;
-            else if (dimB == 1)
-                out[i] = dimA;
-            else if (dimA == dimB)
-                out[i] = dimA;
-            else
-            {
-                std::stringstream ss;
-                ss << "Cannot broadcast shapes " << toString(a) << " and " << toString(b);
-                throw std::runtime_error(ss.str());
-            }
-        }
-        return out;
-    }
-
-    std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)
-    {
-        if (graph.constantStaging.count(id))
-        {
-            const auto &data = graph.constantStaging.at(id);
-            std::vector<int32_t> res(data.size() / sizeof(int32_t));
-            std::memcpy(res.data(), data.data(), data.size());
-            return res;
-        }
-        std::stringstream ss;
-        ss << "Expected constant for shape inference but not found in staging. Node ID: " << id;
-        throw std::runtime_error(ss.str());
-    }
-
-    // TODO: move this to ShapePropagator and use ShapePropagator.forward/ShapePropagator.backward
     void inferShapes(const std::vector<uint32_t> &topo, Graph &graph)
     {
+        ShapePropagator propagator;
         for (uint32_t nodeId : topo)
         {
             TensorNode &node = graph.nodes[nodeId];
-
-            if (!node.shape.empty() && node.opType != OpType::RESHAPE)
-            {
-                continue;
-            }
-            if (node.opType == OpType::INPUT)
-            { // handles both INPUT and CONSTANT mappings
-                continue;
-            }
-
-            switch (node.opType)
-            {
-            case OpType::ADD:
-            case OpType::MUL:
-            case OpType::DIVIDE:
-            case OpType::POWER:
-            {
-                auto s0 = graph.nodes[node.parentIds[0]].shape;
-                auto s1 = graph.nodes[node.parentIds[1]].shape;
-
-                if (s0 != s1)
-                {
-                    std::stringstream ss;
-                    ss << "[Planner.inferShapes] Atomic " << toString(node.opType)
-                       << " requires exact shape match. Got " << toString(s0)
-                       << " and " << toString(s1) << ". Use explicit repeat/reshape. (Node " << nodeId << ")";
-                    throw std::runtime_error(ss.str());
-                }
-                node.shape = s0;
-                break;
-            }
-            case OpType::DOT:
-            {
-                const auto &s0 = graph.nodes[node.parentIds[0]].shape;
-                const auto &s1 = graph.nodes[node.parentIds[1]].shape;
-                size_t r0 = s0.size();
-                size_t r1 = s1.size();
-
-                if (r0 != r1)
-                {
-                    std::stringstream ss;
-                    ss << "[Planner.inferShapes] DOT requires equal ranks. Got " << r0 << " and " << r1
-                       << ". Implicit broadcasting is disabled; use explicit reshape to align ranks.";
-                    throw std::runtime_error(ss.str());
-                }
-
-                if (r0 == 2)
-                {
-                    if (s0[1] != s1[0])
-                        throw std::runtime_error("DOT: K-dim mismatch [M,K] @ [K,N]");
-                    node.shape = {s0[0], s1[1]};
-                }
-                else if (r0 == 3)
-                {
-                    if (s0[0] != s1[0])
-                        throw std::runtime_error("DOT: Batch dim mismatch [B,M,K] @ [B,K,N]");
-                    if (s0[2] != s1[1])
-                        throw std::runtime_error("DOT: K-dim mismatch [B,M,K] @ [B,K,N]");
-                    node.shape = {s0[0], s0[1], s1[2]};
-                }
-                else
-                {
-                    throw std::runtime_error("DOT: Only Rank 2 and Rank 3 are currently supported in this framework.");
-                }
-                break;
-            }
-            case OpType::SIN:
-            case OpType::COS:
-            case OpType::NEGATE:
-            case OpType::CAST:
-            case OpType::TRIU:
-            case OpType::COPY_TO:
-            {
-                node.shape = graph.nodes[node.parentIds[0]].shape;
-                break;
-            }
-            case OpType::SUM:
-            case OpType::MAX:
-            {
-                auto s0 = graph.nodes[node.parentIds[0]].shape;
-                auto axis_vec = getConstantInt32(node.parentIds[1], graph);
-                int32_t axis = axis_vec[0];
-
-                if (axis < 0)
-                    axis += s0.size();
-
-                std::vector<uint32_t> new_shape;
-                for (size_t i = 0; i < s0.size(); ++i)
-                {
-                    if (i == (size_t)axis)
-                    {
-                        new_shape.push_back(1);
-                    }
-                    else
-                    {
-                        new_shape.push_back(s0[i]);
-                    }
-                }
-                node.shape = new_shape;
-                break;
-            }
-            case OpType::RESHAPE:
-            {
-                auto s0 = graph.nodes[node.parentIds[0]].shape;
-                auto target_dims = getConstantInt32(node.parentIds[1], graph);
-                uint64_t total_vol = countElements(s0);
-                uint64_t known_vol = 1;
-                for (size_t i = 0; i < target_dims.size(); ++i)
-                {
-                    if (target_dims[i] != -1)
-                    {
-                        known_vol *= target_dims[i];
-                    }
-                }
-                std::vector<uint32_t> out_shape(target_dims.size());
-                for (size_t i = 0; i < target_dims.size(); ++i)
-                {
-                    if (target_dims[i] == -1)
-                    {
-                        out_shape[i] = total_vol / known_vol;
-                    }
-                    else
-                    {
-                        out_shape[i] = target_dims[i];
-                    }
-                }
-                node.shape = out_shape;
-                break;
-            }
-            case OpType::PERMUTE:
-            {
-                auto s0 = graph.nodes[node.parentIds[0]].shape;
-                auto dims = getConstantInt32(node.parentIds[1], graph);
-                std::vector<uint32_t> out_shape(dims.size());
-                for (size_t i = 0; i < dims.size(); ++i)
-                {
-                    out_shape[i] = s0[dims[i]];
-                }
-                node.shape = out_shape;
-                break;
-            }
-            case OpType::GATHER:
-            {
-                auto data_shape = graph.nodes[node.parentIds[0]].shape;
-                auto idx_shape = graph.nodes[node.parentIds[1]].shape;
-                std::vector<uint32_t> out_shape = idx_shape;
-                for (size_t i = 1; i < data_shape.size(); ++i)
-                {
-                    out_shape.push_back(data_shape[i]);
-                }
-                node.shape = out_shape;
-                break;
-            }
-            case OpType::CONCAT:
-            {
-                uint32_t axis_id = node.parentIds.back();
-                auto axis_vec = getConstantInt32(axis_id, graph);
-                int32_t axis = axis_vec[0];
-                auto s0 = graph.nodes[node.parentIds[0]].shape;
-                if (axis < 0)
-                    axis += s0.size();
-
-                std::vector<uint32_t> out_shape = s0;
-                uint32_t total_dim = s0[axis];
-                for (size_t i = 1; i < node.parentIds.size() - 1; ++i)
-                {
-                    auto si = graph.nodes[node.parentIds[i]].shape;
-                    total_dim += si[axis];
-                }
-                out_shape[axis] = total_dim;
-                node.shape = out_shape;
-                break;
-            }
-            case OpType::REPEAT:
-            {
-                auto s0 = graph.nodes[node.parentIds[0]].shape;
-                auto repeats = getConstantInt32(node.parentIds[1], graph)[0];
-                auto axis = getConstantInt32(node.parentIds[2], graph)[0];
-                if (axis < 0)
-                    axis += s0.size();
-                std::vector<uint32_t> out_shape = s0;
-                out_shape[axis] *= repeats;
-                node.shape = out_shape;
-                break;
-            }
-            case OpType::FILL:
-            {
-                auto target_dims = getConstantInt32(node.parentIds[1], graph);
-                std::vector<uint32_t> out_shape(target_dims.size());
-                for (size_t i = 0; i < target_dims.size(); ++i)
-                {
-                    out_shape[i] = target_dims[i];
-                }
-                node.shape = out_shape;
-                break;
-            }
-            case OpType::IM2COL:
-            {
-                auto s0 = graph.nodes[node.parentIds[0]].shape; // N, C, H, W
-                uint32_t k = getConstantInt32(node.parentIds[1], graph)[0];
-                uint32_t s = getConstantInt32(node.parentIds[2], graph)[0];
-                uint32_t p = getConstantInt32(node.parentIds[3], graph)[0];
-                uint32_t H = s0[2];
-                uint32_t W = s0[3];
-                uint32_t H_out = (H + 2 * p - k) / s + 1;
-                uint32_t W_out = (W + 2 * p - k) / s + 1;
-                node.shape = {s0[0], s0[1] * k * k, H_out * W_out};
-                break;
-            }
-            case OpType::SLICE:
-            {
-                auto s0 = graph.nodes[node.parentIds[0]].shape;
-                auto starts = getConstantInt32(node.parentIds[1], graph);
-                auto ends = getConstantInt32(node.parentIds[2], graph);
-                auto steps = getConstantInt32(node.parentIds[3], graph);
-                std::vector<uint32_t> out_shape(s0.size());
-                for (size_t i = 0; i < s0.size(); ++i)
-                {
-                    int32_t start = i < starts.size() ? starts[i] : 0;
-                    int32_t end = i < ends.size() ? ends[i] : s0[i];
-                    int32_t step = i < steps.size() ? steps[i] : 1;
-                    if (start < 0)
-                        start += s0[i];
-                    if (end < 0)
-                        end += s0[i];
-                    out_shape[i] = std::max(0, (end - start + step - 1) / step);
-                }
-                node.shape = out_shape;
-                break;
-            }
-            case OpType::ARANGE:
-            {
-                int32_t start = getConstantInt32(node.parentIds[0], graph)[0];
-                int32_t stop = getConstantInt32(node.parentIds[1], graph)[0];
-                int32_t step = getConstantInt32(node.parentIds[2], graph)[0];
-                node.shape = {(uint32_t)std::max(0, (stop - start + step - 1) / step)};
-                break;
-            }
-            case OpType::FUSED:
-            {
-                break;
-            }
-            default:
-                break;
-            }
-
+            propagator.inferShape(node, graph);
             if (node.view.shape.empty() && !node.shape.empty())
             {
                 node.view.shape = node.shape;
@@ -866,3 +557,45 @@ private:
         memo[nodeHash] = candidates;
     }
 };
+
+inline std::unordered_map<uint32_t, std::vector<Region>> propagateDirtyRegions(
+    const CompiledGraph &compiled,
+    const Graph &graph,
+    const std::unordered_map<uint32_t, std::vector<Region>> &inputDirtyRegions)
+{
+    ShapePropagator propagator;
+    std::unordered_map<uint32_t, std::vector<Region>> allRegions(inputDirtyRegions);
+
+    for (const OpInstruction &inst : compiled.instructions)
+    {
+        const TensorNode &node = graph.nodes[inst.nodeId];
+
+        // Gather parent regions
+        std::vector<std::vector<Region>> parentRegions;
+        bool anyParentDirty = false;
+        for (uint32_t pid : node.parentIds)
+        {
+            auto it = allRegions.find(pid);
+            if (it != allRegions.end() && !it->second.empty())
+            {
+                parentRegions.push_back(it->second);
+                anyParentDirty = true;
+            }
+            else
+            {
+                parentRegions.push_back({});
+            }
+        }
+
+        if (anyParentDirty)
+        {
+            allRegions[inst.nodeId] = propagator.forward(node, graph, parentRegions);
+        }
+        else
+        {
+            allRegions[inst.nodeId] = {};
+        }
+    }
+
+    return allRegions;
+}

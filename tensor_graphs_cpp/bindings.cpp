@@ -41,9 +41,12 @@ PYBIND11_MODULE(tg_cpp, m)
     // Memory Management
     py::class_<MemoryManager>(m, "MemoryManager")
         .def(py::init<>())
-        .def("add_buffer", [](MemoryManager &self, Backend b, uint64_t size)
+        .def("add_buffer",[](MemoryManager &self, Backend b, uint64_t size)
              { self.buffers.emplace(b, DeviceBuffer(size)); })
-        .def("init_all", [](MemoryManager &self)
+        .def("allocate", &MemoryManager::allocate,
+             py::arg("backend"), py::arg("nodeId"), py::arg("sizeBytes"), py::arg("storageType"),
+             py::arg("refCount") = 0, py::arg("cost") = 0.0f)
+        .def("init_all",[](MemoryManager &self)
              {
             for(auto& pair : self.buffers) pair.second.init(); });
 
@@ -51,12 +54,13 @@ PYBIND11_MODULE(tg_cpp, m)
     py::class_<Graph>(m, "Graph")
         .def(py::init<>())
         .def("allocateId", &Graph::allocateId)
-        .def("constant", [](Graph &g, std::vector<uint32_t> shape,
+        .def("constant",[](Graph &g, std::vector<uint32_t> shape,
                             py::array_t<float> data, DType dtype)
              { return g.constant(shape, data.data(), dtype); })
-        .def("weight", [](Graph &g, const std::string &path, const std::string &name)
+        .def("weight",[](Graph &g, const std::string &path, const std::string &name)
              { return g.weight(path, name); })
         .def("input", &Graph::input)
+        .def("inputWithId", &Graph::inputWithId, py::arg("id"), py::arg("shape"), py::arg("dtype"), py::arg("view"), py::arg("storageType") = StorageType::PERSISTENT)
         // Math operations
         .def("add", &Graph::add)
         .def("mul", &Graph::mul)

@@ -49,6 +49,7 @@ struct Graph
         view.shape = shape;
         view.strides = TensorView::calcContiguousStrides(shape);
         view.baseOffset = 0;
+        view.dtype = dtype;
 
         // 5. Create the input node with this view
         uint32_t nodeId = inputWithId(id, shape, dtype, view, StorageType::PERSISTENT);
@@ -79,6 +80,7 @@ struct Graph
         view.shape = meta.shape;
         view.strides = TensorView::calcContiguousStrides(meta.shape);
         view.baseOffset = 0;
+        view.dtype = meta.dtype;
 
         // 5. Identity of a weight is its file + name! No disk I/O needed here.
         uint32_t nodeId = inputWithId(id, meta.shape, meta.dtype, view, StorageType::PERSISTENT);

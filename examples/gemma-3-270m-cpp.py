@@ -132,33 +132,33 @@ class Gemma3ModelCPP:
 
     def tanh_atomic(self, x_id):
         """
-        Decomposed tanh using atomic operations.
-        tanh(x) = (e^x - e^-x) / (e^x + e^-x)
+        Numerically stable decomposed tanh using atomic operations.
+        tanh(x) = (2 / (1 + e^-2x)) - 1
         """
-        # -x
-        neg_x = self.g.neg(x_id)
-
-        # e^x using pow(e, x)
+        # Constants
+        neg_two = self.g.constant(
+            [1], np.array([-2.0], dtype=np.float32), tg_cpp.DType.FLOAT32
+        )
+        two = self.g.constant(
+            [1], np.array([2.0], dtype=np.float32), tg_cpp.DType.FLOAT32
+        )
         e_node = self.g.constant(
-            [1],
-            np.array([2.718281828459045], dtype=np.float32),
-            tg_cpp.DType.FLOAT32,
+            [1], np.array([2.718281828459045], dtype=np.float32), tg_cpp.DType.FLOAT32
         )
 
-        exp_x = self.g.pow(e_node, x_id)
-        exp_neg_x = self.g.pow(e_node, neg_x)
+        # 1. exp(-2x)
+        neg_2x = self.g.mul(x_id, neg_two)
+        exp_neg_2x = self.g.pow(e_node, neg_2x)
 
-        # -e^-x
-        neg_exp_neg = self.g.neg(exp_neg_x)
+        # 2. 1 + exp(-2x)
+        den = self.g.add(self.one_fp32, exp_neg_2x)
 
-        # e^x - e^-x
-        num = self.g.add(exp_x, neg_exp_neg)
+        # 3. 2 / (1 + exp(-2x))
+        quotient = self.g.div(two, den)
 
-        # e^x + e^-x
-        den = self.g.add(exp_x, exp_neg_x)
-
-        # (e^x - e^-x) / (e^x + e^-x)
-        return self.g.div(num, den)
+        # 4. quotient - 1
+        neg_one = self.g.neg(self.one_fp32)
+        return self.g.add(quotient, neg_one)
 
     def build_graph(self, input_ids_id):
         cfg = self.cfg
@@ -313,8 +313,25 @@ def main():
 
     # Define Input
     MAX_SEQ_LEN = 128
-    input_view = tg_cpp.TensorView()  # TODO: get the view from mem.allocate
-    input_ids_node = graph.input([1, MAX_SEQ_LEN], tg_cpp.DType.INT32, input_view)
+
+    input_ids_id = graph.allocateId()
+    size_bytes = 1 * MAX_SEQ_LEN * 4  # 4 bytes for INT32
+    mem.allocate(
+        tg_cpp.Backend.CPU, input_ids_id, size_bytes, tg_cpp.StorageType.PERSISTENT
+    )
+
+    input_view = tg_cpp.TensorView()
+    input_view.shape = [1, MAX_SEQ_LEN]
+    input_view.strides = [MAX_SEQ_LEN, 1]
+    input_view.dtype = tg_cpp.DType.INT32
+
+    input_ids_node = graph.inputWithId(
+        input_ids_id,
+        [1, MAX_SEQ_LEN],
+        tg_cpp.DType.INT32,
+        input_view,
+        tg_cpp.StorageType.PERSISTENT,
+    )
 
     model = Gemma3ModelCPP(cfg, graph, mem)
     logits_id = model.build_graph(input_ids_node)

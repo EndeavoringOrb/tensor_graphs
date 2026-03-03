@@ -2,6 +2,5 @@
 
 computes DAGs with caching on subsequent runs
 
-ccache /c/msys64/mingw64/bin/g++ -fdiagnostics-color=always -g -O0 /c/Users/aaron/CODING/tensor_graphs/tensor_graphs_cpp/main.cpp -o /c/Users/aaron/CODING/tensor_graphs/tensor_graphs_cpp/main.exe -I/c/Users/aaron/CODING/tensor_graphs/tensor_graphs_cpp
-
-/c/msys64/mingw64/bin/gdb /c/Users/aaron/CODING/tensor_graphs/tensor_graphs_cpp/main.exe
+Arm64 Native Tools Command Prompt for VS 2022
+cl.exe /Zi /EHsc /Fe: tensor_graphs_cpp/main.exe tensor_graphs_cpp/main.cpp /Itensor_graphs_cpp /std:c++17

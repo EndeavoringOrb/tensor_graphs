@@ -4,7 +4,9 @@
 #include "core/planner.hpp"
 #include "core/memory.hpp"
 #include "core/kernels.hpp"
+#include "core/debug.hpp"
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <cstring>
 #include <stdexcept>
@@ -23,57 +25,118 @@ public:
     void run(const std::unordered_map<uint32_t, const void *> &inputs,
              const DirtyBucket &bucket)
     {
-        // 1. Setup Runtime Inputs (Dynamic Transients)
-        for (const auto &pair : inputs)
+        std::cout << "running..." << std::endl;
+        std::unordered_set<uint32_t> neededNodes;
+        if (!compiled.instructions.empty())
         {
-            uint32_t nodeId = pair.first;
-            const void *dataPtr = pair.second;
-
-            const TensorNode &node = graph.nodes[nodeId];
-            if (node.opType != OpType::INPUT)
-                continue;
-
-            uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
-            uint32_t refs = compiled.refCounts[nodeId];
-
-            uint64_t offset = memManager.allocate(node.backend, nodeId, sizeBytes, StorageType::TRANSIENT, refs, 0.0f);
-
-            auto &buf = memManager.buffers.at(node.backend);
-            std::memcpy(buf.arena.data() + offset, dataPtr, sizeBytes);
+            neededNodes.insert(compiled.instructions.back().nodeId);
         }
 
-        // 2. Execute Compiled Instructions (bucket-aware)
-        for (const OpInstruction &inst : compiled.instructions)
+        struct NodeState
         {
-            const TensorNode &node = graph.nodes[inst.nodeId];
+            bool isDirty;
+            bool inCache;
+        };
+        std::unordered_map<uint32_t, NodeState> nodeStates;
 
-            // Determine dirty status from bucket
-            auto regionIt = bucket.regions.find(inst.nodeId);
+        // Pass 1: Backward Liveness (Prune unneeded nodes when cached)
+        for (auto it = compiled.instructions.rbegin(); it != compiled.instructions.rend(); ++it)
+        {
+            uint32_t nodeId = it->nodeId;
+            const TensorNode &node = graph.nodes[nodeId];
+            auto regionIt = bucket.regions.find(nodeId);
             bool isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
 
-            // Check if output is already cached in memory
-            auto &outBuf = memManager.buffers.at(node.backend);
-            bool inCache = (outBuf.allocationMap.find(node.id) != outBuf.allocationMap.end());
-
-            // Decision: skip if clean and cached
-            if (!isDirty && inCache)
+            bool inCache = false;
+            if (neededNodes.count(nodeId))
             {
-                // Re-lock the existing allocation so it survives this iteration
-                auto blockIt = outBuf.allocationMap.at(node.id);
-                blockIt->refCount = compiled.refCounts[inst.nodeId];
-                blockIt->isLocked = true;
+                auto &outBuf = memManager.buffers.at(node.backend);
+                inCache = (outBuf.allocationMap.find(nodeId) != outBuf.allocationMap.end());
 
-                // Still release parent refs
-                for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
+                if (isDirty || !inCache)
                 {
-                    if (static_cast<int>(i) == inst.inplaceInputIndex)
-                        continue;
-                    uint32_t inId = inst.inputNodeIds[i];
+                    for (uint32_t pId : it->inputNodeIds)
+                    {
+                        neededNodes.insert(pId);
+                    }
+                }
+            }
+            nodeStates[nodeId] = {isDirty, inCache};
+        }
+
+        // Pass 2: Execute Compiled Instructions (bucket-aware)
+        uint32_t instIdx = 0;
+        for (const OpInstruction &inst : compiled.instructions)
+        {
+            instIdx++;
+            std::cout << instIdx << "/" << compiled.instructions.size() << "\r";
+            uint32_t nodeId = inst.nodeId;
+            const TensorNode &node = graph.nodes[nodeId];
+            auto &outBuf = memManager.buffers.at(node.backend);
+
+            bool isDirty = nodeStates[nodeId].isDirty;
+            bool inCache = nodeStates[nodeId].inCache;
+            bool isNeeded = neededNodes.count(nodeId);
+
+            // Pruned node (e.g. its child was fully cached and clean)
+            if (!isNeeded)
+            {
+                for (uint32_t inId : inst.inputNodeIds)
+                {
                     memManager.release(graph.nodes[inId].backend, inId);
                 }
                 continue;
             }
 
+            // 1. Skip if clean and already in memory
+            if (!isDirty && inCache)
+            {
+                auto blockIt = outBuf.allocationMap.at(nodeId);
+                blockIt->refCount = compiled.refCounts[nodeId];
+                blockIt->isLocked = true;
+                for (uint32_t inId : inst.inputNodeIds)
+                {
+                    memManager.release(graph.nodes[inId].backend, inId);
+                }
+                continue;
+            }
+
+            // 2. RESOLVE INPUTS FIRST (Before metadata changes/allocations)
+            // We fetch pointers and views now while parent IDs are still in the allocationMap
+            struct ResolvedInput
+            {
+                const void *ptr;
+                TensorView view;
+            };
+            std::vector<ResolvedInput> resolvedInputs;
+            for (uint32_t inId : inst.inputNodeIds)
+            {
+                const TensorNode &inNode = graph.nodes[inId];
+                resolvedInputs.push_back({memManager.buffers.at(inNode.backend).arena.data() + memManager.buffers.at(inNode.backend).getOffset(inId),
+                                          memManager.getView(inNode)});
+            }
+
+            // 3. ALLOCATE / TRANSFER OUTPUT
+            if (!inCache)
+            {
+                if (inst.inplaceInputIndex >= 0)
+                {
+                    uint32_t srcId = inst.inputNodeIds[inst.inplaceInputIndex];
+                    memManager.transferOwnership(inst.backend, srcId, inst.nodeId);
+                }
+                else
+                {
+                    uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+                    memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts[inst.nodeId], 0.0f);
+                }
+            }
+
+            // Ensure output is locked
+            auto outBlockIt = outBuf.allocationMap.at(inst.nodeId);
+            outBlockIt->refCount = compiled.refCounts[inst.nodeId];
+            outBlockIt->isLocked = true;
+
+            // 4. EXECUTE KERNEL
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernelId);
 
             // Determine compute regions
@@ -81,6 +144,7 @@ public:
             if (isDirty && inCache)
             {
                 // Partial compute: only the dirty regions
+                auto regionIt = bucket.regions.find(inst.nodeId);
                 computeRegions = regionIt->second;
             }
             else
@@ -94,37 +158,9 @@ public:
                 computeRegions = {full};
             }
 
-            // 2.b Allocate / Transfer memory for the Output
-            if (!inCache)
-            {
-                if (inst.inplaceInputIndex >= 0)
-                {
-                    uint32_t srcId = inst.inputNodeIds[inst.inplaceInputIndex];
-                    memManager.transferOwnership(inst.backend, srcId, inst.nodeId);
-
-                    auto blockIt = outBuf.allocationMap.at(inst.nodeId);
-                    blockIt->refCount = compiled.refCounts[inst.nodeId];
-                    blockIt->isLocked = true;
-                }
-                else
-                {
-                    uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
-                    uint32_t refs = compiled.refCounts[inst.nodeId];
-                    memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, refs, 0.0f);
-                }
-            }
-            else
-            {
-                // Already cached but dirty: re-lock
-                auto blockIt = outBuf.allocationMap.at(node.id);
-                blockIt->refCount = compiled.refCounts[inst.nodeId];
-                blockIt->isLocked = true;
-            }
-
-            // Get the bucket's inputSlices for this node (if available)
             auto slicesIt = bucket.inputSlices.find(inst.nodeId);
 
-            // 2.c Execute kernel for each compute region
+            // Execute kernel for each compute region
             for (size_t rIdx = 0; rIdx < computeRegions.size(); ++rIdx)
             {
                 const Region &outRegion = computeRegions[rIdx];
@@ -148,20 +184,11 @@ public:
                     uint32_t inId = inst.inputNodeIds[pIdx];
                     const TensorNode &inNode = graph.nodes[inId];
                     auto &inBuf = memManager.buffers.at(inNode.backend);
-                    auto it = inBuf.allocationMap.find(inId);
 
-                    if (it == inBuf.allocationMap.end())
-                    {
-                        throw std::runtime_error("Input node not found in memory allocation map");
-                    }
-
-                    TensorView inView = memManager.getView(inNode);
+                    TensorView inView = resolvedInputs[pIdx].view;
 
                     // Apply input slicing if partial and slices are available
-                    if (!isFullRegion && slicesIt != bucket.inputSlices.end()
-                        && rIdx < slicesIt->second.size()
-                        && pIdx < slicesIt->second[rIdx].size()
-                        && !slicesIt->second[rIdx][pIdx].empty())
+                    if (!isFullRegion && slicesIt != bucket.inputSlices.end() && rIdx < slicesIt->second.size() && pIdx < slicesIt->second[rIdx].size() && !slicesIt->second[rIdx][pIdx].empty())
                     {
                         const Region &inputSlice = slicesIt->second[rIdx][pIdx][0];
 
@@ -224,13 +251,18 @@ public:
                 kernelOutViews.push_back(outView);
 
                 // Run the kernel
+                for (uint32_t inId : inst.inputNodeIds)
+                {
+                    Debug::checkNan(graph.nodes[inId], memManager, "Kernel Input: " + inst.nodeId);
+                }
                 kernel.run(kernelInputs, kernelOutputs, kernelInViews, kernelOutViews);
+                Debug::checkNan(graph.nodes[inst.nodeId], memManager, "Kernel Output: " + inst.nodeId);
             }
 
-            // 2.e Release Consumed Parents
+            // 5. Release Consumed Parents
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {
-                if (static_cast<int>(i) == inst.inplaceInputIndex)
+                if (static_cast<int>(i) == inst.inplaceInputIndex && !inCache)
                     continue;
 
                 uint32_t inId = inst.inputNodeIds[i];

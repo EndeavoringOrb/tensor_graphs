@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <tuple>
+#include <float.h>
 
 #include "core/types.hpp"
 #include "core/memory.hpp"
@@ -204,19 +205,30 @@ public:
 
     uint32_t tanh_atomic(uint32_t x_id, uint32_t last_dim)
     {
-        uint32_t neg_x = g.neg(x_id);
+        float neg_two_val = -2.0f;
+        uint32_t neg_two = expand_scalar_to_3d(g.constant({1}, &neg_two_val, DType::FLOAT32), 1, seq_len, last_dim);
+
+        float two_val = 2.0f;
+        uint32_t two = expand_scalar_to_3d(g.constant({1}, &two_val, DType::FLOAT32), 1, seq_len, last_dim);
 
         float e_val = 2.718281828459045f;
         uint32_t e_node = expand_scalar_to_3d(g.constant({1}, &e_val, DType::FLOAT32), 1, seq_len, last_dim);
 
-        uint32_t exp_x = g.pow(e_node, x_id);
-        uint32_t exp_neg_x = g.pow(e_node, neg_x);
+        uint32_t one_node = expand_scalar_to_3d(one_fp32, 1, seq_len, last_dim);
 
-        uint32_t neg_exp_neg = g.neg(exp_neg_x);
-        uint32_t num = g.add(exp_x, neg_exp_neg);
-        uint32_t den = g.add(exp_x, exp_neg_x);
+        // 1. exp(-2x)
+        uint32_t neg_2x = g.mul(x_id, neg_two);
+        uint32_t exp_neg_2x = g.pow(e_node, neg_2x);
 
-        return g.div(num, den);
+        // 2. 1 + exp(-2x)
+        uint32_t den = g.add(one_node, exp_neg_2x);
+
+        // 3. 2 / (1 + exp(-2x))
+        uint32_t quotient = g.div(two, den);
+
+        // 4. quotient - 1
+        uint32_t neg_one = g.neg(one_node);
+        return g.add(quotient, neg_one);
     }
 
     std::tuple<uint32_t, uint32_t, uint32_t> attention_qkv_atomic(uint32_t x, const std::string &prefix)
@@ -331,20 +343,30 @@ public:
 
 int main()
 {
-    std::vector<uint32_t> tokens = {2, 818, 6789, 531, 1972, 563};
+    // Enable floating-point exceptions for invalid operations (NaN)
+    _controlfp_s(nullptr, 0, 0);                                                 // optional: reset control word
+    _controlfp_s(nullptr, _EM_INVALID | _EM_ZERODIVIDE | _EM_OVERFLOW, _MCW_EM); // enable invalid op exception
+    std::vector<uint32_t> tokens = {2, 105, 2364, 107, 155122, 27825, 49087, 531, 496, 236743, 236810, 1051, 2255, 236761, 106, 107, 105, 4368, 107};
+    // should output 70895 as argmax of output logits
     uint32_t maxSeqLen = 128;
     std::string modelPath = "C:/Users/aaron/CODING/tensor_graphs/resources/model.safetensors";
 
     ModelConfig cfg;
     MemoryManager mem;
-    // Boosted slightly from 2GB to 3GB since 2GB is right on the boundary after expanding weights
-    // down the sequence dim + retaining intermediate activation nodes
-    mem.buffers.emplace(Backend::CPU, DeviceBuffer(3ULL * 1024 * 1024 * 1024));
+    mem.buffers.emplace(Backend::CPU, DeviceBuffer(2ULL * 1024 * 1024 * 1024));
 
     Graph g;
 
+    uint32_t inputIdsId = g.allocateId();
+    uint64_t sizeBytes = maxSeqLen * getDTypeSize(DType::INT32);
+    mem.allocate(Backend::CPU, inputIdsId, sizeBytes, StorageType::PERSISTENT);
+
     TensorView inputView;
-    uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32, inputView, StorageType::TRANSIENT);
+    inputView.shape = {1, maxSeqLen};
+    inputView.strides = TensorView::calcContiguousStrides(inputView.shape);
+    inputView.dtype = DType::INT32;
+
+    g.inputWithId(inputIdsId, {1, maxSeqLen}, DType::INT32, inputView, StorageType::PERSISTENT);
 
     std::cout << "Building Graph..." << std::endl;
 
@@ -352,7 +374,7 @@ int main()
     uint32_t logits_id = model.build_graph(inputIdsId);
 
     std::cout << "Initializing Session..." << std::endl;
-    Session session(g, mem, logits_id, "gemma_cache.jsonl");
+    Session session(g, mem, logits_id, "dirty_region_caches/gemma-3-270m-cpp.jsonl");
 
     mem.buffers.at(Backend::CPU).init();
 
@@ -375,13 +397,34 @@ int main()
 
     if (output_ptr)
     {
-        std::cout << "Inference successful. First 5 logits at last token: " << std::endl;
-        uint64_t last_token_offset = (tokens.size() - 1) * cfg.vocab_size;
-        for (int i = 0; i < 5; ++i)
+        // 1. Identify the offset for the next token
+        uint32_t next_token_pos = (uint32_t)tokens.size();
+        uint64_t offset = (uint64_t)next_token_pos * cfg.vocab_size;
+        const float* next_token_logits = output_ptr + offset;
+
+        // 2. Find Argmax
+        float max_val = -FLT_MAX;
+        int32_t argmax_idx = -1;
+
+        for (uint32_t i = 0; i < cfg.vocab_size; ++i)
         {
-            std::cout << output_ptr[last_token_offset + i] << " ";
+            if (next_token_logits[i] > max_val)
+            {
+                max_val = next_token_logits[i];
+                argmax_idx = i;
+            }
         }
-        std::cout << std::endl;
+
+        std::cout << "\nInference Results:" << std::endl;
+        std::cout << "------------------" << std::endl;
+        std::cout << "Next Token Position: " << next_token_pos << std::endl;
+        std::cout << "Predicted Token ID (Argmax): " << argmax_idx << std::endl;
+        std::cout << "Logit Value: " << max_val << std::endl;
+
+        std::cout << "\nFirst 5 logits for this token: " << std::endl;
+        for (int i = 0; i < 5; ++i) {
+            std::cout << "  [" << i << "]: " << next_token_logits[i] << std::endl;
+        }
     }
     else
     {

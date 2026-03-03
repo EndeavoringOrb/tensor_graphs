@@ -165,7 +165,7 @@ inline bool regionsMatch(const Region &r1, const Region &r2)
 
 struct TensorView
 {
-    uint64_t baseOffset; // Offset into the MemoryManager's DeviceBuffer
+    uint64_t baseOffset = 0; // Offset into the MemoryManager's DeviceBuffer
     std::vector<uint32_t> shape;
     std::vector<int64_t> strides; // Strides in terms of elements, not bytes
     DType dtype;
@@ -506,3 +506,184 @@ public:
         return ss.str();
     }
 };
+
+// Enable JSON serialization for Enums
+NLOHMANN_JSON_SERIALIZE_ENUM(DType, {
+                                        {DType::FLOAT32, "FLOAT32"},
+                                        {DType::INT32, "INT32"},
+                                        {DType::BF16, "BF16"},
+                                        {DType::BOOL, "BOOL"},
+                                    })
+
+NLOHMANN_JSON_SERIALIZE_ENUM(OpType, {
+                                         {OpType::INPUT, "INPUT"},
+                                         {OpType::ADD, "ADD"},
+                                         {OpType::MUL, "MUL"},
+                                         {OpType::DIVIDE, "DIVIDE"},
+                                         {OpType::DOT, "DOT"},
+                                         {OpType::SIN, "SIN"},
+                                         {OpType::COS, "COS"},
+                                         {OpType::NEGATE, "NEGATE"},
+                                         {OpType::POWER, "POWER"},
+                                         {OpType::SUM, "SUM"},
+                                         {OpType::MAX, "MAX"},
+                                         {OpType::RESHAPE, "RESHAPE"},
+                                         {OpType::PERMUTE, "PERMUTE"},
+                                         {OpType::SLICE, "SLICE"},
+                                         {OpType::CONCAT, "CONCAT"},
+                                         {OpType::CAST, "CAST"},
+                                         {OpType::REPEAT, "REPEAT"},
+                                         {OpType::ARANGE, "ARANGE"},
+                                         {OpType::TRIU, "TRIU"},
+                                         {OpType::GATHER, "GATHER"},
+                                         {OpType::FILL, "FILL"},
+                                         {OpType::COPY_TO, "COPY_TO"},
+                                         {OpType::IM2COL, "IM2COL"},
+                                         {OpType::FUSED, "FUSED"},
+                                     })
+
+NLOHMANN_JSON_SERIALIZE_ENUM(Backend, {
+                                          {Backend::CPU, "CPU"},
+                                      })
+
+NLOHMANN_JSON_SERIALIZE_ENUM(StorageType, {
+                                              {StorageType::TRANSIENT, "TRANSIENT"},
+                                              {StorageType::PERSISTENT, "PERSISTENT"},
+                                          })
+
+struct OpInstruction
+{
+    uint32_t nodeId;
+    uint32_t kernelId;
+    std::vector<uint32_t> inputNodeIds;
+    int32_t inplaceInputIndex; // -1 if not inplace
+    Backend backend;
+};
+
+struct CompiledGraph
+{
+    std::vector<OpInstruction> instructions;
+    std::unordered_map<uint32_t, uint32_t> refCounts;
+    std::unordered_map<uint32_t, TensorNode> nodesMap;
+};
+
+struct BeamStrategy
+{
+    float cost;
+    uint32_t nodeId;
+    std::unordered_map<std::string, Backend> assignments;
+    std::unordered_map<std::string, uint32_t> kernelAssignments;
+
+    bool operator<(const BeamStrategy &other) const
+    {
+        return cost < other.cost;
+    }
+};
+
+// Serialization for helper structs
+inline void to_json(json &j, const Dim &d) { j = json{d.start, d.stop}; }
+inline void from_json(const json &j, Dim &d)
+{
+    d.start = j[0];
+    d.stop = j[1];
+}
+
+inline void to_json(json &j, const TensorView &v)
+{
+    j = json{
+        {"baseOffset", v.baseOffset}, 
+        {"shape", v.shape}, 
+        {"strides", v.strides}, 
+        {"dtype", v.dtype}
+    };
+}
+inline void from_json(const json &j, TensorView &v)
+{
+    v.baseOffset = j.at("baseOffset").get<uint64_t>();
+    v.shape = j.at("shape").get<std::vector<uint32_t>>();
+    v.strides = j.at("strides").get<std::vector<int64_t>>();
+    v.dtype = j.at("dtype").get<DType>();
+}
+
+inline void to_json(json &j, const TensorNode &n)
+{
+    j = json{
+        {"id", n.id}, 
+        {"opType", n.opType}, 
+        {"opName", n.opName}, 
+        {"dtype", n.dtype}, 
+        {"parentIds", n.parentIds}, 
+        {"shape", n.shape}, 
+        {"backend", n.backend}, 
+        {"view", n.view}, 
+        {"storageType", n.storageType}, 
+        {"contentHash", n.contentHash}
+    };
+}
+inline void from_json(const json &j, TensorNode &n)
+{
+    n.id = j.at("id").get<uint32_t>();
+    n.opType = j.at("opType").get<OpType>();
+    n.opName = j.at("opName").get<std::string>();
+    n.dtype = j.at("dtype").get<DType>();
+    n.parentIds = j.at("parentIds").get<std::vector<uint32_t>>();
+    n.shape = j.at("shape").get<std::vector<uint32_t>>();
+    n.backend = j.at("backend").get<Backend>();
+    n.view = j.at("view").get<TensorView>();
+    n.storageType = j.at("storageType").get<StorageType>();
+    n.contentHash = j.at("contentHash").get<std::string>();
+}
+
+inline void to_json(json &j, const OpInstruction &i)
+{
+    j = json{
+        {"nodeId", i.nodeId}, 
+        {"kernelId", i.kernelId}, 
+        {"inputNodeIds", i.inputNodeIds}, 
+        {"inplaceInputIndex", i.inplaceInputIndex}, 
+        {"backend", i.backend}
+    };
+}
+inline void from_json(const json &j, OpInstruction &i)
+{
+    i.nodeId = j.at("nodeId").get<uint32_t>();
+    i.kernelId = j.at("kernelId").get<uint32_t>();
+    i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();
+    i.inplaceInputIndex = j.at("inplaceInputIndex").get<int32_t>();
+    i.backend = j.at("backend").get<Backend>();
+}
+
+inline void to_json(json &j, const CompiledGraph &cg)
+{
+    json refCounts = json::object();
+    for (const auto& kv : cg.refCounts) {
+        refCounts[std::to_string(kv.first)] = kv.second;
+    }
+    json nodesMap = json::object();
+    for (const auto& kv : cg.nodesMap) {
+        nodesMap[std::to_string(kv.first)] = kv.second;
+    }
+    j = json{
+        {"instructions", cg.instructions},
+        {"refCounts", refCounts},
+        {"nodesMap", nodesMap}};
+}
+
+inline void from_json(const json &j, CompiledGraph &cg)
+{
+    cg.instructions = j.at("instructions").get<std::vector<OpInstruction>>();
+    
+    cg.refCounts.clear();
+    if (j.contains("refCounts")) {
+        for (const auto& item : j.at("refCounts").items()) {
+            cg.refCounts[std::stoul(item.key())] = item.value().get<uint32_t>();
+        }
+    }
+    
+    cg.nodesMap.clear();
+    if (j.contains("nodesMap")) {
+        for (const auto& item : j.at("nodesMap").items()) {
+            cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
+        }
+    }
+}

@@ -153,6 +153,7 @@ private:
     CompiledGraph compiled;
     std::unique_ptr<Executor> executor;
     uint32_t rootId;
+    bool isPlanned;
     bool isCompiled;
 
     std::string cachePath;
@@ -163,12 +164,9 @@ private:
 
 public:
     Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "")
-        : graph(g), memManager(mem), rootId(root), isCompiled(false), cachePath(cacheFile)
+        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile)
     {
-        if (!cachePath.empty())
-        {
-            loadCache();
-        }
+        loadCache();
     }
 
     static uint32_t nextPowerOf2(uint32_t x)
@@ -186,63 +184,55 @@ public:
 
     void compile(const std::unordered_map<uint32_t, const void *> &sampleInputs)
     {
-        std::cout << "[Session.compile] compiling..." << std::endl;
-        Planner planner(costModel, 4ULL * 1024 * 1024 * 1024);
+        if (isPlanned)
+        {
+            std::cout << "[Session.compile] Using cached compilation." << std::endl;
+        }
+        else
+        {
+            std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
+            Planner planner(costModel, 4ULL * 1024 * 1024 * 1024);
+            compiled = planner.plan(rootId, graph);
 
-        // 1. Generate execution plan (Zero memory allocations happen here!)
-        compiled = planner.plan(rootId, graph);
+            // Save immediately after planning
+            saveCompiledGraph(compiled);
+            isPlanned = true;
+        }
 
+        // --- THE MATERIALIZATION PASS ---
+        // This must run even if we load from cache because pointers/DeviceBuffers
+        // are process-specific and not persistent.
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
-
-        // Ensure DeviceBuffers are initialized so we have raw pointers to write to
         memManager.buffers.at(Backend::CPU).init();
 
-        // 2. The Materialization Pass - allocate and load data ONCE after planning!
-        uint32_t nodeIdx = 0;
         for (const auto &pair : compiled.nodesMap)
         {
-            nodeIdx++;
-            std::cout << nodeIdx << "/" << compiled.nodesMap.size() << "\r";
             uint32_t nodeId = pair.first;
             TensorNode &node = graph.nodes[nodeId];
 
-            // We only care about PERSISTENT inputs (Constants & Weights).
-            // TRANSIENT inputs are handled per-run.
             if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
             {
                 uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
 
-                // A. Allocate the physical block in the MemoryManager
+                // Physical allocation
                 uint64_t offset = memManager.allocate(node.backend, nodeId, sizeBytes, StorageType::PERSISTENT);
 
-                // Link the logical view to the physical memory offset
-                node.view.baseOffset = offset;
-
-                // B. Populate the actual data
+                // Data loading
                 if (graph.constantStaging.count(nodeId))
                 {
-                    // It's a constant (e.g., epsilon, half_val)
                     memManager.write(node.backend, nodeId, graph.constantStaging[nodeId].data(), sizeBytes);
                 }
                 else if (graph.weightSources.count(nodeId))
                 {
-                    // It's a heavy weight. Stream it directly from disk to the physical arena!
                     const auto &source = graph.weightSources.at(nodeId);
                     auto &loader = graph.loaders.at(source.first);
-
-                    // Get the raw memory pointer inside the DeviceBuffer arena
                     uint8_t *destPtr = memManager.buffers.at(node.backend).arena.data() + offset;
-
-                    // Read directly from the Safetensors file into RAM (zero-copy stream!)
                     loader->loadTensor(source.second, destPtr, sizeBytes);
                 }
             }
         }
 
-        // Optional: Reclaim RAM by clearing the constant staging area now that it is in the DeviceBuffer
-        graph.constantStaging.clear();
-
-        // Collect transient input node IDs
+        // Re-verify cache coverage if needed (or assume persistent cache is sufficient)
         std::vector<uint32_t> inputNodeIds;
         for (const auto &pair : compiled.nodesMap)
         {
@@ -251,11 +241,11 @@ public:
                 inputNodeIds.push_back(pair.first);
             }
         }
-
         ensureCacheCoverage(inputNodeIds);
 
         executor = std::make_unique<Executor>(compiled, memManager, graph);
         isCompiled = true;
+        graph.constantStaging.clear();
     }
 
     // Snap a raw dirty region to the nearest power-of-2 aligned bucket
@@ -363,6 +353,9 @@ public:
             auto &stored = previousInputData[nodeId];
             stored.resize(sizeBytes);
             std::memcpy(stored.data(), newData, sizeBytes);
+
+            // Write the new data to the buffer
+            memManager.write(node.backend, nodeId, newData, sizeBytes);
         }
 
         // Find the best matching bucket
@@ -715,11 +708,27 @@ public:
     // Cache persistence (JSONL format)
     // -----------------------------------------------------------------------
 
+    void saveCompiledGraph(const CompiledGraph &cg)
+    {
+        if (cachePath.empty())
+            return;
+        std::ofstream file(cachePath, std::ios::app);
+        if (!file.is_open())
+            return;
+
+        json entry;
+        entry["type"] = "compiled_graph";
+        entry["data"] = cg;
+        // Also save the graph's current ID counter to ensure future nodes don't collide
+        entry["graph_count"] = graph.count;
+
+        file << entry.dump() << "\n";
+    }
+
     void loadCache()
     {
         if (cachePath.empty())
             return;
-
         std::ifstream file(cachePath);
         if (!file.is_open())
             return;
@@ -729,11 +738,33 @@ public:
         {
             if (line.empty())
                 continue;
-
             json entry = json::parse(line);
-            std::string key = entry["key"].get<std::string>();
-            DirtyBucket bucket = dirty_cache_json::bucketFromJson(entry["bucket"]);
-            dirtyCache[key] = std::move(bucket);
+
+            if (entry.contains("type") && entry["type"] == "compiled_graph")
+            {
+                std::cout << "[Session.loadCache] Loading pre-compiled graph..." << std::endl;
+                compiled = entry["data"].get<CompiledGraph>();
+                graph.count = entry["graph_count"];
+
+                // Re-sync the main graph's nodes with the compiled nodes
+                // The planner often creates new nodes (fusions/equivalents) that aren't in the user's initial graph
+                for (const auto &pair : compiled.nodesMap)
+                {
+                    uint32_t id = pair.first;
+                    if (id >= graph.nodes.size())
+                    {
+                        graph.nodes.resize(id + 1);
+                    }
+                    graph.nodes[id] = pair.second;
+                }
+                isPlanned = true;
+            }
+            else if (entry.contains("key"))
+            {
+                std::string key = entry["key"].get<std::string>();
+                DirtyBucket bucket = dirty_cache_json::bucketFromJson(entry["bucket"]);
+                dirtyCache[key] = std::move(bucket);
+            }
         }
     }
 

@@ -316,7 +316,7 @@ def main():
         # prompt = input("Enter prompt: ")
         prompt = "Explain Quantum Mechanics to a 5 year old."
         prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
-        input_ids = tokenizer.encode(prompt).ids
+        input_ids = tokenizer.encode(prompt).ids # [2, 105, 2364, 107, 155122, 27825, 49087, 531, 496, 236743, 236810, 1051, 2255, 236761, 106, 107, 105, 4368, 107]
         initial_len = len(input_ids)
 
         # Track timing for performance measurement
