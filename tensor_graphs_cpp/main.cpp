@@ -46,18 +46,18 @@ public:
     Gemma3Model(ModelConfig config, Graph &graph, MemoryManager &memory, const std::string &weight_path)
         : cfg(config), g(graph), mem(memory), w_path(weight_path), eps(1e-6f)
     {
-        // Pre-allocate constants (all FP32)
-        one_fp32 = g.constant({1}, &eps, DType::FLOAT32, mem);
-        eps_fp32 = g.constant({1}, &eps, DType::FLOAT32, mem);
+        float one_val = 1.0f;
+        one_fp32 = g.constant({1}, &one_val, DType::FLOAT32);
+        eps_fp32 = g.constant({1}, &eps, DType::FLOAT32);
 
         float half_val = 0.5f;
-        half_fp32 = g.constant({1}, &half_val, DType::FLOAT32, mem);
+        half_fp32 = g.constant({1}, &half_val, DType::FLOAT32);
     }
 
     uint32_t weight(const std::string &path, const std::string &name)
     {
-        // Load the raw weight (may be BF16, FP16, etc.)
-        uint32_t raw_weight = g.weight(path, name, mem);
+        // CHANGED: Removed mem parameter from weight call
+        uint32_t raw_weight = g.weight(path, name);
 
         // Always cast to ensure consistency across the graph
         return g.cast(raw_weight, DType::FLOAT32);
@@ -70,16 +70,16 @@ public:
 
         // 2. sum(x^2, axis=-1, keepdims=True)
         int32_t axis_val = -1;
-        uint32_t axis_node = g.constant({1}, &axis_val, DType::INT32, mem);
+        uint32_t axis_node = g.constant({1}, &axis_val, DType::INT32);
 
         bool keepdims_val = true;
-        uint32_t keepdims_node = g.constant({1}, &keepdims_val, DType::BOOL, mem);
+        uint32_t keepdims_node = g.constant({1}, &keepdims_val, DType::BOOL);
 
         uint32_t sum_sq = g.sum(x_sq, axis_node, keepdims_node);
 
         // 3. mean = sum / n (where n = shape[-1])
         float n_val = (float)cfg.emb_dim;
-        uint32_t n_node = g.constant({1}, &n_val, DType::FLOAT32, mem);
+        uint32_t n_node = g.constant({1}, &n_val, DType::FLOAT32);
 
         uint32_t mean_sq = g.div(sum_sq, n_node);
 
@@ -88,13 +88,13 @@ public:
 
         // 5. sqrt(mean_sq + eps) using pow(x, 0.5)
         float half_val = 0.5f;
-        uint32_t sqrt_node = g.constant({1}, &half_val, DType::FLOAT32, mem);
+        uint32_t sqrt_node = g.constant({1}, &half_val, DType::FLOAT32);
 
         uint32_t std = g.pow(mean_sq_plus_eps, sqrt_node);
 
         // 6. 1.0 / std
         float one_val = 1.0f;
-        uint32_t one_node = g.constant({1}, &one_val, DType::FLOAT32, mem);
+        uint32_t one_node = g.constant({1}, &one_val, DType::FLOAT32);
         uint32_t inv_std = g.div(one_node, std);
 
         // 7. x * inv_std (normalized)
@@ -113,10 +113,10 @@ public:
     {
         // Constants
         float c1_val = 0.044715f;
-        uint32_t c1_node = g.constant({1}, &c1_val, DType::FLOAT32, mem);
+        uint32_t c1_node = g.constant({1}, &c1_val, DType::FLOAT32);
 
         float c2_val = 0.79788456f; // sqrt(2/pi)
-        uint32_t c2_node = g.constant({1}, &c2_val, DType::FLOAT32, mem);
+        uint32_t c2_node = g.constant({1}, &c2_val, DType::FLOAT32);
 
         // x^2
         uint32_t x_sq = g.mul(x_id, x_id);
@@ -138,7 +138,7 @@ public:
 
         // 1 + tanh(...)
         float one_val = 1.0f;
-        uint32_t one_node = g.constant({1}, &one_val, DType::FLOAT32, mem);
+        uint32_t one_node = g.constant({1}, &one_val, DType::FLOAT32);
         uint32_t term4 = g.add(one_node, tanh_result);
 
         // 0.5 * x
@@ -155,7 +155,7 @@ public:
 
         // e^x using pow(e, x)
         float e_val = 2.718281828459045f;
-        uint32_t e_node = g.constant({1}, &e_val, DType::FLOAT32, mem);
+        uint32_t e_node = g.constant({1}, &e_val, DType::FLOAT32);
 
         uint32_t exp_x = g.pow(e_node, x_id);
         uint32_t exp_neg_x = g.pow(e_node, neg_x);
@@ -181,7 +181,7 @@ public:
 
         // Scale by sqrt(emb_dim)
         float scale_val = std::sqrt((float)cfg.emb_dim);
-        uint32_t scale_node = g.constant({1}, &scale_val, DType::FLOAT32, mem);
+        uint32_t scale_node = g.constant({1}, &scale_val, DType::FLOAT32);
         x = g.mul(x, scale_node);
 
         // 2. Layers
@@ -220,7 +220,7 @@ public:
 
         // Weight tying - transpose embedding weights
         int32_t perm_dims[] = {1, 0};
-        uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32, mem);
+        uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
         uint32_t w_emb_t = g.permute(w_emb, dims_node);
         uint32_t logits = g.dot(x, w_emb_t);
 
@@ -231,7 +231,7 @@ public:
     {
         // Common dimensions node for permutation
         int32_t perm_dims[] = {1, 0};
-        uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32, mem);
+        uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
 
         // Q projection - use weight helper for FP32 casting
         uint32_t w_q = weight(w_path, prefix + ".self_attn.q_proj.weight");
@@ -253,20 +253,30 @@ public:
 
     uint32_t attention_output_atomic(std::tuple<uint32_t, uint32_t, uint32_t> qkv, const std::string &prefix)
     {
-        uint32_t q = std::get<0>(qkv);
+        uint32_t q = std::get<0>(qkv); // Shape [1, 128, 1024]
 
-        // For simplicity, just return a scaled version of the input
+        // 1. Scale Q (as you were doing)
         float scale_val = 1.0f / std::sqrt((float)cfg.query_pre_attn_scalar);
-        uint32_t scale_node = g.constant({1}, &scale_val, DType::FLOAT32, mem);
+        uint32_t scale_node = g.constant({1}, &scale_val, DType::FLOAT32);
+        uint32_t scaled_q = g.mul(q, scale_node);
 
-        return g.mul(q, scale_node);
+        // 2. Project back to emb_dim (640) using o_proj
+        // This is the step that fixes the shape mismatch
+        uint32_t w_o = weight(w_path, prefix + ".self_attn.o_proj.weight"); // Shape [640, 1024]
+
+        int32_t perm_dims[] = {1, 0};
+        uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
+        uint32_t w_o_t = g.permute(w_o, dims_node); // Shape [1024, 640]
+
+        // [1, 128, 1024] @ [1024, 640] -> [1, 128, 640]
+        return g.dot(scaled_q, w_o_t);
     }
 
     uint32_t mlp_atomic(uint32_t x, const std::string &prefix)
     {
         // Common dimensions node for permutation
         int32_t perm_dims[] = {1, 0};
-        uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32, mem);
+        uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
 
         // Gate projection - use weight helper for FP32 casting
         uint32_t w_gate = weight(w_path, prefix + ".mlp.gate_proj.weight");
@@ -308,7 +318,7 @@ int main()
     TensorView inputView;
     uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32, inputView, StorageType::TRANSIENT);
 
-    // 3. Build Model Graph (using class)
+    // 3. Build Model Graph (using class) - No mem needed during graph building!
     std::cout << "Building Graph..." << std::endl;
 
     Gemma3Model model(cfg, g, mem, modelPath);
@@ -335,6 +345,7 @@ int main()
     inputs[inputIdsId] = input_data.data();
 
     session.run(inputs);
+    return 0;
 
     // 6. Get Results
     const float *output_ptr = static_cast<const float *>(session.getOutput(logits_id));

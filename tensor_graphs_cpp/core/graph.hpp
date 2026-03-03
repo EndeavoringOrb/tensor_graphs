@@ -15,6 +15,9 @@ struct Graph
     std::unordered_map<std::string, std::shared_ptr<SafetensorsLoader>> loaders;     // Mapping of path -> Loader instance
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
 
+    // NEW: Lightweight staging area for small constants (e.g., 2.718 for e)
+    std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
+
     uint32_t allocateId() noexcept { return count++; }
 
     void registerLoader(const std::string &path)
@@ -25,28 +28,37 @@ struct Graph
         }
     }
 
-    uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype, MemoryManager &memManager)
+    // CHANGED: Removed MemoryManager parameter - graph building is now pure IR construction
+    uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype)
     {
-        // 1. Calculate size in bytes
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
 
-        // 2. Atomic ID generation
+        // 1. Atomic ID generation
         uint32_t id = allocateId();
 
-        // 3. Physical Allocation (PERSISTENT for constants)
-        memManager.allocate(Backend::CPU, id, sizeBytes, StorageType::PERSISTENT);
+        // 2. Compute content hash directly from raw bytes (O(1), no I/O)
+        SHA256 sha;
+        sha.update(static_cast<const uint8_t *>(dataPtr), sizeBytes);
 
-        // 4. Write the data to memory
-        memManager.write(Backend::CPU, id, dataPtr, sizeBytes);
+        // 3. Stash the bytes in staging area
+        std::vector<uint8_t> buffer(sizeBytes);
+        std::memcpy(buffer.data(), dataPtr, sizeBytes);
+        constantStaging[id] = std::move(buffer);
 
-        // 5. Get the view for this allocation
-        TensorView view = memManager.getView(Backend::CPU, id, shape);
+        // 4. Create View (baseOffset remains 0 until materialization)
+        TensorView view;
+        view.shape = shape;
+        view.strides = TensorView::calcContiguousStrides(shape);
+        view.baseOffset = 0;
 
-        // 6. Create the input node with this view
-        return inputWithId(id, shape, dtype, view);
+        // 5. Create the input node with this view
+        uint32_t nodeId = inputWithId(id, shape, dtype, view, StorageType::PERSISTENT);
+        nodes[nodeId].contentHash = sha.digest();
+        return nodeId;
     }
 
-    uint32_t weight(const std::string &path, const std::string &name, MemoryManager &memManager)
+    // CHANGED: Removed MemoryManager parameter - graph building is now pure IR construction
+    uint32_t weight(const std::string &path, const std::string &name)
     {
         // 1. Ensure loader exists and tensor is present
         registerLoader(path);
@@ -61,17 +73,21 @@ struct Graph
         // 2. Atomic ID generation
         uint32_t id = allocateId();
 
-        // 3. Physical Allocation
-        // We do this BEFORE creating the node so that if it throws MemoryAllocationError,
-        // the graph remains in a valid state (though we've consumed an ID).
-        memManager.allocate(Backend::CPU, id, meta.sizeBytes(), StorageType::PERSISTENT);
-
-        // 4. Track source and get View
+        // 3. Track source for later materialization
         weightSources[id] = {path, name};
-        TensorView view = memManager.getView(Backend::CPU, id, meta.shape);
 
-        // 5. Finalize Node
-        return inputWithId(id, meta.shape, meta.dtype, view);
+        // 4. Create View (baseOffset remains 0 until materialization)
+        TensorView view;
+        view.shape = meta.shape;
+        view.strides = TensorView::calcContiguousStrides(meta.shape);
+        view.baseOffset = 0;
+
+        // 5. Identity of a weight is its file + name! No disk I/O needed here.
+        uint32_t nodeId = inputWithId(id, meta.shape, meta.dtype, view, StorageType::PERSISTENT);
+        SHA256 sha;
+        sha.update(path + "::" + name);
+        nodes[nodeId].contentHash = sha.digest();
+        return nodeId;
     }
 
     uint32_t input(std::vector<uint32_t> shape, DType dtype, TensorView view, StorageType storageType = StorageType::PERSISTENT)
@@ -93,7 +109,7 @@ struct Graph
     }
 
     // Builder function for fused operations resolving reference graph logic
-    uint32_t tanh(uint32_t id0, MemoryManager &memManager);
+    uint32_t tanh(uint32_t id0);
 
     // Existing atomic mathematical ops ...
     uint32_t add(uint32_t id0, uint32_t id1)

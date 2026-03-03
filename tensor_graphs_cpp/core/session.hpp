@@ -173,7 +173,8 @@ public:
 
     static uint32_t nextPowerOf2(uint32_t x)
     {
-        if (x == 0) return 1;
+        if (x == 0)
+            return 1;
         x--;
         x |= x >> 1;
         x |= x >> 2;
@@ -183,12 +184,61 @@ public:
         return x + 1;
     }
 
+    // CHANGED: compile() now includes the Materialization Pass - allocate & load weights AFTER planning!
     void compile(const std::unordered_map<uint32_t, const void *> &sampleInputs)
     {
         std::cout << "[Session.compile] compiling..." << std::endl;
         Planner planner(costModel, 4ULL * 1024 * 1024 * 1024);
 
-        compiled = planner.plan(rootId, graph, memManager);
+        // 1. Generate execution plan (Zero memory allocations happen here!)
+        compiled = planner.plan(rootId, graph);
+
+        std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
+
+        // Ensure DeviceBuffers are initialized so we have raw pointers to write to
+        memManager.buffers.at(Backend::CPU).init();
+
+        // 2. The Materialization Pass - allocate and load data ONCE after planning!
+        for (const auto &pair : compiled.nodesMap)
+        {
+            uint32_t nodeId = pair.first;
+            TensorNode &node = graph.nodes[nodeId];
+
+            // We only care about PERSISTENT inputs (Constants & Weights).
+            // TRANSIENT inputs are handled per-run.
+            if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
+            {
+                uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+
+                // A. Allocate the physical block in the MemoryManager
+                uint64_t offset = memManager.allocate(node.backend, nodeId, sizeBytes, StorageType::PERSISTENT);
+
+                // Link the logical view to the physical memory offset
+                node.view.baseOffset = offset;
+
+                // B. Populate the actual data
+                if (graph.constantStaging.count(nodeId))
+                {
+                    // It's a constant (e.g., epsilon, half_val)
+                    memManager.write(node.backend, nodeId, graph.constantStaging[nodeId].data(), sizeBytes);
+                }
+                else if (graph.weightSources.count(nodeId))
+                {
+                    // It's a heavy weight. Stream it directly from disk to the physical arena!
+                    const auto &source = graph.weightSources.at(nodeId);
+                    auto &loader = graph.loaders.at(source.first);
+
+                    // Get the raw memory pointer inside the DeviceBuffer arena
+                    uint8_t *destPtr = memManager.buffers.at(node.backend).arena.data() + offset;
+
+                    // Read directly from the Safetensors file into RAM (zero-copy stream!)
+                    loader->loadTensor(source.second, destPtr, sizeBytes);
+                }
+            }
+        }
+
+        // Optional: Reclaim RAM by clearing the constant staging area now that it is in the DeviceBuffer
+        graph.constantStaging.clear();
 
         // Collect transient input node IDs
         std::vector<uint32_t> inputNodeIds;

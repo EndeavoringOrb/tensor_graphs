@@ -10,6 +10,9 @@
 #include <unordered_set>
 #include <algorithm>
 #include <stdexcept>
+#include <iostream>
+#include <sstream>
+#include <cstring>
 
 struct OpInstruction
 {
@@ -33,7 +36,7 @@ struct BeamStrategy
     uint32_t nodeId;
     std::unordered_map<uint32_t, Backend> assignments;
     std::unordered_map<uint32_t, uint32_t> kernelAssignments;
-    MemoryManager memManager; // Enforce distinct independent copy tracking global simulation
+    // DELETED: MemoryManager memManager;
 
     bool operator<(const BeamStrategy &other) const
     {
@@ -47,11 +50,14 @@ public:
     Planner(CostModel &costModel, uint64_t maxMemoryBytes = 4ULL * 1024 * 1024 * 1024)
         : costModel(costModel), maxMemoryBytes(maxMemoryBytes) {}
 
-    CompiledGraph plan(uint32_t rootId, Graph &graph, MemoryManager &rootMemManager)
+    CompiledGraph plan(uint32_t rootId, Graph &graph)
     {
         std::cout << "[Planner.plan] initial sort..." << std::endl;
         std::unordered_map<uint32_t, std::string> structHashMemo;
         std::vector<uint32_t> topo = topologicalSort(rootId, graph);
+
+        std::cout << "[Planner.plan] inferring shapes..." << std::endl;
+        inferShapes(topo, graph);
 
         // Build fused patterns from the Reference Graph Registry
         struct FusedPattern
@@ -60,7 +66,6 @@ public:
             std::vector<uint32_t> variables;
             uint32_t rootId;
             Graph graph;
-            MemoryManager memManager;
         };
         std::vector<FusedPattern> fusedPatterns;
 
@@ -77,18 +82,23 @@ public:
 
             FusedPattern pattern;
             pattern.opName = opName;
-            pattern.memManager.buffers.emplace(Backend::CPU, DeviceBuffer(1024 * 1024));
 
             for (size_t i = 0; i < numInputs; ++i)
             {
                 uint32_t inId = pattern.graph.allocateId();
-                pattern.memManager.allocate(Backend::CPU, inId, 4, StorageType::TRANSIENT);
-                TensorView view = pattern.memManager.getView(Backend::CPU, inId, {1});
+                TensorView view;
+                view.shape = {1};
+                view.strides = TensorView::calcContiguousStrides({1});
+                view.baseOffset = 0;
                 pattern.graph.inputWithId(inId, {1}, DType::FLOAT32, view);
                 pattern.variables.push_back(inId);
             }
 
-            pattern.rootId = factory(pattern.variables, pattern.graph, pattern.memManager);
+            pattern.rootId = factory(pattern.variables, pattern.graph);
+
+            std::vector<uint32_t> p_topo = topologicalSort(pattern.rootId, pattern.graph);
+            inferShapes(p_topo, pattern.graph);
+
             fusedPatterns.push_back(std::move(pattern));
         }
 
@@ -112,7 +122,8 @@ public:
             topoIdx++;
             std::cout << topoIdx << "/" << topo.size() << "\r";
             uint32_t nodeId = *it;
-            std::string hash = Hashing::detail::structuralHashImpl(nodeId, graph, rootMemManager, structHashMemo);
+            // CHANGED: Removed MemoryManager from hash call
+            std::string hash = Hashing::detail::structuralHashImpl(nodeId, graph, structHashMemo);
 
             std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(nodeId, graph, rules);
             for (uint32_t eqId : equivalents)
@@ -163,7 +174,10 @@ public:
         }
 
         std::cout << "[Planner.plan] doing augmented topo sort..." << std::endl;
-        std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, fusionMap, graph, rootMemManager, structHashMemo);
+        std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, fusionMap, graph, structHashMemo);
+
+        std::cout << "[Planner.plan] inferring shapes for augmented graph..." << std::endl;
+        inferShapes(sortedNodes, graph);
 
         std::unordered_map<std::string, std::vector<BeamStrategy>> memo;
 
@@ -173,12 +187,29 @@ public:
         {
             nodeIdx++;
             std::cout << nodeIdx << "/" << sortedNodes.size() << "\r";
-            planNodeIterative(nodeId, graph, fusionMap, memo, rootMemManager, structHashMemo);
+            planNodeIterative(nodeId, graph, fusionMap, memo, structHashMemo);
         }
 
-        std::string rootHash = Hashing::detail::structuralHashImpl(rootId, graph, rootMemManager, structHashMemo);
+        std::string rootHash = Hashing::detail::structuralHashImpl(rootId, graph, structHashMemo);
         if (memo.find(rootHash) == memo.end() || memo[rootHash].empty())
         {
+            const auto &rootNode = graph.nodes[rootId];
+            std::cout << "[Planner.plan] ERROR: Couldn't find any strategy for root node " << rootId
+                      << " (OpType: " << toString(rootNode.opType)
+                      << ", DType: " << toString(rootNode.dtype)
+                      << ", Shape: " << toString(rootNode.shape)
+                      << ", ParentCount: " << rootNode.parentIds.size()
+                      << ")" << std::endl;
+
+            // Print which parent IDs were not successfully planned
+            for (uint32_t pid : rootNode.parentIds)
+            {
+                const auto &pNode = graph.nodes[pid];
+                std::cout << "  Parent " << pid << ": OpType=" << toString(pNode.opType)
+                          << ", DType=" << toString(pNode.dtype)
+                          << ", Shape=" << toString(pNode.shape) << std::endl;
+            }
+
             throw std::runtime_error("Planner failed to find any execution strategy for root node.");
         }
 
@@ -251,6 +282,293 @@ private:
     uint64_t maxMemoryBytes;
     size_t beamWidth = 3;
 
+    std::vector<uint32_t> broadcastShapes(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b)
+    {
+        int rankA = a.size();
+        int rankB = b.size();
+        int outRank = std::max(rankA, rankB);
+        std::vector<uint32_t> out(outRank);
+        for (int i = 0; i < outRank; ++i)
+        {
+            uint32_t dimA = (i < outRank - rankA) ? 1 : a[i - (outRank - rankA)];
+            uint32_t dimB = (i < outRank - rankB) ? 1 : b[i - (outRank - rankB)];
+            if (dimA == 1)
+                out[i] = dimB;
+            else if (dimB == 1)
+                out[i] = dimA;
+            else if (dimA == dimB)
+                out[i] = dimA;
+            else
+            {
+                std::stringstream ss;
+                ss << "Cannot broadcast shapes " << toString(a) << " and " << toString(b);
+                throw std::runtime_error(ss.str());
+            }
+        }
+        return out;
+    }
+
+    std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)
+    {
+        if (graph.constantStaging.count(id))
+        {
+            const auto &data = graph.constantStaging.at(id);
+            std::vector<int32_t> res(data.size() / sizeof(int32_t));
+            std::memcpy(res.data(), data.data(), data.size());
+            return res;
+        }
+        std::stringstream ss;
+        ss << "Expected constant for shape inference but not found in staging. Node ID: " << id;
+        throw std::runtime_error(ss.str());
+    }
+
+    void inferShapes(const std::vector<uint32_t> &topo, Graph &graph)
+    {
+        for (uint32_t nodeId : topo)
+        {
+            TensorNode &node = graph.nodes[nodeId];
+
+            if (!node.shape.empty() && node.opType != OpType::RESHAPE)
+            {
+                continue;
+            }
+            if (node.opType == OpType::INPUT)
+            { // handles both INPUT and CONSTANT mappings
+                continue;
+            }
+
+            switch (node.opType)
+            {
+            case OpType::ADD:
+            case OpType::MUL:
+            case OpType::DIVIDE:
+            case OpType::POWER:
+            {
+                auto s0 = graph.nodes[node.parentIds[0]].shape;
+                auto s1 = graph.nodes[node.parentIds[1]].shape;
+                node.shape = broadcastShapes(s0, s1);
+                break;
+            }
+            case OpType::DOT:
+            {
+                auto s0 = graph.nodes[node.parentIds[0]].shape;
+                auto s1 = graph.nodes[node.parentIds[1]].shape;
+                int r0 = s0.size();
+                int r1 = s1.size();
+                if (r0 == 1 && r1 == 2)
+                {
+                    node.shape = {s1[1]};
+                }
+                else if (r0 == 2 && r1 == 2)
+                {
+                    node.shape = {s0[0], s1[1]};
+                }
+                else if (r0 >= 2 && r1 >= 2)
+                {
+                    std::vector<uint32_t> b0(s0.begin(), s0.end() - 2);
+                    std::vector<uint32_t> b1(s1.begin(), s1.end() - 2);
+                    auto batch = broadcastShapes(b0, b1);
+                    batch.push_back(s0[r0 - 2]);
+                    batch.push_back(s1[r1 - 1]);
+                    node.shape = batch;
+                }
+                else
+                {
+                    throw std::runtime_error("Unsupported shapes for DOT");
+                }
+                break;
+            }
+            case OpType::SIN:
+            case OpType::COS:
+            case OpType::NEGATE:
+            case OpType::CAST:
+            case OpType::TRIU:
+            case OpType::COPY_TO:
+            {
+                node.shape = graph.nodes[node.parentIds[0]].shape;
+                break;
+            }
+            case OpType::SUM:
+            case OpType::MAX:
+            {
+                auto s0 = graph.nodes[node.parentIds[0]].shape;
+                auto axis_vec = getConstantInt32(node.parentIds[1], graph);
+                int32_t axis = axis_vec[0];
+                const auto &keepdims_data = graph.constantStaging.at(node.parentIds[2]);
+                bool keepdims = keepdims_data[0] != 0;
+
+                if (axis < 0)
+                    axis += s0.size();
+
+                std::vector<uint32_t> new_shape;
+                for (size_t i = 0; i < s0.size(); ++i)
+                {
+                    if (i == (size_t)axis)
+                    {
+                        if (keepdims)
+                            new_shape.push_back(1);
+                    }
+                    else
+                    {
+                        new_shape.push_back(s0[i]);
+                    }
+                }
+                node.shape = new_shape;
+                break;
+            }
+            case OpType::RESHAPE:
+            {
+                auto s0 = graph.nodes[node.parentIds[0]].shape;
+                auto target_dims = getConstantInt32(node.parentIds[1], graph);
+                uint64_t total_vol = countElements(s0);
+                uint64_t known_vol = 1;
+                for (size_t i = 0; i < target_dims.size(); ++i)
+                {
+                    if (target_dims[i] != -1)
+                    {
+                        known_vol *= target_dims[i];
+                    }
+                }
+                std::vector<uint32_t> out_shape(target_dims.size());
+                for (size_t i = 0; i < target_dims.size(); ++i)
+                {
+                    if (target_dims[i] == -1)
+                    {
+                        out_shape[i] = total_vol / known_vol;
+                    }
+                    else
+                    {
+                        out_shape[i] = target_dims[i];
+                    }
+                }
+                node.shape = out_shape;
+                break;
+            }
+            case OpType::PERMUTE:
+            {
+                auto s0 = graph.nodes[node.parentIds[0]].shape;
+                auto dims = getConstantInt32(node.parentIds[1], graph);
+                std::vector<uint32_t> out_shape(dims.size());
+                for (size_t i = 0; i < dims.size(); ++i)
+                {
+                    out_shape[i] = s0[dims[i]];
+                }
+                node.shape = out_shape;
+                break;
+            }
+            case OpType::GATHER:
+            {
+                auto data_shape = graph.nodes[node.parentIds[0]].shape;
+                auto idx_shape = graph.nodes[node.parentIds[1]].shape;
+                std::vector<uint32_t> out_shape = idx_shape;
+                for (size_t i = 1; i < data_shape.size(); ++i)
+                {
+                    out_shape.push_back(data_shape[i]);
+                }
+                node.shape = out_shape;
+                break;
+            }
+            case OpType::CONCAT:
+            {
+                uint32_t axis_id = node.parentIds.back();
+                auto axis_vec = getConstantInt32(axis_id, graph);
+                int32_t axis = axis_vec[0];
+                auto s0 = graph.nodes[node.parentIds[0]].shape;
+                if (axis < 0)
+                    axis += s0.size();
+
+                std::vector<uint32_t> out_shape = s0;
+                uint32_t total_dim = s0[axis];
+                for (size_t i = 1; i < node.parentIds.size() - 1; ++i)
+                {
+                    auto si = graph.nodes[node.parentIds[i]].shape;
+                    total_dim += si[axis];
+                }
+                out_shape[axis] = total_dim;
+                node.shape = out_shape;
+                break;
+            }
+            case OpType::REPEAT:
+            {
+                auto s0 = graph.nodes[node.parentIds[0]].shape;
+                auto repeats = getConstantInt32(node.parentIds[1], graph)[0];
+                auto axis = getConstantInt32(node.parentIds[2], graph)[0];
+                if (axis < 0)
+                    axis += s0.size();
+                std::vector<uint32_t> out_shape = s0;
+                out_shape[axis] *= repeats;
+                node.shape = out_shape;
+                break;
+            }
+            case OpType::FILL:
+            {
+                auto target_dims = getConstantInt32(node.parentIds[1], graph);
+                std::vector<uint32_t> out_shape(target_dims.size());
+                for (size_t i = 0; i < target_dims.size(); ++i)
+                {
+                    out_shape[i] = target_dims[i];
+                }
+                node.shape = out_shape;
+                break;
+            }
+            case OpType::IM2COL:
+            {
+                auto s0 = graph.nodes[node.parentIds[0]].shape; // N, C, H, W
+                uint32_t k = getConstantInt32(node.parentIds[1], graph)[0];
+                uint32_t s = getConstantInt32(node.parentIds[2], graph)[0];
+                uint32_t p = getConstantInt32(node.parentIds[3], graph)[0];
+                uint32_t H = s0[2];
+                uint32_t W = s0[3];
+                uint32_t H_out = (H + 2 * p - k) / s + 1;
+                uint32_t W_out = (W + 2 * p - k) / s + 1;
+                node.shape = {s0[0], s0[1] * k * k, H_out * W_out};
+                break;
+            }
+            case OpType::SLICE:
+            {
+                auto s0 = graph.nodes[node.parentIds[0]].shape;
+                auto starts = getConstantInt32(node.parentIds[1], graph);
+                auto ends = getConstantInt32(node.parentIds[2], graph);
+                auto steps = getConstantInt32(node.parentIds[3], graph);
+                std::vector<uint32_t> out_shape(s0.size());
+                for (size_t i = 0; i < s0.size(); ++i)
+                {
+                    int32_t start = i < starts.size() ? starts[i] : 0;
+                    int32_t end = i < ends.size() ? ends[i] : s0[i];
+                    int32_t step = i < steps.size() ? steps[i] : 1;
+                    if (start < 0)
+                        start += s0[i];
+                    if (end < 0)
+                        end += s0[i];
+                    out_shape[i] = std::max(0, (end - start + step - 1) / step);
+                }
+                node.shape = out_shape;
+                break;
+            }
+            case OpType::ARANGE:
+            {
+                int32_t start = getConstantInt32(node.parentIds[0], graph)[0];
+                int32_t stop = getConstantInt32(node.parentIds[1], graph)[0];
+                int32_t step = getConstantInt32(node.parentIds[2], graph)[0];
+                node.shape = {(uint32_t)std::max(0, (stop - start + step - 1) / step)};
+                break;
+            }
+            case OpType::FUSED:
+            {
+                break;
+            }
+            default:
+                break;
+            }
+
+            if (node.view.shape.empty() && !node.shape.empty())
+            {
+                node.view.shape = node.shape;
+                node.view.strides = TensorView::calcContiguousStrides(node.shape);
+            }
+        }
+    }
+
     bool matchPattern(uint32_t concreteId, const Graph &mainGraph,
                       uint32_t patternId, const Graph &patternGraph,
                       const std::vector<uint32_t> &patternVariables,
@@ -309,17 +627,17 @@ private:
         return order;
     }
 
+    // CHANGED: Removed MemoryManager parameter from sort function
     std::vector<uint32_t> getAugmentedTopologicalSort(const std::vector<uint32_t> &baseNodes,
                                                       std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
                                                       const Graph &graph,
-                                                      MemoryManager &rootMemManager,
                                                       std::unordered_map<uint32_t, std::string> &structHashMemo)
     {
         std::vector<uint32_t> order;
         std::unordered_set<std::string> visited;
         auto visit = [&](auto &self, uint32_t node) -> void
         {
-            std::string hash = Hashing::detail::structuralHashImpl(node, graph, rootMemManager, structHashMemo);
+            std::string hash = Hashing::detail::structuralHashImpl(node, graph, structHashMemo);
             if (visited.count(hash))
                 return;
             visited.insert(hash);
@@ -352,10 +670,9 @@ private:
     void planNodeIterative(uint32_t nodeId, const Graph &graph,
                            std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
                            std::unordered_map<std::string, std::vector<BeamStrategy>> &memo,
-                           MemoryManager &rootMemManager,
                            std::unordered_map<uint32_t, std::string> &structHashMemo)
     {
-        std::string nodeHash = Hashing::detail::structuralHashImpl(nodeId, graph, rootMemManager, structHashMemo);
+        std::string nodeHash = Hashing::detail::structuralHashImpl(nodeId, graph, structHashMemo);
         if (memo.count(nodeHash))
             return;
 
@@ -366,7 +683,6 @@ private:
             strat.cost = 0.0f;
             strat.nodeId = nodeId;
             strat.assignments[nodeId] = node.backend;
-            strat.memManager = rootMemManager; // Initialize copy explicitly
             memo[nodeHash] = {strat};
             return;
         }
@@ -385,19 +701,35 @@ private:
         {
             const auto &target = graph.nodes[targetId];
 
+            // Check if all parents have been successfully planned
             std::vector<std::vector<BeamStrategy>> parentBeamSets;
-            bool missingParents = false;
+            bool anyParentMissing = false;
             for (uint32_t pid : target.parentIds)
             {
-                std::string phash = Hashing::detail::structuralHashImpl(pid, graph, rootMemManager, structHashMemo);
+                std::string phash = Hashing::detail::structuralHashImpl(pid, graph, structHashMemo);
                 if (memo.count(phash) == 0)
                 {
-                    missingParents = true;
+                    anyParentMissing = true;
+                    const auto &pNode = graph.nodes[pid];
                     break;
                 }
                 parentBeamSets.push_back(memo[phash]);
             }
-            if (missingParents)
+            if (anyParentMissing)
+                continue;
+
+            // Check if any parent beam sets are empty
+            bool anyParentEmpty = false;
+            for (size_t i = 0; i < parentBeamSets.size(); ++i)
+            {
+                if (parentBeamSets[i].empty())
+                {
+                    const auto &pNode = graph.nodes[target.parentIds[i]];
+                    anyParentEmpty = true;
+                    break;
+                }
+            }
+            if (anyParentEmpty)
                 continue;
 
             for (Backend backend : availableBackends)
@@ -408,9 +740,13 @@ private:
                     inputNodes.push_back(graph.nodes[pid]);
                 }
 
+                std::string opName = (target.opType == OpType::FUSED) ? target.opName : toString(target.opType);
                 std::vector<uint32_t> matchingKernels = KernelRegistry::get().findMatchingKernels(target.opType, target.opName, backend, inputNodes, target);
+
                 if (matchingKernels.empty())
+                {
                     continue;
+                }
 
                 for (uint32_t kernelId : matchingKernels)
                 {
@@ -422,16 +758,9 @@ private:
                         std::unordered_map<uint32_t, uint32_t> kAssigns;
                         kAssigns[targetId] = kernelId;
 
-                        BeamStrategy strat{cost, targetId, assigns, kAssigns, rootMemManager};
-                        try
-                        {
-                            strat.memManager.allocate(backend, targetId, getSizeBytes(target.shape, target.dtype), StorageType::TRANSIENT, 1, cost);
-                            candidates.push_back(strat);
-                        }
-                        catch (MemoryAllocationError)
-                        {
-                            continue;
-                        }
+                        BeamStrategy strat{cost, targetId, assigns, kAssigns};
+
+                        candidates.push_back(strat);
 
                         continue;
                     }
@@ -466,16 +795,7 @@ private:
 
                         cost += costModel.estimateCost(target, graph, kernelId);
 
-                        MemoryManager newMem = parentBeamSets[0][indices[0]].memManager;
-                        try
-                        {
-                            newMem.allocate(backend, targetId, getSizeBytes(target.shape, target.dtype), StorageType::TRANSIENT, 1, cost);
-                            candidates.push_back({cost, targetId, assigns, kAssigns, newMem});
-                        }
-                        catch (MemoryAllocationError)
-                        {
-                            // TODO: If OOM simulation fails, we legitimately discard this sequence path.
-                        }
+                        candidates.push_back({cost, targetId, assigns, kAssigns});
 
                         int p = static_cast<int>(indices.size()) - 1;
                         while (p >= 0)
@@ -497,6 +817,18 @@ private:
         if (candidates.size() > beamWidth)
         {
             candidates.resize(beamWidth);
+        }
+
+        if (candidates.empty())
+        {
+            const auto &node = graph.nodes[nodeId];
+            std::stringstream ss;
+            ss << "[Planner.planNodeIterative] ERROR: Node " << nodeId
+               << " has NO valid strategies (OpType: " << node.opType
+               << ", DType: " << node.dtype
+               << ", Shape: " << toString(node.shape)
+               << ", ParentCount: " << node.parentIds.size() << ")" << std::endl;
+            throw std::runtime_error(ss.str());
         }
 
         memo[nodeHash] = candidates;

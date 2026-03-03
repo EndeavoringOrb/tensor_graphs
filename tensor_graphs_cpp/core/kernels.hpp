@@ -18,8 +18,8 @@ using KernelFunc = void (*)(const std::vector<const void *> &inputs,
                             const std::vector<TensorView> &inViews,
                             const std::vector<TensorView> &outViews);
 
-// Factory function type that builds an equivalent sub-graph given a set of input variables
-using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph, MemoryManager &memManager);
+// CHANGED: Removed MemoryManager - factories only need Graph for pattern construction
+using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph);
 
 struct ReferenceGraphEntry
 {
@@ -59,12 +59,12 @@ private:
 };
 
 // Implement the Graph builder method here to resolve dependencies smoothly
-inline uint32_t Graph::tanh(uint32_t id0, MemoryManager &memManager)
+inline uint32_t Graph::tanh(uint32_t id0)
 {
     auto *entry = ReferenceGraphRegistry::get().getFactory("Tanh");
     if (!entry)
         throw std::runtime_error("No reference factory registered for Tanh");
-    return entry->factory({id0}, *this, memManager);
+    return entry->factory({id0}, *this);
 }
 
 struct KernelEntry

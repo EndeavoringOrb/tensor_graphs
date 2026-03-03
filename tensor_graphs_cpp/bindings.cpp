@@ -46,14 +46,17 @@ PYBIND11_MODULE(tg_cpp, m)
              {
             for(auto& pair : self.buffers) pair.second.init(); });
 
-    // Graph Building
+    // Graph Building - CHANGED: Removed MemoryManager parameters from constant and weight!
     py::class_<Graph>(m, "Graph")
         .def(py::init<>())
         .def("allocateId", &Graph::allocateId)
+        // CHANGED: Removed mem parameter
         .def("constant", [](Graph &g, std::vector<uint32_t> shape,
-                            py::array_t<float> data, DType dtype, MemoryManager &mem)
-             { return g.constant(shape, data.data(), dtype, mem); })
-        .def("weight", &Graph::weight)
+                            py::array_t<float> data, DType dtype)
+             { return g.constant(shape, data.data(), dtype); })
+        // CHANGED: Removed mem parameter
+        .def("weight", [](Graph &g, const std::string &path, const std::string &name)
+             { return g.weight(path, name); })
         .def("input", &Graph::input)
         // Math operations
         .def("add", &Graph::add)

@@ -38,22 +38,17 @@ void runTanhF32_1D(const std::vector<const void *> &inputs, const std::vector<vo
     }
 }
 
-uint32_t refFactoryTanh(const std::vector<uint32_t> &inputs, Graph &graph, MemoryManager &memManager)
+// CHANGED: Removed MemoryManager parameter - only needs Graph for pattern construction
+uint32_t refFactoryTanh(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     if (inputs.size() != 1)
         throw std::runtime_error("Tanh requires 1 input");
     uint32_t x = inputs[0];
 
     // Create Constant 'e'
-    uint32_t e_id = graph.allocateId();
-    uint64_t offset = memManager.allocate(Backend::CPU, e_id, sizeof(float), StorageType::PERSISTENT);
-
-    TensorView e_view = memManager.getView(Backend::CPU, e_id, {1});
-
-    uint32_t e_node = graph.inputWithId(e_id, {1}, DType::FLOAT32, e_view);
-
     float e_val = 2.718281828459f;
-    memManager.write(Backend::CPU, e_id, &e_val, sizeof(float));
+    // CHANGED: Just pass to graph! No MemoryManager needed.
+    uint32_t e_node = graph.constant({1}, &e_val, DType::FLOAT32);
 
     // Decompose
     uint32_t exp_x = graph.pow(e_node, x);
