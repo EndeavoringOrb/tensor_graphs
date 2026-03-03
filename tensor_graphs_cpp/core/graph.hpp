@@ -393,7 +393,7 @@ struct Graph
         return node.id;
     }
 
-    uint32_t arange(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3)
+    uint32_t arange(uint32_t id1, uint32_t id2, uint32_t id3)
     {
         if (nodes[id1].dtype != DType::INT32)
         {
@@ -416,8 +416,8 @@ struct Graph
         TensorNode node = TensorNode();
         node.id = allocateId();
         node.opType = OpType::ARANGE;
-        node.dtype = nodes[id0].dtype;
-        node.parentIds = {id0, id1, id2, id3};
+        node.dtype = DType::INT32;
+        node.parentIds = {id1, id2, id3};
         nodes.push_back(node);
         return node.id;
     }

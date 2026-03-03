@@ -190,6 +190,12 @@ class Gemma3ModelCPP:
             # Attention (simplified - using atomic ops for projections)
             q = self.attention_qkv_atomic(x, prefix, cfg)
             x = self.attention_output_atomic(q, prefix, cfg)
+
+            w_post_attn = self.weight(
+                w_path, f"{prefix}.post_attention_layernorm.weight"
+            )
+            x = self.rms_norm_gemma_atomic(x, w_post_attn)
+
             x = self.g.add(residual, x)
 
             # MLP Block
@@ -198,6 +204,12 @@ class Gemma3ModelCPP:
             w_ln2 = self.weight(w_path, f"{prefix}.pre_feedforward_layernorm.weight")
             x = self.rms_norm_gemma_atomic(x, w_ln2)
             x = self.mlp_atomic(x, prefix, cfg)
+
+            w_post_ff = self.weight(
+                w_path, f"{prefix}.post_feedforward_layernorm.weight"
+            )
+            x = self.rms_norm_gemma_atomic(x, w_post_ff)
+
             x = self.g.add(residual, x)
 
         # 3. Final Norm & Head
