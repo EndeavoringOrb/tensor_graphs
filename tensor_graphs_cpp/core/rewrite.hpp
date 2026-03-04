@@ -20,14 +20,15 @@ namespace Rewrite
     {
         std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
         {
-            const auto &node = graph.nodes[id];
-            if ((node.opType == OpType::ADD || node.opType == OpType::MUL) && node.parentIds.size() == 2)
+            const auto &node = [&]() -> const TensorNode &
+            { return graph.nodes[id]; }; // This is done to make sure the reference is valid in the case of vector resizes.
+            if ((node().opType == OpType::ADD || node().opType == OpType::MUL) && node().parentIds.size() == 2)
             {
-                uint32_t p0 = node.parentIds[0];
-                uint32_t p1 = node.parentIds[1];
+                uint32_t p0 = node().parentIds[0];
+                uint32_t p1 = node().parentIds[1];
                 if (p0 != p1)
                 {
-                    uint32_t newId = (node.opType == OpType::ADD) ? graph.add(p1, p0) : graph.mul(p1, p0);
+                    uint32_t newId = (node().opType == OpType::ADD) ? graph.add(p1, p0) : graph.mul(p1, p0);
                     return {newId};
                 }
             }
@@ -39,20 +40,22 @@ namespace Rewrite
     {
         std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
         {
-            const auto &node = graph.nodes[id];
+            const auto &node = [&]() -> const TensorNode &
+            { return graph.nodes[id]; };
             // Matches: a * (b + c) -> (a * b) + (a * c)
-            if (node.opType == OpType::MUL && node.parentIds.size() == 2)
+            if (node().opType == OpType::MUL && node().parentIds.size() == 2)
             {
-                uint32_t a = node.parentIds[0];
-                uint32_t add_node_id = node.parentIds[1];
+                uint32_t a = node().parentIds[0];
+                uint32_t add_node_id = node().parentIds[1];
 
                 auto match = [&](uint32_t a_id, uint32_t add_id) -> std::vector<uint32_t>
                 {
-                    const auto &add_node = graph.nodes[add_id];
-                    if (add_node.opType == OpType::ADD && add_node.parentIds.size() == 2)
+                    const auto &add_node = [&]() -> const TensorNode &
+                    { return graph.nodes[add_id]; };
+                    if (add_node().opType == OpType::ADD && add_node().parentIds.size() == 2)
                     {
-                        uint32_t b = add_node.parentIds[0];
-                        uint32_t c = add_node.parentIds[1];
+                        uint32_t b = add_node().parentIds[0];
+                        uint32_t c = add_node().parentIds[1];
                         uint32_t mul1 = graph.mul(a_id, b);
                         uint32_t mul2 = graph.mul(a_id, c);
                         return {graph.add(mul1, mul2)};
@@ -75,12 +78,13 @@ namespace Rewrite
     {
         std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
         {
-            const auto &node = graph.nodes[id];
+            const auto &node = [&]() -> const TensorNode &
+            { return graph.nodes[id]; };
             // Matches: (a * b) + (a * c) -> a * (b + c)
-            if (node.opType == OpType::ADD && node.parentIds.size() == 2)
+            if (node().opType == OpType::ADD && node().parentIds.size() == 2)
             {
-                const auto &mul1 = graph.nodes[node.parentIds[0]];
-                const auto &mul2 = graph.nodes[node.parentIds[1]];
+                const auto &mul1 = graph.nodes[node().parentIds[0]];
+                const auto &mul2 = graph.nodes[node().parentIds[1]];
 
                 if (mul1.opType == OpType::MUL && mul2.opType == OpType::MUL &&
                     mul1.parentIds.size() == 2 && mul2.parentIds.size() == 2)
@@ -110,33 +114,34 @@ namespace Rewrite
         std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
         {
             std::vector<uint32_t> results;
-            const auto &node = graph.nodes[id];
-            if ((node.opType == OpType::ADD || node.opType == OpType::MUL) && node.parentIds.size() == 2)
+            const auto &node = [&]() -> const TensorNode &
+            { return graph.nodes[id]; };
+            if ((node().opType == OpType::ADD || node().opType == OpType::MUL) && node().parentIds.size() == 2)
             {
-                uint32_t a_id = node.parentIds[0];
-                uint32_t b_id = node.parentIds[1];
+                uint32_t a_id = node().parentIds[0];
+                uint32_t b_id = node().parentIds[1];
                 const auto &a = graph.nodes[a_id];
                 const auto &b = graph.nodes[b_id];
 
                 // (x op y) op z -> x op (y op z)
-                if (a.opType == node.opType && a.parentIds.size() == 2)
+                if (a.opType == node().opType && a.parentIds.size() == 2)
                 {
                     uint32_t x = a.parentIds[0];
                     uint32_t y = a.parentIds[1];
                     uint32_t z = b_id;
-                    uint32_t new_inner = (node.opType == OpType::ADD) ? graph.add(y, z) : graph.mul(y, z);
-                    uint32_t new_outer = (node.opType == OpType::ADD) ? graph.add(x, new_inner) : graph.mul(x, new_inner);
+                    uint32_t new_inner = (node().opType == OpType::ADD) ? graph.add(y, z) : graph.mul(y, z);
+                    uint32_t new_outer = (node().opType == OpType::ADD) ? graph.add(x, new_inner) : graph.mul(x, new_inner);
                     results.push_back(new_outer);
                 }
 
                 // x op (y op z) -> (x op y) op z
-                if (b.opType == node.opType && b.parentIds.size() == 2)
+                if (b.opType == node().opType && b.parentIds.size() == 2)
                 {
                     uint32_t x = a_id;
                     uint32_t y = b.parentIds[0];
                     uint32_t z = b.parentIds[1];
-                    uint32_t new_inner = (node.opType == OpType::ADD) ? graph.add(x, y) : graph.mul(x, y);
-                    uint32_t new_outer = (node.opType == OpType::ADD) ? graph.add(new_inner, z) : graph.mul(new_inner, z);
+                    uint32_t new_inner = (node().opType == OpType::ADD) ? graph.add(x, y) : graph.mul(x, y);
+                    uint32_t new_outer = (node().opType == OpType::ADD) ? graph.add(new_inner, z) : graph.mul(new_inner, z);
                     results.push_back(new_outer);
                 }
             }
@@ -148,10 +153,11 @@ namespace Rewrite
     {
         std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
         {
-            const auto &node = graph.nodes[id];
-            if (node.opType == OpType::NEGATE && node.parentIds.size() == 1)
+            const auto &node = [&]() -> const TensorNode &
+            { return graph.nodes[id]; };
+            if (node().opType == OpType::NEGATE && node().parentIds.size() == 1)
             {
-                const auto &inner = graph.nodes[node.parentIds[0]];
+                const auto &inner = graph.nodes[node().parentIds[0]];
                 if (inner.opType == OpType::NEGATE && inner.parentIds.size() == 1)
                 {
                     return {inner.parentIds[0]};
@@ -165,10 +171,11 @@ namespace Rewrite
     {
         std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
         {
-            const auto &node = graph.nodes[id];
-            if (node.opType == OpType::NEGATE && node.parentIds.size() == 1)
+            const auto &node = [&]() -> const TensorNode &
+            { return graph.nodes[id]; };
+            if (node().opType == OpType::NEGATE && node().parentIds.size() == 1)
             {
-                const auto &inner = graph.nodes[node.parentIds[0]];
+                const auto &inner = graph.nodes[node().parentIds[0]];
                 if (inner.opType == OpType::ADD && inner.parentIds.size() == 2)
                 {
                     uint32_t a = inner.parentIds[0];
@@ -186,11 +193,12 @@ namespace Rewrite
     {
         std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
         {
-            const auto &node = graph.nodes[id];
-            if (node.opType == OpType::MUL && node.parentIds.size() == 2)
+            const auto &node = [&]() -> const TensorNode &
+            { return graph.nodes[id]; };
+            if (node().opType == OpType::MUL && node().parentIds.size() == 2)
             {
-                uint32_t a_id = node.parentIds[0];
-                uint32_t b_id = node.parentIds[1];
+                uint32_t a_id = node().parentIds[0];
+                uint32_t b_id = node().parentIds[1];
                 const auto &a = graph.nodes[a_id];
                 const auto &b = graph.nodes[b_id];
 
@@ -211,12 +219,13 @@ namespace Rewrite
     {
         std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
         {
-            const auto &node = graph.nodes[id];
+            const auto &node = [&]() -> const TensorNode &
+            { return graph.nodes[id]; };
             // (a / c) + (b / c) -> (a + b) / c
-            if (node.opType == OpType::ADD && node.parentIds.size() == 2)
+            if (node().opType == OpType::ADD && node().parentIds.size() == 2)
             {
-                const auto &div1 = graph.nodes[node.parentIds[0]];
-                const auto &div2 = graph.nodes[node.parentIds[1]];
+                const auto &div1 = graph.nodes[node().parentIds[0]];
+                const auto &div2 = graph.nodes[node().parentIds[1]];
                 if (div1.opType == OpType::DIVIDE && div2.opType == OpType::DIVIDE &&
                     div1.parentIds.size() == 2 && div2.parentIds.size() == 2)
                 {

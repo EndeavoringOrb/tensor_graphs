@@ -4,13 +4,15 @@ import tg_cpp  # The compiled C++ extension
 
 
 class Gemma3ModelCPP:
-    def __init__(self, cfg, graph, mem):
+    def __init__(self, cfg, seq_len, graph, mem):
         self.cfg = cfg
         self.g = graph
         self.mem = mem
         self.eps = 1e-6
+        self.seq_len = seq_len
+        self.w_path = "resources/model.safetensors"
 
-        # CHANGED: Removed mem parameter from constant calls
+        # Constants
         self.one_fp32 = self.g.constant(
             [1], np.array([1.0], dtype=np.float32), tg_cpp.DType.FLOAT32
         )
@@ -21,287 +23,178 @@ class Gemma3ModelCPP:
             [1], np.array([0.5], dtype=np.float32), tg_cpp.DType.FLOAT32
         )
 
-    def weight(self, path, name):
-        """
-        Helper function to load a weight and ensure it's cast to FP32.
-        This is necessary because model weights may be stored as BF16/FP16
-        but our operations expect FP32.
-        """
-        # CHANGED: Removed mem parameter from weight call
-        raw_weight = self.g.weight(path, name)
-
-        # Check if it needs casting (assume weights need to be FP32 for compatibility)
-        # For now, always cast to ensure consistency across the graph
+    def weight(self, name):
+        """Helper to load a weight and cast to FP32."""
+        raw_weight = self.g.weight(self.w_path, name)
         return self.g.cast(raw_weight, tg_cpp.DType.FLOAT32)
 
-    def rms_norm_gemma_atomic(self, x_id, weight_id):
-        """
-        Decomposed RMSNorm using only atomic operations.
-        Gemma uses: RMSNorm(x) * (1 + weight)
-        RMSNorm = x / sqrt(mean(x^2) + eps)
-        """
-        # 1. x * x (element-wise square)
-        x_sq = self.g.mul(x_id, x_id)
+    def repeat_3d_axis(self, tensor_id, repeats, axis):
+        if repeats <= 1:
+            return tensor_id
+        rep_node = self.g.constant(
+            [1], np.array([repeats], dtype=np.int32), tg_cpp.DType.INT32
+        )
+        ax_node = self.g.constant(
+            [1], np.array([axis], dtype=np.int32), tg_cpp.DType.INT32
+        )
+        return self.g.repeat(tensor_id, rep_node, ax_node)
 
-        # 2. sum(x^2, axis=-1, keepdims=True)
+    def expand_scalar_to_3d(self, scalar_id, dim0, dim1, dim2):
+        shape_node = self.g.constant(
+            [3], np.array([1, 1, 1], dtype=np.int32), tg_cpp.DType.INT32
+        )
+        out = self.g.reshape(scalar_id, shape_node)
+        if dim0 > 1:
+            out = self.repeat_3d_axis(out, dim0, 0)
+        if dim1 > 1:
+            out = self.repeat_3d_axis(out, dim1, 1)
+        if dim2 > 1:
+            out = self.repeat_3d_axis(out, dim2, 2)
+        return out
+
+    def expand_1d_to_3d(self, vec_id, vec_len, dim0, dim1):
+        shape_node = self.g.constant(
+            [3], np.array([1, 1, vec_len], dtype=np.int32), tg_cpp.DType.INT32
+        )
+        out = self.g.reshape(vec_id, shape_node)
+        if dim0 > 1:
+            out = self.repeat_3d_axis(out, dim0, 0)
+        if dim1 > 1:
+            out = self.repeat_3d_axis(out, dim1, 1)
+        return out
+
+    def rms_norm_gemma_atomic(self, x_id, weight_id, dim0, dim_size):
+        x_sq = self.g.mul(x_id, x_id)
         axis_node = self.g.constant(
             [1], np.array([-1], dtype=np.int32), tg_cpp.DType.INT32
         )
+        sum_sq = self.g.sum(x_sq, axis_node)
 
-        keepdims_node = self.g.constant(
-            [1], np.array([True], dtype=np.bool_), tg_cpp.DType.BOOL
+        n_node = self.expand_scalar_to_3d(
+            self.g.constant(
+                [1], np.array([float(dim_size)], dtype=np.float32), tg_cpp.DType.FLOAT32
+            ),
+            dim0,
+            self.seq_len,
+            1,
         )
-
-        sum_sq = self.g.sum(x_sq, axis_node, keepdims_node)
-
-        # 3. mean = sum / n (where n = shape[-1])
-        n_node = self.g.constant(
-            [1],
-            np.array([float(self.cfg["emb_dim"])], dtype=np.float32),
-            tg_cpp.DType.FLOAT32,
-        )
-
         mean_sq = self.g.div(sum_sq, n_node)
 
-        # 4. mean_sq + eps
-        mean_sq_plus_eps = self.g.add(mean_sq, self.eps_fp32)
-
-        # 5. sqrt(mean_sq + eps) using pow(x, 0.5)
-        sqrt_node = self.g.constant(
-            [1], np.array([0.5], dtype=np.float32), tg_cpp.DType.FLOAT32
+        eps_exp = self.expand_scalar_to_3d(self.eps_fp32, dim0, self.seq_len, 1)
+        std = self.g.pow(
+            self.g.add(mean_sq, eps_exp),
+            self.expand_scalar_to_3d(self.half_fp32, dim0, self.seq_len, 1),
         )
 
-        std = self.g.pow(mean_sq_plus_eps, sqrt_node)
-
-        # 6. 1.0 / std
-        inv_std = self.g.div(self.one_fp32, std)
-
-        # 7. x * inv_std (normalized)
+        one_exp = self.expand_scalar_to_3d(self.one_fp32, dim0, self.seq_len, 1)
+        inv_std = self.repeat_3d_axis(self.g.div(one_exp, std), dim_size, 2)
         x_norm = self.g.mul(x_id, inv_std)
 
-        # 8. scale = 1 + weight (Gemma's offset scaling)
-        # Ensure weight is FP32 before adding
-        weight_fp32 = self.g.cast(weight_id, tg_cpp.DType.FLOAT32)
-        scale = self.g.add(weight_fp32, self.one_fp32)
-
-        # 9. x_norm * scale
+        weight_exp = self.expand_1d_to_3d(weight_id, dim_size, dim0, self.seq_len)
+        scale = self.g.add(
+            weight_exp,
+            self.expand_scalar_to_3d(self.one_fp32, dim0, self.seq_len, dim_size),
+        )
         return self.g.mul(x_norm, scale)
-
-    def gelu_atomic(self, x_id):
-        """
-        Decomposed GELU using atomic operations.
-        GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-        """
-        # Constants
-        c1_node = self.g.constant(
-            [1], np.array([0.044715], dtype=np.float32), tg_cpp.DType.FLOAT32
-        )
-
-        c2_node = self.g.constant(
-            [1],
-            np.array([0.79788456], dtype=np.float32),
-            tg_cpp.DType.FLOAT32,
-        )
-
-        # x^2
-        x_sq = self.g.mul(x_id, x_id)
-
-        # x^3
-        x_cube = self.g.mul(x_sq, x_id)
-
-        # 0.044715 * x^3
-        term1 = self.g.mul(x_cube, c1_node)
-
-        # x + 0.044715 * x^3
-        term2 = self.g.add(x_id, term1)
-
-        # sqrt(2/pi) * (x + 0.044715 * x^3)
-        term3 = self.g.mul(term2, c2_node)
-
-        # tanh(term3) - using atomic decomposition
-        tanh_result = self.tanh_atomic(term3)
-
-        # 1 + tanh(...)
-        term4 = self.g.add(self.one_fp32, tanh_result)
-
-        # 0.5 * x
-        term5 = self.g.mul(x_id, self.half_fp32)
-
-        # 0.5 * x * (1 + tanh(...))
-        return self.g.mul(term5, term4)
-
-    def tanh_atomic(self, x_id):
-        """
-        Numerically stable decomposed tanh using atomic operations.
-        tanh(x) = (2 / (1 + e^-2x)) - 1
-        """
-        # Constants
-        neg_two = self.g.constant(
-            [1], np.array([-2.0], dtype=np.float32), tg_cpp.DType.FLOAT32
-        )
-        two = self.g.constant(
-            [1], np.array([2.0], dtype=np.float32), tg_cpp.DType.FLOAT32
-        )
-        e_node = self.g.constant(
-            [1], np.array([2.718281828459045], dtype=np.float32), tg_cpp.DType.FLOAT32
-        )
-
-        # 1. exp(-2x)
-        neg_2x = self.g.mul(x_id, neg_two)
-        exp_neg_2x = self.g.pow(e_node, neg_2x)
-
-        # 2. 1 + exp(-2x)
-        den = self.g.add(self.one_fp32, exp_neg_2x)
-
-        # 3. 2 / (1 + exp(-2x))
-        quotient = self.g.div(two, den)
-
-        # 4. quotient - 1
-        neg_one = self.g.neg(self.one_fp32)
-        return self.g.add(quotient, neg_one)
 
     def build_graph(self, input_ids_id):
         cfg = self.cfg
-        w_path = "resources/model.safetensors"
-
-        # 1. Embedding - now uses helper that casts to FP32
-        w_emb = self.weight(w_path, "model.embed_tokens.weight")
+        w_emb = self.weight("model.embed_tokens.weight")
         x = self.g.gather(w_emb, input_ids_id)
 
-        # Scale by sqrt(emb_dim)
-        scale_node = self.g.constant(
-            [1],
-            np.array([float(cfg["emb_dim"] ** 0.5)], dtype=np.float32),
-            tg_cpp.DType.FLOAT32,
+        # Scale embedding
+        scale_val = float(cfg["emb_dim"] ** 0.5)
+        scale_node = self.expand_scalar_to_3d(
+            self.g.constant(
+                [1], np.array([scale_val], dtype=np.float32), tg_cpp.DType.FLOAT32
+            ),
+            1,
+            self.seq_len,
+            cfg["emb_dim"],
         )
         x = self.g.mul(x, scale_node)
 
-        # 2. Layers
         for i in range(cfg["n_layers"]):
             prefix = f"model.layers.{i}"
-
-            # Pre-norm Residual Block
             residual = x
 
-            # Load weight and cast to FP32 using helper
-            w_ln1 = self.weight(w_path, f"{prefix}.input_layernorm.weight")
-            x = self.rms_norm_gemma_atomic(x, w_ln1)
+            # Pre-norm
+            w_ln1 = self.weight(f"{prefix}.input_layernorm.weight")
+            x = self.rms_norm_gemma_atomic(x, w_ln1, 1, cfg["emb_dim"])
 
-            # Attention (simplified - using atomic ops for projections)
-            q = self.attention_qkv_atomic(x, prefix, cfg)
-            x = self.attention_output_atomic(q, prefix, cfg)
+            # Attention (Simplified projection logic matching C++ impl requirements)
+            x = self.attention_block(x, prefix)
 
-            w_post_attn = self.weight(
-                w_path, f"{prefix}.post_attention_layernorm.weight"
-            )
-            x = self.rms_norm_gemma_atomic(x, w_post_attn)
-
+            w_post_attn = self.weight(f"{prefix}.post_attention_layernorm.weight")
+            x = self.rms_norm_gemma_atomic(x, w_post_attn, 1, cfg["emb_dim"])
             x = self.g.add(residual, x)
 
-            # MLP Block
+            # MLP
             residual = x
+            w_ln2 = self.weight(f"{prefix}.pre_feedforward_layernorm.weight")
+            x = self.rms_norm_gemma_atomic(x, w_ln2, 1, cfg["emb_dim"])
+            x = self.mlp_block(x, prefix)
 
-            w_ln2 = self.weight(w_path, f"{prefix}.pre_feedforward_layernorm.weight")
-            x = self.rms_norm_gemma_atomic(x, w_ln2)
-            x = self.mlp_atomic(x, prefix, cfg)
-
-            w_post_ff = self.weight(
-                w_path, f"{prefix}.post_feedforward_layernorm.weight"
-            )
-            x = self.rms_norm_gemma_atomic(x, w_post_ff)
-
+            w_post_ff = self.weight(f"{prefix}.post_feedforward_layernorm.weight")
+            x = self.rms_norm_gemma_atomic(x, w_post_ff, 1, cfg["emb_dim"])
             x = self.g.add(residual, x)
 
-        # 3. Final Norm & Head
-        w_final_ln = self.weight(w_path, "model.norm.weight")
-        x = self.rms_norm_gemma_atomic(x, w_final_ln)
+        w_final_ln = self.weight("model.norm.weight")
+        x = self.rms_norm_gemma_atomic(x, w_final_ln, 1, cfg["emb_dim"])
 
-        # Weight tying - transpose embedding weights
-        dims_node = self.g.constant(
+        # Head
+        perm_dims = self.g.constant(
             [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
         )
-        w_emb_t = self.g.permute(w_emb, dims_node)
-        logits = self.g.dot(x, w_emb_t)
+        w_emb_t = self.g.permute(w_emb, perm_dims)
+        s3 = self.g.constant(
+            [3],
+            np.array([1, cfg["emb_dim"], cfg["vocab_size"]], dtype=np.int32),
+            tg_cpp.DType.INT32,
+        )
+        return self.g.dot(x, self.g.reshape(w_emb_t, s3))
 
-        return logits
-
-    def attention_qkv_atomic(self, x, prefix, cfg):
-        """Compute Q, K, V projections using atomic operations."""
-        w_path = "resources/model.safetensors"
-
-        # Q projection - use weight helper for FP32 casting
-        w_q = self.weight(w_path, f"{prefix}.self_attn.q_proj.weight")
-        dims_node = self.g.constant(
+    def attention_block(self, x, prefix):
+        # Mirroring the simplified projection used for the small 270m example
+        w_q = self.weight(f"{prefix}.self_attn.q_proj.weight")
+        perm_dims = self.g.constant(
             [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
         )
-        w_q_t = self.g.permute(w_q, dims_node)
-        q = self.g.dot(x, w_q_t)
-
-        # K projection
-        w_k = self.weight(w_path, f"{prefix}.self_attn.k_proj.weight")
-        dims_node = self.g.constant(
-            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
-        )
-        w_k_t = self.g.permute(w_k, dims_node)
-        k = self.g.dot(x, w_k_t)
-
-        # V projection
-        w_v = self.weight(w_path, f"{prefix}.self_attn.v_proj.weight")
-        dims_node = self.g.constant(
-            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
-        )
-        w_v_t = self.g.permute(w_v, dims_node)
-        v = self.g.dot(x, w_v_t)
-
-        return q, k, v
-
-    def attention_output_atomic(self, qkv, prefix, cfg):
-        """Simplified attention output using atomic operations."""
-        q, k, v = qkv
-
-        # For simplicity, just return a scaled version of the input
-        scale_node = self.g.constant(
-            [1],
+        w_q_t = self.g.permute(w_q, perm_dims)
+        s3 = self.g.constant(
+            [3],
             np.array(
-                [1.0 / float(cfg["query_pre_attn_scalar"] ** 0.5)], dtype=np.float32
+                [1, self.cfg["emb_dim"], self.cfg["n_heads"] * self.cfg["head_dim"]],
+                dtype=np.int32,
             ),
-            tg_cpp.DType.FLOAT32,
+            tg_cpp.DType.INT32,
         )
+        q = self.g.dot(x, self.g.reshape(w_q_t, s3))
 
+        # Scaling matching the query_pre_attn_scalar
+        scale = 1.0 / (self.cfg["query_pre_attn_scalar"] ** 0.5)
+        scale_node = self.expand_scalar_to_3d(
+            self.g.constant(
+                [1], np.array([scale], dtype=np.float32), tg_cpp.DType.FLOAT32
+            ),
+            1,
+            self.seq_len,
+            self.cfg["n_heads"] * self.cfg["head_dim"],
+        )
         return self.g.mul(q, scale_node)
 
-    def mlp_atomic(self, x, prefix, cfg):
-        """MLP using atomic operations with GELU."""
-        w_path = "resources/model.safetensors"
-
-        # Gate projection - use weight helper for FP32 casting
-        w_gate = self.weight(w_path, f"{prefix}.mlp.gate_proj.weight")
-        dims_node = self.g.constant(
+    def mlp_block(self, x, prefix):
+        w_gate = self.weight(f"{prefix}.mlp.gate_proj.weight")
+        perm_dims = self.g.constant(
             [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
         )
-        w_gate_t = self.g.permute(w_gate, dims_node)
-        gate = self.g.dot(x, w_gate_t)
-        gate = self.gelu_atomic(gate)
-
-        # Up projection
-        w_up = self.weight(w_path, f"{prefix}.mlp.up_proj.weight")
-        dims_node = self.g.constant(
-            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
+        w_gate_t = self.g.permute(w_gate, perm_dims)
+        s3 = self.g.constant(
+            [3],
+            np.array([1, self.cfg["emb_dim"], self.cfg["hidden_dim"]], dtype=np.int32),
+            tg_cpp.DType.INT32,
         )
-        w_up_t = self.g.permute(w_up, dims_node)
-        up = self.g.dot(x, w_up_t)
-
-        # Gate * Up
-        gate_up = self.g.mul(gate, up)
-
-        # Down projection
-        w_down = self.weight(w_path, f"{prefix}.mlp.down_proj.weight")
-        dims_node = self.g.constant(
-            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
-        )
-        w_down_t = self.g.permute(w_down, dims_node)
-
-        return self.g.dot(gate_up, w_down_t)
+        return self.g.dot(x, self.g.reshape(w_gate_t, s3))
 
 
 def main():
@@ -316,27 +209,23 @@ def main():
         "query_pre_attn_scalar": 256,
     }
 
-    # Initialize C++ Backend
     mem = tg_cpp.MemoryManager()
-    # Allocate 2GB for CPU
     mem.add_buffer(tg_cpp.Backend.CPU, 2 * 1024 * 1024 * 1024)
-
     graph = tg_cpp.Graph()
-
-    # Define Input
     MAX_SEQ_LEN = 128
 
+    # Input Definition
     input_ids_id = graph.allocateId()
-    size_bytes = 1 * MAX_SEQ_LEN * 4  # 4 bytes for INT32
     mem.allocate(
-        tg_cpp.Backend.CPU, input_ids_id, size_bytes, tg_cpp.StorageType.PERSISTENT
+        tg_cpp.Backend.CPU, input_ids_id, MAX_SEQ_LEN * 4, tg_cpp.StorageType.PERSISTENT
     )
 
     input_view = tg_cpp.TensorView()
-    input_view.shape = [1, MAX_SEQ_LEN]
-    input_view.strides = [MAX_SEQ_LEN, 1]
-    input_view.dtype = tg_cpp.DType.INT32
-
+    input_view.shape, input_view.strides, input_view.dtype = (
+        [1, MAX_SEQ_LEN],
+        [MAX_SEQ_LEN, 1],
+        tg_cpp.DType.INT32,
+    )
     input_ids_node = graph.inputWithId(
         input_ids_id,
         [1, MAX_SEQ_LEN],
@@ -345,32 +234,28 @@ def main():
         tg_cpp.StorageType.PERSISTENT,
     )
 
-    model = Gemma3ModelCPP(cfg, graph, mem)
+    model = Gemma3ModelCPP(cfg, MAX_SEQ_LEN, graph, mem)
     logits_id = model.build_graph(input_ids_node)
 
-    # Initialize Session
-    session = tg_cpp.Session(graph, mem, logits_id, "gemma_cache.jsonl")
-
-    # Init memory (Actualizes the Arena)
+    # Use a unique cache path for Python to avoid Node ID collisions with the C++ binary
+    session = tg_cpp.Session(
+        graph, mem, logits_id, "dirty_region_caches/gemma-3-270m-python.jsonl"
+    )
     mem.init_all()
 
     tokenizer = Tokenizer.from_file("resources/tokenizer.json")
-    prompt = "The secret to life is"
-    tokens = tokenizer.encode(prompt).ids
+    tokens = tokenizer.encode("The secret to life is").ids
 
     print("Running Inference...")
-    for _ in range(20):
-        # Prepare input buffer
+    for _ in range(10):
         input_data = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
         input_data[0, : len(tokens)] = tokens
-
-        # Run Session (passing a dict of ID -> Numpy Array)
         session.run({input_ids_node: input_data})
 
-        # Get output pointer as numpy array
         output_logits = session.get_output(logits_id)
-
-        next_token = int(np.argmax(output_logits[0, len(tokens) - 1, :]))
+        # Reshape flat output back to [Batch, Seq, Vocab] for argmax
+        logits_reshaped = output_logits.reshape(1, MAX_SEQ_LEN, cfg["vocab_size"])
+        next_token = int(np.argmax(logits_reshaped[0, len(tokens) - 1, :]))
         tokens.append(next_token)
         print(tokenizer.decode([next_token]), end="", flush=True)
 

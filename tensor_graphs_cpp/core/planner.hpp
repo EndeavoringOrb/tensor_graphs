@@ -87,15 +87,15 @@ public:
         Rewrite::DivMulRule dmr;
         Rewrite::DivAddRule dar;
 
-        // std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr, &fr, &ar, &dnr, &nar, &dmr, &dar};
-        std::vector<const Rewrite::RewriteRule *> rules = {}; // TODO: remove this line, this is just so the matching phase is fast while debugging planning phase
+        std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr, &fr, &ar, &dnr, &nar, &dmr, &dar};
+        // std::vector<const Rewrite::RewriteRule *> rules = {}; // TODO: remove this line, this is just so the matching phase is fast while debugging planning phase
 
         std::cout << "[Planner.plan] matching fusion patterns..." << std::endl;
         uint32_t topoIdx = 0;
         for (auto it = topo.rbegin(); it != topo.rend(); ++it)
         {
             topoIdx++;
-            std::cout << topoIdx << "/" << topo.size() << "\r";
+            std::cout << topoIdx << "/" << topo.size() << ", matched: " << fusionMap.size() << "\r";
             uint32_t nodeId = *it;
             std::string hash = Hashing::detail::structuralHashImpl(nodeId, graph, structHashMemo);
 
