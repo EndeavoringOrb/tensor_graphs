@@ -501,7 +501,7 @@ private:
                             std::string phash = Hashing::detail::structuralHashImpl(pStrat.nodeId, graph, structHashMemo);
                             if (pStrat.assignments.at(phash) != backend)
                             {
-                                cost += 0.05f;
+                                cost += 0.05f; // TODO: use estimateCost with temp copyTo node
                             }
                         }
 

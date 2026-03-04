@@ -184,6 +184,7 @@ public:
 
     void compile(const std::unordered_map<uint32_t, const void *> &sampleInputs)
     {
+        costModel.load("benchmarks/records.jsonl");
         if (isPlanned)
         {
             std::cout << "[Session.compile] Using cached compilation." << std::endl;

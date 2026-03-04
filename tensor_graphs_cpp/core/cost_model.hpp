@@ -44,11 +44,41 @@ struct CostModel
     std::unordered_set<std::string> loggedCalls;
     std::ofstream callFile;
 
+    CostModel()
+    {
+#ifdef TENSOR_GRAPHS_LOG_COST_CALLS
+        const std::string path = "benchmarks/calls.jsonl";
+
+        // 1. Load existing logged calls
+        {
+            std::ifstream inFile(path);
+            if (inFile.is_open())
+            {
+                std::string line;
+                while (std::getline(inFile, line))
+                {
+                    if (!line.empty())
+                    {
+                        loggedCalls.insert(line);
+                    }
+                }
+            }
+        }
+
+        // 2. Open for append
+        callFile.open(path, std::ios::app);
+
+        if (!callFile.is_open())
+        {
+            std::cerr << "Failed to open " << path << " for appending.\n";
+        }
+#endif
+    }
+
     void load(std::string benchmarkPath)
     {
         // Clear previous state
         records.clear();
-        loggedCalls.clear();
 
         std::ifstream file(benchmarkPath);
         if (!file.is_open())
@@ -64,13 +94,6 @@ struct CostModel
             uint32_t kid = j.at("kernelId").get<uint32_t>();
             records[kid].push_back(r);
         }
-
-#ifdef TENSOR_GRAPHS_LOG_COST_CALLS
-        if (!callFile.is_open())
-        {
-            callFile.open("benchmarks/calls.jsonl", std::ios::app);
-        }
-#endif
     }
 
     // TODO: improve this. for example: sum of 2048 and sum of 1024 have same output shape but different runtimes, so current interpolate would be a bad heuristic

@@ -56,18 +56,13 @@ int main()
         {
             if (line.empty())
                 continue;
-            try
-            {
-                auto j = json::parse(line);
-                json keyObj;
-                keyObj["kernelId"] = j["kernelId"];
-                keyObj["inputShapes"] = j["inputShapes"];
-                keyObj["outputShapes"] = j["outputShapes"];
-                recordedKeys.insert(keyObj.dump());
-            }
-            catch (...)
-            {
-            }
+
+            auto j = json::parse(line);
+            json keyObj;
+            keyObj["kernelId"] = j["kernelId"];
+            keyObj["inputShapes"] = j["inputShapes"];
+            keyObj["outputShapes"] = j["outputShapes"];
+            recordedKeys.insert(keyObj.dump());
         }
     }
 
@@ -86,23 +81,17 @@ int main()
     {
         if (line.empty())
             continue;
-        try
-        {
-            auto j = json::parse(line);
-            json keyObj;
-            keyObj["kernelId"] = j["kernelId"];
-            keyObj["inputShapes"] = j["inputShapes"];
-            keyObj["outputShapes"] = j["outputShapes"];
-            std::string key = keyObj.dump();
+        auto j = json::parse(line);
+        json keyObj;
+        keyObj["kernelId"] = j["kernelId"];
+        keyObj["inputShapes"] = j["inputShapes"];
+        keyObj["outputShapes"] = j["outputShapes"];
+        std::string key = keyObj.dump();
 
-            if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
-            {
-                seenCalls.insert(key);
-                toBenchmark.push_back(j);
-            }
-        }
-        catch (...)
+        if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
         {
+            seenCalls.insert(key);
+            toBenchmark.push_back(j);
         }
     }
 
