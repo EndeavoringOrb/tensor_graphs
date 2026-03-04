@@ -221,85 +221,54 @@ public:
                 assignedBackend = bestRecipe.assignments.at(h);
             }
 
-            uint32_t assignedKernelId = 0;
-            if (bestRecipe.kernelAssignments.count(h))
+            // Prepare input nodes for querying
+            std::vector<TensorNode> inputNodes;
+            for (uint32_t pid : node.parentIds)
             {
-                assignedKernelId = bestRecipe.kernelAssignments.at(h);
+                inputNodes.push_back(graph.nodes[pid]);
+            }
+
+            // Pass refCounts to findMatchingKernels to enforce inplace safety at runtime
+            std::vector<uint32_t> validKernels = KernelRegistry::get().findMatchingKernels(
+                node.opType, node.opName, assignedBackend, inputNodes, node, &compiled.refCounts);
+
+            uint32_t finalKernelId;
+
+            // Check if our planned kernel is still valid
+            uint32_t plannedKernelId = bestRecipe.kernelAssignments.count(h) ? bestRecipe.kernelAssignments.at(h) : UINT32_MAX;
+            bool isPlannedValid = false;
+            for (uint32_t kid : validKernels)
+            {
+                if (kid == plannedKernelId)
+                {
+                    isPlannedValid = true;
+                    break;
+                }
+            }
+
+            if (isPlannedValid)
+            {
+                finalKernelId = plannedKernelId;
             }
             else
             {
-                std::string opStr = (node.opType == OpType::FUSED) ? node.opName : toString(node.opType);
-                throw std::runtime_error("No kernel assigned for node with OpType " + opStr + " (ID " + std::to_string(id) + ")");
+                // Fallback: The planned kernel (e.g. inplace) is invalid under current refCounts.
+                // Select the first available valid kernel (usually the out-of-place version).
+                if (validKernels.empty())
+                {
+                    throw std::runtime_error("[Planner.plan] CRITICAL: No valid kernel found for node " + std::to_string(id));
+                }
+                finalKernelId = validKernels[0];
             }
 
-            const KernelEntry &kEntry = KernelRegistry::get().getKernel(assignedKernelId);
-
-            // Determine if inplace execution is actually safe for this node context
-            // (Inplace safety depends on refcounts and storage type, which are finalized here)
-            bool is_inplace_safe = false;
-            if (!node.parentIds.empty())
-            {
-                uint32_t p0 = node.parentIds[0];
-                if (graph.nodes[p0].storageType == StorageType::TRANSIENT &&
-                    compiled.refCounts[p0] == 1 &&
-                    countElements(graph.nodes[p0].shape) == countElements(node.shape) &&
-                    getDTypeSize(graph.nodes[p0].dtype) == getDTypeSize(node.dtype))
-                {
-                    is_inplace_safe = true;
-                }
-            }
-
-            uint32_t finalKernelId = assignedKernelId;
-            int32_t inplaceInputIndex = -1;
-
-            if (kEntry.inplace)
-            {
-                if (is_inplace_safe)
-                {
-                    inplaceInputIndex = 0;
-                }
-                else
-                {
-                    // Inplace kernel assigned during planning (optimistic), but runtime conditions forbid it.
-                    // Fallback: Find a compatible out-of-place kernel for this operation.
-                    std::vector<TensorNode> inputNodes;
-                    for (uint32_t pid : node.parentIds)
-                    {
-                        inputNodes.push_back(graph.nodes[pid]);
-                    }
-
-                    std::vector<uint32_t> candidates = KernelRegistry::get().findMatchingKernels(
-                        node.opType, node.opName, assignedBackend, inputNodes, node);
-
-                    bool found_fallback = false;
-                    for (uint32_t kid : candidates)
-                    {
-                        const auto &candidate = KernelRegistry::get().getKernel(kid);
-                        if (!candidate.inplace)
-                        {
-                            finalKernelId = kid;
-                            found_fallback = true;
-                            break;
-                        }
-                    }
-
-                    if (!found_fallback)
-                    {
-                        std::string opStr = (node.opType == OpType::FUSED) ? node.opName : toString(node.opType);
-                        throw std::runtime_error("[Planner.plan] CRITICAL: Inplace kernel '" + opStr +
-                                                 "' assigned for node " + std::to_string(id) +
-                                                 " but inplace conditions not met and no out-of-place fallback found.");
-                    }
-                }
-            }
-            // else: out-of-place kernel. inplaceInputIndex remains -1.
+            const KernelEntry &kEntry = KernelRegistry::get().getKernel(finalKernelId);
 
             OpInstruction inst;
             inst.nodeId = id;
             inst.kernelId = finalKernelId;
             inst.inputNodeIds = node.parentIds;
             inst.backend = assignedBackend;
-            inst.inplaceInputIndex = inplaceInputIndex;
+            inst.inplaceInputIndex = kEntry.inplace ? 0 : -1; // Simplified: Inplace kernels assume input 0 is the target
 
             compiled.instructions.push_back(inst);
         }
@@ -450,42 +419,26 @@ private:
         }
 
         std::vector<Backend> availableBackends = {Backend::CPU};
-
         std::vector<BeamStrategy> candidates;
 
         for (uint32_t targetId : targets)
         {
             const auto &target = graph.nodes[targetId];
 
-            // Check if all parents have been successfully planned
+            // Check parent planning status
             std::vector<std::vector<BeamStrategy>> parentBeamSets;
             bool anyParentMissing = false;
             for (uint32_t pid : target.parentIds)
             {
                 std::string phash = Hashing::detail::structuralHashImpl(pid, graph, structHashMemo);
-                if (memo.count(phash) == 0)
+                if (memo.count(phash) == 0 || memo[phash].empty())
                 {
                     anyParentMissing = true;
-                    const auto &pNode = graph.nodes[pid];
                     break;
                 }
                 parentBeamSets.push_back(memo[phash]);
             }
             if (anyParentMissing)
-                continue;
-
-            // Check if any parent beam sets are empty
-            bool anyParentEmpty = false;
-            for (size_t i = 0; i < parentBeamSets.size(); ++i)
-            {
-                if (parentBeamSets[i].empty())
-                {
-                    const auto &pNode = graph.nodes[target.parentIds[i]];
-                    anyParentEmpty = true;
-                    break;
-                }
-            }
-            if (anyParentEmpty)
                 continue;
 
             for (Backend backend : availableBackends)
@@ -496,32 +449,18 @@ private:
                     inputNodes.push_back(graph.nodes[pid]);
                 }
 
-                std::string opName = (target.opType == OpType::FUSED) ? target.opName : toString(target.opType);
-                std::vector<uint32_t> matchingKernels = KernelRegistry::get().findMatchingKernels(target.opType, target.opName, backend, inputNodes, target);
+                // Pass nullptr for refCounts during planning phase.
+                // We perform optimistic planning for inplace ops (assuming refcount=1).
+                // Runtime safety checks will happen during the final instruction build.
+                std::vector<uint32_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
+                    target.opType, target.opName, backend, inputNodes, target, nullptr);
 
-                if (matchingKernels.empty())
-                {
-                    continue;
-                }
+                // Removed the manual loop checking inplace && PERSISTENT.
+                // This is now handled inside findMatchingKernels.
 
                 for (uint32_t kernelId : matchingKernels)
                 {
                     const KernelEntry &kEntry = KernelRegistry::get().getKernel(kernelId);
-
-                    // Constraint: Inplace kernels cannot operate on persistent inputs (weights/constants)
-                    if (kEntry.inplace)
-                    {
-                        if (!target.parentIds.empty())
-                        {
-                            uint32_t p0 = target.parentIds[0];
-                            if (graph.nodes[p0].storageType == StorageType::PERSISTENT)
-                            {
-                                // Skip this kernel; cannot perform inplace operation on read-only data
-                                continue;
-                            }
-                        }
-                    }
-
                     std::string targetHash = Hashing::detail::structuralHashImpl(targetId, graph, structHashMemo);
 
                     if (parentBeamSets.empty())

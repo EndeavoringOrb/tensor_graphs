@@ -96,21 +96,58 @@ public:
         }
     }
 
-    std::vector<uint32_t> findMatchingKernels(OpType op, const std::string &opName, Backend backend,
-                                              const std::vector<TensorNode> &inputs,
-                                              const TensorNode &output) const
+    // Updated signature to include refCounts for runtime inplace safety checks
+    std::vector<uint32_t> findMatchingKernels(
+        OpType op,
+        const std::string &opName,
+        Backend backend,
+        const std::vector<TensorNode> &inputs,
+        const TensorNode &output,
+        const std::unordered_map<uint32_t, uint32_t> *refCounts = nullptr) const
     {
         std::vector<uint32_t> matches;
         for (uint32_t i = 0; i < entries.size(); ++i)
         {
-            if (entries[i].opType == op && entries[i].backend == backend)
+            const auto &entry = entries[i];
+            if (entry.opType != op || entry.backend != backend)
+                continue;
+            if (op == OpType::FUSED && entry.opName != opName)
+                continue;
+
+            // ---------------------------------------------------------
+            // Inplace Kernel Logic Centralized Here
+            // ---------------------------------------------------------
+            if (entry.inplace)
             {
-                if (op == OpType::FUSED && entries[i].opName != opName)
+                if (inputs.empty())
                     continue;
-                if (entries[i].match(inputs, output))
+
+                const TensorNode &input0 = inputs[0];
+
+                // Constraint 1: Cannot perform inplace operation on PERSISTENT (read-only) inputs
+                if (input0.storageType == StorageType::PERSISTENT)
+                    continue;
+
+                // Constraint 2: Shape and DType must be compatible for aliasing
+                if (countElements(input0.shape) != countElements(output.shape))
+                    continue;
+                if (getDTypeSize(input0.dtype) != getDTypeSize(output.dtype))
+                    continue;
+
+                // Constraint 3: Runtime Reference Count Check
+                // If refCounts are provided, we can only alias if the input is no longer needed
+                if (refCounts)
                 {
-                    matches.push_back(i);
+                    auto it = refCounts->find(input0.id);
+                    if (it == refCounts->end() || it->second != 1)
+                        continue;
                 }
+            }
+
+            // Finally, check the specific kernel match function
+            if (entry.match(inputs, output))
+            {
+                matches.push_back(i);
             }
         }
         return matches;
