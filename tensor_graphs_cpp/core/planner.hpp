@@ -27,6 +27,7 @@ public:
     {
         std::cout << "[Planner.plan] initial sort..." << std::endl;
         std::unordered_map<uint32_t, std::string> structHashMemo;
+        std::unordered_map<uint32_t, std::string> patternHashMemo;
         std::vector<uint32_t> topo = topologicalSort(rootId, graph);
 
         std::cout << "[Planner.plan] inferring shapes..." << std::endl;
@@ -71,7 +72,7 @@ public:
             pattern.rootId = factory(pattern.variables, pattern.graph);
 
             std::vector<uint32_t> p_topo = topologicalSort(pattern.rootId, pattern.graph);
-            inferShapes(p_topo, pattern.graph);
+            // inferShapes(p_topo, pattern.graph);
 
             fusedPatterns.push_back(std::move(pattern));
         }
@@ -93,11 +94,13 @@ public:
 
         std::cout << "[Planner.plan] matching fusion patterns..." << std::endl;
         uint32_t topoIdx = 0;
+        uint32_t fusionMatches = 0;
         for (auto it = topo.rbegin(); it != topo.rend(); ++it)
         {
             topoIdx++;
-            std::cout << topoIdx << "/" << topo.size() << ", matched: " << fusionMap.size() << "\r";
+            std::cout << topoIdx << "/" << topo.size() << ", rewrites: " << fusionMap.size() << ", matches: " << fusionMatches << "\r";
             uint32_t nodeId = *it;
+            // std::string patHash = Hashing::detail::patternHashImpl(nodeId, graph, patternHashMemo);
             std::string hash = Hashing::detail::structuralHashImpl(nodeId, graph, structHashMemo);
 
             std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(nodeId, graph, rules);
@@ -142,6 +145,7 @@ public:
                             graph.nodes.push_back(fusedNode);
 
                             fusionMap[hash].push_back(fusedNode.id);
+                            fusionMatches++;
                         }
                     }
                 }
@@ -425,6 +429,9 @@ private:
         for (uint32_t targetId : targets)
         {
             const auto &target = graph.nodes[targetId];
+            if (target.opName != "") {
+                int a = 5; // for debug breakpoint
+            }
 
             // Check parent planning status
             std::vector<std::vector<BeamStrategy>> parentBeamSets;

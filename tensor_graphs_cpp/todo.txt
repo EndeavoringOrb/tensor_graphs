@@ -1,0 +1,12 @@
+add compile time DEBUG ifdef flag
+-check nan
+
+more fused ops
+
+test.cpp
+
+examples/gemma-3-270m-cpp.py
+
+graph parallel
+
+constant folding
