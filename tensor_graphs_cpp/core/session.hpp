@@ -208,25 +208,23 @@ public:
         for (const auto &pair : compiled.nodesMap)
         {
             uint32_t nodeId = pair.first;
-            TensorNode &node = graph.nodes[nodeId];
-
-            if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
+            if (graph.nodes[nodeId].opType == OpType::INPUT && graph.nodes[nodeId].storageType == StorageType::PERSISTENT)
             {
-                uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+                uint64_t sizeBytes = getSizeBytes(graph.nodes[nodeId].shape, graph.nodes[nodeId].dtype);
 
                 // Physical allocation
-                uint64_t offset = memManager.allocate(node.backend, nodeId, sizeBytes, StorageType::PERSISTENT);
+                uint64_t offset = memManager.allocate(graph.nodes[nodeId].backend, nodeId, sizeBytes, StorageType::PERSISTENT);
 
                 // Data loading
                 if (graph.constantStaging.count(nodeId))
                 {
-                    memManager.write(node.backend, nodeId, graph.constantStaging[nodeId].data(), sizeBytes);
+                    memManager.write(graph.nodes[nodeId].backend, nodeId, graph.constantStaging[nodeId].data(), sizeBytes);
                 }
                 else if (graph.weightSources.count(nodeId))
                 {
                     const auto &source = graph.weightSources.at(nodeId);
                     auto &loader = graph.loaders.at(source.first);
-                    uint8_t *destPtr = memManager.buffers.at(node.backend).arena.data() + offset;
+                    uint8_t *destPtr = memManager.buffers.at(graph.nodes[nodeId].backend).arena.data() + offset;
                     loader->loadTensor(source.second, destPtr, sizeBytes);
                 }
             }
@@ -265,7 +263,6 @@ public:
         {
             uint32_t nodeId = pair.first;
             const auto &regionList = pair.second;
-            const TensorNode &node = graph.nodes[nodeId];
 
             if (regionList.empty())
                 continue;
@@ -276,7 +273,7 @@ public:
 
             for (size_t d = 0; d < box.region.size(); ++d)
             {
-                uint32_t dimLen = node.shape[d];
+                uint32_t dimLen = graph.nodes[nodeId].shape[d];
                 uint32_t start = box.region[d].start;
                 uint32_t stop = box.region[d].stop;
 
@@ -330,9 +327,8 @@ public:
         {
             uint32_t nodeId = pair.first;
             const void *newData = pair.second;
-            const TensorNode &node = graph.nodes[nodeId];
 
-            if (node.opType != OpType::INPUT)
+            if (graph.nodes[nodeId].opType != OpType::INPUT)
                 continue;
 
             const void *oldData = nullptr;
@@ -342,20 +338,20 @@ public:
                 oldData = prevIt->second.data();
             }
 
-            auto diff = computeInputDiff(oldData, newData, node.shape, node.dtype);
+            auto diff = computeInputDiff(oldData, newData, graph.nodes[nodeId].shape, graph.nodes[nodeId].dtype);
             if (!diff.empty())
             {
                 inputDiffs[nodeId] = diff;
             }
 
             // Save a copy of the new input data
-            uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+            uint64_t sizeBytes = getSizeBytes(graph.nodes[nodeId].shape, graph.nodes[nodeId].dtype);
             auto &stored = previousInputData[nodeId];
             stored.resize(sizeBytes);
             std::memcpy(stored.data(), newData, sizeBytes);
 
             // Write the new data to the buffer
-            memManager.write(node.backend, nodeId, newData, sizeBytes);
+            memManager.write(graph.nodes[nodeId].backend, nodeId, newData, sizeBytes);
         }
 
         // Find the best matching bucket
@@ -366,15 +362,14 @@ public:
 
     const void *getOutput(uint32_t nodeId) const
     {
-        const TensorNode &node = graph.nodes[nodeId];
-        auto &buf = memManager.buffers.at(node.backend);
+        auto &buf = memManager.buffers.at(graph.nodes[nodeId].backend);
         auto it = buf.allocationMap.find(nodeId);
 
         if (it == buf.allocationMap.end())
             return nullptr;
 
         uint64_t offset = it->second->offset;
-        uint64_t baseOffset = node.view.shape.empty() ? 0 : node.view.baseOffset;
+        uint64_t baseOffset = graph.nodes[nodeId].view.shape.empty() ? 0 : graph.nodes[nodeId].view.baseOffset;
 
         return buf.arena.data() + offset + baseOffset;
     }
@@ -550,13 +545,12 @@ public:
         std::vector<InputOption> inputOptions;
         for (uint32_t nodeId : inputNodeIds)
         {
-            const TensorNode &node = graph.nodes[nodeId];
-            if (node.opType != OpType::INPUT)
+            if (graph.nodes[nodeId].opType != OpType::INPUT)
                 continue;
 
             InputOption opt;
             opt.nodeId = nodeId;
-            for (uint32_t dimLen : node.shape)
+            for (uint32_t dimLen : graph.nodes[nodeId].shape)
             {
                 opt.dimSlices.push_back(generateSlicesForDim(dimLen));
             }

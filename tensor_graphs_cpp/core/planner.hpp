@@ -271,12 +271,11 @@ private:
         ShapePropagator propagator;
         for (uint32_t nodeId : topo)
         {
-            TensorNode &node = graph.nodes[nodeId];
-            propagator.inferShape(node, graph);
-            if (node.view.shape.empty() && !node.shape.empty())
+            propagator.inferShape(nodeId, graph);
+            if (graph.nodes[nodeId].view.shape.empty() && !graph.nodes[nodeId].shape.empty())
             {
-                node.view.shape = node.shape;
-                node.view.strides = TensorView::calcContiguousStrides(node.shape);
+                graph.nodes[nodeId].view.shape = graph.nodes[nodeId].shape;
+                graph.nodes[nodeId].view.strides = TensorView::calcContiguousStrides(graph.nodes[nodeId].shape);
             }
         }
     }
@@ -345,19 +344,19 @@ private:
                                                       std::unordered_map<uint32_t, std::string> &structHashMemo)
     {
         std::vector<uint32_t> order;
-        std::unordered_set<std::string> visited;
+        std::unordered_set<uint32_t> visited;
         auto visit = [&](auto &self, uint32_t node) -> void
         {
-            std::string hash = Hashing::detail::structuralHashImpl(node, graph, structHashMemo);
-            if (visited.count(hash))
+            if (visited.count(node))
                 return;
-            visited.insert(hash);
+            visited.insert(node);
 
             for (uint32_t pid : graph.nodes[node].parentIds)
             {
                 self(self, pid);
             }
 
+            std::string hash = Hashing::detail::structuralHashImpl(node, graph, structHashMemo);
             if (fusionMap.count(hash))
             {
                 for (uint32_t altNode : fusionMap[hash])
