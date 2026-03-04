@@ -11,6 +11,8 @@ inline bool matchReshapeInplaceND(const std::vector<TensorNode> &inputs, const T
 {
     if (inputs.size() != 2)
         return false;
+    if (inputs[0].view.baseOffset != output.view.baseOffset)
+        return false;
     return countElements(inputs[0].shape) == countElements(output.shape);
 }
 

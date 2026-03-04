@@ -15,8 +15,6 @@
 #include <sstream>
 #include <cstring>
 
-
-
 class Planner
 {
 public:
@@ -234,6 +232,10 @@ public:
                 throw std::runtime_error("No kernel assigned for node with OpType " + opStr + " (ID " + std::to_string(id) + ")");
             }
 
+            const KernelEntry &kEntry = KernelRegistry::get().getKernel(assignedKernelId);
+
+            // Determine if inplace execution is actually safe for this node context
+            // (Inplace safety depends on refcounts and storage type, which are finalized here)
             bool is_inplace_safe = false;
             if (!node.parentIds.empty())
             {
@@ -247,14 +249,57 @@ public:
                 }
             }
 
+            uint32_t finalKernelId = assignedKernelId;
+            int32_t inplaceInputIndex = -1;
+
+            if (kEntry.inplace)
+            {
+                if (is_inplace_safe)
+                {
+                    inplaceInputIndex = 0;
+                }
+                else
+                {
+                    // Inplace kernel assigned during planning (optimistic), but runtime conditions forbid it.
+                    // Fallback: Find a compatible out-of-place kernel for this operation.
+                    std::vector<TensorNode> inputNodes;
+                    for (uint32_t pid : node.parentIds)
+                    {
+                        inputNodes.push_back(graph.nodes[pid]);
+                    }
+
+                    std::vector<uint32_t> candidates = KernelRegistry::get().findMatchingKernels(
+                        node.opType, node.opName, assignedBackend, inputNodes, node);
+
+                    bool found_fallback = false;
+                    for (uint32_t kid : candidates)
+                    {
+                        const auto &candidate = KernelRegistry::get().getKernel(kid);
+                        if (!candidate.inplace)
+                        {
+                            finalKernelId = kid;
+                            found_fallback = true;
+                            break;
+                        }
+                    }
+
+                    if (!found_fallback)
+                    {
+                        std::string opStr = (node.opType == OpType::FUSED) ? node.opName : toString(node.opType);
+                        throw std::runtime_error("[Planner.plan] CRITICAL: Inplace kernel '" + opStr +
+                                                 "' assigned for node " + std::to_string(id) +
+                                                 " but inplace conditions not met and no out-of-place fallback found.");
+                    }
+                }
+            }
+            // else: out-of-place kernel. inplaceInputIndex remains -1.
+
             OpInstruction inst;
             inst.nodeId = id;
-            inst.kernelId = assignedKernelId;
+            inst.kernelId = finalKernelId;
             inst.inputNodeIds = node.parentIds;
             inst.backend = assignedBackend;
-
-            const KernelEntry &kEntry = KernelRegistry::get().getKernel(assignedKernelId);
-            inst.inplaceInputIndex = (is_inplace_safe && kEntry.supportsInplace) ? 0 : -1;
+            inst.inplaceInputIndex = inplaceInputIndex;
 
             compiled.instructions.push_back(inst);
         }
@@ -461,6 +506,22 @@ private:
 
                 for (uint32_t kernelId : matchingKernels)
                 {
+                    const KernelEntry &kEntry = KernelRegistry::get().getKernel(kernelId);
+
+                    // Constraint: Inplace kernels cannot operate on persistent inputs (weights/constants)
+                    if (kEntry.inplace)
+                    {
+                        if (!target.parentIds.empty())
+                        {
+                            uint32_t p0 = target.parentIds[0];
+                            if (graph.nodes[p0].storageType == StorageType::PERSISTENT)
+                            {
+                                // Skip this kernel; cannot perform inplace operation on read-only data
+                                continue;
+                            }
+                        }
+                    }
+
                     std::string targetHash = Hashing::detail::structuralHashImpl(targetId, graph, structHashMemo);
 
                     if (parentBeamSets.empty())

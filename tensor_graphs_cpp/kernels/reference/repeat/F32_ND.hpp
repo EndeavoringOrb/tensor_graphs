@@ -29,10 +29,6 @@ inline void runRepeatF32_ND(const std::vector<const void *> &inputs, const std::
     int32_t axis = *static_cast<const int32_t *>(inputs[2]);
     float *dst = static_cast<float *>(outputs[0]);
 
-    // Safety check: The standard kernel expects distinct buffers.
-    if (src == dst)
-        return;
-
     int32_t ndim = static_cast<int32_t>(inViews[0].shape.size());
     if (axis < 0)
         axis += ndim;

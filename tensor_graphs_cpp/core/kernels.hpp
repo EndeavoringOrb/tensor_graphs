@@ -75,7 +75,7 @@ struct KernelEntry
     MatchFunc match;
     KernelFunc run;
     ReferenceFactory refFactory;
-    bool supportsInplace;
+    bool inplace; // Strict flag: true for inplace-only, false for out-of-place-only
 };
 
 class KernelRegistry
@@ -87,9 +87,9 @@ public:
         return instance;
     }
 
-    void registerKernel(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool supportsInplace)
+    void registerKernel(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace)
     {
-        entries.push_back({op, opName, numInputs, backend, match, run, refFactory, supportsInplace});
+        entries.push_back({op, opName, numInputs, backend, match, run, refFactory, inplace});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory);
@@ -131,20 +131,24 @@ private:
 
 struct KernelRegistrar
 {
-    KernelRegistrar(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool supportsInplace)
+    KernelRegistrar(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace)
     {
-        KernelRegistry::get().registerKernel(op, opName, numInputs, backend, match, run, refFactory, supportsInplace);
+        KernelRegistry::get().registerKernel(op, opName, numInputs, backend, match, run, refFactory, inplace);
     }
 };
 
+// Standard kernel (out-of-place)
 #define REGISTER_KERNEL(op, backend, match, run) \
     static KernelRegistrar _registrar_##run(op, "", 0, backend, match, run, nullptr, false)
 
+// In-place kernel
 #define REGISTER_KERNEL_INPLACE(op, backend, match, run) \
     static KernelRegistrar _registrar_##run(op, "", 0, backend, match, run, nullptr, true)
 
+// Standard fused kernel (out-of-place)
 #define REGISTER_FUSED_KERNEL(opName, numInputs, backend, match, run, refFactory) \
     static KernelRegistrar _registrar_fused_##run(OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false)
 
+// In-place fused kernel
 #define REGISTER_FUSED_KERNEL_INPLACE(opName, numInputs, backend, match, run, refFactory) \
     static KernelRegistrar _registrar_fused_##run(OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true)
