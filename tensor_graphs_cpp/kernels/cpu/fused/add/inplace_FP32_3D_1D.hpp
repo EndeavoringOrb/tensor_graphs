@@ -69,7 +69,7 @@ inline void runAddFP32_3D_1D_Inplace(const std::vector<const void *> &inputs, co
  * Reference Factory: Defines the pattern the planner looks for to apply this fusion.
  * Pattern: add(x_3d, repeat(repeat(reshape(x_1d, [1,1,D]), B, 0), S, 1))
  */
-inline uint32_t refFactoryAdd3D_1D_inplace(const std::vector<uint32_t> &inputs, Graph &graph)
+inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         throw std::runtime_error("Fused Add 3D+1D requires 2 inputs");
@@ -77,33 +77,19 @@ inline uint32_t refFactoryAdd3D_1D_inplace(const std::vector<uint32_t> &inputs, 
     uint32_t id3D = inputs[0];
     uint32_t id1D = inputs[1];
 
-    // We use the shapes from the graph to build a pattern that matches exactly
-    // how the Python frontend expands dimensions.
-    const auto &s3D = graph.nodes[id3D].shape;
-    const auto &s1D = graph.nodes[id1D].shape;
-
-    uint32_t B = s3D[0];
-    uint32_t S = s3D[1];
-    uint32_t D = s1D[0];
-
     // 1. Reshape 1D -> [1, 1, D]
-    int32_t target_shape[] = {1, 1, (int32_t)D};
-    uint32_t shape_node = graph.constant({3}, target_shape, DType::INT32);
+    uint32_t shape_node = graph.constant();
     uint32_t reshaped = graph.reshape(id1D, shape_node);
 
     // 2. Repeat axis 0 (Batch)
-    int32_t b_reps[] = {(int32_t)B};
-    int32_t b_axis[] = {0};
     uint32_t repeated_b = graph.repeat(reshaped,
-                                       graph.constant({1}, b_reps, DType::INT32),
-                                       graph.constant({1}, b_axis, DType::INT32));
+                                       graph.constant(),
+                                       graph.constant());
 
     // 3. Repeat axis 1 (Sequence)
-    int32_t s_reps[] = {(int32_t)S};
-    int32_t s_axis[] = {1};
     uint32_t expanded = graph.repeat(repeated_b,
-                                     graph.constant({1}, s_reps, DType::INT32),
-                                     graph.constant({1}, s_axis, DType::INT32));
+                                     graph.constant(),
+                                     graph.constant());
 
     // 4. Final Add
     return graph.add(id3D, expanded);

@@ -42,6 +42,7 @@ int main()
             keyObj["inputShapes"] = j["inputShapes"];
             keyObj["outputShapes"] = j["outputShapes"];
             std::string key = keyObj.dump();
+            recordedKeys.insert(key);
         }
     }
 
@@ -71,6 +72,8 @@ int main()
         {
             seenCalls.insert(key);
             toBenchmark.push_back(j);
+        } else {
+            int a = 5;
         }
     }
 

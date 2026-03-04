@@ -306,7 +306,7 @@ struct ShapePropagator
             break;
         }
         case OpType::FUSED:
-            break;
+            break; // TODO: we should never hit this, only infer shapes for atomic, fused should inherit from atomic that it is replacing
         default:
             break;
         }

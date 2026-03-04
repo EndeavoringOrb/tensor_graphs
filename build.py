@@ -18,21 +18,21 @@ CORE_DEPENDENCIES = [
     ROOT_DIR / "core" / "memory.hpp",
     ROOT_DIR / "core" / "kernels.hpp",
     ROOT_DIR / "core" / "graph.hpp",
-    ROOT_DIR / "core" / "shapes.hpp",
 ]
 
 # Windows ARM64 Compiler Configuration
-COMPILER_CMD = [
-    "cl.exe",
-    "/Zi",
-    "/std:c++17",
-    "/EHsc",
-    "/O2",  # Optimization flag
-    "/Fe:tensor_graphs_cpp/main.exe",
-    f"/I{ROOT_DIR}",
-    # Input file placed at the end so it can be stripped for the hash
-    str(ROOT_DIR / "main.cpp"),
-]
+def get_compiler_cmd(fname: str):
+    return [
+        "cl.exe",
+        "/Zi",
+        "/std:c++17",
+        "/EHsc",
+        "/O2",  # Optimization flag
+        f"/I{ROOT_DIR}",
+        # Input file placed at the end so it can be stripped for the hash
+        str(ROOT_DIR / fname),
+        f"/Fe:tensor_graphs_cpp/{fname.split('.')[0]}.exe",
+    ]
 
 
 def get_file_hash(filepath):
@@ -77,15 +77,15 @@ def generate_kernel_uids(core_seed):
                 uid_val = f"0x{uid_val_raw:016x}ULL"
 
                 # GUARANTEE: Check for collisions
-                if uid_val_raw in uid_to_path:
-                    if uid_to_path[uid_val_raw] != str(rel_path):
+                if uid_val in uid_to_path:
+                    if uid_to_path[uid_val] != str(rel_path):
                         raise Exception(
                             f"CRITICAL COLLISION: Kernels '{rel_path}' and "
-                            f"'{uid_to_path[uid_val_raw]}' produced the same UID: {uid_val}. "
+                            f"'{uid_to_path[uid_val]}' produced the same UID: {uid_val}. "
                             f"Change the kernel content slightly or update the core seed."
                         )
 
-                uid_to_path[uid_val_raw] = str(rel_path)
+                uid_to_path[uid_val] = str(rel_path)
 
                 const_name = (
                     str(rel_path)
@@ -152,6 +152,10 @@ def generate_kernel_includes(core_seed):
                 f.write(
                     f"#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL({uid}, name, n, back, m, r, ref)\n"
                 )
+                f.write(f"#undef REGISTER_FUSED_KERNEL_INPLACE\n")
+                f.write(
+                    f"#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL({uid}, name, n, back, m, r, ref)\n"
+                )
             else:
                 f.write(f"#undef REGISTER_KERNEL\n")
                 f.write(
@@ -165,6 +169,10 @@ def generate_kernel_includes(core_seed):
                 f.write(
                     f"#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref) REGISTER_FUSED_KERNEL_INTERNAL({uid}, name, n, back, m, r, ref)\n"
                 )
+                f.write(f"#undef REGISTER_FUSED_KERNEL_INPLACE\n")
+                f.write(
+                    f"#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL({uid}, name, n, back, m, r, ref)\n"
+                )
 
             f.write(f'#include "{inc_path}"\n')
 
@@ -174,7 +182,9 @@ def generate_kernel_includes(core_seed):
             f.write(f"#undef REGISTER_KERNEL_INPLACE\n")
             f.write(f"#define REGISTER_KERNEL_INPLACE(...) \n")
             f.write(f"#undef REGISTER_FUSED_KERNEL\n")
-            f.write(f"#define REGISTER_FUSED_KERNEL(...) \n\n")
+            f.write(f"#define REGISTER_FUSED_KERNEL(...) \n")
+            f.write(f"#undef REGISTER_FUSED_KERNEL_INPLACE\n")
+            f.write(f"#define REGISTER_FUSED_KERNEL_INPLACE(...) \n\n")
 
     print(f"Generated {len(kernel_entries)} Kernel Includes with UID injection.")
 
@@ -184,7 +194,7 @@ def generate_build_context():
     ctx_hpp = GENERATED_DIR / "build_context.gen.hpp"
 
     # Hash the command string (excluding input file path)
-    cmd_str = " ".join(COMPILER_CMD[:-1])
+    cmd_str = " ".join(get_compiler_cmd("")[:-2])
     ctx_hash = hashlib.sha256(cmd_str.encode("utf-8")).hexdigest()
 
     with open(ctx_hpp, "w") as f:
@@ -196,12 +206,12 @@ def generate_build_context():
     print(f"Build Context ID: 0x{ctx_hash[:16]}")
 
 
-def compile_binary():
+def compile_binary(fname: str):
     """Invokes the C++ compiler within the ARM64 environment."""
     print("\nCompiling for ARM64...")
 
     # Convert the list of arguments into a single string for CMD
-    compiler_args_str = " ".join(COMPILER_CMD)
+    compiler_args_str = " ".join(get_compiler_cmd(fname))
 
     # Combine the environment setup and the compiler call
     # We use '&&' to run the compiler only if the environment setup succeeds
@@ -228,7 +238,8 @@ def main():
     generate_kernel_uids(core_seed)
     generate_kernel_includes(core_seed)
     generate_build_context()
-    compile_binary()
+    compile_binary("main.cpp")
+    compile_binary("bench.cpp")
 
 
 if __name__ == "__main__":

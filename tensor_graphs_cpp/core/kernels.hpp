@@ -22,7 +22,7 @@ using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph
 
 struct ReferenceGraphEntry
 {
-    size_t numInputs;
+    uint32_t numInputs;
     ReferenceFactory factory;
 };
 
@@ -35,7 +35,7 @@ public:
         return instance;
     }
 
-    void registerFactory(const std::string &name, size_t numInputs, ReferenceFactory factory)
+    void registerFactory(const std::string &name, uint32_t numInputs, ReferenceFactory factory)
     {
         factories[name] = {numInputs, factory};
     }
@@ -86,7 +86,7 @@ struct KernelEntry
     uint64_t uid;
     OpType opType;
     std::string opName;
-    size_t numInputs;
+    uint32_t numInputs;
     Backend backend;
     MatchFunc match;
     KernelFunc run;
@@ -108,7 +108,7 @@ public:
 
     const std::vector<KernelEntry> &getAllKernels() const { return entries; }
 
-    void registerKernel(uint64_t uid, OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace, bool isReference)
+    void registerKernel(uint64_t uid, OpType op, const std::string &opName, uint32_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace, bool isReference)
     {
         entries.push_back({uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference});
         if (refFactory && op == OpType::FUSED)
@@ -182,7 +182,7 @@ private:
 
 struct KernelRegistrar
 {
-    KernelRegistrar(uint64_t uid, OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace, bool isReference)
+    KernelRegistrar(uint64_t uid, OpType op, const std::string &opName, uint32_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace, bool isReference)
     {
         KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference);
     }
@@ -205,3 +205,9 @@ struct KernelRegistrar
 
 #define REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory) \
     static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false, true)
+
+#define REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory) \
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true, false)
+
+#define REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory) \
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true, true)

@@ -57,6 +57,17 @@ struct Graph
         return nodeId;
     }
 
+    // For creating reference factories, we just care about graph pattern so don't need to actually populate
+    uint32_t constant(DType dtype = DType::INT32)
+    {
+        // 1. Atomic ID generation
+        uint32_t id = allocateId();
+
+        // 2. Create the input node
+        uint32_t nodeId = inputWithId(id, {}, dtype, {}, StorageType::PERSISTENT);
+        return nodeId;
+    }
+
     uint32_t weight(const std::string &path, const std::string &name)
     {
         // 1. Ensure loader exists and tensor is present
