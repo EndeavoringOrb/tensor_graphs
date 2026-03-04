@@ -87,7 +87,8 @@ public:
         Rewrite::DivMulRule dmr;
         Rewrite::DivAddRule dar;
 
-        std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr, &fr, &ar, &dnr, &nar, &dmr, &dar};
+        // std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr, &fr, &ar, &dnr, &nar, &dmr, &dar};
+        std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr};
         // std::vector<const Rewrite::RewriteRule *> rules = {}; // TODO: remove this line, this is just so the matching phase is fast while debugging planning phase
 
         std::cout << "[Planner.plan] matching fusion patterns..." << std::endl;

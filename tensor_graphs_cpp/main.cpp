@@ -29,6 +29,8 @@
 #include "kernels/reference/permute/F32_ND.hpp"
 #include "kernels/reference/pow/F32_ND.hpp"
 #include "kernels/reference/repeat/F32_ND.hpp"
+#include "kernels/reference/repeat/inplace_F32_ND.hpp"
+#include "kernels/reference/reshape/inplace_ND.hpp"
 #include "kernels/reference/reshape/ND.hpp"
 #include "kernels/reference/sin/F32_ND.hpp"
 #include "kernels/reference/slice/F32_ND.hpp"
