@@ -15,6 +15,8 @@
 #include <sstream>
 #include <cstring>
 
+#define FUSE_OPS
+
 class Planner
 {
 public:
@@ -75,7 +77,7 @@ public:
         }
 
         std::unordered_map<std::string, std::vector<uint32_t>> fusionMap;
-
+#ifdef FUSE_OPS
         Rewrite::CommutativeRule cr;
         Rewrite::DistributiveRule dr;
         Rewrite::FactoringRule fr;
@@ -145,7 +147,7 @@ public:
                 }
             }
         }
-
+#endif
         std::cout << "[Planner.plan] doing augmented topo sort..." << std::endl;
         std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, fusionMap, graph, structHashMemo);
 

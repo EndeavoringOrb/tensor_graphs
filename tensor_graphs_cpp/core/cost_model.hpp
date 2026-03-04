@@ -10,7 +10,7 @@
 #include <limits>
 
 // Uncomment the following line to enable logging calls to `benchmarks/calls.jsonl`
-#define TENSOR_GRAPHS_LOG_COST_CALLS 1
+// #define TENSOR_GRAPHS_LOG_COST_CALLS
 
 struct Record
 {
