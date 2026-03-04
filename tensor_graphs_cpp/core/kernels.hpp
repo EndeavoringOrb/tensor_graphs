@@ -66,8 +66,24 @@ inline uint32_t Graph::tanh(uint32_t id0)
     return entry->factory({id0}, *this);
 }
 
+// --- AUTOMATIC REGISTRATION HELPERS ---
+// These are used by kernel files. build.py injects the UID during the build process.
+#ifndef REGISTER_KERNEL
+    #define REGISTER_KERNEL(op, backend, match, run)
+#endif
+#ifndef REGISTER_KERNEL_INPLACE
+    #define REGISTER_KERNEL_INPLACE(op, backend, match, run)
+#endif
+#ifndef REGISTER_FUSED_KERNEL
+    #define REGISTER_FUSED_KERNEL(opName, numInputs, backend, match, run, refFactory)
+#endif
+#ifndef REGISTER_FUSED_KERNEL_INPLACE
+    #define REGISTER_FUSED_KERNEL_INPLACE(opName, numInputs, backend, match, run, refFactory)
+#endif
+
 struct KernelEntry
 {
+    uint64_t uid; // Added field
     OpType opType;
     std::string opName;
     size_t numInputs;
@@ -75,7 +91,7 @@ struct KernelEntry
     MatchFunc match;
     KernelFunc run;
     ReferenceFactory refFactory;
-    bool inplace; // Strict flag: true for inplace-only, false for out-of-place-only
+    bool inplace;
 };
 
 class KernelRegistry
@@ -87,17 +103,16 @@ public:
         return instance;
     }
 
-    void registerKernel(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace)
+    void registerKernel(uint64_t uid, OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace)
     {
-        entries.push_back({op, opName, numInputs, backend, match, run, refFactory, inplace});
+        entries.push_back({uid, op, opName, numInputs, backend, match, run, refFactory, inplace});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory);
         }
     }
 
-    // Updated signature to include refCounts for runtime inplace safety checks
-    std::vector<uint32_t> findMatchingKernels(
+    std::vector<uint64_t> findMatchingKernels(
         OpType op,
         const std::string &opName,
         Backend backend,
@@ -105,37 +120,27 @@ public:
         const TensorNode &output,
         const std::unordered_map<uint32_t, uint32_t> *refCounts = nullptr) const
     {
-        std::vector<uint32_t> matches;
-        for (uint32_t i = 0; i < entries.size(); ++i)
+        std::vector<uint64_t> matches;
+        for (const auto &entry : entries)
         {
-            const auto &entry = entries[i];
             if (entry.opType != op || entry.backend != backend)
                 continue;
             if (op == OpType::FUSED && entry.opName != opName)
                 continue;
 
-            // ---------------------------------------------------------
-            // Inplace Kernel Logic Centralized Here
-            // ---------------------------------------------------------
             if (entry.inplace)
             {
                 if (inputs.empty())
                     continue;
-
                 const TensorNode &input0 = inputs[0];
 
-                // Constraint 1: Cannot perform inplace operation on PERSISTENT (read-only) inputs
                 if (input0.storageType == StorageType::PERSISTENT)
                     continue;
-
-                // Constraint 2: Shape and DType must be compatible for aliasing
                 if (countElements(input0.shape) != countElements(output.shape))
                     continue;
                 if (getDTypeSize(input0.dtype) != getDTypeSize(output.dtype))
                     continue;
 
-                // Constraint 3: Runtime Reference Count Check
-                // If refCounts are provided, we can only alias if the input is no longer needed
                 if (refCounts)
                 {
                     auto it = refCounts->find(input0.id);
@@ -144,22 +149,22 @@ public:
                 }
             }
 
-            // Finally, check the specific kernel match function
             if (entry.match(inputs, output))
             {
-                matches.push_back(i);
+                matches.push_back(entry.uid);
             }
         }
         return matches;
     }
 
-    const KernelEntry &getKernel(uint32_t id) const
+    const KernelEntry &getKernel(uint64_t uid) const
     {
-        if (id >= entries.size())
+        for (const auto &entry : entries)
         {
-            throw std::runtime_error("Invalid kernel ID");
+            if (entry.uid == uid)
+                return entry;
         }
-        return entries[id];
+        throw std::runtime_error("Invalid kernel UID");
     }
 
 private:
@@ -168,24 +173,20 @@ private:
 
 struct KernelRegistrar
 {
-    KernelRegistrar(OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace)
+    KernelRegistrar(uint64_t uid, OpType op, const std::string &opName, size_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace)
     {
-        KernelRegistry::get().registerKernel(op, opName, numInputs, backend, match, run, refFactory, inplace);
+        KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backend, match, run, refFactory, inplace);
     }
 };
 
-// Standard kernel (out-of-place)
-#define REGISTER_KERNEL(op, backend, match, run) \
-    static KernelRegistrar _registrar_##run(op, "", 0, backend, match, run, nullptr, false)
+#define REGISTER_KERNEL_INTERNAL(uid, op, backend, match, run) \
+    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, false)
 
-// In-place kernel
-#define REGISTER_KERNEL_INPLACE(op, backend, match, run) \
-    static KernelRegistrar _registrar_##run(op, "", 0, backend, match, run, nullptr, true)
+#define REGISTER_KERNEL_INPLACE_INTERNAL(uid, op, backend, match, run) \
+    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, true)
 
-// Standard fused kernel (out-of-place)
-#define REGISTER_FUSED_KERNEL(opName, numInputs, backend, match, run, refFactory) \
-    static KernelRegistrar _registrar_fused_##run(OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false)
+#define REGISTER_FUSED_KERNEL_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory) \
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false)
 
-// In-place fused kernel
-#define REGISTER_FUSED_KERNEL_INPLACE(opName, numInputs, backend, match, run, refFactory) \
-    static KernelRegistrar _registrar_fused_##run(OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true)
+#define REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory) \
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true)

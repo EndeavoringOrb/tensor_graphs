@@ -231,15 +231,14 @@ public:
             }
 
             // Pass refCounts to findMatchingKernels to enforce inplace safety at runtime
-            std::vector<uint32_t> validKernels = KernelRegistry::get().findMatchingKernels(
+            std::vector<uint64_t> validKernels = KernelRegistry::get().findMatchingKernels(
                 node.opType, node.opName, assignedBackend, inputNodes, node, &compiled.refCounts);
 
-            uint32_t finalKernelId;
-
-            // Check if our planned kernel is still valid
-            uint32_t plannedKernelId = bestRecipe.kernelAssignments.count(h) ? bestRecipe.kernelAssignments.at(h) : UINT32_MAX;
+            uint64_t finalKernelId; // Changed
+            
+            uint64_t plannedKernelId = bestRecipe.kernelAssignments.count(h) ? bestRecipe.kernelAssignments.at(h) : UINT64_MAX; // Changed
             bool isPlannedValid = false;
-            for (uint32_t kid : validKernels)
+            for (uint64_t kid : validKernels) // Changed
             {
                 if (kid == plannedKernelId)
                 {
@@ -454,13 +453,13 @@ private:
                 // Pass nullptr for refCounts during planning phase.
                 // We perform optimistic planning for inplace ops (assuming refcount=1).
                 // Runtime safety checks will happen during the final instruction build.
-                std::vector<uint32_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
+                std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
                     target.opType, target.opName, backend, inputNodes, target, nullptr);
 
                 // Removed the manual loop checking inplace && PERSISTENT.
                 // This is now handled inside findMatchingKernels.
 
-                for (uint32_t kernelId : matchingKernels)
+                for (uint64_t kernelId : matchingKernels)
                 {
                     const KernelEntry &kEntry = KernelRegistry::get().getKernel(kernelId);
                     std::string targetHash = Hashing::detail::structuralHashImpl(targetId, graph, structHashMemo);
@@ -470,7 +469,7 @@ private:
                         float cost = costModel.estimateCost(target, graph, kernelId);
                         std::unordered_map<std::string, Backend> assigns;
                         assigns[targetHash] = backend;
-                        std::unordered_map<std::string, uint32_t> kAssigns;
+                        std::unordered_map<std::string, uint64_t> kAssigns; // Changed
                         kAssigns[targetHash] = kernelId;
 
                         BeamStrategy strat{cost, targetId, assigns, kAssigns};
@@ -484,7 +483,7 @@ private:
                         float cost = 0.0f;
                         std::unordered_map<std::string, Backend> assigns;
                         assigns[targetHash] = backend;
-                        std::unordered_map<std::string, uint32_t> kAssigns;
+                        std::unordered_map<std::string, uint64_t> kAssigns; // Changed
                         kAssigns[targetHash] = kernelId;
 
                         for (size_t i = 0; i < parentBeamSets.size(); i++)

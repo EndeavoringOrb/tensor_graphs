@@ -554,7 +554,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(StorageType, {
 struct OpInstruction
 {
     uint32_t nodeId;
-    uint32_t kernelId;
+    uint64_t kernelId;
     std::vector<uint32_t> inputNodeIds;
     int32_t inplaceInputIndex; // -1 if not inplace
     Backend backend;
@@ -572,7 +572,7 @@ struct BeamStrategy
     float cost;
     uint32_t nodeId;
     std::unordered_map<std::string, Backend> assignments;
-    std::unordered_map<std::string, uint32_t> kernelAssignments;
+    std::unordered_map<std::string, uint64_t> kernelAssignments; // Changed to uint64_t
 
     bool operator<(const BeamStrategy &other) const
     {
@@ -591,11 +591,10 @@ inline void from_json(const json &j, Dim &d)
 inline void to_json(json &j, const TensorView &v)
 {
     j = json{
-        {"baseOffset", v.baseOffset}, 
-        {"shape", v.shape}, 
-        {"strides", v.strides}, 
-        {"dtype", v.dtype}
-    };
+        {"baseOffset", v.baseOffset},
+        {"shape", v.shape},
+        {"strides", v.strides},
+        {"dtype", v.dtype}};
 }
 inline void from_json(const json &j, TensorView &v)
 {
@@ -608,17 +607,16 @@ inline void from_json(const json &j, TensorView &v)
 inline void to_json(json &j, const TensorNode &n)
 {
     j = json{
-        {"id", n.id}, 
-        {"opType", n.opType}, 
-        {"opName", n.opName}, 
-        {"dtype", n.dtype}, 
-        {"parentIds", n.parentIds}, 
-        {"shape", n.shape}, 
-        {"backend", n.backend}, 
-        {"view", n.view}, 
-        {"storageType", n.storageType}, 
-        {"contentHash", n.contentHash}
-    };
+        {"id", n.id},
+        {"opType", n.opType},
+        {"opName", n.opName},
+        {"dtype", n.dtype},
+        {"parentIds", n.parentIds},
+        {"shape", n.shape},
+        {"backend", n.backend},
+        {"view", n.view},
+        {"storageType", n.storageType},
+        {"contentHash", n.contentHash}};
 }
 inline void from_json(const json &j, TensorNode &n)
 {
@@ -636,18 +634,19 @@ inline void from_json(const json &j, TensorNode &n)
 
 inline void to_json(json &j, const OpInstruction &i)
 {
+    std::stringstream ss;
+    ss << "0x" << std::hex << i.kernelId;
     j = json{
-        {"nodeId", i.nodeId}, 
-        {"kernelId", i.kernelId}, 
-        {"inputNodeIds", i.inputNodeIds}, 
-        {"inplaceInputIndex", i.inplaceInputIndex}, 
-        {"backend", i.backend}
-    };
+        {"nodeId", i.nodeId},
+        {"kernelId", ss.str()},
+        {"inputNodeIds", i.inputNodeIds},
+        {"inplaceInputIndex", i.inplaceInputIndex},
+        {"backend", i.backend}};
 }
 inline void from_json(const json &j, OpInstruction &i)
 {
     i.nodeId = j.at("nodeId").get<uint32_t>();
-    i.kernelId = j.at("kernelId").get<uint32_t>();
+    i.kernelId = std::stoull(j.at("kernelId").get<std::string>(), nullptr, 16);
     i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();
     i.inplaceInputIndex = j.at("inplaceInputIndex").get<int32_t>();
     i.backend = j.at("backend").get<Backend>();
@@ -656,11 +655,13 @@ inline void from_json(const json &j, OpInstruction &i)
 inline void to_json(json &j, const CompiledGraph &cg)
 {
     json refCounts = json::object();
-    for (const auto& kv : cg.refCounts) {
+    for (const auto &kv : cg.refCounts)
+    {
         refCounts[std::to_string(kv.first)] = kv.second;
     }
     json nodesMap = json::object();
-    for (const auto& kv : cg.nodesMap) {
+    for (const auto &kv : cg.nodesMap)
+    {
         nodesMap[std::to_string(kv.first)] = kv.second;
     }
     j = json{
@@ -672,17 +673,21 @@ inline void to_json(json &j, const CompiledGraph &cg)
 inline void from_json(const json &j, CompiledGraph &cg)
 {
     cg.instructions = j.at("instructions").get<std::vector<OpInstruction>>();
-    
+
     cg.refCounts.clear();
-    if (j.contains("refCounts")) {
-        for (const auto& item : j.at("refCounts").items()) {
+    if (j.contains("refCounts"))
+    {
+        for (const auto &item : j.at("refCounts").items())
+        {
             cg.refCounts[std::stoul(item.key())] = item.value().get<uint32_t>();
         }
     }
-    
+
     cg.nodesMap.clear();
-    if (j.contains("nodesMap")) {
-        for (const auto& item : j.at("nodesMap").items()) {
+    if (j.contains("nodesMap"))
+    {
+        for (const auto &item : j.at("nodesMap").items())
+        {
             cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
         }
     }

@@ -13,31 +13,8 @@
 #include "core/kernels.hpp"
 #include "core/cost_model.hpp"
 
-// Explicitly register all kernels
-#include "kernels/fused/tanh/F32_1D.hpp"
-#include "kernels/reference/add/F32_ND.hpp"
-#include "kernels/reference/arange/I32_ND.hpp"
-#include "kernels/reference/cast/BF16_F32_ND.hpp"
-#include "kernels/reference/cast/I32_F32_ND.hpp"
-#include "kernels/reference/concat/F32_ND.hpp"
-#include "kernels/reference/cos/F32_ND.hpp"
-#include "kernels/reference/div/F32_ND.hpp"
-#include "kernels/reference/dot/F32_3D.hpp"
-#include "kernels/reference/fill/F32_ND.hpp"
-#include "kernels/reference/gather/F32_I32_ND.hpp"
-#include "kernels/reference/max/F32_ND.hpp"
-#include "kernels/reference/mul/F32_ND.hpp"
-#include "kernels/reference/neg/F32_ND.hpp"
-#include "kernels/reference/permute/F32_ND.hpp"
-#include "kernels/reference/pow/F32_ND.hpp"
-#include "kernels/reference/repeat/F32_ND.hpp"
-#include "kernels/reference/repeat/inplace_F32_ND.hpp"
-#include "kernels/reference/reshape/inplace_ND.hpp"
-#include "kernels/reference/reshape/ND.hpp"
-#include "kernels/reference/sin/F32_ND.hpp"
-#include "kernels/reference/slice/F32_ND.hpp"
-#include "kernels/reference/sum/F32_ND.hpp"
-#include "kernels/reference/triu/F32_ND.hpp"
+#include "generated/kernels_all.gen.hpp"
+#include "generated/build_context.gen.hpp"
 
 using json = nlohmann::json;
 
@@ -61,10 +38,10 @@ int main()
 
             auto j = json::parse(line);
             json keyObj;
-            keyObj["kernelId"] = j["kernelId"];
+            keyObj["kernelUid"] = j["kernelUid"];
             keyObj["inputShapes"] = j["inputShapes"];
             keyObj["outputShapes"] = j["outputShapes"];
-            recordedKeys.insert(keyObj.dump());
+            std::string key = keyObj.dump();
         }
     }
 
@@ -85,7 +62,7 @@ int main()
             continue;
         auto j = json::parse(line);
         json keyObj;
-        keyObj["kernelId"] = j["kernelId"];
+        keyObj["kernelUid"] = j["kernelUid"];
         keyObj["inputShapes"] = j["inputShapes"];
         keyObj["outputShapes"] = j["outputShapes"];
         std::string key = keyObj.dump();
@@ -109,13 +86,13 @@ int main()
     for (size_t i = 0; i < toBenchmark.size(); ++i)
     {
         auto &call = toBenchmark[i];
-        uint32_t kernelId = call["kernelId"].get<uint32_t>();
+        uint64_t kernelUid = std::stoull(call["kernelUid"].get<std::string>(), nullptr, 16);
 
         Record r = call.get<Record>();
 
         try
         {
-            const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelId);
+            const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
 
             std::vector<std::vector<uint8_t>> inData(r.inputShapes.size());
             std::vector<const void *> inPtrs(r.inputShapes.size());
@@ -209,12 +186,12 @@ int main()
 
             std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "] "
                       << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                      << " (Kernel " << kernelId << ") -> "
+                      << " (Kernel 0x" << std::hex << kernelUid << std::dec << ") -> "
                       << runtimeMs << " ms" << std::endl;
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Failed to benchmark kernel " << kernelId << ": " << e.what() << std::endl;
+            std::cerr << "Failed to benchmark kernel " << kernelUid << ": " << e.what() << std::endl;
         }
     }
 

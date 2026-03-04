@@ -1,6 +1,8 @@
+// File: tensor_graphs_cpp/core/cost_model.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
+#include "generated/build_context.gen.hpp"
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -14,17 +16,28 @@
 
 struct Record
 {
+    uint64_t kernelUid;
+    uint64_t buildContextId;
+    std::string hwTag;
+
     std::vector<std::vector<uint32_t>> inputShapes;
     std::vector<std::vector<uint32_t>> outputShapes;
     std::vector<DType> inputDTypes;
     std::vector<DType> outputDTypes;
     std::vector<std::vector<uint8_t>> inputConstants;
-    float runTime; // run time in milliseconds
+    float runTime;
 };
 
 inline void to_json(json &j, const Record &r)
 {
+    std::stringstream uid_ss, build_ss;
+    uid_ss << "0x" << std::hex << r.kernelUid;
+    build_ss << "0x" << std::hex << r.buildContextId;
+
     j = json{
+        {"kernelUid", uid_ss.str()},
+        {"buildContextId", build_ss.str()},
+        {"hwTag", r.hwTag},
         {"inputShapes", r.inputShapes},
         {"outputShapes", r.outputShapes},
         {"inputDTypes", r.inputDTypes},
@@ -35,6 +48,10 @@ inline void to_json(json &j, const Record &r)
 
 inline void from_json(const json &j, Record &r)
 {
+    r.kernelUid = std::stoull(j.at("kernelUid").get<std::string>(), nullptr, 16);
+    r.buildContextId = std::stoull(j.at("buildContextId").get<std::string>(), nullptr, 16);
+    r.hwTag = j.at("hwTag").get<std::string>();
+
     r.inputShapes = j.at("inputShapes").get<std::vector<std::vector<uint32_t>>>();
     r.outputShapes = j.at("outputShapes").get<std::vector<std::vector<uint32_t>>>();
     r.inputDTypes = j.at("inputDTypes").get<std::vector<DType>>();
@@ -45,7 +62,7 @@ inline void from_json(const json &j, Record &r)
 
 struct CostModel
 {
-    std::unordered_map<uint32_t, std::vector<Record>> records;
+    std::unordered_map<uint64_t, std::vector<Record>> records;
     std::unordered_set<std::string> loggedCalls;
     std::ofstream callFile;
 
@@ -85,12 +102,10 @@ struct CostModel
                 continue;
             auto j = json::parse(line);
             Record r = j.get<Record>();
-            uint32_t kid = j.at("kernelId").get<uint32_t>();
-            records[kid].push_back(r);
+            records[r.kernelUid].push_back(r);
         }
     }
 
-    // TODO: improve this. for example: sum of 2048 and sum of 1024 have same output shape but different runtimes, so current interpolate would be a bad heuristic
     float interpolate(const std::vector<Record> &kernelRecords, const TensorNode &node, const Graph &graph)
     {
         uint64_t targetElements = countElements(node.shape);
@@ -118,7 +133,7 @@ struct CostModel
         return (bestDist == std::numeric_limits<float>::infinity()) ? bestDist : estimatedTime;
     }
 
-    float estimateCost(const TensorNode &node, const Graph &graph, uint32_t kernelId)
+    float estimateCost(const TensorNode &node, const Graph &graph, uint64_t kernelUid)
     {
         std::vector<std::vector<uint32_t>> inShapes(node.parentIds.size());
         std::vector<std::vector<uint8_t>> inConstants(node.parentIds.size());
@@ -142,6 +157,18 @@ struct CostModel
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS
         {
             Record r;
+            r.kernelUid = kernelUid;
+            r.buildContextId = BUILD_CONTEXT_ID;
+
+// TODO: make hardware detection better
+#if defined(_WIN32) || defined(_WIN64)
+            r.hwTag = "Windows_ARM64";
+#elif defined(__APPLE__)
+            r.hwTag = "Apple_Silicon";
+#else
+            r.hwTag = "Linux_ARM64";
+#endif
+
             r.inputShapes = inShapes;
             r.outputShapes = outShapes;
             r.inputDTypes = inDTypes;
@@ -150,7 +177,6 @@ struct CostModel
             r.runTime = 0.0f;
 
             json callObj = r;
-            callObj["kernelId"] = kernelId;
             std::string callStr = callObj.dump();
 
             if (loggedCalls.find(callStr) == loggedCalls.end())
@@ -165,7 +191,7 @@ struct CostModel
         }
 #endif
 
-        auto it = records.find(kernelId);
+        auto it = records.find(kernelUid);
         if (it == records.end() || it->second.empty())
             return std::numeric_limits<float>::infinity();
 
