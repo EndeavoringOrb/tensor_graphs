@@ -204,7 +204,7 @@ public:
         // This must run even if we load from cache because pointers/DeviceBuffers
         // are process-specific and not persistent.
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
-        memManager.buffers.at(Backend::CPU).init();
+        memManager.init();
 
         for (const auto &pair : compiled.nodesMap)
         {

@@ -545,8 +545,6 @@ int main()
     std::cout << "Initializing Session..." << std::endl;
     Session session(g, mem, logits_id, "dirty_region_caches/gemma-3-270m-cpp.jsonl");
 
-    mem.buffers.at(Backend::CPU).init();
-
     std::cout << "Running Inference..." << std::endl;
 
     std::vector<int32_t> input_data(maxSeqLen, 0);

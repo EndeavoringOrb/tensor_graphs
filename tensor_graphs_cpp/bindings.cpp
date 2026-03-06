@@ -46,9 +46,7 @@ PYBIND11_MODULE(tg_cpp, m)
         .def("allocate", &MemoryManager::allocate,
              py::arg("backend"), py::arg("nodeId"), py::arg("sizeBytes"), py::arg("storageType"),
              py::arg("refCount") = 0, py::arg("cost") = 0.0f)
-        .def("init_all",[](MemoryManager &self)
-             {
-            for(auto& pair : self.buffers) pair.second.init(); });
+        .def("init", &MemoryManager::init);
 
     // Graph Building
     py::class_<Graph>(m, "Graph")

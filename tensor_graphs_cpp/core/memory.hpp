@@ -402,9 +402,15 @@ struct MemoryManager
     MemoryManager(std::unordered_map<Backend, uint64_t> bufferSizes)
     {
         buffers.reserve(bufferSizes.size());
-        for (auto &buf : bufferSizes)
+        for (auto &bufSize : bufferSizes)
         {
-            buffers.emplace(buf.first, DeviceBuffer(buf.first, buf.second));
+            buffers.emplace(bufSize.first, DeviceBuffer(bufSize.first, bufSize.second));
+        }
+    }
+
+    void init() {
+        for (auto &buf : buffers) {
+            buf.second.init();
         }
     }
 
