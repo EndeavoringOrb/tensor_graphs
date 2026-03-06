@@ -126,10 +126,11 @@ def generate_kernel_includes(core_seed):
     """Generates kernels_all.gen.hpp with UID injection logic."""
     includes_hpp = GENERATED_DIR / "kernels_all.gen.hpp"
     kernel_entries = []
+    kernel_exts = [".hpp", ".cu"]
 
     for root, _, files in os.walk(KERNELS_DIR):
         for f in files:
-            if f.endswith(".hpp"):
+            if any(f.endswith(ext) for ext in kernel_exts):
                 path = Path(root) / f
                 rel_path = path.relative_to(ROOT_DIR)
 
