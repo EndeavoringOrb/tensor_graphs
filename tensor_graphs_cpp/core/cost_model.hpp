@@ -11,6 +11,15 @@
 #include <cmath>
 #include <limits>
 
+// TODO: make hardware detection better
+#if defined(_WIN32) || defined(_WIN64)
+#define HW_TAG "Windows_ARM64"
+#elif defined(__APPLE__)
+#define HW_TAG "Apple_Silicon"
+#else
+#define HW_TAG "Linux_ARM64"
+#endif
+
 // Uncomment the following line to enable logging calls to `benchmarks/calls.jsonl`
 #define TENSOR_GRAPHS_LOG_COST_CALLS
 
@@ -96,14 +105,21 @@ struct CostModel
             return;
 
         std::string line;
+        uint32_t total = 0;
+        uint32_t valid = 0;
         while (std::getline(file, line))
         {
             if (line.empty())
                 continue;
+            total++;
             auto j = json::parse(line);
             Record r = j.get<Record>();
+            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID)
+                continue;
+            valid++;
             records[r.kernelUid].push_back(r);
         }
+        std::cout << "Loaded " << valid << " valid records out of " << total << " total records from " << benchmarkPath << std::endl;
     }
 
     float interpolate(const std::vector<Record> &kernelRecords, const TensorNode &node, const Graph &graph)
@@ -159,16 +175,7 @@ struct CostModel
             Record r;
             r.kernelUid = kernelUid;
             r.buildContextId = BUILD_CONTEXT_ID;
-
-// TODO: make hardware detection better
-#if defined(_WIN32) || defined(_WIN64)
-            r.hwTag = "Windows_ARM64";
-#elif defined(__APPLE__)
-            r.hwTag = "Apple_Silicon";
-#else
-            r.hwTag = "Linux_ARM64";
-#endif
-
+            r.hwTag = HW_TAG;
             r.inputShapes = inShapes;
             r.outputShapes = outShapes;
             r.inputDTypes = inDTypes;

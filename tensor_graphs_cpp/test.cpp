@@ -1,4 +1,3 @@
-// TODO: test all fused kernels against their reference graph made up of atomic kernels
 #include <iostream>
 #include <vector>
 #include <string>
@@ -16,7 +15,7 @@
 #include "generated/kernels_all.gen.hpp"
 #include "generated/build_context.gen.hpp"
 
-// Fills an array with random uniform values from [-1.0, 1.0]
+// Fills an array with random uniform values from[-1.0, 1.0]
 void fillRandom(float *ptr, size_t elements)
 {
     static std::mt19937 gen(42);
@@ -81,70 +80,63 @@ int main()
         }
     };
 
-    // ---------------------------------------------------------
-    // Add_3D_1D Fused
-    // ---------------------------------------------------------
+    // Automatically test all fused kernels against their reference graph made up of atomic kernels
+    const auto &kernels = KernelRegistry::get().getAllKernels();
+    for (const auto &kernel : kernels)
     {
+        // Skip reference implementations and non-fused (atomic) kernels since they don't have a refFactory test pattern
+        if (kernel.isReference || kernel.opType != OpType::FUSED)
+        {
+            continue;
+        }
+
+        if (kernel.dummyShapes.size() != kernel.numInputs)
+        {
+            std::cout << "Skipping " << kernel.opName << " due to missing dummy shapes in registry." << std::endl;
+            continue;
+        }
+
         Graph g_ref, g_tgt;
         MemoryManager mem_ref, mem_tgt;
         mem_ref.buffers.emplace(Backend::CPU, DeviceBuffer(1024 * 1024 * 16));
         mem_tgt.buffers.emplace(Backend::CPU, DeviceBuffer(1024 * 1024 * 16));
 
-        std::vector<float> d3D(24);
-        fillRandom(d3D.data(), 24);
-        std::vector<float> d1D(4);
-        fillRandom(d1D.data(), 4);
+        // Generate data based on the sizes declared in the `REGISTER_FUSED_KERNEL` macro.
+        std::vector<std::vector<float>> inputData(kernel.dummyShapes.size());
+        for (size_t i = 0; i < kernel.dummyShapes.size(); ++i)
+        {
+            uint64_t elements = countElements(kernel.dummyShapes[i]);
+            if (elements == 0)
+                elements = 1;
+            inputData[i].resize(elements);
+            fillRandom(inputData[i].data(), elements);
+        }
 
         auto setup = [&](Graph &g, MemoryManager &mem) -> std::pair<uint32_t, std::unordered_map<uint32_t, const void *>>
         {
-            uint32_t id3D = g.allocateId();
-            std::vector<uint32_t> shape3D = {2, 3, 4};
-            mem.allocate(Backend::CPU, id3D, getSizeBytes(shape3D, DType::FLOAT32), StorageType::TRANSIENT);
-            TensorView v3D = mem.getView(Backend::CPU, id3D, shape3D, DType::FLOAT32);
-            g.inputWithId(id3D, v3D.shape, v3D.dtype, v3D, StorageType::TRANSIENT);
+            std::vector<uint32_t> inputIds;
+            std::unordered_map<uint32_t, const void *> in_map;
 
-            uint32_t id1D = g.allocateId();
-            std::vector<uint32_t> shape1D = {4};
-            mem.allocate(Backend::CPU, id1D, getSizeBytes(shape1D, DType::FLOAT32), StorageType::TRANSIENT);
-            TensorView v1D = mem.getView(Backend::CPU, id1D, shape1D, DType::FLOAT32);
-            g.inputWithId(id1D, v1D.shape, v1D.dtype, v1D, StorageType::TRANSIENT);
+            for (size_t i = 0; i < kernel.dummyShapes.size(); ++i)
+            {
+                uint32_t id = g.allocateId();
+                mem.allocate(Backend::CPU, id, getSizeBytes(kernel.dummyShapes[i], DType::FLOAT32), StorageType::TRANSIENT);
+                TensorView v = mem.getView(Backend::CPU, id, kernel.dummyShapes[i], DType::FLOAT32);
+                g.inputWithId(id, v.shape, v.dtype, v, StorageType::TRANSIENT);
+                inputIds.push_back(id);
+                in_map[id] = inputData[i].data();
+            }
 
-            uint32_t outId = ReferenceGraphRegistry::get().getFactory("Add_3D_1D")->factory({id3D, id1D}, g);
-            return {outId, {{id3D, d3D.data()}, {id1D, d1D.data()}}};
+            // Execute the factory matching pattern
+            uint32_t outId = kernel.refFactory(inputIds, g);
+            return {outId, in_map};
         };
 
         auto ref = setup(g_ref, mem_ref);
         auto tgt = setup(g_tgt, mem_tgt);
-        executeAndCompare("Add_3D_1D", g_ref, mem_ref, ref.second, ref.first, g_tgt, mem_tgt, tgt.second, tgt.first);
-    }
 
-    // ---------------------------------------------------------
-    // Tanh Fused
-    // ---------------------------------------------------------
-    {
-        Graph g_ref, g_tgt;
-        MemoryManager mem_ref, mem_tgt;
-        mem_ref.buffers.emplace(Backend::CPU, DeviceBuffer(1024 * 1024 * 16));
-        mem_tgt.buffers.emplace(Backend::CPU, DeviceBuffer(1024 * 1024 * 16));
-
-        std::vector<float> d1D(10);
-        fillRandom(d1D.data(), 10);
-
-        auto setup = [&](Graph &g, MemoryManager &mem) -> std::pair<uint32_t, std::unordered_map<uint32_t, const void *>>
-        {
-            uint32_t id1D = g.allocateId();
-            std::vector<uint32_t> shape1D = {10};
-            mem.allocate(Backend::CPU, id1D, getSizeBytes(shape1D, DType::FLOAT32), StorageType::TRANSIENT);
-            TensorView v1D = mem.getView(Backend::CPU, id1D, shape1D, DType::FLOAT32);
-            g.inputWithId(id1D, v1D.shape, v1D.dtype, v1D, StorageType::TRANSIENT);
-
-            uint32_t outId = ReferenceGraphRegistry::get().getFactory("Tanh")->factory({id1D}, g);
-            return {outId, {{id1D, d1D.data()}}};
-        };
-
-        auto ref = setup(g_ref, mem_ref);
-        auto tgt = setup(g_tgt, mem_tgt);
-        executeAndCompare("Tanh", g_ref, mem_ref, ref.second, ref.first, g_tgt, mem_tgt, tgt.second, tgt.first);
+        std::string testName = kernel.opName + (kernel.inplace ? " (Inplace)" : "");
+        executeAndCompare(testName, g_ref, mem_ref, ref.second, ref.first, g_tgt, mem_tgt, tgt.second, tgt.first);
     }
 
     std::cout << "\n----------------------" << std::endl;

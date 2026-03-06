@@ -165,6 +165,9 @@ def analyze(graph_file, records_file):
                 "inplace": is_inplace_candidate,
             }
         )
+    # After building the trace, add this check:
+    fused_count = sum(1 for t in trace if t['name'].startswith('FUSED_'))
+    print(f"\n[DEBUG] Found {fused_count} fused operations in compiled graph")
 
     # 1. Arithmetic Intensity
     print("\n" + "=" * 80 + "\n1. ARITHMETIC INTENSITY ANALYSIS\n" + "=" * 80)

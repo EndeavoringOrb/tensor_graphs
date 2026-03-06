@@ -152,6 +152,8 @@ public:
                 }
             }
         }
+        std::cout << "# Rewrites: " << fusionMap.size() << std::endl;
+        std::cout << "# Fusion matches: " << fusionMatches << std::endl;
 #endif
         std::cout << "[Planner.plan] doing augmented topo sort..." << std::endl;
         std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, fusionMap, graph, structHashMemo);
@@ -194,6 +196,7 @@ public:
         }
 
         auto bestRecipe = memo[rootHash][0];
+        std::cout << "best recipe cost: " << bestRecipe.cost << std::endl;
 
         std::cout << "[Planner.plan] final topo sort..." << std::endl;
         std::vector<uint32_t> finalTopo = topologicalSort(bestRecipe.nodeId, graph);
