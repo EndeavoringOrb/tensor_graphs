@@ -1,7 +1,8 @@
 #ifdef USE_CUDA
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
 #include "core/types.hpp"
 #include "core/kernels.hpp"
-#include <cuda_runtime.h>
 #include <iostream>
 #include <vector>
 

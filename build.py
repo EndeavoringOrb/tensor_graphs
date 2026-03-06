@@ -22,8 +22,9 @@ CORE_DEPENDENCIES = [
 
 USE_CUDA = False
 
+
 # TODO: add better compiler detection/selection
-def get_compiler_cmd(fname: str, cu_files=[]):
+def get_compiler_cmd(fname: str):
     if USE_CUDA:
         cmd = [
             "nvcc",
@@ -31,9 +32,9 @@ def get_compiler_cmd(fname: str, cu_files=[]):
             "-std=c++17",
             f"-I{ROOT_DIR}",
             "-DUSE_CUDA",
+            "-x",
+            "cu",  # Force CUDA compilation for .cpp files
         ]
-        for cu in cu_files:
-            cmd.append(str(cu))
         cmd.append(str(ROOT_DIR / fname))
         cmd.extend(["-o", f"tensor_graphs_cpp/{fname.split('.')[0]}.exe"])
         return cmd
@@ -192,9 +193,9 @@ def generate_build_context():
     print(f"Build Context ID: 0x{ctx_hash[:16]}")
 
 
-def compile_binary(fname: str, cu_files=[]):
+def compile_binary(fname: str):
     print(f"\nCompiling {fname}...")
-    compiler_args_str = " ".join(get_compiler_cmd(fname, cu_files))
+    compiler_args_str = " ".join(get_compiler_cmd(fname))
 
     if os.name == "nt":
         arch = "amd64" if USE_CUDA else "arm64"
@@ -236,9 +237,9 @@ def main():
                 if f.endswith(".cu"):
                     cu_files.append(Path(root) / f)
 
-    compile_binary("main.cpp", cu_files)
-    compile_binary("bench.cpp", cu_files)
-    compile_binary("test.cpp", cu_files)
+    compile_binary("main.cpp")
+    compile_binary("bench.cpp")
+    compile_binary("test.cpp")
 
 
 if __name__ == "__main__":
