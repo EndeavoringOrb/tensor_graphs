@@ -728,7 +728,6 @@ private:
         {
             if (std::isinf(candidates[i].cost))
             {
-                std::cout << "Erasing inf cand cost at idx " << i << ": " << candidates[i].cost << std::endl;
                 candidates.erase(candidates.begin() + i);
             }
         }
