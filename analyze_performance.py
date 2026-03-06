@@ -119,8 +119,6 @@ def analyze(graph_file, records_file):
             count_elements(n["shape"]) * dtype_size(n["dtype"]) for n in in_nodes
         )
 
-        # Inplace Logic:
-        # Ref count of input is 1 and shape matches output.
         is_inplace_candidate = False
         for nid in inst["inputNodeIds"]:
             in_node = nodes_map[str(nid)]
@@ -165,9 +163,6 @@ def analyze(graph_file, records_file):
                 "inplace": is_inplace_candidate,
             }
         )
-    # After building the trace, add this check:
-    fused_count = sum(1 for t in trace if t['name'].startswith('FUSED_'))
-    print(f"\n[DEBUG] Found {fused_count} fused operations in compiled graph")
 
     # 1. Arithmetic Intensity
     print("\n" + "=" * 80 + "\n1. ARITHMETIC INTENSITY ANALYSIS\n" + "=" * 80)
@@ -191,21 +186,15 @@ def analyze(graph_file, records_file):
 
     # 2 & 3. N-Grams
     print("\n" + "=" * 80 + "\n2 & 3. N-GRAM ANALYSIS\n" + "=" * 80)
-
-    # We use two separate storage containers for Inplace vs Not Inplace
     ngram_data = {
         True: collections.defaultdict(lambda: {"mem": 0, "time": 0, "count": 0}),
         False: collections.defaultdict(lambda: {"mem": 0, "time": 0, "count": 0}),
     }
-
     for n in range(2, 7):
         for i in range(len(trace) - n + 1):
             window = trace[i : i + n]
             key = " -> ".join(t["name"] for t in window)
-
-            # A chain is ONLY 'inplace' if every step is a candidate
             is_chain_inplace = all(t["inplace"] for t in window)
-
             runtime = sum(t["time"] for t in window)
             win_nodes = {t["out_node_id"] for t in window}
             saved = sum(
@@ -214,27 +203,14 @@ def analyze(graph_file, records_file):
                 for in_id in t["in_node_ids"]
                 if in_id in win_nodes
             )
-
             target = ngram_data[is_chain_inplace][key]
             target["mem"] += saved
             target["time"] += runtime
             target["count"] += 1
 
-    # Tables for N-Grams
     for is_inplace in [True, False]:
         label = "INPLACE" if is_inplace else "NOT INPLACE"
         print(f"\n--- {label} CHAINS ---")
-
-        # Memory Table
-        print(f"\nTop 10 {label} by MEMORY TRAFFIC SAVED")
-        top_mem = sorted(
-            ngram_data[is_inplace].items(), key=lambda x: x[1]["mem"], reverse=True
-        )[:10]
-        rows_mem = [(k, v["count"], format_bytes(v["mem"])) for k, v in top_mem]
-        print_dynamic_table(rows_mem, ["Chain", "Count", "Traffic Saved"])
-
-        # Runtime Table
-        print(f"\nTop 10 {label} by CUMULATIVE RUNTIME")
         top_time = sorted(
             ngram_data[is_inplace].items(), key=lambda x: x[1]["time"], reverse=True
         )[:10]
@@ -258,78 +234,60 @@ def analyze(graph_file, records_file):
     if len(current_sg) > 1:
         subgraphs.append(list(current_sg))
 
-    def get_sg_tables(is_inplace_filter):
-        # Grouping by Op Chain
-        agg_op = collections.defaultdict(lambda: {"time": 0.0, "count": 0})
-        # Grouping by Op Chain + Shape
+    for is_inplace in [True, False]:
+        label = "INPLACE" if is_inplace else "NOT INPLACE"
+        print(f"\n--- {label} SHAPE-PRESERVING SUBGRAPHS ---")
         agg_shape = collections.defaultdict(lambda: {"time": 0.0, "count": 0})
-
         for sg in subgraphs:
-            all_inplace = all(n["inplace"] for n in sg)
-            if all_inplace != is_inplace_filter:
-                continue
-
-            chain_only = " -> ".join(n["name"] for n in sg)
-            chain_shape = f"{chain_only} | {sg[0]['shape']}"
-            runtime = sum(n["time"] for n in sg)
-
-            agg_op[chain_only]["time"] += runtime
-            agg_op[chain_only]["count"] += 1
-            agg_shape[chain_shape]["time"] += runtime
-            agg_shape[chain_shape]["count"] += 1
-
-        res_op = sorted(
-            [(k, v["count"], f"{v['time']:.2f}") for k, v in agg_op.items()],
-            key=lambda x: float(x[2]),
-            reverse=True,
-        )[:10]
-        res_shape = sorted(
+            if all(n["inplace"] for n in sg) == is_inplace:
+                chain_shape = f"{' -> '.join(n['name'] for n in sg)} | {sg[0]['shape']}"
+                agg_shape[chain_shape]["time"] += sum(n["time"] for n in sg)
+                agg_shape[chain_shape]["count"] += 1
+        shape_rows = sorted(
             [(k, v["count"], f"{v['time']:.2f}") for k, v in agg_shape.items()],
             key=lambda x: float(x[2]),
             reverse=True,
         )[:10]
-        return res_op, res_shape
-
-    for is_inplace in [True, False]:
-        label = "INPLACE" if is_inplace else "NOT INPLACE"
-        print(f"\n--- {label} SHAPE-PRESERVING SUBGRAPHS ---")
-        op_rows, shape_rows = get_sg_tables(is_inplace)
-
-        print(f"\n[Grouped by Operation Chain Only - {label}]")
-        print_dynamic_table(op_rows, ["Chain", "Occurrences", "Total Time (ms)"])
-
-        print(f"\n[Grouped by Operation Chain AND Shape - {label}]")
         print_dynamic_table(
             shape_rows, ["Chain | Shape", "Occurrences", "Total Time (ms)"]
         )
 
-    # 5. Top Kernels
-    print("\n" + "=" * 80 + "\n5. TOP KERNELS OVERALL (INPLACE STATS)\n" + "=" * 80)
-    k_stats = collections.defaultdict(
+    # 5. Top Kernels (Grouped by Kernel ID + Shape)
+    print("\n" + "=" * 80 + "\n5. TOP KERNELS BY SHAPE & ID\n" + "=" * 80)
+
+    # We group by (Operation Name, KernelId, Shape)
+    k_shape_stats = collections.defaultdict(
         lambda: {"time": 0.0, "count": 0, "inplace_count": 0}
     )
-    for t in trace:
-        key = f"{t['name']} ({t['kernelId'][:8]}...)"
-        k_stats[key]["time"] += t["time"]
-        k_stats[key]["count"] += 1
-        if t["inplace"]:
-            k_stats[key]["inplace_count"] += 1
 
-    kernel_rows = [
-        (
-            k,
-            v["count"],
-            f"{v['time']:.2f}",
-            f"{v['time']/v['count']:.3f}",
-            f"{v['inplace_count']}/{v['count']}",
+    for t in trace:
+        # Construct a tuple key to ensure unique grouping
+        group_key = (t["name"], t["kernelId"], t["shape"])
+        k_shape_stats[group_key]["time"] += t["time"]
+        k_shape_stats[group_key]["count"] += 1
+        if t["inplace"]:
+            k_shape_stats[group_key]["inplace_count"] += 1
+
+    kernel_shape_rows = []
+    for (name, kid, shape), stats in k_shape_stats.items():
+        kernel_label = f"{name} ({kid[:8]}...)"
+        kernel_shape_rows.append(
+            (
+                kernel_label,
+                str(shape),
+                stats["count"],
+                f"{stats['time']:.2f}",
+                f"{stats['time']/stats['count']:.3f}",
+                f"{stats['inplace_count']}/{stats['count']}",
+            )
         )
-        for k, v in sorted(k_stats.items(), key=lambda x: x[1]["time"], reverse=True)[
-            :15
-        ]
-    ]
+
+    # Sort by total time descending
+    kernel_shape_rows.sort(key=lambda x: float(x[3]), reverse=True)
 
     print_dynamic_table(
-        kernel_rows, ["Kernel", "Count", "Total (ms)", "Avg (ms)", "Inplace/Total"]
+        kernel_shape_rows[:20],
+        ["Kernel", "Shape", "Count", "Total (ms)", "Avg (ms)", "Inplace/Total"],
     )
 
     print("\nDone.")
