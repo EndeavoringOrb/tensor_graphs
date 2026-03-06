@@ -19,6 +19,121 @@
 
 class Planner
 {
+private:
+    struct AdapterChain
+    {
+        std::vector<AdapterOp> ops;
+        Backend finalBackend;
+        bool finalContig;
+        float cost;
+    };
+
+    std::vector<AdapterChain> getAdapterChains(const TensorNode &pNode, Backend pBackend, Backend targetBackend, const Graph &graph, const std::unordered_map<uint32_t, uint32_t> &refCounts, CostModel &costModel)
+    {
+        std::vector<AdapterChain> chains;
+        bool isContig = pNode.view.isContiguous();
+
+        auto evalKernel = [&](OpType op, Backend opBackend, const TensorNode &input, TensorNode &output, uint64_t &bestK, float &bestCost)
+        {
+            output = input; // copy properties
+            // Keep input's original ID so costModel can look up its shape correctly.
+            // (Both CONTIGUOUS and COPY_TO preserve shape/dtype)
+            output.id = input.id;
+            output.opType = op;
+            output.opName = "";
+            output.parentIds = {input.id};
+            output.backend = opBackend;
+            output.storageType = StorageType::TRANSIENT;
+            if (op == OpType::CONTIGUOUS)
+            {
+                output.view.strides = TensorView::calcContiguousStrides(output.shape);
+            }
+
+            std::vector<TensorNode> inputsList = {input};
+            std::vector<uint64_t> kernels = KernelRegistry::get().findMatchingKernels(op, "", opBackend, inputsList, output, &refCounts);
+            bestCost = std::numeric_limits<float>::infinity();
+            bestK = UINT64_MAX;
+            for (uint64_t k : kernels)
+            {
+                float c = costModel.estimateCost(output, graph, k);
+                if (c < bestCost)
+                {
+                    bestCost = c;
+                    bestK = k;
+                }
+            }
+        };
+
+        if (pBackend == targetBackend)
+        {
+            // Chain 0: None
+            chains.push_back({{}, targetBackend, isContig, 0.0f});
+
+            // Chain 1: CONTIGUOUS
+            if (!isContig)
+            {
+                TensorNode contigOut;
+                uint64_t k;
+                float c;
+                TensorNode pNodeOverride = pNode;
+                pNodeOverride.backend = pBackend;
+                evalKernel(OpType::CONTIGUOUS, pBackend, pNodeOverride, contigOut, k, c);
+                if (k != UINT64_MAX)
+                {
+                    chains.push_back({{{OpType::CONTIGUOUS, k, pBackend}}, targetBackend, true, c});
+                }
+            }
+        }
+        else
+        {
+            // Chain 2: COPY_TO
+            TensorNode copyOut;
+            uint64_t kCopy;
+            float cCopy;
+            TensorNode pNodeOverride = pNode;
+            pNodeOverride.backend = pBackend;
+            evalKernel(OpType::COPY_TO, targetBackend, pNodeOverride, copyOut, kCopy, cCopy);
+            if (kCopy != UINT64_MAX)
+            {
+                chains.push_back({{{OpType::COPY_TO, kCopy, targetBackend}}, targetBackend, isContig, cCopy});
+            }
+
+            if (!isContig)
+            {
+                // Chain 3: CONTIGUOUS -> COPY_TO
+                TensorNode contigOut;
+                uint64_t kContig;
+                float cContig;
+                evalKernel(OpType::CONTIGUOUS, pBackend, pNodeOverride, contigOut, kContig, cContig);
+                if (kContig != UINT64_MAX)
+                {
+                    TensorNode copyOut2;
+                    uint64_t kCopy2;
+                    float cCopy2;
+                    evalKernel(OpType::COPY_TO, targetBackend, contigOut, copyOut2, kCopy2, cCopy2);
+                    if (kCopy2 != UINT64_MAX)
+                    {
+                        chains.push_back({{{OpType::CONTIGUOUS, kContig, pBackend}, {OpType::COPY_TO, kCopy2, targetBackend}}, targetBackend, true, cContig + cCopy2});
+                    }
+                }
+
+                // Chain 4: COPY_TO -> CONTIGUOUS
+                if (kCopy != UINT64_MAX)
+                {
+                    TensorNode contigOut2;
+                    uint64_t kContig2;
+                    float cContig2;
+                    evalKernel(OpType::CONTIGUOUS, targetBackend, copyOut, contigOut2, kContig2, cContig2);
+                    if (kContig2 != UINT64_MAX)
+                    {
+                        chains.push_back({{{OpType::COPY_TO, kCopy, targetBackend}, {OpType::CONTIGUOUS, kContig2, targetBackend}}, targetBackend, true, cCopy + cContig2});
+                    }
+                }
+            }
+        }
+        return chains;
+    }
+
 public:
     Planner(CostModel &costModel, uint64_t maxMemoryBytes = 4ULL * 1024 * 1024 * 1024)
         : costModel(costModel), maxMemoryBytes(maxMemoryBytes) {}
@@ -167,7 +282,8 @@ public:
                 }
             }
         }
-        std::cout << std::endl << "# Rewrites: " << fusionMap.size() << std::endl;
+        std::cout << std::endl
+                  << "# Rewrites: " << fusionMap.size() << std::endl;
         std::cout << "# Fusion matches: " << fusionMatches << std::endl;
 #endif
         std::cout << "[Planner.plan] doing augmented topo sort..." << std::endl;
@@ -283,59 +399,65 @@ public:
                 std::string phash = Hashing::structuralHash(pid, graph, structHashMemo);
                 uint32_t chosenPid = bestRecipe.selectedNodes.count(phash) ? bestRecipe.selectedNodes.at(phash) : pid;
 
-                Backend parentBackend = graph.nodes[chosenPid].backend;
-                if (bestRecipe.assignments.count(phash))
+                std::string edgeHash = phash + "->" + h;
+
+                if (bestRecipe.edgeAdapters.count(edgeHash) && !bestRecipe.edgeAdapters.at(edgeHash).empty())
                 {
-                    parentBackend = bestRecipe.assignments.at(phash);
-                }
-
-                if (parentBackend != assignedBackend)
-                {
-                    std::string copyKey = std::to_string(chosenPid) + "_" + std::to_string(static_cast<uint32_t>(assignedBackend));
-                    if (insertedCopyNodes.count(copyKey))
+                    uint32_t currentPid = chosenPid;
+                    for (const auto &adapter : bestRecipe.edgeAdapters.at(edgeHash))
                     {
-                        uint32_t copyId = insertedCopyNodes[copyKey];
-                        mappedParentIds.push_back(copyId);
-                        compiled.refCounts[copyId]++;
-                    }
-                    else
-                    {
-                        TensorNode copyNode;
-                        copyNode.id = graph.allocateId();
-                        copyNode.opType = OpType::COPY_TO;
-                        copyNode.opName = "";
-                        copyNode.dtype = graph.nodes[chosenPid].dtype;
-                        copyNode.shape = graph.nodes[chosenPid].shape;
-                        copyNode.parentIds = {chosenPid};
-                        copyNode.backend = assignedBackend;
-
-                        if (copyNode.id >= graph.nodes.size())
+                        std::string adapterKey = std::to_string(currentPid) + "_" + toString(adapter.opType) + "_" + toString(adapter.backend);
+                        if (insertedCopyNodes.count(adapterKey))
                         {
-                            graph.nodes.resize(copyNode.id + 1);
-                        }
-                        graph.nodes[copyNode.id] = copyNode;
-
-                        insertedCopyNodes[copyKey] = copyNode.id;
-                        finalTopoWithCopies.push_back(copyNode.id);
-
-                        mappedParentIds.push_back(copyNode.id);
-                        compiled.refCounts[copyNode.id]++;
-                        compiled.refCounts[chosenPid]++;
-
-                        compiled.nodesMap[copyNode.id] = copyNode;
-
-                        std::string edgeHash = phash + "->" + h;
-                        std::string copyHash = Hashing::structuralHash(copyNode.id, graph, structHashMemo);
-                        if (bestRecipe.kernelAssignments.count(edgeHash))
-                        {
-                            bestRecipe.kernelAssignments[copyHash] = bestRecipe.kernelAssignments[edgeHash];
-                            bestRecipe.assignments[copyHash] = assignedBackend;
+                            currentPid = insertedCopyNodes[adapterKey];
+                            compiled.refCounts[currentPid]++;
                         }
                         else
                         {
-                            throw std::runtime_error("Missing copy kernel assignment for edge " + edgeHash);
+                            TensorNode adapterNode;
+                            adapterNode.id = graph.allocateId();
+                            adapterNode.opType = adapter.opType;
+                            adapterNode.opName = "";
+                            adapterNode.dtype = graph.nodes[chosenPid].dtype;
+                            adapterNode.shape = graph.nodes[chosenPid].shape;
+                            adapterNode.parentIds = {currentPid};
+                            adapterNode.backend = adapter.backend;
+                            adapterNode.storageType = StorageType::TRANSIENT;
+
+                            // Inherit view from currentPid, modify if CONTIGUOUS
+                            adapterNode.view = graph.nodes[currentPid].view;
+                            if (adapter.opType == OpType::CONTIGUOUS)
+                            {
+                                adapterNode.view.strides = TensorView::calcContiguousStrides(adapterNode.shape);
+                                adapterNode.view.baseOffset = 0; // New allocation
+                            }
+                            else if (adapter.opType == OpType::COPY_TO)
+                            {
+                                adapterNode.view.baseOffset = 0; // New allocation
+                            }
+
+                            if (adapterNode.id >= graph.nodes.size())
+                            {
+                                graph.nodes.resize(adapterNode.id + 1);
+                            }
+                            graph.nodes[adapterNode.id] = adapterNode;
+
+                            insertedCopyNodes[adapterKey] = adapterNode.id;
+                            finalTopoWithCopies.push_back(adapterNode.id);
+
+                            compiled.refCounts[adapterNode.id]++;
+                            compiled.refCounts[currentPid]++;
+
+                            compiled.nodesMap[adapterNode.id] = adapterNode;
+
+                            std::string adapterHash = Hashing::structuralHash(adapterNode.id, graph, structHashMemo);
+                            bestRecipe.kernelAssignments[adapterHash] = adapter.kernelId;
+                            bestRecipe.assignments[adapterHash] = adapter.backend;
+
+                            currentPid = adapterNode.id;
                         }
                     }
+                    mappedParentIds.push_back(currentPid);
                 }
                 else
                 {
@@ -575,127 +697,163 @@ private:
 
             for (Backend backend : availableBackends)
             {
-                std::vector<TensorNode> inputNodes;
-                for (uint32_t pid : target.parentIds)
+                if (target.parentIds.empty())
                 {
-                    inputNodes.push_back(graph.nodes[pid]);
-                }
+                    std::vector<TensorNode> inputNodes;
+                    std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
+                        target.opType, target.opName, backend, inputNodes, target, &estimatedRefCounts);
 
-                std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
-                    target.opType, target.opName, backend, inputNodes, target, &estimatedRefCounts);
-
-                for (uint64_t kernelId : matchingKernels)
-                {
-                    std::string targetHash = Hashing::structuralHash(targetId, graph, structHashMemo);
-
-                    if (parentBeamSets.empty())
+                    for (uint64_t kernelId : matchingKernels)
                     {
+                        std::string targetHash = Hashing::structuralHash(targetId, graph, structHashMemo);
                         float cost = costModel.estimateCost(target, graph, kernelId);
                         std::unordered_map<std::string, Backend> assigns;
                         assigns[targetHash] = backend;
-                        std::unordered_map<std::string, uint64_t> kAssigns; // Changed
+                        std::unordered_map<std::string, uint64_t> kAssigns;
                         kAssigns[targetHash] = kernelId;
                         std::unordered_map<std::string, float> nCosts;
                         nCosts[targetHash] = cost;
                         std::unordered_map<std::string, uint32_t> sNodes;
                         sNodes[nodeHash] = targetId;
+                        std::unordered_map<std::string, std::vector<AdapterOp>> edgeAdapters;
+                        candidates.push_back({cost, targetId, assigns, kAssigns, nCosts, sNodes, edgeAdapters});
+                    }
+                    continue;
+                }
 
-                        BeamStrategy strat{cost, targetId, assigns, kAssigns, nCosts, sNodes};
-                        candidates.push_back(strat);
-                        continue;
+                std::vector<size_t> indices(parentBeamSets.size(), 0);
+                while (true)
+                {
+                    std::vector<std::vector<AdapterChain>> parentAdapterChains(parentBeamSets.size());
+                    bool possible = true;
+                    for (size_t i = 0; i < parentBeamSets.size(); ++i)
+                    {
+                        const auto &pStrat = parentBeamSets[i][indices[i]];
+                        std::string phash = Hashing::structuralHash(pStrat.nodeId, graph, structHashMemo);
+                        Backend pBackend = pStrat.assignments.at(phash);
+
+                        parentAdapterChains[i] = getAdapterChains(graph.nodes[pStrat.nodeId], pBackend, backend, graph, estimatedRefCounts, costModel);
+                        if (parentAdapterChains[i].empty())
+                        {
+                            possible = false;
+                            break;
+                        }
                     }
 
-                    std::vector<size_t> indices(parentBeamSets.size(), 0);
-                    while (true)
+                    if (possible)
                     {
-                        std::unordered_map<std::string, Backend> assigns;
-                        assigns[targetHash] = backend;
-                        std::unordered_map<std::string, uint64_t> kAssigns; // Changed
-                        kAssigns[targetHash] = kernelId;
-                        std::unordered_map<std::string, float> nCosts;
-                        std::unordered_map<std::string, uint32_t> sNodes;
-                        sNodes[nodeHash] = targetId;
-
-                        for (size_t i = 0; i < parentBeamSets.size(); i++)
+                        std::vector<size_t> chainIndices(parentAdapterChains.size(), 0);
+                        while (true)
                         {
-                            const auto &pStrat = parentBeamSets[i][indices[i]];
-                            for (auto &pair : pStrat.assignments)
-                            {
-                                assigns[pair.first] = pair.second; // pair.first is now a hash string
-                            }
-                            for (auto &pair : pStrat.kernelAssignments)
-                            {
-                                kAssigns[pair.first] = pair.second;
-                            }
-                            for (auto &pair : pStrat.nodeCosts)
-                            {
-                                nCosts[pair.first] = pair.second;
-                            }
-                            for (auto &pair : pStrat.selectedNodes)
-                            {
-                                sNodes[pair.first] = pair.second;
-                            }
+                            std::vector<TensorNode> adaptedInputNodes;
+                            float totalAdapterCost = 0.0f;
+                            std::unordered_map<std::string, std::vector<AdapterOp>> tempEdgeAdapters;
 
-                            // Check transfer cost using parent's hash
-                            // TODO: make this actually good. might need to insert copy node into graph inbetween parent and current node
-                            std::string phash = Hashing::structuralHash(pStrat.nodeId, graph, structHashMemo);
-                            Backend parentBackend = pStrat.assignments.at(phash);
-                            if (parentBackend != backend)
+                            for (size_t i = 0; i < parentAdapterChains.size(); ++i)
                             {
+                                const auto &chain = parentAdapterChains[i][chainIndices[i]];
+                                totalAdapterCost += chain.cost;
+
+                                const auto &pStrat = parentBeamSets[i][indices[i]];
+                                std::string phash = Hashing::structuralHash(pStrat.nodeId, graph, structHashMemo);
+                                std::string targetHash = Hashing::structuralHash(targetId, graph, structHashMemo);
                                 std::string edgeHash = phash + "->" + targetHash;
-
-                                TensorNode copyInNode = graph.nodes[pStrat.nodeId];
-                                copyInNode.backend = parentBackend;
-
-                                TensorNode copyOutNode = copyInNode;
-                                copyOutNode.id = 0; // dummy
-                                copyOutNode.opType = OpType::COPY_TO;
-                                copyOutNode.opName = "";
-                                copyOutNode.parentIds = {pStrat.nodeId};
-                                copyOutNode.backend = backend;
-
-                                std::vector<TensorNode> copyInputs = {copyInNode};
-                                std::vector<uint64_t> copyKernels = KernelRegistry::get().findMatchingKernels(
-                                    OpType::COPY_TO, "", backend, copyInputs, copyOutNode, &estimatedRefCounts);
-
-                                float bestCopyCost = std::numeric_limits<float>::infinity();
-                                uint64_t bestCopyKernelId = UINT64_MAX;
-                                for (uint64_t copyKId : copyKernels)
+                                if (!chain.ops.empty())
                                 {
-                                    float copyCost = costModel.estimateCost(copyOutNode, graph, copyKId);
-                                    if (copyCost < bestCopyCost)
+                                    tempEdgeAdapters[edgeHash] = chain.ops;
+                                }
+
+                                TensorNode adaptedNode = graph.nodes[pStrat.nodeId];
+                                adaptedNode.backend = chain.finalBackend;
+                                if (chain.finalContig)
+                                {
+                                    adaptedNode.view.strides = TensorView::calcContiguousStrides(adaptedNode.shape);
+                                }
+                                adaptedInputNodes.push_back(adaptedNode);
+                            }
+
+                            std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
+                                target.opType, target.opName, backend, adaptedInputNodes, target, &estimatedRefCounts);
+
+                            for (uint64_t kernelId : matchingKernels)
+                            {
+                                float targetCost = costModel.estimateCost(target, graph, kernelId);
+
+                                std::string targetHash = Hashing::structuralHash(targetId, graph, structHashMemo);
+                                std::unordered_map<std::string, Backend> assigns;
+                                assigns[targetHash] = backend;
+                                std::unordered_map<std::string, uint64_t> kAssigns;
+                                kAssigns[targetHash] = kernelId;
+                                std::unordered_map<std::string, float> nCosts;
+                                nCosts[targetHash] = targetCost;
+                                std::unordered_map<std::string, uint32_t> sNodes;
+                                sNodes[nodeHash] = targetId;
+
+                                for (size_t i = 0; i < parentBeamSets.size(); ++i)
+                                {
+                                    const auto &pStrat = parentBeamSets[i][indices[i]];
+                                    std::string phash = Hashing::structuralHash(pStrat.nodeId, graph, structHashMemo);
+                                    std::string edgeHash = phash + "->" + targetHash;
+                                    float chainCost = parentAdapterChains[i][chainIndices[i]].cost;
+                                    if (chainCost > 0.0f)
                                     {
-                                        bestCopyCost = copyCost;
-                                        bestCopyKernelId = copyKId;
+                                        nCosts[edgeHash] = chainCost;
+                                    }
+
+                                    for (auto &pair : pStrat.assignments)
+                                        assigns[pair.first] = pair.second;
+                                    for (auto &pair : pStrat.kernelAssignments)
+                                        kAssigns[pair.first] = pair.second;
+                                    for (auto &pair : pStrat.nodeCosts)
+                                        nCosts[pair.first] = pair.second;
+                                    for (auto &pair : pStrat.selectedNodes)
+                                        sNodes[pair.first] = pair.second;
+                                }
+
+                                float totalCost = 0.0f;
+                                for (const auto &pair : nCosts)
+                                {
+                                    totalCost += pair.second;
+                                }
+
+                                std::unordered_map<std::string, std::vector<AdapterOp>> combinedEdgeAdapters = tempEdgeAdapters;
+                                for (size_t i = 0; i < parentBeamSets.size(); ++i)
+                                {
+                                    const auto &pStrat = parentBeamSets[i][indices[i]];
+                                    for (auto &pair : pStrat.edgeAdapters)
+                                    {
+                                        combinedEdgeAdapters[pair.first] = pair.second;
                                     }
                                 }
-                                nCosts[edgeHash] = bestCopyCost;
-                                kAssigns[edgeHash] = bestCopyKernelId;
+
+                                candidates.push_back({totalCost, targetId, assigns, kAssigns, nCosts, sNodes, combinedEdgeAdapters});
                             }
-                        }
 
-                        nCosts[targetHash] = costModel.estimateCost(target, graph, kernelId);
-
-                        float totalCost = 0.0f;
-                        for (const auto &pair : nCosts)
-                        {
-                            totalCost += pair.second;
-                        }
-
-                        candidates.push_back({totalCost, targetId, assigns, kAssigns, nCosts, sNodes});
-
-                        int p = static_cast<int>(indices.size()) - 1;
-                        while (p >= 0)
-                        {
-                            indices[p]++;
-                            if (indices[p] < parentBeamSets[p].size())
+                            int c = static_cast<int>(chainIndices.size()) - 1;
+                            while (c >= 0)
+                            {
+                                chainIndices[c]++;
+                                if (chainIndices[c] < parentAdapterChains[c].size())
+                                    break;
+                                chainIndices[c] = 0;
+                                c--;
+                            }
+                            if (c < 0)
                                 break;
-                            indices[p] = 0;
-                            p--;
                         }
-                        if (p < 0)
-                            break;
                     }
+
+                    int p = static_cast<int>(indices.size()) - 1;
+                    while (p >= 0)
+                    {
+                        indices[p]++;
+                        if (indices[p] < parentBeamSets[p].size())
+                            break;
+                        indices[p] = 0;
+                        p--;
+                    }
+                    if (p < 0)
+                        break;
                 }
             }
         }

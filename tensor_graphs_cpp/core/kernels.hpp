@@ -76,6 +76,7 @@ struct KernelEntry
     bool isReference;
     std::vector<DType> dtypes;
     std::vector<std::vector<uint32_t>> dummyShapes;
+    std::vector<bool> requiresContiguous;
 };
 
 class KernelRegistry
@@ -95,9 +96,10 @@ public:
                         Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
                         bool inplace, bool isReference,
                         const std::vector<DType> &dtypes,
-                        const std::vector<std::vector<uint32_t>> &dummyShapes)
+                        const std::vector<std::vector<uint32_t>> &dummyShapes,
+                        const std::vector<bool> &contiguous)
     {
-        entries.push_back({uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, dtypes, dummyShapes});
+        entries.push_back({uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, dtypes, dummyShapes, contiguous});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory, dtypes, dummyShapes);
@@ -173,9 +175,10 @@ struct KernelRegistrar
                     Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
                     bool inplace, bool isReference,
                     const std::vector<DType> &dtypes = {},
-                    const std::vector<std::vector<uint32_t>> &dummyShapes = {})
+                    const std::vector<std::vector<uint32_t>> &dummyShapes = {},
+                    const std::vector<bool> &contiguous = {})
     {
-        KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, dtypes, dummyShapes);
+        KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, dtypes, dummyShapes, contiguous);
     }
 };
 
@@ -195,10 +198,10 @@ struct KernelRegistrar
 #endif
 
 #define REGISTER_REF_KERNEL_INTERNAL(uid, op, backend, match, run) \
-    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, false, true, {}, {})
+    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, false, true, {}, {}, {})
 
 #define REGISTER_REF_KERNEL_INPLACE_INTERNAL(uid, op, backend, match, run) \
-    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, true, true, {}, {})
+    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, true, true, {}, {}, {})
 
 #define REGISTER_KERNEL_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory, ...) \
     static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false, false, __VA_ARGS__)

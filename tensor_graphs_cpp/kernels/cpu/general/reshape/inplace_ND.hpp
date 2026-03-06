@@ -22,4 +22,4 @@ inline uint32_t refFactoryReshapeInplaceND(const std::vector<uint32_t> &inputs, 
     return graph.reshape(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL_INPLACE("Reshape_Inplace", 2, Backend::CPU, matchReshapeInplaceND, runReshapeInplaceND, refFactoryReshapeInplaceND, {DType::FLOAT32, DType::INT32}, {{1}, {1}}); // TODO: for this kernel input[0] doesn't have to have dtype float32, maybe we should update signature to allow list of dtypes instead of single dtype
+REGISTER_KERNEL_INPLACE("Reshape_Inplace", 2, Backend::CPU, matchReshapeInplaceND, runReshapeInplaceND, refFactoryReshapeInplaceND, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {false, false}); // TODO: for this kernel input[0] doesn't have to have dtype float32, maybe we should update signature to allow list of dtypes instead of single dtype

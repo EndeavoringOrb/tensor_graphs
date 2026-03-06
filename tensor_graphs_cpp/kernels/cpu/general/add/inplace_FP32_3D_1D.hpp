@@ -102,4 +102,4 @@ inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL_INPLACE("Add_3D_1D_inplace", 2, Backend::CPU, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}});
+REGISTER_KERNEL_INPLACE("Add_3D_1D_inplace", 2, Backend::CPU, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {false, false});

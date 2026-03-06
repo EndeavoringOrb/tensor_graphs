@@ -108,10 +108,17 @@ struct Graph
         return node.id;
     }
 
-    // Builder function for fused operations resolving reference graph logic
-    uint32_t tanh(uint32_t id0);
+    uint32_t contiguous(uint32_t id0)
+    {
+        TensorNode node = TensorNode();
+        node.id = allocateId();
+        node.opType = OpType::CONTIGUOUS;
+        node.dtype = nodes[id0].dtype;
+        node.parentIds = {id0};
+        nodes.push_back(node);
+        return node.id;
+    }
 
-    // Existing atomic mathematical ops ...
     uint32_t add(uint32_t id0, uint32_t id1)
     {
         if (nodes[id0].dtype != nodes[id1].dtype)

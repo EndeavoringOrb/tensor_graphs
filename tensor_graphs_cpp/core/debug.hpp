@@ -13,7 +13,6 @@ namespace Debug
 #ifndef DEBUG
         return;
 #endif
-        std::cout << "checking nan values" << std::endl;
         // INT32 and BOOL cannot represent NaNs, so we skip them
         if (node.dtype != DType::FLOAT32 && node.dtype != DType::BF16)
         {

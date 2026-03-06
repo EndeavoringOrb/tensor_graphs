@@ -75,6 +75,7 @@ enum class OpType : uint32_t
     FILL,
     COPY_TO,
     IM2COL,
+    CONTIGUOUS,
 
     FUSED
 };
@@ -571,6 +572,13 @@ struct CompiledGraph
     std::unordered_map<uint32_t, TensorNode> nodesMap;
 };
 
+struct AdapterOp
+{
+    OpType opType;
+    uint64_t kernelId;
+    Backend backend;
+};
+
 struct BeamStrategy
 {
     float cost;
@@ -579,6 +587,7 @@ struct BeamStrategy
     std::unordered_map<std::string, uint64_t> kernelAssignments;
     std::unordered_map<std::string, float> nodeCosts;
     std::unordered_map<std::string, uint32_t> selectedNodes;
+    std::unordered_map<std::string, std::vector<AdapterOp>> edgeAdapters;
 
     bool operator<(const BeamStrategy &other) const
     {
