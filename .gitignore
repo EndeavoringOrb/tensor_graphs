@@ -11,17 +11,28 @@ resources/*.json
 .vscode
 flux-klein-4b
 out.log
-kernel_launches
-benchmarks.db
-profile_output*
-dirty_region_caches
 images
 wsl_venv
 .claude
 CLAUDE.md
+
+# Profiling artifacts
+profile_output*
+
+# Cache and Benchmarks
+benchmarks*
+dirty_region_caches/
+kernel_launches
+
+# Compiled binaries
 *.exe
-*.pyd
-*.ilk
+*.out
+*.app
 *.pdb
 *.obj
-benchmarks
+*.o
+*.pyd
+*.ilk
+
+# Generated C++ headers
+tensor_graphs_cpp/generated/
