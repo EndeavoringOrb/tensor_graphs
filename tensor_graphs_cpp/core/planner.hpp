@@ -15,7 +15,7 @@
 #include <sstream>
 #include <cstring>
 
-// #define FUSE_OPS
+#define FUSE_OPS
 
 class Planner
 {
@@ -66,7 +66,7 @@ public:
                 view.strides = TensorView::calcContiguousStrides(view.shape);
                 view.baseOffset = 0;
                 DType dtype = pair.second.dtypes[i];
-                view.dtype = dtype;  // TODO: maybe assert len
+                view.dtype = dtype; // TODO: maybe assert len
                 pattern.graph.inputWithId(inId, view.shape, dtype, view);
                 pattern.variables.push_back(inId);
             }
@@ -90,8 +90,8 @@ public:
         Rewrite::DivMulRule dmr;
         Rewrite::DivAddRule dar;
 
-        // std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr, &fr, &ar, &dnr, &nar, &dmr, &dar};
-        std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr};
+        std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr, &fr, &ar, &dnr, &nar, &dmr, &dar};
+        // std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr};
         // std::vector<const Rewrite::RewriteRule *> rules = {}; // TODO: remove this line, this is just so the matching phase is fast while debugging planning phase
 
         std::cout << "[Planner.plan] matching fusion patterns..." << std::endl;
@@ -420,6 +420,7 @@ private:
             strat.cost = 0.0f;
             strat.nodeId = nodeId;
             strat.assignments[nodeHash] = node.backend;
+            strat.nodeCosts[nodeHash] = 0.0f; // Inputs have 0 compute cost
             memo[nodeHash] = {strat};
             return;
         }
@@ -436,14 +437,9 @@ private:
         for (uint32_t targetId : targets)
         {
             const auto &target = graph.nodes[targetId];
-            if (target.opName != "")
-            {
-                int a = 5; // for debug breakpoint
-            }
-
-            // Check parent planning status
             std::vector<std::vector<BeamStrategy>> parentBeamSets;
             bool anyParentMissing = false;
+
             for (uint32_t pid : target.parentIds)
             {
                 std::string phash = Hashing::detail::structuralHashImpl(pid, graph, structHashMemo);
@@ -461,9 +457,7 @@ private:
             {
                 std::vector<TensorNode> inputNodes;
                 for (uint32_t pid : target.parentIds)
-                {
                     inputNodes.push_back(graph.nodes[pid]);
-                }
 
                 // Pass nullptr for refCounts during planning phase.
                 // We perform optimistic planning for inplace ops (assuming refcount=1).
@@ -474,59 +468,77 @@ private:
 
                 for (uint64_t kernelId : matchingKernels)
                 {
-                    const KernelEntry &kEntry = KernelRegistry::get().getKernel(kernelId);
                     std::string targetHash = Hashing::detail::structuralHashImpl(targetId, graph, structHashMemo);
+                    float currentKernelCost = costModel.estimateCost(target, graph, kernelId);
 
                     if (parentBeamSets.empty())
                     {
-                        float cost = costModel.estimateCost(target, graph, kernelId);
-                        std::unordered_map<std::string, Backend> assigns;
-                        assigns[targetHash] = backend;
-                        std::unordered_map<std::string, uint64_t> kAssigns; // Changed
-                        kAssigns[targetHash] = kernelId;
-
-                        BeamStrategy strat{cost, targetId, assigns, kAssigns};
+                        BeamStrategy strat;
+                        strat.cost = currentKernelCost;
+                        strat.nodeId = targetId;
+                        strat.assignments[targetHash] = backend;
+                        strat.kernelAssignments[targetHash] = kernelId;
+                        strat.nodeCosts[targetHash] = currentKernelCost;
                         candidates.push_back(strat);
                         continue;
                     }
 
+                    // Iterative combination of parent beams
                     std::vector<size_t> indices(parentBeamSets.size(), 0);
                     while (true)
                     {
-                        float cost = 0.0f;
-                        std::unordered_map<std::string, Backend> assigns;
-                        assigns[targetHash] = backend;
-                        std::unordered_map<std::string, uint64_t> kAssigns; // Changed
-                        kAssigns[targetHash] = kernelId;
+                        BeamStrategy mergedStrat;
+                        mergedStrat.nodeId = targetId;
+                        bool possible = true;
 
+                        // Merge all parent strategies
                         for (size_t i = 0; i < parentBeamSets.size(); i++)
                         {
                             const auto &pStrat = parentBeamSets[i][indices[i]];
-                            cost += pStrat.cost;
-                            for (auto &pair : pStrat.assignments)
-                            {
-                                assigns[pair.first] = pair.second; // pair.first is now a hash string
-                            }
-                            for (auto &pair : pStrat.kernelAssignments)
-                            {
-                                kAssigns[pair.first] = pair.second;
-                            }
 
-                            // Check transfer cost using parent's hash
-                            std::string phash = Hashing::detail::structuralHashImpl(pStrat.nodeId, graph, structHashMemo);
+                            // Check for backend assignment conflicts
+                            for (auto const &[h, b] : pStrat.assignments)
+                            {
+                                if (mergedStrat.assignments.count(h) && mergedStrat.assignments[h] != b)
+                                {
+                                    possible = false;
+                                    break;
+                                }
+                                mergedStrat.assignments[h] = b;
+                            }
+                            if (!possible)
+                                break;
+
+                            mergedStrat.kernelAssignments.insert(pStrat.kernelAssignments.begin(), pStrat.kernelAssignments.end());
+                            mergedStrat.nodeCosts.insert(pStrat.nodeCosts.begin(), pStrat.nodeCosts.end());
+
+                            // Add transfer cost if parent is on different backend
+                            std::string phash = Hashing::detail::structuralHashImpl(target.parentIds[i], graph, structHashMemo);
                             if (pStrat.assignments.at(phash) != backend)
                             {
-                                cost += 0.05f; // TODO: use estimateCost with temp copyTo node
+                                mergedStrat.cost += 0.05f; // Placeholder for transfer cost
                             }
                         }
 
-                        cost += costModel.estimateCost(target, graph, kernelId);
+                        if (possible)
+                        {
+                            // Add current node
+                            mergedStrat.assignments[targetHash] = backend;
+                            mergedStrat.kernelAssignments[targetHash] = kernelId;
+                            mergedStrat.nodeCosts[targetHash] = currentKernelCost;
 
-                        assigns[targetHash] = backend;
-                        kAssigns[targetHash] = kernelId;
+                            // Calculate final deduplicated cost
+                            float totalDeduplicatedCost = 0.0f;
+                            for (auto const &[h, c] : mergedStrat.nodeCosts)
+                            {
+                                totalDeduplicatedCost += c;
+                            }
+                            mergedStrat.cost += totalDeduplicatedCost;
 
-                        candidates.push_back({cost, targetId, assigns, kAssigns});
+                            candidates.push_back(mergedStrat);
+                        }
 
+                        // Advance indices
                         int p = static_cast<int>(indices.size()) - 1;
                         while (p >= 0)
                         {
@@ -545,9 +557,8 @@ private:
 
         std::sort(candidates.begin(), candidates.end());
         if (candidates.size() > beamWidth)
-        {
             candidates.resize(beamWidth);
-        }
+        
 
         if (candidates.empty())
         {
@@ -566,13 +577,6 @@ private:
             ss << std::endl;
             throw std::runtime_error(ss.str());
         }
-
-        for (const auto &cand : candidates) {
-            if (isinf(cand.cost)) {
-                int a = 5;
-            }
-        }
-        std::cout << candidates[0].cost << std::endl;
 
         memo[nodeHash] = candidates;
     }

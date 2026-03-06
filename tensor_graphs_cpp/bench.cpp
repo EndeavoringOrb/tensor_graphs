@@ -60,6 +60,9 @@ int main()
 
     std::vector<json> toBenchmark;
     std::unordered_set<std::string> seenCalls;
+    std::ostringstream ss;
+    ss << "0x" << std::hex << BUILD_CONTEXT_ID;
+    std::string BUILD_CONTEXT_ID_STRING = ss.str();
 
     std::string line;
     while (std::getline(callsFile, line))
@@ -81,9 +84,17 @@ int main()
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
         {
             seenCalls.insert(key);
-            if (j["hwTag"] == HW_TAG && j["buildContextId"] == BUILD_CONTEXT_ID)
+            std::string valA = j["hwTag"].get<std::string>();
+            std::string valB = j["buildContextId"].get<std::string>();
+            bool checkA = valA == HW_TAG;
+            bool checkB = valB == BUILD_CONTEXT_ID_STRING;
+            if (checkA && checkB)
+            {
                 toBenchmark.push_back(j);
-        } else {
+            }
+        }
+        else
+        {
             int a = 5;
         }
     }

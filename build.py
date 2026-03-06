@@ -28,7 +28,7 @@ def get_compiler_cmd(fname: str):
         "/Zi",
         "/std:c++17",
         "/EHsc",
-        "/OO",  # Optimization flag
+        "/O2",  # Optimization flag
         f"/I{ROOT_DIR}",
         # Input file placed at the end so it can be stripped for the hash
         str(ROOT_DIR / fname),
