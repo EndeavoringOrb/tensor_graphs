@@ -75,10 +75,11 @@ def generate_kernel_uids(core_seed):
     uids_hpp = GENERATED_DIR / "kernel_uids.gen.hpp"
     kernel_map = {}
     uid_to_path = {}
+    kernel_exts = [".hpp", ".cu"]
 
     for root, _, files in os.walk(KERNELS_DIR):
         for f in files:
-            if f.endswith(".hpp"):
+            if any(f.endswith(ext) for ext in kernel_exts):
                 path = Path(root) / f
                 rel_path = path.relative_to(ROOT_DIR)
 
