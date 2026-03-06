@@ -117,6 +117,6 @@ REGISTER_KERNEL(
     runDotF32_3D_CUDA,
     refFactoryDotF32_3D_CUDA,
     {DType::FLOAT32, DType::FLOAT32},
-    {{2, 8, 16}, {2, 16, 8}});
+    {{2, 8, 16}, {2, 16, 8}}, {true, true});
 
 #endif
