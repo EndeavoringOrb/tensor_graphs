@@ -164,6 +164,31 @@ public:
         std::cout << "[Planner.plan] inferring shapes for augmented graph..." << std::endl;
         inferShapes(sortedNodes, graph);
 
+        std::unordered_map<uint32_t, uint32_t> estimatedRefCounts;
+        for (uint32_t id : topo)
+        {
+            for (uint32_t pid : graph.nodes[id].parentIds)
+            {
+                estimatedRefCounts[pid]++;
+            }
+        }
+        estimatedRefCounts[rootId] = 1;
+
+        std::unordered_set<uint32_t> topoSet(topo.begin(), topo.end());
+        for (uint32_t id : sortedNodes)
+        {
+            if (topoSet.count(id) == 0)
+            {
+                for (uint32_t pid : graph.nodes[id].parentIds)
+                {
+                    if (topoSet.count(pid) == 0)
+                    {
+                        estimatedRefCounts[pid]++;
+                    }
+                }
+            }
+        }
+
         std::unordered_map<std::string, std::vector<BeamStrategy>> memo;
 
         std::cout << "[Planner.plan] planning nodes..." << std::endl;
@@ -172,7 +197,7 @@ public:
         {
             nodeIdx++;
             std::cout << nodeIdx << "/" << sortedNodes.size() << "\r";
-            planNodeIterative(nodeId, graph, fusionMap, memo, structHashMemo);
+            planNodeIterative(nodeId, graph, fusionMap, memo, structHashMemo, estimatedRefCounts);
         }
 
         std::string rootHash = Hashing::detail::structuralHashImpl(rootId, graph, structHashMemo);
@@ -261,49 +286,22 @@ public:
                 assignedBackend = bestRecipe.assignments.at(h);
             }
 
-            // Prepare input nodes for querying
-            std::vector<TensorNode> inputNodes;
-            for (uint32_t pid : compiled.nodesMap[id].parentIds) // <-- Read from mapped
+            uint64_t finalKernelId = bestRecipe.kernelAssignments.count(h) ? bestRecipe.kernelAssignments.at(h) : UINT64_MAX;
+            if (finalKernelId == UINT64_MAX)
             {
-                inputNodes.push_back(compiled.nodesMap[pid]);    // <-- Read from mapped
-            }
-
-            // Pass refCounts to findMatchingKernels to enforce inplace safety at runtime
-            std::vector<uint64_t> validKernels = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, assignedBackend, inputNodes, node, &compiled.refCounts);
-
-            uint64_t finalKernelId; // Changed
-
-            uint64_t plannedKernelId = bestRecipe.kernelAssignments.count(h) ? bestRecipe.kernelAssignments.at(h) : UINT64_MAX; // Changed
-            bool isPlannedValid = false;
-            for (uint64_t kid : validKernels) // Changed
-            {
-                if (kid == plannedKernelId)
-                {
-                    isPlannedValid = true;
-                    break;
-                }
-            }
-
-            if (isPlannedValid)
-            {
-                finalKernelId = plannedKernelId;
-            }
-            else
-            {
-                // Fallback: The planned kernel (e.g. inplace) is invalid under current refCounts.
-                // Select the first available valid kernel (usually the out-of-place version).
-                if (validKernels.empty())
-                {
-                    throw std::runtime_error("[Planner.plan] CRITICAL: No valid kernel found for node " + std::to_string(id));
-                }
-                std::cout << "[DEBUG] Fallback triggered for node " << id
-                          << " (Op: " << toString(node.opType)
-                          << "). Expected kernel missing!\n";
-                finalKernelId = validKernels[0];
+                throw std::runtime_error("[Planner.plan] CRITICAL: Missing kernel assignment for node " + std::to_string(id));
             }
 
             const KernelEntry &kEntry = KernelRegistry::get().getKernel(finalKernelId);
+
+            if (kEntry.inplace)
+            {
+                uint32_t input0Id = compiled.nodesMap[id].parentIds[0];
+                if (compiled.refCounts[input0Id] > 1)
+                {
+                    throw std::runtime_error("[Planner.plan] CRITICAL: Planned inplace kernel but refCount > 1 for node " + std::to_string(input0Id));
+                }
+            }
 
             OpInstruction inst;
             inst.nodeId = id;
@@ -437,7 +435,8 @@ private:
     void planNodeIterative(uint32_t nodeId, const Graph &graph,
                            std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
                            std::unordered_map<std::string, std::vector<BeamStrategy>> &memo,
-                           std::unordered_map<uint32_t, std::string> &structHashMemo)
+                           std::unordered_map<uint32_t, std::string> &structHashMemo,
+                           const std::unordered_map<uint32_t, uint32_t> &estimatedRefCounts)
     {
         std::string nodeHash = Hashing::detail::structuralHashImpl(nodeId, graph, structHashMemo);
         if (memo.count(nodeHash))
@@ -451,6 +450,7 @@ private:
             strat.nodeId = nodeId;
             strat.assignments[nodeHash] = node.backend;
             strat.nodeCosts[nodeHash] = 0.0f;
+            strat.selectedNodes[nodeHash] = nodeId;
             memo[nodeHash] = {strat};
             return;
         }
@@ -496,12 +496,8 @@ private:
                     inputNodes.push_back(graph.nodes[pid]);
                 }
 
-                // Pass nullptr for refCounts during planning phase.
-                // We perform optimistic planning for inplace ops (assuming refcount=1).
-                // Runtime safety checks will happen during the final instruction build.
-                // TODO: pass actual ref counts, passing nullptr is bad.
                 std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
-                    target.opType, target.opName, backend, inputNodes, target, nullptr);
+                    target.opType, target.opName, backend, inputNodes, target, &estimatedRefCounts);
 
                 for (uint64_t kernelId : matchingKernels)
                 {
@@ -549,6 +545,10 @@ private:
                             for (auto &pair : pStrat.nodeCosts)
                             {
                                 nCosts[pair.first] = pair.second;
+                            }
+                            for (auto &pair : pStrat.selectedNodes)
+                            {
+                                sNodes[pair.first] = pair.second;
                             }
 
                             // Check transfer cost using parent's hash
@@ -614,7 +614,7 @@ private:
         {
             if (isinf(cand.cost))
             {
-                std::cout << "Detected inf cand cost: " << candidates[0].cost << std::endl;
+                std::cout << "Detected inf cand cost: " << cand.cost << std::endl; // TODO: maybe remove this candidate?
             }
         }
 
