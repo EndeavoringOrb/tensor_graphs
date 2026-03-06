@@ -517,6 +517,11 @@ int main()
     std::string modelPath = "resources/model.safetensors";
 
     ModelConfig cfg;
+#if USE_CUDA
+    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 2ULL * 1024 * 1024 * 1024},{Backend::CUDA, 2ULL * 1024 * 1024 * 1024}};
+#else
+    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 2ULL * 1024 * 1024 * 1024}};
+#endif
     MemoryManager mem = MemoryManager({{Backend::CPU, 2ULL * 1024 * 1024 * 1024}});
 
     Graph g;
