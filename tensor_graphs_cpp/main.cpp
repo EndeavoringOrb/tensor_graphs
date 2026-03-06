@@ -4,7 +4,9 @@
 #include <cmath>
 #include <algorithm>
 #include <tuple>
+#if defined(_WIN32)
 #include <float.h>
+#endif
 
 #include "core/types.hpp"
 #include "core/memory.hpp"
@@ -506,8 +508,10 @@ public:
 
 int main()
 {
+#if defined(_WIN32)
     _controlfp_s(nullptr, 0, 0);
     _controlfp_s(nullptr, _EM_INVALID | _EM_ZERODIVIDE | _EM_OVERFLOW, _MCW_EM);
+#endif
     std::vector<uint32_t> tokens = {2, 105, 2364, 107, 155122, 27825, 49087, 531, 496, 236743, 236810, 1051, 2255, 236761, 106, 107, 105, 4368, 107};
     uint32_t maxSeqLen = 128;
     std::string modelPath = "resources/model.safetensors";

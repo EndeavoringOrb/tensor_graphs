@@ -624,7 +624,7 @@ private:
 
         for (const auto &cand : candidates)
         {
-            if (isinf(cand.cost))
+            if (std::isinf(cand.cost))
             {
                 std::cout << "Detected inf cand cost: " << cand.cost << std::endl; // TODO: maybe remove this candidate?
             }
