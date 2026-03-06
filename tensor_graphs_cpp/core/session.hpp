@@ -225,7 +225,7 @@ public:
                 {
                     const auto &source = graph.weightSources.at(nodeId);
                     auto &loader = graph.loaders.at(source.first);
-                    uint8_t *destPtr = memManager.buffers.at(graph.nodes[nodeId].backend).arena.data() + offset;
+                    uint8_t *destPtr = memManager.buffers.at(graph.nodes[nodeId].backend).arena_ptr + offset;
                     loader->loadTensor(source.second, destPtr, sizeBytes);
                 }
             }
@@ -372,7 +372,11 @@ public:
         uint64_t offset = it->second->offset;
         uint64_t baseOffset = graph.nodes[nodeId].view.shape.empty() ? 0 : graph.nodes[nodeId].view.baseOffset;
 
-        return buf.arena.data() + offset + baseOffset;
+#ifdef USE_CUDA
+        cudaDeviceSynchronize();
+#endif
+
+        return buf.arena_ptr + offset + baseOffset;
     }
 
     const void *getRootOutput() const

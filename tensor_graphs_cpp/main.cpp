@@ -513,8 +513,7 @@ int main()
     std::string modelPath = "resources/model.safetensors";
 
     ModelConfig cfg;
-    MemoryManager mem;
-    mem.buffers.emplace(Backend::CPU, DeviceBuffer(2ULL * 1024 * 1024 * 1024));
+    MemoryManager mem = MemoryManager({{Backend::CPU, 2ULL * 1024 * 1024 * 1024}});
 
     Graph g;
 

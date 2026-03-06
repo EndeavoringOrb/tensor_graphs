@@ -1,4 +1,4 @@
-# File: build.py
+import argparse
 import os
 import sys
 import hashlib
@@ -20,20 +20,35 @@ CORE_DEPENDENCIES = [
     ROOT_DIR / "core" / "graph.hpp",
 ]
 
+USE_CUDA = False
 
-# Windows ARM64 Compiler Configuration
-def get_compiler_cmd(fname: str):
-    return [
-        "cl.exe",
-        "/Zi",
-        "/std:c++17",
-        "/EHsc",
-        "/O2",  # Optimization flag
-        f"/I{ROOT_DIR}",
-        # Input file placed at the end so it can be stripped for the hash
-        str(ROOT_DIR / fname),
-        f"/Fe:tensor_graphs_cpp/{fname.split('.')[0]}.exe",
-    ]
+
+def get_compiler_cmd(fname: str, cu_files=[]):
+    if USE_CUDA:
+        cmd = [
+            "nvcc",
+            "-O3",
+            "-std=c++17",
+            f"-I{ROOT_DIR}",
+            "-DUSE_CUDA",
+        ]
+        for cu in cu_files:
+            cmd.append(str(cu))
+        cmd.append(str(ROOT_DIR / fname))
+        cmd.extend(["-o", f"tensor_graphs_cpp/{fname.split('.')[0]}.exe"])
+        return cmd
+    else:
+        cmd = [
+            "cl.exe",
+            "/Zi",
+            "/std:c++17",
+            "/EHsc",
+            "/O2",
+            f"/I{ROOT_DIR}",
+            str(ROOT_DIR / fname),
+            f"/Fe:tensor_graphs_cpp/{fname.split('.')[0]}.exe",
+        ]
+        return cmd
 
 
 def get_file_hash(filepath):
@@ -59,8 +74,6 @@ def generate_kernel_uids(core_seed):
     os.makedirs(GENERATED_DIR, exist_ok=True)
     uids_hpp = GENERATED_DIR / "kernel_uids.gen.hpp"
     kernel_map = {}
-
-    # NEW: Reverse map to detect collisions
     uid_to_path = {}
 
     for root, _, files in os.walk(KERNELS_DIR):
@@ -73,11 +86,9 @@ def generate_kernel_uids(core_seed):
                 combined = core_seed + file_content_hash
                 full_hash = hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
-                # Truncate to 64-bit
                 uid_val_raw = int(full_hash[:16], 16)
                 uid_val = f"0x{uid_val_raw:016x}ULL"
 
-                # GUARANTEE: Check for collisions
                 if uid_val in uid_to_path:
                     if uid_to_path[uid_val] != str(rel_path):
                         raise Exception(
@@ -87,7 +98,6 @@ def generate_kernel_uids(core_seed):
                         )
 
                 uid_to_path[uid_val] = str(rel_path)
-
                 const_name = (
                     str(rel_path)
                     .replace("/", "_")
@@ -114,7 +124,6 @@ def generate_kernel_uids(core_seed):
 def generate_kernel_includes(core_seed):
     """Generates kernels_all.gen.hpp with UID injection logic."""
     includes_hpp = GENERATED_DIR / "kernels_all.gen.hpp"
-
     kernel_entries = []
 
     for root, _, files in os.walk(KERNELS_DIR):
@@ -123,7 +132,6 @@ def generate_kernel_includes(core_seed):
                 path = Path(root) / f
                 rel_path = path.relative_to(ROOT_DIR)
 
-                # Calculate the UID for this specific file
                 file_content_hash = get_file_hash(path)
                 combined = core_seed + file_content_hash
                 full_hash = hashlib.sha256(combined.encode("utf-8")).hexdigest()
@@ -139,7 +147,6 @@ def generate_kernel_includes(core_seed):
 
         for inc_path, uid in sorted(kernel_entries):
             f.write(f"// --- {inc_path} ---\n")
-
             f.write(f"#undef REGISTER_REF_KERNEL\n")
             f.write(f"#undef REGISTER_REF_KERNEL_INPLACE\n")
             f.write(f"#undef REGISTER_KERNEL\n")
@@ -157,10 +164,8 @@ def generate_kernel_includes(core_seed):
             f.write(
                 f"#define REGISTER_KERNEL_INPLACE(name, n, back, m, r, ref, dtypes, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, name, n, back, m, r, ref, dtypes, __VA_ARGS__)\n"
             )
-
             f.write(f'#include "{inc_path}"\n\n')
 
-        # Clean up macros at the end of the file
         f.write(f"// --- Clean up macros ---\n")
         f.write(f"#undef REGISTER_REF_KERNEL\n")
         f.write(f"#undef REGISTER_REF_KERNEL_INPLACE\n")
@@ -173,9 +178,7 @@ def generate_kernel_includes(core_seed):
 def generate_build_context():
     """Hashes compiler command arguments to detect build flag changes."""
     ctx_hpp = GENERATED_DIR / "build_context.gen.hpp"
-
-    # Hash the command string (excluding input file path)
-    cmd_str = " ".join(get_compiler_cmd("")[:-2])
+    cmd_str = " ".join(get_compiler_cmd("", [])[:-2])
     ctx_hash = hashlib.sha256(cmd_str.encode("utf-8")).hexdigest()
 
     with open(ctx_hpp, "w") as f:
@@ -187,20 +190,17 @@ def generate_build_context():
     print(f"Build Context ID: 0x{ctx_hash[:16]}")
 
 
-def compile_binary(fname: str):
-    """Invokes the C++ compiler within the ARM64 environment."""
-    print("\nCompiling for ARM64...")
+def compile_binary(fname: str, cu_files=[]):
+    print(f"\nCompiling {fname}...")
+    compiler_args_str = " ".join(get_compiler_cmd(fname, cu_files))
 
-    # Convert the list of arguments into a single string for CMD
-    compiler_args_str = " ".join(get_compiler_cmd(fname))
-
-    # Combine the environment setup and the compiler call
-    # We use '&&' to run the compiler only if the environment setup succeeds
-    full_command = f'"{VCVARS_PATH}" arm64 && {compiler_args_str}'
+    if os.name == "nt":
+        arch = "amd64" if USE_CUDA else "arm64"
+        full_command = f'"{VCVARS_PATH}" {arch} && {compiler_args_str}'
+    else:
+        full_command = compiler_args_str
 
     print(f"Executing: {full_command}")
-
-    # shell=True is required to execute the batch file and && operator
     result = subprocess.run(full_command, capture_output=True, text=True, shell=True)
 
     if result.returncode != 0:
@@ -214,14 +214,29 @@ def compile_binary(fname: str):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cuda", action="store_true", help="Enable CUDA build")
+    args = parser.parse_args()
+
+    global USE_CUDA
+    USE_CUDA = args.cuda
+
     print("Starting One-Click Build...")
     core_seed = generate_core_seed()
     generate_kernel_uids(core_seed)
     generate_kernel_includes(core_seed)
     generate_build_context()
-    compile_binary("main.cpp")
-    compile_binary("bench.cpp")
-    compile_binary("test.cpp")
+
+    cu_files = []
+    if USE_CUDA:
+        for root, _, files in os.walk(KERNELS_DIR):
+            for f in files:
+                if f.endswith(".cu"):
+                    cu_files.append(Path(root) / f)
+
+    compile_binary("main.cpp", cu_files)
+    compile_binary("bench.cpp", cu_files)
+    compile_binary("test.cpp", cu_files)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,9 @@
 #include <limits>
 
 // TODO: make hardware detection better
-#if defined(_WIN32) || defined(_WIN64)
+#if defined(USE_CUDA)
+#define HW_TAG "CUDA_Enabled"
+#elif defined(_WIN32) || defined(_WIN64)
 #define HW_TAG "Windows_ARM64"
 #elif defined(__APPLE__)
 #define HW_TAG "Apple_Silicon"

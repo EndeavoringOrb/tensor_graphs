@@ -86,7 +86,8 @@ inline constexpr bool isAtomic(OpType type)
 
 enum class Backend : uint32_t
 {
-    CPU
+    CPU,
+    CUDA
 };
 
 enum class StorageType : uint32_t
@@ -311,6 +312,8 @@ inline const char *toString(Backend backend)
     {
     case Backend::CPU:
         return "CPU";
+    case Backend::CUDA:
+        return "CUDA";
     default:
         return "UNKNOWN_BACKEND";
     }
@@ -544,6 +547,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(OpType, {
 
 NLOHMANN_JSON_SERIALIZE_ENUM(Backend, {
                                           {Backend::CPU, "CPU"},
+                                          {Backend::CUDA, "CUDA"},
                                       })
 
 NLOHMANN_JSON_SERIALIZE_ENUM(StorageType, {

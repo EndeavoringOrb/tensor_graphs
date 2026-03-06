@@ -5,6 +5,9 @@
 #include <list>
 #include <cstring>
 #include <stdexcept>
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#endif
 
 struct MemBlock
 {
@@ -24,21 +27,20 @@ struct MemBlock
 
 struct DeviceBuffer
 {
-    std::vector<uint8_t> arena;
+    Backend backend;
+    std::vector<uint8_t> cpu_arena;
+    uint8_t *arena_ptr = nullptr;
     uint64_t sizeBytes;
     bool initialized = false;
 
-    // Sparse representation for writing weights/constants before huge physical memory allocation
+    // Sparse representation
     std::unordered_map<uint32_t, std::vector<uint8_t>> sparseData;
 
-    // Unified physical memory layout representation
     std::list<MemBlock> blocks;
-    // O(1) lookup map pointing directly to the list node for fast updates
     std::unordered_map<uint32_t, std::list<MemBlock>::iterator> allocationMap;
 
-    DeviceBuffer(uint64_t _sizeBytes) : sizeBytes(_sizeBytes)
+    DeviceBuffer(Backend b, uint64_t _sizeBytes) : backend(b), sizeBytes(_sizeBytes)
     {
-        // Initialize with one massive free block
         MemBlock initialFree;
         initialFree.offset = 0;
         initialFree.sizeBytes = _sizeBytes;
@@ -48,24 +50,86 @@ struct DeviceBuffer
         blocks.push_back(initialFree);
     }
 
+    DeviceBuffer(const DeviceBuffer &) = delete;
+    DeviceBuffer &operator=(const DeviceBuffer &) = delete;
+
+    DeviceBuffer(DeviceBuffer &&other) noexcept
+        : backend(other.backend), cpu_arena(std::move(other.cpu_arena)),
+          arena_ptr(other.arena_ptr), sizeBytes(other.sizeBytes),
+          initialized(other.initialized), sparseData(std::move(other.sparseData)),
+          blocks(std::move(other.blocks)), allocationMap(std::move(other.allocationMap))
+    {
+        other.arena_ptr = nullptr;
+    }
+
+    DeviceBuffer &operator=(DeviceBuffer &&other) noexcept
+    {
+        if (this != &other)
+        {
+#ifdef USE_CUDA
+            if (arena_ptr != nullptr)
+            {
+                cudaFree(arena_ptr);
+            }
+#endif
+            backend = other.backend;
+            cpu_arena = std::move(other.cpu_arena);
+            arena_ptr = other.arena_ptr;
+            sizeBytes = other.sizeBytes;
+            initialized = other.initialized;
+            sparseData = std::move(other.sparseData);
+            blocks = std::move(other.blocks);
+            allocationMap = std::move(other.allocationMap);
+
+            other.arena_ptr = nullptr;
+        }
+        return *this;
+    }
+
+    ~DeviceBuffer()
+    {
+#ifdef USE_CUDA
+        if (arena_ptr != nullptr)
+        {
+            cudaFree(arena_ptr);
+        }
+#endif
+    }
+
     void init()
     {
         if (initialized)
             return;
-        arena.resize(sizeBytes);
+
+#ifdef USE_CUDA
+        cudaError_t err = cudaMallocManaged(&arena_ptr, sizeBytes);
+        if (err != cudaSuccess)
+        {
+            throw std::runtime_error(std::string("CUDA malloc managed failed: ") + cudaGetErrorString(err));
+        }
+#else
+        if (backend == Backend::CPU)
+        {
+            cpu_arena.resize(sizeBytes);
+            arena_ptr = cpu_arena.data();
+        }
+        else
+        {
+            throw std::runtime_error("CUDA backend not supported without USE_CUDA");
+        }
+#endif
         initialized = true;
 
-        // Copy over all sparse data to their allocated offsets in the arena
         for (const auto &pair : sparseData)
         {
             uint32_t nodeId = pair.first;
             auto it = allocationMap.find(nodeId);
             if (it != allocationMap.end())
             {
-                std::memcpy(arena.data() + it->second->offset, pair.second.data(), pair.second.size());
+                std::memcpy(arena_ptr + it->second->offset, pair.second.data(), pair.second.size());
             }
         }
-        sparseData.clear(); // Free up redundant metadata storage
+        sparseData.clear();
     }
 
     void write(uint32_t nodeId, const void *data, uint64_t size)
@@ -81,7 +145,7 @@ struct DeviceBuffer
             auto it = allocationMap.find(nodeId);
             if (it != allocationMap.end())
             {
-                std::memcpy(arena.data() + it->second->offset, data, size);
+                std::memcpy(arena_ptr + it->second->offset, data, size);
             }
             else
             {
@@ -106,7 +170,10 @@ struct DeviceBuffer
             auto it = allocationMap.find(nodeId);
             if (it != allocationMap.end())
             {
-                return arena.data() + it->second->offset;
+#ifdef USE_CUDA
+                cudaDeviceSynchronize();
+#endif
+                return arena_ptr + it->second->offset;
             }
             return nullptr;
         }
@@ -294,6 +361,13 @@ struct DeviceBuffer
 struct MemoryManager
 {
     std::unordered_map<Backend, DeviceBuffer> buffers;
+
+    MemoryManager(std::unordered_map<Backend, uint64_t> bufferSizes) {
+        buffers.reserve(bufferSizes.size());
+        for (auto &buf : bufferSizes) {
+            buffers.emplace(buf.first, DeviceBuffer(buf.first, buf.second));
+        }
+    }
 
     uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f)
     {

@@ -43,7 +43,7 @@ public:
         for (auto it = compiled.instructions.rbegin(); it != compiled.instructions.rend(); ++it)
         {
             uint32_t nodeId = it->nodeId;
-            const TensorNode &node = graph.nodes[nodeId];
+            const TensorNode &node = compiled.nodesMap.at(nodeId);
             auto regionIt = bucket.regions.find(nodeId);
             bool isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
 
@@ -71,7 +71,7 @@ public:
             instIdx++;
             std::cout << instIdx << "/" << compiled.instructions.size() << "\r";
             uint32_t nodeId = inst.nodeId;
-            const TensorNode &node = graph.nodes[nodeId];
+            const TensorNode &node = compiled.nodesMap.at(nodeId);
             auto &outBuf = memManager.buffers.at(node.backend);
 
             bool isDirty = nodeStates[nodeId].isDirty;
@@ -83,7 +83,7 @@ public:
             {
                 for (uint32_t inId : inst.inputNodeIds)
                 {
-                    memManager.release(graph.nodes[inId].backend, inId);
+                    memManager.release(compiled.nodesMap.at(inId).backend, inId);
                 }
                 continue;
             }
@@ -96,7 +96,7 @@ public:
                 blockIt->isLocked = true;
                 for (uint32_t inId : inst.inputNodeIds)
                 {
-                    memManager.release(graph.nodes[inId].backend, inId);
+                    memManager.release(compiled.nodesMap.at(inId).backend, inId);
                 }
                 continue;
             }
@@ -111,8 +111,8 @@ public:
             std::vector<ResolvedInput> resolvedInputs;
             for (uint32_t inId : inst.inputNodeIds)
             {
-                const TensorNode &inNode = graph.nodes[inId];
-                resolvedInputs.push_back({memManager.buffers.at(inNode.backend).arena.data() + memManager.buffers.at(inNode.backend).getOffset(inId),
+                const TensorNode &inNode = compiled.nodesMap.at(inId);
+                resolvedInputs.push_back({memManager.buffers.at(inNode.backend).arena_ptr + memManager.buffers.at(inNode.backend).getOffset(inId),
                                           memManager.getView(inNode)});
             }
 
@@ -182,7 +182,7 @@ public:
                 for (size_t pIdx = 0; pIdx < inst.inputNodeIds.size(); ++pIdx)
                 {
                     uint32_t inId = inst.inputNodeIds[pIdx];
-                    const TensorNode &inNode = graph.nodes[inId];
+                    const TensorNode &inNode = compiled.nodesMap.at(inId);
                     auto &inBuf = memManager.buffers.at(inNode.backend);
 
                     TensorView inView = resolvedInputs[pIdx].view;
@@ -213,12 +213,12 @@ public:
                         // Recalculate strides for the sliced shape
                         slicedView.strides = TensorView::calcContiguousStrides(slicedView.shape);
 
-                        kernelInputs.push_back(inBuf.arena.data() + slicedView.baseOffset);
+                        kernelInputs.push_back(inBuf.arena_ptr + slicedView.baseOffset);
                         kernelInViews.push_back(slicedView);
                     }
                     else
                     {
-                        kernelInputs.push_back(inBuf.arena.data() + inView.baseOffset);
+                        kernelInputs.push_back(inBuf.arena_ptr + inView.baseOffset);
                         kernelInViews.push_back(inView);
                     }
                 }
@@ -247,16 +247,16 @@ public:
                     outView.strides = TensorView::calcContiguousStrides(outView.shape);
                 }
 
-                kernelOutputs.push_back(outBuf.arena.data() + outView.baseOffset);
+                kernelOutputs.push_back(outBuf.arena_ptr + outView.baseOffset);
                 kernelOutViews.push_back(outView);
 
                 // Run the kernel
                 for (uint32_t inId : inst.inputNodeIds)
                 {
-                    Debug::checkNan(graph.nodes[inId], memManager, "Kernel Input: " + inst.nodeId);
+                    Debug::checkNan(compiled.nodesMap.at(inId), memManager, "Kernel Input: " + inst.nodeId);
                 }
                 kernel.run(kernelInputs, kernelOutputs, kernelInViews, kernelOutViews);
-                Debug::checkNan(graph.nodes[inst.nodeId], memManager, "Kernel Output: " + inst.nodeId);
+                Debug::checkNan(compiled.nodesMap.at(inst.nodeId), memManager, "Kernel Output: " + inst.nodeId);
             }
 
             // 5. Release Consumed Parents
@@ -266,7 +266,7 @@ public:
                     continue;
 
                 uint32_t inId = inst.inputNodeIds[i];
-                memManager.release(graph.nodes[inId].backend, inId);
+                memManager.release(compiled.nodesMap.at(inId).backend, inId);
             }
         }
     }

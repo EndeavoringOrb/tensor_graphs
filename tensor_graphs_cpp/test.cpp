@@ -97,9 +97,8 @@ int main()
         }
 
         Graph g_ref, g_tgt;
-        MemoryManager mem_ref, mem_tgt;
-        mem_ref.buffers.emplace(Backend::CPU, DeviceBuffer(1024 * 1024 * 16));
-        mem_tgt.buffers.emplace(Backend::CPU, DeviceBuffer(1024 * 1024 * 16));
+        MemoryManager mem_ref = MemoryManager({{Backend::CPU, 1024 * 1024 * 16}});
+        MemoryManager mem_tgt = MemoryManager({{Backend::CPU, 1024 * 1024 * 16}});
 
         // Generate data based on the sizes declared in the `REGISTER_FUSED_KERNEL` macro.
         std::vector<std::vector<float>> inputData(kernel.dummyShapes.size());

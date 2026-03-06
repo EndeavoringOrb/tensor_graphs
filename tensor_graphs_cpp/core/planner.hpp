@@ -266,6 +266,13 @@ public:
             }
 
             mappedNode.parentIds = mappedParentIds;
+
+            std::string h = Hashing::detail::structuralHashImpl(id, graph, structHashMemo);
+            if (bestRecipe.assignments.count(h))
+            {
+                mappedNode.backend = bestRecipe.assignments.at(h);
+            }
+
             compiled.nodesMap[id] = mappedNode;
         }
         compiled.refCounts[bestRecipe.nodeId] = 1;
@@ -461,7 +468,12 @@ private:
             targets.insert(targets.end(), fusionMap[nodeHash].begin(), fusionMap[nodeHash].end());
         }
 
+        // TODO: make a handler or something to get available backends
+#ifdef USE_CUDA
+        std::vector<Backend> availableBackends = {Backend::CPU, Backend::CUDA};
+#else
         std::vector<Backend> availableBackends = {Backend::CPU};
+#endif
         std::vector<BeamStrategy> candidates;
 
         for (uint32_t targetId : targets)
