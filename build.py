@@ -161,10 +161,10 @@ def generate_kernel_includes(core_seed):
                 f"#define REGISTER_REF_KERNEL_INPLACE(op, back, m, r) REGISTER_REF_KERNEL_INPLACE_INTERNAL({uid}, op, back, m, r)\n"
             )
             f.write(
-                f"#define REGISTER_KERNEL(name, n, back, m, r, ref, dtypes, shapes) REGISTER_KERNEL_INTERNAL({uid}, name, n, back, m, r, ref, dtypes, shapes)\n"
+                f"#define REGISTER_KERNEL(name, n, back, m, r, ref, ...) REGISTER_KERNEL_INTERNAL({uid}, name, n, back, m, r, ref, __VA_ARGS__)\n"
             )
             f.write(
-                f"#define REGISTER_KERNEL_INPLACE(name, n, back, m, r, ref, dtypes, shapes) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, name, n, back, m, r, ref, dtypes, shapes)\n"
+                f"#define REGISTER_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, name, n, back, m, r, ref, __VA_ARGS__)\n"
             )
             f.write(f'#include "{inc_path}"\n\n')
 
