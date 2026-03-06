@@ -28,7 +28,7 @@ namespace Debug
         // If your tensor is heavily sliced/permuted, this might need a strided iterator.
         if (node.dtype == DType::FLOAT32)
         {
-            const float *data = reinterpret_cast<const float *>(basePtr + (view.baseOffset - mem.buffers.at(node.backend).getOffset(node.id)));
+            const float *data = reinterpret_cast<const float *>(basePtr);
             for (uint64_t i = 0; i < numElements; ++i)
             {
                 if (std::isnan(data[i]))
@@ -44,7 +44,7 @@ namespace Debug
         }
         else if (node.dtype == DType::BF16)
         {
-            const uint16_t *data = reinterpret_cast<const uint16_t *>(basePtr + (view.baseOffset - mem.buffers.at(node.backend).getOffset(node.id)));
+            const uint16_t *data = reinterpret_cast<const uint16_t *>(basePtr);
             for (uint64_t i = 0; i < numElements; ++i)
             {
                 // BF16 NaN: Exponent (bits 7-14) is all 1s, Mantissa (bits 0-6) is non-zero
