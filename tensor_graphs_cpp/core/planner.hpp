@@ -251,38 +251,99 @@ public:
         CompiledGraph compiled;
 
         uint32_t mapIdx = 0;
+        std::unordered_map<std::string, uint32_t> insertedCopyNodes;
+        std::vector<uint32_t> finalTopoWithCopies;
         for (uint32_t id : finalTopo)
         {
             mapIdx++;
             TensorNode mappedNode = graph.nodes[id];
-            std::vector<uint32_t> mappedParentIds;
-
-            for (uint32_t pid : mappedNode.parentIds)
-            {
-                std::string phash = Hashing::detail::structuralHashImpl(pid, graph, structHashMemo);
-                uint32_t chosenPid = bestRecipe.selectedNodes.count(phash) ? bestRecipe.selectedNodes.at(phash) : pid;
-                mappedParentIds.push_back(chosenPid);
-                compiled.refCounts[chosenPid]++;
-            }
-
-            mappedNode.parentIds = mappedParentIds;
 
             std::string h = Hashing::detail::structuralHashImpl(id, graph, structHashMemo);
             if (bestRecipe.assignments.count(h))
             {
                 mappedNode.backend = bestRecipe.assignments.at(h);
             }
+            Backend assignedBackend = mappedNode.backend;
+            std::vector<uint32_t> mappedParentIds;
 
+            for (uint32_t pid : mappedNode.parentIds)
+            {
+                std::string phash = Hashing::detail::structuralHashImpl(pid, graph, structHashMemo);
+                uint32_t chosenPid = bestRecipe.selectedNodes.count(phash) ? bestRecipe.selectedNodes.at(phash) : pid;
+
+                Backend parentBackend = graph.nodes[chosenPid].backend;
+                if (bestRecipe.assignments.count(phash))
+                {
+                    parentBackend = bestRecipe.assignments.at(phash);
+                }
+
+                if (parentBackend != assignedBackend)
+                {
+                    std::string copyKey = std::to_string(chosenPid) + "_" + std::to_string(static_cast<uint32_t>(assignedBackend));
+                    if (insertedCopyNodes.count(copyKey))
+                    {
+                        uint32_t copyId = insertedCopyNodes[copyKey];
+                        mappedParentIds.push_back(copyId);
+                        compiled.refCounts[copyId]++;
+                    }
+                    else
+                    {
+                        TensorNode copyNode;
+                        copyNode.id = graph.allocateId();
+                        copyNode.opType = OpType::COPY_TO;
+                        copyNode.opName = "";
+                        copyNode.dtype = graph.nodes[chosenPid].dtype;
+                        copyNode.shape = graph.nodes[chosenPid].shape;
+                        copyNode.parentIds = {chosenPid};
+                        copyNode.backend = assignedBackend;
+
+                        if (copyNode.id >= graph.nodes.size())
+                        {
+                            graph.nodes.resize(copyNode.id + 1);
+                        }
+                        graph.nodes[copyNode.id] = copyNode;
+
+                        insertedCopyNodes[copyKey] = copyNode.id;
+                        finalTopoWithCopies.push_back(copyNode.id);
+
+                        mappedParentIds.push_back(copyNode.id);
+                        compiled.refCounts[copyNode.id]++;
+                        compiled.refCounts[chosenPid]++;
+
+                        compiled.nodesMap[copyNode.id] = copyNode;
+
+                        std::string edgeHash = phash + "->" + h;
+                        std::string copyHash = Hashing::detail::structuralHashImpl(copyNode.id, graph, structHashMemo);
+                        if (bestRecipe.kernelAssignments.count(edgeHash))
+                        {
+                            bestRecipe.kernelAssignments[copyHash] = bestRecipe.kernelAssignments[edgeHash];
+                            bestRecipe.assignments[copyHash] = assignedBackend;
+                        }
+                        else
+                        {
+                            throw std::runtime_error("Missing copy kernel assignment for edge " + edgeHash);
+                        }
+                    }
+                }
+                else
+                {
+                    mappedParentIds.push_back(chosenPid);
+                    compiled.refCounts[chosenPid]++;
+                }
+            }
+
+            mappedNode.parentIds = mappedParentIds;
             compiled.nodesMap[id] = mappedNode;
+            finalTopoWithCopies.push_back(id);
         }
         compiled.refCounts[bestRecipe.nodeId] = 1;
 
         uint32_t instIdx = 0;
-        for (uint32_t id : finalTopo)
+        for (uint32_t id : finalTopoWithCopies)
         {
             instIdx++;
-            std::cout << "Inst: " << instIdx << "/" << finalTopo.size() << "\r";
-            const auto &node = graph.nodes[id];
+            std::cout << "Inst: " << instIdx << "/" << finalTopoWithCopies.size() << "\r";
+            const auto &node = compiled.nodesMap.at(id);
             if (node.opType == OpType::INPUT)
                 continue;
 
@@ -303,7 +364,7 @@ public:
 
             if (kEntry.inplace)
             {
-                uint32_t input0Id = compiled.nodesMap[id].parentIds[0];
+                uint32_t input0Id = compiled.nodesMap.at(id).parentIds[0];
                 if (compiled.refCounts[input0Id] > 1)
                 {
                     throw std::runtime_error("[Planner.plan] CRITICAL: Planned inplace kernel but refCount > 1 for node " + std::to_string(input0Id));
@@ -313,9 +374,9 @@ public:
             OpInstruction inst;
             inst.nodeId = id;
             inst.kernelId = finalKernelId;
-            inst.inputNodeIds = compiled.nodesMap[id].parentIds;
+            inst.inputNodeIds = compiled.nodesMap.at(id).parentIds;
             inst.backend = assignedBackend;
-            inst.inplaceInputIndex = kEntry.inplace ? 0 : -1; // Simplified: Inplace kernels assume input 0 is the target
+            inst.inplaceInputIndex = kEntry.inplace ? 0 : -1; // TODO: this is simplified: inplace kernels assume input 0 is the target
 
             compiled.instructions.push_back(inst);
         }
@@ -586,15 +647,18 @@ private:
                                     OpType::COPY_TO, "", backend, copyInputs, copyOutNode, &estimatedRefCounts);
 
                                 float bestCopyCost = std::numeric_limits<float>::infinity();
+                                uint64_t bestCopyKernelId = UINT64_MAX;
                                 for (uint64_t copyKId : copyKernels)
                                 {
                                     float copyCost = costModel.estimateCost(copyOutNode, graph, copyKId);
                                     if (copyCost < bestCopyCost)
                                     {
                                         bestCopyCost = copyCost;
+                                        bestCopyKernelId = copyKId;
                                     }
                                 }
                                 nCosts[edgeHash] = bestCopyCost;
+                                kAssigns[edgeHash] = bestCopyKernelId;
                             }
                         }
 
