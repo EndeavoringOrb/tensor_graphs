@@ -22,7 +22,7 @@ CORE_DEPENDENCIES = [
 
 USE_CUDA = False
 
-
+# TODO: add better compiler detection/selection
 def get_compiler_cmd(fname: str, cu_files=[]):
     if USE_CUDA:
         cmd = [
