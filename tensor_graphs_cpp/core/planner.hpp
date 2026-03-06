@@ -56,23 +56,24 @@ public:
 
             FusedPattern pattern;
             pattern.opName = opName;
+            const auto &dummyShapes = pair.second.dummyShapes;
 
             for (size_t i = 0; i < numInputs; ++i)
             {
                 uint32_t inId = pattern.graph.allocateId();
                 TensorView view;
-                view.shape = {1};
-                view.strides = TensorView::calcContiguousStrides({1});
+                view.shape = (i < dummyShapes.size()) ? dummyShapes[i] : std::vector<uint32_t>{1};
+                view.strides = TensorView::calcContiguousStrides(view.shape);
                 view.baseOffset = 0;
                 view.dtype = DType::FLOAT32;
-                pattern.graph.inputWithId(inId, {1}, DType::FLOAT32, view);
+                pattern.graph.inputWithId(inId, view.shape, DType::FLOAT32, view);
                 pattern.variables.push_back(inId);
             }
 
             pattern.rootId = factory(pattern.variables, pattern.graph);
 
             std::vector<uint32_t> p_topo = topologicalSort(pattern.rootId, pattern.graph);
-            // inferShapes(p_topo, pattern.graph);
+            inferShapes(p_topo, pattern.graph);
 
             fusedPatterns.push_back(std::move(pattern));
         }
@@ -239,7 +240,7 @@ public:
                 node.opType, node.opName, assignedBackend, inputNodes, node, &compiled.refCounts);
 
             uint64_t finalKernelId; // Changed
-            
+
             uint64_t plannedKernelId = bestRecipe.kernelAssignments.count(h) ? bestRecipe.kernelAssignments.at(h) : UINT64_MAX; // Changed
             bool isPlannedValid = false;
             for (uint64_t kid : validKernels) // Changed
@@ -429,7 +430,8 @@ private:
         for (uint32_t targetId : targets)
         {
             const auto &target = graph.nodes[targetId];
-            if (target.opName != "") {
+            if (target.opName != "")
+            {
                 int a = 5; // for debug breakpoint
             }
 

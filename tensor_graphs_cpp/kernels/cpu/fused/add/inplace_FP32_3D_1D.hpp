@@ -64,7 +64,6 @@ inline void runAddFP32_3D_1D_Inplace(const std::vector<const void *> &inputs, co
     }
 }
 
-// TODO: somehow reuse the reference factory from tensor_graphs_cpp\kernels\cpu\fused\add\FP32_3D_1D.hpp
 /**
  * Reference Factory: Defines the pattern the planner looks for to apply this fusion.
  * Pattern: add(x_3d, repeat(repeat(reshape(x_1d, [1,1,D]), B, 0), S, 1))
@@ -77,22 +76,30 @@ inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     uint32_t id3D = inputs[0];
     uint32_t id1D = inputs[1];
 
+    auto shape3D = graph.nodes[id3D].shape;
+    auto shape1D = graph.nodes[id1D].shape;
+
     // 1. Reshape 1D -> [1, 1, D]
-    uint32_t shape_node = graph.constant();
+    int32_t reshape_dims[] = {1, 1, (int32_t)shape1D[0]};
+    uint32_t shape_node = graph.constant({3}, reshape_dims, DType::INT32);
     uint32_t reshaped = graph.reshape(id1D, shape_node);
 
     // 2. Repeat axis 0 (Batch)
-    uint32_t repeated_b = graph.repeat(reshaped,
-                                       graph.constant(),
-                                       graph.constant());
+    int32_t b_repeats[] = {(int32_t)shape3D[0]};
+    int32_t b_axis[] = {0};
+    uint32_t rep_b = graph.constant({1}, b_repeats, DType::INT32);
+    uint32_t ax_b = graph.constant({1}, b_axis, DType::INT32);
+    uint32_t repeated_b = graph.repeat(reshaped, rep_b, ax_b);
 
     // 3. Repeat axis 1 (Sequence)
-    uint32_t expanded = graph.repeat(repeated_b,
-                                     graph.constant(),
-                                     graph.constant());
+    int32_t s_repeats[] = {(int32_t)shape3D[1]};
+    int32_t s_axis[] = {1};
+    uint32_t rep_s = graph.constant({1}, s_repeats, DType::INT32);
+    uint32_t ax_s = graph.constant({1}, s_axis, DType::INT32);
+    uint32_t expanded = graph.repeat(repeated_b, rep_s, ax_s);
 
     // 4. Final Add
     return graph.add(id3D, expanded);
 }
 
-REGISTER_FUSED_KERNEL_INPLACE("Add_3D_1D", 2, Backend::CPU, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace);
+REGISTER_FUSED_KERNEL_INPLACE("Add_3D_1D", 2, Backend::CPU, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace, {1, 1, 1}, {1});
