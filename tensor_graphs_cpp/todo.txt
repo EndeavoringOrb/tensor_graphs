@@ -10,3 +10,9 @@ examples/gemma-3-270m-cpp.py
 graph parallel
 
 constant folding
+
+remove sparseData? functionality might be covered by graph.constantStaging
+
+improve hash stability. right now if you change a single character in a commented line in core/types.hpp, system benchmarks all kernels again
+
+allow finer user control over dirty bucket caching. Maybe they know a certain input will always be fully dirty so isn't worth computing diff each time. or maybe add a mode where user can provide the dirty slice so we don't have to compute input diff

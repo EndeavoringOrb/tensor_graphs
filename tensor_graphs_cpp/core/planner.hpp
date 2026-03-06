@@ -462,11 +462,9 @@ private:
                 // Pass nullptr for refCounts during planning phase.
                 // We perform optimistic planning for inplace ops (assuming refcount=1).
                 // Runtime safety checks will happen during the final instruction build.
+                // TODO: pass actual ref counts, passing nullptr is bad.
                 std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
                     target.opType, target.opName, backend, inputNodes, target, nullptr);
-
-                // Removed the manual loop checking inplace && PERSISTENT.
-                // This is now handled inside findMatchingKernels.
 
                 for (uint64_t kernelId : matchingKernels)
                 {

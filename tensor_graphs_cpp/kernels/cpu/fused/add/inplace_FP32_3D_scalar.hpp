@@ -93,4 +93,4 @@ inline uint32_t refFactoryAdd3D_Scalar_Inplace(const std::vector<uint32_t> &inpu
     return graph.add(id3D, expanded);
 }
 
-REGISTER_FUSED_KERNEL_INPLACE("Add_3D_Scalar", 2, Backend::CPU, matchAddFP32_3D_Scalar_Inplace, runAddFP32_3D_Scalar_Inplace, refFactoryAdd3D_Scalar_Inplace, {1, 1, 1}, {1});
+REGISTER_FUSED_KERNEL_INPLACE("Add_3D_Scalar_inplace", 2, Backend::CPU, matchAddFP32_3D_Scalar_Inplace, runAddFP32_3D_Scalar_Inplace, refFactoryAdd3D_Scalar_Inplace, {1, 1, 1}, {1});

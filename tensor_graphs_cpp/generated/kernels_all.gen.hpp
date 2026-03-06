@@ -8,10 +8,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0x06faaaaf5e5076efULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0x06faaaaf5e5076efULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0x06faaaaf5e5076efULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0x06faaaaf5e5076efULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0xfdb75fd975dac8aaULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0xfdb75fd975dac8aaULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0xfdb75fd975dac8aaULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0xfdb75fd975dac8aaULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/fused/add/FP32_3D_1D.hpp"
 
 // --- kernels/cpu/fused/add/FP32_3D_scalar.hpp ---
@@ -19,10 +19,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0x5a690ff0cc7bb92cULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0x5a690ff0cc7bb92cULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0x5a690ff0cc7bb92cULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0x5a690ff0cc7bb92cULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0x47f06c0e9d138103ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0x47f06c0e9d138103ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0x47f06c0e9d138103ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0x47f06c0e9d138103ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/fused/add/FP32_3D_scalar.hpp"
 
 // --- kernels/cpu/fused/add/inplace_FP32_3D_1D.hpp ---
@@ -30,10 +30,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0x0f478111235228c8ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0x0f478111235228c8ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0x0f478111235228c8ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0x0f478111235228c8ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0x6b1aa562ed2e0328ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0x6b1aa562ed2e0328ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0x6b1aa562ed2e0328ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0x6b1aa562ed2e0328ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/fused/add/inplace_FP32_3D_1D.hpp"
 
 // --- kernels/cpu/fused/add/inplace_FP32_3D_scalar.hpp ---
@@ -41,10 +41,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0x1c2cf9e25b780b72ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0x1c2cf9e25b780b72ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0x1c2cf9e25b780b72ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0x1c2cf9e25b780b72ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0x39964490382d73cbULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0x39964490382d73cbULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0x39964490382d73cbULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0x39964490382d73cbULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/fused/add/inplace_FP32_3D_scalar.hpp"
 
 // --- kernels/cpu/fused/tanh/F32_1D.hpp ---
@@ -52,10 +52,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0xbc0b3ac47f313cb7ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0xbc0b3ac47f313cb7ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0xbc0b3ac47f313cb7ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0xbc0b3ac47f313cb7ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0x7911fdbd260914f8ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0x7911fdbd260914f8ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0x7911fdbd260914f8ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0x7911fdbd260914f8ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/fused/tanh/F32_1D.hpp"
 
 // --- kernels/cpu/general/repeat/inplace_F32_ND.hpp ---
@@ -63,10 +63,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0x1d9fc97ef824d8dcULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0x1d9fc97ef824d8dcULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0x1d9fc97ef824d8dcULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0x1d9fc97ef824d8dcULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0xd3abb818927a3a35ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0xd3abb818927a3a35ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0xd3abb818927a3a35ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0xd3abb818927a3a35ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/general/repeat/inplace_F32_ND.hpp"
 
 // --- kernels/cpu/general/reshape/inplace_ND.hpp ---
@@ -74,10 +74,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0x943c1d59678568feULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0x943c1d59678568feULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0x943c1d59678568feULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0x943c1d59678568feULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL(0xee7b08db76e08095ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL(0xee7b08db76e08095ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL(0xee7b08db76e08095ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(0xee7b08db76e08095ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/general/reshape/inplace_ND.hpp"
 
 // --- kernels/cpu/reference/add/F32_ND.hpp ---
@@ -85,10 +85,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x95be29e57d4ad039ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x95be29e57d4ad039ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x95be29e57d4ad039ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x95be29e57d4ad039ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xe9cc2d4b472462a1ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xe9cc2d4b472462a1ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xe9cc2d4b472462a1ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xe9cc2d4b472462a1ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/add/F32_ND.hpp"
 
 // --- kernels/cpu/reference/arange/I32_ND.hpp ---
@@ -96,10 +96,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xd10bdacc909829bfULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xd10bdacc909829bfULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xd10bdacc909829bfULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xd10bdacc909829bfULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x874ffbf8090212e2ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x874ffbf8090212e2ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x874ffbf8090212e2ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x874ffbf8090212e2ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/arange/I32_ND.hpp"
 
 // --- kernels/cpu/reference/cast/BF16_F32_ND.hpp ---
@@ -107,10 +107,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x1ee146836d9b14fbULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x1ee146836d9b14fbULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x1ee146836d9b14fbULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x1ee146836d9b14fbULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xe9ad5724c7fa10ffULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xe9ad5724c7fa10ffULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xe9ad5724c7fa10ffULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xe9ad5724c7fa10ffULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/cast/BF16_F32_ND.hpp"
 
 // --- kernels/cpu/reference/cast/I32_F32_ND.hpp ---
@@ -118,10 +118,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x220e4f5e7e5a59b0ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x220e4f5e7e5a59b0ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x220e4f5e7e5a59b0ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x220e4f5e7e5a59b0ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x5c7829d32bd1ce30ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x5c7829d32bd1ce30ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x5c7829d32bd1ce30ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x5c7829d32bd1ce30ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/cast/I32_F32_ND.hpp"
 
 // --- kernels/cpu/reference/concat/F32_ND.hpp ---
@@ -129,10 +129,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xe22bd91aca8ebe30ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xe22bd91aca8ebe30ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xe22bd91aca8ebe30ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xe22bd91aca8ebe30ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x0fb37fba74b6ed20ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x0fb37fba74b6ed20ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x0fb37fba74b6ed20ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x0fb37fba74b6ed20ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/concat/F32_ND.hpp"
 
 // --- kernels/cpu/reference/cos/F32_ND.hpp ---
@@ -140,10 +140,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x422cacdb679e8087ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x422cacdb679e8087ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x422cacdb679e8087ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x422cacdb679e8087ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x725451fca637a7a1ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x725451fca637a7a1ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x725451fca637a7a1ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x725451fca637a7a1ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/cos/F32_ND.hpp"
 
 // --- kernels/cpu/reference/div/F32_ND.hpp ---
@@ -151,10 +151,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x17b8fe1a26d34672ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x17b8fe1a26d34672ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x17b8fe1a26d34672ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x17b8fe1a26d34672ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x858b2d568399cb4cULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x858b2d568399cb4cULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x858b2d568399cb4cULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x858b2d568399cb4cULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/div/F32_ND.hpp"
 
 // --- kernels/cpu/reference/dot/F32_3D.hpp ---
@@ -162,10 +162,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xc2348ecc31b5f561ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xc2348ecc31b5f561ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xc2348ecc31b5f561ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xc2348ecc31b5f561ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x55d5ef3da1d7a39fULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x55d5ef3da1d7a39fULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x55d5ef3da1d7a39fULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x55d5ef3da1d7a39fULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/dot/F32_3D.hpp"
 
 // --- kernels/cpu/reference/fill/F32_ND.hpp ---
@@ -173,10 +173,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x8fdbc748744037a0ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x8fdbc748744037a0ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x8fdbc748744037a0ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x8fdbc748744037a0ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x58c4c379018349c1ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x58c4c379018349c1ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x58c4c379018349c1ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x58c4c379018349c1ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/fill/F32_ND.hpp"
 
 // --- kernels/cpu/reference/gather/F32_I32_ND.hpp ---
@@ -184,10 +184,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x28537b65433bdb50ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x28537b65433bdb50ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x28537b65433bdb50ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x28537b65433bdb50ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xd72168a76eb82e93ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xd72168a76eb82e93ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xd72168a76eb82e93ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xd72168a76eb82e93ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/gather/F32_I32_ND.hpp"
 
 // --- kernels/cpu/reference/max/F32_ND.hpp ---
@@ -195,10 +195,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xb23216e4f6dba40fULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xb23216e4f6dba40fULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xb23216e4f6dba40fULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xb23216e4f6dba40fULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x26d242abe833bd65ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x26d242abe833bd65ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x26d242abe833bd65ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x26d242abe833bd65ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/max/F32_ND.hpp"
 
 // --- kernels/cpu/reference/mul/F32_ND.hpp ---
@@ -206,10 +206,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xb4978727322f336eULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xb4978727322f336eULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xb4978727322f336eULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xb4978727322f336eULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x0356299b48700e22ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x0356299b48700e22ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x0356299b48700e22ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x0356299b48700e22ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/mul/F32_ND.hpp"
 
 // --- kernels/cpu/reference/neg/F32_ND.hpp ---
@@ -217,10 +217,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x15d19a7577254d46ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x15d19a7577254d46ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x15d19a7577254d46ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x15d19a7577254d46ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x62ec0507d807034bULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x62ec0507d807034bULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x62ec0507d807034bULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x62ec0507d807034bULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/neg/F32_ND.hpp"
 
 // --- kernels/cpu/reference/permute/F32_ND.hpp ---
@@ -228,10 +228,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x22ebfe6bfbbc522fULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x22ebfe6bfbbc522fULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x22ebfe6bfbbc522fULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x22ebfe6bfbbc522fULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xba50946c5a4615abULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xba50946c5a4615abULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xba50946c5a4615abULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xba50946c5a4615abULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/permute/F32_ND.hpp"
 
 // --- kernels/cpu/reference/pow/F32_ND.hpp ---
@@ -239,10 +239,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x426de9cd5b4a6af2ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x426de9cd5b4a6af2ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x426de9cd5b4a6af2ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x426de9cd5b4a6af2ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x44fc9c3885d2ff1dULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x44fc9c3885d2ff1dULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x44fc9c3885d2ff1dULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x44fc9c3885d2ff1dULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/pow/F32_ND.hpp"
 
 // --- kernels/cpu/reference/repeat/F32_ND.hpp ---
@@ -250,10 +250,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x9c2215acdf3a6ac1ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x9c2215acdf3a6ac1ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x9c2215acdf3a6ac1ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x9c2215acdf3a6ac1ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xf372fc5bd1e508d4ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xf372fc5bd1e508d4ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xf372fc5bd1e508d4ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xf372fc5bd1e508d4ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/repeat/F32_ND.hpp"
 
 // --- kernels/cpu/reference/reshape/ND.hpp ---
@@ -261,10 +261,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x7919adfbe8a48939ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x7919adfbe8a48939ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x7919adfbe8a48939ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x7919adfbe8a48939ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xc2e5051453b5b9a3ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xc2e5051453b5b9a3ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xc2e5051453b5b9a3ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xc2e5051453b5b9a3ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/reshape/ND.hpp"
 
 // --- kernels/cpu/reference/sin/F32_ND.hpp ---
@@ -272,10 +272,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xf5b9a2245d95805aULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xf5b9a2245d95805aULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xf5b9a2245d95805aULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xf5b9a2245d95805aULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x4eefb430f28e71b0ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x4eefb430f28e71b0ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x4eefb430f28e71b0ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x4eefb430f28e71b0ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/sin/F32_ND.hpp"
 
 // --- kernels/cpu/reference/slice/F32_ND.hpp ---
@@ -283,10 +283,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x8236f1260e81affaULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x8236f1260e81affaULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x8236f1260e81affaULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x8236f1260e81affaULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xc5a4324f87c52535ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xc5a4324f87c52535ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xc5a4324f87c52535ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xc5a4324f87c52535ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/slice/F32_ND.hpp"
 
 // --- kernels/cpu/reference/sum/F32_ND.hpp ---
@@ -294,10 +294,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xf5e769d9b27724a7ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xf5e769d9b27724a7ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xf5e769d9b27724a7ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xf5e769d9b27724a7ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0x168a28f8deab7766ULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0x168a28f8deab7766ULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0x168a28f8deab7766ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0x168a28f8deab7766ULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/sum/F32_ND.hpp"
 
 // --- kernels/cpu/reference/triu/F32_ND.hpp ---
@@ -305,10 +305,10 @@
 #undef REGISTER_KERNEL_INPLACE
 #undef REGISTER_FUSED_KERNEL
 #undef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xbcdacc3f79243282ULL, op, back, m, r)
-#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xbcdacc3f79243282ULL, op, back, m, r)
-#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xbcdacc3f79243282ULL, name, n, back, m, r, ref, __VA_ARGS__)
-#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xbcdacc3f79243282ULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL(0xf8c468c33c93f7eeULL, op, back, m, r)
+#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(0xf8c468c33c93f7eeULL, op, back, m, r)
+#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(0xf8c468c33c93f7eeULL, name, n, back, m, r, ref, __VA_ARGS__)
+#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(0xf8c468c33c93f7eeULL, name, n, back, m, r, ref, __VA_ARGS__)
 #include "kernels/cpu/reference/triu/F32_ND.hpp"
 
 // --- Clean up macros ---

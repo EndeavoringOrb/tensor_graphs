@@ -38,6 +38,9 @@ public:
 
     void registerFactory(const std::string &name, uint32_t numInputs, ReferenceFactory factory, const std::vector<std::vector<uint32_t>> &dummyShapes)
     {
+        auto it = factories.find(name);
+        if (it != factories.end())
+            throw std::runtime_error("A kernel with name \"" + name + "\" is already registered.");
         factories[name] = {numInputs, factory, dummyShapes};
     }
 
