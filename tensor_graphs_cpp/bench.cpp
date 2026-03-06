@@ -123,6 +123,7 @@ int main()
             std::vector<const void *> inPtrs(r.inputShapes.size());
             std::vector<TensorView> inViews(r.inputShapes.size());
 
+            // TODO: if kernel.backend not in available backends, skip benchmarking it
 #ifdef USE_CUDA
             bool isInputCuda = kernel.backend == Backend::CUDA;
             bool isOutputCuda = kernel.backend == Backend::CUDA;

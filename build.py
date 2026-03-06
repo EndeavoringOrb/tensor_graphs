@@ -37,7 +37,7 @@ def get_compiler_cmd(fname: str):
 
         if DEBUG_MODE:
             # Debug flags: -g (host debug), -G (device debug), -O0 (no optimization)
-            cmd.extend(["-g", "-G", "-O0"])
+            cmd.extend(["-g", "-G", "-O0", "-DDEBUG"])
         else:
             # Release flags
             cmd.extend(["-O3"])
@@ -55,10 +55,10 @@ def get_compiler_cmd(fname: str):
 
         if DEBUG_MODE:
             # Debug flags: /Zi (debug info), /Od (disable optimization), /RTC1 (runtime checks)
-            cmd.extend(["/Zi", "/Od", "/RTC1", "/D_DEBUG"])
+            cmd.extend(["/Zi", "/Od", "/DDEBUG"])
         else:
-            # Release flags: /O2 (maximize speed), /DNDEBUG (disable asserts)
-            cmd.extend(["/O2", "/DNDEBUG"])
+            # Release flags: /O2 (maximize speed)
+            cmd.extend(["/O2"])
 
         cmd.append(str(ROOT_DIR / fname))
         cmd.extend([f"/Fe:tensor_graphs_cpp/{fname.split('.')[0]}.exe"])
