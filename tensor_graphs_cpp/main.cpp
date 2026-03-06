@@ -522,7 +522,7 @@ int main()
 #else
     std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 2ULL * 1024 * 1024 * 1024}};
 #endif
-    MemoryManager mem = MemoryManager({{Backend::CPU, 2ULL * 1024 * 1024 * 1024}});
+    MemoryManager mem = MemoryManager(bufferSizes);
 
     Graph g;
 
