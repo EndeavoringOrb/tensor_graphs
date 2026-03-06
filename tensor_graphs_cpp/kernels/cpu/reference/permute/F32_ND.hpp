@@ -80,4 +80,4 @@ inline void runPermuteF32_ND(const std::vector<const void *> &inputs, const std:
     }
 }
 
-REGISTER_KERNEL(OpType::PERMUTE, Backend::CPU, matchPermuteF32_ND, runPermuteF32_ND);
+REGISTER_REF_KERNEL(OpType::PERMUTE, Backend::CPU, matchPermuteF32_ND, runPermuteF32_ND);

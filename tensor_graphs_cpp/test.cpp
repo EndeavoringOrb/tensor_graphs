@@ -80,12 +80,12 @@ int main()
         }
     };
 
-    // Automatically test all fused kernels against their reference graph made up of atomic kernels
+    // Automatically test all non-reference kernels against their reference graph
     const auto &kernels = KernelRegistry::get().getAllKernels();
     for (const auto &kernel : kernels)
     {
-        // Skip reference implementations and non-fused (atomic) kernels since they don't have a refFactory test pattern
-        if (kernel.isReference || kernel.opType != OpType::FUSED)
+        // Skip reference implementations since they are the source of truth
+        if (kernel.isReference)
         {
             continue;
         }

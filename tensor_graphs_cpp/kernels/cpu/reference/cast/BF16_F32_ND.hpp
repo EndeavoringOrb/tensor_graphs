@@ -63,4 +63,4 @@ inline void runCastBF16_F32_ND(const std::vector<const void *> &inputs, const st
 }
 
 // Register as a CPU kernel for the CAST operation
-REGISTER_KERNEL(OpType::CAST, Backend::CPU, matchCastBF16_F32_ND, runCastBF16_F32_ND);
+REGISTER_REF_KERNEL(OpType::CAST, Backend::CPU, matchCastBF16_F32_ND, runCastBF16_F32_ND);

@@ -45,4 +45,4 @@ inline void runMaxF32_ND(const std::vector<const void *> &inputs, const std::vec
     }
 }
 
-REGISTER_KERNEL(OpType::MAX, Backend::CPU, matchMaxF32_ND, runMaxF32_ND);
+REGISTER_REF_KERNEL(OpType::MAX, Backend::CPU, matchMaxF32_ND, runMaxF32_ND);

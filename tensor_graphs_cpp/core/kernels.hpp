@@ -24,6 +24,7 @@ struct ReferenceGraphEntry
 {
     uint32_t numInputs;
     ReferenceFactory factory;
+    std::vector<DType> dtypes;
     std::vector<std::vector<uint32_t>> dummyShapes;
 };
 
@@ -36,12 +37,12 @@ public:
         return instance;
     }
 
-    void registerFactory(const std::string &name, uint32_t numInputs, ReferenceFactory factory, const std::vector<std::vector<uint32_t>> &dummyShapes)
+    void registerFactory(const std::string &name, uint32_t numInputs, ReferenceFactory factory, const std::vector<DType> &dtypes, const std::vector<std::vector<uint32_t>> &dummyShapes)
     {
         auto it = factories.find(name);
         if (it != factories.end())
             throw std::runtime_error("A kernel with name \"" + name + "\" is already registered.");
-        factories[name] = {numInputs, factory, dummyShapes};
+        factories[name] = {numInputs, factory, dtypes, dummyShapes};
     }
 
     const ReferenceGraphEntry *getFactory(const std::string &name) const
@@ -61,21 +62,6 @@ private:
     std::unordered_map<std::string, ReferenceGraphEntry> factories;
 };
 
-// --- AUTOMATIC REGISTRATION HELPERS ---
-// These are used by kernel files. build.py injects the UID during the build process.
-#ifndef REGISTER_KERNEL
-#define REGISTER_KERNEL(op, backend, match, run)
-#endif
-#ifndef REGISTER_KERNEL_INPLACE
-#define REGISTER_KERNEL_INPLACE(op, backend, match, run)
-#endif
-#ifndef REGISTER_FUSED_KERNEL
-#define REGISTER_FUSED_KERNEL(opName, numInputs, backend, match, run, refFactory)
-#endif
-#ifndef REGISTER_FUSED_KERNEL_INPLACE
-#define REGISTER_FUSED_KERNEL_INPLACE(opName, numInputs, backend, match, run, refFactory)
-#endif
-
 struct KernelEntry
 {
     uint64_t uid;
@@ -88,6 +74,7 @@ struct KernelEntry
     ReferenceFactory refFactory;
     bool inplace;
     bool isReference;
+    std::vector<DType> dtypes;
     std::vector<std::vector<uint32_t>> dummyShapes;
 };
 
@@ -104,12 +91,16 @@ public:
 
     const std::vector<KernelEntry> &getAllKernels() const { return entries; }
 
-    void registerKernel(uint64_t uid, OpType op, const std::string &opName, uint32_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace, bool isReference, const std::vector<std::vector<uint32_t>> &dummyShapes)
+    void registerKernel(uint64_t uid, OpType op, const std::string &opName, uint32_t numInputs,
+                        Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
+                        bool inplace, bool isReference,
+                        const std::vector<DType> &dtypes,
+                        const std::vector<std::vector<uint32_t>> &dummyShapes)
     {
-        entries.push_back({uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, dummyShapes});
+        entries.push_back({uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, dtypes, dummyShapes});
         if (refFactory && op == OpType::FUSED)
         {
-            ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory, dummyShapes);
+            ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory, dtypes, dummyShapes);
         }
     }
 
@@ -178,32 +169,39 @@ private:
 
 struct KernelRegistrar
 {
-    KernelRegistrar(uint64_t uid, OpType op, const std::string &opName, uint32_t numInputs, Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory, bool inplace, bool isReference, const std::vector<std::vector<uint32_t>> &dummyShapes = {})
+    KernelRegistrar(uint64_t uid, OpType op, const std::string &opName, uint32_t numInputs,
+                    Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
+                    bool inplace, bool isReference,
+                    const std::vector<DType> &dtypes = {},
+                    const std::vector<std::vector<uint32_t>> &dummyShapes = {})
     {
-        KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, dummyShapes);
+        KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, dtypes, dummyShapes);
     }
 };
 
-#define REGISTER_KERNEL_INTERNAL(uid, op, backend, match, run) \
-    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, false, false, {})
+// --- AUTOMATIC REGISTRATION HELPERS ---
+// These are used by kernel files. build.py injects the UID during the build process.
+#ifndef REGISTER_REF_KERNEL
+#define REGISTER_REF_KERNEL(op, backend, match, run)
+#endif
+#ifndef REGISTER_REF_KERNEL_INPLACE
+#define REGISTER_REF_KERNEL_INPLACE(op, backend, match, run)
+#endif
+#ifndef REGISTER_KERNEL
+#define REGISTER_KERNEL(opName, numInputs, backend, match, run, refFactory, dtypes, shapes)
+#endif
+#ifndef REGISTER_KERNEL_INPLACE
+#define REGISTER_KERNEL_INPLACE(opName, numInputs, backend, match, run, refFactory, dtypes, shapes)
+#endif
 
-#define REGISTER_REFERENCE_KERNEL_INTERNAL(uid, op, backend, match, run) \
+#define REGISTER_REF_KERNEL_INTERNAL(uid, op, backend, match, run) \
     static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, false, true, {})
 
-#define REGISTER_KERNEL_INPLACE_INTERNAL(uid, op, backend, match, run) \
-    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, true, false, {})
-
-#define REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL(uid, op, backend, match, run) \
+#define REGISTER_REF_KERNEL_INPLACE_INTERNAL(uid, op, backend, match, run) \
     static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, true, true, {})
 
-#define REGISTER_FUSED_KERNEL_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory, ...) \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false, false, std::vector<std::vector<uint32_t>>{__VA_ARGS__})
+#define REGISTER_KERNEL_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory, dtypes, shapes) \
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false, false, dtypes, shapes)
 
-#define REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory, ...) \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false, true, std::vector<std::vector<uint32_t>>{__VA_ARGS__})
-
-#define REGISTER_FUSED_KERNEL_INPLACE_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory, ...) \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true, false, std::vector<std::vector<uint32_t>>{__VA_ARGS__})
-
-#define REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory, ...) \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true, true, std::vector<std::vector<uint32_t>>{__VA_ARGS__})
+#define REGISTER_KERNEL_INPLACE_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory, dtypes, shapes) \
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true, false, dtypes, shapes)

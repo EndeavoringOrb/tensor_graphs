@@ -15,7 +15,7 @@
 #include <sstream>
 #include <cstring>
 
-#define FUSE_OPS
+// #define FUSE_OPS
 
 class Planner
 {
@@ -62,18 +62,19 @@ public:
             {
                 uint32_t inId = pattern.graph.allocateId();
                 TensorView view;
-                view.shape = (i < dummyShapes.size()) ? dummyShapes[i] : std::vector<uint32_t>{1};
+                view.shape = dummyShapes[i]; // TODO: maybe assert len
                 view.strides = TensorView::calcContiguousStrides(view.shape);
                 view.baseOffset = 0;
-                view.dtype = DType::FLOAT32;
-                pattern.graph.inputWithId(inId, view.shape, DType::FLOAT32, view);
+                DType dtype = pair.second.dtypes[i];
+                view.dtype = dtype;  // TODO: maybe assert len
+                pattern.graph.inputWithId(inId, view.shape, dtype, view);
                 pattern.variables.push_back(inId);
             }
 
             pattern.rootId = factory(pattern.variables, pattern.graph);
 
             std::vector<uint32_t> p_topo = topologicalSort(pattern.rootId, pattern.graph);
-            inferShapes(p_topo, pattern.graph);
+            // inferShapes(p_topo, pattern.graph);
 
             fusedPatterns.push_back(std::move(pattern));
         }
@@ -95,11 +96,12 @@ public:
 
         std::cout << "[Planner.plan] matching fusion patterns..." << std::endl;
         uint32_t topoIdx = 0;
+        uint32_t rewrites = 0;
         uint32_t fusionMatches = 0;
         for (auto it = topo.rbegin(); it != topo.rend(); ++it)
         {
             topoIdx++;
-            std::cout << topoIdx << "/" << topo.size() << ", rewrites: " << fusionMap.size() << ", matches: " << fusionMatches << "\r";
+            std::cout << topoIdx << "/" << topo.size() << ", rewrites: " << rewrites << ", matches: " << fusionMatches << "\r";
             uint32_t nodeId = *it;
             // std::string patHash = Hashing::detail::patternHashImpl(nodeId, graph, patternHashMemo);
             std::string hash = Hashing::detail::structuralHashImpl(nodeId, graph, structHashMemo);
@@ -109,6 +111,7 @@ public:
             {
                 if (eqId != nodeId)
                 {
+                    rewrites++;
                     fusionMap[hash].push_back(eqId);
                 }
 
@@ -519,7 +522,6 @@ private:
 
                         cost += costModel.estimateCost(target, graph, kernelId);
 
-                        // std::string targetHash = Hashing::detail::structuralHashImpl(targetId, graph, structHashMemo);
                         assigns[targetHash] = backend;
                         kAssigns[targetHash] = kernelId;
 
@@ -564,6 +566,13 @@ private:
             ss << std::endl;
             throw std::runtime_error(ss.str());
         }
+
+        for (const auto &cand : candidates) {
+            if (isinf(cand.cost)) {
+                int a = 5;
+            }
+        }
+        std::cout << candidates[0].cost << std::endl;
 
         memo[nodeHash] = candidates;
     }

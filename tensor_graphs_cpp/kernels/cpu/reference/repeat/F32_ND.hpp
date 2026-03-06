@@ -58,4 +58,4 @@ inline void runRepeatF32_ND(const std::vector<const void *> &inputs, const std::
     }
 }
 
-REGISTER_KERNEL(OpType::REPEAT, Backend::CPU, matchRepeatF32_ND, runRepeatF32_ND);
+REGISTER_REF_KERNEL(OpType::REPEAT, Backend::CPU, matchRepeatF32_ND, runRepeatF32_ND);

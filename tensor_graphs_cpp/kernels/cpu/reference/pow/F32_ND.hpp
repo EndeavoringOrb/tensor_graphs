@@ -44,4 +44,4 @@ inline void runPowF32_ND(const std::vector<const void *> &inputs, const std::vec
 }
 
 // Register as a CPU kernel for the POWER operation
-REGISTER_KERNEL(OpType::POWER, Backend::CPU, matchPowF32_ND, runPowF32_ND);
+REGISTER_REF_KERNEL(OpType::POWER, Backend::CPU, matchPowF32_ND, runPowF32_ND);

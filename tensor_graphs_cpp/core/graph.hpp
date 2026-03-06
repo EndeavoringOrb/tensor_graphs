@@ -370,6 +370,7 @@ struct Graph
         return node.id;
     }
 
+    // input, # repeats, axis
     uint32_t repeat(uint32_t id0, uint32_t repeats_id, uint32_t axis_id)
     {
         if (nodes[repeats_id].dtype != DType::INT32)

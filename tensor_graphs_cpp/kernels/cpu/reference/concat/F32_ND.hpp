@@ -35,4 +35,4 @@ inline void runConcatF32_ND(const std::vector<const void *> &inputs, const std::
     }
 }
 
-REGISTER_KERNEL(OpType::CONCAT, Backend::CPU, matchConcatF32_ND, runConcatF32_ND);
+REGISTER_REF_KERNEL(OpType::CONCAT, Backend::CPU, matchConcatF32_ND, runConcatF32_ND);

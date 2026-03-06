@@ -28,7 +28,7 @@ def get_compiler_cmd(fname: str):
         "/Zi",
         "/std:c++17",
         "/EHsc",
-        "/O2",  # Optimization flag
+        "/OO",  # Optimization flag
         f"/I{ROOT_DIR}",
         # Input file placed at the end so it can be stripped for the hash
         str(ROOT_DIR / fname),
@@ -140,30 +140,32 @@ def generate_kernel_includes(core_seed):
         for inc_path, uid in sorted(kernel_entries):
             f.write(f"// --- {inc_path} ---\n")
 
+            f.write(f"#undef REGISTER_REF_KERNEL\n")
+            f.write(f"#undef REGISTER_REF_KERNEL_INPLACE\n")
             f.write(f"#undef REGISTER_KERNEL\n")
             f.write(f"#undef REGISTER_KERNEL_INPLACE\n")
-            f.write(f"#undef REGISTER_FUSED_KERNEL\n")
-            f.write(f"#undef REGISTER_FUSED_KERNEL_INPLACE\n")
 
-            if "reference" in inc_path:
-                f.write(f"#define REGISTER_KERNEL(op, back, m, r) REGISTER_REFERENCE_KERNEL_INTERNAL({uid}, op, back, m, r)\n")
-                f.write(f"#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_REFERENCE_KERNEL_INPLACE_INTERNAL({uid}, op, back, m, r)\n")
-                f.write(f"#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INTERNAL({uid}, name, n, back, m, r, ref, __VA_ARGS__)\n")
-                f.write(f"#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_REFERENCE_FUSED_KERNEL_INPLACE_INTERNAL({uid}, name, n, back, m, r, ref, __VA_ARGS__)\n")
-            else:
-                f.write(f"#define REGISTER_KERNEL(op, back, m, r) REGISTER_KERNEL_INTERNAL({uid}, op, back, m, r)\n")
-                f.write(f"#define REGISTER_KERNEL_INPLACE(op, back, m, r) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, op, back, m, r)\n")
-                f.write(f"#define REGISTER_FUSED_KERNEL(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INTERNAL({uid}, name, n, back, m, r, ref, __VA_ARGS__)\n")
-                f.write(f"#define REGISTER_FUSED_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_FUSED_KERNEL_INPLACE_INTERNAL({uid}, name, n, back, m, r, ref, __VA_ARGS__)\n")
+            f.write(
+                f"#define REGISTER_REF_KERNEL(op, back, m, r) REGISTER_REF_KERNEL_INTERNAL({uid}, op, back, m, r)\n"
+            )
+            f.write(
+                f"#define REGISTER_REF_KERNEL_INPLACE(op, back, m, r) REGISTER_REF_KERNEL_INPLACE_INTERNAL({uid}, op, back, m, r)\n"
+            )
+            f.write(
+                f"#define REGISTER_KERNEL(name, n, back, m, r, ref, dtypes, ...) REGISTER_KERNEL_INTERNAL({uid}, name, n, back, m, r, ref, dtypes, __VA_ARGS__)\n"
+            )
+            f.write(
+                f"#define REGISTER_KERNEL_INPLACE(name, n, back, m, r, ref, dtypes, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, name, n, back, m, r, ref, dtypes, __VA_ARGS__)\n"
+            )
 
             f.write(f'#include "{inc_path}"\n\n')
 
         # Clean up macros at the end of the file
         f.write(f"// --- Clean up macros ---\n")
+        f.write(f"#undef REGISTER_REF_KERNEL\n")
+        f.write(f"#undef REGISTER_REF_KERNEL_INPLACE\n")
         f.write(f"#undef REGISTER_KERNEL\n")
         f.write(f"#undef REGISTER_KERNEL_INPLACE\n")
-        f.write(f"#undef REGISTER_FUSED_KERNEL\n")
-        f.write(f"#undef REGISTER_FUSED_KERNEL_INPLACE\n")
 
     print(f"Generated {len(kernel_entries)} Kernel Includes with UID injection.")
 

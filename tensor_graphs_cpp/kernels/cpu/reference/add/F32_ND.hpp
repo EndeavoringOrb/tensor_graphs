@@ -43,4 +43,4 @@ inline void runAddF32_ND(const std::vector<const void *> &inputs, const std::vec
 }
 
 // Register as a CPU kernel for the ADD operation
-REGISTER_KERNEL(OpType::ADD, Backend::CPU, matchAddF32_ND, runAddF32_ND);
+REGISTER_REF_KERNEL(OpType::ADD, Backend::CPU, matchAddF32_ND, runAddF32_ND);

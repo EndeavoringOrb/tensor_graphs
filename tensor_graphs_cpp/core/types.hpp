@@ -572,7 +572,7 @@ struct BeamStrategy
     float cost;
     uint32_t nodeId;
     std::unordered_map<std::string, Backend> assignments;
-    std::unordered_map<std::string, uint64_t> kernelAssignments; // Changed to uint64_t
+    std::unordered_map<std::string, uint64_t> kernelAssignments;
 
     bool operator<(const BeamStrategy &other) const
     {

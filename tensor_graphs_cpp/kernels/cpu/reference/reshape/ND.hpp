@@ -26,4 +26,4 @@ inline void runReshapeND(const std::vector<const void *> &inputs, const std::vec
 }
 
 // Registered as a standard kernel (not inplace)
-REGISTER_KERNEL(OpType::RESHAPE, Backend::CPU, matchReshapeND, runReshapeND);
+REGISTER_REF_KERNEL(OpType::RESHAPE, Backend::CPU, matchReshapeND, runReshapeND);

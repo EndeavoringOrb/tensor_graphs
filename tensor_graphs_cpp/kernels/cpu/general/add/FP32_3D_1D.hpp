@@ -4,13 +4,13 @@
 #include <vector>
 
 /**
- * FUSED KERNEL: ADD FP32 3D + 1D (In-place Broadcasting)
- * Pattern: Input3D[b, s, d] += Input1D[d]
+ * FUSED KERNEL: ADD FP32 3D + 1D (Broadcasting)
+ * Pattern: Output[b, s, d] = Input3D[b, s, d] + Input1D[d]
  *
- * This kernel performs the addition directly on the 3D input buffer.
+ * This kernel replaces the sequence: RESHAPE(1D) -> REPEAT(axis 0) -> REPEAT(axis 1) -> ADD
  */
 
-inline bool matchAddFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchAddFP32_3D_1D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs.size() != 2)
         return false;
@@ -30,12 +30,8 @@ inline bool matchAddFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, co
     if (in3D.shape[2] != in1D.shape[0] || output.shape[2] != in1D.shape[0])
         return false;
 
-    // In-place requires shape identity between input 3D and output
+    // Output must match 3D input shape
     if (in3D.shape != output.shape)
-        return false;
-
-    // Ensure memory aliasing (In-place requirement)
-    if (in3D.view.baseOffset != output.view.baseOffset)
         return false;
 
     // Reference implementation assumes contiguity for the large tensors
@@ -45,22 +41,23 @@ inline bool matchAddFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, co
     return true;
 }
 
-inline void runAddFP32_3D_1D_Inplace(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                     const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runAddFP32_3D_1D(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
+                             const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
 {
-    float *data3D = static_cast<float *>(outputs[0]); // Modifying output directly
+    const float *data3D = static_cast<const float *>(inputs[0]);
     const float *data1D = static_cast<const float *>(inputs[1]);
+    float *out = static_cast<float *>(outputs[0]);
 
-    uint32_t B = outViews[0].shape[0];
-    uint32_t S = outViews[0].shape[1];
-    uint32_t D = outViews[0].shape[2];
+    uint32_t B = inViews[0].shape[0];
+    uint32_t S = inViews[0].shape[1];
+    uint32_t D = inViews[0].shape[2];
 
     uint64_t totalElements = (uint64_t)B * S * D;
 
-    // Optimized in-place loop
+    // Optimized loop: The 1D data is accessed cyclically
     for (uint64_t i = 0; i < totalElements; ++i)
     {
-        data3D[i] += data1D[i % D];
+        out[i] = data3D[i] + data1D[i % D];
     }
 }
 
@@ -68,7 +65,7 @@ inline void runAddFP32_3D_1D_Inplace(const std::vector<const void *> &inputs, co
  * Reference Factory: Defines the pattern the planner looks for to apply this fusion.
  * Pattern: add(x_3d, repeat(repeat(reshape(x_1d, [1,1,D]), B, 0), S, 1))
  */
-inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, Graph &graph)
+inline uint32_t refFactoryAdd3D_1D(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         throw std::runtime_error("Fused Add 3D+1D requires 2 inputs");
@@ -102,4 +99,4 @@ inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     return graph.add(id3D, expanded);
 }
 
-REGISTER_FUSED_KERNEL_INPLACE("Add_3D_1D_inplace", 2, Backend::CPU, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace, {1, 1, 1}, {1});
+REGISTER_KERNEL("Add_3D_1D", 2, Backend::CPU, matchAddFP32_3D_1D, runAddFP32_3D_1D, refFactoryAdd3D_1D, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}});

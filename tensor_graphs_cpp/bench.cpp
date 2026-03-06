@@ -38,6 +38,11 @@ int main()
 
             auto j = json::parse(line);
             json keyObj;
+            keyObj["buildContextId"] = j["buildContextId"];
+            keyObj["hwTag"] = j["hwTag"];
+            keyObj["inputConstants"] = j["inputConstants"];
+            keyObj["inputDTypes"] = j["inputDTypes"];
+            keyObj["outputDTypes"] = j["outputDTypes"];
             keyObj["kernelUid"] = j["kernelUid"];
             keyObj["inputShapes"] = j["inputShapes"];
             keyObj["outputShapes"] = j["outputShapes"];
@@ -63,6 +68,11 @@ int main()
             continue;
         auto j = json::parse(line);
         json keyObj;
+        keyObj["buildContextId"] = j["buildContextId"];
+        keyObj["hwTag"] = j["hwTag"];
+        keyObj["inputConstants"] = j["inputConstants"];
+        keyObj["inputDTypes"] = j["inputDTypes"];
+        keyObj["outputDTypes"] = j["outputDTypes"];
         keyObj["kernelUid"] = j["kernelUid"];
         keyObj["inputShapes"] = j["inputShapes"];
         keyObj["outputShapes"] = j["outputShapes"];
@@ -71,7 +81,8 @@ int main()
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
         {
             seenCalls.insert(key);
-            toBenchmark.push_back(j);
+            if (j["hwTag"] == HW_TAG && j["buildContextId"] == BUILD_CONTEXT_ID)
+                toBenchmark.push_back(j);
         } else {
             int a = 5;
         }

@@ -42,4 +42,4 @@ inline void runDivF32_ND(const std::vector<const void *> &inputs, const std::vec
 }
 
 // Register as a CPU kernel for the DIVIDE operation
-REGISTER_KERNEL(OpType::DIVIDE, Backend::CPU, matchDivF32_ND, runDivF32_ND);
+REGISTER_REF_KERNEL(OpType::DIVIDE, Backend::CPU, matchDivF32_ND, runDivF32_ND);
