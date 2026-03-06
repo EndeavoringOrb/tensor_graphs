@@ -564,11 +564,37 @@ private:
                             }
 
                             // Check transfer cost using parent's hash
+                            // TODO: make this actually good. might need to insert copy node into graph inbetween parent and current node
                             std::string phash = Hashing::detail::structuralHashImpl(pStrat.nodeId, graph, structHashMemo);
-                            if (pStrat.assignments.at(phash) != backend)
+                            Backend parentBackend = pStrat.assignments.at(phash);
+                            if (parentBackend != backend)
                             {
                                 std::string edgeHash = phash + "->" + targetHash;
-                                nCosts[edgeHash] = 0.05f; // TODO: use estimateCost with temp copyTo node
+
+                                TensorNode copyInNode = graph.nodes[pStrat.nodeId];
+                                copyInNode.backend = parentBackend;
+
+                                TensorNode copyOutNode = copyInNode;
+                                copyOutNode.id = 0; // dummy
+                                copyOutNode.opType = OpType::COPY_TO;
+                                copyOutNode.opName = "";
+                                copyOutNode.parentIds = {pStrat.nodeId};
+                                copyOutNode.backend = backend;
+
+                                std::vector<TensorNode> copyInputs = {copyInNode};
+                                std::vector<uint64_t> copyKernels = KernelRegistry::get().findMatchingKernels(
+                                    OpType::COPY_TO, "", backend, copyInputs, copyOutNode, &estimatedRefCounts);
+
+                                float bestCopyCost = std::numeric_limits<float>::infinity();
+                                for (uint64_t copyKId : copyKernels)
+                                {
+                                    float copyCost = costModel.estimateCost(copyOutNode, graph, copyKId);
+                                    if (copyCost < bestCopyCost)
+                                    {
+                                        bestCopyCost = copyCost;
+                                    }
+                                }
+                                nCosts[edgeHash] = bestCopyCost;
                             }
                         }
 

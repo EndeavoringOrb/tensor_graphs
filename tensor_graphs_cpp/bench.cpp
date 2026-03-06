@@ -123,6 +123,28 @@ int main()
             std::vector<const void *> inPtrs(r.inputShapes.size());
             std::vector<TensorView> inViews(r.inputShapes.size());
 
+#ifdef USE_CUDA
+            bool isInputCuda = kernel.backend == Backend::CUDA;
+            bool isOutputCuda = kernel.backend == Backend::CUDA;
+
+            if (kernel.opType == OpType::COPY_TO)
+            {
+                if (kernel.backend == Backend::CUDA)
+                {
+                    isInputCuda = false;
+                    isOutputCuda = true;
+                }
+                else
+                {
+                    isInputCuda = true;
+                    isOutputCuda = false;
+                }
+            }
+#else
+            bool isInputCuda = false;
+            bool isOutputCuda = false;
+#endif
+
             for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
                 uint64_t elements = countElements(r.inputShapes[idx]);
@@ -164,7 +186,19 @@ int main()
                     }
                 }
 
-                inPtrs[idx] = inData[idx].data();
+                if (isInputCuda)
+                {
+#ifdef USE_CUDA
+                    void *d_ptr;
+                    cudaMalloc(&d_ptr, bytes);
+                    cudaMemcpy(d_ptr, inData[idx].data(), bytes, cudaMemcpyHostToDevice);
+                    inPtrs[idx] = d_ptr;
+#endif
+                }
+                else
+                {
+                    inPtrs[idx] = inData[idx].data();
+                }
 
                 inViews[idx].shape = r.inputShapes[idx];
                 inViews[idx].strides = TensorView::calcContiguousStrides(r.inputShapes[idx]);
@@ -184,7 +218,18 @@ int main()
                 uint64_t bytes = elements * getDTypeSize(r.outputDTypes[idx]);
                 outData[idx].resize(bytes);
 
-                outPtrs[idx] = outData[idx].data();
+                if (isOutputCuda)
+                {
+#ifdef USE_CUDA
+                    void *d_ptr;
+                    cudaMalloc(&d_ptr, bytes);
+                    outPtrs[idx] = d_ptr;
+#endif
+                }
+                else
+                {
+                    outPtrs[idx] = outData[idx].data();
+                }
 
                 outViews[idx].shape = r.outputShapes[idx];
                 outViews[idx].strides = TensorView::calcContiguousStrides(r.outputShapes[idx]);
@@ -201,7 +246,26 @@ int main()
             {
                 kernel.run(inPtrs, outPtrs, inViews, outViews);
             }
+#ifdef USE_CUDA
+            if (isInputCuda || isOutputCuda)
+            {
+                cudaDeviceSynchronize();
+            }
+#endif
             auto end = std::chrono::high_resolution_clock::now();
+
+#ifdef USE_CUDA
+            for (size_t idx = 0; idx < inPtrs.size(); ++idx)
+            {
+                if (isInputCuda)
+                    cudaFree(const_cast<void *>(inPtrs[idx]));
+            }
+            for (size_t idx = 0; idx < outPtrs.size(); ++idx)
+            {
+                if (isOutputCuda)
+                    cudaFree(outPtrs[idx]);
+            }
+#endif
 
             float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count() / iters;
 
