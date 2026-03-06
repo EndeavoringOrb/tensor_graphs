@@ -181,7 +181,7 @@ def generate_kernel_includes(core_seed):
 def generate_build_context():
     """Hashes compiler command arguments to detect build flag changes."""
     ctx_hpp = GENERATED_DIR / "build_context.gen.hpp"
-    cmd_str = " ".join(get_compiler_cmd("", [])[:-2])
+    cmd_str = " ".join(get_compiler_cmd("")[:-2])
     ctx_hash = hashlib.sha256(cmd_str.encode("utf-8")).hexdigest()
 
     with open(ctx_hpp, "w") as f:
