@@ -622,17 +622,15 @@ private:
             throw std::runtime_error(ss.str());
         }
 
-        for (const auto &cand : candidates)
+        for (int i = static_cast<int>(candidates.size()) - 1; i > 0; --i)
         {
-            if (std::isinf(cand.cost))
+            if (std::isinf(candidates[i].cost))
             {
-                std::cout << "Detected inf cand cost: " << cand.cost << std::endl; // TODO: maybe remove this candidate?
+                std::cout << "Erasing inf cand cost at idx " << i << ": " << candidates[i].cost << std::endl;
+                candidates.erase(candidates.begin() + i);
             }
         }
 
-        std::cout << "[DEBUG] Original Node " << nodeId
-                  << " -> Best Target Chosen: " << candidates[0].nodeId
-                  << " (Op: " << toString(graph.nodes[candidates[0].nodeId].opType) << ")\n";
         memo[nodeHash] = candidates;
     }
 };

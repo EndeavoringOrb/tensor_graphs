@@ -203,7 +203,7 @@ struct CostModel
         auto it = records.find(kernelUid);
         if (it == records.end() || it->second.empty())
         {
-            std::cout << "[CostModel.estimateCost] WARNING: inf cost" << std::endl;
+            // std::cout << "[CostModel.estimateCost] WARNING: inf cost" << std::endl;
             return std::numeric_limits<float>::infinity();
         }
 
