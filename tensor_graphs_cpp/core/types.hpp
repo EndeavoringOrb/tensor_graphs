@@ -574,6 +574,7 @@ struct BeamStrategy
     std::unordered_map<std::string, Backend> assignments;
     std::unordered_map<std::string, uint64_t> kernelAssignments;
     std::unordered_map<std::string, float> nodeCosts;
+    std::unordered_map<std::string, uint32_t> selectedNodes;
 
     bool operator<(const BeamStrategy &other) const
     {

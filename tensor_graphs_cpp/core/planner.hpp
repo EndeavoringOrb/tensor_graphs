@@ -66,7 +66,7 @@ public:
                 view.strides = TensorView::calcContiguousStrides(view.shape);
                 view.baseOffset = 0;
                 DType dtype = pair.second.dtypes[i];
-                view.dtype = dtype;  // TODO: maybe assert len
+                view.dtype = dtype; // TODO: maybe assert len
                 pattern.graph.inputWithId(inId, view.shape, dtype, view);
                 pattern.variables.push_back(inId);
             }
@@ -202,21 +202,48 @@ public:
         std::cout << "best recipe cost: " << bestRecipe.cost << std::endl;
 
         std::cout << "[Planner.plan] final topo sort..." << std::endl;
-        std::vector<uint32_t> finalTopo = topologicalSort(bestRecipe.nodeId, graph);
+        std::vector<uint32_t> finalTopo;
+        std::unordered_set<uint32_t> visited;
+
+        auto visit = [&](auto &self, uint32_t currOriginalId) -> void
+        {
+            std::string h = Hashing::detail::structuralHashImpl(currOriginalId, graph, structHashMemo);
+
+            // Jump to the chosen fused node if one was selected
+            uint32_t chosenId = bestRecipe.selectedNodes.count(h) ? bestRecipe.selectedNodes.at(h) : currOriginalId;
+
+            if (visited.count(chosenId))
+                return;
+            visited.insert(chosenId);
+
+            for (uint32_t pid : graph.nodes[chosenId].parentIds)
+            {
+                self(self, pid);
+            }
+            finalTopo.push_back(chosenId);
+        };
+        visit(visit, rootId);
         CompiledGraph compiled;
 
         uint32_t mapIdx = 0;
         for (uint32_t id : finalTopo)
         {
             mapIdx++;
-            std::cout << "Map: " << mapIdx << "/" << finalTopo.size() << "\r";
-            compiled.nodesMap[id] = graph.nodes[id];
-            for (uint32_t pid : graph.nodes[id].parentIds)
+            TensorNode mappedNode = graph.nodes[id];
+            std::vector<uint32_t> mappedParentIds;
+
+            for (uint32_t pid : mappedNode.parentIds)
             {
-                compiled.refCounts[pid]++;
+                std::string phash = Hashing::detail::structuralHashImpl(pid, graph, structHashMemo);
+                uint32_t chosenPid = bestRecipe.selectedNodes.count(phash) ? bestRecipe.selectedNodes.at(phash) : pid;
+                mappedParentIds.push_back(chosenPid);
+                compiled.refCounts[chosenPid]++;
             }
-            compiled.refCounts[bestRecipe.nodeId] = 1;
+
+            mappedNode.parentIds = mappedParentIds;
+            compiled.nodesMap[id] = mappedNode;
         }
+        compiled.refCounts[bestRecipe.nodeId] = 1;
 
         uint32_t instIdx = 0;
         for (uint32_t id : finalTopo)
@@ -236,9 +263,9 @@ public:
 
             // Prepare input nodes for querying
             std::vector<TensorNode> inputNodes;
-            for (uint32_t pid : node.parentIds)
+            for (uint32_t pid : compiled.nodesMap[id].parentIds) // <-- Read from mapped
             {
-                inputNodes.push_back(graph.nodes[pid]);
+                inputNodes.push_back(compiled.nodesMap[pid]);    // <-- Read from mapped
             }
 
             // Pass refCounts to findMatchingKernels to enforce inplace safety at runtime
@@ -270,6 +297,9 @@ public:
                 {
                     throw std::runtime_error("[Planner.plan] CRITICAL: No valid kernel found for node " + std::to_string(id));
                 }
+                std::cout << "[DEBUG] Fallback triggered for node " << id
+                          << " (Op: " << toString(node.opType)
+                          << "). Expected kernel missing!\n";
                 finalKernelId = validKernels[0];
             }
 
@@ -278,7 +308,7 @@ public:
             OpInstruction inst;
             inst.nodeId = id;
             inst.kernelId = finalKernelId;
-            inst.inputNodeIds = node.parentIds;
+            inst.inputNodeIds = compiled.nodesMap[id].parentIds;
             inst.backend = assignedBackend;
             inst.inplaceInputIndex = kEntry.inplace ? 0 : -1; // Simplified: Inplace kernels assume input 0 is the target
 
@@ -420,6 +450,7 @@ private:
             strat.cost = 0.0f;
             strat.nodeId = nodeId;
             strat.assignments[nodeHash] = node.backend;
+            strat.nodeCosts[nodeHash] = 0.0f;
             memo[nodeHash] = {strat};
             return;
         }
@@ -483,8 +514,12 @@ private:
                         assigns[targetHash] = backend;
                         std::unordered_map<std::string, uint64_t> kAssigns; // Changed
                         kAssigns[targetHash] = kernelId;
+                        std::unordered_map<std::string, float> nCosts;
+                        nCosts[targetHash] = cost;
+                        std::unordered_map<std::string, uint32_t> sNodes;
+                        sNodes[nodeHash] = targetId;
 
-                        BeamStrategy strat{cost, targetId, assigns, kAssigns};
+                        BeamStrategy strat{cost, targetId, assigns, kAssigns, nCosts, sNodes};
                         candidates.push_back(strat);
                         continue;
                     }
@@ -492,16 +527,17 @@ private:
                     std::vector<size_t> indices(parentBeamSets.size(), 0);
                     while (true)
                     {
-                        float cost = 0.0f;
                         std::unordered_map<std::string, Backend> assigns;
                         assigns[targetHash] = backend;
                         std::unordered_map<std::string, uint64_t> kAssigns; // Changed
                         kAssigns[targetHash] = kernelId;
+                        std::unordered_map<std::string, float> nCosts;
+                        std::unordered_map<std::string, uint32_t> sNodes;
+                        sNodes[nodeHash] = targetId;
 
                         for (size_t i = 0; i < parentBeamSets.size(); i++)
                         {
                             const auto &pStrat = parentBeamSets[i][indices[i]];
-                            cost += pStrat.cost;
                             for (auto &pair : pStrat.assignments)
                             {
                                 assigns[pair.first] = pair.second; // pair.first is now a hash string
@@ -510,21 +546,29 @@ private:
                             {
                                 kAssigns[pair.first] = pair.second;
                             }
+                            for (auto &pair : pStrat.nodeCosts)
+                            {
+                                nCosts[pair.first] = pair.second;
+                            }
 
                             // Check transfer cost using parent's hash
                             std::string phash = Hashing::detail::structuralHashImpl(pStrat.nodeId, graph, structHashMemo);
                             if (pStrat.assignments.at(phash) != backend)
                             {
-                                cost += 0.05f; // TODO: use estimateCost with temp copyTo node
+                                std::string edgeHash = phash + "->" + targetHash;
+                                nCosts[edgeHash] = 0.05f; // TODO: use estimateCost with temp copyTo node
                             }
                         }
 
-                        cost += costModel.estimateCost(target, graph, kernelId);
+                        nCosts[targetHash] = costModel.estimateCost(target, graph, kernelId);
 
-                        assigns[targetHash] = backend;
-                        kAssigns[targetHash] = kernelId;
+                        float totalCost = 0.0f;
+                        for (const auto &pair : nCosts)
+                        {
+                            totalCost += pair.second;
+                        }
 
-                        candidates.push_back({cost, targetId, assigns, kAssigns});
+                        candidates.push_back({totalCost, targetId, assigns, kAssigns, nCosts, sNodes});
 
                         int p = static_cast<int>(indices.size()) - 1;
                         while (p >= 0)
@@ -566,13 +610,17 @@ private:
             throw std::runtime_error(ss.str());
         }
 
-        for (const auto &cand : candidates) {
-            if (isinf(cand.cost)) {
-                int a = 5;
+        for (const auto &cand : candidates)
+        {
+            if (isinf(cand.cost))
+            {
+                std::cout << "Detected inf cand cost: " << candidates[0].cost << std::endl;
             }
         }
-        std::cout << candidates[0].cost << std::endl;
 
+        std::cout << "[DEBUG] Original Node " << nodeId
+                  << " -> Best Target Chosen: " << candidates[0].nodeId
+                  << " (Op: " << toString(graph.nodes[candidates[0].nodeId].opType) << ")\n";
         memo[nodeHash] = candidates;
     }
 };
