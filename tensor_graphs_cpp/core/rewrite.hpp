@@ -225,7 +225,7 @@ namespace Rewrite
         }
     };
 
-    inline std::vector<uint32_t> generateAllEquivalents(uint32_t rootId, Graph &graph, const std::vector<const RewriteRule *> &rules)
+    inline std::vector<uint32_t> generateAllEquivalents(uint32_t rootId, Graph &graph, const std::vector<const RewriteRule *> &rules, std::unordered_map<uint32_t, std::string> &memo)
     {
         std::vector<uint32_t> equivalents;
         std::unordered_set<std::string> seenHashes;
@@ -233,7 +233,7 @@ namespace Rewrite
 
         equivalents.push_back(rootId);
         worklist.push(rootId);
-        seenHashes.insert(Hashing::getPatternHash(rootId, graph));
+        seenHashes.insert(Hashing::patternHash(rootId, graph, memo));
 
         while (!worklist.empty())
         {
@@ -245,7 +245,7 @@ namespace Rewrite
                 std::vector<uint32_t> newNodes = rule->apply(current, graph);
                 for (uint32_t newNode : newNodes)
                 {
-                    std::string newHash = Hashing::getPatternHash(newNode, graph);
+                    std::string newHash = Hashing::patternHash(newNode, graph, memo);
                     if (seenHashes.find(newHash) == seenHashes.end())
                     {
                         seenHashes.insert(newHash);

@@ -558,7 +558,11 @@ int main()
     std::unordered_map<uint32_t, const void *> inputs;
     inputs[inputIdsId] = input_data.data();
 
+    auto start = std::chrono::high_resolution_clock::now();
     session.run(inputs);
+    auto end = std::chrono::high_resolution_clock::now();
+    float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
+    std::cout << "finished run in " << runtimeMs << "ms" << std::endl;
 
     const float *output_ptr = static_cast<const float *>(session.getOutput(logits_id));
 

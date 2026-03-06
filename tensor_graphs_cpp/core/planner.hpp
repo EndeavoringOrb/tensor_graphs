@@ -78,6 +78,12 @@ public:
 
             fusedPatterns.push_back(std::move(pattern));
         }
+        std::unordered_map<OpType, std::vector<uint32_t>> patternsByRootOp;
+        for (uint32_t i = 0; i < fusedPatterns.size(); i++)
+        {
+            OpType patternRootOp = fusedPatterns[i].graph.nodes[fusedPatterns[i].rootId].opType;
+            patternsByRootOp[patternRootOp].push_back(i);
+        }
 
         std::unordered_map<std::string, std::vector<uint32_t>> fusionMap;
 #ifdef FUSE_OPS
@@ -103,10 +109,10 @@ public:
             topoIdx++;
             std::cout << topoIdx << "/" << topo.size() << ", rewrites: " << rewrites << ", matches: " << fusionMatches << "\r";
             uint32_t nodeId = *it;
-            // std::string patHash = Hashing::detail::patternHashImpl(nodeId, graph, patternHashMemo);
-            std::string hash = Hashing::detail::structuralHashImpl(nodeId, graph, structHashMemo);
+            // std::string patHash = Hashing::patternHash(nodeId, graph, patternHashMemo);
+            std::string hash = Hashing::structuralHash(nodeId, graph, structHashMemo);
 
-            std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(nodeId, graph, rules);
+            std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(nodeId, graph, rules, patternHashMemo);
             for (uint32_t eqId : equivalents)
             {
                 if (eqId != nodeId)
@@ -115,47 +121,53 @@ public:
                     fusionMap[hash].push_back(eqId);
                 }
 
-                for (const auto &fp : fusedPatterns)
+                OpType eqOpType = graph.nodes[eqId].opType;
+                auto it = patternsByRootOp.find(eqOpType);
+                if (it != patternsByRootOp.end())
                 {
-                    std::unordered_map<uint32_t, uint32_t> binding;
-                    if (matchPattern(eqId, graph, fp.rootId, fp.graph, fp.variables, binding))
+                    for (const uint32_t fpIdx : it->second)
                     {
-                        bool allBound = true;
-                        for (uint32_t var : fp.variables)
+                        const FusedPattern &fp = fusedPatterns[fpIdx];
+                        std::unordered_map<uint32_t, uint32_t> binding;
+                        if (matchPattern(eqId, graph, fp.rootId, fp.graph, fp.variables, binding))
                         {
-                            if (binding.find(var) == binding.end())
-                            {
-                                allBound = false;
-                                break;
-                            }
-                        }
-                        if (allBound)
-                        {
-                            std::vector<uint32_t> parentIds;
+                            bool allBound = true;
                             for (uint32_t var : fp.variables)
                             {
-                                parentIds.push_back(binding[var]);
+                                if (binding.find(var) == binding.end())
+                                {
+                                    allBound = false;
+                                    break;
+                                }
                             }
+                            if (allBound)
+                            {
+                                std::vector<uint32_t> parentIds;
+                                for (uint32_t var : fp.variables)
+                                {
+                                    parentIds.push_back(binding[var]);
+                                }
 
-                            TensorNode fusedNode;
-                            fusedNode.id = graph.allocateId();
-                            fusedNode.opType = OpType::FUSED;
-                            fusedNode.opName = fp.opName;
-                            fusedNode.dtype = graph.nodes[eqId].dtype;
-                            fusedNode.shape = graph.nodes[eqId].shape;
-                            fusedNode.parentIds = parentIds;
-                            fusedNode.backend = graph.nodes[eqId].backend;
+                                TensorNode fusedNode;
+                                fusedNode.id = graph.allocateId();
+                                fusedNode.opType = OpType::FUSED;
+                                fusedNode.opName = fp.opName;
+                                fusedNode.dtype = graph.nodes[eqId].dtype;
+                                fusedNode.shape = graph.nodes[eqId].shape;
+                                fusedNode.parentIds = parentIds;
+                                fusedNode.backend = graph.nodes[eqId].backend;
 
-                            graph.nodes.push_back(fusedNode);
+                                graph.nodes.push_back(fusedNode);
 
-                            fusionMap[hash].push_back(fusedNode.id);
-                            fusionMatches++;
+                                fusionMap[hash].push_back(fusedNode.id);
+                                fusionMatches++;
+                            }
                         }
                     }
                 }
             }
         }
-        std::cout << "# Rewrites: " << fusionMap.size() << std::endl;
+        std::cout << std::endl << "# Rewrites: " << fusionMap.size() << std::endl;
         std::cout << "# Fusion matches: " << fusionMatches << std::endl;
 #endif
         std::cout << "[Planner.plan] doing augmented topo sort..." << std::endl;
@@ -200,7 +212,7 @@ public:
             planNodeIterative(nodeId, graph, fusionMap, memo, structHashMemo, estimatedRefCounts);
         }
 
-        std::string rootHash = Hashing::detail::structuralHashImpl(rootId, graph, structHashMemo);
+        std::string rootHash = Hashing::structuralHash(rootId, graph, structHashMemo);
         if (memo.find(rootHash) == memo.end() || memo[rootHash].empty())
         {
             const auto &rootNode = graph.nodes[rootId];
@@ -232,7 +244,7 @@ public:
 
         auto visit = [&](auto &self, uint32_t currOriginalId) -> void
         {
-            std::string h = Hashing::detail::structuralHashImpl(currOriginalId, graph, structHashMemo);
+            std::string h = Hashing::structuralHash(currOriginalId, graph, structHashMemo);
 
             // Jump to the chosen fused node if one was selected
             uint32_t chosenId = bestRecipe.selectedNodes.count(h) ? bestRecipe.selectedNodes.at(h) : currOriginalId;
@@ -258,7 +270,7 @@ public:
             mapIdx++;
             TensorNode mappedNode = graph.nodes[id];
 
-            std::string h = Hashing::detail::structuralHashImpl(id, graph, structHashMemo);
+            std::string h = Hashing::structuralHash(id, graph, structHashMemo);
             if (bestRecipe.assignments.count(h))
             {
                 mappedNode.backend = bestRecipe.assignments.at(h);
@@ -268,7 +280,7 @@ public:
 
             for (uint32_t pid : mappedNode.parentIds)
             {
-                std::string phash = Hashing::detail::structuralHashImpl(pid, graph, structHashMemo);
+                std::string phash = Hashing::structuralHash(pid, graph, structHashMemo);
                 uint32_t chosenPid = bestRecipe.selectedNodes.count(phash) ? bestRecipe.selectedNodes.at(phash) : pid;
 
                 Backend parentBackend = graph.nodes[chosenPid].backend;
@@ -313,7 +325,7 @@ public:
                         compiled.nodesMap[copyNode.id] = copyNode;
 
                         std::string edgeHash = phash + "->" + h;
-                        std::string copyHash = Hashing::detail::structuralHashImpl(copyNode.id, graph, structHashMemo);
+                        std::string copyHash = Hashing::structuralHash(copyNode.id, graph, structHashMemo);
                         if (bestRecipe.kernelAssignments.count(edgeHash))
                         {
                             bestRecipe.kernelAssignments[copyHash] = bestRecipe.kernelAssignments[edgeHash];
@@ -347,7 +359,7 @@ public:
             if (node.opType == OpType::INPUT)
                 continue;
 
-            std::string h = Hashing::detail::structuralHashImpl(id, graph, structHashMemo);
+            std::string h = Hashing::structuralHash(id, graph, structHashMemo);
             Backend assignedBackend = node.backend;
             if (bestRecipe.assignments.count(h))
             {
@@ -479,7 +491,7 @@ private:
                 self(self, pid);
             }
 
-            std::string hash = Hashing::detail::structuralHashImpl(node, graph, structHashMemo);
+            std::string hash = Hashing::structuralHash(node, graph, structHashMemo);
             if (fusionMap.count(hash))
             {
                 for (uint32_t altNode : fusionMap[hash])
@@ -506,7 +518,7 @@ private:
                            std::unordered_map<uint32_t, std::string> &structHashMemo,
                            const std::unordered_map<uint32_t, uint32_t> &estimatedRefCounts)
     {
-        std::string nodeHash = Hashing::detail::structuralHashImpl(nodeId, graph, structHashMemo);
+        std::string nodeHash = Hashing::structuralHash(nodeId, graph, structHashMemo);
         if (memo.count(nodeHash))
             return;
 
@@ -550,7 +562,7 @@ private:
             bool anyParentMissing = false;
             for (uint32_t pid : target.parentIds)
             {
-                std::string phash = Hashing::detail::structuralHashImpl(pid, graph, structHashMemo);
+                std::string phash = Hashing::structuralHash(pid, graph, structHashMemo);
                 if (memo.count(phash) == 0 || memo[phash].empty())
                 {
                     anyParentMissing = true;
@@ -574,7 +586,7 @@ private:
 
                 for (uint64_t kernelId : matchingKernels)
                 {
-                    std::string targetHash = Hashing::detail::structuralHashImpl(targetId, graph, structHashMemo);
+                    std::string targetHash = Hashing::structuralHash(targetId, graph, structHashMemo);
 
                     if (parentBeamSets.empty())
                     {
@@ -626,7 +638,7 @@ private:
 
                             // Check transfer cost using parent's hash
                             // TODO: make this actually good. might need to insert copy node into graph inbetween parent and current node
-                            std::string phash = Hashing::detail::structuralHashImpl(pStrat.nodeId, graph, structHashMemo);
+                            std::string phash = Hashing::structuralHash(pStrat.nodeId, graph, structHashMemo);
                             Backend parentBackend = pStrat.assignments.at(phash);
                             if (parentBackend != backend)
                             {
