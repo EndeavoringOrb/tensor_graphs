@@ -253,10 +253,10 @@ public:
                 // Run the kernel
                 for (uint32_t inId : inst.inputNodeIds)
                 {
-                    Debug::checkNan(compiled.nodesMap.at(inId), memManager, "Kernel Input: " + inst.nodeId);
+                    Debug::checkNan(compiled.nodesMap.at(inId), memManager, "Kernel Input: " + std::to_string(inId));
                 }
                 kernel.run(kernelInputs, kernelOutputs, kernelInViews, kernelOutViews);
-                Debug::checkNan(compiled.nodesMap.at(inst.nodeId), memManager, "Kernel Output: " + inst.nodeId);
+                Debug::checkNan(compiled.nodesMap.at(inst.nodeId), memManager, "Kernel Output: " + std::to_string(inst.nodeId));
             }
 
             // 5. Release Consumed Parents
