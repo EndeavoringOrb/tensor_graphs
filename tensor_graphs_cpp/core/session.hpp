@@ -235,9 +235,11 @@ public:
         std::vector<uint32_t> inputNodeIds;
         for (const auto &pair : compiled.nodesMap)
         {
-            if (pair.second.opType == OpType::INPUT && pair.second.storageType == StorageType::TRANSIENT)
-            {
-                inputNodeIds.push_back(pair.first);
+            uint32_t nodeId = pair.first;
+            if (pair.second.opType == OpType::INPUT) {
+                if (graph.weightSources.count(nodeId) == 0 && graph.constantStaging.count(nodeId) == 0) {
+                    inputNodeIds.push_back(nodeId);
+                }
             }
         }
         ensureCacheCoverage(inputNodeIds);
