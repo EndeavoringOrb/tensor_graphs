@@ -20,6 +20,8 @@
 class Planner
 {
 private:
+    uint32_t currentGeneration = 0; // Used for extremely fast cycle-free DAG DFS
+
     std::unordered_map<std::string, uint32_t> hashToId;
     uint32_t getHashId(const std::string &h)
     {
@@ -143,6 +145,27 @@ private:
             }
         }
         return chains;
+    }
+
+    // Calculates deduplicated sum of the sub-graph execution cost.
+    float dfsCost(const BeamStrategy *root)
+    {
+        if (!root || root->visitedGen == currentGeneration)
+            return 0.0f;
+        root->visitedGen = currentGeneration;
+
+        float total = root->nodeCost + root->edgeCost;
+        for (const auto &p : root->parentStrategies)
+        {
+            total += dfsCost(p.get());
+        }
+        return total;
+    }
+
+    float getDeduplicatedCost(const BeamStrategy *root)
+    {
+        currentGeneration++;
+        return dfsCost(root);
     }
 
 public:
@@ -335,7 +358,7 @@ public:
         for (uint32_t nodeId : sortedNodes)
         {
             nodeIdx++;
-            std::cout << nodeIdx << "/" << sortedNodes.size();
+            std::cout << nodeIdx << "/" << sortedNodes.size() << "\r";
             planNodeIterative(nodeId, graph, fusionMap, memo, structHashMemo, estimatedRefCounts);
         }
 
@@ -363,7 +386,7 @@ public:
         }
 
         auto bestRecipe = memo[rootHash][0];
-        std::cout << "best recipe cost: " << bestRecipe->cost << std::endl;
+        std::cout << "\nbest recipe cost: " << bestRecipe->cost << " ms" << std::endl;
 
         // Reconstruct the global maps from the winning path-tracking tree
         std::unordered_map<uint32_t, Backend> bestAssignments;
@@ -722,6 +745,8 @@ private:
         {
             auto strat = std::make_shared<BeamStrategy>();
             strat->cost = 0.0f;
+            strat->nodeCost = 0.0f;
+            strat->edgeCost = 0.0f;
             strat->nodeId = nodeId;
             strat->selectedNodeId = nodeId;
             strat->backend = node.backend;
@@ -777,8 +802,11 @@ private:
                         std::string targetHash = Hashing::structuralHash(targetId, graph, structHashMemo);
                         uint32_t targetHashId = getHashId(targetHash);
                         float cost = costModel.estimateCost(target, graph, kernelId);
+
                         auto strat = std::make_shared<BeamStrategy>();
                         strat->cost = cost;
+                        strat->nodeCost = cost;
+                        strat->edgeCost = 0.0f;
                         strat->nodeId = nodeId;
                         strat->selectedNodeId = targetId;
                         strat->backend = backend;
@@ -834,26 +862,29 @@ private:
                             for (uint64_t kernelId : matchingKernels)
                             {
                                 float targetCost = costModel.estimateCost(target, graph, kernelId);
-                                float totalCost = targetCost;
 
                                 auto strat = std::make_shared<BeamStrategy>();
                                 strat->nodeId = nodeId;
                                 strat->selectedNodeId = targetId;
                                 strat->backend = backend;
                                 strat->kernelId = kernelId;
+                                strat->nodeCost = targetCost;
 
+                                float totalEdgeCost = 0.0f;
                                 for (size_t i = 0; i < parentBeamSets.size(); ++i)
                                 {
                                     const auto &pStrat = parentBeamSets[i][indices[i]];
                                     float chainCost = parentAdapterChains[i][chainIndices[i]].cost;
 
-                                    totalCost += pStrat->cost + chainCost;
+                                    totalEdgeCost += chainCost;
 
                                     strat->parentStrategies.push_back(pStrat);
                                     strat->parentAdapters.push_back(parentAdapterChains[i][chainIndices[i]].ops);
                                 }
 
-                                strat->cost = totalCost;
+                                strat->edgeCost = totalEdgeCost;
+                                strat->cost = getDeduplicatedCost(strat.get());
+
                                 candidates.push_back(strat);
                             }
 
@@ -901,8 +932,6 @@ private:
             }
         }
 
-        std::cout << ", cost: " << candidates[0]->cost << std::endl;
-
         if (candidates.empty())
         {
             const auto &node = graph.nodes[nodeId];
@@ -922,7 +951,6 @@ private:
             throw std::runtime_error(ss.str());
         }
 
-        
         memo[nodeHash] = candidates;
     }
 };

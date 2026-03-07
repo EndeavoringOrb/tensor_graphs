@@ -582,11 +582,15 @@ struct AdapterOp
 
 struct BeamStrategy
 {
-    float cost;               // Total cumulative cost
-    uint32_t nodeId;          // The original node ID this strategy resolves
-    uint32_t selectedNodeId;  // The actual fused/replaced node ID chosen
-    Backend backend;          // Backend chosen for this node
-    uint64_t kernelId;        // Kernel chosen for this node
+    float cost;                      // Total cumulative cost (deduplicated)
+    float nodeCost = 0.0f;           // The cost of THIS specific node's kernel
+    float edgeCost = 0.0f;           // The cost of all adapter chains linking to parents
+    mutable uint32_t visitedGen = 0; // Ensures deduplication during DFS cost accumulation
+
+    uint32_t nodeId;         // The original node ID this strategy resolves
+    uint32_t selectedNodeId; // The actual fused/replaced node ID chosen
+    Backend backend;         // Backend chosen for this node
+    uint64_t kernelId;       // Kernel chosen for this node
 
     // Pointers tracking the selected parent paths
     std::vector<std::shared_ptr<BeamStrategy>> parentStrategies;
