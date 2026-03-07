@@ -674,10 +674,6 @@ private:
         for (uint32_t targetId : targets)
         {
             const auto &target = graph.nodes[targetId];
-            if (target.opName != "")
-            {
-                int a = 5; // for debug breakpoint
-            }
 
             // Check parent planning status
             std::vector<std::vector<BeamStrategy>> parentBeamSets;
@@ -864,6 +860,14 @@ private:
             candidates.resize(beamWidth);
         }
 
+        // for (int i = static_cast<int>(candidates.size()) - 1; i > 0; --i)
+        // {
+        //     if (std::isinf(candidates[i].cost))
+        //     {
+        //         candidates.erase(candidates.begin() + i);
+        //     }
+        // }
+
         if (candidates.empty())
         {
             const auto &node = graph.nodes[nodeId];
@@ -880,14 +884,6 @@ private:
             }
             ss << std::endl;
             throw std::runtime_error(ss.str());
-        }
-
-        for (int i = static_cast<int>(candidates.size()) - 1; i > 0; --i)
-        {
-            if (std::isinf(candidates[i].cost))
-            {
-                candidates.erase(candidates.begin() + i);
-            }
         }
 
         memo[nodeHash] = candidates;

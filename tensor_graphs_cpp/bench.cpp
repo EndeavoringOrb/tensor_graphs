@@ -238,6 +238,10 @@ int main()
                 outViews[idx].dtype = r.outputDTypes[idx];
             }
 
+            std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "] "
+                      << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
+                      << " (Kernel 0x" << std::hex << kernelUid << std::dec << ")" << std::flush;
+
             // Warmup
             kernel.run(inPtrs, outPtrs, inViews, outViews);
 
@@ -274,10 +278,7 @@ int main()
             outFile << call.dump() << "\n";
             outFile.flush();
 
-            std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "] "
-                      << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                      << " (Kernel 0x" << std::hex << kernelUid << std::dec << ") -> "
-                      << runtimeMs << " ms" << std::endl;
+            std::cout << " -> " << runtimeMs << " ms" << std::endl;
         }
         catch (const std::exception &e)
         {
