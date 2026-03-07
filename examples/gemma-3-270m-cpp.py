@@ -12,7 +12,7 @@ class Gemma3ModelCPP:
         self.seq_len = seq_len
         self.w_path = "resources/model.safetensors"
 
-        # Constants
+        # Global Constants used for expansion
         self.one_fp32 = self.g.constant(
             [1], np.array([1.0], dtype=np.float32), tg_cpp.DType.FLOAT32
         )
@@ -21,6 +21,16 @@ class Gemma3ModelCPP:
         )
         self.half_fp32 = self.g.constant(
             [1], np.array([0.5], dtype=np.float32), tg_cpp.DType.FLOAT32
+        )
+
+        self.neg_one_fp32 = self.g.constant(
+            [1], np.array([-1.0], dtype=np.float32), tg_cpp.DType.FLOAT32
+        )
+        self.two_fp32 = self.g.constant(
+            [1], np.array([2.0], dtype=np.float32), tg_cpp.DType.FLOAT32
+        )
+        self.e_fp32 = self.g.constant(
+            [1], np.array([2.718281828459], dtype=np.float32), tg_cpp.DType.FLOAT32
         )
 
     def weight(self, name):
@@ -81,10 +91,8 @@ class Gemma3ModelCPP:
         mean_sq = self.g.div(sum_sq, n_node)
 
         eps_exp = self.expand_scalar_to_3d(self.eps_fp32, dim0, self.seq_len, 1)
-        std = self.g.pow(
-            self.g.add(mean_sq, eps_exp),
-            self.expand_scalar_to_3d(self.half_fp32, dim0, self.seq_len, 1),
-        )
+        sqrt_exp = self.expand_scalar_to_3d(self.half_fp32, dim0, self.seq_len, 1)
+        std = self.g.pow(self.g.add(mean_sq, eps_exp), sqrt_exp)
 
         one_exp = self.expand_scalar_to_3d(self.one_fp32, dim0, self.seq_len, 1)
         inv_std = self.repeat_3d_axis(self.g.div(one_exp, std), dim_size, 2)
@@ -97,104 +105,498 @@ class Gemma3ModelCPP:
         )
         return self.g.mul(x_norm, scale)
 
-    def build_graph(self, input_ids_id):
-        cfg = self.cfg
-        w_emb = self.weight("model.embed_tokens.weight")
-        x = self.g.gather(w_emb, input_ids_id)
-
-        # Scale embedding
-        scale_val = float(cfg["emb_dim"] ** 0.5)
-        scale_node = self.expand_scalar_to_3d(
+    def tanh_atomic(self, x_id, last_dim):
+        # tanh(x) = 2 / (1 + e^(-2x)) - 1
+        neg_two = self.expand_scalar_to_3d(
             self.g.constant(
-                [1], np.array([scale_val], dtype=np.float32), tg_cpp.DType.FLOAT32
+                [1], np.array([-2.0], dtype=np.float32), tg_cpp.DType.FLOAT32
             ),
             1,
             self.seq_len,
-            cfg["emb_dim"],
+            last_dim,
         )
-        x = self.g.mul(x, scale_node)
+        two = self.expand_scalar_to_3d(self.two_fp32, 1, self.seq_len, last_dim)
+        e_node = self.expand_scalar_to_3d(self.e_fp32, 1, self.seq_len, last_dim)
+        one_node = self.expand_scalar_to_3d(self.one_fp32, 1, self.seq_len, last_dim)
 
-        for i in range(cfg["n_layers"]):
+        neg_2x = self.g.mul(x_id, neg_two)
+        exp_neg_2x = self.g.pow(e_node, neg_2x)
+        den = self.g.add(one_node, exp_neg_2x)
+        return self.g.add(self.g.div(two, den), self.g.neg(one_node))
+
+    def gelu_atomic(self, x_id, last_dim):
+        # GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        c1 = self.expand_scalar_to_3d(
+            self.g.constant(
+                [1], np.array([0.044715], dtype=np.float32), tg_cpp.DType.FLOAT32
+            ),
+            1,
+            self.seq_len,
+            last_dim,
+        )
+        c2 = self.expand_scalar_to_3d(
+            self.g.constant(
+                [1], np.array([0.79788456], dtype=np.float32), tg_cpp.DType.FLOAT32
+            ),
+            1,
+            self.seq_len,
+            last_dim,
+        )
+
+        x_cube = self.g.mul(self.g.mul(x_id, x_id), x_id)
+        inner = self.g.mul(self.g.add(x_id, self.g.mul(x_cube, c1)), c2)
+        tanh_out = self.tanh_atomic(inner, last_dim)
+
+        one_node = self.expand_scalar_to_3d(self.one_fp32, 1, self.seq_len, last_dim)
+        half_node = self.expand_scalar_to_3d(self.half_fp32, 1, self.seq_len, last_dim)
+        return self.g.mul(self.g.mul(x_id, half_node), self.g.add(one_node, tanh_out))
+
+    def compute_rope(self):
+        # Implementation mirrors main.cpp RoPE generation
+        zero_int = self.g.constant(
+            [1], np.array([0], dtype=np.int32), tg_cpp.DType.INT32
+        )
+        h_dim_half = self.cfg["head_dim"] // 2
+
+        # inv_freq = 1.0 / (10000 ^ (arange(0, head_dim, 2) / head_dim))
+        indices = self.g.cast(
+            self.g.arange(
+                zero_int,
+                self.g.constant(
+                    [1],
+                    np.array([self.cfg["head_dim"]], dtype=np.int32),
+                    tg_cpp.DType.INT32,
+                ),
+                self.g.constant([1], np.array([2], dtype=np.int32), tg_cpp.DType.INT32),
+            ),
+            tg_cpp.DType.FLOAT32,
+        )
+        h_dim_fp = self.g.repeat(
+            self.g.constant(
+                [1],
+                np.array([float(self.cfg["head_dim"])], dtype=np.float32),
+                tg_cpp.DType.FLOAT32,
+            ),
+            self.g.constant(
+                [1], np.array([h_dim_half], dtype=np.int32), tg_cpp.DType.INT32
+            ),
+            zero_int,
+        )
+        exponent = self.g.div(indices, h_dim_fp)
+        base = self.g.repeat(
+            self.g.constant(
+                [1], np.array([10000.0], dtype=np.float32), tg_cpp.DType.FLOAT32
+            ),
+            self.g.constant(
+                [1], np.array([h_dim_half], dtype=np.int32), tg_cpp.DType.INT32
+            ),
+            zero_int,
+        )
+        inv_freq = self.g.div(
+            self.g.repeat(
+                self.one_fp32,
+                self.g.constant(
+                    [1], np.array([h_dim_half], dtype=np.int32), tg_cpp.DType.INT32
+                ),
+                zero_int,
+            ),
+            self.g.pow(base, exponent),
+        )
+
+        # outer product pos * inv_freq
+        pos = self.g.cast(
+            self.g.arange(
+                zero_int,
+                self.g.constant(
+                    [1], np.array([self.seq_len], dtype=np.int32), tg_cpp.DType.INT32
+                ),
+                self.g.constant([1], np.array([1], dtype=np.int32), tg_cpp.DType.INT32),
+            ),
+            tg_cpp.DType.FLOAT32,
+        )
+        pos_col = self.g.reshape(
+            pos,
+            self.g.constant(
+                [2], np.array([self.seq_len, 1], dtype=np.int32), tg_cpp.DType.INT32
+            ),
+        )
+        freq_row = self.g.reshape(
+            inv_freq,
+            self.g.constant(
+                [2], np.array([1, h_dim_half], dtype=np.int32), tg_cpp.DType.INT32
+            ),
+        )
+
+        angles_half = self.g.mul(
+            self.repeat_3d_axis(pos_col, h_dim_half, 1),
+            self.repeat_3d_axis(freq_row, self.seq_len, 0),
+        )
+        angles = self.g.concat(
+            [angles_half, angles_half],
+            self.g.constant([1], np.array([1], dtype=np.int32), tg_cpp.DType.INT32),
+        )
+
+        s3 = self.g.constant(
+            [3],
+            np.array([1, self.seq_len, self.cfg["head_dim"]], dtype=np.int32),
+            tg_cpp.DType.INT32,
+        )
+        return self.g.reshape(self.g.cos(angles), s3), self.g.reshape(
+            self.g.sin(angles), s3
+        )
+
+    def apply_rope(self, x_id, cos_id, sin_id, n_groups):
+        # [groups, seq, head_dim]
+        h_dim = self.cfg["head_dim"]
+        half = h_dim // 2
+
+        starts1 = self.g.constant(
+            [3], np.array([0, 0, 0], dtype=np.int32), tg_cpp.DType.INT32
+        )
+        ends1 = self.g.constant(
+            [3],
+            np.array([n_groups, self.seq_len, half], dtype=np.int32),
+            tg_cpp.DType.INT32,
+        )
+        steps = self.g.constant(
+            [3], np.array([1, 1, 1], dtype=np.int32), tg_cpp.DType.INT32
+        )
+        x1 = self.g.slice(x_id, starts1, ends1, steps)
+
+        starts2 = self.g.constant(
+            [3], np.array([0, 0, half], dtype=np.int32), tg_cpp.DType.INT32
+        )
+        ends2 = self.g.constant(
+            [3],
+            np.array([n_groups, self.seq_len, h_dim], dtype=np.int32),
+            tg_cpp.DType.INT32,
+        )
+        x2 = self.g.slice(x_id, starts2, ends2, steps)
+
+        rotated = self.g.concat(
+            [self.g.neg(x2), x1],
+            self.g.constant([1], np.array([2], dtype=np.int32), tg_cpp.DType.INT32),
+        )
+        cos_exp = self.repeat_3d_axis(cos_id, n_groups, 0)
+        sin_exp = self.repeat_3d_axis(sin_id, n_groups, 0)
+
+        return self.g.add(self.g.mul(x_id, cos_exp), self.g.mul(rotated, sin_exp))
+
+    def build_graph(self, input_ids_id):
+        w_emb = self.weight("model.embed_tokens.weight")
+        x = self.g.gather(w_emb, input_ids_id)
+
+        # Scaling
+        scale_val = self.cfg["emb_dim"] ** 0.5
+        x = self.g.mul(
+            x,
+            self.expand_scalar_to_3d(
+                self.g.constant(
+                    [1], np.array([scale_val], dtype=np.float32), tg_cpp.DType.FLOAT32
+                ),
+                1,
+                self.seq_len,
+                self.cfg["emb_dim"],
+            ),
+        )
+
+        rope_cos, rope_sin = self.compute_rope()
+
+        # Causal Mask (simplified triu logic)
+        mask_shape = self.g.constant(
+            [2],
+            np.array([self.seq_len, self.seq_len], dtype=np.int32),
+            tg_cpp.DType.INT32,
+        )
+        ones = self.g.fill(self.one_fp32, mask_shape)
+        triu_mask = self.g.triu(
+            ones,
+            self.g.constant([1], np.array([1], dtype=np.int32), tg_cpp.DType.INT32),
+        )
+        neg_inf = self.expand_scalar_to_3d(
+            self.g.constant(
+                [1], np.array([-1e9], dtype=np.float32), tg_cpp.DType.FLOAT32
+            ),
+            1,
+            self.seq_len,
+            self.seq_len,
+        )
+        mask = self.g.reshape(
+            self.g.mul(triu_mask, self.g.reshape(neg_inf, mask_shape)),
+            self.g.constant(
+                [3],
+                np.array([1, self.seq_len, self.seq_len], dtype=np.int32),
+                tg_cpp.DType.INT32,
+            ),
+        )
+
+        for i in range(self.cfg["n_layers"]):
             prefix = f"model.layers.{i}"
             residual = x
 
-            # Pre-norm
-            w_ln1 = self.weight(f"{prefix}.input_layernorm.weight")
-            x = self.rms_norm_gemma_atomic(x, w_ln1, 1, cfg["emb_dim"])
+            # Attention Branch
+            x = self.rms_norm_gemma_atomic(
+                x,
+                self.weight(f"{prefix}.input_layernorm.weight"),
+                1,
+                self.cfg["emb_dim"],
+            )
+            x = self.attention_block(x, prefix, rope_cos, rope_sin, mask)
 
-            # Attention (Simplified projection logic matching C++ impl requirements)
-            x = self.attention_block(x, prefix)
-
-            w_post_attn = self.weight(f"{prefix}.post_attention_layernorm.weight")
-            x = self.rms_norm_gemma_atomic(x, w_post_attn, 1, cfg["emb_dim"])
+            x = self.rms_norm_gemma_atomic(
+                x,
+                self.weight(f"{prefix}.post_attention_layernorm.weight"),
+                1,
+                self.cfg["emb_dim"],
+            )
             x = self.g.add(residual, x)
 
-            # MLP
+            # MLP Branch
             residual = x
-            w_ln2 = self.weight(f"{prefix}.pre_feedforward_layernorm.weight")
-            x = self.rms_norm_gemma_atomic(x, w_ln2, 1, cfg["emb_dim"])
+            x = self.rms_norm_gemma_atomic(
+                x,
+                self.weight(f"{prefix}.pre_feedforward_layernorm.weight"),
+                1,
+                self.cfg["emb_dim"],
+            )
             x = self.mlp_block(x, prefix)
 
-            w_post_ff = self.weight(f"{prefix}.post_feedforward_layernorm.weight")
-            x = self.rms_norm_gemma_atomic(x, w_post_ff, 1, cfg["emb_dim"])
+            x = self.rms_norm_gemma_atomic(
+                x,
+                self.weight(f"{prefix}.post_feedforward_layernorm.weight"),
+                1,
+                self.cfg["emb_dim"],
+            )
             x = self.g.add(residual, x)
 
-        w_final_ln = self.weight("model.norm.weight")
-        x = self.rms_norm_gemma_atomic(x, w_final_ln, 1, cfg["emb_dim"])
+        x = self.rms_norm_gemma_atomic(
+            x, self.weight("model.norm.weight"), 1, self.cfg["emb_dim"]
+        )
 
-        # Head
-        perm_dims = self.g.constant(
+        # Output Head (Transposed embedding dot)
+        perm = self.g.constant(
             [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
         )
-        w_emb_t = self.g.permute(w_emb, perm_dims)
+        w_emb_t = self.g.permute(w_emb, perm)
         s3 = self.g.constant(
             [3],
-            np.array([1, cfg["emb_dim"], cfg["vocab_size"]], dtype=np.int32),
+            np.array([1, self.cfg["emb_dim"], self.cfg["vocab_size"]], dtype=np.int32),
             tg_cpp.DType.INT32,
         )
         return self.g.dot(x, self.g.reshape(w_emb_t, s3))
 
-    def attention_block(self, x, prefix):
-        # Mirroring the simplified projection used for the small 270m example
-        w_q = self.weight(f"{prefix}.self_attn.q_proj.weight")
-        perm_dims = self.g.constant(
-            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
+    def attention_block(self, x, prefix, cos, sin, mask):
+        def project(name, out_d):
+            w = self.weight(f"{prefix}.self_attn.{name}_proj.weight")
+            w_t = self.g.permute(
+                w,
+                self.g.constant(
+                    [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
+                ),
+            )
+            s3 = self.g.constant(
+                [3],
+                np.array([1, self.cfg["emb_dim"], out_d], dtype=np.int32),
+                tg_cpp.DType.INT32,
+            )
+            return self.g.dot(x, self.g.reshape(w_t, s3))
+
+        q = project("q", self.cfg["n_heads"] * self.cfg["head_dim"])
+        k = project("k", self.cfg["n_kv_groups"] * self.cfg["head_dim"])
+        v = project("v", self.cfg["n_kv_groups"] * self.cfg["head_dim"])
+
+        # Reshape for multi-head [Batch, Seq, Heads, Dim] -> [Heads, Seq, Dim]
+        perm4 = self.g.constant(
+            [4], np.array([0, 2, 1, 3], dtype=np.int32), tg_cpp.DType.INT32
         )
-        w_q_t = self.g.permute(w_q, perm_dims)
-        s3 = self.g.constant(
+
+        def split_heads(tensor, n_heads):
+            s4 = self.g.constant(
+                [4],
+                np.array(
+                    [1, self.seq_len, n_heads, self.cfg["head_dim"]], dtype=np.int32
+                ),
+                tg_cpp.DType.INT32,
+            )
+            s3 = self.g.constant(
+                [3],
+                np.array([n_heads, self.seq_len, self.cfg["head_dim"]], dtype=np.int32),
+                tg_cpp.DType.INT32,
+            )
+            return self.g.reshape(self.g.permute(self.g.reshape(tensor, s4), perm4), s3)
+
+        q, k, v = (
+            split_heads(q, self.cfg["n_heads"]),
+            split_heads(k, self.cfg["n_kv_groups"]),
+            split_heads(v, self.cfg["n_kv_groups"]),
+        )
+
+        # Per-head Norm
+        q = self.rms_norm_gemma_atomic(
+            q,
+            self.weight(f"{prefix}.self_attn.q_norm.weight"),
+            self.cfg["n_heads"],
+            self.cfg["head_dim"],
+        )
+        k = self.rms_norm_gemma_atomic(
+            k,
+            self.weight(f"{prefix}.self_attn.k_norm.weight"),
+            self.cfg["n_kv_groups"],
+            self.cfg["head_dim"],
+        )
+
+        q, k = self.apply_rope(q, cos, sin, self.cfg["n_heads"]), self.apply_rope(
+            k, cos, sin, self.cfg["n_kv_groups"]
+        )
+
+        # GQA Repeat
+        if self.cfg["n_heads"] != self.cfg["n_kv_groups"]:
+            reps = self.g.constant(
+                [1],
+                np.array(
+                    [self.cfg["n_heads"] // self.cfg["n_kv_groups"]], dtype=np.int32
+                ),
+                tg_cpp.DType.INT32,
+            )
+            zero = self.g.constant(
+                [1], np.array([0], dtype=np.int32), tg_cpp.DType.INT32
+            )
+            k, v = self.g.repeat(k, reps, zero), self.g.repeat(v, reps, zero)
+
+        # Scaled Dot Product
+        scale = 1.0 / (self.cfg["query_pre_attn_scalar"] ** 0.5)
+        q_scaled = self.g.mul(
+            q,
+            self.expand_scalar_to_3d(
+                self.g.constant(
+                    [1], np.array([scale], dtype=np.float32), tg_cpp.DType.FLOAT32
+                ),
+                self.cfg["n_heads"],
+                self.seq_len,
+                self.cfg["head_dim"],
+            ),
+        )
+
+        k_t = self.g.permute(
+            k,
+            self.g.constant(
+                [3], np.array([0, 2, 1], dtype=np.int32), tg_cpp.DType.INT32
+            ),
+        )
+        scores = self.g.add(
+            self.g.dot(q_scaled, k_t), self.repeat_3d_axis(mask, self.cfg["n_heads"], 0)
+        )
+
+        # Softmax
+        axis = self.g.constant([1], np.array([-1], dtype=np.int32), tg_cpp.DType.INT32)
+        max_s = self.repeat_3d_axis(self.g.max(scores, axis), self.seq_len, 2)
+        exp_s = self.g.pow(
+            self.expand_scalar_to_3d(
+                self.e_fp32, self.cfg["n_heads"], self.seq_len, self.seq_len
+            ),
+            self.g.add(scores, self.g.neg(max_s)),
+        )
+        probs = self.g.div(
+            exp_s, self.repeat_3d_axis(self.g.sum(exp_s, axis), self.seq_len, 2)
+        )
+
+        # Out projection
+        context = self.g.dot(probs, v)
+        s3_flat = self.g.constant(
             [3],
             np.array(
-                [1, self.cfg["emb_dim"], self.cfg["n_heads"] * self.cfg["head_dim"]],
+                [1, self.seq_len, self.cfg["n_heads"] * self.cfg["head_dim"]],
                 dtype=np.int32,
             ),
             tg_cpp.DType.INT32,
         )
-        q = self.g.dot(x, self.g.reshape(w_q_t, s3))
-
-        # Scaling matching the query_pre_attn_scalar
-        scale = 1.0 / (self.cfg["query_pre_attn_scalar"] ** 0.5)
-        scale_node = self.expand_scalar_to_3d(
-            self.g.constant(
-                [1], np.array([scale], dtype=np.float32), tg_cpp.DType.FLOAT32
+        context_flat = self.g.reshape(
+            self.g.permute(
+                self.g.reshape(
+                    context,
+                    self.g.constant(
+                        [4],
+                        np.array(
+                            [
+                                self.cfg["n_heads"],
+                                1,
+                                self.seq_len,
+                                self.cfg["head_dim"],
+                            ],
+                            dtype=np.int32,
+                        ),
+                        tg_cpp.DType.INT32,
+                    ),
+                ),
+                perm4,
             ),
-            1,
-            self.seq_len,
-            self.cfg["n_heads"] * self.cfg["head_dim"],
+            s3_flat,
         )
-        return self.g.mul(q, scale_node)
+
+        w_o = self.weight(f"{prefix}.self_attn.o_proj.weight")
+        w_o_t = self.g.permute(
+            w_o,
+            self.g.constant([2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32),
+        )
+        return self.g.dot(
+            context_flat,
+            self.g.reshape(
+                w_o_t,
+                self.g.constant(
+                    [3],
+                    np.array(
+                        [
+                            1,
+                            self.cfg["n_heads"] * self.cfg["head_dim"],
+                            self.cfg["emb_dim"],
+                        ],
+                        dtype=np.int32,
+                    ),
+                    tg_cpp.DType.INT32,
+                ),
+            ),
+        )
 
     def mlp_block(self, x, prefix):
-        w_gate = self.weight(f"{prefix}.mlp.gate_proj.weight")
-        perm_dims = self.g.constant(
-            [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
+        def project(name, out_d):
+            w = self.weight(f"{prefix}.mlp.{name}_proj.weight")
+            w_t = self.g.permute(
+                w,
+                self.g.constant(
+                    [2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32
+                ),
+            )
+            s3 = self.g.constant(
+                [3],
+                np.array([1, self.cfg["emb_dim"], out_d], dtype=np.int32),
+                tg_cpp.DType.INT32,
+            )
+            return self.g.dot(x, self.g.reshape(w_t, s3))
+
+        gate = self.gelu_atomic(
+            project("gate", self.cfg["hidden_dim"]), self.cfg["hidden_dim"]
         )
-        w_gate_t = self.g.permute(w_gate, perm_dims)
-        s3 = self.g.constant(
-            [3],
-            np.array([1, self.cfg["emb_dim"], self.cfg["hidden_dim"]], dtype=np.int32),
-            tg_cpp.DType.INT32,
+        up = project("up", self.cfg["hidden_dim"])
+        gate_up = self.g.mul(gate, up)
+
+        w_down = self.weight(f"{prefix}.mlp.down_proj.weight")
+        w_down_t = self.g.permute(
+            w_down,
+            self.g.constant([2], np.array([1, 0], dtype=np.int32), tg_cpp.DType.INT32),
         )
-        return self.g.dot(x, self.g.reshape(w_gate_t, s3))
+        return self.g.dot(
+            gate_up,
+            self.g.reshape(
+                w_down_t,
+                self.g.constant(
+                    [3],
+                    np.array(
+                        [1, self.cfg["hidden_dim"], self.cfg["emb_dim"]], dtype=np.int32
+                    ),
+                    tg_cpp.DType.INT32,
+                ),
+            ),
+        )
 
 
 def main():
@@ -209,12 +611,12 @@ def main():
         "query_pre_attn_scalar": 256,
     }
 
-    mem = tg_cpp.MemoryManager()
-    mem.add_buffer(tg_cpp.Backend.CPU, 2 * 1024 * 1024 * 1024)
+    # Initialize Memory and Graph
+    mem = tg_cpp.MemoryManager({tg_cpp.Backend.CPU: 2 * 1024 * 1024 * 1024})
+    # If CUDA is available, you could add: mem.add_buffer(tg_cpp.Backend.CUDA, 2 * 1024 * 1024 * 1024)
     graph = tg_cpp.Graph()
     MAX_SEQ_LEN = 128
 
-    # Input Definition
     input_ids_id = graph.allocateId()
     mem.allocate(
         tg_cpp.Backend.CPU, input_ids_id, MAX_SEQ_LEN * 4, tg_cpp.StorageType.PERSISTENT
@@ -226,7 +628,7 @@ def main():
         [MAX_SEQ_LEN, 1],
         tg_cpp.DType.INT32,
     )
-    input_ids_node = graph.inputWithId(
+    input_node = graph.inputWithId(
         input_ids_id,
         [1, MAX_SEQ_LEN],
         tg_cpp.DType.INT32,
@@ -235,29 +637,33 @@ def main():
     )
 
     model = Gemma3ModelCPP(cfg, MAX_SEQ_LEN, graph, mem)
-    logits_id = model.build_graph(input_ids_node)
+    logits_id = model.build_graph(input_node)
 
-    # Use a unique cache path for Python to avoid Node ID collisions with the C++ binary
     session = tg_cpp.Session(
         graph, mem, logits_id, "dirty_region_caches/gemma-3-270m-python.jsonl"
     )
-    mem.init_all()
+    mem.init()
 
     tokenizer = Tokenizer.from_file("resources/tokenizer.json")
-    tokens = tokenizer.encode("The secret to life is").ids
+    prompt = "The secret to life is"
+    tokens = tokenizer.encode(prompt).ids
 
-    print("Running Inference...")
+    print(f"Running Inference for prompt: '{prompt}'")
     for _ in range(10):
         input_data = np.zeros((1, MAX_SEQ_LEN), dtype=np.int32)
         input_data[0, : len(tokens)] = tokens
-        session.run({input_ids_node: input_data})
+        session.run({input_node: input_data})
 
-        output_logits = session.get_output(logits_id)
-        # Reshape flat output back to [Batch, Seq, Vocab] for argmax
+        # get_output returns a NumPy array view
+        output_logits = session.get_output(logits_id, graph)
+        # Reshape to [Batch, Seq, Vocab]
         logits_reshaped = output_logits.reshape(1, MAX_SEQ_LEN, cfg["vocab_size"])
+
+        # Greedy sample
         next_token = int(np.argmax(logits_reshaped[0, len(tokens) - 1, :]))
         tokens.append(next_token)
         print(tokenizer.decode([next_token]), end="", flush=True)
+    print()
 
 
 if __name__ == "__main__":
