@@ -124,10 +124,13 @@ int main()
             const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
 
             std::vector<std::vector<uint8_t>> inData(r.inputShapes.size());
-            std::vector<const void *> inPtrs(r.inputShapes.size());
+            std::vector<const void *> inPtrs(r.inputShapes.size(), nullptr);
             std::vector<TensorView> inViews(r.inputShapes.size());
 
-            // TODO: if kernel.backend not in available backends, skip benchmarking it
+            std::vector<std::vector<uint8_t>> outData(r.outputShapes.size());
+            std::vector<void *> outPtrs(r.outputShapes.size(), nullptr);
+            std::vector<TensorView> outViews(r.outputShapes.size());
+
 #ifdef USE_CUDA
             bool isInputCuda = kernel.backend == Backend::CUDA;
             bool isOutputCuda = kernel.backend == Backend::CUDA;
@@ -149,6 +152,30 @@ int main()
             bool isInputCuda = false;
             bool isOutputCuda = false;
 #endif
+
+            // RAII wrapper to guarantee device memory is freed even if an exception occurs
+            struct CudaCleanup
+            {
+                std::vector<const void *> &inPtrs;
+                std::vector<void *> &outPtrs;
+                bool isInputCuda;
+                bool isOutputCuda;
+                ~CudaCleanup()
+                {
+#ifdef USE_CUDA
+                    for (size_t idx = 0; idx < inPtrs.size(); ++idx)
+                    {
+                        if (isInputCuda && inPtrs[idx])
+                            cudaFree(const_cast<void *>(inPtrs[idx]));
+                    }
+                    for (size_t idx = 0; idx < outPtrs.size(); ++idx)
+                    {
+                        if (isOutputCuda && outPtrs[idx])
+                            cudaFree(outPtrs[idx]);
+                    }
+#endif
+                }
+            } cleanup{inPtrs, outPtrs, isInputCuda, isOutputCuda};
 
             for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
@@ -194,9 +221,21 @@ int main()
                 if (isInputCuda)
                 {
 #ifdef USE_CUDA
-                    void *d_ptr;
-                    cudaMalloc(&d_ptr, bytes);
-                    cudaMemcpy(d_ptr, inData[idx].data(), bytes, cudaMemcpyHostToDevice);
+                    void *d_ptr = nullptr;
+                    cudaError_t err = cudaMalloc(&d_ptr, bytes);
+                    if (err != cudaSuccess)
+                    {
+                        throw std::runtime_error("cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
+                    }
+                    if (bytes > 0 && inData[idx].data())
+                    {
+                        err = cudaMemcpy(d_ptr, inData[idx].data(), bytes, cudaMemcpyHostToDevice);
+                        if (err != cudaSuccess)
+                        {
+                            cudaFree(d_ptr);
+                            throw std::runtime_error("cudaMemcpy failed: " + std::string(cudaGetErrorString(err)));
+                        }
+                    }
                     inPtrs[idx] = d_ptr;
 #endif
                 }
@@ -211,10 +250,6 @@ int main()
                 inViews[idx].dtype = r.inputDTypes[idx];
             }
 
-            std::vector<std::vector<uint8_t>> outData(r.outputShapes.size());
-            std::vector<void *> outPtrs(r.outputShapes.size());
-            std::vector<TensorView> outViews(r.outputShapes.size());
-
             for (size_t idx = 0; idx < r.outputShapes.size(); ++idx)
             {
                 uint64_t elements = countElements(r.outputShapes[idx]);
@@ -226,8 +261,12 @@ int main()
                 if (isOutputCuda)
                 {
 #ifdef USE_CUDA
-                    void *d_ptr;
-                    cudaMalloc(&d_ptr, bytes);
+                    void *d_ptr = nullptr;
+                    cudaError_t err = cudaMalloc(&d_ptr, bytes);
+                    if (err != cudaSuccess)
+                    {
+                        throw std::runtime_error("cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
+                    }
                     outPtrs[idx] = d_ptr;
 #endif
                 }
@@ -262,19 +301,6 @@ int main()
             }
 #endif
             auto end = std::chrono::high_resolution_clock::now();
-
-#ifdef USE_CUDA
-            for (size_t idx = 0; idx < inPtrs.size(); ++idx)
-            {
-                if (isInputCuda)
-                    cudaFree(const_cast<void *>(inPtrs[idx]));
-            }
-            for (size_t idx = 0; idx < outPtrs.size(); ++idx)
-            {
-                if (isOutputCuda)
-                    cudaFree(outPtrs[idx]);
-            }
-#endif
 
             float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count() / iters;
 
