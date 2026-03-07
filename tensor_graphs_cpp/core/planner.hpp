@@ -465,7 +465,10 @@ public:
                 uint32_t phashId = getHashId(phash);
                 uint32_t chosenPid = bestSelectedNodes.count(phashId) ? bestSelectedNodes.at(phashId) : pid;
 
-                uint64_t edgeHashId = ((uint64_t)phashId << 32) | hId;
+                std::string chosenPhash = Hashing::structuralHash(chosenPid, graph, structHashMemo);
+                uint32_t chosenPhashId = getHashId(chosenPhash);
+
+                uint64_t edgeHashId = ((uint64_t)chosenPhashId << 32) | hId;
 
                 if (bestEdgeAdapters.count(edgeHashId) && !bestEdgeAdapters.at(edgeHashId).empty())
                 {
