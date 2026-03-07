@@ -340,6 +340,12 @@ public:
             }
 
             auto diff = computeInputDiff(oldData, newData, graph.nodes[nodeId].shape, graph.nodes[nodeId].dtype);
+            std::cout << "Input Diffs " << pair.first << ": " << std::endl;
+            for (uint32_t i = 0; i < diff.size(); i++)
+            {
+                Region &reg = diff[i];
+                std::cout << "  " << i << ": " << toString(reg) << std::endl;
+            }
             if (!diff.empty())
             {
                 inputDiffs[nodeId] = diff;
@@ -364,7 +370,8 @@ public:
     const void *getOutput(uint32_t nodeId) const
     {
         // If retrieving the root node, map it to the actual executed physical node ID
-        if (isCompiled && nodeId == rootId && !compiled.instructions.empty()) {
+        if (isCompiled && nodeId == rootId && !compiled.instructions.empty())
+        {
             nodeId = compiled.instructions.back().nodeId;
         }
 
@@ -372,7 +379,8 @@ public:
         uint64_t baseOffset = graph.nodes[nodeId].view.shape.empty() ? 0 : graph.nodes[nodeId].view.baseOffset;
 
         // Use the compiled node details if available, since the planner might have shifted its Backend or BaseOffset
-        if (isCompiled && compiled.nodesMap.find(nodeId) != compiled.nodesMap.end()) {
+        if (isCompiled && compiled.nodesMap.find(nodeId) != compiled.nodesMap.end())
+        {
             backend = compiled.nodesMap.at(nodeId).backend;
             baseOffset = compiled.nodesMap.at(nodeId).view.shape.empty() ? 0 : compiled.nodesMap.at(nodeId).view.baseOffset;
         }
@@ -386,7 +394,8 @@ public:
         uint64_t offset = it->second->offset;
 
 #ifdef USE_CUDA
-        if (backend == Backend::CUDA) {
+        if (backend == Backend::CUDA)
+        {
             cudaDeviceSynchronize();
         }
 #endif

@@ -40,3 +40,16 @@ inline void printNode(const TensorNode& node, const Graph& graph, const std::str
               << nodeToString(node, graph) 
               << "\n-----------------------" << std::endl;
 }
+
+std::string toString(const Region &reg) {
+    std::stringstream ss;
+    ss << "[";
+    for (uint32_t i = 0; i < reg.region.size(); i++) {
+        if (i > 0) {
+            ss << ", ";
+        }
+        const Dim &dim = reg.region[i];
+        ss << "(" << dim.start << ", " << dim.stop << ")";
+    }
+    return ss.str();
+}
