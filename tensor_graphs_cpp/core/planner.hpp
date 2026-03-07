@@ -381,21 +381,31 @@ public:
                 return;
             visitedStrats.insert(strat->nodeId);
 
-            std::string h = Hashing::structuralHash(strat->nodeId, graph, structHashMemo);
-            uint32_t hId = getHashId(h);
+            // 1. Hash of the logical node (the node the user created, e.g., an ADD)
+            std::string hLog = Hashing::structuralHash(strat->nodeId, graph, structHashMemo);
+            uint32_t hLogId = getHashId(hLog);
 
-            bestAssignments[hId] = strat->backend;
-            bestKernelAssignments[hId] = strat->kernelId;
-            bestSelectedNodes[hId] = strat->selectedNodeId;
+            // 2. Hash of the physical node (the node we chose to run, e.g., FUSED_Add_3D_1D)
+            std::string hPhys = Hashing::structuralHash(strat->selectedNodeId, graph, structHashMemo);
+            uint32_t hPhysId = getHashId(hPhys);
+
+            // Store physical assignments using the physical hash
+            bestAssignments[hPhysId] = strat->backend;
+            bestKernelAssignments[hPhysId] = strat->kernelId;
+
+            // Store the mapping so that when we look at a logical node's children,
+            // we know which physical node was actually chosen
+            bestSelectedNodes[hLogId] = strat->selectedNodeId;
 
             for (size_t i = 0; i < strat->parentStrategies.size(); ++i)
             {
                 const auto &pStrat = strat->parentStrategies[i];
                 if (pStrat)
                 {
-                    std::string ph = Hashing::structuralHash(pStrat->nodeId, graph, structHashMemo);
-                    uint32_t phId = getHashId(ph);
-                    uint64_t edgeHashId = ((uint64_t)phId << 32) | hId;
+                    // Edge adapters link physical parent to physical child
+                    std::string phPhys = Hashing::structuralHash(pStrat->selectedNodeId, graph, structHashMemo);
+                    uint32_t phPhysId = getHashId(phPhys);
+                    uint64_t edgeHashId = ((uint64_t)phPhysId << 32) | hPhysId;
 
                     if (!strat->parentAdapters[i].empty())
                     {
