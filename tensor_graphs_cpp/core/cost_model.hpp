@@ -148,6 +148,29 @@ struct CostModel
                 estimatedTime = r.runTime * (static_cast<float>(targetElements) / static_cast<float>(recElements));
             }
         }
+        if (bestDist == std::numeric_limits<float>::infinity())
+        {
+            std::cout << "[CostModel.estimateCost] WARNING: inf cost" << std::endl;
+            std::stringstream ss;
+            ss << "[Planner.planNodeIterative] ERROR: Node " << node.id
+               << " has NO valid strategies (OpType: " << node.opType
+               << ", DType: " << node.dtype
+               << ", Shape: " << toString(node.shape)
+               << ", ParentCount: " << node.parentIds.size()
+               << ", Contiguous: " << node.view.isContiguous() << ")" << std::endl;
+            std::cout << ss.str();
+            for (int i = 0; i < node.parentIds.size(); i++)
+            {
+                std::stringstream ss;
+                uint32_t pid = node.parentIds[i];
+                ss << "Parent " << i << ": (OpType: " << graph.nodes[pid].opType
+                   << ", DType: " << graph.nodes[pid].dtype
+                   << ", Shape: " << toString(graph.nodes[pid].shape)
+                   << ", ParentCount: " << graph.nodes[pid].parentIds.size()
+                   << ", Contiguous: " << graph.nodes[pid].view.isContiguous() << ")" << std::endl;
+                std::cout << ss.str();
+            }
+        }
         return (bestDist == std::numeric_limits<float>::infinity()) ? bestDist : estimatedTime;
     }
 
@@ -204,7 +227,26 @@ struct CostModel
         auto it = records.find(kernelUid);
         if (it == records.end() || it->second.empty())
         {
-            // std::cout << "[CostModel.estimateCost] WARNING: inf cost" << std::endl;
+            std::cout << "[CostModel.estimateCost] WARNING: inf cost" << std::endl;
+            std::stringstream ss;
+            ss << "[Planner.planNodeIterative] ERROR: Node " << node.id
+               << " has NO valid strategies (OpType: " << node.opType
+               << ", DType: " << node.dtype
+               << ", Shape: " << toString(node.shape)
+               << ", ParentCount: " << node.parentIds.size()
+               << ", Contiguous: " << node.view.isContiguous() << ")" << std::endl;
+            std::cout << ss.str();
+            for (int i = 0; i < node.parentIds.size(); i++)
+            {
+                std::stringstream ss;
+                uint32_t pid = node.parentIds[i];
+                ss << "Parent " << i << ": (OpType: " << graph.nodes[pid].opType
+                   << ", DType: " << graph.nodes[pid].dtype
+                   << ", Shape: " << toString(graph.nodes[pid].shape)
+                   << ", ParentCount: " << graph.nodes[pid].parentIds.size()
+                   << ", Contiguous: " << graph.nodes[pid].view.isContiguous() << ")" << std::endl;
+                std::cout << ss.str();
+            }
             return std::numeric_limits<float>::infinity();
         }
 

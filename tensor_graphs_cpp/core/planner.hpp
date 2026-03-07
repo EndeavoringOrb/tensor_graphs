@@ -909,7 +909,8 @@ private:
                << " has NO valid strategies (OpType: " << node.opType
                << ", DType: " << node.dtype
                << ", Shape: " << toString(node.shape)
-               << ", ParentCount: " << node.parentIds.size() << ")";
+               << ", ParentCount: " << node.parentIds.size()
+               << ", Contiguous: " << node.view.isContiguous() << ")";
             for (int i = 0; i < node.parentIds.size(); i++)
             {
                 uint32_t pid = node.parentIds[i];
