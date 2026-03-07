@@ -901,6 +901,8 @@ private:
             }
         }
 
+        std::cout << ", cost: " << candidates[0]->cost << std::endl;
+
         if (candidates.empty())
         {
             const auto &node = graph.nodes[nodeId];
@@ -920,7 +922,7 @@ private:
             throw std::runtime_error(ss.str());
         }
 
-        std::cout << ", cost: " << candidates[0]->cost << "\r";
+        
         memo[nodeHash] = candidates;
     }
 };
