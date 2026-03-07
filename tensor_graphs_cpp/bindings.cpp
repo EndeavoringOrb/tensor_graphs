@@ -7,6 +7,9 @@
 #include "core/memory.hpp"
 #include "core/session.hpp"
 
+#include "generated/kernels_all.gen.hpp"
+#include "generated/build_context.gen.hpp"
+
 namespace py = pybind11;
 
 // Helper to convert tg_cpp DType to NumPy format strings

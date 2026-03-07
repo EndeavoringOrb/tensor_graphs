@@ -6,6 +6,7 @@
 #include "core/rewrite.hpp"
 #include "core/hashing.hpp"
 #include "core/shapes.hpp"
+#include "core/misc.hpp"
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -936,18 +937,7 @@ private:
         {
             const auto &node = graph.nodes[nodeId];
             std::stringstream ss;
-            ss << "[Planner.planNodeIterative] ERROR: Node " << nodeId
-               << " has NO valid strategies (OpType: " << node.opType
-               << ", DType: " << node.dtype
-               << ", Shape: " << toString(node.shape)
-               << ", ParentCount: " << node.parentIds.size()
-               << ", Contiguous: " << node.view.isContiguous() << ")";
-            for (int i = 0; i < node.parentIds.size(); i++)
-            {
-                uint32_t pid = node.parentIds[i];
-                ss << ", p" << i << ": " << toString(graph.nodes[pid].shape) << " | " << graph.nodes[pid].dtype;
-            }
-            ss << std::endl;
+            ss << "[Planner.planNodeIterative] ERROR: Node " << nodeToString(node, graph) << std::endl;
             throw std::runtime_error(ss.str());
         }
 
