@@ -8,6 +8,10 @@
 #include <float.h>
 #endif
 
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#endif
+
 #include "core/types.hpp"
 #include "core/memory.hpp"
 #include "core/graph.hpp"
@@ -562,10 +566,22 @@ int main()
     float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
     std::cout << "finished run in " << runtimeMs << "ms" << std::endl;
 
-    const float *output_ptr = static_cast<const float *>(session.getOutput(logits_id));
+    const float *device_output_ptr = static_cast<const float *>(session.getOutput(logits_id));
 
-    if (output_ptr)
+    if (device_output_ptr)
     {
+        const float *output_ptr = device_output_ptr;
+        std::vector<float> host_output;
+#ifdef USE_CUDA
+        cudaPointerAttributes attrs;
+        cudaError_t err = cudaPointerGetAttributes(&attrs, device_output_ptr);
+        if (err == cudaSuccess && attrs.type == cudaMemoryTypeDevice) {
+            host_output.resize(1 * maxSeqLen * cfg.vocab_size);
+            cudaMemcpy(host_output.data(), device_output_ptr, host_output.size() * sizeof(float), cudaMemcpyDeviceToHost);
+            output_ptr = host_output.data();
+        }
+#endif
+
         uint32_t next_token_pos = (uint32_t)tokens.size() - 1;
         uint64_t offset = (uint64_t)next_token_pos * cfg.vocab_size;
         const float *next_token_logits = output_ptr + offset;

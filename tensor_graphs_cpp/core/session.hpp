@@ -363,17 +363,32 @@ public:
 
     const void *getOutput(uint32_t nodeId) const
     {
-        auto &buf = memManager.buffers.at(graph.nodes[nodeId].backend);
+        // If retrieving the root node, map it to the actual executed physical node ID
+        if (isCompiled && nodeId == rootId && !compiled.instructions.empty()) {
+            nodeId = compiled.instructions.back().nodeId;
+        }
+
+        Backend backend = graph.nodes[nodeId].backend;
+        uint64_t baseOffset = graph.nodes[nodeId].view.shape.empty() ? 0 : graph.nodes[nodeId].view.baseOffset;
+
+        // Use the compiled node details if available, since the planner might have shifted its Backend or BaseOffset
+        if (isCompiled && compiled.nodesMap.find(nodeId) != compiled.nodesMap.end()) {
+            backend = compiled.nodesMap.at(nodeId).backend;
+            baseOffset = compiled.nodesMap.at(nodeId).view.shape.empty() ? 0 : compiled.nodesMap.at(nodeId).view.baseOffset;
+        }
+
+        auto &buf = memManager.buffers.at(backend);
         auto it = buf.allocationMap.find(nodeId);
 
         if (it == buf.allocationMap.end())
             return nullptr;
 
         uint64_t offset = it->second->offset;
-        uint64_t baseOffset = graph.nodes[nodeId].view.shape.empty() ? 0 : graph.nodes[nodeId].view.baseOffset;
 
 #ifdef USE_CUDA
-        cudaDeviceSynchronize();
+        if (backend == Backend::CUDA) {
+            cudaDeviceSynchronize();
+        }
 #endif
 
         return buf.arena_ptr + offset + baseOffset;

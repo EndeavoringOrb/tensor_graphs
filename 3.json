@@ -1,0 +1,5 @@
+{
+  "replacement": "#include <cstring>\n\n#ifdef USE_CUDA\n#include <cuda_runtime.h>\n#endif\n\n#include \"core/types.hpp\"",
+  "filepath": "tensor_graphs_cpp/bench.cpp",
+  "search_pattern": "#include <cstring>\n\n#include \"core/types.hpp\""
+}

@@ -7,6 +7,10 @@
 #include <filesystem>
 #include <cstring>
 
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#endif
+
 #include "core/types.hpp"
 #include "core/memory.hpp"
 #include "core/graph.hpp"
