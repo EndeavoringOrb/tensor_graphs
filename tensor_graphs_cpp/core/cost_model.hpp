@@ -149,7 +149,7 @@ struct CostModel
                 estimatedTime = r.runTime * (static_cast<float>(targetElements) / static_cast<float>(recElements));
             }
         }
-        if (bestDist == std::numeric_limits<float>::infinity())
+        if (bestDist == std::numeric_limits<float>::infinity() || estimatedTime == std::numeric_limits<float>::infinity())
         {
             std::cout << "[CostModel.interpolate] WARNING: inf cost" << std::endl;
             std::cout << nodeToString(node, graph, "[Planner Error] ") << std::endl;
