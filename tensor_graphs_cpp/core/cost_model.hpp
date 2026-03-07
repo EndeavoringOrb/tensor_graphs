@@ -161,6 +161,7 @@ struct CostModel
         {
             uint32_t pid = node.parentIds[i];
             inShapes[i] = graph.nodes[pid].shape;
+            inDTypes[i] = graph.nodes[pid].dtype;
 
             if (graph.nodes[pid].opType == OpType::INPUT && graph.nodes[pid].storageType == StorageType::PERSISTENT)
             {
