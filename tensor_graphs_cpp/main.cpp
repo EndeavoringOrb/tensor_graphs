@@ -4,6 +4,8 @@
 #include <cmath>
 #include <algorithm>
 #include <tuple>
+#include <chrono>
+
 #if defined(_WIN32)
 #include <float.h>
 #endif
@@ -516,20 +518,23 @@ int main()
     _controlfp_s(nullptr, 0, 0);
     _controlfp_s(nullptr, _EM_INVALID | _EM_ZERODIVIDE | _EM_OVERFLOW, _MCW_EM);
 #endif
+
+    // Initial prompt tokens
     std::vector<uint32_t> tokens = {2, 105, 2364, 107, 155122, 27825, 49087, 531, 496, 236743, 236810, 1051, 2255, 236761, 106, 107, 105, 4368, 107};
     uint32_t maxSeqLen = 128;
+    uint32_t numTokensToGenerate = 20; // Number of new tokens to generate
     std::string modelPath = "resources/model.safetensors";
 
     ModelConfig cfg;
 #if USE_CUDA
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 2ULL * 1024 * 1024 * 1024},{Backend::CUDA, 2ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 2ULL * 1024 * 1024 * 1024}, {Backend::CUDA, 2ULL * 1024 * 1024 * 1024}};
 #else
     std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 2ULL * 1024 * 1024 * 1024}};
 #endif
     MemoryManager mem = MemoryManager(bufferSizes);
-
     Graph g;
 
+    // Setup input node
     uint32_t inputIdsId = g.allocateId();
     uint64_t sizeBytes = maxSeqLen * getDTypeSize(DType::INT32);
     mem.allocate(Backend::CPU, inputIdsId, sizeBytes, StorageType::PERSISTENT);
@@ -538,82 +543,92 @@ int main()
     inputView.shape = {1, maxSeqLen};
     inputView.strides = TensorView::calcContiguousStrides(inputView.shape);
     inputView.dtype = DType::INT32;
-
     g.inputWithId(inputIdsId, {1, maxSeqLen}, DType::INT32, inputView, StorageType::PERSISTENT);
 
     std::cout << "Building Graph..." << std::endl;
-
     Gemma3Model model(cfg, maxSeqLen, g, mem, modelPath);
     uint32_t logits_id = model.build_graph(inputIdsId);
 
     std::cout << "Initializing Session..." << std::endl;
     Session session(g, mem, logits_id, "dirty_region_caches/gemma-3-270m-cpp.jsonl");
 
-    std::cout << "Running Inference..." << std::endl;
-
+    std::cout << "Starting Generation..." << std::endl;
     std::vector<int32_t> input_data(maxSeqLen, 0);
-    for (size_t i = 0; i < tokens.size(); ++i)
+
+    for (uint32_t step = 0; step < numTokensToGenerate; ++step)
     {
-        input_data[i] = (int32_t)tokens[i];
-    }
+        if (tokens.size() >= maxSeqLen)
+        {
+            std::cout << "\nReached max sequence length." << std::endl;
+            break;
+        }
 
-    std::unordered_map<uint32_t, const void *> inputs;
-    inputs[inputIdsId] = input_data.data();
+        // 1. Prepare input data (current tokens + padding)
+        std::fill(input_data.begin(), input_data.end(), 0);
+        for (size_t i = 0; i < tokens.size(); ++i)
+        {
+            input_data[i] = (int32_t)tokens[i];
+        }
 
-    auto start = std::chrono::high_resolution_clock::now();
-    session.run(inputs);
-    auto end = std::chrono::high_resolution_clock::now();
-    float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
-    std::cout << "finished run in " << runtimeMs << "ms" << std::endl;
+        std::unordered_map<uint32_t, const void *> inputs;
+        inputs[inputIdsId] = input_data.data();
 
-    const float *device_output_ptr = static_cast<const float *>(session.getOutput(logits_id));
+        // 2. Run inference
+        auto start = std::chrono::high_resolution_clock::now();
+        session.run(inputs);
+        auto end = std::chrono::high_resolution_clock::now();
+        float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
 
-    if (device_output_ptr)
-    {
+        // 3. Extract output and perform Argmax sampling
+        const float *device_output_ptr = static_cast<const float *>(session.getOutput(logits_id));
+        if (!device_output_ptr)
+        {
+            std::cerr << "Failed to retrieve output." << std::endl;
+            break;
+        }
+
         const float *output_ptr = device_output_ptr;
-        std::vector<float> host_output;
 #ifdef USE_CUDA
+        std::vector<float> host_output;
         cudaPointerAttributes attrs;
         cudaError_t err = cudaPointerGetAttributes(&attrs, device_output_ptr);
-        if (err == cudaSuccess && attrs.type == cudaMemoryTypeDevice) {
+        if (err == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
+        {
             host_output.resize(1 * maxSeqLen * cfg.vocab_size);
             cudaMemcpy(host_output.data(), device_output_ptr, host_output.size() * sizeof(float), cudaMemcpyDeviceToHost);
             output_ptr = host_output.data();
         }
 #endif
 
-        uint32_t next_token_pos = (uint32_t)tokens.size() - 1;
-        uint64_t offset = (uint64_t)next_token_pos * cfg.vocab_size;
-        const float *next_token_logits = output_ptr + offset;
+        // Get logits for the LAST token in our current valid sequence
+        uint32_t last_token_pos = (uint32_t)tokens.size() - 1;
+        uint64_t offset = (uint64_t)last_token_pos * cfg.vocab_size;
+        const float *logits_vec = output_ptr + offset;
 
         float max_val = -FLT_MAX;
-        int32_t argmax_idx = -1;
-
+        int32_t argmax_idx = 0;
         for (uint32_t i = 0; i < cfg.vocab_size; ++i)
         {
-            if (next_token_logits[i] > max_val)
+            if (logits_vec[i] > max_val)
             {
-                max_val = next_token_logits[i];
+                max_val = logits_vec[i];
                 argmax_idx = i;
             }
         }
 
-        std::cout << "\nInference Results:" << std::endl;
-        std::cout << "------------------" << std::endl;
-        std::cout << "Next Token Position: " << next_token_pos << std::endl;
-        std::cout << "Predicted Token ID (Argmax): " << argmax_idx << std::endl;
-        std::cout << "Logit Value: " << max_val << std::endl;
+        // 4. Update state
+        tokens.push_back((uint32_t)argmax_idx);
 
-        std::cout << "\nFirst 5 logits for this token: " << std::endl;
-        for (int i = 0; i < 5; ++i)
-        {
-            std::cout << "  [" << i << "]: " << next_token_logits[i] << std::endl;
-        }
+        // Print progress
+        std::cout << "Step " << step + 1 << " | Token: " << argmax_idx
+                  << " | Latency: " << runtimeMs << "ms" << std::endl;
     }
-    else
-    {
-        std::cerr << "Failed to retrieve output." << std::endl;
-    }
+
+    std::cout << "\nFinal sequence length: " << tokens.size() << std::endl;
+    std::cout << "Tokens: ";
+    for (auto t : tokens)
+        std::cout << t << " ";
+    std::cout << std::endl;
 
     return 0;
 }
