@@ -245,7 +245,7 @@ int main()
             // Warmup
             kernel.run(inPtrs, outPtrs, inViews, outViews);
 
-            int iters = 15;
+            int iters = 1; // TODO: make this an arg, default to 15
             auto start = std::chrono::high_resolution_clock::now();
             for (int it = 0; it < iters; ++it)
             {
