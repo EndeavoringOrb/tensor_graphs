@@ -893,13 +893,13 @@ private:
             candidates.resize(beamWidth);
         }
 
-        // for (int i = static_cast<int>(candidates.size()) - 1; i > 0; --i)
-        // {
-        //     if (std::isinf(candidates[i].cost))
-        //     {
-        //         candidates.erase(candidates.begin() + i);
-        //     }
-        // }
+        for (int i = static_cast<int>(candidates.size()) - 1; i >= 0; --i)
+        {
+            if (std::isinf(candidates[i]->cost))
+            {
+                candidates.erase(candidates.begin() + i);
+            }
+        }
 
         if (candidates.empty())
         {
