@@ -2,6 +2,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
+#include "core/misc.hpp"
 #include "generated/build_context.gen.hpp"
 #include <vector>
 #include <unordered_map>
@@ -150,26 +151,8 @@ struct CostModel
         }
         if (bestDist == std::numeric_limits<float>::infinity())
         {
-            std::cout << "[CostModel.estimateCost] WARNING: inf cost" << std::endl;
-            std::stringstream ss;
-            ss << "[Planner.planNodeIterative] ERROR: Node " << node.id
-               << " has NO valid strategies (OpType: " << node.opType
-               << ", DType: " << node.dtype
-               << ", Shape: " << toString(node.shape)
-               << ", ParentCount: " << node.parentIds.size()
-               << ", Contiguous: " << node.view.isContiguous() << ")" << std::endl;
-            std::cout << ss.str();
-            for (int i = 0; i < node.parentIds.size(); i++)
-            {
-                std::stringstream ss;
-                uint32_t pid = node.parentIds[i];
-                ss << "Parent " << i << ": (OpType: " << graph.nodes[pid].opType
-                   << ", DType: " << graph.nodes[pid].dtype
-                   << ", Shape: " << toString(graph.nodes[pid].shape)
-                   << ", ParentCount: " << graph.nodes[pid].parentIds.size()
-                   << ", Contiguous: " << graph.nodes[pid].view.isContiguous() << ")" << std::endl;
-                std::cout << ss.str();
-            }
+            std::cout << "[CostModel.interpolate] WARNING: inf cost" << std::endl;
+            std::cout << nodeToString(node, graph, "[Planner Error] ") << std::endl;
         }
         return (bestDist == std::numeric_limits<float>::infinity()) ? bestDist : estimatedTime;
     }
@@ -227,26 +210,12 @@ struct CostModel
         auto it = records.find(kernelUid);
         if (it == records.end() || it->second.empty())
         {
-            std::cout << "[CostModel.estimateCost] WARNING: inf cost" << std::endl;
-            std::stringstream ss;
-            ss << "[Planner.planNodeIterative] ERROR: Node " << node.id
-               << " has NO valid strategies (OpType: " << node.opType
-               << ", DType: " << node.dtype
-               << ", Shape: " << toString(node.shape)
-               << ", ParentCount: " << node.parentIds.size()
-               << ", Contiguous: " << node.view.isContiguous() << ")" << std::endl;
-            std::cout << ss.str();
-            for (int i = 0; i < node.parentIds.size(); i++)
-            {
-                std::stringstream ss;
-                uint32_t pid = node.parentIds[i];
-                ss << "Parent " << i << ": (OpType: " << graph.nodes[pid].opType
-                   << ", DType: " << graph.nodes[pid].dtype
-                   << ", Shape: " << toString(graph.nodes[pid].shape)
-                   << ", ParentCount: " << graph.nodes[pid].parentIds.size()
-                   << ", Contiguous: " << graph.nodes[pid].view.isContiguous() << ")" << std::endl;
-                std::cout << ss.str();
-            }
+            std::cout << "[CostModel.estimateCost] WARNING: No records found for kernelUid: 0x"
+                      << std::hex << kernelUid << std::dec << std::endl;
+
+            // Use the helper here
+            std::cout << nodeToString(node, graph, "[Planner Error] ") << std::endl;
+
             return std::numeric_limits<float>::infinity();
         }
 
