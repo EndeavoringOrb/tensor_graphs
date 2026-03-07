@@ -1,5 +1,0 @@
-{
-  "search_pattern": "#if defined(_WIN32)\n#include <float.h>\n#endif\n\n#include \"core/types.hpp\"",
-  "filepath": "tensor_graphs_cpp/main.cpp",
-  "replacement": "#if defined(_WIN32)\n#include <float.h>\n#endif\n\n#ifdef USE_CUDA\n#include <cuda_runtime.h>\n#endif\n\n#include \"core/types.hpp\""
-}
