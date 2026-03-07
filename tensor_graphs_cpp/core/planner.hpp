@@ -335,7 +335,7 @@ public:
         for (uint32_t nodeId : sortedNodes)
         {
             nodeIdx++;
-            std::cout << nodeIdx << "/" << sortedNodes.size() << "\r";
+            std::cout << nodeIdx << "/" << sortedNodes.size();
             planNodeIterative(nodeId, graph, fusionMap, memo, structHashMemo, estimatedRefCounts);
         }
 
@@ -920,6 +920,7 @@ private:
             throw std::runtime_error(ss.str());
         }
 
+        std::cout << ", cost: " << candidates[0]->cost << "\r";
         memo[nodeHash] = candidates;
     }
 };
