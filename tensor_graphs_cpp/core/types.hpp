@@ -8,6 +8,7 @@
 #include <vector>
 #include <limits>
 #include <cctype>
+#include <memory>
 #include <list>
 #include <json.hpp>
 using json = nlohmann::json;
@@ -581,13 +582,15 @@ struct AdapterOp
 
 struct BeamStrategy
 {
-    float cost;
-    uint32_t nodeId;
-    std::unordered_map<uint32_t, Backend> assignments;
-    std::unordered_map<uint32_t, uint64_t> kernelAssignments;
-    std::unordered_map<uint64_t, float> nodeCosts;
-    std::unordered_map<uint32_t, uint32_t> selectedNodes;
-    std::unordered_map<uint64_t, std::vector<AdapterOp>> edgeAdapters;
+    float cost;               // Total cumulative cost
+    uint32_t nodeId;          // The original node ID this strategy resolves
+    uint32_t selectedNodeId;  // The actual fused/replaced node ID chosen
+    Backend backend;          // Backend chosen for this node
+    uint64_t kernelId;        // Kernel chosen for this node
+
+    // Pointers tracking the selected parent paths
+    std::vector<std::shared_ptr<BeamStrategy>> parentStrategies;
+    std::vector<std::vector<AdapterOp>> parentAdapters;
 
     bool operator<(const BeamStrategy &other) const
     {

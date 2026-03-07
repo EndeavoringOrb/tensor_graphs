@@ -286,7 +286,7 @@ def analyze(graph_file, records_file):
     kernel_shape_rows.sort(key=lambda x: float(x[3]), reverse=True)
 
     print_dynamic_table(
-        kernel_shape_rows[:20],
+        kernel_shape_rows[:50],
         ["Kernel", "Shape", "Count", "Total (ms)", "Avg (ms)", "Inplace/Total"],
     )
 
