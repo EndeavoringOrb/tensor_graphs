@@ -32,13 +32,6 @@ public:
             neededNodes.insert(compiled.instructions.back().nodeId);
         }
 
-        struct NodeState
-        {
-            bool isDirty;
-            bool inCache;
-        };
-        std::unordered_map<uint32_t, NodeState> nodeStates;
-
         // Pass 1: Backward Liveness (Prune unneeded nodes when cached)
         for (auto it = compiled.instructions.rbegin(); it != compiled.instructions.rend(); ++it)
         {
@@ -46,39 +39,48 @@ public:
             const TensorNode &node = compiled.nodesMap.at(nodeId);
             auto regionIt = bucket.regions.find(nodeId);
             bool isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
-
-            bool inCache = false;
+            bool inCache = memManager.has(it->backend, nodeId);
             if (neededNodes.count(nodeId))
             {
-                auto &outBuf = memManager.buffers.at(node.backend);
-                inCache = (outBuf.allocationMap.find(nodeId) != outBuf.allocationMap.end());
-
                 if (isDirty || !inCache)
                 {
                     for (uint32_t pId : it->inputNodeIds)
                     {
                         neededNodes.insert(pId);
+                        const TensorNode &pNode = compiled.nodesMap.at(nodeId);
+                        regionIt = bucket.regions.find(pId);
+                        isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
+                        inCache = memManager.has(pNode.backend, pId);
+                        if (!isDirty && inCache)
+                        {
+                            // Lock clean nodes that are in cache
+                            auto &outBuf = memManager.buffers.at(pNode.backend);
+                            auto blockIt = outBuf.allocationMap.at(pId);
+                            blockIt->refCount = compiled.refCounts[nodeId];
+                            blockIt->isLocked = true;
+                        }
                     }
                 }
             }
-            nodeStates[nodeId] = {isDirty, inCache};
         }
 
         // Pass 2: Execute Compiled Instructions (bucket-aware)
         uint32_t instIdx = 0;
+        uint32_t nPartial = 0;
         for (const OpInstruction &inst : compiled.instructions)
         {
             instIdx++;
-            std::cout << instIdx << "/" << compiled.instructions.size() << "\r";
-            uint32_t nodeId = inst.nodeId;
+            const uint32_t nodeId = inst.nodeId;
             const TensorNode &node = compiled.nodesMap.at(nodeId);
             auto &outBuf = memManager.buffers.at(node.backend);
 
-            bool isDirty = nodeStates[nodeId].isDirty;
-            bool inCache = nodeStates[nodeId].inCache;
+            auto regionIt = bucket.regions.find(inst.nodeId);
+            bool isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
+            bool inCache = memManager.has(inst.backend, nodeId);
             bool isNeeded = neededNodes.count(nodeId);
 
             // Pruned node (e.g. its child was fully cached and clean)
+            // TODO: release this memory before execution loop
             if (!isNeeded)
             {
                 for (uint32_t inId : inst.inputNodeIds)
@@ -127,7 +129,7 @@ public:
                 else
                 {
                     uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
-                    memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts[inst.nodeId], 0.0f);
+                    memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts[inst.nodeId], 0.0f); // TODO: pass in actual cost
                 }
             }
 
@@ -146,6 +148,7 @@ public:
                 // Partial compute: only the dirty regions
                 auto regionIt = bucket.regions.find(inst.nodeId);
                 computeRegions = regionIt->second;
+                nPartial++;
             }
             else
             {
@@ -268,6 +271,8 @@ public:
                 uint32_t inId = inst.inputNodeIds[i];
                 memManager.release(compiled.nodesMap.at(inId).backend, inId);
             }
+
+            std::cout << instIdx << "/" << compiled.instructions.size() << ", #part: " << nPartial << "\r";
         }
     }
 };

@@ -283,7 +283,7 @@ int main()
 
             std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "] "
                       << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                      << " (Kernel 0x" << std::hex << kernelUid << std::dec << ")" << std::flush;
+                      << " (Kernel 0x" << std::hex << kernelUid << std::dec << "), Out Shape: " << toString(outViews[0].shape) << std::flush;
 
             // Warmup
             kernel.run(inPtrs, outPtrs, inViews, outViews);

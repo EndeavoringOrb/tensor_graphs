@@ -408,8 +408,10 @@ struct MemoryManager
         }
     }
 
-    void init() {
-        for (auto &buf : buffers) {
+    void init()
+    {
+        for (auto &buf : buffers)
+        {
             buf.second.init();
         }
     }
@@ -551,5 +553,11 @@ struct MemoryManager
         view.dtype = dtype;
 
         return view;
+    }
+
+    bool has(Backend backend, uint32_t nodeId) const
+    {
+        const DeviceBuffer &buf = buffers.at(backend);
+        return (buf.allocationMap.find(nodeId) != buf.allocationMap.end());
     }
 };

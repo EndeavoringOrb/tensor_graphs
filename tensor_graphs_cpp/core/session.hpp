@@ -236,13 +236,27 @@ public:
         for (const auto &pair : compiled.nodesMap)
         {
             uint32_t nodeId = pair.first;
-            if (pair.second.opType == OpType::INPUT) {
-                if (graph.weightSources.count(nodeId) == 0 && graph.constantStaging.count(nodeId) == 0) {
+            if (pair.second.opType == OpType::INPUT)
+            {
+                if (graph.weightSources.count(nodeId) == 0 && graph.constantStaging.count(nodeId) == 0)
+                {
                     inputNodeIds.push_back(nodeId);
                 }
             }
         }
         ensureCacheCoverage(inputNodeIds);
+
+        // Re-sync the main graph's nodes with the compiled nodes
+        // The planner often creates new nodes (fusions/equivalents) that aren't in the user's initial graph
+        for (const auto &pair : compiled.nodesMap)
+        {
+            uint32_t id = pair.first;
+            if (id >= graph.nodes.size())
+            {
+                graph.nodes.resize(id + 1);
+            }
+            graph.nodes[id] = pair.second;
+        }
 
         executor = std::make_unique<Executor>(compiled, memManager, graph);
         isCompiled = true;
@@ -770,18 +784,6 @@ public:
                 std::cout << "[Session.loadCache] Loading pre-compiled graph..." << std::endl;
                 compiled = entry["data"].get<CompiledGraph>();
                 graph.count = entry["graph_count"];
-
-                // Re-sync the main graph's nodes with the compiled nodes
-                // The planner often creates new nodes (fusions/equivalents) that aren't in the user's initial graph
-                for (const auto &pair : compiled.nodesMap)
-                {
-                    uint32_t id = pair.first;
-                    if (id >= graph.nodes.size())
-                    {
-                        graph.nodes.resize(id + 1);
-                    }
-                    graph.nodes[id] = pair.second;
-                }
                 isPlanned = true;
             }
             else if (entry.contains("key"))

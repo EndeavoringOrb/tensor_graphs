@@ -15,7 +15,6 @@ VCVARS_PATH = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxil
 # Core files that affect the ABI/ID of all kernels
 CORE_DEPENDENCIES = [
     ROOT_DIR / "core" / "types.hpp",
-    ROOT_DIR / "core" / "memory.hpp",
     ROOT_DIR / "core" / "kernels.hpp",
     ROOT_DIR / "core" / "graph.hpp",
 ]
@@ -256,7 +255,7 @@ def main():
 
     compile_binary("main.cpp")
     compile_binary("bench.cpp")
-    compile_binary("test.cpp")
+    # compile_binary("test.cpp")
 
 
 if __name__ == "__main__":

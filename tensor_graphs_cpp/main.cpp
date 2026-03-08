@@ -529,7 +529,7 @@ int main()
 #if USE_CUDA
     std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 2ULL * 1024 * 1024 * 1024}, {Backend::CUDA, 2ULL * 1024 * 1024 * 1024}};
 #else
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 2ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 8ULL * 1024 * 1024 * 1024}};
 #endif
     MemoryManager mem = MemoryManager(bufferSizes);
     Graph g;
