@@ -100,6 +100,21 @@ namespace dirty_cache_json // TODO: change case? not sure camelCase or PascalCas
         }
         obj["input_slices"] = slicesObj;
 
+        // Kernel IDs
+        json kernelsObj;
+        for (const auto &pair : bucket.kernelIds)
+        {
+            json kArr = json::array();
+            for (uint64_t k : pair.second)
+            {
+                std::stringstream ss;
+                ss << "0x" << std::hex << k;
+                kArr.push_back(ss.str());
+            }
+            kernelsObj[std::to_string(pair.first)] = kArr;
+        }
+        obj["kernel_ids"] = kernelsObj;
+
         return obj;
     }
 
@@ -133,6 +148,20 @@ namespace dirty_cache_json // TODO: change case? not sure camelCase or PascalCas
                     perNode.push_back(perParent);
                 }
                 bucket.inputSlices[nodeId] = perNode;
+            }
+        }
+
+        if (obj.contains("kernel_ids"))
+        {
+            for (auto it = obj["kernel_ids"].begin(); it != obj["kernel_ids"].end(); ++it)
+            {
+                uint32_t nodeId = std::stoul(it.key());
+                std::vector<uint64_t> kArr;
+                for (const auto &kStr : it.value())
+                {
+                    kArr.push_back(std::stoull(kStr.get<std::string>(), nullptr, 16));
+                }
+                bucket.kernelIds[nodeId] = kArr;
             }
         }
 
@@ -700,14 +729,81 @@ public:
 
                         const auto &outputRegions = regIt->second;
                         std::vector<std::vector<std::vector<Region>>> perOutputRegionSlices;
+                        std::vector<uint64_t> regionKernels;
 
-                        for (const Region &outRegion : outputRegions)
+                        for (size_t rIdx = 0; rIdx < outputRegions.size(); ++rIdx)
                         {
+                            const Region &outRegion = outputRegions[rIdx];
                             auto parentSlices = getInputSlices(graph, inst.nodeId, {outRegion});
                             perOutputRegionSlices.push_back(parentSlices);
+
+                            // --- Select Bucket-Specific Kernel ---
+                            TensorNode dummyOut = graph.nodes[inst.nodeId];
+                            dummyOut.backend = inst.backend;
+                            std::vector<uint32_t> outShape;
+                            for (const auto &d : outRegion.region)
+                            {
+                                outShape.push_back(d.stop - d.start);
+                            }
+                            dummyOut.shape = outShape;
+                            dummyOut.view.shape = outShape;
+
+                            std::vector<TensorNode> dummyInputs;
+                            for (size_t pIdx = 0; pIdx < inst.inputNodeIds.size(); ++pIdx)
+                            {
+                                uint32_t pId = inst.inputNodeIds[pIdx];
+                                TensorNode dummyIn = graph.nodes[pId];
+                                if (pIdx < parentSlices.size() && !parentSlices[pIdx].empty())
+                                {
+                                    const Region &pReg = parentSlices[pIdx][0];
+                                    std::vector<uint32_t> inShape;
+                                    for (const auto &d : pReg.region)
+                                    {
+                                        inShape.push_back(d.stop - d.start);
+                                    }
+                                    dummyIn.shape = inShape;
+                                    dummyIn.view.shape = inShape;
+                                }
+                                dummyInputs.push_back(dummyIn);
+                            }
+
+                            std::unordered_map<uint32_t, uint32_t> dummyRefCounts;
+                            if (inst.inplaceInputIndex >= 0)
+                            {
+                                dummyRefCounts[inst.inputNodeIds[inst.inplaceInputIndex]] = 1;
+                            }
+
+                            std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
+                                dummyOut.opType, dummyOut.opName, inst.backend, dummyInputs, dummyOut, &dummyRefCounts);
+
+                            uint64_t selectedKernel = inst.kernelId; // Default fallback to general planner kernel
+                            if (!matchingKernels.empty())
+                            {
+                                float bestCost = std::numeric_limits<float>::infinity();
+                                for (uint64_t kId : matchingKernels)
+                                {
+                                    float c = costModel.estimateCost(dummyOut, graph, kId);
+                                    if (c < bestCost)
+                                    {
+                                        bestCost = c;
+                                        selectedKernel = kId;
+                                    }
+                                }
+                            }
+                            if (selectedKernel == inst.kernelId) {
+                                std::string opName;
+                                if (dummyOut.opType == OpType::FUSED) {
+                                    opName = dummyOut.opName;
+                                } else {
+                                    opName = toString(dummyOut.opType);
+                                }
+                                std::cout << "[Session.ensureCacheCoverage] [" << key << "] [Node " << inst.nodeId << "] [Slice " << rIdx << "] [" << opName << "] Could not find better kernel." << std::endl;
+                            }
+                            regionKernels.push_back(selectedKernel);
                         }
 
                         bucket.inputSlices[inst.nodeId] = perOutputRegionSlices;
+                        bucket.kernelIds[inst.nodeId] = regionKernels;
                     }
 
                     dirtyCache[key] = bucket;

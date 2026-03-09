@@ -139,16 +139,27 @@ public:
             outBlockIt->isLocked = true;
 
             // 4. EXECUTE KERNEL
-            const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernelId);
 
-            // Determine compute regions
+            // Determine compute regions and their targeted kernels
             std::vector<Region> computeRegions;
+            std::vector<uint64_t> computeKernels;
+
             if (isDirty && inCache)
             {
                 // Partial compute: only the dirty regions
                 auto regionIt = bucket.regions.find(inst.nodeId);
                 computeRegions = regionIt->second;
                 nPartial++;
+
+                auto kIt = bucket.kernelIds.find(inst.nodeId);
+                if (kIt != bucket.kernelIds.end())
+                {
+                    computeKernels = kIt->second;
+                }
+                else
+                {
+                    computeKernels.assign(computeRegions.size(), inst.kernelId);
+                }
             }
             else
             {
@@ -159,6 +170,7 @@ public:
                     full.region.push_back({0, dim});
                 }
                 computeRegions = {full};
+                computeKernels = {inst.kernelId};
             }
 
             auto slicesIt = bucket.inputSlices.find(inst.nodeId);
@@ -167,6 +179,7 @@ public:
             for (size_t rIdx = 0; rIdx < computeRegions.size(); ++rIdx)
             {
                 const Region &outRegion = computeRegions[rIdx];
+                const KernelEntry &kernel = KernelRegistry::get().getKernel(computeKernels[rIdx]);
 
                 bool isFullRegion = true;
                 for (size_t d = 0; d < outRegion.region.size(); ++d)

@@ -372,6 +372,13 @@ struct DirtyBucket
     input slices[output region idx][parent idx][dirty input region idx]
     */
     std::unordered_map<uint32_t, std::vector<std::vector<std::vector<Region>>>> inputSlices;
+
+    /*
+    cached kernels
+    node id -> list of kernel IDs
+    kernelIds[output region idx]
+    */
+    std::unordered_map<uint32_t, std::vector<uint64_t>> kernelIds;
 };
 
 // Add this before the #endif if there is one, or at the end of types.hpp
