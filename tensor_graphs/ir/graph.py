@@ -196,7 +196,6 @@ def graph_from_json(
 
 class GraphBuilder:
     def __init__(self):
-        self.inputs = {}
         self._count = 0
 
     def _next_name(self, op_name):
@@ -209,7 +208,6 @@ class GraphBuilder:
         node = TensorNode(
             OpType.INPUT, dtype, [], shape, name, storage_type=StorageType.TRANSIENT
         )
-        self.inputs[name] = node
         return node
 
     def const(self, value, dtype=None):

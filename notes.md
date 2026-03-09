@@ -11,12 +11,208 @@ My vision is the user says "run this graph" and the framework uses the best kern
 
 ---
 
-Right now planner and db put the whole graph into the db. I want it to look for all "paths" and the db should only benchmark specific kernels. So for example, lets say I execute a TensorNode representing tanh. It should iterate over all kernels and check if the kernel's reference graph is equal to the input graph. Now lets say we have a GPU_TORCH tanh kernel, and a CPU_NUMPY tanh kernel, and tanh can be decomposed down further. This means we have 3 options (although there could be many more as we can have multiple tanh kernels for a given backend). So for each of the 3 options, we need to see if we can fit it into the graph, like are we able to convert our inputs to the kernel input signature and the output back (this might be a no-op). Then for each of the remaining options (the ones we can convert to/from) if they are not a kernel we need to decompose and call plan on the decomposed children. Like tanh -> (DIVIDE, (e^x - e^(-x)), (e^x + e^(-x))). Can you help me concretely plan this out? Then for kernels we need to get the runtime (call db wrapper that handles interpolation). the runtime estimation needs to take into account convert time which I think can be we could just always compute a kernel's cost as (transfer + execution) and for sequential operations on the same backend the transfer cost will be near 0 in the db (same as an op, just query db for CopyTo, no need for separate transfer cost estimation).
+Here is a comprehensive plan for a "One-Click" Python build system that handles dependency hashing, code generation, and compilation for your Windows Arm64 setup.
 
-I think this means we need to update the DB. The db shouldn't store canonical_graphs, just the kernel and its benchmark time. This way we can fetch the reference graph in python and we don't need to worry about hashing graphs because we only store kernels. This will be better because there doesn't have to be distinction between atomic and fused, it is just all kernels. tensor_graphs/benchmark/db.py should handle initializing the db and interpolating results. Like when the planner queries the DB for MatMul(100, 100) x (100, 100) and finding no exact match, it should look for the nearest shapes (e.g., 128x128) and scale the latency based on other data points. Like fit linear regression mapping input parameters -> runtime and then use that linear regression to predict runtime. This can also be cached in the python wrapper.
+### The Strategy: `build.py`
 
-For checking graph equality we need to normalize graphs. Always rewriting B+A to A+B (based on hash). Always rewriting Add(Add(A, B), C) to a canonical associative form (e.g., left-associative tree). Like if I have `a+(b*c)` that can be `(a*b)+(a*c)`. Also you can match `a+(b*c)` to a fused multiply-add operation. I feel this can be really powerful for decreasing runtime (maybe you can rewrite something to be more parallelizable). Hashing should have commutative sort.
+The Python script will act as the orchestrator. Instead of relying on the preprocessor or manual file listings, Python will parse your directory structure, calculate content hashes, generate necessary headers, and invoke the compiler.
 
-To avoid infinite recursion during decomposition, an operations decomposition should not be allowed to contain itself.
+This approach solves all three identity layers:
+1.  **Implementation Identity**: Calculated by hashing file contents + core dependencies.
+2.  **Build Identity**: Calculated by hashing the compiler command arguments.
+3.  **Hardware Identity**: Injected at runtime via C++ API calls.
 
-Something else is calling the DB and running the planner for every add and mul will be very slow. Can we implement some caching mechanism so we only need to do "TransformerBlock" once? But I don't want to hardcode any blocks, it should be automatically discovered using the graph equality checker.
+---
+
+### 1. Implementation Identity: The Hashing Logic
+
+We need a "Core Seed" to handle shared dependencies (like `types.hpp` or `memory.hpp`). If these change, *all* kernel IDs must change.
+
+*   **Core Seed Calculation**:
+    *   Define a list of "Core Files" (e.g., `core/types.hpp`, `core/memory.hpp`, `core/kernels.hpp`).
+    *   Read all these files, concatenate contents, and compute a SHA256 hash. This is the **`CORE_SEED`**.
+*   **Kernel UID Calculation**:
+    *   Recursively find all `*.hpp` files in `tensor_graphs_cpp/kernels/`.
+    *   For each file:
+        *   Read file content.
+        *   Compute Hash: `SHA256(CORE_SEED + File_Content)`.
+        *   Convert the first 64 bits of this hash to a `uint64_t` constant.
+        *   Generate a C++ `constexpr` definition for this ID.
+
+### 2. Code Generation: The Generated Files
+
+The script will create a directory `tensor_graphs_cpp/generated/`.
+
+#### A. `kernel_uids.gen.hpp`
+This file maps the file path to a stable integer ID.
+**Schema:**
+```cpp
+#pragma once
+#include <cstdint>
+
+// Generated by build.py
+// DO NOT EDIT MANUALLY
+
+// Core Dependency Hash: 0xA1B2C3D4...
+namespace KernelIDs {
+    // File: kernels/reference/add/F32_ND.hpp
+    constexpr uint64_t ADD_F32_ND = 0x11223344AABBCCDD;
+
+    // File: kernels/fused/tanh/F32_1D.hpp
+    constexpr uint64_t FUSED_TANH_F32_1D = 0x99887766FFEEDDCC;
+    
+    // ... etc for every kernel file
+}
+```
+
+#### B. `kernels_all.gen.hpp`
+This file solves your requirement to "just include one file".
+**Schema:**
+```cpp
+#pragma once
+
+// Generated by build.py - Includes all kernel implementations
+
+#include "kernels/reference/add/F32_ND.hpp"
+#include "kernels/fused/tanh/F32_1D.hpp"
+// ... includes for all detected kernel files
+```
+
+#### C. `build_context.gen.hpp`
+This captures the Build Identity.
+**Schema:**
+```cpp
+#pragma once
+#include <cstdint>
+
+// Generated by build.py
+// Represents the compile command flags and compiler version
+constexpr uint64_t BUILD_CONTEXT_ID = 0xDEADBEEF12345678;
+```
+
+### 3. Updating C++ Code: Structs & Registration
+
+You need to adapt your C++ code to consume these generated IDs.
+
+#### Updated `core/kernels.hpp` Registration Macro
+Change your macro to accept the ID as an argument.
+
+```cpp
+// Updated Macro in core/kernels.hpp
+#define REGISTER_KERNEL_WITH_ID(uid, op, backend, match, run) \
+    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, false)
+
+// Updated Macro for Fused Kernels
+#define REGISTER_FUSED_KERNEL_WITH_ID(uid, opName, numInputs, backend, match, run, refFactory) \
+    static KernelRegistrar _registrar_fused_##run(OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false)
+```
+
+#### Kernel File Example (`add/F32_ND.hpp`)
+You manually update the registration lines in your kernel files to use the IDs from the generated header.
+
+```cpp
+#pragma once
+#include "core/types.hpp"
+#include "core/kernels.hpp"
+#include "generated/kernel_uids.gen.hpp" // Include generated IDs
+
+// ... match and run functions ...
+
+// Use the generated ID
+REGISTER_KERNEL_WITH_ID(KernelIDs::ADD_F32_ND, OpType::ADD, Backend::CPU, matchAddF32_ND, runAddF32_ND);
+```
+
+#### Updated `main.cpp`
+You simplify your includes.
+
+```cpp
+#include "core/session.hpp"
+// ... standard includes ...
+
+// ONE include to rule them all
+#include "generated/kernels_all.gen.hpp"
+#include "generated/build_context.gen.hpp"
+
+// ... main function ...
+```
+
+#### Updated `Record` Struct (for JSON)
+The `kernelId` field changes type, and new fields are added for context.
+
+**JSON Schema (`records.jsonl`):**
+```json
+{
+  "kernelUid": "0x11223344AABBCCDD",   // String hex for readability
+  "buildContextId": "0xDEADBEEF...",   // Links to compiler flags
+  "hwTag": "Snapdragon_8cx_Gen3",     // Added at runtime
+  "inputShapes": [[128, 128]],
+  "outputShapes": [[128, 128]],
+  "runTime": 0.05
+}
+```
+
+**C++ Struct (`core/cost_model.hpp`):**
+```cpp
+struct Record {
+    uint64_t kernelUid; // Changed from uint32_t
+    uint64_t buildContextId;
+    std::string hwTag; // Runtime populated
+    
+    std::vector<std::vector<uint32_t>> inputShapes;
+    // ... rest of fields
+};
+```
+
+### 4. The Build Script: `build.py`
+
+The script will perform the following steps:
+
+1.  **Setup**:
+    *   Define paths (`tensor_graphs_cpp/`, `build/`).
+    *   Define the exact `cl.exe` command arguments you use (excluding the input files, which will be added dynamically).
+    *   Create a `generated/` directory if it doesn't exist.
+
+2.  **Dependency Scan (Identity Layer 1)**:
+    *   Hash `core/types.hpp`, `core/memory.hpp`, `core/kernels.hpp` -> `CORE_SEED`.
+    *   Iterate `kernels/**/*.hpp`.
+    *   Hash `CORE_SEED + file_content` -> `KERNEL_UID`.
+    *   Write `generated/kernel_uids.gen.hpp`.
+
+3.  **Include Aggregation**:
+    *   Write `generated/kernels_all.gen.hpp` with `#include` paths relative to `tensor_graphs_cpp/`.
+
+4.  **Build Identity (Identity Layer 2)**:
+    *   Hash the string of your compiler flags + compiler path.
+    *   Write `generated/build_context.gen.hpp`.
+
+5.  **Hardware Identity (Identity Layer 3)**:
+    *   This does not go into the generated header (since the binary is shared).
+    *   The script ensures `build_context.gen.hpp` contains a variable `BUILD_CONTEXT_ID`.
+    *   When `main.cpp` runs, it queries the OS for CPU info and creates the `hwTag` string (e.g., "ARM64_Cortex_A78"). This is combined with `BUILD_CONTEXT_ID` when saving benchmarks.
+
+6.  **Compilation**:
+    *   Construct the full `cl.exe` command.
+    *   Include `tensor_graphs_cpp/`.
+    *   Compile `main.cpp`.
+    *   Link.
+
+### 5. Workflow Summary
+
+**To build, you simply run:**
+```bash
+python build.py
+```
+
+**What happens automatically:**
+1.  Python detects if you changed `types.hpp`. The `CORE_SEED` changes.
+2.  All Kernel UIDs in `kernel_uids.gen.hpp` update automatically.
+3.  `main.cpp` includes the updated files.
+4.  `cl.exe` compiles the binary.
+5.  When you run the binary, it saves records tagged with `kernelUid` and `buildContextId`.
+
+**How caching works:**
+*   If you edit `add/F32_ND.hpp`: Only that kernel's ID changes. Old benchmarks for other kernels are still valid (same ID).
+*   If you edit `types.hpp`: All IDs change. All old benchmarks are invalidated.
+*   If you switch from `-O2` to `-O3`: The `buildContextId` changes. All benchmarks are invalidated.
+
+This plan ensures your kernel indexing is robust, shareable, and requires zero manual maintenance of file lists.

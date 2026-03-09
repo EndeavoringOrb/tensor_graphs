@@ -1,0 +1,24 @@
+add compile time DEBUG ifdef flag
+-check nan
+
+more fused ops
+
+test.cpp
+
+examples/gemma-3-270m-cpp.py
+
+graph parallel
+
+constant folding
+
+remove sparseData? functionality might be covered by graph.constantStaging
+
+improve hash stability. right now if you change a single character in a commented line in core/types.hpp, system benchmarks all kernels again
+
+allow finer user control over dirty bucket caching. Maybe they know a certain input will always be fully dirty so isn't worth computing diff each time. or maybe add a mode where user can provide the dirty slice so we don't have to compute input diff
+
+main.exe should create benchmarks/ folder
+
+add atomic OpType::CONTIGUOUS so operations whose output is non-contiguous can be added. then planner will insert OpType::CONTIGUOUS node if parent is non-contiguous and current node requires contiguous (similar to inserting copyto node if backends don't match)
+
+automatically reject dirty region cache .jsonl if invalid kernel ids

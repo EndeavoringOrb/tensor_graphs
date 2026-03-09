@@ -13,3 +13,4 @@ pillow
 line-profiler
 ruff
 pyright
+pybind11
