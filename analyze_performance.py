@@ -1,7 +1,7 @@
-import json
-import math
 import collections
 import argparse
+import json
+import math
 import os
 
 
