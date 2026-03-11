@@ -151,11 +151,13 @@ struct CostModel
                 estimatedTime = r.runTime * (static_cast<float>(targetElements) / static_cast<float>(recElements));
             }
         }
+#ifdef DEBUG
         if (bestDist == std::numeric_limits<float>::infinity() || estimatedTime == std::numeric_limits<float>::infinity())
         {
             std::cout << "[CostModel.interpolate] WARNING: inf cost" << std::endl;
             std::cout << nodeToString(node, graph, "[Planner Error] ") << std::endl;
         }
+#endif
         return (bestDist == std::numeric_limits<float>::infinity()) ? bestDist : estimatedTime;
     }
 
@@ -212,12 +214,13 @@ struct CostModel
         auto it = records.find(kernelUid);
         if (it == records.end() || it->second.empty())
         {
+#ifdef DEBUG
             std::cout << "[CostModel.estimateCost] WARNING: No records found for kernelUid: 0x"
                       << std::hex << kernelUid << std::dec << std::endl;
 
             // Use the helper here
             std::cout << nodeToString(node, graph, "[Planner Error] ") << std::endl;
-
+#endif
             return std::numeric_limits<float>::infinity();
         }
 
