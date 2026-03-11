@@ -396,6 +396,7 @@ public:
         std::unordered_map<uint64_t, std::vector<AdapterOp>> bestEdgeAdapters;
 
         std::unordered_set<uint32_t> visitedStrats; // track by original node ID to prevent duplicate DFS
+        CompiledGraph compiled;
 
         auto reconstruct = [&](auto &self, const std::shared_ptr<BeamStrategy> &strat) -> void
         {
@@ -466,7 +467,6 @@ public:
             finalTopo.push_back(chosenId);
         };
         visit(visit, rootId);
-        CompiledGraph compiled;
 
         uint32_t mapIdx = 0;
         std::unordered_map<std::string, uint32_t> insertedCopyNodes;
@@ -482,7 +482,6 @@ public:
             {
                 mappedNode.backend = bestAssignments.at(hId);
             }
-            Backend assignedBackend = mappedNode.backend;
             std::vector<uint32_t> mappedParentIds;
 
             for (uint32_t pid : mappedNode.parentIds)

@@ -66,7 +66,6 @@ inline void runPermuteF32_ND(const std::vector<const void *> &inputs, const std:
 
     // Naive implementation: Iterate over output space
     for (uint64_t i = 0; i < numElements; ++i) {
-        uint64_t temp_idx = i;
         uint64_t src_idx = 0;
 
         // Decompose output linear index into coordinates
