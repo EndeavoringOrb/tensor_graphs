@@ -17,15 +17,31 @@ private:
     CompiledGraph compiled;
     MemoryManager &memManager;
     const Graph &graph;
+    std::unordered_map<uint32_t, float> nodeCosts;
 
 public:
     Executor(CompiledGraph cg, MemoryManager &mm, const Graph &g)
-        : compiled(std::move(cg)), memManager(mm), graph(g) {}
+        : compiled(std::move(cg)), memManager(mm), graph(g)
+    {
+        if (compiled.nodeCosts.empty())
+        {
+            throw std::runtime_error("[Executor] Critical Error: CompiledGraph contains no nodeCosts. "
+                                     "Execution cannot proceed as memory eviction requires cost metadata.");
+        }
+    }
 
     void run(const std::unordered_map<uint32_t, const void *> &inputs,
              const DirtyBucket &bucket)
     {
         std::cout << "running..." << std::endl;
+
+        // Build graph parent structure to assist in calculating recursive eviction costs
+        std::unordered_map<uint32_t, std::vector<uint32_t>> parentMap;
+        for (const auto &pair : compiled.nodesMap)
+        {
+            parentMap[pair.first] = pair.second.parentIds;
+        }
+
         std::unordered_set<uint32_t> neededNodes;
         if (!compiled.instructions.empty())
         {
@@ -129,7 +145,8 @@ public:
                 else
                 {
                     uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
-                    memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts[inst.nodeId], 0.0f); // TODO: pass in actual cost
+                    float cost = compiled.nodeCosts.at(inst.nodeId);
+                    memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts[inst.nodeId], cost, &parentMap, &compiled.nodeCosts);
                 }
             }
 

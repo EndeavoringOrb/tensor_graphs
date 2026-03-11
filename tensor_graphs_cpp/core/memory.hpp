@@ -2,12 +2,60 @@
 #include "core/types.hpp"
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <list>
 #include <cstring>
 #include <stdexcept>
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
+
+inline float calculateSavedCost(
+    const std::unordered_set<uint32_t> &cacheState,
+    const std::unordered_map<uint32_t, std::vector<uint32_t>> &parentMap,
+    const std::unordered_map<uint32_t, float> &nodeCosts)
+{
+    std::unordered_set<uint32_t> savedNodes;
+    std::vector<uint32_t> stack;
+
+    // A node in the cache saves itself AND all of its recursive ancestors.
+    for (uint32_t node : cacheState)
+    {
+        if (savedNodes.insert(node).second)
+        {
+            stack.push_back(node);
+        }
+    }
+
+    while (!stack.empty())
+    {
+        uint32_t curr = stack.back();
+        stack.pop_back();
+
+        auto it = parentMap.find(curr);
+        if (it != parentMap.end())
+        {
+            for (uint32_t p : it->second)
+            {
+                if (savedNodes.insert(p).second)
+                {
+                    stack.push_back(p);
+                }
+            }
+        }
+    }
+
+    float totalCost = 0.0f;
+    for (uint32_t node : savedNodes)
+    {
+        auto it = nodeCosts.find(node);
+        if (it != nodeCosts.end())
+        {
+            totalCost += it->second;
+        }
+    }
+    return totalCost;
+}
 
 struct MemBlock
 {
@@ -236,17 +284,25 @@ struct DeviceBuffer
         return blocks.end();
     }
 
-    bool tryEvict(uint64_t needed)
+    bool tryEvict(uint64_t needed,
+                  const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr,
+                  const std::unordered_map<uint32_t, float> *nodeCosts = nullptr,
+                  const std::unordered_set<uint32_t> &globalCacheState = {})
     {
         auto left = blocks.begin();
         auto right = blocks.begin();
         uint64_t currentSize = 0;
-        float currentCost = 0.0f;
 
         auto bestLeft = blocks.end();
         auto bestRight = blocks.end();
-        float bestCost = std::numeric_limits<float>::infinity();
+        float bestCostLost = -1.0f;
         uint64_t bestSize = std::numeric_limits<uint64_t>::max();
+
+        float currentTotalSaved = 0.0f;
+        if (parentMap && nodeCosts)
+        {
+            currentTotalSaved = calculateSavedCost(globalCacheState, *parentMap, *nodeCosts);
+        }
 
         while (right != blocks.end())
         {
@@ -256,20 +312,53 @@ struct DeviceBuffer
                 right++;
                 left = right;
                 currentSize = 0;
-                currentCost = 0.0f;
                 continue;
             }
 
             currentSize += right->sizeBytes;
-            currentCost += right->cost;
 
             // Once the window meets our size requirement, evaluate and shrink
             while (currentSize >= needed)
             {
-                // Save it if it is strictly cheaper, OR same cost but wastes less physical space
-                if (currentCost < bestCost || (currentCost == bestCost && currentSize < bestSize))
+                float costLost = 0.0f;
+                if (parentMap && nodeCosts)
                 {
-                    bestCost = currentCost;
+                    std::unordered_set<uint32_t> windowNodes;
+                    auto tempIt = left;
+                    while (tempIt != std::next(right))
+                    {
+                        if (!tempIt->isFree())
+                        {
+                            windowNodes.insert(tempIt->nodeId);
+                        }
+                        tempIt++;
+                    }
+
+                    // Create hypothetical state simulating what remains if window is evicted
+                    std::unordered_set<uint32_t> cacheStateWithoutWindow = globalCacheState;
+                    for (uint32_t wn : windowNodes)
+                    {
+                        cacheStateWithoutWindow.erase(wn);
+                    }
+
+                    float newSaved = calculateSavedCost(cacheStateWithoutWindow, *parentMap, *nodeCosts);
+                    costLost = currentTotalSaved - newSaved;
+                }
+                else
+                {
+                    auto tempIt = left;
+                    while (tempIt != std::next(right))
+                    {
+                        if (!tempIt->isFree())
+                            costLost += tempIt->cost;
+                        tempIt++;
+                    }
+                }
+
+                // Save it if it is strictly cheaper (we lose less cached compute), OR same cost but wastes less physical space
+                if (bestCostLost < 0 || costLost < bestCostLost || (costLost == bestCostLost && currentSize < bestSize))
+                {
+                    bestCostLost = costLost;
                     bestSize = currentSize;
                     bestLeft = left;
                     bestRight = right;
@@ -281,7 +370,6 @@ struct DeviceBuffer
 
                 // Shrink from the left
                 currentSize -= left->sizeBytes;
-                currentCost -= left->isFree() ? 0.0f : left->cost;
                 left++;
             }
             right++;
@@ -318,8 +406,10 @@ struct DeviceBuffer
         return false;
     }
 
-    // float cost is the cumulative cost to recompute. TODO: when node is evicted, update its children's cost
-    uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost)
+    uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost,
+                      const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr,
+                      const std::unordered_map<uint32_t, float> *nodeCosts = nullptr,
+                      const std::unordered_set<uint32_t> &globalCacheState = {})
     {
         // 1. If it's already cached, lock it and update
         auto mapIt = allocationMap.find(nodeId);
@@ -338,7 +428,7 @@ struct DeviceBuffer
         // 3. If no space, try evict
         if (slotIt == blocks.end())
         {
-            if (tryEvict(_sizeBytes))
+            if (tryEvict(_sizeBytes, parentMap, nodeCosts, globalCacheState))
             {
                 slotIt = findFreeSlot(_sizeBytes);
             }
@@ -416,12 +506,32 @@ struct MemoryManager
         }
     }
 
-    uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f)
+    std::unordered_set<uint32_t> getGlobalCacheState() const
+    {
+        std::unordered_set<uint32_t> state;
+        for (const auto &pair : buffers)
+        {
+            for (const auto &alloc : pair.second.allocationMap)
+            {
+                state.insert(alloc.first);
+            }
+        }
+        return state;
+    }
+
+    uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f, const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr, const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
     {
         auto it = buffers.find(backend);
         if (it == buffers.end())
             throw std::runtime_error("Backend buffer not initialized in MemoryManager");
-        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost);
+
+        std::unordered_set<uint32_t> globalCacheState;
+        if (parentMap && nodeCosts)
+        {
+            globalCacheState = getGlobalCacheState();
+        }
+
+        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost, parentMap, nodeCosts, globalCacheState);
     }
 
     void write(Backend backend, uint32_t nodeId, const void *data, uint64_t size)

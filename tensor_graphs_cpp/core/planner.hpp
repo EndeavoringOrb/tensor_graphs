@@ -421,6 +421,8 @@ public:
             // we know which physical node was actually chosen
             bestSelectedNodes[hLogId] = strat->selectedNodeId;
 
+            compiled.nodeCosts[strat->selectedNodeId] = strat->nodeCost;
+
             for (size_t i = 0; i < strat->parentStrategies.size(); ++i)
             {
                 const auto &pStrat = strat->parentStrategies[i];
@@ -547,6 +549,7 @@ public:
                             uint32_t adapterHashId = getHashId(adapterHash);
                             bestKernelAssignments[adapterHashId] = adapter.kernelId;
                             bestAssignments[adapterHashId] = adapter.backend;
+                            compiled.nodeCosts[adapterNode.id] = costModel.estimateCost(adapterNode, graph, adapter.kernelId);
 
                             currentPid = adapterNode.id;
                         }

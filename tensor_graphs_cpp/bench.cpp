@@ -122,6 +122,12 @@ int main()
         try
         {
             const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
+            // SAFETY CHECK: Ensure the Record from JSON matches the Kernel's expectations
+            if (r.inputShapes.size() < (kernel.inplace ? 1 : kernel.numInputs) && !kernel.isReference) {
+                std::cerr << "Skipping kernel " << kernel.opName << ": Record has " 
+                          << r.inputShapes.size() << " inputs, kernel requires " << kernel.numInputs << std::endl;
+                continue;
+            }
 
             std::vector<std::vector<uint8_t>> inData(r.inputShapes.size());
             std::vector<const void *> inPtrs(r.inputShapes.size(), nullptr);

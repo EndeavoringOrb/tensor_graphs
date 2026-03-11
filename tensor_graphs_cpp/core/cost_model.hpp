@@ -16,9 +16,11 @@
 #if defined(USE_CUDA)
 #define HW_TAG "CUDA_Enabled"
 #elif defined(_WIN32) || defined(_WIN64)
-#define HW_TAG "Windows_ARM64"
+#define HW_TAG "Windows_x64"
 #elif defined(__APPLE__)
 #define HW_TAG "Apple_Silicon"
+#elif defined(__x86_64__) || defined(_M_X64)
+#define HW_TAG "Linux_x64"
 #else
 #define HW_TAG "Linux_ARM64"
 #endif

@@ -578,6 +578,7 @@ struct CompiledGraph
     std::vector<OpInstruction> instructions;
     std::unordered_map<uint32_t, uint32_t> refCounts;
     std::unordered_map<uint32_t, TensorNode> nodesMap;
+    std::unordered_map<uint32_t, float> nodeCosts;
 };
 
 struct AdapterOp
@@ -680,23 +681,25 @@ inline void from_json(const json &j, OpInstruction &i)
     i.inplaceInputIndex = j.at("inplaceInputIndex").get<int32_t>();
     i.backend = j.at("backend").get<Backend>();
 }
-
 inline void to_json(json &j, const CompiledGraph &cg)
 {
     json refCounts = json::object();
     for (const auto &kv : cg.refCounts)
-    {
         refCounts[std::to_string(kv.first)] = kv.second;
-    }
+
     json nodesMap = json::object();
     for (const auto &kv : cg.nodesMap)
-    {
         nodesMap[std::to_string(kv.first)] = kv.second;
-    }
+
+    json nodeCosts = json::object(); // Add this
+    for (const auto &kv : cg.nodeCosts)
+        nodeCosts[std::to_string(kv.first)] = kv.second;
+
     j = json{
         {"instructions", cg.instructions},
         {"refCounts", refCounts},
-        {"nodesMap", nodesMap}};
+        {"nodesMap", nodesMap},
+        {"nodeCosts", nodeCosts}};
 }
 
 inline void from_json(const json &j, CompiledGraph &cg)
@@ -707,17 +710,20 @@ inline void from_json(const json &j, CompiledGraph &cg)
     if (j.contains("refCounts"))
     {
         for (const auto &item : j.at("refCounts").items())
-        {
             cg.refCounts[std::stoul(item.key())] = item.value().get<uint32_t>();
-        }
     }
 
     cg.nodesMap.clear();
     if (j.contains("nodesMap"))
     {
         for (const auto &item : j.at("nodesMap").items())
-        {
             cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
-        }
+    }
+
+    cg.nodeCosts.clear(); // Add this
+    if (j.contains("nodeCosts"))
+    {
+        for (const auto &item : j.at("nodeCosts").items())
+            cg.nodeCosts[std::stoul(item.key())] = item.value().get<float>();
     }
 }
