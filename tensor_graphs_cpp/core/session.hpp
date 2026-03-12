@@ -801,7 +801,9 @@ public:
                                 {
                                     opName = toString(dummyOut.opType);
                                 }
+#ifdef DEBUG
                                 std::cout << "[Session.ensureCacheCoverage] [" << key << "] [Node " << inst.nodeId << "] [Slice " << rIdx << "] [" << opName << "] Could not find better kernel." << std::endl;
+#endif
                             }
                             regionKernels.push_back(selectedKernel);
                         }
