@@ -161,21 +161,22 @@ struct CostModel
         return (bestDist == std::numeric_limits<float>::infinity()) ? bestDist : estimatedTime;
     }
 
-    float estimateCost(const TensorNode &node, const Graph &graph, uint64_t kernelUid)
+    float estimateCost(const TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph, uint64_t kernelUid)
     {
-        std::vector<std::vector<uint32_t>> inShapes(node.parentIds.size());
-        std::vector<std::vector<uint8_t>> inConstants(node.parentIds.size());
-        std::vector<DType> inDTypes(node.parentIds.size());
+        std::vector<std::vector<uint32_t>> inShapes(inputs.size());
+        std::vector<std::vector<uint8_t>> inConstants(inputs.size());
+        std::vector<DType> inDTypes(inputs.size());
 
-        for (size_t i = 0; i < node.parentIds.size(); ++i)
+        for (size_t i = 0; i < inputs.size(); ++i)
         {
-            uint32_t pid = node.parentIds[i];
-            inShapes[i] = graph.nodes[pid].shape;
-            inDTypes[i] = graph.nodes[pid].dtype;
+            const auto &inNode = inputs[i];
+            inShapes[i] = inNode.shape;
+            inDTypes[i] = inNode.dtype;
 
-            if (graph.nodes[pid].opType == OpType::INPUT && graph.nodes[pid].storageType == StorageType::PERSISTENT)
+            // Check if this input corresponds to a persistent constant in the global graph
+            if (inNode.opType == OpType::INPUT && inNode.storageType == StorageType::PERSISTENT)
             {
-                auto stagingIt = graph.constantStaging.find(pid);
+                auto stagingIt = graph.constantStaging.find(inNode.id);
                 if (stagingIt != graph.constantStaging.end())
                     inConstants[i] = stagingIt->second;
             }

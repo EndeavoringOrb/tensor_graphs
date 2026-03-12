@@ -69,7 +69,7 @@ private:
             bestK = UINT64_MAX;
             for (uint64_t k : kernels)
             {
-                float c = costModel.estimateCost(output, graph, k);
+                float c = costModel.estimateCost(output, inputsList, graph, k);
                 if (c < bestCost)
                 {
                     bestCost = c;
@@ -548,7 +548,8 @@ public:
                             uint32_t adapterHashId = getHashId(adapterHash);
                             bestKernelAssignments[adapterHashId] = adapter.kernelId;
                             bestAssignments[adapterHashId] = adapter.backend;
-                            compiled.nodeCosts[adapterNode.id] = costModel.estimateCost(adapterNode, graph, adapter.kernelId);
+                            std::vector<TensorNode> adapterInputs = { graph.nodes[currentPid] };
+                            compiled.nodeCosts[adapterNode.id] = costModel.estimateCost(adapterNode, adapterInputs, graph, adapter.kernelId);
 
                             currentPid = adapterNode.id;
                         }
@@ -804,7 +805,7 @@ private:
                     {
                         std::string targetHash = Hashing::structuralHash(targetId, graph, structHashMemo);
                         uint32_t targetHashId = getHashId(targetHash);
-                        float cost = costModel.estimateCost(target, graph, kernelId);
+                        float cost = costModel.estimateCost(target, inputNodes, graph, kernelId);
 
                         auto strat = std::make_shared<BeamStrategy>();
                         strat->cost = cost;
@@ -864,7 +865,7 @@ private:
 
                             for (uint64_t kernelId : matchingKernels)
                             {
-                                float targetCost = costModel.estimateCost(target, graph, kernelId);
+                                float targetCost = costModel.estimateCost(target, adaptedInputNodes, graph, kernelId);
 
                                 auto strat = std::make_shared<BeamStrategy>();
                                 strat->nodeId = nodeId;

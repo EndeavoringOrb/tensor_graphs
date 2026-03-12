@@ -782,7 +782,7 @@ public:
                                 float bestCost = std::numeric_limits<float>::infinity();
                                 for (uint64_t kId : matchingKernels)
                                 {
-                                    float c = costModel.estimateCost(dummyOut, graph, kId);
+                                    float c = costModel.estimateCost(dummyOut, dummyInputs, graph, kId);
                                     if (c < bestCost)
                                     {
                                         bestCost = c;
@@ -790,11 +790,15 @@ public:
                                     }
                                 }
                             }
-                            if (selectedKernel == inst.kernelId) {
+                            if (selectedKernel == inst.kernelId)
+                            {
                                 std::string opName;
-                                if (dummyOut.opType == OpType::FUSED) {
+                                if (dummyOut.opType == OpType::FUSED)
+                                {
                                     opName = dummyOut.opName;
-                                } else {
+                                }
+                                else
+                                {
                                     opName = toString(dummyOut.opType);
                                 }
                                 std::cout << "[Session.ensureCacheCoverage] [" << key << "] [Node " << inst.nodeId << "] [Slice " << rIdx << "] [" << opName << "] Could not find better kernel." << std::endl;
