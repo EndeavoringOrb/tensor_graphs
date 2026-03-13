@@ -13,10 +13,6 @@
 #include <cstring>
 #include <set>
 
-// ---------------------------------------------------------------------------
-// JSON serialization helpers for Region / Dim / DirtyBucket
-// ---------------------------------------------------------------------------
-
 namespace dirty_cache_json // TODO: change case? not sure camelCase or PascalCase
 {
     inline json dimToJson(const Dim &d)
@@ -69,12 +65,10 @@ namespace dirty_cache_json // TODO: change case? not sure camelCase or PascalCas
         return regions;
     }
 
-    // Serialize a DirtyBucket to JSON
     inline json bucketToJson(const DirtyBucket &bucket)
     {
         json obj;
 
-        // Regions
         json regionsObj;
         for (const auto &pair : bucket.regions)
         {
@@ -82,7 +76,6 @@ namespace dirty_cache_json // TODO: change case? not sure camelCase or PascalCas
         }
         obj["regions"] = regionsObj;
 
-        // Input slices
         json slicesObj;
         for (const auto &pair : bucket.inputSlices)
         {
@@ -100,7 +93,6 @@ namespace dirty_cache_json // TODO: change case? not sure camelCase or PascalCas
         }
         obj["input_slices"] = slicesObj;
 
-        // Kernel IDs
         json kernelsObj;
         for (const auto &pair : bucket.kernelIds)
         {
@@ -118,7 +110,6 @@ namespace dirty_cache_json // TODO: change case? not sure camelCase or PascalCas
         return obj;
     }
 
-    // Deserialize a DirtyBucket from JSON
     inline DirtyBucket bucketFromJson(const json &obj)
     {
         DirtyBucket bucket;
@@ -167,11 +158,7 @@ namespace dirty_cache_json // TODO: change case? not sure camelCase or PascalCas
 
         return bucket;
     }
-} // namespace dirty_cache_json
-
-// ---------------------------------------------------------------------------
-// Session
-// ---------------------------------------------------------------------------
+}
 
 class Session
 {
@@ -188,8 +175,112 @@ private:
     std::string cachePath;
     std::unordered_map<std::string, DirtyBucket> dirtyCache;
 
-    // Map of node ID -> previous input data (for computing diffs)
     std::unordered_map<uint32_t, std::vector<uint8_t>> previousInputData;
+
+    std::vector<std::vector<Region>> getBackwardSlicesAtomic(
+        uint32_t physNodeId,
+        const std::vector<uint32_t> &physInputIds,
+        const Region &outRegion,
+        const CompiledGraph &compiledGraph,
+        const Graph &atomicGraph,
+        const std::vector<uint32_t> &atomicTopo) const
+    {
+        const TensorNode &physNode = compiledGraph.nodesMap.at(physNodeId);
+
+        if (physNode.opType == OpType::COPY_TO || physNode.opType == OpType::CONTIGUOUS)
+        {
+            std::vector<std::vector<Region>> res(physInputIds.size());
+            for (size_t i = 0; i < physInputIds.size(); ++i)
+            {
+                res[i] = {outRegion};
+            }
+            return res;
+        }
+
+        uint32_t logOutId = compiledGraph.logicalNodeMap.at(physNodeId);
+
+        std::unordered_set<uint32_t> logInputSet;
+        for (uint32_t pid : physInputIds)
+        {
+            logInputSet.insert(compiledGraph.logicalNodeMap.at(pid));
+        }
+
+        std::unordered_map<uint32_t, std::vector<Region>> reqRegions;
+        reqRegions[logOutId] = {outRegion};
+
+        ShapePropagator prop;
+
+        for (auto it = atomicTopo.rbegin(); it != atomicTopo.rend(); ++it)
+        {
+            uint32_t curr = *it;
+            if (reqRegions.count(curr) && !reqRegions[curr].empty())
+            {
+
+                if (logInputSet.count(curr) && curr != logOutId)
+                {
+                    continue;
+                }
+
+                const TensorNode &atomicNode = atomicGraph.nodes[curr];
+                if (atomicNode.opType == OpType::INPUT)
+                    continue;
+
+                Region currBox = reqRegions[curr][0];
+                for (size_t i = 1; i < reqRegions[curr].size(); ++i)
+                {
+                    for (size_t d = 0; d < currBox.region.size() && d < reqRegions[curr][i].region.size(); ++d)
+                    {
+                        currBox.region[d].start = std::min(currBox.region[d].start, reqRegions[curr][i].region[d].start);
+                        currBox.region[d].stop = std::max(currBox.region[d].stop, reqRegions[curr][i].region[d].stop);
+                    }
+                }
+
+                auto parentReqs = prop.backward(atomicNode, atomicGraph, {currBox});
+                for (size_t i = 0; i < atomicNode.parentIds.size(); ++i)
+                {
+                    uint32_t pid = atomicNode.parentIds[i];
+                    if (i < parentReqs.size())
+                    {
+                        for (const auto &r : parentReqs[i])
+                        {
+                            reqRegions[pid].push_back(r);
+                        }
+                    }
+                }
+            }
+        }
+
+        std::vector<std::vector<Region>> parentSlices(physInputIds.size());
+        for (size_t pIdx = 0; pIdx < physInputIds.size(); ++pIdx)
+        {
+            uint32_t logPid = compiledGraph.logicalNodeMap.at(physInputIds[pIdx]);
+
+            auto it = reqRegions.find(logPid);
+            if (it == reqRegions.end() || it->second.empty())
+            {
+                parentSlices[pIdx] = {};
+            }
+            else if (it->second.size() == 1)
+            {
+                parentSlices[pIdx] = it->second;
+            }
+            else
+            {
+                Region bbox = it->second[0];
+                for (size_t i = 1; i < it->second.size(); ++i)
+                {
+                    for (size_t d = 0; d < bbox.region.size() && d < it->second[i].region.size(); ++d)
+                    {
+                        bbox.region[d].start = std::min(bbox.region[d].start, it->second[i].region[d].start);
+                        bbox.region[d].stop = std::max(bbox.region[d].stop, it->second[i].region[d].stop);
+                    }
+                }
+                parentSlices[pIdx] = {bbox};
+            }
+        }
+
+        return parentSlices;
+    }
 
 public:
     Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "")
@@ -224,14 +315,10 @@ public:
             Planner planner(costModel, 4ULL * 1024 * 1024 * 1024);
             compiled = planner.plan(rootId, graph);
 
-            // Save immediately after planning
             saveCompiledGraph(compiled);
             isPlanned = true;
         }
 
-        // --- THE MATERIALIZATION PASS ---
-        // This must run even if we load from cache because pointers/DeviceBuffers
-        // are process-specific and not persistent.
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
         memManager.init();
 
@@ -242,10 +329,8 @@ public:
             {
                 uint64_t sizeBytes = getSizeBytes(graph.nodes[nodeId].shape, graph.nodes[nodeId].dtype);
 
-                // Physical allocation
                 uint64_t offset = memManager.allocate(graph.nodes[nodeId].backend, nodeId, sizeBytes, StorageType::PERSISTENT);
 
-                // Data loading
                 if (graph.constantStaging.count(nodeId))
                 {
                     memManager.write(graph.nodes[nodeId].backend, nodeId, graph.constantStaging[nodeId].data(), sizeBytes);
@@ -260,7 +345,6 @@ public:
             }
         }
 
-        // Re-verify cache coverage if needed (or assume persistent cache is sufficient)
         std::vector<uint32_t> inputNodeIds;
         for (const auto &pair : compiled.nodesMap)
         {
@@ -275,8 +359,6 @@ public:
         }
         ensureCacheCoverage(inputNodeIds);
 
-        // Re-sync the main graph's nodes with the compiled nodes
-        // The planner often creates new nodes (fusions/equivalents) that aren't in the user's initial graph
         for (const auto &pair : compiled.nodesMap)
         {
             uint32_t id = pair.first;
@@ -292,14 +374,11 @@ public:
         graph.constantStaging.clear();
     }
 
-    // Snap a raw dirty region to the nearest power-of-2 aligned bucket
-    // and look up the cached bucket for these input diffs.
     DirtyBucket findBestBucket(
         const std::unordered_map<uint32_t, std::vector<Region>> &inputDiffs) const
     {
         if (inputDiffs.empty())
         {
-            // No diffs — return an empty bucket (everything clean)
             return DirtyBucket{};
         }
 
@@ -313,7 +392,6 @@ public:
             if (regionList.empty())
                 continue;
 
-            // Use the first region box for bucket snapping
             const Region &box = regionList[0];
             Region canonical;
 
@@ -355,7 +433,6 @@ public:
             return *cached;
         }
 
-        // Fallback: return empty bucket (full recompute behavior)
         return DirtyBucket{};
     }
 
@@ -366,7 +443,6 @@ public:
             compile(inputs);
         }
 
-        // Compute input diffs against previous data
         std::unordered_map<uint32_t, std::vector<Region>> inputDiffs;
 
         for (const auto &pair : inputs)
@@ -396,25 +472,20 @@ public:
                 inputDiffs[nodeId] = diff;
             }
 
-            // Save a copy of the new input data
             uint64_t sizeBytes = getSizeBytes(graph.nodes[nodeId].shape, graph.nodes[nodeId].dtype);
             auto &stored = previousInputData[nodeId];
             stored.resize(sizeBytes);
             std::memcpy(stored.data(), newData, sizeBytes);
 
-            // Write the new data to the buffer
             memManager.write(graph.nodes[nodeId].backend, nodeId, newData, sizeBytes);
         }
 
-        // Find the best matching bucket
         DirtyBucket bucket = findBestBucket(inputDiffs);
-
         executor->run(inputs, bucket);
     }
 
     const void *getOutput(uint32_t nodeId) const
     {
-        // If retrieving the root node, map it to the actual executed physical node ID
         if (isCompiled && nodeId == rootId && !compiled.instructions.empty())
         {
             nodeId = compiled.instructions.back().nodeId;
@@ -423,7 +494,6 @@ public:
         Backend backend = graph.nodes[nodeId].backend;
         uint64_t baseOffset = graph.nodes[nodeId].view.shape.empty() ? 0 : graph.nodes[nodeId].view.baseOffset;
 
-        // Use the compiled node details if available, since the planner might have shifted its Backend or BaseOffset
         if (isCompiled && compiled.nodesMap.find(nodeId) != compiled.nodesMap.end())
         {
             backend = compiled.nodesMap.at(nodeId).backend;
@@ -453,13 +523,6 @@ public:
         return getOutput(rootId);
     }
 
-    // -----------------------------------------------------------------------
-    // Input diff — compute dirty regions by comparing old vs new data
-    // -----------------------------------------------------------------------
-
-    // Computes per-dimension bounding-box dirty regions between old and new data.
-    // Returns a single bounding box Region that encompasses all dirty elements.
-    // Returns an empty vector if no diff.
     std::vector<Region> computeInputDiff(
         const void *oldData,
         const void *newData,
@@ -472,7 +535,6 @@ public:
         uint64_t totalElements = countElements(shape);
         uint64_t elementSize = getDTypeSize(dtype);
 
-        // If no old data, everything is dirty
         if (oldData == nullptr)
         {
             Region full;
@@ -486,7 +548,6 @@ public:
         const uint8_t *oldBytes = static_cast<const uint8_t *>(oldData);
         const uint8_t *newBytes = static_cast<const uint8_t *>(newData);
 
-        // Calculate strides for coordinate decomposition
         std::vector<uint64_t> strides(shape.size(), 1);
         for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i)
         {
@@ -497,7 +558,6 @@ public:
         std::vector<uint32_t> maxBounds(shape.size(), 0);
         bool anyDirty = false;
 
-        // Element-wise comparison across all elements
         for (uint64_t i = 0; i < totalElements; ++i)
         {
             if (std::memcmp(oldBytes + i * elementSize, newBytes + i * elementSize, elementSize) != 0)
@@ -518,7 +578,6 @@ public:
         if (!anyDirty)
             return {};
 
-        // Build a single bounding box using the observed min/max extents per dimension
         Region r;
         for (size_t d = 0; d < shape.size(); ++d)
         {
@@ -528,11 +587,6 @@ public:
         return {r};
     }
 
-    // -----------------------------------------------------------------------
-    // Power-of-2 tile generation
-    // -----------------------------------------------------------------------
-
-    // Generate all non-overlapping aligned power-of-2 tiles for a given dim length
     static std::vector<Dim> generateSlicesForDim(uint32_t dimLen)
     {
         std::set<std::pair<uint32_t, uint32_t>> unique;
@@ -558,16 +612,9 @@ public:
         return slices;
     }
 
-    // -----------------------------------------------------------------------
-    // Cache key encoding
-    // -----------------------------------------------------------------------
-
-    // Canonical key string from a sorted map of input node ID -> dirty regions.
-    // Format: "id:[(s,e),(s,e)...];id:[(s,e),...];..."
     static std::string encodeCacheKey(
         const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)
     {
-        // Sort by node ID for determinism
         std::vector<uint32_t> ids;
         ids.reserve(inputRegions.size());
         for (const auto &pair : inputRegions)
@@ -602,18 +649,13 @@ public:
         return ss.str();
     }
 
-    // -----------------------------------------------------------------------
-    // Cache coverage — pre-compute all dirty region permutations
-    // -----------------------------------------------------------------------
-
     void ensureCacheCoverage(const std::vector<uint32_t> &inputNodeIds)
     {
         std::cout << "Ensuring cache coverage" << std::endl;
-        // 1. For each input, generate power-of-2 tile options per dimension
         struct InputOption
         {
             uint32_t nodeId;
-            std::vector<std::vector<Dim>> dimSlices; // per dimension
+            std::vector<std::vector<Dim>> dimSlices;
         };
 
         std::vector<InputOption> inputOptions;
@@ -634,7 +676,6 @@ public:
         if (inputOptions.empty())
             return;
 
-        // Generate atomic topo sort
         std::vector<uint32_t> atomicTopo;
         std::unordered_set<uint32_t> visited;
         auto visit = [&](auto &self, uint32_t node) -> void
@@ -651,8 +692,6 @@ public:
         };
         visit(visit, rootId);
 
-        // 2. Generate all region combinations for each input
-        //    Each input gets a list of possible region lists (either empty for clean, or 1 box)
         struct InputRegionSet
         {
             uint32_t nodeId;
@@ -665,7 +704,6 @@ public:
             InputRegionSet irs;
             irs.nodeId = opt.nodeId;
 
-            // Cartesian product across dimensions
             std::vector<Region> current = {Region{}};
             for (const auto &dimSlices : opt.dimSlices)
             {
@@ -682,10 +720,8 @@ public:
                 current = std::move(next);
             }
 
-            // Add clean state (empty list of regions)
             irs.options.push_back({});
 
-            // Add all dirty states (list containing one region box)
             for (const auto &r : current)
             {
                 irs.options.push_back({r});
@@ -695,8 +731,6 @@ public:
             perInput.push_back(irs);
         }
 
-        // 3. Cartesian product across all inputs
-        //    Use iterative index tracking
         std::vector<size_t> indices(perInput.size(), 0);
         std::vector<size_t> sizes;
         for (const auto &irs : perInput)
@@ -710,7 +744,6 @@ public:
         {
             cacheIdx++;
             std::cout << cacheIdx << "\r";
-            // Build input dirty regions for this permutation
             std::unordered_map<uint32_t, std::vector<Region>> inputRegions;
             bool allClean = true;
             for (size_t i = 0; i < perInput.size(); ++i)
@@ -727,32 +760,31 @@ public:
             {
                 std::string key = encodeCacheKey(inputRegions);
 
-                // Skip if already cached
                 if (dirtyCache.find(key) == dirtyCache.end())
                 {
-                    // Forward propagate
                     auto atomicRegions = propagateDirtyRegionsAtomic(atomicTopo, graph, inputRegions);
 
-                    // Map to PHYSICAL regions
                     std::unordered_map<uint32_t, std::vector<Region>> physicalRegions;
-                    for (const auto& pair : compiled.logicalNodeMap) {
+                    for (const auto &pair : compiled.logicalNodeMap)
+                    {
                         uint32_t physId = pair.first;
                         uint32_t logId = pair.second;
-                        if (atomicRegions.count(logId)) {
+                        if (atomicRegions.count(logId))
+                        {
                             physicalRegions[physId] = atomicRegions.at(logId);
                         }
                     }
-                    for (uint32_t inId : inputNodeIds) {
-                        if (inputRegions.count(inId)) {
+                    for (uint32_t inId : inputNodeIds)
+                    {
+                        if (inputRegions.count(inId))
+                        {
                             physicalRegions[inId] = inputRegions.at(inId);
                         }
                     }
 
-                    // Build bucket
                     DirtyBucket bucket;
                     bucket.regions = physicalRegions;
 
-                    // Backward propagate input slices for each dirty non-input node
                     for (const OpInstruction &inst : compiled.instructions)
                     {
                         auto regIt = physicalRegions.find(inst.nodeId);
@@ -767,11 +799,9 @@ public:
                         {
                             const Region &outRegion = outputRegions[rIdx];
                             TensorNode dummyOut = compiled.nodesMap.at(inst.nodeId);
-                            ShapePropagator prop;
-                            auto parentSlices = prop.backward(dummyOut, graph, {outRegion});
-                            perOutputRegionSlices.push_back(parentSlices);
 
-                            // --- Select Bucket-Specific Kernel ---
+                            auto parentSlices = getBackwardSlicesAtomic(inst.nodeId, inst.inputNodeIds, outRegion, compiled, graph, atomicTopo);
+
                             dummyOut.backend = inst.backend;
                             std::vector<uint32_t> outShape;
                             for (const auto &d : outRegion.region)
@@ -785,7 +815,7 @@ public:
                             for (size_t pIdx = 0; pIdx < inst.inputNodeIds.size(); ++pIdx)
                             {
                                 uint32_t pId = inst.inputNodeIds[pIdx];
-                                TensorNode dummyIn = graph.nodes[pId];
+                                TensorNode dummyIn = compiled.nodesMap.at(pId);
                                 if (pIdx < parentSlices.size() && !parentSlices[pIdx].empty())
                                 {
                                     const Region &pReg = parentSlices[pIdx][0];
@@ -809,7 +839,7 @@ public:
                             std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
                                 dummyOut.opType, dummyOut.opName, inst.backend, dummyInputs, dummyOut, &dummyRefCounts);
 
-                            uint64_t selectedKernel = inst.kernelId; // Default fallback to general planner kernel
+                            uint64_t selectedKernel = inst.kernelId;
                             if (!matchingKernels.empty())
                             {
                                 float bestCost = std::numeric_limits<float>::infinity();
@@ -835,10 +865,11 @@ public:
                                     opName = toString(dummyOut.opType);
                                 }
 #ifdef DEBUG
-                                std::cout << "[Session.ensureCacheCoverage] [" << key << "] [Node " << inst.nodeId << "] [Slice " << rIdx << "] [" << opName << "] Could not find better kernel." << std::endl;
+                                std::cout << "[Session.ensureCacheCoverage] [" << key << "] [Node " << inst.nodeId << "] [Slice " << rIdx << "][" << opName << "] Could not find better kernel." << std::endl;
 #endif
                             }
                             regionKernels.push_back(selectedKernel);
+                            perOutputRegionSlices.push_back(parentSlices);
                         }
 
                         bucket.inputSlices[inst.nodeId] = perOutputRegionSlices;
@@ -850,7 +881,6 @@ public:
                 }
             }
 
-            // Advance indices (odometer-style)
             int p = static_cast<int>(indices.size()) - 1;
             while (p >= 0)
             {
@@ -865,7 +895,6 @@ public:
         }
     }
 
-    // Lookup a cached bucket by input dirty regions. Returns nullptr if not found.
     const DirtyBucket *lookupCache(
         const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions) const
     {
@@ -878,10 +907,6 @@ public:
         return nullptr;
     }
 
-    // -----------------------------------------------------------------------
-    // Cache persistence (JSONL format)
-    // -----------------------------------------------------------------------
-
     void saveCompiledGraph(const CompiledGraph &cg)
     {
         if (cachePath.empty())
@@ -893,7 +918,6 @@ public:
         json entry;
         entry["type"] = "compiled_graph";
         entry["data"] = cg;
-        // Also save the graph's current ID counter to ensure future nodes don't collide
         entry["graph_count"] = graph.count;
 
         file << entry.dump() << "\n";
