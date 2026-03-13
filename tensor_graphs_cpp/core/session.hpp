@@ -772,7 +772,6 @@ public:
                             perOutputRegionSlices.push_back(parentSlices);
 
                             // --- Select Bucket-Specific Kernel ---
-                            TensorNode dummyOut = graph.nodes[inst.nodeId];
                             dummyOut.backend = inst.backend;
                             std::vector<uint32_t> outShape;
                             for (const auto &d : outRegion.region)
