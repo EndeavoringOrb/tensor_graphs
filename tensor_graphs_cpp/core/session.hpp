@@ -325,21 +325,23 @@ public:
         for (const auto &pair : compiled.nodesMap)
         {
             uint32_t nodeId = pair.first;
-            if (graph.nodes[nodeId].opType == OpType::INPUT && graph.nodes[nodeId].storageType == StorageType::PERSISTENT)
-            {
-                uint64_t sizeBytes = getSizeBytes(graph.nodes[nodeId].shape, graph.nodes[nodeId].dtype);
+            const TensorNode &node = pair.second;
 
-                uint64_t offset = memManager.allocate(graph.nodes[nodeId].backend, nodeId, sizeBytes, StorageType::PERSISTENT);
+            if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
+            {
+                uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+
+                uint64_t offset = memManager.allocate(node.backend, nodeId, sizeBytes, StorageType::PERSISTENT);
 
                 if (graph.constantStaging.count(nodeId))
                 {
-                    memManager.write(graph.nodes[nodeId].backend, nodeId, graph.constantStaging[nodeId].data(), sizeBytes);
+                    memManager.write(node.backend, nodeId, graph.constantStaging[nodeId].data(), sizeBytes);
                 }
                 else if (graph.weightSources.count(nodeId))
                 {
                     const auto &source = graph.weightSources.at(nodeId);
                     auto &loader = graph.loaders.at(source.first);
-                    uint8_t *destPtr = memManager.buffers.at(graph.nodes[nodeId].backend).arena_ptr + offset;
+                    uint8_t *destPtr = memManager.buffers.at(node.backend).arena_ptr + offset;
                     loader->loadTensor(source.second, destPtr, sizeBytes);
                 }
             }
