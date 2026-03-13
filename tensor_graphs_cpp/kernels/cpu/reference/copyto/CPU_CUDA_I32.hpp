@@ -1,3 +1,4 @@
+// File: tensor_graphs_cpp/kernels/cpu/reference/copyto/CPU_CUDA_I32.hpp
 #ifdef USE_CUDA
 #pragma once
 #include "core/types.hpp"
@@ -18,6 +19,9 @@ inline bool matchCopyTo_CPU_CUDA_I32(const std::vector<TensorNode> &inputs, cons
         return false;
 
     if (inputs[0].shape != output.shape)
+        return false;
+
+    if (!inputs[0].view.isContiguous() || !output.view.isContiguous())
         return false;
 
     return true;

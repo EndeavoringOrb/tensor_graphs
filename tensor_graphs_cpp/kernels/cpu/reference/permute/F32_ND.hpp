@@ -1,3 +1,4 @@
+// File: tensor_graphs_cpp/kernels/cpu/reference/permute/F32_ND.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -20,10 +21,10 @@ inline bool matchPermuteF32_ND(const std::vector<TensorNode> &inputs, const Tens
     if (inputs[1].dtype != DType::INT32)
         return false;
 
-    // Contiguity check: Permutation often results in non-contiguous memory access patterns,
-    // so this reference implementation assumes the input is contiguous, 
-    // but the output will typically be non-contiguous.
-    if (!inputs[0].view.isContiguous())
+    // Contiguity check: Permutation often results in non-contiguous memory access patterns logically,
+    // but this reference implementation assumes the input is contiguous physically,
+    // and writes sequentially to a contiguous output buffer.
+    if (!inputs[0].view.isContiguous() || !output.view.isContiguous())
         return false;
 
     return true;

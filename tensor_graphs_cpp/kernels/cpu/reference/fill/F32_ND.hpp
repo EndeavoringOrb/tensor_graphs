@@ -1,10 +1,11 @@
+// File: tensor_graphs_cpp/kernels/cpu/reference/fill/F32_ND.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
 inline bool matchFillF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() == 2 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32;
+    return inputs.size() == 2 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && output.view.isContiguous();
 }
 
 inline void runFillF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

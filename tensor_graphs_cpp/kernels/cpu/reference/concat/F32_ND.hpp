@@ -1,3 +1,4 @@
+// File: tensor_graphs_cpp/kernels/cpu/reference/concat/F32_ND.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -5,7 +6,11 @@
 
 inline bool matchConcatF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() >= 2 && output.dtype == DType::FLOAT32;
+    if (inputs.size() < 2 || output.dtype != DType::FLOAT32) return false;
+    for (size_t i = 0; i < inputs.size() - 1; ++i) {
+        if (!inputs[i].view.isContiguous()) return false;
+    }
+    return output.view.isContiguous();
 }
 
 inline void runConcatF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

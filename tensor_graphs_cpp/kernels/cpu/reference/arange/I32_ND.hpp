@@ -1,10 +1,11 @@
+// File: tensor_graphs_cpp/kernels/cpu/reference/arange/I32_ND.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
 inline bool matchArangeI32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() == 3 && output.dtype == DType::INT32;
+    return inputs.size() == 3 && output.dtype == DType::INT32 && output.view.isContiguous();
 }
 
 inline void runArangeI32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

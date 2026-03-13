@@ -20,3 +20,5 @@ allow finer user control over dirty bucket caching. Maybe they know a certain in
 main.exe should create benchmarks/ folder
 
 automatically reject dirty region cache .jsonl if invalid kernel ids
+
+make ctrl-c safe (cudafree or whatever)

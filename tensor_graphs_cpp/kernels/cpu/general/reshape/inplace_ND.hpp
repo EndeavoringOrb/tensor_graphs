@@ -1,3 +1,4 @@
+// File: tensor_graphs_cpp/kernels/cpu/general/reshape/inplace_ND.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -5,6 +6,8 @@
 inline bool matchReshapeInplaceND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs.size() != 2)
+        return false;
+    if (!inputs[0].view.isContiguous())
         return false;
     if (inputs[0].view.baseOffset != output.view.baseOffset || inputs[0].view.dtype != output.view.dtype)
         return false;

@@ -1,3 +1,4 @@
+// File: tensor_graphs_cpp/kernels/cpu/reference/reshape/ND.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -11,6 +12,8 @@
 inline bool matchReshapeND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs.size() != 2)
+        return false;
+    if (!inputs[0].view.isContiguous() || !output.view.isContiguous()) 
         return false;
     return countElements(inputs[0].shape) == countElements(output.shape);
 }

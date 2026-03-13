@@ -1,3 +1,4 @@
+// File: tensor_graphs_cpp/core/planner.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
@@ -50,8 +51,6 @@ private:
         auto evalKernel = [&](OpType op, Backend opBackend, const TensorNode &input, TensorNode &output, uint64_t &bestK, float &bestCost)
         {
             output = input; // copy properties
-            // Keep input's original ID so costModel can look up its shape correctly.
-            // (Both CONTIGUOUS and COPY_TO preserve shape/dtype)
             output.id = input.id;
             output.opType = op;
             output.opName = "";
@@ -80,10 +79,8 @@ private:
 
         if (pBackend == targetBackend)
         {
-            // Chain 0: None
             chains.push_back({{}, targetBackend, isContig, 0.0f});
 
-            // Chain 1: CONTIGUOUS
             if (!isContig)
             {
                 TensorNode contigOut;
@@ -100,7 +97,6 @@ private:
         }
         else
         {
-            // Chain 2: COPY_TO
             TensorNode copyOut;
             uint64_t kCopy;
             float cCopy;
@@ -114,7 +110,6 @@ private:
 
             if (!isContig)
             {
-                // Chain 3: CONTIGUOUS -> COPY_TO
                 TensorNode contigOut;
                 uint64_t kContig;
                 float cContig;
@@ -131,7 +126,6 @@ private:
                     }
                 }
 
-                // Chain 4: COPY_TO -> CONTIGUOUS
                 if (kCopy != UINT64_MAX)
                 {
                     TensorNode contigOut2;
@@ -148,7 +142,6 @@ private:
         return chains;
     }
 
-    // Calculates deduplicated sum of the sub-graph execution cost.
     float dfsCost(const BeamStrategy *root)
     {
         if (!root || root->visitedGen == currentGeneration)
@@ -183,7 +176,6 @@ public:
         std::cout << "[Planner.plan] inferring shapes..." << std::endl;
         inferShapes(topo, graph);
 
-        // Build fused patterns from the Reference Graph Registry
         struct FusedPattern
         {
             std::string opName;
@@ -212,11 +204,11 @@ public:
             {
                 uint32_t inId = pattern.graph.allocateId();
                 TensorView view;
-                view.shape = dummyShapes[i]; // TODO: maybe assert len
+                view.shape = dummyShapes[i];
                 view.strides = TensorView::calcContiguousStrides(view.shape);
                 view.baseOffset = 0;
                 DType dtype = pair.second.dtypes[i];
-                view.dtype = dtype; // TODO: maybe assert len
+                view.dtype = dtype;
                 pattern.graph.inputWithId(inId, view.shape, dtype, view);
                 pattern.variables.push_back(inId);
             }
@@ -224,7 +216,6 @@ public:
             pattern.rootId = factory(pattern.variables, pattern.graph);
 
             std::vector<uint32_t> p_topo = topologicalSort(pattern.rootId, pattern.graph);
-            // inferShapes(p_topo, pattern.graph);
 
             fusedPatterns.push_back(std::move(pattern));
         }
@@ -247,8 +238,6 @@ public:
         Rewrite::DivAddRule dar;
 
         std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr, &fr, &ar, &dnr, &nar, &dmr, &dar};
-        // std::vector<const Rewrite::RewriteRule *> rules = {&cr, &dr};
-        // std::vector<const Rewrite::RewriteRule *> rules = {}; // TODO: remove this line, this is just so the matching phase is fast while debugging planning phase
 
         std::cout << "[Planner.plan] matching fusion patterns..." << std::endl;
         uint32_t topoIdx = 0;
@@ -259,7 +248,6 @@ public:
             topoIdx++;
             std::cout << topoIdx << "/" << topo.size() << ", rewrites: " << rewrites << ", matches: " << fusionMatches << "\r";
             uint32_t nodeId = *it;
-            // std::string patHash = Hashing::patternHash(nodeId, graph, patternHashMemo);
             std::string hash = Hashing::structuralHash(nodeId, graph, structHashMemo);
 
             std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(nodeId, graph, rules, patternHashMemo);
@@ -374,7 +362,6 @@ public:
                       << ", ParentCount: " << rootNode.parentIds.size()
                       << ")" << std::endl;
 
-            // Print which parent IDs were not successfully planned
             for (uint32_t pid : rootNode.parentIds)
             {
                 const auto &pNode = graph.nodes[pid];
@@ -389,13 +376,12 @@ public:
         auto bestRecipe = memo[rootHash][0];
         std::cout << "\nbest recipe cost: " << bestRecipe->cost << " ms" << std::endl;
 
-        // Reconstruct the global maps from the winning path-tracking tree
         std::unordered_map<uint32_t, Backend> bestAssignments;
         std::unordered_map<uint32_t, uint64_t> bestKernelAssignments;
         std::unordered_map<uint32_t, uint32_t> bestSelectedNodes;
         std::unordered_map<uint64_t, std::vector<AdapterOp>> bestEdgeAdapters;
 
-        std::unordered_set<uint32_t> visitedStrats; // track by original node ID to prevent duplicate DFS
+        std::unordered_set<uint32_t> visitedStrats;
         CompiledGraph compiled;
 
         auto reconstruct = [&](auto &self, const std::shared_ptr<BeamStrategy> &strat) -> void
@@ -406,20 +392,14 @@ public:
                 return;
             visitedStrats.insert(strat->nodeId);
 
-            // 1. Hash of the logical node (the node the user created, e.g., an ADD)
             std::string hLog = Hashing::structuralHash(strat->nodeId, graph, structHashMemo);
             uint32_t hLogId = getHashId(hLog);
 
-            // 2. Hash of the physical node (the node we chose to run, e.g., FUSED_Add_3D_1D)
             std::string hPhys = Hashing::structuralHash(strat->selectedNodeId, graph, structHashMemo);
             uint32_t hPhysId = getHashId(hPhys);
 
-            // Store physical assignments using the physical hash
             bestAssignments[hPhysId] = strat->backend;
             bestKernelAssignments[hPhysId] = strat->kernelId;
-
-            // Store the mapping so that when we look at a logical node's children,
-            // we know which physical node was actually chosen
             bestSelectedNodes[hLogId] = strat->selectedNodeId;
 
             compiled.logicalNodeMap[strat->selectedNodeId] = strat->nodeId;
@@ -430,7 +410,6 @@ public:
                 const auto &pStrat = strat->parentStrategies[i];
                 if (pStrat)
                 {
-                    // Edge adapters link physical parent to physical child
                     std::string phPhys = Hashing::structuralHash(pStrat->selectedNodeId, graph, structHashMemo);
                     uint32_t phPhysId = getHashId(phPhys);
                     uint64_t edgeHashId = ((uint64_t)phPhysId << 32) | hPhysId;
@@ -454,7 +433,6 @@ public:
             std::string h = Hashing::structuralHash(currOriginalId, graph, structHashMemo);
             uint32_t hId = getHashId(h);
 
-            // Jump to the chosen fused node if one was selected
             uint32_t chosenId = bestSelectedNodes.count(hId) ? bestSelectedNodes.at(hId) : currOriginalId;
 
             if (visited.count(chosenId))
@@ -519,16 +497,15 @@ public:
                             adapterNode.backend = adapter.backend;
                             adapterNode.storageType = StorageType::TRANSIENT;
 
-                            // Inherit view from currentPid, modify if CONTIGUOUS
                             adapterNode.view = graph.nodes[currentPid].view;
                             if (adapter.opType == OpType::CONTIGUOUS)
                             {
                                 adapterNode.view.strides = TensorView::calcContiguousStrides(adapterNode.shape);
-                                adapterNode.view.baseOffset = 0; // New allocation
+                                adapterNode.view.baseOffset = 0;
                             }
                             else if (adapter.opType == OpType::COPY_TO)
                             {
-                                adapterNode.view.baseOffset = 0; // New allocation
+                                adapterNode.view.baseOffset = 0;
                             }
 
                             if (adapterNode.id >= graph.nodes.size())
@@ -560,8 +537,81 @@ public:
                 }
                 else
                 {
-                    mappedParentIds.push_back(chosenPid);
-                    compiled.refCounts[chosenPid]++;
+                    // Safety net for DAG divergence:
+                    // If the parent's assigned backend differs from this node's backend, we MUST dynamically insert adapters.
+                    uint32_t currentPid = chosenPid;
+                    Backend parentBackend = compiled.nodesMap.count(chosenPid) ? compiled.nodesMap.at(chosenPid).backend : graph.nodes[chosenPid].backend;
+                    
+                    if (parentBackend != mappedNode.backend)
+                    {
+                        auto fallbackChains = getAdapterChains(compiled.nodesMap.count(chosenPid) ? compiled.nodesMap.at(chosenPid) : graph.nodes[chosenPid], parentBackend, mappedNode.backend, graph, compiled.refCounts, costModel);
+                        if (fallbackChains.empty()) {
+                            throw std::runtime_error("No valid adapter chain found during DAG safety fallback");
+                        }
+                        std::sort(fallbackChains.begin(), fallbackChains.end(),[](const auto &a, const auto &b) { return a.cost < b.cost; });
+                        const auto &bestChain = fallbackChains[0];
+
+                        for (const auto &adapter : bestChain.ops)
+                        {
+                            std::string adapterKey = std::to_string(currentPid) + "_" + toString(adapter.opType) + "_" + toString(adapter.backend);
+                            if (insertedCopyNodes.count(adapterKey))
+                            {
+                                currentPid = insertedCopyNodes[adapterKey];
+                                compiled.refCounts[currentPid]++;
+                            }
+                            else
+                            {
+                                TensorNode adapterNode;
+                                adapterNode.id = graph.allocateId();
+                                adapterNode.opType = adapter.opType;
+                                adapterNode.opName = "";
+                                adapterNode.dtype = graph.nodes[chosenPid].dtype;
+                                adapterNode.shape = graph.nodes[chosenPid].shape;
+                                adapterNode.parentIds = {currentPid};
+                                adapterNode.backend = adapter.backend;
+                                adapterNode.storageType = StorageType::TRANSIENT;
+
+                                adapterNode.view = compiled.nodesMap.count(currentPid) ? compiled.nodesMap.at(currentPid).view : graph.nodes[currentPid].view;
+                                if (adapter.opType == OpType::CONTIGUOUS)
+                                {
+                                    adapterNode.view.strides = TensorView::calcContiguousStrides(adapterNode.shape);
+                                    adapterNode.view.baseOffset = 0;
+                                }
+                                else if (adapter.opType == OpType::COPY_TO)
+                                {
+                                    adapterNode.view.baseOffset = 0;
+                                }
+
+                                if (adapterNode.id >= graph.nodes.size())
+                                    graph.nodes.resize(adapterNode.id + 1);
+                                graph.nodes[adapterNode.id] = adapterNode;
+
+                                insertedCopyNodes[adapterKey] = adapterNode.id;
+                                finalTopoWithCopies.push_back(adapterNode.id);
+
+                                compiled.refCounts[adapterNode.id]++;
+                                compiled.refCounts[currentPid]++;
+
+                                compiled.nodesMap[adapterNode.id] = adapterNode;
+                                compiled.logicalNodeMap[adapterNode.id] = compiled.logicalNodeMap.count(currentPid) ? compiled.logicalNodeMap[currentPid] : currentPid;
+
+                                std::string adapterHash = Hashing::structuralHash(adapterNode.id, graph, structHashMemo);
+                                uint32_t adapterHashId = getHashId(adapterHash);
+                                bestKernelAssignments[adapterHashId] = adapter.kernelId;
+                                bestAssignments[adapterHashId] = adapter.backend;
+                                
+                                std::vector<TensorNode> adapterInputs = {compiled.nodesMap.count(currentPid) ? compiled.nodesMap.at(currentPid) : graph.nodes[currentPid]};
+                                compiled.nodeCosts[adapterNode.id] = costModel.estimateCost(adapterNode, adapterInputs, graph, adapter.kernelId);
+
+                                currentPid = adapterNode.id;
+                            }
+                        }
+                    }
+                    
+                    mappedParentIds.push_back(currentPid);
+                    if (currentPid == chosenPid) {
+                        compiled.refCounts[chosenPid]++;
+                    }
                 }
             }
 
@@ -610,7 +660,7 @@ public:
             inst.kernelId = finalKernelId;
             inst.inputNodeIds = compiled.nodesMap.at(id).parentIds;
             inst.backend = assignedBackend;
-            inst.inplaceInputIndex = kEntry.inplace ? 0 : -1; // TODO: this is simplified: inplace kernels assume input 0 is the target
+            inst.inplaceInputIndex = kEntry.inplace ? 0 : -1;
 
             compiled.instructions.push_back(inst);
         }
@@ -765,7 +815,6 @@ private:
             targets.insert(targets.end(), fusionMap[nodeHash].begin(), fusionMap[nodeHash].end());
         }
 
-        // TODO: make a handler or something to get available backends
 #ifdef USE_CUDA
         std::vector<Backend> availableBackends = {Backend::CPU, Backend::CUDA};
 #else
@@ -777,7 +826,6 @@ private:
         {
             const auto &target = graph.nodes[targetId];
 
-            // Check parent planning status
             std::vector<std::vector<std::shared_ptr<BeamStrategy>>> parentBeamSets;
             bool anyParentMissing = false;
             for (uint32_t pid : target.parentIds)
@@ -803,8 +851,6 @@ private:
 
                     for (uint64_t kernelId : matchingKernels)
                     {
-                        std::string targetHash = Hashing::structuralHash(targetId, graph, structHashMemo);
-                        uint32_t targetHashId = getHashId(targetHash);
                         float cost = costModel.estimateCost(target, inputNodes, graph, kernelId);
 
                         auto strat = std::make_shared<BeamStrategy>();
@@ -921,7 +967,7 @@ private:
             }
         }
 
-        std::sort(candidates.begin(), candidates.end(), [](const std::shared_ptr<BeamStrategy> &a, const std::shared_ptr<BeamStrategy> &b)
+        std::sort(candidates.begin(), candidates.end(),[](const std::shared_ptr<BeamStrategy> &a, const std::shared_ptr<BeamStrategy> &b)
                   { return a->cost < b->cost; });
         if (candidates.size() > beamWidth)
         {

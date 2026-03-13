@@ -1,10 +1,11 @@
+// File: tensor_graphs_cpp/kernels/cpu/reference/triu/F32_ND.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
 inline bool matchTriuF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() == 2 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32;
+    return inputs.size() == 2 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && inputs[0].view.isContiguous() && output.view.isContiguous();
 }
 
 inline void runTriuF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
