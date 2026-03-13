@@ -12,8 +12,9 @@
 #include <algorithm>
 #include <cstring>
 #include <set>
+#include <queue>
 
-namespace dirty_cache_json // TODO: change case? not sure camelCase or PascalCase
+namespace dirty_cache_json
 {
     inline json dimToJson(const Dim &d)
     {
@@ -183,7 +184,7 @@ private:
         const Region &outRegion,
         const CompiledGraph &compiledGraph,
         const Graph &atomicGraph,
-        const std::vector<uint32_t> &atomicTopo) const
+        const std::vector<uint32_t> &topoIndex) const
     {
         const TensorNode &physNode = compiledGraph.nodesMap.at(physNodeId);
 
@@ -210,41 +211,63 @@ private:
 
         ShapePropagator prop;
 
-        for (auto it = atomicTopo.rbegin(); it != atomicTopo.rend(); ++it)
+        std::priority_queue<std::pair<uint32_t, uint32_t>> pq;
+        if (logOutId < topoIndex.size())
         {
-            uint32_t curr = *it;
-            if (reqRegions.count(curr) && !reqRegions[curr].empty())
+            pq.push({topoIndex[logOutId], logOutId});
+        }
+        else
+        {
+            pq.push({0, logOutId});
+        }
+        std::unordered_set<uint32_t> inQueue;
+        inQueue.insert(logOutId);
+
+        while (!pq.empty())
+        {
+            uint32_t curr = pq.top().second;
+            pq.pop();
+
+            if (logInputSet.count(curr) && curr != logOutId)
             {
+                continue;
+            }
 
-                if (logInputSet.count(curr) && curr != logOutId)
+            const TensorNode &atomicNode = atomicGraph.nodes[curr];
+            if (atomicNode.opType == OpType::INPUT)
+                continue;
+
+            Region currBox = reqRegions[curr][0];
+            for (size_t i = 1; i < reqRegions[curr].size(); ++i)
+            {
+                for (size_t d = 0; d < currBox.region.size() && d < reqRegions[curr][i].region.size(); ++d)
                 {
-                    continue;
+                    currBox.region[d].start = std::min(currBox.region[d].start, reqRegions[curr][i].region[d].start);
+                    currBox.region[d].stop = std::max(currBox.region[d].stop, reqRegions[curr][i].region[d].stop);
                 }
+            }
 
-                const TensorNode &atomicNode = atomicGraph.nodes[curr];
-                if (atomicNode.opType == OpType::INPUT)
-                    continue;
-
-                Region currBox = reqRegions[curr][0];
-                for (size_t i = 1; i < reqRegions[curr].size(); ++i)
+            auto parentReqs = prop.backward(atomicNode, atomicGraph, {currBox});
+            for (size_t i = 0; i < atomicNode.parentIds.size(); ++i)
+            {
+                uint32_t pid = atomicNode.parentIds[i];
+                if (i < parentReqs.size())
                 {
-                    for (size_t d = 0; d < currBox.region.size() && d < reqRegions[curr][i].region.size(); ++d)
+                    for (const auto &r : parentReqs[i])
                     {
-                        currBox.region[d].start = std::min(currBox.region[d].start, reqRegions[curr][i].region[d].start);
-                        currBox.region[d].stop = std::max(currBox.region[d].stop, reqRegions[curr][i].region[d].stop);
+                        reqRegions[pid].push_back(r);
                     }
-                }
-
-                auto parentReqs = prop.backward(atomicNode, atomicGraph, {currBox});
-                for (size_t i = 0; i < atomicNode.parentIds.size(); ++i)
-                {
-                    uint32_t pid = atomicNode.parentIds[i];
-                    if (i < parentReqs.size())
+                    if (inQueue.find(pid) == inQueue.end())
                     {
-                        for (const auto &r : parentReqs[i])
+                        if (pid < topoIndex.size())
                         {
-                            reqRegions[pid].push_back(r);
+                            pq.push({topoIndex[pid], pid});
                         }
+                        else
+                        {
+                            pq.push({0, pid});
+                        }
+                        inQueue.insert(pid);
                     }
                 }
             }
@@ -694,6 +717,12 @@ public:
         };
         visit(visit, rootId);
 
+        std::vector<uint32_t> topoIndex(graph.nodes.size(), 0);
+        for (uint32_t i = 0; i < atomicTopo.size(); ++i)
+        {
+            topoIndex[atomicTopo[i]] = i;
+        }
+
         ShapePropagator prop;
         for (uint32_t nodeId : atomicTopo)
         {
@@ -757,10 +786,41 @@ public:
 
         std::cout << "Caching dirty region propagation" << std::endl;
         uint32_t cacheIdx = 0;
+
+        struct KernelSelectionKey
+        {
+            uint32_t physNodeId;
+            std::vector<uint32_t> outShape;
+            std::vector<std::vector<uint32_t>> inShapes;
+
+            bool operator==(const KernelSelectionKey &o) const
+            {
+                return physNodeId == o.physNodeId && outShape == o.outShape && inShapes == o.inShapes;
+            }
+        };
+
+        struct KernelSelectionHash
+        {
+            size_t operator()(const KernelSelectionKey &k) const
+            {
+                size_t h = k.physNodeId;
+                for (auto v : k.outShape)
+                    h ^= (v + 0x9e3779b9 + (h << 6) + (h >> 2));
+                for (const auto &s : k.inShapes)
+                {
+                    for (auto v : s)
+                        h ^= (v + 0x9e3779b9 + (h << 6) + (h >> 2));
+                }
+                return h;
+            }
+        };
+
+        std::unordered_map<KernelSelectionKey, uint64_t, KernelSelectionHash> kernelSelectionMemo;
+
         while (true)
         {
             cacheIdx++;
-            std::cout << cacheIdx << "\r";
+            std::cout << cacheIdx << "\r" << std::flush;
             std::unordered_map<uint32_t, std::vector<Region>> inputRegions;
             bool allClean = true;
             for (size_t i = 0; i < perInput.size(); ++i)
@@ -817,7 +877,7 @@ public:
                             const Region &outRegion = outputRegions[rIdx];
                             TensorNode dummyOut = compiled.nodesMap.at(inst.nodeId);
 
-                            auto parentSlices = getBackwardSlicesAtomic(inst.nodeId, inst.inputNodeIds, outRegion, compiled, graph, atomicTopo);
+                            auto parentSlices = getBackwardSlicesAtomic(inst.nodeId, inst.inputNodeIds, outRegion, compiled, graph, topoIndex);
 
                             dummyOut.backend = inst.backend;
                             std::vector<uint32_t> outShape;
@@ -847,29 +907,47 @@ public:
                                 dummyInputs.push_back(dummyIn);
                             }
 
-                            std::unordered_map<uint32_t, uint32_t> dummyRefCounts;
-                            if (inst.inplaceInputIndex >= 0)
+                            KernelSelectionKey selKey;
+                            selKey.physNodeId = inst.nodeId;
+                            selKey.outShape = outShape;
+                            for (const auto &di : dummyInputs)
                             {
-                                dummyRefCounts[inst.inputNodeIds[inst.inplaceInputIndex]] = 1;
+                                selKey.inShapes.push_back(di.shape);
                             }
-
-                            std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
-                                dummyOut.opType, dummyOut.opName, inst.backend, dummyInputs, dummyOut, &dummyRefCounts);
 
                             uint64_t selectedKernel = inst.kernelId;
-                            if (!matchingKernels.empty())
+                            auto memIt = kernelSelectionMemo.find(selKey);
+                            if (memIt != kernelSelectionMemo.end())
                             {
-                                float bestCost = std::numeric_limits<float>::infinity();
-                                for (uint64_t kId : matchingKernels)
+                                selectedKernel = memIt->second;
+                            }
+                            else
+                            {
+                                std::unordered_map<uint32_t, uint32_t> dummyRefCounts;
+                                if (inst.inplaceInputIndex >= 0)
                                 {
-                                    float c = costModel.estimateCost(dummyOut, dummyInputs, graph, kId);
-                                    if (c < bestCost)
+                                    dummyRefCounts[inst.inputNodeIds[inst.inplaceInputIndex]] = 1;
+                                }
+
+                                std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
+                                    dummyOut.opType, dummyOut.opName, inst.backend, dummyInputs, dummyOut, &dummyRefCounts);
+
+                                if (!matchingKernels.empty())
+                                {
+                                    float bestCost = std::numeric_limits<float>::infinity();
+                                    for (uint64_t kId : matchingKernels)
                                     {
-                                        bestCost = c;
-                                        selectedKernel = kId;
+                                        float c = costModel.estimateCost(dummyOut, dummyInputs, graph, kId);
+                                        if (c < bestCost)
+                                        {
+                                            bestCost = c;
+                                            selectedKernel = kId;
+                                        }
                                     }
                                 }
+                                kernelSelectionMemo[selKey] = selectedKernel;
                             }
+
                             if (selectedKernel == inst.kernelId)
                             {
                                 std::string opName;
