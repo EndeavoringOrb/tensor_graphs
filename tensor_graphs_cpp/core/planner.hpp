@@ -550,7 +550,7 @@ public:
                             uint32_t adapterHashId = getHashId(adapterHash);
                             bestKernelAssignments[adapterHashId] = adapter.kernelId;
                             bestAssignments[adapterHashId] = adapter.backend;
-                            std::vector<TensorNode> adapterInputs = { graph.nodes[currentPid] };
+                            std::vector<TensorNode> adapterInputs = {graph.nodes[currentPid]};
                             compiled.nodeCosts[adapterNode.id] = costModel.estimateCost(adapterNode, adapterInputs, graph, adapter.kernelId);
 
                             currentPid = adapterNode.id;
@@ -718,10 +718,9 @@ private:
             {
                 for (uint32_t altNode : fusionMap[hash])
                 {
-                    for (uint32_t pid : graph.nodes[altNode].parentIds)
-                    {
-                        self(self, pid);
-                    }
+                    // Recursively visit the alternative node so it pushes itself
+                    // and its ancestors to the topological sort order
+                    self(self, altNode);
                 }
             }
             order.push_back(node);
@@ -960,25 +959,32 @@ inline std::unordered_map<uint32_t, std::vector<Region>> propagateDirtyRegionsAt
 
     for (uint32_t nodeId : topo)
     {
-        if (nodeId >= graph.nodes.size()) continue;
+        if (nodeId >= graph.nodes.size())
+            continue;
         const TensorNode &node = graph.nodes[nodeId];
-        if (node.opType == OpType::INPUT) continue;
+        if (node.opType == OpType::INPUT)
+            continue;
 
         std::vector<std::vector<Region>> parentRegions;
         bool anyParentDirty = false;
         for (uint32_t pid : node.parentIds)
         {
             auto it = allRegions.find(pid);
-            if (it != allRegions.end() && !it->second.empty()) {
+            if (it != allRegions.end() && !it->second.empty())
+            {
                 parentRegions.push_back(it->second);
                 anyParentDirty = true;
-            } else {
+            }
+            else
+            {
                 parentRegions.push_back({});
             }
         }
-        
-        if (anyParentDirty) allRegions[nodeId] = propagator.forward(node, graph, parentRegions);
-        else allRegions[nodeId] = {};
+
+        if (anyParentDirty)
+            allRegions[nodeId] = propagator.forward(node, graph, parentRegions);
+        else
+            allRegions[nodeId] = {};
     }
     return allRegions;
 }

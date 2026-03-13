@@ -694,6 +694,20 @@ public:
         };
         visit(visit, rootId);
 
+        ShapePropagator prop;
+        for (uint32_t nodeId : atomicTopo)
+        {
+            if (nodeId < graph.nodes.size())
+            {
+                prop.inferShape(nodeId, graph);
+                if (graph.nodes[nodeId].view.shape.empty() && !graph.nodes[nodeId].shape.empty())
+                {
+                    graph.nodes[nodeId].view.shape = graph.nodes[nodeId].shape;
+                    graph.nodes[nodeId].view.strides = TensorView::calcContiguousStrides(graph.nodes[nodeId].shape);
+                }
+            }
+        }
+
         struct InputRegionSet
         {
             uint32_t nodeId;
@@ -867,7 +881,7 @@ public:
                                     opName = toString(dummyOut.opType);
                                 }
 #ifdef DEBUG
-                                std::cout << "[Session.ensureCacheCoverage] [" << key << "] [Node " << inst.nodeId << "] [Slice " << rIdx << "][" << opName << "] Could not find better kernel." << std::endl;
+                                std::cout << "[Session.ensureCacheCoverage] [" << key << "] [Node " << inst.nodeId << "][Slice " << rIdx << "][" << opName << "] Could not find better kernel." << std::endl;
 #endif
                             }
                             regionKernels.push_back(selectedKernel);
