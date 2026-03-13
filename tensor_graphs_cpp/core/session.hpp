@@ -634,6 +634,23 @@ public:
         if (inputOptions.empty())
             return;
 
+        // Generate atomic topo sort
+        std::vector<uint32_t> atomicTopo;
+        std::unordered_set<uint32_t> visited;
+        auto visit = [&](auto &self, uint32_t node) -> void
+        {
+            if (visited.count(node))
+                return;
+            visited.insert(node);
+            if (node < graph.nodes.size())
+            {
+                for (uint32_t pid : graph.nodes[node].parentIds)
+                    self(self, pid);
+            }
+            atomicTopo.push_back(node);
+        };
+        visit(visit, rootId);
+
         // 2. Generate all region combinations for each input
         //    Each input gets a list of possible region lists (either empty for clean, or 1 box)
         struct InputRegionSet
@@ -714,17 +731,32 @@ public:
                 if (dirtyCache.find(key) == dirtyCache.end())
                 {
                     // Forward propagate
-                    auto allRegions = propagateDirtyRegions(compiled, graph, inputRegions);
+                    auto atomicRegions = propagateDirtyRegionsAtomic(atomicTopo, graph, inputRegions);
+
+                    // Map to PHYSICAL regions
+                    std::unordered_map<uint32_t, std::vector<Region>> physicalRegions;
+                    for (const auto& pair : compiled.logicalNodeMap) {
+                        uint32_t physId = pair.first;
+                        uint32_t logId = pair.second;
+                        if (atomicRegions.count(logId)) {
+                            physicalRegions[physId] = atomicRegions.at(logId);
+                        }
+                    }
+                    for (uint32_t inId : inputNodeIds) {
+                        if (inputRegions.count(inId)) {
+                            physicalRegions[inId] = inputRegions.at(inId);
+                        }
+                    }
 
                     // Build bucket
                     DirtyBucket bucket;
-                    bucket.regions = allRegions;
+                    bucket.regions = physicalRegions;
 
                     // Backward propagate input slices for each dirty non-input node
                     for (const OpInstruction &inst : compiled.instructions)
                     {
-                        auto regIt = allRegions.find(inst.nodeId);
-                        if (regIt == allRegions.end() || regIt->second.empty())
+                        auto regIt = physicalRegions.find(inst.nodeId);
+                        if (regIt == physicalRegions.end() || regIt->second.empty())
                             continue;
 
                         const auto &outputRegions = regIt->second;
@@ -734,7 +766,9 @@ public:
                         for (size_t rIdx = 0; rIdx < outputRegions.size(); ++rIdx)
                         {
                             const Region &outRegion = outputRegions[rIdx];
-                            auto parentSlices = getInputSlices(graph, inst.nodeId, {outRegion});
+                            TensorNode dummyOut = compiled.nodesMap.at(inst.nodeId);
+                            ShapePropagator prop;
+                            auto parentSlices = prop.backward(dummyOut, graph, {outRegion});
                             perOutputRegionSlices.push_back(parentSlices);
 
                             // --- Select Bucket-Specific Kernel ---

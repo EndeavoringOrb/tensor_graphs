@@ -242,10 +242,6 @@ public:
                         {
                             slicedView.shape[d] = inputSlice.region[d].stop - inputSlice.region[d].start;
                         }
-
-                        // Recalculate strides for the sliced shape
-                        slicedView.strides = TensorView::calcContiguousStrides(slicedView.shape);
-
                         kernelInputs.push_back(inBuf.arena_ptr + slicedView.baseOffset);
                         kernelInViews.push_back(slicedView);
                     }
@@ -276,8 +272,6 @@ public:
                     {
                         outView.shape[d] = outRegion.region[d].stop - outRegion.region[d].start;
                     }
-
-                    outView.strides = TensorView::calcContiguousStrides(outView.shape);
                 }
 
                 kernelOutputs.push_back(outBuf.arena_ptr + outView.baseOffset);

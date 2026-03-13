@@ -422,6 +422,7 @@ public:
             // we know which physical node was actually chosen
             bestSelectedNodes[hLogId] = strat->selectedNodeId;
 
+            compiled.logicalNodeMap[strat->selectedNodeId] = strat->nodeId;
             compiled.nodeCosts[strat->selectedNodeId] = strat->nodeCost;
 
             for (size_t i = 0; i < strat->parentStrategies.size(); ++i)
@@ -543,6 +544,7 @@ public:
                             compiled.refCounts[currentPid]++;
 
                             compiled.nodesMap[adapterNode.id] = adapterNode;
+                            compiled.logicalNodeMap[adapterNode.id] = compiled.logicalNodeMap.count(currentPid) ? compiled.logicalNodeMap[currentPid] : currentPid;
 
                             std::string adapterHash = Hashing::structuralHash(adapterNode.id, graph, structHashMemo);
                             uint32_t adapterHashId = getHashId(adapterHash);
@@ -948,44 +950,35 @@ private:
     }
 };
 
-inline std::unordered_map<uint32_t, std::vector<Region>> propagateDirtyRegions(
-    const CompiledGraph &compiled,
+inline std::unordered_map<uint32_t, std::vector<Region>> propagateDirtyRegionsAtomic(
+    const std::vector<uint32_t> &topo,
     const Graph &graph,
     const std::unordered_map<uint32_t, std::vector<Region>> &inputDirtyRegions)
 {
     ShapePropagator propagator;
     std::unordered_map<uint32_t, std::vector<Region>> allRegions(inputDirtyRegions);
 
-    for (const OpInstruction &inst : compiled.instructions)
+    for (uint32_t nodeId : topo)
     {
-        const TensorNode &node = graph.nodes[inst.nodeId];
+        if (nodeId >= graph.nodes.size()) continue;
+        const TensorNode &node = graph.nodes[nodeId];
+        if (node.opType == OpType::INPUT) continue;
 
-        // Gather parent regions
         std::vector<std::vector<Region>> parentRegions;
         bool anyParentDirty = false;
         for (uint32_t pid : node.parentIds)
         {
             auto it = allRegions.find(pid);
-            if (it != allRegions.end() && !it->second.empty())
-            {
+            if (it != allRegions.end() && !it->second.empty()) {
                 parentRegions.push_back(it->second);
                 anyParentDirty = true;
-            }
-            else
-            {
+            } else {
                 parentRegions.push_back({});
             }
         }
-
-        if (anyParentDirty)
-        {
-            allRegions[inst.nodeId] = propagator.forward(node, graph, parentRegions);
-        }
-        else
-        {
-            allRegions[inst.nodeId] = {};
-        }
+        
+        if (anyParentDirty) allRegions[nodeId] = propagator.forward(node, graph, parentRegions);
+        else allRegions[nodeId] = {};
     }
-
     return allRegions;
 }

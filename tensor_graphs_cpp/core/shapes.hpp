@@ -160,6 +160,7 @@ struct ShapePropagator
         case OpType::CAST:
         case OpType::TRIU:
         case OpType::COPY_TO:
+        case OpType::CONTIGUOUS:
         {
             graph.nodes[nodeId].shape = graph.nodes[graph.nodes[nodeId].parentIds[0]].shape;
             break;
@@ -722,6 +723,7 @@ struct ShapePropagator
         case OpType::CAST:
         case OpType::TRIU:
         case OpType::COPY_TO:
+        case OpType::CONTIGUOUS:
             return forwardElementwise(node, graph, parentRegions);
         case OpType::DOT:
             return forwardDot(node, graph, parentRegions);
@@ -764,6 +766,7 @@ struct ShapePropagator
         case OpType::CAST:
         case OpType::TRIU:
         case OpType::COPY_TO:
+        case OpType::CONTIGUOUS:
             return backwardElementwise(node, outputRegions);
         case OpType::DOT:
             return backwardDot(node, graph, outputRegions);

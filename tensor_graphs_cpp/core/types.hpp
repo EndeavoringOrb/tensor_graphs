@@ -579,6 +579,7 @@ struct CompiledGraph
     std::unordered_map<uint32_t, uint32_t> refCounts;
     std::unordered_map<uint32_t, TensorNode> nodesMap;
     std::unordered_map<uint32_t, float> nodeCosts;
+    std::unordered_map<uint32_t, uint32_t> logicalNodeMap;
 };
 
 struct AdapterOp
@@ -691,15 +692,20 @@ inline void to_json(json &j, const CompiledGraph &cg)
     for (const auto &kv : cg.nodesMap)
         nodesMap[std::to_string(kv.first)] = kv.second;
 
-    json nodeCosts = json::object(); // Add this
+    json nodeCosts = json::object();
     for (const auto &kv : cg.nodeCosts)
         nodeCosts[std::to_string(kv.first)] = kv.second;
+
+    json logicalMap = json::object();
+    for (const auto &kv : cg.logicalNodeMap)
+        logicalMap[std::to_string(kv.first)] = kv.second;
 
     j = json{
         {"instructions", cg.instructions},
         {"refCounts", refCounts},
         {"nodesMap", nodesMap},
-        {"nodeCosts", nodeCosts}};
+        {"nodeCosts", nodeCosts},
+        {"logicalNodeMap", logicalMap}};
 }
 
 inline void from_json(const json &j, CompiledGraph &cg)
@@ -720,10 +726,17 @@ inline void from_json(const json &j, CompiledGraph &cg)
             cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
     }
 
-    cg.nodeCosts.clear(); // Add this
+    cg.nodeCosts.clear();
     if (j.contains("nodeCosts"))
     {
         for (const auto &item : j.at("nodeCosts").items())
             cg.nodeCosts[std::stoul(item.key())] = item.value().get<float>();
+    }
+
+    cg.logicalNodeMap.clear();
+    if (j.contains("logicalNodeMap"))
+    {
+        for (const auto &item : j.at("logicalNodeMap").items())
+            cg.logicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
     }
 }
