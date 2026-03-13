@@ -704,6 +704,7 @@ public:
                 {
                     graph.nodes[nodeId].view.shape = graph.nodes[nodeId].shape;
                     graph.nodes[nodeId].view.strides = TensorView::calcContiguousStrides(graph.nodes[nodeId].shape);
+                    graph.nodes[nodeId].view.dtype = graph.nodes[nodeId].dtype;
                 }
             }
         }

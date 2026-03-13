@@ -633,6 +633,7 @@ private:
             {
                 graph.nodes[nodeId].view.shape = graph.nodes[nodeId].shape;
                 graph.nodes[nodeId].view.strides = TensorView::calcContiguousStrides(graph.nodes[nodeId].shape);
+                graph.nodes[nodeId].view.dtype = graph.nodes[nodeId].dtype;
             }
         }
     }
@@ -718,8 +719,6 @@ private:
             {
                 for (uint32_t altNode : fusionMap[hash])
                 {
-                    // Recursively visit the alternative node so it pushes itself
-                    // and its ancestors to the topological sort order
                     self(self, altNode);
                 }
             }
@@ -939,10 +938,7 @@ private:
 
         if (candidates.empty())
         {
-            const auto &node = graph.nodes[nodeId];
-            std::stringstream ss;
-            ss << "[Planner.planNodeIterative] ERROR: Node " << nodeToString(node, graph) << std::endl;
-            throw std::runtime_error(ss.str());
+            return;
         }
 
         memo[nodeHash] = candidates;
