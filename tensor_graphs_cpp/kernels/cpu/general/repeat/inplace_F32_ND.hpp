@@ -8,8 +8,6 @@ inline bool matchRepeatF32_Inplace_ND(const std::vector<TensorNode> &inputs, con
         return false;
     if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
-    if (inputs[0].shape != output.shape)
-        return false;
     if (inputs[0].view.baseOffset != output.view.baseOffset)
         return false;
     if (inputs[0].storageType == StorageType::PERSISTENT)

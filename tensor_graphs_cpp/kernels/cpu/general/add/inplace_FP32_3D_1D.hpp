@@ -87,21 +87,21 @@ inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     uint32_t reshaped = graph.reshape(id1D, shape_node);
 
     // 2. Repeat axis 0 (Batch)
-    int32_t b_repeats[] = {(int32_t)shape3D[0]};
-    int32_t b_axis[] = {0};
-    uint32_t rep_b = graph.constant({1}, b_repeats, DType::INT32);
-    uint32_t ax_b = graph.constant({1}, b_axis, DType::INT32);
+        int32_t b_repeats[] = {(int32_t)shape3D[0]};
+        int32_t b_axis[] = {0};
+        uint32_t rep_b = graph.constant({1}, b_repeats, DType::INT32);
+        uint32_t ax_b = graph.constant({1}, b_axis, DType::INT32);
     uint32_t repeated_b = graph.repeat(reshaped, rep_b, ax_b);
 
     // 3. Repeat axis 1 (Sequence)
-    int32_t s_repeats[] = {(int32_t)shape3D[1]};
-    int32_t s_axis[] = {1};
-    uint32_t rep_s = graph.constant({1}, s_repeats, DType::INT32);
-    uint32_t ax_s = graph.constant({1}, s_axis, DType::INT32);
+        int32_t s_repeats[] = {(int32_t)shape3D[1]};
+        int32_t s_axis[] = {1};
+        uint32_t rep_s = graph.constant({1}, s_repeats, DType::INT32);
+        uint32_t ax_s = graph.constant({1}, s_axis, DType::INT32);
     uint32_t expanded = graph.repeat(repeated_b, rep_s, ax_s);
 
     // 4. Final Add
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL_INPLACE("Add_3D_1D_inplace", 2, Backend::CPU, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true});
+REGISTER_KERNEL_INPLACE("Add_3D_1D_inplace", 2, Backend::CPU, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace, {DType::FLOAT32, DType::FLOAT32}, {{1, 128, 640}, {640}}, {true, true});

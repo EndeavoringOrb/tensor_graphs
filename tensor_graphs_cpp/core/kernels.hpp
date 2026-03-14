@@ -123,8 +123,6 @@ public:
 
             if (entry.opType != op || entry.backend != backend)
                 continue;
-            if (op == OpType::FUSED && entry.opName != opName)
-                continue;
 
             if (entry.match(inputs, output, refCounts))
             {
@@ -166,9 +164,6 @@ public:
             ss << std::flush;
             std::string out = ss.str();
             std::cout << out;
-            if (output.shape.size() == 0) {
-                int a = 5;
-            }
         }
         return matches;
     }

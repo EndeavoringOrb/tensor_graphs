@@ -69,7 +69,7 @@ private:
             for (uint64_t k : kernels)
             {
                 float c = costModel.estimateCost(output, inputsList, graph, k);
-                if (c < bestCost)
+                if (c < bestCost || bestK == UINT64_MAX)
                 {
                     bestCost = c;
                     bestK = k;

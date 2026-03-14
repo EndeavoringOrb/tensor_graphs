@@ -938,7 +938,7 @@ public:
                                     for (uint64_t kId : matchingKernels)
                                     {
                                         float c = costModel.estimateCost(dummyOut, dummyInputs, graph, kId);
-                                        if (c < bestCost)
+                                        if (c < bestCost || selectedKernel == UINT64_MAX)
                                         {
                                             bestCost = c;
                                             selectedKernel = kId;
@@ -950,7 +950,6 @@ public:
 
                             if (selectedKernel == UINT64_MAX)
                             {
-                                std::stringstream ss;
                                 std::string opName;
                                 if (dummyOut.opType == OpType::FUSED)
                                 {
@@ -960,8 +959,23 @@ public:
                                 {
                                     opName = toString(dummyOut.opType);
                                 }
-                                ss << "[Session.ensureCacheCoverage][" << key << "][Node " << inst.nodeId << "][Slice " << rIdx << "][" << opName << "] Could not find kernel.";
+                                std::stringstream ss;
+                                ss << "\n[Session.ensureCacheCoverage] CRITICAL: Could not find a kernel matching the dirty slice requirements.\n";
+                                ss << "Cache Key: " << key << "\n";
+                                ss << "Physical Node ID: " << inst.nodeId << ", Slice Index: " << rIdx << ", Name: " << opName << "\n";
+
+                                ss << "--- Target Output (Sliced) ---\n";
+                                ss << toString(dummyOut, graph);
+
+                                for (size_t i = 0; i < dummyInputs.size(); ++i)
+                                {
+                                    ss << "\n--- Input " << i << " (Sliced) ---\n";
+                                    ss << toString(dummyInputs[i], graph);
+                                }
+
+                                ss << "\n------------------------------------------------\n";
                                 std::string out = ss.str();
+                                std::cerr << out << std::endl;
                                 throw std::runtime_error(out);
                             }
                             regionKernels.push_back(selectedKernel);
