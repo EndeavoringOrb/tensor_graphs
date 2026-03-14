@@ -14,7 +14,9 @@ inline bool matchReshapeInplaceND(const std::vector<TensorNode> &inputs, const T
     if (inputs[0].storageType == StorageType::PERSISTENT)
         return false;
     auto it = refCounts.find(inputs[0].id);
-    if (it == refCounts.end() || it->second != 1)
+    if (it == refCounts.end())
+        return false;
+    if (it->second != 1)
         return false;
     return countElements(inputs[0].shape) == countElements(output.shape);
 }

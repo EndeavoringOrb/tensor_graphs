@@ -319,29 +319,57 @@ public:
         std::cout << "[Planner.plan] inferring shapes for augmented graph..." << std::endl;
         inferShapes(sortedNodes, graph);
 
-        std::unordered_map<uint32_t, uint32_t> estimatedRefCounts;
-        for (uint32_t id : topo)
-        {
-            for (uint32_t pid : graph.nodes[id].parentIds)
-            {
-                estimatedRefCounts[pid]++;
-            }
-        }
-        estimatedRefCounts[rootId] = 1;
+        std::unordered_map<std::string, uint32_t> canonicalNode;
+        std::unordered_map<uint32_t, uint32_t> nodeToCanonical;
 
         std::unordered_set<uint32_t> topoSet(topo.begin(), topo.end());
+
+        for (uint32_t id : sortedNodes)
+        {
+            std::string hash = Hashing::structuralHash(id, graph, structHashMemo);
+            if (canonicalNode.find(hash) == canonicalNode.end())
+            {
+                canonicalNode[hash] = id;
+            }
+            nodeToCanonical[id] = canonicalNode[hash];
+        }
+
+        std::unordered_map<uint32_t, uint32_t> canonicalRefCounts;
+
+        for (uint32_t id : topo)
+        {
+            if (nodeToCanonical[id] == id)
+            {
+                for (uint32_t pid : graph.nodes[id].parentIds)
+                {
+                    canonicalRefCounts[nodeToCanonical[pid]]++;
+                }
+            }
+        }
+
         for (uint32_t id : sortedNodes)
         {
             if (topoSet.count(id) == 0)
             {
-                for (uint32_t pid : graph.nodes[id].parentIds)
+                if (nodeToCanonical[id] == id)
                 {
-                    if (topoSet.count(pid) == 0)
+                    for (uint32_t pid : graph.nodes[id].parentIds)
                     {
-                        estimatedRefCounts[pid]++;
+                        if (topoSet.count(pid) == 0)
+                        {
+                            canonicalRefCounts[nodeToCanonical[pid]]++;
+                        }
                     }
                 }
             }
+        }
+
+        canonicalRefCounts[nodeToCanonical[rootId]]++;
+
+        std::unordered_map<uint32_t, uint32_t> estimatedRefCounts;
+        for (uint32_t id : sortedNodes)
+        {
+            estimatedRefCounts[id] = canonicalRefCounts[nodeToCanonical[id]];
         }
 
         std::unordered_map<std::string, std::vector<std::shared_ptr<BeamStrategy>>> memo;

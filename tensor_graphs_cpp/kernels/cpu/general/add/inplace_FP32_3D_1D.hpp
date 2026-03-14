@@ -41,7 +41,9 @@ inline bool matchAddFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, co
     if (inputs[0].storageType == StorageType::PERSISTENT)
         return false;
     auto it = refCounts.find(inputs[0].id);
-    if (it == refCounts.end() || it->second != 1)
+    if (it == refCounts.end())
+        return false;
+    if (it->second != 1)
         return false;
 
     return true;
