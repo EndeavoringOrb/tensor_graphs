@@ -200,10 +200,13 @@ private:
 
         uint32_t logOutId = compiledGraph.logicalNodeMap.at(physNodeId);
 
-        std::unordered_set<uint32_t> logInputSet;
+        std::unordered_map<uint32_t, std::string> localMemo;
+
+        std::unordered_set<std::string> logInputHashes;
         for (uint32_t pid : physInputIds)
         {
-            logInputSet.insert(compiledGraph.logicalNodeMap.at(pid));
+            uint32_t logId = compiledGraph.logicalNodeMap.at(pid);
+            logInputHashes.insert(Hashing::structuralHash(logId, atomicGraph, localMemo));
         }
 
         std::unordered_map<uint32_t, std::vector<Region>> reqRegions;
@@ -228,7 +231,8 @@ private:
             uint32_t curr = pq.top().second;
             pq.pop();
 
-            if (logInputSet.count(curr) && curr != logOutId)
+            std::string currHash = Hashing::structuralHash(curr, atomicGraph, localMemo);
+            if (logInputHashes.count(currHash) && curr != logOutId)
             {
                 continue;
             }
@@ -277,25 +281,37 @@ private:
         for (size_t pIdx = 0; pIdx < physInputIds.size(); ++pIdx)
         {
             uint32_t logPid = compiledGraph.logicalNodeMap.at(physInputIds[pIdx]);
+            std::string targetHash = Hashing::structuralHash(logPid, atomicGraph, localMemo);
 
-            auto it = reqRegions.find(logPid);
-            if (it == reqRegions.end() || it->second.empty())
+            std::vector<Region> combinedRegions;
+            for (const auto &pair : reqRegions)
+            {
+                if (Hashing::structuralHash(pair.first, atomicGraph, localMemo) == targetHash)
+                {
+                    for (const auto &r : pair.second)
+                    {
+                        combinedRegions.push_back(r);
+                    }
+                }
+            }
+
+            if (combinedRegions.empty())
             {
                 parentSlices[pIdx] = {};
             }
-            else if (it->second.size() == 1)
+            else if (combinedRegions.size() == 1)
             {
-                parentSlices[pIdx] = it->second;
+                parentSlices[pIdx] = combinedRegions;
             }
             else
             {
-                Region bbox = it->second[0];
-                for (size_t i = 1; i < it->second.size(); ++i)
+                Region bbox = combinedRegions[0];
+                for (size_t i = 1; i < combinedRegions.size(); ++i)
                 {
-                    for (size_t d = 0; d < bbox.region.size() && d < it->second[i].region.size(); ++d)
+                    for (size_t d = 0; d < bbox.region.size() && d < combinedRegions[i].region.size(); ++d)
                     {
-                        bbox.region[d].start = std::min(bbox.region[d].start, it->second[i].region[d].start);
-                        bbox.region[d].stop = std::max(bbox.region[d].stop, it->second[i].region[d].stop);
+                        bbox.region[d].start = std::min(bbox.region[d].start, combinedRegions[i].region[d].start);
+                        bbox.region[d].stop = std::max(bbox.region[d].stop, combinedRegions[i].region[d].stop);
                     }
                 }
                 parentSlices[pIdx] = {bbox};
@@ -975,7 +991,7 @@ public:
 
                                 ss << "\n------------------------------------------------\n";
                                 std::string out = ss.str();
-                                std::cerr << out << std::endl;
+                                std::cerr << out << std::endl << std::flush;
                                 throw std::runtime_error(out);
                             }
                             regionKernels.push_back(selectedKernel);

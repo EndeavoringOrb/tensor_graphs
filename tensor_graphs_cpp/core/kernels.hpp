@@ -129,6 +129,7 @@ public:
                 matches.push_back(entry.uid);
             }
         }
+#ifdef DEBUG
         if (matches.size() == 0)
         {
             std::stringstream ss;
@@ -165,6 +166,7 @@ public:
             std::string out = ss.str();
             std::cout << out;
         }
+#endif
         return matches;
     }
 
