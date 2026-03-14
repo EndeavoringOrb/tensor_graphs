@@ -243,6 +243,8 @@ public:
         uint32_t topoIdx = 0;
         uint32_t rewrites = 0;
         uint32_t fusionMatches = 0;
+        ShapePropagator prop;
+
         for (auto it = topo.rbegin(); it != topo.rend(); ++it)
         {
             topoIdx++;
@@ -259,11 +261,13 @@ public:
                     fusionMap[hash].push_back(eqId);
                 }
 
+                prop.inferShapeRecursive(eqId, graph);
+
                 OpType eqOpType = graph.nodes[eqId].opType;
-                auto it = patternsByRootOp.find(eqOpType);
-                if (it != patternsByRootOp.end())
+                auto patIt = patternsByRootOp.find(eqOpType);
+                if (patIt != patternsByRootOp.end())
                 {
-                    for (const uint32_t fpIdx : it->second)
+                    for (const uint32_t fpIdx : patIt->second)
                     {
                         const FusedPattern &fp = fusedPatterns[fpIdx];
                         std::unordered_map<uint32_t, uint32_t> binding;
@@ -541,14 +545,16 @@ public:
                     // If the parent's assigned backend differs from this node's backend, we MUST dynamically insert adapters.
                     uint32_t currentPid = chosenPid;
                     Backend parentBackend = compiled.nodesMap.count(chosenPid) ? compiled.nodesMap.at(chosenPid).backend : graph.nodes[chosenPid].backend;
-                    
+
                     if (parentBackend != mappedNode.backend)
                     {
                         auto fallbackChains = getAdapterChains(compiled.nodesMap.count(chosenPid) ? compiled.nodesMap.at(chosenPid) : graph.nodes[chosenPid], parentBackend, mappedNode.backend, graph, compiled.refCounts, costModel);
-                        if (fallbackChains.empty()) {
+                        if (fallbackChains.empty())
+                        {
                             throw std::runtime_error("No valid adapter chain found during DAG safety fallback");
                         }
-                        std::sort(fallbackChains.begin(), fallbackChains.end(),[](const auto &a, const auto &b) { return a.cost < b.cost; });
+                        std::sort(fallbackChains.begin(), fallbackChains.end(), [](const auto &a, const auto &b)
+                                  { return a.cost < b.cost; });
                         const auto &bestChain = fallbackChains[0];
 
                         for (const auto &adapter : bestChain.ops)
@@ -599,7 +605,7 @@ public:
                                 uint32_t adapterHashId = getHashId(adapterHash);
                                 bestKernelAssignments[adapterHashId] = adapter.kernelId;
                                 bestAssignments[adapterHashId] = adapter.backend;
-                                
+
                                 std::vector<TensorNode> adapterInputs = {compiled.nodesMap.count(currentPid) ? compiled.nodesMap.at(currentPid) : graph.nodes[currentPid]};
                                 compiled.nodeCosts[adapterNode.id] = costModel.estimateCost(adapterNode, adapterInputs, graph, adapter.kernelId);
 
@@ -607,9 +613,10 @@ public:
                             }
                         }
                     }
-                    
+
                     mappedParentIds.push_back(currentPid);
-                    if (currentPid == chosenPid) {
+                    if (currentPid == chosenPid)
+                    {
                         compiled.refCounts[chosenPid]++;
                     }
                 }
@@ -967,7 +974,7 @@ private:
             }
         }
 
-        std::sort(candidates.begin(), candidates.end(),[](const std::shared_ptr<BeamStrategy> &a, const std::shared_ptr<BeamStrategy> &b)
+        std::sort(candidates.begin(), candidates.end(), [](const std::shared_ptr<BeamStrategy> &a, const std::shared_ptr<BeamStrategy> &b)
                   { return a->cost < b->cost; });
         if (candidates.size() > beamWidth)
         {

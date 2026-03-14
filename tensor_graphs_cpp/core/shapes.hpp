@@ -115,6 +115,29 @@ inline Region unravelFlatBounds(uint64_t flat_start, uint64_t flat_stop, const s
 
 struct ShapePropagator
 {
+    void inferShapeRecursive(uint32_t nodeId, Graph &graph)
+    {
+        if (nodeId >= graph.nodes.size())
+            return;
+
+        // If shape is already populated (and it's not a RESHAPE which sometimes needs re-eval), skip
+        if (!graph.nodes[nodeId].shape.empty() && graph.nodes[nodeId].opType != OpType::RESHAPE)
+            return;
+
+        // Input nodes are the base case and should already be statically sized
+        if (graph.nodes[nodeId].opType == OpType::INPUT)
+            return;
+
+        // Ensure all parents have their shapes inferred first
+        for (uint32_t pid : graph.nodes[nodeId].parentIds)
+        {
+            inferShapeRecursive(pid, graph);
+        }
+
+        // Infer the shape of the current node
+        inferShape(nodeId, graph);
+    }
+
     void inferShape(uint32_t nodeId, Graph &graph)
     {
         if (!graph.nodes[nodeId].shape.empty() && graph.nodes[nodeId].opType != OpType::RESHAPE)
