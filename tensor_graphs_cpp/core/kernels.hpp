@@ -154,13 +154,13 @@ public:
             if (inputs.empty())
                 throw std::runtime_error("THIS SHOULD NOT HAPPEN");
             auto it = refCounts.find(inputs[0].id);
-            if (it != refCounts.end() || it->second != 1)
+            if (it != refCounts.end())
             {
                 ss << "  " << it->first << " -> " << it->second << "\n";
             }
             else
             {
-                ss << "no ref counts\n";
+                ss << "no ref count\n";
             }
             ss << std::flush;
             std::string out = ss.str();
