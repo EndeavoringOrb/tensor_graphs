@@ -6,7 +6,7 @@
  * KERNEL: MUL F32 ND (Generic ND, Contiguous)
  */
 
-inline bool matchMulF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchMulF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 2)
         return false;

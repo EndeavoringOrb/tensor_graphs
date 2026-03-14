@@ -10,7 +10,7 @@
  * This kernel replaces the sequence: RESHAPE(1D) -> REPEAT(axis 0) -> REPEAT(axis 1) -> ADD
  */
 
-inline bool matchAddFP32_3D_1D(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchAddFP32_3D_1D(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 2)
         return false;
@@ -99,4 +99,4 @@ inline uint32_t refFactoryAdd3D_1D(const std::vector<uint32_t> &inputs, Graph &g
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL("Add_3D_1D", 2, Backend::CPU, matchAddFP32_3D_1D, runAddFP32_3D_1D, refFactoryAdd3D_1D, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {false, false});
+REGISTER_KERNEL("Add_3D_1D", 2, Backend::CPU, matchAddFP32_3D_1D, runAddFP32_3D_1D, refFactoryAdd3D_1D, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true});

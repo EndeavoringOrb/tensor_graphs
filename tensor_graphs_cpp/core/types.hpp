@@ -13,6 +13,22 @@
 #include <json.hpp>
 using json = nlohmann::json;
 
+inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape, const std::vector<int64_t> &strides)
+{
+    uint64_t stridedIndex = 0;
+    uint64_t temp = flatIndex;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
+    {
+        if (shape[i] > 1)
+        {
+            uint64_t coord = temp % shape[i];
+            stridedIndex += coord * strides[i];
+            temp /= shape[i];
+        }
+    }
+    return stridedIndex;
+}
+
 uint64_t countElements(std::vector<uint32_t> shape)
 {
     uint64_t count = 1;

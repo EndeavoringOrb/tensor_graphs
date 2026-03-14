@@ -7,7 +7,7 @@
  * Performs: Out[b, m, n] = sum_k (A[b, m, k] * B[b, k, n])
  */
 
-inline bool matchDotF32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchDotF32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 2) return false;
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)

@@ -4,7 +4,7 @@
 #include "core/kernels.hpp"
 #include <cstring>
 
-inline bool matchConcatF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchConcatF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() < 2 || output.dtype != DType::FLOAT32) return false;
     for (size_t i = 0; i < inputs.size() - 1; ++i) {

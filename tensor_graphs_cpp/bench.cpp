@@ -16,6 +16,7 @@
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/cost_model.hpp"
+#include "core/misc.hpp"
 
 #include "generated/kernels_all.gen.hpp"
 #include "generated/build_context.gen.hpp"

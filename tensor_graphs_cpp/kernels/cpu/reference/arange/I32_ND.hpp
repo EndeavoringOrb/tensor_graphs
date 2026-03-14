@@ -3,7 +3,7 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
-inline bool matchArangeI32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchArangeI32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     return inputs.size() == 3 && output.dtype == DType::INT32 && output.view.isContiguous();
 }

@@ -344,11 +344,10 @@ def main():
             # Decoding
             next_token_logits = logits_out[0, seq_len - 1, :]
             next_token_id = int(np.argmax(next_token_logits))
-            print("Logits:")
+            print("\nLogits:")
             for i in range(5):
                 print(logits_out[0, seq_len - 1, i])
             print(f"Argmax (at seq idx {seq_len - 1}): {next_token_id}")
-            exit(0)
             input_ids.append(next_token_id)
             word = tokenizer.decode([next_token_id])
             print(word, end="\n" if DEBUG_EXECUTION else "", flush=True)

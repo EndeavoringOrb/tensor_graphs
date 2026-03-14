@@ -7,7 +7,7 @@
 // Formula: tanh(x) = (e^x - e^-x) / (e^x + e^-x)
 // ---------------------------------------------------------
 
-bool matchTanhF32_1D(const std::vector<TensorNode> &inputs, const TensorNode &output)
+bool matchTanhF32_1D(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 1)
         return false;

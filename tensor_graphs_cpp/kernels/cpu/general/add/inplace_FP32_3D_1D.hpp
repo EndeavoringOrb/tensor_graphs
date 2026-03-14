@@ -10,7 +10,7 @@
  * This kernel performs the addition directly on the 3D input buffer.
  */
 
-inline bool matchAddFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchAddFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 2)
         return false;
@@ -34,12 +34,14 @@ inline bool matchAddFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, co
     if (in3D.shape != output.shape)
         return false;
 
-    // Ensure memory aliasing (In-place requirement)
-    if (in3D.view.baseOffset != output.view.baseOffset)
-        return false;
-
     // Reference implementation assumes contiguity for the large tensors
     if (!in3D.view.isContiguous() || !in1D.view.isContiguous() || !output.view.isContiguous())
+        return false;
+
+    if (inputs[0].storageType == StorageType::PERSISTENT)
+        return false;
+    auto it = refCounts.find(inputs[0].id);
+    if (it == refCounts.end() || it->second != 1)
         return false;
 
     return true;
@@ -102,4 +104,4 @@ inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL_INPLACE("Add_3D_1D_inplace", 2, Backend::CPU, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {false, false});
+REGISTER_KERNEL_INPLACE("Add_3D_1D_inplace", 2, Backend::CPU, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true});

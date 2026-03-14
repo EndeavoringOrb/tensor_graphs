@@ -22,3 +22,5 @@ main.exe should create benchmarks/ folder
 automatically reject dirty region cache .jsonl if invalid kernel ids
 
 make ctrl-c safe (cudafree or whatever)
+
+replace throw error with wrapper that first prints message (windows doesn't print the error message for some reason)

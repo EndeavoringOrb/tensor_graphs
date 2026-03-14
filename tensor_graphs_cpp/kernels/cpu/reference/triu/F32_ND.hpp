@@ -3,7 +3,7 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
-inline bool matchTriuF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchTriuF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     return inputs.size() == 2 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && inputs[0].view.isContiguous() && output.view.isContiguous();
 }

@@ -6,7 +6,7 @@
  * Helper to format a TensorNode's metadata and its parents' metadata into a string.
  * This encapsulates the logging logic used in estimateCost and interpolate.
  */
-inline std::string nodeToString(const TensorNode &node, const Graph &graph, const std::string &prefix = "")
+inline std::string toString(const TensorNode &node, const Graph &graph, const std::string &prefix = "")
 {
     std::stringstream ss;
     ss << prefix << "Node " << node.id << " [" << toString(node.opType) << "]\n"
@@ -42,13 +42,29 @@ inline std::string nodeToString(const TensorNode &node, const Graph &graph, cons
     return ss.str();
 }
 
+inline std::string toString(const TensorNode &node, const std::string &prefix = "")
+{
+    std::stringstream ss;
+    ss << prefix << "Node " << node.id << " [" << toString(node.opType);
+    if (node.opType == OpType::FUSED) {
+        ss << " (" << node.opName << ")";
+    }
+    ss << "]\n"
+       << prefix << "  DType:        " << toString(node.dtype) << "\n"
+       << prefix << "  Shape:        " << toString(node.shape) << "\n"
+       << prefix << "  Backend:      " << node.backend << "\n"
+       << prefix << "  Contiguous:   " << (node.view.isContiguous() ? "true" : "false") << "\n"
+       << prefix << "  Storage Type: " << toString(node.storageType);
+    return ss.str();
+}
+
 /**
  * Convenience wrapper to print node info directly to std::cout
  */
 inline void printNode(const TensorNode &node, const Graph &graph, const std::string &label = "NODE INFO")
 {
     std::cout << "--- " << label << " ---\n"
-              << nodeToString(node, graph)
+              << toString(node, graph)
               << "\n-----------------------" << std::endl;
 }
 

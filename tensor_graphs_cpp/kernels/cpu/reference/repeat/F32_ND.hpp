@@ -8,7 +8,7 @@
  * Replicates a tensor along a specific axis into a new allocation.
  */
 
-inline bool matchRepeatF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchRepeatF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 3)
         return false;

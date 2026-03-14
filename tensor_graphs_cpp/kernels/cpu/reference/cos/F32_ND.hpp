@@ -3,7 +3,7 @@
 #include "core/kernels.hpp"
 #include <cmath>
 
-inline bool matchCosF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchCosF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 1)
         return false;

@@ -9,7 +9,7 @@
  * Performs reduction along specified axes.
  */
 
-inline bool matchSumF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchSumF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     // Sum requires: data (0), axis (1)
     if (inputs.size() != 2) return false;

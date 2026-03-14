@@ -10,7 +10,7 @@
  * Reorders the dimensions of the input tensor.
  */
 
-inline bool matchPermuteF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchPermuteF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     // Inputs: Data (0), Permutation Indices (1)
     if (inputs.size() != 2)

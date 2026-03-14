@@ -9,7 +9,7 @@
  * This kernel handles reshapes where the input and output
  * reside in different memory locations, requiring a physical copy.
  */
-inline bool matchReshapeND(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchReshapeND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 2)
         return false;

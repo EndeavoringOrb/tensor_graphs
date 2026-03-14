@@ -8,7 +8,7 @@
  * Pattern: Input3D[b, s, d] += InputScalar[]
  */
 
-inline bool matchAddFP32_3D_Scalar_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchAddFP32_3D_Scalar_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 2)
         return false;
@@ -30,6 +30,12 @@ inline bool matchAddFP32_3D_Scalar_Inplace(const std::vector<TensorNode> &inputs
         return false;
 
     if (!in3D.view.isContiguous() || !output.view.isContiguous())
+        return false;
+
+    if (inputs[0].storageType == StorageType::PERSISTENT)
+        return false;
+    auto it = refCounts.find(inputs[0].id);
+    if (it == refCounts.end() || it->second != 1)
         return false;
 
     return true;
@@ -93,4 +99,4 @@ inline uint32_t refFactoryAdd3D_Scalar_Inplace(const std::vector<uint32_t> &inpu
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL_INPLACE("Add_3D_Scalar_inplace", 2, Backend::CPU, matchAddFP32_3D_Scalar_Inplace, runAddFP32_3D_Scalar_Inplace, refFactoryAdd3D_Scalar_Inplace, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {false, false});
+REGISTER_KERNEL_INPLACE("Add_3D_Scalar_inplace", 2, Backend::CPU, matchAddFP32_3D_Scalar_Inplace, runAddFP32_3D_Scalar_Inplace, refFactoryAdd3D_Scalar_Inplace, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true});

@@ -8,7 +8,7 @@
  * Pattern: Output[b, s, d] = Input3D[b, s, d] + InputScalar[]
  */
 
-inline bool matchAddFP32_3D_Scalar(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchAddFP32_3D_Scalar(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 2)
         return false;
@@ -89,4 +89,4 @@ inline uint32_t refFactoryAdd3D_Scalar(const std::vector<uint32_t> &inputs, Grap
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL("Add_3D_Scalar", 2, Backend::CPU, matchAddFP32_3D_Scalar, runAddFP32_3D_Scalar, refFactoryAdd3D_Scalar, {DType::FLOAT32, DType::FLOAT32}, {{2, 3, 4}, {1}}, {false, false});
+REGISTER_KERNEL("Add_3D_Scalar", 2, Backend::CPU, matchAddFP32_3D_Scalar, runAddFP32_3D_Scalar, refFactoryAdd3D_Scalar, {DType::FLOAT32, DType::FLOAT32}, {{2, 3, 4}, {1}}, {true, true});

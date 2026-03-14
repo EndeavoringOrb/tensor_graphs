@@ -30,7 +30,7 @@ __global__ void dot_f32_3d_kernel(const float *A, const float *B, float *Out,
 /**
  * Match function: Validates if the tensors are compatible with this specific 3D CUDA implementation.
  */
-inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 2)
         return false;

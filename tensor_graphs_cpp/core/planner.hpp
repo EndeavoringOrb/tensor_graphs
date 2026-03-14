@@ -63,7 +63,7 @@ private:
             }
 
             std::vector<TensorNode> inputsList = {input};
-            std::vector<uint64_t> kernels = KernelRegistry::get().findMatchingKernels(op, "", opBackend, inputsList, output, &refCounts);
+            std::vector<uint64_t> kernels = KernelRegistry::get().findMatchingKernels(op, "", opBackend, inputsList, output, refCounts);
             bestCost = std::numeric_limits<float>::infinity();
             bestK = UINT64_MAX;
             for (uint64_t k : kernels)
@@ -847,7 +847,7 @@ private:
                 {
                     std::vector<TensorNode> inputNodes;
                     std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
-                        target.opType, target.opName, backend, inputNodes, target, &estimatedRefCounts);
+                        target.opType, target.opName, backend, inputNodes, target, estimatedRefCounts);
 
                     for (uint64_t kernelId : matchingKernels)
                     {
@@ -907,7 +907,7 @@ private:
                             }
 
                             std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
-                                target.opType, target.opName, backend, adaptedInputNodes, target, &estimatedRefCounts);
+                                target.opType, target.opName, backend, adaptedInputNodes, target, estimatedRefCounts);
 
                             for (uint64_t kernelId : matchingKernels)
                             {

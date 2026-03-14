@@ -2,6 +2,7 @@
 #include "core/types.hpp"
 #include "core/graph.hpp"
 #include "core/memory.hpp"
+#include "core/misc.hpp"
 #include <vector>
 #include <stdexcept>
 #include <string>
@@ -9,7 +10,7 @@
 
 // A matching function checks the context of the requested operation to determine
 // if the kernel supports the specific layout, rank, dimensions, or dtypes.
-using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
+using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts);
 
 // The execution function receives raw pointers dynamically mapped to the device buffer,
 // alongside the TensorViews to access strides and shapes during execution.
@@ -112,7 +113,7 @@ public:
         Backend backend,
         const std::vector<TensorNode> &inputs,
         const TensorNode &output,
-        const std::unordered_map<uint32_t, uint32_t> *refCounts = nullptr) const
+        const std::unordered_map<uint32_t, uint32_t> &refCounts = {}) const
     {
         std::vector<uint64_t> matches;
         for (const auto &entry : entries)
@@ -125,30 +126,48 @@ public:
             if (op == OpType::FUSED && entry.opName != opName)
                 continue;
 
-            if (entry.inplace)
-            {
-                if (inputs.empty())
-                    continue;
-                const TensorNode &input0 = inputs[0];
-
-                if (input0.storageType == StorageType::PERSISTENT)
-                    continue;
-                if (countElements(input0.shape) != countElements(output.shape))
-                    continue;
-                if (getDTypeSize(input0.dtype) != getDTypeSize(output.dtype))
-                    continue;
-
-                if (refCounts)
-                {
-                    auto it = refCounts->find(input0.id);
-                    if (it == refCounts->end() || it->second != 1)
-                        continue;
-                }
-            }
-
-            if (entry.match(inputs, output))
+            if (entry.match(inputs, output, refCounts))
             {
                 matches.push_back(entry.uid);
+            }
+        }
+        if (matches.size() == 0)
+        {
+            std::stringstream ss;
+            std::string opNameDebug;
+            if (op == OpType::FUSED)
+            {
+                opNameDebug = opName;
+            }
+            else
+            {
+                opNameDebug = toString(op);
+            }
+            ss << "[KernelRegistry.findMatchingKernels] Could not find kernel.\n"
+               << "Output\n"
+               << toString(output);
+            for (const auto &inp : inputs)
+            {
+                ss << "\nInput\n"
+                   << toString(inp);
+            }
+            ss << "\nRef Counts:\n";
+            if (inputs.empty())
+                throw std::runtime_error("THIS SHOULD NOT HAPPEN");
+            auto it = refCounts.find(inputs[0].id);
+            if (it != refCounts.end() || it->second != 1)
+            {
+                ss << "  " << it->first << " -> " << it->second << "\n";
+            }
+            else
+            {
+                ss << "no ref counts\n";
+            }
+            ss << std::flush;
+            std::string out = ss.str();
+            std::cout << out;
+            if (output.shape.size() == 0) {
+                int a = 5;
             }
         }
         return matches;

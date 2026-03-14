@@ -915,7 +915,7 @@ public:
                                 selKey.inShapes.push_back(di.shape);
                             }
 
-                            uint64_t selectedKernel = inst.kernelId;
+                            uint64_t selectedKernel = UINT64_MAX;
                             auto memIt = kernelSelectionMemo.find(selKey);
                             if (memIt != kernelSelectionMemo.end())
                             {
@@ -930,7 +930,7 @@ public:
                                 }
 
                                 std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
-                                    dummyOut.opType, dummyOut.opName, inst.backend, dummyInputs, dummyOut, &dummyRefCounts);
+                                    dummyOut.opType, dummyOut.opName, inst.backend, dummyInputs, dummyOut, dummyRefCounts);
 
                                 if (!matchingKernels.empty())
                                 {
@@ -948,8 +948,9 @@ public:
                                 kernelSelectionMemo[selKey] = selectedKernel;
                             }
 
-                            if (selectedKernel == inst.kernelId)
+                            if (selectedKernel == UINT64_MAX)
                             {
+                                std::stringstream ss;
                                 std::string opName;
                                 if (dummyOut.opType == OpType::FUSED)
                                 {
@@ -959,9 +960,9 @@ public:
                                 {
                                     opName = toString(dummyOut.opType);
                                 }
-#ifdef DEBUG
-                                std::cout << "[Session.ensureCacheCoverage] [" << key << "] [Node " << inst.nodeId << "][Slice " << rIdx << "][" << opName << "] Could not find better kernel." << std::endl;
-#endif
+                                ss << "[Session.ensureCacheCoverage][" << key << "][Node " << inst.nodeId << "][Slice " << rIdx << "][" << opName << "] Could not find kernel.";
+                                std::string out = ss.str();
+                                throw std::runtime_error(out);
                             }
                             regionKernels.push_back(selectedKernel);
                             perOutputRegionSlices.push_back(parentSlices);

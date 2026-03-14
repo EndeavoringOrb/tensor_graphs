@@ -155,7 +155,7 @@ struct CostModel
         if (bestDist == std::numeric_limits<float>::infinity() || estimatedTime == std::numeric_limits<float>::infinity())
         {
             std::cout << "[CostModel.interpolate] WARNING: inf cost" << std::endl;
-            std::cout << nodeToString(node, graph, "[Planner Error] ") << std::endl;
+            std::cout << toString(node, graph, "[Planner Error] ") << std::endl;
         }
 #endif
         return (bestDist == std::numeric_limits<float>::infinity()) ? bestDist : estimatedTime;
@@ -220,7 +220,7 @@ struct CostModel
                       << std::hex << kernelUid << std::dec << std::endl;
 
             // Use the helper here
-            std::cout << nodeToString(node, graph, "[Planner Error] ") << std::endl;
+            std::cout << toString(node, graph, "[Planner Error] ") << std::endl;
 #endif
             return std::numeric_limits<float>::infinity();
         }
