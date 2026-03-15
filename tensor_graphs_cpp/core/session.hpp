@@ -747,25 +747,63 @@ public:
                             // Compute input slices for this output region
                             std::vector<std::vector<Region>> parentSlices(inst.inputNodeIds.size());
                             const TensorNode &physNode = compiled.nodesMap.at(inst.nodeId);
-                            if (physNode.opType == OpType::FUSED ||
-                                physNode.opType == OpType::COPY_TO ||
-                                physNode.opType == OpType::CONTIGUOUS)
+                            if (physNode.opType == OpType::COPY_TO || physNode.opType == OpType::CONTIGUOUS)
                             {
-                                // FUSED: inherit dirty regions from forward propagation
-                                // COPY_TO/CONTIGUOUS: passthrough (input slice = output slice)
                                 for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
-                                {
-                                    auto pIt = physicalRegions.find(inst.inputNodeIds[i]);
-                                    if (pIt != physicalRegions.end() && !pIt->second.empty())
-                                        parentSlices[i] = pIt->second;
-                                    else
+                                    parentSlices[i] = {outRegion};
+                            }
+                            else if (physNode.opType == OpType::FUSED)
+                            {
+                                std::unordered_map<uint32_t, std::vector<Region>> reqRegions;
+                                uint32_t logRoot = compiled.logicalNodeMap.at(inst.nodeId);
+                                reqRegions[logRoot] = {outRegion};
+                                
+                                ShapePropagator bp;
+                                for (auto it = atomicTopo.rbegin(); it != atomicTopo.rend(); ++it) {
+                                    uint32_t logId = *it;
+                                    if (reqRegions.count(logId) && !reqRegions[logId].empty()) {
+                                        bool isPhysicalInput = false;
+                                        for (uint32_t pInId : inst.inputNodeIds) {
+                                            if (compiled.logicalNodeMap.count(pInId) && compiled.logicalNodeMap.at(pInId) == logId && logId != logRoot) {
+                                                isPhysicalInput = true;
+                                                break;
+                                            }
+                                        }
+                                        if (isPhysicalInput) continue;
+
+                                        const TensorNode& logNode = graph.nodes[logId];
+                                        if (logNode.opType != OpType::INPUT) {
+                                            auto pRegs = bp.backward(logNode, graph, reqRegions[logId]);
+                                            for (size_t k = 0; k < logNode.parentIds.size(); ++k) {
+                                                reqRegions[logNode.parentIds[k]] = pRegs[k];
+                                            }
+                                        }
+                                    }
+                                }
+
+                                for (size_t i = 0; i < inst.inputNodeIds.size(); ++i) {
+                                    if (compiled.logicalNodeMap.count(inst.inputNodeIds[i])) {
+                                        uint32_t logInId = compiled.logicalNodeMap.at(inst.inputNodeIds[i]);
+                                        if (reqRegions.count(logInId) && !reqRegions[logInId].empty())
+                                            parentSlices[i] = reqRegions[logInId];
+                                        else
+                                            parentSlices[i] = {outRegion};
+                                    } else {
                                         parentSlices[i] = {outRegion};
+                                    }
                                 }
                             }
                             else
                             {
                                 ShapePropagator backProp;
                                 parentSlices = backProp.backward(physNode, graph, {outRegion});
+                            }
+
+                            for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
+                            {
+                                auto pIt = physicalRegions.find(inst.inputNodeIds[i]);
+                                if (pIt != physicalRegions.end() && !pIt->second.empty())
+                                    parentSlices[i] = pIt->second;
                             }
 
                             dummyOut.backend = inst.backend;
