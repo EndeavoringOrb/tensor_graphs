@@ -5,7 +5,7 @@ tokenizer = Tokenizer.from_file("resources/tokenizer.json")
 
 # 2. These are the tokens currently in your main.cpp
 tokens = [2, 105, 2364, 107, 155122, 27825, 49087, 531, 496, 236743, 236810, 1051, 2255, 236761, 106, 107, 105, 4368, 107]
-tokens += [70895, 611, 8669, 107, 106, 107]
+tokens += [70895, 506]
 # 3. Decode to string
 output_text = tokenizer.decode(tokens)
 

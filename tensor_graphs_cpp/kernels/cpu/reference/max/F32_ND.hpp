@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/reference/max/F32_ND.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -6,7 +5,7 @@
 
 inline bool matchMaxF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
-    return inputs.size() == 2 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && inputs[0].view.isContiguous() && output.view.isContiguous();
+    return inputs.size() == 2 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32;
 }
 
 inline void runMaxF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
@@ -17,31 +16,30 @@ inline void runMaxF32_ND(const std::vector<const void *> &inputs, const std::vec
     float *out = static_cast<float *>(outputs[0]);
     const auto &inShape = inViews[0].shape;
     int32_t ndim = static_cast<int32_t>(inShape.size());
-    if (axis < 0)
-        axis += ndim;
-
-    uint64_t outer = 1, inner = 1;
-    for (int d = 0; d < axis; ++d)
-        outer *= inShape[d];
-    for (int d = axis + 1; d < ndim; ++d)
-        inner *= inShape[d];
-    uint32_t dim_size = inShape[axis];
+    if (axis < 0) axis += ndim;
 
     uint64_t out_count = countElements(outViews[0].shape);
-    for (uint64_t i = 0; i < out_count; ++i)
-        out[i] = -FLT_MAX;
+    for (uint64_t i = 0; i < out_count; ++i) {
+        out[getStridedIndex(i, outViews[0].shape, outViews[0].strides)] = -FLT_MAX;
+    }
 
-    for (uint64_t o = 0; o < outer; ++o)
-    {
-        for (uint32_t d = 0; d < dim_size; ++d)
-        {
-            for (uint64_t i = 0; i < inner; ++i)
-            {
-                float val = in[(o * dim_size + d) * inner + i];
-                uint64_t dst_idx = o * inner + i;
-                if (val > out[dst_idx])
-                    out[dst_idx] = val;
+    uint64_t in_count = countElements(inViews[0].shape);
+    for(uint64_t i = 0; i < in_count; ++i) {
+        uint64_t temp = i;
+        uint64_t out_flat = 0;
+        uint64_t out_stride = 1;
+        for(int32_t d = ndim - 1; d >= 0; --d) {
+            uint32_t coord = temp % inShape[d];
+            temp /= inShape[d];
+            if (d != axis) {
+                out_flat += coord * out_stride;
+                out_stride *= outViews[0].shape[d];
             }
+        }
+        float val = in[getStridedIndex(i, inViews[0].shape, inViews[0].strides)];
+        uint64_t out_idx = getStridedIndex(out_flat, outViews[0].shape, outViews[0].strides);
+        if (val > out[out_idx]) {
+            out[out_idx] = val;
         }
     }
 }
