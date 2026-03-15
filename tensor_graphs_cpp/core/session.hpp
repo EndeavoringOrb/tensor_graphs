@@ -178,8 +178,6 @@ private:
 
     std::unordered_map<uint32_t, std::vector<uint8_t>> previousInputData;
 
-
-
 public:
     Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "")
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile)
@@ -592,8 +590,6 @@ public:
         };
         visit(visit, rootId);
 
-
-
         ShapePropagator prop;
         for (uint32_t nodeId : atomicTopo)
         {
@@ -843,33 +839,42 @@ public:
 
                             if (selectedKernel == UINT64_MAX)
                             {
-                                std::string opName;
-                                if (dummyOut.opType == OpType::FUSED)
+                                const KernelEntry &origKernel = KernelRegistry::get().getKernel(inst.kernelId);
+                                if (origKernel.inplace)
                                 {
-                                    opName = dummyOut.opName;
+                                    selectedKernel = inst.kernelId;
                                 }
                                 else
                                 {
-                                    opName = toString(dummyOut.opType);
+                                    std::string opName;
+                                    if (dummyOut.opType == OpType::FUSED)
+                                    {
+                                        opName = dummyOut.opName;
+                                    }
+                                    else
+                                    {
+                                        opName = toString(dummyOut.opType);
+                                    }
+                                    std::stringstream ss;
+                                    ss << "\n[Session.ensureCacheCoverage] CRITICAL: Could not find a kernel matching the dirty slice requirements.\n";
+                                    ss << "Cache Key: " << key << "\n";
+                                    ss << "Physical Node ID: " << inst.nodeId << ", Slice Index: " << rIdx << ", Name: " << opName << "\n";
+
+                                    ss << "--- Target Output (Sliced) ---\n";
+                                    ss << toString(dummyOut, graph);
+
+                                    for (size_t i = 0; i < dummyInputs.size(); ++i)
+                                    {
+                                        ss << "\n--- Input " << i << " (Sliced) ---\n";
+                                        ss << toString(dummyInputs[i], graph);
+                                    }
+
+                                    ss << "\n------------------------------------------------\n";
+                                    std::string out = ss.str();
+                                    std::cerr << out << std::endl
+                                              << std::flush;
+                                    throw std::runtime_error(out);
                                 }
-                                std::stringstream ss;
-                                ss << "\n[Session.ensureCacheCoverage] CRITICAL: Could not find a kernel matching the dirty slice requirements.\n";
-                                ss << "Cache Key: " << key << "\n";
-                                ss << "Physical Node ID: " << inst.nodeId << ", Slice Index: " << rIdx << ", Name: " << opName << "\n";
-
-                                ss << "--- Target Output (Sliced) ---\n";
-                                ss << toString(dummyOut, graph);
-
-                                for (size_t i = 0; i < dummyInputs.size(); ++i)
-                                {
-                                    ss << "\n--- Input " << i << " (Sliced) ---\n";
-                                    ss << toString(dummyInputs[i], graph);
-                                }
-
-                                ss << "\n------------------------------------------------\n";
-                                std::string out = ss.str();
-                                std::cerr << out << std::endl << std::flush;
-                                throw std::runtime_error(out);
                             }
                             regionKernels.push_back(selectedKernel);
                             perOutputRegionSlices.push_back(parentSlices);
