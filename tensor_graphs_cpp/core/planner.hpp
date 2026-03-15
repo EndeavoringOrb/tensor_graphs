@@ -681,21 +681,50 @@ public:
 
             const KernelEntry &kEntry = KernelRegistry::get().getKernel(finalKernelId);
 
+            // TODO: Long-term fix — defer kernel selection until after adapter
+            // insertion so actual refCounts are known, or re-run beam search
+            // with corrected refCounts for affected nodes.
             if (kEntry.inplace)
             {
                 uint32_t input0Id = compiled.nodesMap.at(id).parentIds[0];
                 if (compiled.refCounts[input0Id] > 1)
                 {
-                    throw std::runtime_error("[Planner.plan] CRITICAL: Planned inplace kernel but refCount > 1 for node " + std::to_string(input0Id));
+                    // Adapter nodes inserted during finalization can increase refCounts
+                    // beyond what was estimated during planning. Fall back to a
+                    // non-inplace kernel with the same op.
+                    std::vector<TensorNode> fallbackInputs;
+                    for (uint32_t pid : compiled.nodesMap.at(id).parentIds)
+                    {
+                        fallbackInputs.push_back(compiled.nodesMap.at(pid));
+                    }
+                    std::vector<uint64_t> fallbackKernels = KernelRegistry::get().findMatchingKernels(
+                        node.opType, node.opName, assignedBackend, fallbackInputs, node, compiled.refCounts);
+
+                    uint64_t fallbackId = UINT64_MAX;
+                    for (uint64_t fk : fallbackKernels)
+                    {
+                        if (!KernelRegistry::get().getKernel(fk).inplace)
+                        {
+                            fallbackId = fk;
+                            break;
+                        }
+                    }
+                    if (fallbackId == UINT64_MAX)
+                    {
+                        throw std::runtime_error("[Planner.plan] CRITICAL: Planned inplace kernel but refCount > 1 for node " + std::to_string(input0Id) + ", and no non-inplace fallback kernel found.");
+                    }
+                    finalKernelId = fallbackId;
                 }
             }
+
+            const KernelEntry &kEntryFinal = KernelRegistry::get().getKernel(finalKernelId);
 
             OpInstruction inst;
             inst.nodeId = id;
             inst.kernelId = finalKernelId;
             inst.inputNodeIds = compiled.nodesMap.at(id).parentIds;
             inst.backend = assignedBackend;
-            inst.inplaceInputIndex = kEntry.inplace ? 0 : -1;
+            inst.inplaceInputIndex = kEntryFinal.inplace ? 0 : -1;
 
             compiled.instructions.push_back(inst);
         }

@@ -178,148 +178,7 @@ private:
 
     std::unordered_map<uint32_t, std::vector<uint8_t>> previousInputData;
 
-    std::vector<std::vector<Region>> getBackwardSlicesAtomic(
-        uint32_t physNodeId,
-        const std::vector<uint32_t> &physInputIds,
-        const Region &outRegion,
-        const CompiledGraph &compiledGraph,
-        const Graph &atomicGraph,
-        const std::vector<uint32_t> &topoIndex) const
-    {
-        const TensorNode &physNode = compiledGraph.nodesMap.at(physNodeId);
 
-        if (physNode.opType == OpType::COPY_TO || physNode.opType == OpType::CONTIGUOUS)
-        {
-            std::vector<std::vector<Region>> res(physInputIds.size());
-            for (size_t i = 0; i < physInputIds.size(); ++i)
-            {
-                res[i] = {outRegion};
-            }
-            return res;
-        }
-
-        uint32_t logOutId = compiledGraph.logicalNodeMap.at(physNodeId);
-
-        std::unordered_map<uint32_t, std::string> localMemo;
-
-        std::unordered_set<std::string> logInputHashes;
-        for (uint32_t pid : physInputIds)
-        {
-            uint32_t logId = compiledGraph.logicalNodeMap.at(pid);
-            logInputHashes.insert(Hashing::structuralHash(logId, atomicGraph, localMemo));
-        }
-
-        std::unordered_map<uint32_t, std::vector<Region>> reqRegions;
-        reqRegions[logOutId] = {outRegion};
-
-        ShapePropagator prop;
-
-        std::priority_queue<std::pair<uint32_t, uint32_t>> pq;
-        if (logOutId < topoIndex.size())
-        {
-            pq.push({topoIndex[logOutId], logOutId});
-        }
-        else
-        {
-            pq.push({0, logOutId});
-        }
-        std::unordered_set<uint32_t> inQueue;
-        inQueue.insert(logOutId);
-
-        while (!pq.empty())
-        {
-            uint32_t curr = pq.top().second;
-            pq.pop();
-
-            std::string currHash = Hashing::structuralHash(curr, atomicGraph, localMemo);
-            if (logInputHashes.count(currHash) && curr != logOutId)
-            {
-                continue;
-            }
-
-            const TensorNode &atomicNode = atomicGraph.nodes[curr];
-            if (atomicNode.opType == OpType::INPUT)
-                continue;
-
-            Region currBox = reqRegions[curr][0];
-            for (size_t i = 1; i < reqRegions[curr].size(); ++i)
-            {
-                for (size_t d = 0; d < currBox.region.size() && d < reqRegions[curr][i].region.size(); ++d)
-                {
-                    currBox.region[d].start = std::min(currBox.region[d].start, reqRegions[curr][i].region[d].start);
-                    currBox.region[d].stop = std::max(currBox.region[d].stop, reqRegions[curr][i].region[d].stop);
-                }
-            }
-
-            auto parentReqs = prop.backward(atomicNode, atomicGraph, {currBox});
-            for (size_t i = 0; i < atomicNode.parentIds.size(); ++i)
-            {
-                uint32_t pid = atomicNode.parentIds[i];
-                if (i < parentReqs.size())
-                {
-                    for (const auto &r : parentReqs[i])
-                    {
-                        reqRegions[pid].push_back(r);
-                    }
-                    if (inQueue.find(pid) == inQueue.end())
-                    {
-                        if (pid < topoIndex.size())
-                        {
-                            pq.push({topoIndex[pid], pid});
-                        }
-                        else
-                        {
-                            pq.push({0, pid});
-                        }
-                        inQueue.insert(pid);
-                    }
-                }
-            }
-        }
-
-        std::vector<std::vector<Region>> parentSlices(physInputIds.size());
-        for (size_t pIdx = 0; pIdx < physInputIds.size(); ++pIdx)
-        {
-            uint32_t logPid = compiledGraph.logicalNodeMap.at(physInputIds[pIdx]);
-            std::string targetHash = Hashing::structuralHash(logPid, atomicGraph, localMemo);
-
-            std::vector<Region> combinedRegions;
-            for (const auto &pair : reqRegions)
-            {
-                if (Hashing::structuralHash(pair.first, atomicGraph, localMemo) == targetHash)
-                {
-                    for (const auto &r : pair.second)
-                    {
-                        combinedRegions.push_back(r);
-                    }
-                }
-            }
-
-            if (combinedRegions.empty())
-            {
-                parentSlices[pIdx] = {};
-            }
-            else if (combinedRegions.size() == 1)
-            {
-                parentSlices[pIdx] = combinedRegions;
-            }
-            else
-            {
-                Region bbox = combinedRegions[0];
-                for (size_t i = 1; i < combinedRegions.size(); ++i)
-                {
-                    for (size_t d = 0; d < bbox.region.size() && d < combinedRegions[i].region.size(); ++d)
-                    {
-                        bbox.region[d].start = std::min(bbox.region[d].start, combinedRegions[i].region[d].start);
-                        bbox.region[d].stop = std::max(bbox.region[d].stop, combinedRegions[i].region[d].stop);
-                    }
-                }
-                parentSlices[pIdx] = {bbox};
-            }
-        }
-
-        return parentSlices;
-    }
 
 public:
     Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "")
@@ -733,11 +592,7 @@ public:
         };
         visit(visit, rootId);
 
-        std::vector<uint32_t> topoIndex(graph.nodes.size(), 0);
-        for (uint32_t i = 0; i < atomicTopo.size(); ++i)
-        {
-            topoIndex[atomicTopo[i]] = i;
-        }
+
 
         ShapePropagator prop;
         for (uint32_t nodeId : atomicTopo)
@@ -893,7 +748,29 @@ public:
                             const Region &outRegion = outputRegions[rIdx];
                             TensorNode dummyOut = compiled.nodesMap.at(inst.nodeId);
 
-                            auto parentSlices = getBackwardSlicesAtomic(inst.nodeId, inst.inputNodeIds, outRegion, compiled, graph, topoIndex);
+                            // Compute input slices for this output region
+                            std::vector<std::vector<Region>> parentSlices(inst.inputNodeIds.size());
+                            const TensorNode &physNode = compiled.nodesMap.at(inst.nodeId);
+                            if (physNode.opType == OpType::FUSED ||
+                                physNode.opType == OpType::COPY_TO ||
+                                physNode.opType == OpType::CONTIGUOUS)
+                            {
+                                // FUSED: inherit dirty regions from forward propagation
+                                // COPY_TO/CONTIGUOUS: passthrough (input slice = output slice)
+                                for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
+                                {
+                                    auto pIt = physicalRegions.find(inst.inputNodeIds[i]);
+                                    if (pIt != physicalRegions.end() && !pIt->second.empty())
+                                        parentSlices[i] = pIt->second;
+                                    else
+                                        parentSlices[i] = {outRegion};
+                                }
+                            }
+                            else
+                            {
+                                ShapePropagator backProp;
+                                parentSlices = backProp.backward(physNode, graph, {outRegion});
+                            }
 
                             dummyOut.backend = inst.backend;
                             std::vector<uint32_t> outShape;

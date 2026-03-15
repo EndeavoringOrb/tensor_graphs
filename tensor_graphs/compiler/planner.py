@@ -305,7 +305,6 @@ class Planner:
             ExpAddRule(),
             ExpAddReverseRule(),
         ]
-        rules = []
 
         class DummyAttrs(dict):
             def __missing__(self, key):
