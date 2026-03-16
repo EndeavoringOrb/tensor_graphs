@@ -525,10 +525,76 @@ struct ShapePropagator
         const auto &sA = graph.nodes[node.parentIds[0]].shape;
         const auto &outShape = node.shape;
 
-        uint64_t flat_start, flat_stop;
-        getFlatBounds(rA[0], sA, flat_start, flat_stop);
+        std::vector<Region> outBoxes;
+        for (const auto &reg : rA)
+        {
+            uint64_t old_vol = 1;
+            for (const auto &d : reg.region)
+            {
+                old_vol *= (d.stop - d.start);
+            }
 
-        return {unravelFlatBounds(flat_start, flat_stop, outShape)};
+            uint32_t rank = sA.size();
+
+            if (rank >= 64)
+            {
+                uint64_t flat_start, flat_stop;
+                getFlatBounds(reg, sA, flat_start, flat_stop);
+                outBoxes.push_back(unravelFlatBounds(flat_start, flat_stop, outShape));
+                continue;
+            }
+
+            std::vector<uint64_t> strides(rank, 1);
+            for (int i = static_cast<int>(rank) - 2; i >= 0; --i)
+            {
+                strides[i] = strides[i + 1] * sA[i + 1];
+            }
+
+            std::vector<uint32_t> min_coords(outShape.size(), UINT32_MAX);
+            std::vector<uint32_t> max_coords(outShape.size(), 0);
+
+            uint64_t num_corners = 1ULL << rank;
+            for (uint64_t i = 0; i < num_corners; ++i)
+            {
+                uint64_t flat_idx = 0;
+                for (uint32_t d = 0; d < rank; ++d)
+                {
+                    uint32_t coord = ((i >> d) & 1) ? (reg.region[d].stop - 1) : reg.region[d].start;
+                    flat_idx += coord * strides[d];
+                }
+
+                uint64_t temp = flat_idx;
+                for (int d = static_cast<int>(outShape.size()) - 1; d >= 0; --d)
+                {
+                    uint32_t c = temp % outShape[d];
+                    temp /= outShape[d];
+                    if (c < min_coords[d])
+                        min_coords[d] = c;
+                    if (c > max_coords[d])
+                        max_coords[d] = c;
+                }
+            }
+
+            uint64_t new_vol = 1;
+            Region exact_box;
+            for (size_t d = 0; d < outShape.size(); ++d)
+            {
+                exact_box.region.push_back({min_coords[d], max_coords[d] + 1});
+                new_vol *= (max_coords[d] + 1 - min_coords[d]);
+            }
+
+            if (new_vol == old_vol && old_vol > 0)
+            {
+                outBoxes.push_back(exact_box);
+            }
+            else
+            {
+                uint64_t flat_start, flat_stop;
+                getFlatBounds(reg, sA, flat_start, flat_stop);
+                outBoxes.push_back(unravelFlatBounds(flat_start, flat_stop, outShape));
+            }
+        }
+        return outBoxes;
     }
 
     std::vector<std::vector<Region>> backwardReshape(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
@@ -538,10 +604,76 @@ struct ShapePropagator
         const auto &sA = graph.nodes[node.parentIds[0]].shape;
         const auto &sShape = graph.nodes[node.parentIds[1]].shape;
 
-        uint64_t flat_start, flat_stop;
-        getFlatBounds(outputRegions[0], node.shape, flat_start, flat_stop);
+        std::vector<Region> inBoxes;
+        for (const auto &reg : outputRegions)
+        {
+            uint64_t out_vol = 1;
+            for (const auto &d : reg.region)
+            {
+                out_vol *= (d.stop - d.start);
+            }
 
-        return {{unravelFlatBounds(flat_start, flat_stop, sA)}, makeFull(sShape)};
+            uint32_t rank = node.shape.size();
+
+            if (rank >= 64)
+            {
+                uint64_t flat_start, flat_stop;
+                getFlatBounds(reg, node.shape, flat_start, flat_stop);
+                inBoxes.push_back(unravelFlatBounds(flat_start, flat_stop, sA));
+                continue;
+            }
+
+            std::vector<uint64_t> strides(rank, 1);
+            for (int i = static_cast<int>(rank) - 2; i >= 0; --i)
+            {
+                strides[i] = strides[i + 1] * node.shape[i + 1];
+            }
+
+            std::vector<uint32_t> min_coords(sA.size(), UINT32_MAX);
+            std::vector<uint32_t> max_coords(sA.size(), 0);
+
+            uint64_t num_corners = 1ULL << rank;
+            for (uint64_t i = 0; i < num_corners; ++i)
+            {
+                uint64_t flat_idx = 0;
+                for (uint32_t d = 0; d < rank; ++d)
+                {
+                    uint32_t coord = ((i >> d) & 1) ? (reg.region[d].stop - 1) : reg.region[d].start;
+                    flat_idx += coord * strides[d];
+                }
+
+                uint64_t temp = flat_idx;
+                for (int d = static_cast<int>(sA.size()) - 1; d >= 0; --d)
+                {
+                    uint32_t c = temp % sA[d];
+                    temp /= sA[d];
+                    if (c < min_coords[d])
+                        min_coords[d] = c;
+                    if (c > max_coords[d])
+                        max_coords[d] = c;
+                }
+            }
+
+            uint64_t new_vol = 1;
+            Region exact_box;
+            for (size_t d = 0; d < sA.size(); ++d)
+            {
+                exact_box.region.push_back({min_coords[d], max_coords[d] + 1});
+                new_vol *= (max_coords[d] + 1 - min_coords[d]);
+            }
+
+            if (new_vol == out_vol && out_vol > 0)
+            {
+                inBoxes.push_back(exact_box);
+            }
+            else
+            {
+                uint64_t flat_start, flat_stop;
+                getFlatBounds(reg, node.shape, flat_start, flat_stop);
+                inBoxes.push_back(unravelFlatBounds(flat_start, flat_stop, sA));
+            }
+        }
+        return {inBoxes, makeFull(sShape)};
     }
 
     std::vector<Region> forwardReduce(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)

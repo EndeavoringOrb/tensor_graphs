@@ -799,12 +799,12 @@ public:
                                 parentSlices = backProp.backward(physNode, graph, {outRegion});
                             }
 
-                            for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
-                            {
-                                auto pIt = physicalRegions.find(inst.inputNodeIds[i]);
-                                if (pIt != physicalRegions.end() && !pIt->second.empty())
-                                    parentSlices[i] = pIt->second;
-                            }
+                            // for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
+                            // {
+                            //     auto pIt = physicalRegions.find(inst.inputNodeIds[i]);
+                            //     if (pIt != physicalRegions.end() && !pIt->second.empty())
+                            //         parentSlices[i] = pIt->second;
+                            // }
 
                             dummyOut.backend = inst.backend;
                             std::vector<uint32_t> outShape;
