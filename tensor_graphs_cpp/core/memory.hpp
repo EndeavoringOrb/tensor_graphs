@@ -548,47 +548,6 @@ struct DeviceBuffer
     }
 };
 
-struct InterruptManager
-{
-    static inline std::vector<DeviceBuffer *> buffers;
-    static inline std::mutex mtx;
-
-    static void registerBuffer(DeviceBuffer *buf)
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        buffers.push_back(buf);
-    }
-
-    static void unregisterBuffer(DeviceBuffer *buf)
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        auto it = std::find(buffers.begin(), buffers.end(), buf);
-        if (it != buffers.end())
-        {
-            buffers.erase(it);
-        }
-    }
-
-    static void cleanup(); // Implemented at the bottom of memory.hpp
-
-    static void handleSigInt(int signum)
-    {
-        std::cerr << "\n[TensorGraph] Caught interrupt signal (" << signum << "). Cleaning up..." << std::endl;
-        cleanup();
-        std::exit(signum);
-    }
-
-    static void hook()
-    {
-        static bool hooked = false;
-        if (!hooked)
-        {
-            std::signal(SIGINT, handleSigInt);
-            hooked = true;
-        }
-    }
-};
-
 struct MemoryManager
 {
     std::unordered_map<Backend, DeviceBuffer> buffers;
