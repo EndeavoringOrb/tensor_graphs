@@ -317,8 +317,13 @@ int main()
             }
 
             std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "] "
+                      << "[" << toString(kernel.backend) << "] " // Added Backend
                       << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                      << " (Kernel 0x" << std::hex << kernelUid << std::dec << "), Out Shape: " << toString(outViews[0].shape) << std::flush;
+                      << " (0x" << std::hex << kernelUid << std::dec << ")"
+                      << ", Out DType:   " << toString(outViews[0].dtype) // Added DType
+                      << ", Out Shape:   " << toString(outViews[0].shape)
+                      << ", Out Strides: " << toString(outViews[0].strides) // Added Strides
+                      << std::flush;
 
             // Warmup
             kernel.run(inPtrs, outPtrs, inViews, outViews);
