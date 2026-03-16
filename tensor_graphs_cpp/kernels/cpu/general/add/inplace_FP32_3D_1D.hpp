@@ -75,7 +75,7 @@ inline void runAddFP32_3D_1D_Inplace(const std::vector<const void *> &inputs, co
 inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
-        Error::throw_error("Fused Add 3D+1D requires 2 inputs");
+        Error::throw_err("Fused Add 3D+1D requires 2 inputs");
 
     uint32_t id3D = inputs[0];
     uint32_t id1D = inputs[1];

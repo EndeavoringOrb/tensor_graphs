@@ -41,7 +41,7 @@ void runTanhF32_1D(const std::vector<const void *> &inputs, const std::vector<vo
 uint32_t refFactoryTanh(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     if (inputs.size() != 1)
-        Error::throw_error("Tanh requires 1 input");
+        Error::throw_err("Tanh requires 1 input");
     uint32_t x = inputs[0];
     uint32_t n_elements = graph.nodes[x].shape[0];
 

@@ -87,7 +87,7 @@ void runDotF32_3D_CUDA(const std::vector<const void *> &inputs, const std::vecto
     if (err != cudaSuccess)
     {
         std::cerr << "CUDA Launch Error in runDotF32_3D_CUDA: " << cudaGetErrorString(err) << std::endl;
-        Error::throw_error("CUDA kernel launch failed");
+        Error::throw_err("CUDA kernel launch failed");
     }
 }
 
@@ -98,7 +98,7 @@ void runDotF32_3D_CUDA(const std::vector<const void *> &inputs, const std::vecto
 inline uint32_t refFactoryDotF32_3D_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
-        Error::throw_error("Dot 3D requires 2 inputs");
+        Error::throw_err("Dot 3D requires 2 inputs");
 
     return graph.dot(inputs[0], inputs[1]);
 }

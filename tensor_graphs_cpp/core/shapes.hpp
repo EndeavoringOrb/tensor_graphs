@@ -15,7 +15,7 @@ inline std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)
     }
     std::stringstream ss;
     ss << "Expected constant for shape inference but not found in staging. Node ID: " << id;
-    Error::throw_error(ss.str());
+    Error::throw_err(ss.str());
 }
 
 inline std::vector<uint32_t> broadcastShapes(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b)
@@ -38,7 +38,7 @@ inline std::vector<uint32_t> broadcastShapes(const std::vector<uint32_t> &a, con
         {
             std::stringstream ss;
             ss << "Cannot broadcast shapes " << toString(a) << " and " << toString(b);
-            Error::throw_error(ss.str());
+            Error::throw_err(ss.str());
         }
     }
     return out;
@@ -160,7 +160,7 @@ struct ShapePropagator
                 ss << "[ShapePropagator.inferShape] Atomic " << toString(graph.nodes[nodeId].opType)
                    << " requires exact shape match. Got " << toString(s0)
                    << " and " << toString(s1) << ". Use explicit repeat/reshape. (Node " << graph.nodes[nodeId].id << ")";
-                Error::throw_error(ss.str());
+                Error::throw_err(ss.str());
             }
             graph.nodes[nodeId].shape = s0;
             break;
@@ -177,26 +177,26 @@ struct ShapePropagator
                 std::stringstream ss;
                 ss << "[ShapePropagator.inferShape] DOT requires equal ranks. Got " << r0 << " and " << r1
                    << ". Implicit broadcasting is disabled; use explicit reshape to align ranks.";
-                Error::throw_error(ss.str());
+                Error::throw_err(ss.str());
             }
 
             if (r0 == 2)
             {
                 if (s0[1] != s1[0])
-                    Error::throw_error("DOT: K-dim mismatch [M,K] @ [K,N]");
+                    Error::throw_err("DOT: K-dim mismatch [M,K] @ [K,N]");
                 graph.nodes[nodeId].shape = {s0[0], s1[1]};
             }
             else if (r0 == 3)
             {
                 if (s0[0] != s1[0])
-                    Error::throw_error("DOT: Batch dim mismatch [B,M,K] @ [B,K,N]");
+                    Error::throw_err("DOT: Batch dim mismatch [B,M,K] @ [B,K,N]");
                 if (s0[2] != s1[1])
-                    Error::throw_error("DOT: K-dim mismatch [B,M,K] @ [B,K,N]");
+                    Error::throw_err("DOT: K-dim mismatch [B,M,K] @ [B,K,N]");
                 graph.nodes[nodeId].shape = {s0[0], s0[1], s1[2]};
             }
             else
             {
-                Error::throw_error("DOT: Only Rank 2 and Rank 3 are currently supported in this framework.");
+                Error::throw_err("DOT: Only Rank 2 and Rank 3 are currently supported in this framework.");
             }
             break;
         }
@@ -1015,7 +1015,7 @@ struct ShapePropagator
             {
                 std::stringstream ss;
                 ss << "[ShapePropagator.forward] Invalid parent ID " << pid << " for OpType " << node.opType;
-                Error::throw_error(ss.str());
+                Error::throw_err(ss.str());
             }
         }
         switch (node.opType)
@@ -1055,7 +1055,7 @@ struct ShapePropagator
         default:
             std::stringstream ss;
             ss << "[ShapePropagator.forward] Unsupported OpType for ShapePropagator.forward: " << toString(node.opType);
-            Error::throw_error(ss.str());
+            Error::throw_err(ss.str());
         }
     }
 
@@ -1098,7 +1098,7 @@ struct ShapePropagator
         default:
             std::stringstream ss;
             ss << "[ShapePropagator.backward] Unsupported OpType for ShapePropagator.backward: " << toString(node.opType);
-            Error::throw_error(ss.str());
+            Error::throw_err(ss.str());
         }
     }
 };

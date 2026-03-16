@@ -53,7 +53,7 @@ inline void runAddFP32_3D_Scalar(const std::vector<const void *> &inputs, const 
 inline uint32_t refFactoryAdd3D_Scalar(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
-        Error::throw_error("Fused Add 3D+Scalar requires 2 inputs");
+        Error::throw_err("Fused Add 3D+Scalar requires 2 inputs");
 
     uint32_t id3D = inputs[0];
     uint32_t idScalar = inputs[1];
