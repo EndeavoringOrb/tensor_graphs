@@ -372,6 +372,20 @@ inline std::string toString(const std::vector<uint32_t> &shape)
     return ss.str();
 }
 
+inline std::string toString(const std::vector<uint64_t> &shape)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << shape[i];
+    }
+    ss << "]";
+    return ss.str();
+}
+
 inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << toString(dtype); }
 inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toString(op); }
 inline std::ostream &operator<<(std::ostream &os, Backend backend) { return os << toString(backend); }
