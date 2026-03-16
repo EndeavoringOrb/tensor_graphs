@@ -20,10 +20,6 @@ inline bool matchNegF32_ND(const std::vector<TensorNode> &inputs, const TensorNo
     if (inputs[0].shape != output.shape)
         return false;
 
-    // Check Contiguity
-    if (!inputs[0].view.isContiguous() || !output.view.isContiguous())
-        return false;
-
     return true;
 }
 
@@ -37,7 +33,7 @@ inline void runNegF32_ND(const std::vector<const void *> &inputs, const std::vec
 
     for (uint64_t i = 0; i < numElements; ++i)
     {
-        out[i] = -x[i];
+        out[getStridedIndex(i, outViews[0].shape, outViews[0].strides)] = -x[getStridedIndex(i, inViews[0].shape, inViews[0].strides)];
     }
 }
 
