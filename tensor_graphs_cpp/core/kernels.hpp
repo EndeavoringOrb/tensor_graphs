@@ -42,7 +42,7 @@ public:
     {
         auto it = factories.find(name);
         if (it != factories.end())
-            Error:throw_error("A kernel with name \"" + name + "\" is already registered.");
+            Error::throw_error("A kernel with name \"" + name + "\" is already registered.");
         factories[name] = {numInputs, factory, dtypes, dummyShapes};
     }
 
@@ -155,7 +155,7 @@ public:
             }
             ss << "\nRef Counts:\n";
             if (inputs.empty())
-                Error:throw_error("THIS SHOULD NOT HAPPEN");
+                Error::throw_error("THIS SHOULD NOT HAPPEN");
             auto it = refCounts.find(inputs[0].id);
             if (it != refCounts.end())
             {
@@ -180,7 +180,7 @@ public:
             if (entry.uid == uid)
                 return entry;
         }
-        Error:throw_error("Invalid kernel UID");
+        Error::throw_error("Invalid kernel UID");
     }
 
 private:

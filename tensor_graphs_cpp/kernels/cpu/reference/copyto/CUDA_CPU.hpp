@@ -5,9 +5,10 @@
 #include <stdexcept>
 #include <vector>
 #include <cuda_runtime.h>
+#include <cstring>
 
 // ------------------------------------------------------------
-// GPU gather kernel (strided → contiguous)
+// GPU gather kernel (strided source → contiguous destination)
 // ------------------------------------------------------------
 __global__ void gatherKernelBytes(const uint8_t *__restrict__ src,
                                   uint8_t *__restrict__ dst,
@@ -24,6 +25,7 @@ __global__ void gatherKernelBytes(const uint8_t *__restrict__ src,
     uint64_t tmp = idx;
     uint64_t srcOffset = 0;
 
+    // Calculate strided index from flat index
     for (int i = ndim - 1; i >= 0; --i)
     {
         uint64_t coord = tmp % dims[i];
@@ -75,54 +77,59 @@ inline void runCopyTo_CUDA_CPU(const std::vector<const void *> &inputs,
     uint64_t elemSize = getDTypeSize(inViews[0].dtype);
     size_t bytes = numElements * elemSize;
 
-    auto isContiguous = [](const TensorView &v)
-    {
-        uint64_t expected = 1;
-        for (int i = v.shape.ndim - 1; i >= 0; --i)
-        {
-            if (v.strides[i] != expected)
-                return false;
-            expected *= v.shape.dims[i];
-        }
-        return true;
-    };
+    bool srcContig = inViews[0].isContiguous();
+    bool dstContig = outViews[0].isContiguous();
 
-    bool srcContig = isContiguous(inViews[0]);
-    bool dstContig = isContiguous(outViews[0]);
-
-    // Fast path
+    // -------------------------
+    // Fast path: Both contiguous
+    // -------------------------
     if (srcContig && dstContig)
     {
-        cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
+        cudaError_t err = cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess)
+            Error::throw_err(cudaGetErrorString(err));
         return;
     }
 
-    uint8_t *d_temp = (uint8_t *)src;
+    // -------------------------
+    // Step 1: Handle strided source on GPU
+    // -------------------------
+    const uint8_t *d_contiguousSrc = src;
+    uint8_t *d_tempBuffer = nullptr;
 
     if (!srcContig)
     {
-        cudaMalloc(&d_temp, bytes);
+        // Allocate temporary contiguous buffer on device
+        cudaMalloc(&d_tempBuffer, bytes);
+        d_contiguousSrc = d_tempBuffer;
 
-        size_t metaBytes = inViews[0].shape.ndim * sizeof(uint64_t);
+        int ndim = static_cast<int>(inViews[0].shape.size());
 
-        uint64_t *d_dims;
-        uint64_t *d_strides;
+        // Prepare metadata for the GPU (convert to uint64_t)
+        std::vector<uint64_t> h_dims(ndim);
+        std::vector<uint64_t> h_strides(ndim);
+        for (int i = 0; i < ndim; ++i)
+        {
+            h_dims[i] = static_cast<uint64_t>(inViews[0].shape[i]);
+            h_strides[i] = static_cast<uint64_t>(inViews[0].strides[i]);
+        }
 
-        cudaMalloc(&d_dims, metaBytes);
-        cudaMalloc(&d_strides, metaBytes);
+        uint64_t *d_dims, *d_strides;
+        cudaMalloc(&d_dims, ndim * sizeof(uint64_t));
+        cudaMalloc(&d_strides, ndim * sizeof(uint64_t));
 
-        cudaMemcpy(d_dims, inViews[0].shape.dims, metaBytes, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_strides, inViews[0].strides, metaBytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_dims, h_dims.data(), ndim * sizeof(uint64_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_strides, h_strides.data(), ndim * sizeof(uint64_t), cudaMemcpyHostToDevice);
 
         int blockSize = 256;
-        int numBlocks = (numElements + blockSize - 1) / blockSize;
+        int numBlocks = static_cast<int>((numElements + blockSize - 1) / blockSize);
 
         gatherKernelBytes<<<numBlocks, blockSize>>>(
             src,
-            d_temp,
+            d_tempBuffer,
             numElements,
             elemSize,
-            inViews[0].shape.ndim,
+            ndim,
             d_dims,
             d_strides);
 
@@ -130,26 +137,33 @@ inline void runCopyTo_CUDA_CPU(const std::vector<const void *> &inputs,
         cudaFree(d_strides);
     }
 
-    std::vector<uint8_t> hostBuffer(bytes);
-
-    cudaMemcpy(hostBuffer.data(), d_temp, bytes, cudaMemcpyDeviceToHost);
-
-    if (!srcContig)
-        cudaFree(d_temp);
-
+    // -------------------------
+    // Step 2: Copy to host
+    // -------------------------
     if (dstContig)
     {
-        memcpy(dst, hostBuffer.data(), bytes);
-        return;
+        // Copy directly to destination
+        cudaMemcpy(dst, d_contiguousSrc, bytes, cudaMemcpyDeviceToHost);
+    }
+    else
+    {
+        // Copy to a temporary host buffer, then manually unpack to strided CPU destination
+        std::vector<uint8_t> hostContiguous(bytes);
+        cudaMemcpy(hostContiguous.data(), d_contiguousSrc, bytes, cudaMemcpyDeviceToHost);
+
+        for (uint64_t i = 0; i < numElements; ++i)
+        {
+            uint64_t dstIdx = getStridedIndex(i, outViews[0].shape, outViews[0].strides);
+            std::memcpy(dst + dstIdx * elemSize,
+                        hostContiguous.data() + i * elemSize,
+                        elemSize);
+        }
     }
 
-    for (uint64_t i = 0; i < numElements; ++i)
+    // Cleanup
+    if (d_tempBuffer)
     {
-        uint64_t dstIdx = getStridedIndex(i, outViews[0].shape, outViews[0].strides);
-
-        memcpy(dst + dstIdx * elemSize,
-               hostBuffer.data() + i * elemSize,
-               elemSize);
+        cudaFree(d_tempBuffer);
     }
 }
 

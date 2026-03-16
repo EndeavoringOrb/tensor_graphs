@@ -53,7 +53,7 @@ namespace Debug
                        << " (" << toString(node.opType) << (node.opType == OpType::FUSED ? " " + node.opName : "") << ")"
                        << " during \"" << context
                        << "\" at element index " << i;
-                    Error:throw_error(ss.str());
+                    Error::throw_error(ss.str());
                 }
             }
         }
@@ -72,7 +72,7 @@ namespace Debug
                        << " (" << toString(node.opType) << ")"
                        << " during " << context
                        << " at element index " << i;
-                    Error:throw_error(ss.str());
+                    Error::throw_error(ss.str());
                 }
             }
         }

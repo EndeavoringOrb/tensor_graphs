@@ -23,21 +23,21 @@ public:
         std::ifstream file(filepath, std::ios::binary);
         if (!file.is_open())
         {
-            Error:throw_error("[SafetensorsLoader.SafetensorsLoader] Could not open safetensors file: " + filepath);
+            Error::throw_error("[SafetensorsLoader.SafetensorsLoader] Could not open safetensors file: " + filepath);
         }
 
         // Read 8-byte header size (Safetensors spec relies on little-endian layout here)
         uint64_t headerSize = 0;
         if (!file.read(reinterpret_cast<char *>(&headerSize), sizeof(headerSize)))
         {
-            Error:throw_error("[SafetensorsLoader.SafetensorsLoader] Could not read safetensors header size.");
+            Error::throw_error("[SafetensorsLoader.SafetensorsLoader] Could not read safetensors header size.");
         }
 
         // Read JSON Header
         jsonHeader.resize(headerSize);
         if (!file.read(&jsonHeader[0], headerSize))
         {
-            Error:throw_error("[SafetensorsLoader.SafetensorsLoader] Could not read safetensors JSON header.");
+            Error::throw_error("[SafetensorsLoader.SafetensorsLoader] Could not read safetensors JSON header.");
         }
 
         dataStartOffset = 8 + headerSize;
@@ -49,7 +49,7 @@ public:
         auto it = metadata.find(name);
         if (it == metadata.end())
         {
-            Error:throw_error("[SafetensorsLoader.getMetadata] Tensor not found in safetensors: " + name);
+            Error::throw_error("[SafetensorsLoader.getMetadata] Tensor not found in safetensors: " + name);
         }
         return it->second;
     }
@@ -64,13 +64,13 @@ public:
         const auto &meta = getMetadata(name);
         if (meta.sizeBytes() > destSize)
         {
-            Error:throw_error("[SafetensorsLoader.loadTensor] Destination buffer too small for tensor: " + name);
+            Error::throw_error("[SafetensorsLoader.loadTensor] Destination buffer too small for tensor: " + name);
         }
 
         std::ifstream file(filename, std::ios::binary);
         if (!file.is_open())
         {
-            Error:throw_error("[SafetensorsLoader.loadTensor] Could not open safetensors file: " + filename);
+            Error::throw_error("[SafetensorsLoader.loadTensor] Could not open safetensors file: " + filename);
         }
 
         file.seekg(dataStartOffset + meta.dataOffsetStart, std::ios::beg);

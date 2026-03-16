@@ -32,7 +32,7 @@ inline void runAddNC_F32_ND(const std::vector<const void *> &inputs, const std::
 inline uint32_t refFactoryAddNC_F32_ND(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
-        Error:throw_error("Add Non-Contiguous F32 ND requires 2 inputs");
+        Error::throw_error("Add Non-Contiguous F32 ND requires 2 inputs");
 
     uint32_t id0 = inputs[0];
     uint32_t id1 = inputs[1];

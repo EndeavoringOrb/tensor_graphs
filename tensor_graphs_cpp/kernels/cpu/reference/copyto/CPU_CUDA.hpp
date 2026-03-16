@@ -2,13 +2,8 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
-#include <stdexcept>
-#include <vector>
 #include <cuda_runtime.h>
 
-// ------------------------------------------------------------
-// CUDA Kernel: unpack contiguous buffer → strided destination
-// ------------------------------------------------------------
 __global__ void unpackKernelBytes(const uint8_t *__restrict__ src,
                                   uint8_t *__restrict__ dst,
                                   uint64_t numElements,
@@ -23,7 +18,6 @@ __global__ void unpackKernelBytes(const uint8_t *__restrict__ src,
 
     uint64_t tmp = idx;
     uint64_t dstOffset = 0;
-
     for (int i = ndim - 1; i >= 0; --i)
     {
         uint64_t coord = tmp % dims[i];
@@ -33,137 +27,71 @@ __global__ void unpackKernelBytes(const uint8_t *__restrict__ src,
 
     const uint8_t *srcPtr = src + idx * elemSize;
     uint8_t *dstPtr = dst + dstOffset * elemSize;
-
     for (uint64_t b = 0; b < elemSize; ++b)
         dstPtr[b] = srcPtr[b];
 }
 
-// ------------------------------------------------------------
-// Matcher
-// ------------------------------------------------------------
-inline bool matchCopyTo_CPU_CUDA(const std::vector<TensorNode> &inputs,
-                                 const TensorNode &output,
-                                 const std::unordered_map<uint32_t, uint32_t> &)
+inline bool matchCopyTo_CPU_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &)
 {
-    if (inputs.size() != 1)
-        return false;
-
-    if (inputs[0].backend != Backend::CPU || output.backend != Backend::CUDA)
-        return false;
-
-    if (inputs[0].dtype != output.dtype)
-        return false;
-
-    if (inputs[0].shape != output.shape)
-        return false;
-
-    return true;
+    return (inputs.size() == 1 && inputs[0].backend == Backend::CPU && output.backend == Backend::CUDA && inputs[0].dtype == output.dtype && inputs[0].shape == output.shape);
 }
 
-// ------------------------------------------------------------
-// Runner
-// ------------------------------------------------------------
-inline void runCopyTo_CPU_CUDA(const std::vector<const void *> &inputs,
-                               const std::vector<void *> &outputs,
-                               const std::vector<TensorView> &inViews,
-                               const std::vector<TensorView> &outViews)
+inline void runCopyTo_CPU_CUDA(const std::vector<const void *> &inputs, const std::vector<void *> &outputs, const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
 {
     const uint8_t *src = static_cast<const uint8_t *>(inputs[0]);
     uint8_t *dst = static_cast<uint8_t *>(outputs[0]);
-
     uint64_t numElements = countElements(inViews[0].shape);
     uint64_t elemSize = getDTypeSize(inViews[0].dtype);
     size_t bytes = numElements * elemSize;
 
-    // -------------------------
-    // Contiguity checks
-    // -------------------------
-    auto isContiguous = [](const TensorView &v)
-    {
-        uint64_t expected = 1;
-        for (int i = v.shape.ndim - 1; i >= 0; --i)
-        {
-            if (v.strides[i] != expected)
-                return false;
-            expected *= v.shape.dims[i];
-        }
-        return true;
-    };
+    bool srcContig = inViews[0].isContiguous();
+    bool dstContig = outViews[0].isContiguous();
 
-    bool srcContig = isContiguous(inViews[0]);
-    bool dstContig = isContiguous(outViews[0]);
-
-    // -------------------------
-    // Fast path
-    // -------------------------
     if (srcContig && dstContig)
     {
-        cudaError_t err = cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice);
-        if (err != cudaSuccess)
-            throw std::runtime_error(cudaGetErrorString(err));
+        cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice);
         return;
     }
 
-    // -------------------------
-    // Step 1: CPU gather
-    // -------------------------
-    std::vector<uint8_t> hostBuffer;
+    // Step 1: Pack to contiguous host buffer if needed
     const uint8_t *packedSrc = src;
-
+    std::vector<uint8_t> hostBuffer;
     if (!srcContig)
     {
         hostBuffer.resize(bytes);
-        packedSrc = hostBuffer.data();
-
         for (uint64_t i = 0; i < numElements; ++i)
         {
             uint64_t srcIdx = getStridedIndex(i, inViews[0].shape, inViews[0].strides);
-
-            memcpy(hostBuffer.data() + i * elemSize,
-                   src + srcIdx * elemSize,
-                   elemSize);
+            std::memcpy(hostBuffer.data() + i * elemSize, src + srcIdx * elemSize, elemSize);
         }
+        packedSrc = hostBuffer.data();
     }
 
-    // -------------------------
-    // Step 2: copy to device
-    // -------------------------
+    // Step 2: Copy to device
     uint8_t *d_temp = dst;
-
     if (!dstContig)
-    {
         cudaMalloc(&d_temp, bytes);
-    }
-
     cudaMemcpy(d_temp, packedSrc, bytes, cudaMemcpyHostToDevice);
 
-    // -------------------------
-    // Step 3: GPU unpack
-    // -------------------------
+    // Step 3: Unpack on GPU
     if (!dstContig)
     {
-        size_t metaBytes = outViews[0].shape.ndim * sizeof(uint64_t);
+        int ndim = (int)outViews[0].shape.size();
+        std::vector<uint64_t> h_dims(ndim), h_strides(ndim);
+        for (int i = 0; i < ndim; ++i)
+        {
+            h_dims[i] = outViews[0].shape[i];
+            h_strides[i] = (uint64_t)outViews[0].strides[i];
+        }
 
-        uint64_t *d_dims;
-        uint64_t *d_strides;
-
-        cudaMalloc(&d_dims, metaBytes);
-        cudaMalloc(&d_strides, metaBytes);
-
-        cudaMemcpy(d_dims, outViews[0].shape.dims, metaBytes, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_strides, outViews[0].strides, metaBytes, cudaMemcpyHostToDevice);
+        uint64_t *d_dims, *d_strides;
+        cudaMalloc(&d_dims, ndim * sizeof(uint64_t));
+        cudaMalloc(&d_strides, ndim * sizeof(uint64_t));
+        cudaMemcpy(d_dims, h_dims.data(), ndim * sizeof(uint64_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_strides, h_strides.data(), ndim * sizeof(uint64_t), cudaMemcpyHostToDevice);
 
         int blockSize = 256;
-        int numBlocks = (numElements + blockSize - 1) / blockSize;
-
-        unpackKernelBytes<<<numBlocks, blockSize>>>(
-            d_temp,
-            dst,
-            numElements,
-            elemSize,
-            outViews[0].shape.ndim,
-            d_dims,
-            d_strides);
+        unpackKernelBytes<<<(numElements + blockSize - 1) / blockSize, blockSize>>>(d_temp, dst, numElements, elemSize, ndim, d_dims, d_strides);
 
         cudaFree(d_temp);
         cudaFree(d_dims);
@@ -171,8 +99,5 @@ inline void runCopyTo_CPU_CUDA(const std::vector<const void *> &inputs,
     }
 }
 
-REGISTER_REF_KERNEL(OpType::COPY_TO, Backend::CUDA,
-                    matchCopyTo_CPU_CUDA,
-                    runCopyTo_CPU_CUDA);
-
+REGISTER_REF_KERNEL(OpType::COPY_TO, Backend::CUDA, matchCopyTo_CPU_CUDA, runCopyTo_CPU_CUDA);
 #endif
