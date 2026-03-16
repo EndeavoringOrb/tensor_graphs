@@ -25,8 +25,8 @@ public:
     {
         if (compiled.nodeCosts.empty())
         {
-            throw std::runtime_error("[Executor] Critical Error: CompiledGraph contains no nodeCosts. "
-                                     "Execution cannot proceed as memory eviction requires cost metadata.");
+            Error::throw_err("[Executor] Critical Error: CompiledGraph contains no nodeCosts. "
+                             "Execution cannot proceed as memory eviction requires cost metadata.");
         }
     }
 

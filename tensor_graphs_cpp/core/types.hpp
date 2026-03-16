@@ -13,6 +13,14 @@
 #include <json.hpp>
 using json = nlohmann::json;
 
+namespace Error {
+    template<typename T = std::runtime_error, typename... Args>
+    [[noreturn]] inline void throw_err(const std::string& msg, Args&&... args) {
+        std::cerr << "\n[TensorGraph Error] " << msg << std::endl;
+        throw T(msg, std::forward<Args>(args)...);
+    }
+}
+
 inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape, const std::vector<int64_t> &strides)
 {
     uint64_t stridedIndex = 0;
@@ -62,7 +70,7 @@ inline uint64_t getDTypeSize(DType dtype)
     case DType::BOOL:
         return 1;
     default:
-        throw std::runtime_error("Unknown DType size");
+        Error::throw_err("Unknown DType size");
     }
 }
 
@@ -264,7 +272,7 @@ inline DType fromString(const std::string &str)
         if (toString(dtype) == str)
             return dtype;
     }
-    throw std::runtime_error("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for that instead of generic runtime_error
+    Error::throw_err("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for that instead of generic runtime_error
 }
 
 inline const char *toString(OpType op)

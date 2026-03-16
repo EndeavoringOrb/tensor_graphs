@@ -757,38 +757,49 @@ public:
                                 std::unordered_map<uint32_t, std::vector<Region>> reqRegions;
                                 uint32_t logRoot = compiled.logicalNodeMap.at(inst.nodeId);
                                 reqRegions[logRoot] = {outRegion};
-                                
+
                                 ShapePropagator bp;
-                                for (auto it = atomicTopo.rbegin(); it != atomicTopo.rend(); ++it) {
+                                for (auto it = atomicTopo.rbegin(); it != atomicTopo.rend(); ++it)
+                                {
                                     uint32_t logId = *it;
-                                    if (reqRegions.count(logId) && !reqRegions[logId].empty()) {
+                                    if (reqRegions.count(logId) && !reqRegions[logId].empty())
+                                    {
                                         bool isPhysicalInput = false;
-                                        for (uint32_t pInId : inst.inputNodeIds) {
-                                            if (compiled.logicalNodeMap.count(pInId) && compiled.logicalNodeMap.at(pInId) == logId && logId != logRoot) {
+                                        for (uint32_t pInId : inst.inputNodeIds)
+                                        {
+                                            if (compiled.logicalNodeMap.count(pInId) && compiled.logicalNodeMap.at(pInId) == logId && logId != logRoot)
+                                            {
                                                 isPhysicalInput = true;
                                                 break;
                                             }
                                         }
-                                        if (isPhysicalInput) continue;
+                                        if (isPhysicalInput)
+                                            continue;
 
-                                        const TensorNode& logNode = graph.nodes[logId];
-                                        if (logNode.opType != OpType::INPUT) {
+                                        const TensorNode &logNode = graph.nodes[logId];
+                                        if (logNode.opType != OpType::INPUT)
+                                        {
                                             auto pRegs = bp.backward(logNode, graph, reqRegions[logId]);
-                                            for (size_t k = 0; k < logNode.parentIds.size(); ++k) {
+                                            for (size_t k = 0; k < logNode.parentIds.size(); ++k)
+                                            {
                                                 reqRegions[logNode.parentIds[k]] = pRegs[k];
                                             }
                                         }
                                     }
                                 }
 
-                                for (size_t i = 0; i < inst.inputNodeIds.size(); ++i) {
-                                    if (compiled.logicalNodeMap.count(inst.inputNodeIds[i])) {
+                                for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
+                                {
+                                    if (compiled.logicalNodeMap.count(inst.inputNodeIds[i]))
+                                    {
                                         uint32_t logInId = compiled.logicalNodeMap.at(inst.inputNodeIds[i]);
                                         if (reqRegions.count(logInId) && !reqRegions[logInId].empty())
                                             parentSlices[i] = reqRegions[logInId];
                                         else
                                             parentSlices[i] = {outRegion};
-                                    } else {
+                                    }
+                                    else
+                                    {
                                         parentSlices[i] = {outRegion};
                                     }
                                 }
@@ -909,9 +920,7 @@ public:
 
                                     ss << "\n------------------------------------------------\n";
                                     std::string out = ss.str();
-                                    std::cerr << out << std::endl
-                                              << std::flush;
-                                    throw std::runtime_error(out);
+                                    Error::throw_err(out);
                                 }
                             }
                             regionKernels.push_back(selectedKernel);

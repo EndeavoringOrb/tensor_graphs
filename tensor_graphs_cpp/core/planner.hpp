@@ -402,7 +402,7 @@ public:
                           << ", Shape=" << toString(pNode.shape) << std::endl;
             }
 
-            throw std::runtime_error("Planner failed to find any execution strategy for root node.");
+            Error::throw_err("Planner failed to find any execution strategy for root node.");
         }
 
         auto bestRecipe = memo[rootHash][0];
@@ -579,7 +579,7 @@ public:
                         auto fallbackChains = getAdapterChains(compiled.nodesMap.count(chosenPid) ? compiled.nodesMap.at(chosenPid) : graph.nodes[chosenPid], parentBackend, mappedNode.backend, graph, compiled.refCounts, costModel);
                         if (fallbackChains.empty())
                         {
-                            throw std::runtime_error("No valid adapter chain found during DAG safety fallback");
+                            Error::throw_err("No valid adapter chain found during DAG safety fallback");
                         }
                         std::sort(fallbackChains.begin(), fallbackChains.end(), [](const auto &a, const auto &b)
                                   { return a.cost < b.cost; });
@@ -676,7 +676,7 @@ public:
             uint64_t finalKernelId = bestKernelAssignments.count(hId) ? bestKernelAssignments.at(hId) : UINT64_MAX;
             if (finalKernelId == UINT64_MAX)
             {
-                throw std::runtime_error("[Planner.plan] CRITICAL: Missing kernel assignment for node " + std::to_string(id));
+                Error::throw_err("[Planner.plan] CRITICAL: Missing kernel assignment for node " + std::to_string(id));
             }
 
             const KernelEntry &kEntry = KernelRegistry::get().getKernel(finalKernelId);
@@ -711,7 +711,7 @@ public:
                     }
                     if (fallbackId == UINT64_MAX)
                     {
-                        throw std::runtime_error("[Planner.plan] CRITICAL: Planned inplace kernel but refCount > 1 for node " + std::to_string(input0Id) + ", and no non-inplace fallback kernel found.");
+                        Error::throw_err("[Planner.plan] CRITICAL: Planned inplace kernel but refCount > 1 for node " + std::to_string(input0Id) + ", and no non-inplace fallback kernel found.");
                     }
                     finalKernelId = fallbackId;
                 }

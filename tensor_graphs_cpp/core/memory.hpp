@@ -6,6 +6,12 @@
 #include <list>
 #include <cstring>
 #include <stdexcept>
+#include <mutex>
+#include <csignal>
+#include <cstdlib>
+#include <algorithm>
+#include <iostream>
+
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
@@ -87,6 +93,17 @@ struct DeviceBuffer
     std::list<MemBlock> blocks;
     std::unordered_map<uint32_t, std::list<MemBlock>::iterator> allocationMap;
 
+    void freeArena()
+    {
+#ifdef USE_CUDA
+        if (arena_ptr != nullptr && backend == Backend::CUDA)
+        {
+            cudaFree(arena_ptr);
+            arena_ptr = nullptr;
+        }
+#endif
+    }
+
     DeviceBuffer(Backend b, uint64_t _sizeBytes) : backend(b), sizeBytes(_sizeBytes)
     {
         MemBlock initialFree;
@@ -96,6 +113,9 @@ struct DeviceBuffer
         initialFree.cost = 0.0f;
         initialFree.isLocked = false;
         blocks.push_back(initialFree);
+
+        InterruptManager::registerBuffer(this);
+        InterruptManager::hook();
     }
 
     DeviceBuffer(const DeviceBuffer &) = delete;
@@ -108,18 +128,16 @@ struct DeviceBuffer
           blocks(std::move(other.blocks)), allocationMap(std::move(other.allocationMap))
     {
         other.arena_ptr = nullptr;
+        InterruptManager::unregisterBuffer(&other);
+        InterruptManager::registerBuffer(this);
     }
 
     DeviceBuffer &operator=(DeviceBuffer &&other) noexcept
     {
         if (this != &other)
         {
-#ifdef USE_CUDA
-            if (arena_ptr != nullptr && backend == Backend::CUDA)
-            {
-                cudaFree(arena_ptr);
-            }
-#endif
+            freeArena();
+
             backend = other.backend;
             cpu_arena = std::move(other.cpu_arena);
             arena_ptr = other.arena_ptr;
@@ -130,18 +148,16 @@ struct DeviceBuffer
             allocationMap = std::move(other.allocationMap);
 
             other.arena_ptr = nullptr;
+            InterruptManager::unregisterBuffer(&other);
+            InterruptManager::registerBuffer(this);
         }
         return *this;
     }
 
     ~DeviceBuffer()
     {
-#ifdef USE_CUDA
-        if (arena_ptr != nullptr && backend == Backend::CUDA)
-        {
-            cudaFree(arena_ptr);
-        }
-#endif
+        InterruptManager::unregisterBuffer(this);
+        freeArena();
     }
 
     void init()
@@ -155,7 +171,7 @@ struct DeviceBuffer
             cudaError_t err = cudaMalloc(&arena_ptr, sizeBytes);
             if (err != cudaSuccess)
             {
-                throw std::runtime_error(std::string("CUDA malloc failed: ") + cudaGetErrorString(err));
+                Error::throw_err("CUDA malloc failed: " + std::string(cudaGetErrorString(err)));
             }
         }
         else if (backend == Backend::CPU)
@@ -165,9 +181,19 @@ struct DeviceBuffer
         }
         else
         {
-            throw std::runtime_error("Unknown backend");
+            Error::throw_err("Unknown backend");
         }
 #else
+        if (backend == Backend::CPU)
+        {
+            cpu_arena.resize(sizeBytes);
+            arena_ptr = cpu_arena.data();
+        }
+        else
+        {
+            Error::throw_err("CUDA backend not supported without USE_CUDA");
+        }
+#endif
         if (backend == Backend::CPU)
         {
             cpu_arena.resize(sizeBytes);
@@ -231,7 +257,7 @@ struct DeviceBuffer
             }
             else
             {
-                throw std::runtime_error("Cannot write to unallocated node");
+                Error::throw_err("Cannot write to unallocated node");
             }
         }
     }
@@ -437,7 +463,7 @@ struct DeviceBuffer
         // 4. If still no space, eviction failed.
         if (slotIt == blocks.end())
         {
-            throw MemoryAllocationError("Cannot allocate: Not enough contiguous space.", _sizeBytes);
+            Error::throw_err<MemoryAllocationError>("Cannot allocate: Not enough contiguous space.", _sizeBytes);
         }
 
         // 5. Claim the free slot
@@ -479,9 +505,50 @@ struct DeviceBuffer
         auto it = allocationMap.find(nodeId);
         if (it == allocationMap.end())
         {
-            throw std::runtime_error("[DeviceBuffer.getOffset] Node " + std::to_string(nodeId) + " not found in allocation map");
+            Error::throw_err("[DeviceBuffer.getOffset] Node " + std::to_string(nodeId) + " not found in allocation map");
         }
         return it->second->offset;
+    }
+};
+
+struct InterruptManager
+{
+    static inline std::vector<DeviceBuffer *> buffers;
+    static inline std::mutex mtx;
+
+    static void registerBuffer(DeviceBuffer *buf)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        buffers.push_back(buf);
+    }
+
+    static void unregisterBuffer(DeviceBuffer *buf)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto it = std::find(buffers.begin(), buffers.end(), buf);
+        if (it != buffers.end())
+        {
+            buffers.erase(it);
+        }
+    }
+
+    static void cleanup(); // Implemented at the bottom of memory.hpp
+
+    static void handleSigInt(int signum)
+    {
+        std::cerr << "\n[TensorGraph] Caught interrupt signal (" << signum << "). Cleaning up..." << std::endl;
+        cleanup();
+        std::exit(signum);
+    }
+
+    static void hook()
+    {
+        static bool hooked = false;
+        if (!hooked)
+        {
+            std::signal(SIGINT, handleSigInt);
+            hooked = true;
+        }
     }
 };
 
@@ -523,7 +590,7 @@ struct MemoryManager
     {
         auto it = buffers.find(backend);
         if (it == buffers.end())
-            throw std::runtime_error("Backend buffer not initialized in MemoryManager");
+            Error::throw_err("Backend buffer not initialized in MemoryManager");
 
         std::unordered_set<uint32_t> globalCacheState;
         if (parentMap && nodeCosts)
@@ -585,7 +652,7 @@ struct MemoryManager
         }
         else
         {
-            throw std::runtime_error("[MemoryManager.transferOwnership] Source ID not found in allocation map");
+            Error::throw_err("[MemoryManager.transferOwnership] Source ID not found in allocation map");
         }
     }
 
@@ -594,7 +661,7 @@ struct MemoryManager
         auto it = buffers.find(node.backend);
         if (it == buffers.end())
         {
-            throw std::runtime_error("[MemoryManager.getView] Backend buffer not initialized");
+            Error::throw_err("[MemoryManager.getView] Backend buffer not initialized");
         }
 
         const DeviceBuffer &buf = it->second;
@@ -639,7 +706,7 @@ struct MemoryManager
         {
             std::stringstream ss;
             ss << "[MemoryManager.getView] Backend " << backend << " not initialized.";
-            throw std::runtime_error(ss.str());
+            Error::throw_err(ss.str());
         }
 
         const DeviceBuffer &buf = it->second;
@@ -650,7 +717,7 @@ struct MemoryManager
         {
             std::stringstream ss;
             ss << "[MemoryManager.getView] Node ID " << nodeId << " is not currently allocated on " << backend;
-            throw std::runtime_error(ss.str());
+            Error::throw_err(ss.str());
         }
 
         // 3. Construct the view
@@ -671,3 +738,14 @@ struct MemoryManager
         return (buf.allocationMap.find(nodeId) != buf.allocationMap.end());
     }
 };
+
+// TODO: Can this be moved inside InterruptManager?
+inline void InterruptManager::cleanup()
+{
+    std::lock_guard<std::mutex> lock(mtx);
+    for (auto *buf : buffers)
+    {
+        buf->freeArena();
+    }
+    buffers.clear();
+}
