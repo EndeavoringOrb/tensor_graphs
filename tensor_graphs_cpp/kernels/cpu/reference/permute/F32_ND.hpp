@@ -29,15 +29,6 @@ inline bool matchPermuteF32_ND(const std::vector<TensorNode> &inputs, const Tens
     return true;
 }
 
-// Helper to count elements if not present in types.hpp
-inline uint64_t countElementsHelper(const std::vector<int64_t> &shape)
-{
-    uint64_t count = 1;
-    for (int64_t dim : shape)
-        count *= dim;
-    return count;
-}
-
 inline void runPermuteF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
 {
@@ -49,7 +40,7 @@ inline void runPermuteF32_ND(const std::vector<const void *> &inputs, const std:
     uint32_t ndim = static_cast<uint32_t>(outShape.size());
 
     // Fast exit for scalars or empty tensors
-    uint64_t numElements = countElementsHelper(outShape);
+    uint64_t numElements = countElements(outShape);
     if (numElements == 0)
         return;
     if (ndim == 0)
@@ -90,7 +81,7 @@ inline void runPermuteF32_ND(const std::vector<const void *> &inputs, const std:
     // Note: We capture stack arrays by reference/pointer.
     // To avoid function call overhead in the critical path, we can use a lambda or force inline.
 
-    auto recursive_iterate = [&](int dim, float *dst_ptr, const float *src_ptr) -> void
+    auto recursive_iterate = [&](auto& self, int dim, float *dst_ptr, const float *src_ptr) -> void
     {
         if (dim == static_cast<int>(ndim) - 1)
         {
@@ -133,7 +124,7 @@ inline void runPermuteF32_ND(const std::vector<const void *> &inputs, const std:
 
             for (int64_t i = 0; i < size; ++i)
             {
-                recursive_iterate(dim + 1, dst_ptr, src_ptr);
+                self(self, dim + 1, dst_ptr, src_ptr);
                 dst_ptr += d_stride;
                 src_ptr += s_stride;
             }
@@ -141,7 +132,7 @@ inline void runPermuteF32_ND(const std::vector<const void *> &inputs, const std:
     };
 
     // Start iteration
-    recursive_iterate(0, dst_base, src_base);
+    recursive_iterate(recursive_iterate, 0, dst_base, src_base);
 }
 
 REGISTER_REF_KERNEL(OpType::PERMUTE, Backend::CPU, matchPermuteF32_ND, runPermuteF32_ND);
