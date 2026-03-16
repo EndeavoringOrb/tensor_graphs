@@ -124,6 +124,9 @@ public:
             if (entry.opType != op || entry.backend != backend)
                 continue;
 
+            if (op == OpType::FUSED && entry.opName != opName)
+                continue;
+
             if (entry.match(inputs, output, refCounts))
             {
                 matches.push_back(entry.uid);
