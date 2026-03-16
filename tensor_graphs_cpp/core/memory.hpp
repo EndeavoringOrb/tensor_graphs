@@ -203,6 +203,24 @@ struct DeviceBuffer
         freeArena();
     }
 
+    void mergeFreeBlocks()
+    {
+        auto it = blocks.begin();
+        while (it != blocks.end())
+        {
+            auto nextIt = std::next(it);
+            if (nextIt != blocks.end() && it->isFree() && nextIt->isFree())
+            {
+                it->sizeBytes += nextIt->sizeBytes;
+                blocks.erase(nextIt);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
     void init()
     {
         if (initialized)
@@ -639,6 +657,15 @@ struct MemoryManager
         auto srcIt = buf.allocationMap.find(srcId);
         if (srcIt != buf.allocationMap.end())
         {
+            auto dstIt = buf.allocationMap.find(dstId);
+            if (dstIt != buf.allocationMap.end())
+            {
+                dstIt->second->nodeId = UINT32_MAX;
+                dstIt->second->isLocked = false;
+                buf.allocationMap.erase(dstIt);
+                buf.mergeFreeBlocks();
+            }
+
             auto blockIt = srcIt->second;
             buf.allocationMap.erase(srcIt);
 

@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/core/planner.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
@@ -689,9 +688,6 @@ public:
                 uint32_t input0Id = compiled.nodesMap.at(id).parentIds[0];
                 if (compiled.refCounts[input0Id] > 1)
                 {
-                    // Adapter nodes inserted during finalization can increase refCounts
-                    // beyond what was estimated during planning. Fall back to a
-                    // non-inplace kernel with the same op.
                     std::vector<TensorNode> fallbackInputs;
                     for (uint32_t pid : compiled.nodesMap.at(id).parentIds)
                     {
@@ -725,6 +721,21 @@ public:
             inst.inputNodeIds = compiled.nodesMap.at(id).parentIds;
             inst.backend = assignedBackend;
             inst.inplaceInputIndex = kEntryFinal.inplace ? 0 : -1;
+
+            if (kEntryFinal.inplace)
+            {
+                if (kEntryFinal.inferView)
+                {
+                    std::vector<TensorNode> inputs;
+                    for (uint32_t pid : inst.inputNodeIds)
+                        inputs.push_back(compiled.nodesMap.at(pid));
+                    compiled.nodesMap[id].view = kEntryFinal.inferView(compiled.nodesMap.at(id), inputs);
+                }
+                else
+                {
+                    compiled.nodesMap[id].view = compiled.nodesMap.at(inst.inputNodeIds[inst.inplaceInputIndex]).view;
+                }
+            }
 
             compiled.instructions.push_back(inst);
         }

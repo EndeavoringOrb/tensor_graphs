@@ -185,6 +185,7 @@ def generate_kernel_includes(core_seed):
             f.write(f"#undef REGISTER_REF_KERNEL_INPLACE\n")
             f.write(f"#undef REGISTER_KERNEL\n")
             f.write(f"#undef REGISTER_KERNEL_INPLACE\n")
+            f.write(f"#undef REGISTER_KERNEL_INPLACE_VIEW\n")
 
             f.write(
                 f"#define REGISTER_REF_KERNEL(op, back, m, r) REGISTER_REF_KERNEL_INTERNAL({uid}, op, back, m, r)\n"
@@ -198,6 +199,9 @@ def generate_kernel_includes(core_seed):
             f.write(
                 f"#define REGISTER_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, name, n, back, m, r, ref, __VA_ARGS__)\n"
             )
+            f.write(
+                f"#define REGISTER_KERNEL_INPLACE_VIEW(name, n, back, m, r, ref, inview, ...) REGISTER_KERNEL_INPLACE_VIEW_INTERNAL({uid}, name, n, back, m, r, ref, inview, __VA_ARGS__)\n"
+            )
             f.write(f'#include "{inc_path}"\n\n')
 
         f.write(f"// --- Clean up macros ---\n")
@@ -205,6 +209,7 @@ def generate_kernel_includes(core_seed):
         f.write(f"#undef REGISTER_REF_KERNEL_INPLACE\n")
         f.write(f"#undef REGISTER_KERNEL\n")
         f.write(f"#undef REGISTER_KERNEL_INPLACE\n")
+        f.write(f"#undef REGISTER_KERNEL_INPLACE_VIEW\n")
 
     print(f"Generated {len(kernel_entries)} Kernel Includes with UID injection.")
 
@@ -267,8 +272,6 @@ def main():
     DEBUG_MODE = args.debug
 
     print(f"Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...")
-    os.makedirs("dirty_region_caches", exist_ok=True)
-    os.makedirs("benchmarks", exist_ok=True)
     core_seed = generate_core_seed()
     generate_kernel_uids(core_seed)
     generate_kernel_includes(core_seed)

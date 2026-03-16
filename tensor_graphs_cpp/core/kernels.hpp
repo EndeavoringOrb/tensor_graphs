@@ -21,6 +21,8 @@ using KernelFunc = void (*)(const std::vector<const void *> &inputs,
 
 using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph);
 
+using InferViewFunc = TensorView (*)(const TensorNode &node, const std::vector<TensorNode> &inputs);
+
 struct ReferenceGraphEntry
 {
     uint32_t numInputs;
@@ -75,6 +77,7 @@ struct KernelEntry
     ReferenceFactory refFactory;
     bool inplace;
     bool isReference;
+    InferViewFunc inferView;
     std::vector<DType> dtypes;
     std::vector<std::vector<uint32_t>> dummyShapes;
     std::vector<bool> requiresContiguous;
@@ -95,12 +98,12 @@ public:
 
     void registerKernel(uint64_t uid, OpType op, const std::string &opName, uint32_t numInputs,
                         Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
-                        bool inplace, bool isReference,
+                        bool inplace, bool isReference, InferViewFunc inferView,
                         const std::vector<DType> &dtypes,
                         const std::vector<std::vector<uint32_t>> &dummyShapes,
                         const std::vector<bool> &contiguous)
     {
-        entries.push_back({uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, dtypes, dummyShapes, contiguous});
+        entries.push_back({uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, inferView, dtypes, dummyShapes, contiguous});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory, dtypes, dummyShapes);
@@ -192,12 +195,12 @@ struct KernelRegistrar
 {
     KernelRegistrar(uint64_t uid, OpType op, const std::string &opName, uint32_t numInputs,
                     Backend backend, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
-                    bool inplace, bool isReference,
+                    bool inplace, bool isReference, InferViewFunc inferView = nullptr,
                     const std::vector<DType> &dtypes = {},
                     const std::vector<std::vector<uint32_t>> &dummyShapes = {},
                     const std::vector<bool> &contiguous = {})
     {
-        KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, dtypes, dummyShapes, contiguous);
+        KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, inferView, dtypes, dummyShapes, contiguous);
     }
 };
 
@@ -215,15 +218,21 @@ struct KernelRegistrar
 #ifndef REGISTER_KERNEL_INPLACE
 #define REGISTER_KERNEL_INPLACE(opName, numInputs, backend, match, run, refFactory, ...)
 #endif
+#ifndef REGISTER_KERNEL_INPLACE_VIEW
+#define REGISTER_KERNEL_INPLACE_VIEW(opName, numInputs, backend, match, run, refFactory, inferView, ...)
+#endif
 
 #define REGISTER_REF_KERNEL_INTERNAL(uid, op, backend, match, run) \
-    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, false, true, {}, {}, {})
+    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, false, true, nullptr, {}, {}, {})
 
 #define REGISTER_REF_KERNEL_INPLACE_INTERNAL(uid, op, backend, match, run) \
-    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, true, true, {}, {}, {})
+    static KernelRegistrar _registrar_##run(uid, op, "", 0, backend, match, run, nullptr, true, true, nullptr, {}, {}, {})
 
 #define REGISTER_KERNEL_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory, ...) \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false, false, __VA_ARGS__)
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, false, false, nullptr, __VA_ARGS__)
 
 #define REGISTER_KERNEL_INPLACE_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory, ...) \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true, false, __VA_ARGS__)
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true, false, nullptr, __VA_ARGS__)
+
+#define REGISTER_KERNEL_INPLACE_VIEW_INTERNAL(uid, opName, numInputs, backend, match, run, refFactory, inferView, ...) \
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, backend, match, run, refFactory, true, false, inferView, __VA_ARGS__)

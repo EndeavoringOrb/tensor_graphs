@@ -135,19 +135,16 @@ public:
             }
 
             // 3. ALLOCATE / TRANSFER OUTPUT
-            if (!inCache)
+            if (inst.inplaceInputIndex >= 0)
             {
-                if (inst.inplaceInputIndex >= 0)
-                {
-                    uint32_t srcId = inst.inputNodeIds[inst.inplaceInputIndex];
-                    memManager.transferOwnership(inst.backend, srcId, inst.nodeId);
-                }
-                else
-                {
-                    uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
-                    float cost = compiled.nodeCosts.at(inst.nodeId);
-                    memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts[inst.nodeId], cost, &parentMap, &compiled.nodeCosts);
-                }
+                uint32_t srcId = inst.inputNodeIds[inst.inplaceInputIndex];
+                memManager.transferOwnership(inst.backend, srcId, inst.nodeId);
+            }
+            else if (!inCache)
+            {
+                uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+                float cost = compiled.nodeCosts.at(inst.nodeId);
+                memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts[inst.nodeId], cost, &parentMap, &compiled.nodeCosts);
             }
 
             // Ensure output is locked
@@ -289,7 +286,7 @@ public:
             // 5. Release Consumed Parents
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {
-                if (static_cast<int>(i) == inst.inplaceInputIndex && !inCache)
+                if (static_cast<int>(i) == inst.inplaceInputIndex)
                     continue;
 
                 uint32_t inId = inst.inputNodeIds[i];

@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/reshape/inplace_ND.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -9,16 +8,22 @@ inline bool matchReshapeInplaceND(const std::vector<TensorNode> &inputs, const T
         return false;
     if (!inputs[0].view.isContiguous())
         return false;
-    if (inputs[0].view.baseOffset != output.view.baseOffset || inputs[0].view.dtype != output.view.dtype)
+    if (inputs[0].dtype != output.dtype)
         return false;
     if (inputs[0].storageType == StorageType::PERSISTENT)
         return false;
     auto it = refCounts.find(inputs[0].id);
-    if (it == refCounts.end())
-        return false;
-    if (it->second != 1)
+    if (it == refCounts.end() || it->second != 1)
         return false;
     return countElements(inputs[0].shape) == countElements(output.shape);
+}
+
+inline TensorView inferViewReshapeInplace(const TensorNode &node, const std::vector<TensorNode> &inputs)
+{
+    TensorView view = inputs[0].view;
+    view.shape = node.shape;
+    view.strides = TensorView::calcContiguousStrides(node.shape);
+    return view;
 }
 
 inline void runReshapeInplaceND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
@@ -32,4 +37,4 @@ inline uint32_t refFactoryReshapeInplaceND(const std::vector<uint32_t> &inputs, 
     return graph.reshape(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL_INPLACE("Reshape_Inplace", 2, Backend::CPU, matchReshapeInplaceND, runReshapeInplaceND, refFactoryReshapeInplaceND, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {false, false});
+REGISTER_KERNEL_INPLACE_VIEW("Reshape_Inplace", 2, Backend::CPU, matchReshapeInplaceND, runReshapeInplaceND, refFactoryReshapeInplaceND, inferViewReshapeInplace, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {false, false});
