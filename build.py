@@ -24,6 +24,9 @@ DEBUG_MODE = False
 
 
 def get_compiler_cmd(fname: str):
+    out_ext = ".exe" if os.name == "nt" else ""
+    out_name = f"tensor_graphs_cpp/{fname.split('.')[0]}{out_ext}"
+
     if USE_CUDA:
         cmd = [
             "nvcc",
@@ -42,26 +45,42 @@ def get_compiler_cmd(fname: str):
             cmd.extend(["-O3"])
 
         cmd.append(str(ROOT_DIR / fname))
-        cmd.extend(["-o", f"tensor_graphs_cpp/{fname.split('.')[0]}.exe"])
+        cmd.extend(["-o", out_name])
         return cmd
     else:
-        cmd = [
-            "cl.exe",
-            "/std:c++17",
-            "/EHsc",
-            f"/I{ROOT_DIR}",
-        ]
+        if os.name == "nt":
+            cmd = [
+                "cl.exe",
+                "/std:c++17",
+                "/EHsc",
+                f"/I{ROOT_DIR}",
+            ]
 
-        if DEBUG_MODE:
-            # Debug flags: /Zi (debug info), /Od (disable optimization), /RTC1 (runtime checks)
-            cmd.extend(["/Zi", "/Od", "/DDEBUG"])
+            if DEBUG_MODE:
+                # Debug flags: /Zi (debug info), /Od (disable optimization), /RTC1 (runtime checks)
+                cmd.extend(["/Zi", "/Od", "/DDEBUG"])
+            else:
+                # Release flags: /O2 (maximize speed)
+                cmd.extend(["/O2"])
+
+            cmd.append(str(ROOT_DIR / fname))
+            cmd.extend([f"/Fe:{out_name}"])
+            return cmd
         else:
-            # Release flags: /O2 (maximize speed)
-            cmd.extend(["/O2"])
+            cmd = [
+                "g++",
+                "-std=c++17",
+                f"-I{ROOT_DIR}",
+            ]
 
-        cmd.append(str(ROOT_DIR / fname))
-        cmd.extend([f"/Fe:tensor_graphs_cpp/{fname.split('.')[0]}.exe"])
-        return cmd
+            if DEBUG_MODE:
+                cmd.extend(["-g", "-O0", "-DDEBUG"])
+            else:
+                cmd.extend(["-O3"])
+
+            cmd.append(str(ROOT_DIR / fname))
+            cmd.extend(["-o", out_name])
+            return cmd
 
 
 def get_file_hash(filepath):
