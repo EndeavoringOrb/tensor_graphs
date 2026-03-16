@@ -201,7 +201,7 @@ struct DeviceBuffer
         }
         else
         {
-            throw std::runtime_error("CUDA backend not supported without USE_CUDA");
+            Error:throw_error("CUDA backend not supported without USE_CUDA");
         }
 #endif
         initialized = true;

@@ -35,7 +35,7 @@ inline void runCopyTo_CUDA_CPU_I32(const std::vector<const void *> &inputs, cons
         cudaError_t err = cudaMemcpy(dst + dstIdx, src + srcIdx, sizeof(int32_t), cudaMemcpyDeviceToHost);
         if (err != cudaSuccess)
         {
-            throw std::runtime_error(std::string("CUDA strided copyto (I32) device->host failed: ") + cudaGetErrorString(err));
+            Error:throw_error(std::string("CUDA strided copyto (I32) device->host failed: ") + cudaGetErrorString(err));
         }
     }
 }
