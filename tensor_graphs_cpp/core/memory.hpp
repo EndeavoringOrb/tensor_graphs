@@ -189,19 +189,13 @@ struct DeviceBuffer
             cpu_arena.resize(sizeBytes);
             arena_ptr = cpu_arena.data();
         }
-        else
+        else if (backend == Backend::CUDA)
         {
             Error::throw_err("CUDA backend not supported without USE_CUDA");
         }
-#endif
-        if (backend == Backend::CPU)
-        {
-            cpu_arena.resize(sizeBytes);
-            arena_ptr = cpu_arena.data();
-        }
         else
         {
-            Error:throw_error("CUDA backend not supported without USE_CUDA");
+            Error::throw_err("Unknown backend");
         }
 #endif
         initialized = true;
