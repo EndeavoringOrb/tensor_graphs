@@ -2,6 +2,48 @@
 #include "core/types.hpp"
 #include "core/graph.hpp"
 
+inline std::string toString(const std::vector<uint32_t> &shape)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << shape[i];
+    }
+    ss << "]";
+    return ss.str();
+}
+
+inline std::string toString(const std::vector<uint64_t> &shape)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << shape[i];
+    }
+    ss << "]";
+    return ss.str();
+}
+
+inline std::string toString(const std::vector<int64_t> &shape)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << shape[i];
+    }
+    ss << "]";
+    return ss.str();
+}
+
 /**
  * Helper to format a TensorNode's metadata and its parents' metadata into a string.
  * This encapsulates the logging logic used in estimateCost and interpolate.
@@ -82,47 +124,5 @@ std::string toString(const Region &reg)
         const Dim &dim = reg.region[i];
         ss << "(" << dim.start << ", " << dim.stop << ")";
     }
-    return ss.str();
-}
-
-inline std::string toString(const std::vector<uint32_t> &shape)
-{
-    std::stringstream ss;
-    ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
-    {
-        if (i > 0)
-            ss << ", ";
-        ss << shape[i];
-    }
-    ss << "]";
-    return ss.str();
-}
-
-inline std::string toString(const std::vector<uint64_t> &shape)
-{
-    std::stringstream ss;
-    ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
-    {
-        if (i > 0)
-            ss << ", ";
-        ss << shape[i];
-    }
-    ss << "]";
-    return ss.str();
-}
-
-inline std::string toString(const std::vector<int64_t> &shape)
-{
-    std::stringstream ss;
-    ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
-    {
-        if (i > 0)
-            ss << ", ";
-        ss << shape[i];
-    }
-    ss << "]";
     return ss.str();
 }

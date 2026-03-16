@@ -82,9 +82,9 @@ inline void runDotF32_3D(const std::vector<const void *> &inputs, const std::vec
 
         // Strides for the reduction dimension K
         // In A [B, M, K], K is index 2
-        uint32_t strideA_K = viewA.strides[2];
+        int64_t strideA_K = viewA.strides[2];
         // In B [B, K, N], K is index 1
-        uint32_t strideB_K = viewB.strides[1];
+        int64_t strideB_K = viewB.strides[1];
 
         for (uint32_t b = 0; b < B_count; ++b)
         {
