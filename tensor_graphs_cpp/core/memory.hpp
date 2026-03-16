@@ -16,6 +16,49 @@
 #include <cuda_runtime.h>
 #endif
 
+// Forward declarations
+struct DeviceBuffer;
+
+/**
+ * InterruptManager handles SIGINT (Ctrl+C) to ensure hardware resources
+ * (like CUDA memory) are freed properly before the process exits.
+ */
+struct InterruptManager
+{
+    static inline std::vector<DeviceBuffer *> buffers;
+    static inline std::mutex mtx;
+
+    static void registerBuffer(DeviceBuffer *buf)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        buffers.push_back(buf);
+    }
+
+    static void unregisterBuffer(DeviceBuffer *buf)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto it = std::find(buffers.begin(), buffers.end(), buf);
+        if (it != buffers.end())
+        {
+            buffers.erase(it);
+        }
+    }
+
+    static void cleanup(); // Implemented at the bottom of the file
+
+    static void handleSigInt(int signum); // Implemented at the bottom of the file
+
+    static void hook()
+    {
+        static bool hooked = false;
+        if (!hooked)
+        {
+            std::signal(SIGINT, handleSigInt);
+            hooked = true;
+        }
+    }
+};
+
 inline float calculateSavedCost(
     const std::unordered_set<uint32_t> &cacheState,
     const std::unordered_map<uint32_t, std::vector<uint32_t>> &parentMap,
@@ -739,7 +782,14 @@ inline void InterruptManager::cleanup()
     std::lock_guard<std::mutex> lock(mtx);
     for (auto *buf : buffers)
     {
-        buf->freeArena();
+        buf->freeArena(); // Requires full definition of DeviceBuffer
     }
     buffers.clear();
+}
+
+inline void InterruptManager::handleSigInt(int signum)
+{
+    std::cerr << "\n[TensorGraph] Caught interrupt signal (" << signum << "). Cleaning up..." << std::endl;
+    cleanup();
+    std::exit(signum);
 }
