@@ -36,6 +36,8 @@ struct Record
 
     std::vector<std::vector<uint32_t>> inputShapes;
     std::vector<std::vector<uint32_t>> outputShapes;
+    std::vector<std::vector<int64_t>> inputStrides;
+    std::vector<std::vector<int64_t>> outputStrides;
     std::vector<DType> inputDTypes;
     std::vector<DType> outputDTypes;
     std::vector<std::vector<uint8_t>> inputConstants;
@@ -54,6 +56,8 @@ inline void to_json(json &j, const Record &r)
         {"hwTag", r.hwTag},
         {"inputShapes", r.inputShapes},
         {"outputShapes", r.outputShapes},
+        {"inputStrides", r.inputStrides},
+        {"outputStrides", r.outputStrides},
         {"inputDTypes", r.inputDTypes},
         {"outputDTypes", r.outputDTypes},
         {"inputConstants", r.inputConstants},
@@ -68,6 +72,9 @@ inline void from_json(const json &j, Record &r)
 
     r.inputShapes = j.at("inputShapes").get<std::vector<std::vector<uint32_t>>>();
     r.outputShapes = j.at("outputShapes").get<std::vector<std::vector<uint32_t>>>();
+    r.inputStrides = j.at("inputStrides").get<std::vector<std::vector<int64_t>>>();
+    r.outputStrides = j.at("outputStrides").get<std::vector<std::vector<int64_t>>>();
+
     r.inputDTypes = j.at("inputDTypes").get<std::vector<DType>>();
     r.outputDTypes = j.at("outputDTypes").get<std::vector<DType>>();
     r.inputConstants = j.at("inputConstants").get<std::vector<std::vector<uint8_t>>>();
@@ -164,6 +171,7 @@ struct CostModel
     float estimateCost(const TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph, uint64_t kernelUid)
     {
         std::vector<std::vector<uint32_t>> inShapes(inputs.size());
+        std::vector<std::vector<int64_t>> inStrides(inputs.size());
         std::vector<std::vector<uint8_t>> inConstants(inputs.size());
         std::vector<DType> inDTypes(inputs.size());
 
@@ -171,6 +179,7 @@ struct CostModel
         {
             const auto &inNode = inputs[i];
             inShapes[i] = inNode.shape;
+            inStrides[i] = inNode.view.shape.empty() ? TensorView::calcContiguousStrides(inNode.shape) : inNode.view.strides;
             inDTypes[i] = inNode.dtype;
 
             // Check if this input corresponds to a persistent constant in the global graph
@@ -182,6 +191,7 @@ struct CostModel
             }
         }
         std::vector<std::vector<uint32_t>> outShapes = {node.shape};
+        std::vector<std::vector<int64_t>> outStrides = {node.view.shape.empty() ? TensorView::calcContiguousStrides(node.shape) : node.view.strides};
         std::vector<DType> outDTypes = {node.dtype};
 
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS
@@ -192,6 +202,8 @@ struct CostModel
             r.hwTag = HW_TAG;
             r.inputShapes = inShapes;
             r.outputShapes = outShapes;
+            r.inputStrides = inStrides;
+            r.outputStrides = outStrides;
             r.inputDTypes = inDTypes;
             r.outputDTypes = outDTypes;
             r.inputConstants = inConstants;
@@ -228,6 +240,7 @@ struct CostModel
         for (const auto &r : it->second)
         {
             if (r.inputShapes == inShapes && r.outputShapes == outShapes &&
+                r.inputStrides == inStrides && r.outputStrides == outStrides &&
                 r.inputDTypes == inDTypes && r.outputDTypes == outDTypes)
             {
                 return r.runTime;

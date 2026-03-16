@@ -42,15 +42,21 @@ int main()
                 continue;
 
             auto j = json::parse(line);
+            Record r = j.get<Record>();
             json keyObj;
-            keyObj["buildContextId"] = j["buildContextId"];
-            keyObj["hwTag"] = j["hwTag"];
-            keyObj["inputConstants"] = j["inputConstants"];
-            keyObj["inputDTypes"] = j["inputDTypes"];
-            keyObj["outputDTypes"] = j["outputDTypes"];
-            keyObj["kernelUid"] = j["kernelUid"];
-            keyObj["inputShapes"] = j["inputShapes"];
-            keyObj["outputShapes"] = j["outputShapes"];
+            std::stringstream uid_ss, build_ss;
+            uid_ss << "0x" << std::hex << r.kernelUid;
+            build_ss << "0x" << std::hex << r.buildContextId;
+            keyObj["buildContextId"] = build_ss.str();
+            keyObj["hwTag"] = r.hwTag;
+            keyObj["inputConstants"] = r.inputConstants;
+            keyObj["inputDTypes"] = r.inputDTypes;
+            keyObj["outputDTypes"] = r.outputDTypes;
+            keyObj["kernelUid"] = uid_ss.str();
+            keyObj["inputShapes"] = r.inputShapes;
+            keyObj["outputShapes"] = r.outputShapes;
+            keyObj["inputStrides"] = r.inputStrides;
+            keyObj["outputStrides"] = r.outputStrides;
             std::string key = keyObj.dump();
             recordedKeys.insert(key);
         }
@@ -74,16 +80,23 @@ int main()
     {
         if (line.empty())
             continue;
+
         auto j = json::parse(line);
+        Record r = j.get<Record>();
         json keyObj;
-        keyObj["buildContextId"] = j["buildContextId"];
-        keyObj["hwTag"] = j["hwTag"];
-        keyObj["inputConstants"] = j["inputConstants"];
-        keyObj["inputDTypes"] = j["inputDTypes"];
-        keyObj["outputDTypes"] = j["outputDTypes"];
-        keyObj["kernelUid"] = j["kernelUid"];
-        keyObj["inputShapes"] = j["inputShapes"];
-        keyObj["outputShapes"] = j["outputShapes"];
+        std::stringstream uid_ss, build_ss;
+        uid_ss << "0x" << std::hex << r.kernelUid;
+        build_ss << "0x" << std::hex << r.buildContextId;
+        keyObj["buildContextId"] = build_ss.str();
+        keyObj["hwTag"] = r.hwTag;
+        keyObj["inputConstants"] = r.inputConstants;
+        keyObj["inputDTypes"] = r.inputDTypes;
+        keyObj["outputDTypes"] = r.outputDTypes;
+        keyObj["kernelUid"] = uid_ss.str();
+        keyObj["inputShapes"] = r.inputShapes;
+        keyObj["outputShapes"] = r.outputShapes;
+        keyObj["inputStrides"] = r.inputStrides;
+        keyObj["outputStrides"] = r.outputStrides;
         std::string key = keyObj.dump();
 
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
@@ -97,10 +110,6 @@ int main()
             {
                 toBenchmark.push_back(j);
             }
-        }
-        else
-        {
-            int a = 5;
         }
     }
 
@@ -124,8 +133,9 @@ int main()
         {
             const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
             // SAFETY CHECK: Ensure the Record from JSON matches the Kernel's expectations
-            if (r.inputShapes.size() < (kernel.inplace ? 1 : kernel.numInputs) && !kernel.isReference) {
-                std::cerr << "Skipping kernel " << kernel.opName << ": Record has " 
+            if (r.inputShapes.size() < (kernel.inplace ? 1 : kernel.numInputs) && !kernel.isReference)
+            {
+                std::cerr << "Skipping kernel " << kernel.opName << ": Record has "
                           << r.inputShapes.size() << " inputs, kernel requires " << kernel.numInputs << std::endl;
                 continue;
             }
@@ -186,7 +196,16 @@ int main()
 
             for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
-                uint64_t elements = countElements(r.inputShapes[idx]);
+                uint64_t maxIndex = 0;
+                for (size_t d = 0; d < r.inputShapes[idx].size(); ++d)
+                {
+                    if (r.inputShapes[idx][d] > 0)
+                    {
+                        maxIndex += (r.inputShapes[idx][d] - 1) * r.inputStrides[idx][d];
+                    }
+                }
+                uint64_t elements = r.inputShapes[idx].empty() ? 1 : maxIndex + 1;
+
                 if (elements == 0)
                     elements = 1;
                 uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
@@ -252,14 +271,23 @@ int main()
                 }
 
                 inViews[idx].shape = r.inputShapes[idx];
-                inViews[idx].strides = TensorView::calcContiguousStrides(r.inputShapes[idx]);
+                inViews[idx].strides = r.inputStrides[idx];
                 inViews[idx].baseOffset = 0;
                 inViews[idx].dtype = r.inputDTypes[idx];
             }
 
             for (size_t idx = 0; idx < r.outputShapes.size(); ++idx)
             {
-                uint64_t elements = countElements(r.outputShapes[idx]);
+                uint64_t maxIndex = 0;
+                for (size_t d = 0; d < r.outputShapes[idx].size(); ++d)
+                {
+                    if (r.outputShapes[idx][d] > 0)
+                    {
+                        maxIndex += (r.outputShapes[idx][d] - 1) * r.outputStrides[idx][d];
+                    }
+                }
+                uint64_t elements = r.outputShapes[idx].empty() ? 1 : maxIndex + 1;
+
                 if (elements == 0)
                     elements = 1;
                 uint64_t bytes = elements * getDTypeSize(r.outputDTypes[idx]);
@@ -283,7 +311,7 @@ int main()
                 }
 
                 outViews[idx].shape = r.outputShapes[idx];
-                outViews[idx].strides = TensorView::calcContiguousStrides(r.outputShapes[idx]);
+                outViews[idx].strides = r.outputStrides[idx];
                 outViews[idx].baseOffset = 0;
                 outViews[idx].dtype = r.outputDTypes[idx];
             }
