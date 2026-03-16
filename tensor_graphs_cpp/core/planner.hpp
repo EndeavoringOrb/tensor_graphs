@@ -711,7 +711,7 @@ public:
                     }
                     if (fallbackId == UINT64_MAX)
                     {
-                        Error::throw_err("[Planner.plan] CRITICAL: Planned inplace kernel but refCount > 1 for node " + std::to_string(input0Id) + ", and no non-inplace fallback kernel found.");
+                        Error::throw_err("[Planner.plan] CRITICAL: Planned inplace kernel but refCount > 1 for node " + std::to_string(input0Id) + ", and no non-inplace fallback kernel found.\n" + toString(node));
                     }
                     finalKernelId = fallbackId;
                 }

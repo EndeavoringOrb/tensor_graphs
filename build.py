@@ -267,6 +267,8 @@ def main():
     DEBUG_MODE = args.debug
 
     print(f"Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...")
+    os.makedirs("dirty_region_caches", exist_ok=True)
+    os.makedirs("benchmarks", exist_ok=True)
     core_seed = generate_core_seed()
     generate_kernel_uids(core_seed)
     generate_kernel_includes(core_seed)
