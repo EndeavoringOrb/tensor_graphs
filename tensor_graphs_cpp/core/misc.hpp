@@ -46,7 +46,8 @@ inline std::string toString(const TensorNode &node, const std::string &prefix = 
 {
     std::stringstream ss;
     ss << prefix << "Node " << node.id << " [" << toString(node.opType);
-    if (node.opType == OpType::FUSED) {
+    if (node.opType == OpType::FUSED)
+    {
         ss << " (" << node.opName << ")";
     }
     ss << "]\n"
@@ -81,5 +82,47 @@ std::string toString(const Region &reg)
         const Dim &dim = reg.region[i];
         ss << "(" << dim.start << ", " << dim.stop << ")";
     }
+    return ss.str();
+}
+
+inline std::string toString(const std::vector<uint32_t> &shape)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << shape[i];
+    }
+    ss << "]";
+    return ss.str();
+}
+
+inline std::string toString(const std::vector<uint64_t> &shape)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << shape[i];
+    }
+    ss << "]";
+    return ss.str();
+}
+
+inline std::string toString(const std::vector<int64_t> &shape)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << shape[i];
+    }
+    ss << "]";
     return ss.str();
 }

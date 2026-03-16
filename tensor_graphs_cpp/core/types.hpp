@@ -13,9 +13,11 @@
 #include <json.hpp>
 using json = nlohmann::json;
 
-namespace Error {
-    template<typename T = std::runtime_error, typename... Args>
-    [[noreturn]] inline void throw_err(const std::string& msg, Args&&... args) {
+namespace Error
+{
+    template <typename T = std::runtime_error, typename... Args>
+    [[noreturn]] inline void throw_err(const std::string &msg, Args &&...args)
+    {
         std::cerr << "\n[TensorGraph Error] " << msg << std::endl;
         throw T(msg, std::forward<Args>(args)...);
     }
@@ -356,48 +358,6 @@ inline const char *toString(StorageType storage)
     default:
         return "UNKNOWN_STORAGE";
     }
-}
-
-inline std::string toString(const std::vector<uint32_t> &shape)
-{
-    std::stringstream ss;
-    ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
-    {
-        if (i > 0)
-            ss << ", ";
-        ss << shape[i];
-    }
-    ss << "]";
-    return ss.str();
-}
-
-inline std::string toString(const std::vector<uint64_t> &shape)
-{
-    std::stringstream ss;
-    ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
-    {
-        if (i > 0)
-            ss << ", ";
-        ss << shape[i];
-    }
-    ss << "]";
-    return ss.str();
-}
-
-inline std::string toString(const std::vector<int64_t> &shape)
-{
-    std::stringstream ss;
-    ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
-    {
-        if (i > 0)
-            ss << ", ";
-        ss << shape[i];
-    }
-    ss << "]";
-    return ss.str();
 }
 
 inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << toString(dtype); }

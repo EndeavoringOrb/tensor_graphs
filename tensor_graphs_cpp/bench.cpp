@@ -320,8 +320,8 @@ int main()
                       << "[" << toString(kernel.backend) << "] " // Added Backend
                       << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
                       << " (0x" << std::hex << kernelUid << std::dec << ")"
-                      << ", Out DType:   " << toString(outViews[0].dtype) // Added DType
-                      << ", Out Shape:   " << toString(outViews[0].shape)
+                      << ", Out DType: " << toString(outViews[0].dtype) // Added DType
+                      << ", Out Shape: " << toString(outViews[0].shape)
                       << ", Out Strides: " << toString(outViews[0].strides) // Added Strides
                       << std::flush;
 
