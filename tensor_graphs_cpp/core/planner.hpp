@@ -18,6 +18,48 @@
 
 #define FUSE_OPS
 
+void propagateDirtyRegionsAtomic(
+    const std::vector<uint32_t> &topo,
+    const Graph &graph,
+    std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
+    std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions // dirtyInputRegions[parentId][outputRegionId]
+)
+{
+    ShapePropagator propagator;
+
+    for (uint32_t nodeId : topo)
+    {
+        if (nodeId >= graph.nodes.size())
+            continue;
+        const TensorNode &node = graph.nodes[nodeId];
+        if (node.opType == OpType::INPUT)
+            continue;
+
+        std::vector<std::vector<Region>> parentRegions;
+        bool anyParentDirty = false;
+        for (uint32_t pid : node.parentIds)
+        {
+            auto it = dirtyOutputRegions.find(pid);
+            if (it != dirtyOutputRegions.end() && !it->second.empty())
+            {
+                parentRegions.push_back(it->second);
+                anyParentDirty = true;
+            }
+            else
+            {
+                parentRegions.push_back({});
+            }
+        }
+
+        if (anyParentDirty)
+            dirtyOutputRegions[nodeId] = propagator.forward(node, graph, parentRegions);
+        else
+            dirtyOutputRegions[nodeId] = {};
+
+        dirtyInputRegions[nodeId] = backProp.backward(node, graph, dirtyOutputRegions[nodeId]);
+    }
+}
+
 class Planner
 {
 private:
@@ -381,6 +423,7 @@ public:
 
     CompiledGraph planPhysical(uint32_t rootId, LogicalGraph &lg, const std::unordered_map<uint32_t, std::vector<Region>> &atomicDirtyOutputRegions, const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &atomicDirtyInputRegions)
     {
+        propagateDirtyRegionsAtomic(topo, graph, dirtyOutputRegions, dirtyInputRegions);
         std::unordered_map<std::string, std::vector<std::shared_ptr<BeamStrategy>>> memo;
 
         std::cout << "[Planner.plan] planning nodes..." << std::endl;
@@ -389,7 +432,7 @@ public:
         {
             nodeIdx++;
             std::cout << nodeIdx << "/" << sortedNodes.size() << "\r";
-            planNodeIterative(nodeId, lg.graph, lg.fusionMap, memo, structHashMemo, lg.estimatedRefCounts);
+            planNodeIterative(nodeId, lg.graph, lg.fusionMap, memo, structHashMemo, lg.estimatedRefCounts, dirtyOutputRegions, dirtyInputRegions);
         }
 
         std::string rootHash = Hashing::structuralHash(rootId, graph, structHashMemo);
@@ -871,7 +914,9 @@ private:
                            std::unordered_map<std::string, std::vector<uint32_t>> &fusionMap,
                            std::unordered_map<std::string, std::vector<std::shared_ptr<BeamStrategy>>> &memo,
                            std::unordered_map<uint32_t, std::string> &structHashMemo,
-                           const std::unordered_map<uint32_t, uint32_t> &estimatedRefCounts)
+                           const std::unordered_map<uint32_t, uint32_t> &estimatedRefCounts,
+                           const std::unordered_map<uint32_t, std::vector<Region>> &atomicDirtyOutputRegions,
+                           const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &atomicDirtyInputRegions)
     {
         std::string nodeHash = Hashing::structuralHash(nodeId, graph, structHashMemo);
         if (memo.count(nodeHash))
@@ -1075,43 +1120,3 @@ private:
         memo[nodeHash] = candidates;
     }
 };
-
-inline std::unordered_map<uint32_t, std::vector<Region>> propagateDirtyRegionsAtomic(
-    const std::vector<uint32_t> &topo,
-    const Graph &graph,
-    const std::unordered_map<uint32_t, std::vector<Region>> &inputDirtyRegions)
-{
-    ShapePropagator propagator;
-    std::unordered_map<uint32_t, std::vector<Region>> allRegions(inputDirtyRegions);
-
-    for (uint32_t nodeId : topo)
-    {
-        if (nodeId >= graph.nodes.size())
-            continue;
-        const TensorNode &node = graph.nodes[nodeId];
-        if (node.opType == OpType::INPUT)
-            continue;
-
-        std::vector<std::vector<Region>> parentRegions;
-        bool anyParentDirty = false;
-        for (uint32_t pid : node.parentIds)
-        {
-            auto it = allRegions.find(pid);
-            if (it != allRegions.end() && !it->second.empty())
-            {
-                parentRegions.push_back(it->second);
-                anyParentDirty = true;
-            }
-            else
-            {
-                parentRegions.push_back({});
-            }
-        }
-
-        if (anyParentDirty)
-            allRegions[nodeId] = propagator.forward(node, graph, parentRegions);
-        else
-            allRegions[nodeId] = {};
-    }
-    return allRegions;
-}

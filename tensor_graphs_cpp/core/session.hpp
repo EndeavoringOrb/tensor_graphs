@@ -547,9 +547,9 @@ public:
         return ss.str();
     }
 
-    void ensureCacheCoverage(const std::vector<uint32_t> &inputNodeIds)
+    void getDirtySlices(const std::vector<uint32_t> &inputNodeIds)
     {
-        std::cout << "Ensuring cache coverage" << std::endl;
+        std::cout << "getting dirty slices" << std::endl;
         struct InputOption
         {
             uint32_t nodeId;
@@ -654,281 +654,125 @@ public:
         std::cout << "Caching dirty region propagation" << std::endl;
         uint32_t cacheIdx = 0;
 
-        struct KernelSelectionKey
-        {
-            uint32_t physNodeId;
-            std::vector<uint32_t> outShape;
-            std::vector<std::vector<uint32_t>> inShapes;
-
-            bool operator==(const KernelSelectionKey &o) const
-            {
-                return physNodeId == o.physNodeId && outShape == o.outShape && inShapes == o.inShapes;
-            }
-        };
-
-        struct KernelSelectionHash
-        {
-            size_t operator()(const KernelSelectionKey &k) const
-            {
-                size_t h = k.physNodeId;
-                for (auto v : k.outShape)
-                    h ^= (v + 0x9e3779b9 + (h << 6) + (h >> 2));
-                for (const auto &s : k.inShapes)
-                {
-                    for (auto v : s)
-                        h ^= (v + 0x9e3779b9 + (h << 6) + (h >> 2));
-                }
-                return h;
-            }
-        };
-
-        std::unordered_map<KernelSelectionKey, uint64_t, KernelSelectionHash> kernelSelectionMemo;
-
         while (true)
         {
             cacheIdx++;
             std::cout << cacheIdx << "\r" << std::flush;
-            std::unordered_map<uint32_t, std::vector<Region>> inputRegions;
-            bool allClean = true;
+            std::unordered_map<uint32_t, std::vector<Region>> atomicOutputRegions;
+            std::unordered_map<uint32_t, std::vector<std::vector<Region>>> atomicInputRegions; // id -> item[parentId][outputRegionId]
             for (size_t i = 0; i < perInput.size(); ++i)
             {
                 const auto &option = perInput[i].options[indices[i]];
-                if (!option.empty())
-                {
-                    inputRegions[perInput[i].nodeId] = option;
-                    allClean = false;
-                }
+                atomicOutputRegions[perInput[i].nodeId] = option;
             }
 
-            if (!allClean)
+            std::string key = encodeCacheKey(atomicOutputRegions);
+
+            if (dirtyCache.find(key) == dirtyCache.end())
             {
-                std::string key = encodeCacheKey(inputRegions);
+                propagateDirtyRegionsAtomic(atomicTopo, graph, atomicOutputRegions, atomicInputRegions);
 
-                if (dirtyCache.find(key) == dirtyCache.end())
+                std::unordered_map<uint32_t, std::vector<Region>> physicalRegions;
+                for (const auto &pair : compiled.logicalNodeMap)
                 {
-                    auto atomicRegions = propagateDirtyRegionsAtomic(atomicTopo, graph, inputRegions);
-
-                    std::unordered_map<uint32_t, std::vector<Region>> physicalRegions;
-                    for (const auto &pair : compiled.logicalNodeMap)
+                    uint32_t physId = pair.first;
+                    uint32_t logId = pair.second;
+                    if (atomicRegions.count(logId))
                     {
-                        uint32_t physId = pair.first;
-                        uint32_t logId = pair.second;
-                        if (atomicRegions.count(logId))
-                        {
-                            physicalRegions[physId] = atomicRegions.at(logId);
-                        }
+                        physicalRegions[physId] = atomicRegions.at(logId);
                     }
-                    for (uint32_t inId : inputNodeIds)
+                }
+                for (uint32_t inId : inputNodeIds)
+                {
+                    if (inputRegions.count(inId))
                     {
-                        if (inputRegions.count(inId))
-                        {
-                            physicalRegions[inId] = inputRegions.at(inId);
-                        }
+                        physicalRegions[inId] = inputRegions.at(inId);
                     }
+                }
 
-                    DirtyBucket bucket;
-                    bucket.regions = physicalRegions;
+                DirtyBucket bucket;
+                bucket.regions = physicalRegions;
 
-                    for (const OpInstruction &inst : compiled.instructions)
+                for (const OpInstruction &inst : compiled.instructions)
+                {
+                    auto regIt = physicalRegions.find(inst.nodeId);
+                    if (regIt == physicalRegions.end() || regIt->second.empty())
+                        continue;
+
+                    const auto &outputRegions = regIt->second;
+                    std::vector<std::vector<std::vector<Region>>> perOutputRegionSlices;
+                    std::vector<uint64_t> regionKernels;
+
+                    for (size_t rIdx = 0; rIdx < outputRegions.size(); ++rIdx)
                     {
-                        auto regIt = physicalRegions.find(inst.nodeId);
-                        if (regIt == physicalRegions.end() || regIt->second.empty())
-                            continue;
+                        const Region &outRegion = outputRegions[rIdx];
+                        TensorNode dummyOut = compiled.nodesMap.at(inst.nodeId);
 
-                        const auto &outputRegions = regIt->second;
-                        std::vector<std::vector<std::vector<Region>>> perOutputRegionSlices;
-                        std::vector<uint64_t> regionKernels;
-
-                        for (size_t rIdx = 0; rIdx < outputRegions.size(); ++rIdx)
+                        // Compute input slices for this output region
+                        std::vector<Region> parentSlices(inst.inputNodeIds.size());
+                        const TensorNode &physNode = compiled.nodesMap.at(inst.nodeId);
+                        if (physNode.opType == OpType::COPY_TO || physNode.opType == OpType::CONTIGUOUS)
                         {
-                            const Region &outRegion = outputRegions[rIdx];
-                            TensorNode dummyOut = compiled.nodesMap.at(inst.nodeId);
+                            for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
+                                parentSlices[i] = outRegion;
+                        }
+                        else if (physNode.opType == OpType::FUSED)
+                        {
+                            std::unordered_map<uint32_t, std::vector<Region>> reqRegions;
+                            uint32_t logRoot = compiled.logicalNodeMap.at(inst.nodeId);
+                            reqRegions[logRoot] = outRegion;
 
-                            // Compute input slices for this output region
-                            std::vector<std::vector<Region>> parentSlices(inst.inputNodeIds.size());
-                            const TensorNode &physNode = compiled.nodesMap.at(inst.nodeId);
-                            if (physNode.opType == OpType::COPY_TO || physNode.opType == OpType::CONTIGUOUS)
+                            ShapePropagator bp;
+                            for (auto it = atomicTopo.rbegin(); it != atomicTopo.rend(); ++it)
                             {
-                                for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
-                                    parentSlices[i] = {outRegion};
-                            }
-                            else if (physNode.opType == OpType::FUSED)
-                            {
-                                std::unordered_map<uint32_t, std::vector<Region>> reqRegions;
-                                uint32_t logRoot = compiled.logicalNodeMap.at(inst.nodeId);
-                                reqRegions[logRoot] = {outRegion};
-
-                                ShapePropagator bp;
-                                for (auto it = atomicTopo.rbegin(); it != atomicTopo.rend(); ++it)
+                                uint32_t logId = *it;
+                                if (reqRegions.count(logId) && !reqRegions[logId].empty())
                                 {
-                                    uint32_t logId = *it;
-                                    if (reqRegions.count(logId) && !reqRegions[logId].empty())
+                                    bool isPhysicalInput = false;
+                                    for (uint32_t pInId : inst.inputNodeIds)
                                     {
-                                        bool isPhysicalInput = false;
-                                        for (uint32_t pInId : inst.inputNodeIds)
+                                        if (compiled.logicalNodeMap.count(pInId) && compiled.logicalNodeMap.at(pInId) == logId && logId != logRoot)
                                         {
-                                            if (compiled.logicalNodeMap.count(pInId) && compiled.logicalNodeMap.at(pInId) == logId && logId != logRoot)
-                                            {
-                                                isPhysicalInput = true;
-                                                break;
-                                            }
+                                            isPhysicalInput = true;
+                                            break;
                                         }
-                                        if (isPhysicalInput)
-                                            continue;
+                                    }
+                                    if (isPhysicalInput)
+                                        continue;
 
-                                        const TensorNode &logNode = graph.nodes[logId];
-                                        if (logNode.opType != OpType::INPUT)
+                                    const TensorNode &logNode = graph.nodes[logId];
+                                    if (logNode.opType != OpType::INPUT)
+                                    {
+                                        auto pRegs = bp.backward(logNode, graph, reqRegions[logId]);
+                                        for (size_t k = 0; k < logNode.parentIds.size(); ++k)
                                         {
-                                            auto pRegs = bp.backward(logNode, graph, reqRegions[logId]);
-                                            for (size_t k = 0; k < logNode.parentIds.size(); ++k)
-                                            {
-                                                reqRegions[logNode.parentIds[k]] = pRegs[k];
-                                            }
+                                            reqRegions[logNode.parentIds[k]] = pRegs[k];
                                         }
                                     }
                                 }
+                            }
 
-                                for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
+                            for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
+                            {
+                                if (compiled.logicalNodeMap.count(inst.inputNodeIds[i]))
                                 {
-                                    if (compiled.logicalNodeMap.count(inst.inputNodeIds[i]))
-                                    {
-                                        uint32_t logInId = compiled.logicalNodeMap.at(inst.inputNodeIds[i]);
-                                        if (reqRegions.count(logInId) && !reqRegions[logInId].empty())
-                                            parentSlices[i] = reqRegions[logInId];
-                                        else
-                                            parentSlices[i] = {outRegion};
-                                    }
+                                    uint32_t logInId = compiled.logicalNodeMap.at(inst.inputNodeIds[i]);
+                                    if (reqRegions.count(logInId) && !reqRegions[logInId].empty())
+                                        parentSlices[i] = reqRegions[logInId];
                                     else
-                                    {
                                         parentSlices[i] = {outRegion};
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                ShapePropagator backProp;
-                                parentSlices = backProp.backward(physNode, graph, {outRegion});
-                            }
-
-                            // for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
-                            // {
-                            //     auto pIt = physicalRegions.find(inst.inputNodeIds[i]);
-                            //     if (pIt != physicalRegions.end() && !pIt->second.empty())
-                            //         parentSlices[i] = pIt->second;
-                            // }
-
-                            dummyOut.backend = inst.backend;
-                            std::vector<uint32_t> outShape;
-                            for (const auto &d : outRegion.region)
-                            {
-                                outShape.push_back(d.stop - d.start);
-                            }
-                            dummyOut.shape = outShape;
-                            dummyOut.view.shape = outShape;
-
-                            std::vector<TensorNode> dummyInputs;
-                            for (size_t pIdx = 0; pIdx < inst.inputNodeIds.size(); ++pIdx)
-                            {
-                                uint32_t pId = inst.inputNodeIds[pIdx];
-                                TensorNode dummyIn = compiled.nodesMap.at(pId);
-                                if (pIdx < parentSlices.size() && !parentSlices[pIdx].empty())
-                                {
-                                    const Region &pReg = parentSlices[pIdx][0];
-                                    std::vector<uint32_t> inShape;
-                                    for (const auto &d : pReg.region)
-                                    {
-                                        inShape.push_back(d.stop - d.start);
-                                    }
-                                    dummyIn.shape = inShape;
-                                    dummyIn.view.shape = inShape;
-                                }
-                                dummyInputs.push_back(dummyIn);
-                            }
-
-                            KernelSelectionKey selKey;
-                            selKey.physNodeId = inst.nodeId;
-                            selKey.outShape = outShape;
-                            for (const auto &di : dummyInputs)
-                            {
-                                selKey.inShapes.push_back(di.shape);
-                            }
-
-                            uint64_t selectedKernel = UINT64_MAX;
-                            auto memIt = kernelSelectionMemo.find(selKey);
-                            if (memIt != kernelSelectionMemo.end())
-                            {
-                                selectedKernel = memIt->second;
-                            }
-                            else
-                            {
-                                std::unordered_map<uint32_t, uint32_t> dummyRefCounts;
-                                if (inst.inplaceInputIndex >= 0)
-                                {
-                                    dummyRefCounts[inst.inputNodeIds[inst.inplaceInputIndex]] = 1;
-                                }
-
-                                std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
-                                    dummyOut.opType, dummyOut.opName, inst.backend, dummyInputs, dummyOut, dummyRefCounts);
-
-                                if (!matchingKernels.empty())
-                                {
-                                    float bestCost = std::numeric_limits<float>::infinity();
-                                    for (uint64_t kId : matchingKernels)
-                                    {
-                                        float c = costModel.estimateCost(dummyOut, dummyInputs, graph, kId);
-                                        if (c < bestCost || selectedKernel == UINT64_MAX)
-                                        {
-                                            bestCost = c;
-                                            selectedKernel = kId;
-                                        }
-                                    }
-                                }
-                                kernelSelectionMemo[selKey] = selectedKernel;
-                            }
-
-                            if (selectedKernel == UINT64_MAX)
-                            {
-                                const KernelEntry &origKernel = KernelRegistry::get().getKernel(inst.kernelId);
-                                if (origKernel.inplace)
-                                {
-                                    selectedKernel = inst.kernelId;
                                 }
                                 else
                                 {
-                                    std::string opName;
-                                    if (dummyOut.opType == OpType::FUSED)
-                                    {
-                                        opName = dummyOut.opName;
-                                    }
-                                    else
-                                    {
-                                        opName = toString(dummyOut.opType);
-                                    }
-                                    std::stringstream ss;
-                                    ss << "\n[Session.ensureCacheCoverage] CRITICAL: Could not find a kernel matching the dirty slice requirements.\n";
-                                    ss << "Cache Key: " << key << "\n";
-                                    ss << "Physical Node ID: " << inst.nodeId << ", Slice Index: " << rIdx << ", Name: " << opName << "\n";
-
-                                    ss << "--- Target Output (Sliced) ---\n";
-                                    ss << toString(dummyOut, graph);
-
-                                    for (size_t i = 0; i < dummyInputs.size(); ++i)
-                                    {
-                                        ss << "\n--- Input " << i << " (Sliced) ---\n";
-                                        ss << toString(dummyInputs[i], graph);
-                                    }
-
-                                    ss << "\n------------------------------------------------\n";
-                                    std::string out = ss.str();
-                                    Error::throw_err(out);
+                                    parentSlices[i] = {outRegion};
                                 }
                             }
-                            regionKernels.push_back(selectedKernel);
-                            perOutputRegionSlices.push_back(parentSlices);
                         }
-
-                        bucket.inputSlices[inst.nodeId] = perOutputRegionSlices;
-                        bucket.kernelIds[inst.nodeId] = regionKernels;
+                        else
+                        {
+                            ShapePropagator backProp;
+                            parentSlices = backProp.backward(physNode, graph, {outRegion});
+                        }
                     }
 
                     dirtyCache[key] = bucket;
