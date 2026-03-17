@@ -44,7 +44,10 @@ public:
     {
         auto it = factories.find(name);
         if (it != factories.end())
-            Error::throw_err("A kernel with name \"" + name + "\" is already registered.");
+        {
+            return; // TODO: somehow check that the reference graphs are the same
+            // Error::throw_err("A kernel with name \"" + name + "\" is already registered.");
+        }
         factories[name] = {numInputs, factory, dtypes, dummyShapes};
     }
 

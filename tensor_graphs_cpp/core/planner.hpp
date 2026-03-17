@@ -165,7 +165,7 @@ public:
     Planner(CostModel &costModel, uint64_t maxMemoryBytes = 4ULL * 1024 * 1024 * 1024)
         : costModel(costModel), maxMemoryBytes(maxMemoryBytes) {}
 
-    CompiledGraph plan(uint32_t rootId, Graph &graph)
+    LogicalGraph planLogical(uint32_t rootId, Graph &graph)
     {
         std::cout << "[Planner.plan] initial sort..." << std::endl;
         std::unordered_map<uint32_t, std::string> structHashMemo;
@@ -371,6 +371,16 @@ public:
             estimatedRefCounts[id] = canonicalRefCounts[nodeToCanonical[id]];
         }
 
+        // TODO: don't copy all these structs, build them on the LogicalGraph
+        LogicalGraph lg;
+        lg.graph = graph;
+        lg.fusionMap = fusionMap;
+        lg.estimatedRefCounts = estimatedRefCounts;
+        return lg;
+    }
+
+    CompiledGraph planPhysical(uint32_t rootId, LogicalGraph &lg, const std::unordered_map<uint32_t, std::vector<Region>> &atomicDirtyOutputRegions, const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &atomicDirtyInputRegions)
+    {
         std::unordered_map<std::string, std::vector<std::shared_ptr<BeamStrategy>>> memo;
 
         std::cout << "[Planner.plan] planning nodes..." << std::endl;
@@ -379,7 +389,7 @@ public:
         {
             nodeIdx++;
             std::cout << nodeIdx << "/" << sortedNodes.size() << "\r";
-            planNodeIterative(nodeId, graph, fusionMap, memo, structHashMemo, estimatedRefCounts);
+            planNodeIterative(nodeId, lg.graph, lg.fusionMap, memo, structHashMemo, lg.estimatedRefCounts);
         }
 
         std::string rootHash = Hashing::structuralHash(rootId, graph, structHashMemo);

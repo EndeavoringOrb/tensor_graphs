@@ -752,3 +752,10 @@ inline void from_json(const json &j, CompiledGraph &cg)
             cg.logicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
     }
 }
+
+struct LogicalGraph
+{
+    Graph graph;
+    std::unordered_map<std::string, uint32_t> fusionMap;
+    std::unordered_map<uint32_t, uint32_t> estimatedRefCounts;
+};
