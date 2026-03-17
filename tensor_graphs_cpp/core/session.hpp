@@ -234,15 +234,14 @@ public:
         graph.constantStaging.clear();
     }
 
-    CompiledGraph findBestBucket(
+    std::unordered_map<uint32_t, std::vector<Region>> canonicalizeInputDiffs(
         const std::unordered_map<uint32_t, std::vector<Region>> &inputDiffs) const
     {
+        std::unordered_map<uint32_t, std::vector<Region>> canonicalRegions;
         if (inputDiffs.empty())
         {
-            return CompiledGraph{};
+            return canonicalRegions;
         }
-
-        std::unordered_map<uint32_t, std::vector<Region>> canonicalRegions;
 
         for (const auto &pair : inputDiffs)
         {
@@ -287,13 +286,7 @@ public:
             canonicalRegions[nodeId] = {canonical};
         }
 
-        const CompiledGraph *cached = lookupCache(canonicalRegions);
-        if (cached)
-        {
-            return *cached;
-        }
-
-        return CompiledGraph{};
+        return canonicalRegions;
     }
 
     void run(const std::unordered_map<uint32_t, const void *> &inputs)
@@ -340,8 +333,11 @@ public:
             memManager.write(graph.nodes[nodeId].backend, nodeId, newData, sizeBytes);
         }
 
-        CompiledGraph compiledLocal = findBestBucket(inputDiffs);
-        std::string key = encodeCacheKey(inputDiffs); // TODO: properly canonicalize inputDiffs
+        auto canonicalDiffs = canonicalizeInputDiffs(inputDiffs);
+        const CompiledGraph *cached = lookupCache(canonicalDiffs);
+        CompiledGraph compiledLocal = cached ? *cached : CompiledGraph{};
+        
+        std::string key = encodeCacheKey(canonicalDiffs); 
         auto bIt = cachedBuckets.find(key);
         DirtyBucket bucket = bIt != cachedBuckets.end() ? bIt->second : DirtyBucket{};
 

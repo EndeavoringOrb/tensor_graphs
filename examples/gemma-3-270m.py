@@ -290,7 +290,7 @@ def main():
 
     # Generation Loop Params
     max_new_tokens = 4
-    MAX_SEQ_LEN = 32
+    MAX_SEQ_LEN = 8
 
     # --- BUILD GRAPH ---
     cfg = GEMMA3_CONFIG_270M
@@ -314,8 +314,9 @@ def main():
 
     while True:
         # prompt = input("Enter prompt: ")
-        prompt = "Explain Quantum Mechanics to a 5 year old."
-        prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+        # prompt = "Explain Quantum Mechanics to a 5 year old."
+        # prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+        prompt = "Hello"
         input_ids = tokenizer.encode(
             prompt
         ).ids  # [2, 105, 2364, 107, 155122, 27825, 49087, 531, 496, 236743, 236810, 1051, 2255, 236761, 106, 107, 105, 4368, 107]

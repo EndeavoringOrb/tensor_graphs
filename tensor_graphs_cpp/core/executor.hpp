@@ -27,6 +27,12 @@ public:
     {
         std::cout << "running..." << std::endl;
 
+        auto getLogicalId = [&](uint32_t physId)
+        {
+            auto it = compiled.logicalNodeMap.find(physId);
+            return it != compiled.logicalNodeMap.end() ? it->second : physId;
+        };
+
         std::unordered_map<uint32_t, std::vector<uint32_t>> parentMap;
         for (const auto &pair : compiled.nodesMap)
         {
@@ -42,8 +48,9 @@ public:
         for (auto it = compiled.instructions.rbegin(); it != compiled.instructions.rend(); ++it)
         {
             uint32_t nodeId = it->nodeId;
+            uint32_t logicalId = getLogicalId(nodeId);
             const TensorNode &node = compiled.nodesMap.at(nodeId);
-            auto regionIt = bucket.regions.find(nodeId);
+            auto regionIt = bucket.regions.find(logicalId);
             bool isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
             bool inCache = memManager.has(it->backend, nodeId);
             if (neededNodes.count(nodeId))
@@ -54,7 +61,8 @@ public:
                     {
                         neededNodes.insert(pId);
                         const TensorNode &pNode = compiled.nodesMap.at(pId);
-                        regionIt = bucket.regions.find(pId);
+                        uint32_t pLogicalId = getLogicalId(pId);
+                        regionIt = bucket.regions.find(pLogicalId);
                         isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
                         inCache = memManager.has(pNode.backend, pId);
                         if (!isDirty && inCache)
@@ -75,10 +83,11 @@ public:
         {
             instIdx++;
             const uint32_t nodeId = inst.nodeId;
+            uint32_t logicalId = getLogicalId(nodeId);
             const TensorNode &node = compiled.nodesMap.at(nodeId);
             auto &outBuf = memManager.buffers.at(node.backend);
 
-            auto regionIt = bucket.regions.find(inst.nodeId);
+            auto regionIt = bucket.regions.find(logicalId);
             bool isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
             bool inCache = memManager.has(inst.backend, nodeId);
             bool isNeeded = neededNodes.count(nodeId);
@@ -140,8 +149,8 @@ public:
 
             if (isDirty && inCache)
             {
-                auto regionIt = bucket.regions.find(inst.nodeId);
-                computeRegions = regionIt->second;
+                auto regionIt2 = bucket.regions.find(logicalId);
+                computeRegions = regionIt2->second;
                 nPartial++;
 
                 if (inst.kernelIds.size() == computeRegions.size())
@@ -164,7 +173,7 @@ public:
                 computeKernels = {inst.kernelIds.empty() ? 0 : inst.kernelIds.back()};
             }
 
-            auto slicesIt = bucket.inputSlices.find(inst.nodeId);
+            auto slicesIt = bucket.inputSlices.find(logicalId);
 
             for (size_t rIdx = 0; rIdx < computeRegions.size(); ++rIdx)
             {
