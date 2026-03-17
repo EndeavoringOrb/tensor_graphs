@@ -639,8 +639,10 @@ public:
         uint32_t nodeIdx = 0;
         for (uint32_t nodeId : sortedNodes)
         {
+#ifdef DEBUG
             nodeIdx++;
             std::cout << nodeIdx << "/" << sortedNodes.size() << "\r";
+#endif
             planNodeIterative(nodeId, graph, lg.fusionMap, memo, structHashMemo, lg.estimatedRefCounts, dirtyOutputRegions, dirtyInputRegions);
         }
 
@@ -716,8 +718,9 @@ public:
             }
         };
         reconstruct(reconstruct, bestRecipe);
-
+#ifdef DEBUG
         std::cout << "[Planner.plan] final topo sort..." << std::endl;
+#endif
         std::vector<uint32_t> finalTopo;
         std::unordered_set<uint32_t> visited;
 
@@ -970,8 +973,10 @@ public:
         uint32_t instIdx = 0;
         for (uint32_t id : finalTopoWithCopies)
         {
+#ifdef DEBUG
             instIdx++;
             std::cout << "Inst: " << instIdx << "/" << finalTopoWithCopies.size() << "\r";
+#endif
             const auto &node = compiled.nodesMap.at(id);
             if (node.opType == OpType::INPUT)
                 continue;

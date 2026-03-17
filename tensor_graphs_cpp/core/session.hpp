@@ -601,18 +601,20 @@ public:
 
         std::vector<size_t> indices(perInput.size(), 0);
         std::vector<size_t> sizes;
+        size_t totalSize = 1;
         for (const auto &irs : perInput)
         {
-            sizes.push_back(irs.options.size());
+            size_t size = irs.options.size();
+            totalSize *= size;
+            sizes.push_back(size);
         }
 
-        std::cout << "Caching dirty region propagation" << std::endl;
-        uint32_t cacheIdx = 0;
+        ProgressTimer timer(totalSize, "Caching dirty region propagation: ");
 
         while (true)
         {
-            cacheIdx++;
-            std::cout << cacheIdx << "\r" << std::flush;
+            timer.tick();
+
             std::unordered_map<uint32_t, std::vector<Region>> atomicOutputRegions;
             std::unordered_map<uint32_t, std::vector<std::vector<Region>>> atomicInputRegions; // id -> item[parentId][outputRegionId]
             for (size_t i = 0; i < perInput.size(); ++i)

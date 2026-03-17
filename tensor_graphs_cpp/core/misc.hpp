@@ -1,6 +1,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
+#include "core/timer.hpp"
 
 inline std::string toString(const std::vector<uint32_t> &shape)
 {
