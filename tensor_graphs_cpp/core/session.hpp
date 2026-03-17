@@ -83,11 +83,7 @@ namespace dirty_cache_json
             json perNode = json::array();
             for (const auto &perOutputRegion : pair.second)
             {
-                json perParent = json::array();
-                for (const auto &parentRegions : perOutputRegion)
-                {
-                    perParent.push_back(regionsToJson(parentRegions));
-                }
+                json perParent = regionsToJson(perOutputRegion);
                 perNode.push_back(perParent);
             }
             slicesObj[std::to_string(pair.first)] = perNode;
@@ -115,15 +111,10 @@ namespace dirty_cache_json
             for (auto it = obj["input_slices"].begin(); it != obj["input_slices"].end(); ++it)
             {
                 uint32_t nodeId = std::stoul(it.key());
-                std::vector<std::vector<std::vector<Region>>> perNode;
+                std::vector<std::vector<Region>> perNode;
                 for (const auto &perOutputRegion : it.value())
                 {
-                    std::vector<std::vector<Region>> perParent;
-                    for (const auto &parentRegions : perOutputRegion)
-                    {
-                        perParent.push_back(regionsFromJson(parentRegions));
-                    }
-                    perNode.push_back(perParent);
+                    perNode.push_back(regionsFromJson(perOutputRegion));
                 }
                 bucket.inputSlices[nodeId] = perNode;
             }
@@ -708,7 +699,7 @@ public:
 
         json entry;
         entry["key"] = key;
-        entry["graph"] = to_json(entry["graph"], graph);
+        to_json(entry["graph"], graph);
         entry["bucket"] = dirty_cache_json::bucketToJson(bucket);
 
         file << entry.dump() << "\n";

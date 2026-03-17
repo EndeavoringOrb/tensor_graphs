@@ -1371,7 +1371,7 @@ private:
                                         {
                                             if (pIdx < slicesIt->second[rIdx].size() && !slicesIt->second[rIdx][pIdx].empty())
                                             {
-                                                const Region &inReg = slicesIt->second[rIdx][pIdx].region[0];
+                                                const Region &inReg = slicesIt->second[rIdx][pIdx];
                                                 for (size_t d = 0; d < inReg.region.size(); ++d)
                                                 {
                                                     partialInputs[pIdx].shape[d] = inReg.region[d].stop - inReg.region[d].start;

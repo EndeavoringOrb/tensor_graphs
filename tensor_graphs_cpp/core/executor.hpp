@@ -194,7 +194,7 @@ public:
 
                     if (!isFullRegion && slicesIt != bucket.inputSlices.end() && rIdx < slicesIt->second.size() && pIdx < slicesIt->second[rIdx].size() && !slicesIt->second[rIdx][pIdx].empty())
                     {
-                        const Region &inputSlice = slicesIt->second[rIdx][pIdx].region[0];
+                        const Region &inputSlice = slicesIt->second[rIdx][pIdx];
 
                         TensorView slicedView = inView;
                         uint64_t elementSize = getDTypeSize(inNode.dtype);
