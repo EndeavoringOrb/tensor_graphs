@@ -201,9 +201,9 @@ public:
 
                     TensorView inView = resolvedInputs[pIdx].view;
 
-                    if (!isFullRegion && slicesIt != bucket.inputSlices.end() && rIdx < slicesIt->second.size() && pIdx < slicesIt->second[rIdx].size() && !slicesIt->second[rIdx][pIdx].empty())
+                    if (!isFullRegion && slicesIt != bucket.inputSlices.end() && pIdx < slicesIt->second.size() && rIdx < slicesIt->second[pIdx].size() && !slicesIt->second[pIdx][rIdx].empty())
                     {
-                        const Region &inputSlice = slicesIt->second[rIdx][pIdx];
+                        const Region &inputSlice = slicesIt->second[pIdx][rIdx];
 
                         TensorView slicedView = inView;
                         uint64_t elementSize = getDTypeSize(inNode.dtype);

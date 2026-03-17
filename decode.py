@@ -28,6 +28,7 @@ tokens = [
 tokens += [70895, 1106, 1106, 1106, 1106]
 # tokens += [70895, 506, 1902, 563, 1133, 496, 2563]
 # 3. Decode to string
+tokens = [2, 9259, 236888]
 output_text = tokenizer.decode(tokens)
 
 print(f"Tokens: {tokens}")

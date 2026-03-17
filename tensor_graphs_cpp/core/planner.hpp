@@ -22,7 +22,7 @@ void propagateDirtyRegionsAtomic(
     const std::vector<uint32_t> &topo,
     const Graph &graph,
     std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
-    std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions // dirtyInputRegions[parentId][outputRegionId]
+    std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions // dirtyInputRegions[nodeId][parentIdx][outputRegionIdx]
 )
 {
     ShapePropagator propagator;
@@ -1370,13 +1370,13 @@ private:
                                     }
 
                                     std::vector<TensorNode> partialInputs = adaptedInputNodes;
-                                    if (slicesIt != dirtyInputRegions.end() && rIdx < slicesIt->second.size())
+                                    if (slicesIt != dirtyInputRegions.end())
                                     {
                                         for (size_t pIdx = 0; pIdx < partialInputs.size(); ++pIdx)
                                         {
-                                            if (pIdx < slicesIt->second[rIdx].size() && !slicesIt->second[rIdx][pIdx].empty())
+                                            if (pIdx < slicesIt->second.size() && rIdx < slicesIt->second[pIdx].size() && !slicesIt->second[pIdx][rIdx].empty())
                                             {
-                                                const Region &inReg = slicesIt->second[rIdx][pIdx];
+                                                const Region &inReg = slicesIt->second[pIdx][rIdx];
                                                 for (size_t d = 0; d < inReg.region.size(); ++d)
                                                 {
                                                     partialInputs[pIdx].shape[d] = inReg.region[d].stop - inReg.region[d].start;
