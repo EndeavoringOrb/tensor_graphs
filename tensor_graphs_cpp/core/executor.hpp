@@ -27,7 +27,6 @@ public:
     {
         std::cout << "running..." << std::endl;
 
-        // Build graph parent structure to assist in calculating recursive eviction costs
         std::unordered_map<uint32_t, std::vector<uint32_t>> parentMap;
         for (const auto &pair : compiled.nodesMap)
         {
@@ -40,7 +39,6 @@ public:
             neededNodes.insert(compiled.instructions.back().nodeId);
         }
 
-        // Pass 1: Backward Liveness (Prune unneeded nodes when cached)
         for (auto it = compiled.instructions.rbegin(); it != compiled.instructions.rend(); ++it)
         {
             uint32_t nodeId = it->nodeId;
@@ -55,16 +53,15 @@ public:
                     for (uint32_t pId : it->inputNodeIds)
                     {
                         neededNodes.insert(pId);
-                        const TensorNode &pNode = compiled.nodesMap.at(nodeId);
+                        const TensorNode &pNode = compiled.nodesMap.at(pId);
                         regionIt = bucket.regions.find(pId);
                         isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
                         inCache = memManager.has(pNode.backend, pId);
                         if (!isDirty && inCache)
                         {
-                            // Lock clean nodes that are in cache
                             auto &outBuf = memManager.buffers.at(pNode.backend);
                             auto blockIt = outBuf.allocationMap.at(pId);
-                            blockIt->refCount = compiled.refCounts.at(nodeId);
+                            blockIt->refCount = compiled.refCounts.at(pId);
                             blockIt->isLocked = true;
                         }
                     }
@@ -72,7 +69,6 @@ public:
             }
         }
 
-        // Pass 2: Execute Compiled Instructions (bucket-aware)
         uint32_t instIdx = 0;
         uint32_t nPartial = 0;
         for (const OpInstruction &inst : compiled.instructions)
@@ -98,7 +94,6 @@ public:
                 continue;
             }
 
-            // 1. Skip if clean and already in memory
             if (!isDirty && inCache)
             {
                 auto blockIt = outBuf.allocationMap.at(nodeId);
@@ -111,8 +106,6 @@ public:
                 continue;
             }
 
-            // 2. RESOLVE INPUTS FIRST (Before metadata changes/allocations)
-            // We fetch pointers and views now while parent IDs are still in the allocationMap
             struct ResolvedInput
             {
                 const void *ptr;
@@ -126,7 +119,6 @@ public:
                                           memManager.getView(inNode)});
             }
 
-            // 3. ALLOCATE / TRANSFER OUTPUT
             if (inst.inplaceInputIndex >= 0)
             {
                 uint32_t srcId = inst.inputNodeIds[inst.inplaceInputIndex];
@@ -139,28 +131,22 @@ public:
                 memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts.at(inst.nodeId), cost, &parentMap, &compiled.nodeCosts);
             }
 
-            // Ensure output is locked
             auto outBlockIt = outBuf.allocationMap.at(inst.nodeId);
             outBlockIt->refCount = compiled.refCounts.at(inst.nodeId);
             outBlockIt->isLocked = true;
 
-            // 4. EXECUTE KERNEL
-
-            // Determine compute regions and their targeted kernels
             std::vector<Region> computeRegions;
             std::vector<uint64_t> computeKernels;
 
             if (isDirty && inCache)
             {
-                // Partial compute: only the dirty regions
                 auto regionIt = bucket.regions.find(inst.nodeId);
                 computeRegions = regionIt->second;
                 nPartial++;
 
-                auto kIt = bucket.kernelIds.find(inst.nodeId);
-                if (kIt != bucket.kernelIds.end())
+                if (!inst.partialKernelIds.empty() && inst.partialKernelIds.size() == computeRegions.size())
                 {
-                    computeKernels = kIt->second;
+                    computeKernels = inst.partialKernelIds;
                 }
                 else
                 {
@@ -169,7 +155,6 @@ public:
             }
             else
             {
-                // Full compute: build a full-extent region
                 Region full;
                 for (uint32_t dim : node.shape)
                 {
@@ -181,7 +166,6 @@ public:
 
             auto slicesIt = bucket.inputSlices.find(inst.nodeId);
 
-            // Execute kernel for each compute region
             for (size_t rIdx = 0; rIdx < computeRegions.size(); ++rIdx)
             {
                 const Region &outRegion = computeRegions[rIdx];
@@ -197,7 +181,6 @@ public:
                     }
                 }
 
-                // Build input pointers and views
                 std::vector<const void *> kernelInputs;
                 std::vector<TensorView> kernelInViews;
 
@@ -209,16 +192,13 @@ public:
 
                     TensorView inView = resolvedInputs[pIdx].view;
 
-                    // Apply input slicing if partial and slices are available
                     if (!isFullRegion && slicesIt != bucket.inputSlices.end() && rIdx < slicesIt->second.size() && pIdx < slicesIt->second[rIdx].size() && !slicesIt->second[rIdx][pIdx].empty())
                     {
                         const Region &inputSlice = slicesIt->second[rIdx][pIdx][0];
 
-                        // Build a sliced view: adjust baseOffset and shape
                         TensorView slicedView = inView;
                         uint64_t elementSize = getDTypeSize(inNode.dtype);
 
-                        // Compute new baseOffset from slice starts using strides
                         uint64_t extraOffset = 0;
                         for (size_t d = 0; d < inputSlice.region.size() && d < slicedView.strides.size(); ++d)
                         {
@@ -226,7 +206,6 @@ public:
                         }
                         slicedView.baseOffset += extraOffset * elementSize;
 
-                        // Update shape to the slice extent
                         for (size_t d = 0; d < inputSlice.region.size() && d < slicedView.shape.size(); ++d)
                         {
                             slicedView.shape[d] = inputSlice.region[d].stop - inputSlice.region[d].start;
@@ -241,7 +220,6 @@ public:
                     }
                 }
 
-                // Build output pointer and view
                 std::vector<void *> kernelOutputs;
                 std::vector<TensorView> kernelOutViews;
 
@@ -266,7 +244,6 @@ public:
                 kernelOutputs.push_back(outBuf.arena_ptr + outView.baseOffset);
                 kernelOutViews.push_back(outView);
 
-                // Run the kernel
                 for (uint32_t inId : inst.inputNodeIds)
                 {
                     Debug::checkNan(compiled.nodesMap.at(inId), memManager, "Kernel Input: " + std::to_string(inId));
@@ -275,7 +252,6 @@ public:
                 Debug::checkNan(compiled.nodesMap.at(inst.nodeId), memManager, "Kernel Output: " + std::to_string(inst.nodeId));
             }
 
-            // 5. Release Consumed Parents
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {
                 if (static_cast<int>(i) == inst.inplaceInputIndex)

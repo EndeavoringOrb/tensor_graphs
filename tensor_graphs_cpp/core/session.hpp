@@ -94,20 +94,6 @@ namespace dirty_cache_json
         }
         obj["input_slices"] = slicesObj;
 
-        json kernelsObj;
-        for (const auto &pair : bucket.kernelIds)
-        {
-            json kArr = json::array();
-            for (uint64_t k : pair.second)
-            {
-                std::stringstream ss;
-                ss << "0x" << std::hex << k;
-                kArr.push_back(ss.str());
-            }
-            kernelsObj[std::to_string(pair.first)] = kArr;
-        }
-        obj["kernel_ids"] = kernelsObj;
-
         return obj;
     }
 
@@ -140,20 +126,6 @@ namespace dirty_cache_json
                     perNode.push_back(perParent);
                 }
                 bucket.inputSlices[nodeId] = perNode;
-            }
-        }
-
-        if (obj.contains("kernel_ids"))
-        {
-            for (auto it = obj["kernel_ids"].begin(); it != obj["kernel_ids"].end(); ++it)
-            {
-                uint32_t nodeId = std::stoul(it.key());
-                std::vector<uint64_t> kArr;
-                for (const auto &kStr : it.value())
-                {
-                    kArr.push_back(std::stoull(kStr.get<std::string>(), nullptr, 16));
-                }
-                bucket.kernelIds[nodeId] = kArr;
             }
         }
 
@@ -209,10 +181,10 @@ public:
         {
             std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
             std::vector<uint32_t> inputNodeIds;
-            for (const auto &pair : compiled.nodesMap)
+            for (const auto &pair : graph.nodes)
             {
-                uint32_t nodeId = pair.first;
-                if (pair.second.opType == OpType::INPUT)
+                uint32_t nodeId = pair.id;
+                if (pair.opType == OpType::INPUT)
                 {
                     if (graph.weightSources.count(nodeId) == 0 && graph.constantStaging.count(nodeId) == 0)
                     {
@@ -222,17 +194,16 @@ public:
             }
             Planner planner(costModel, 4ULL * 1024 * 1024 * 1024);
             LogicalGraph lg = planner.planLogical(rootId, graph);
-            ensureCacheCoverage(inputNodeIds, lg);
+            ensureCacheCoverage(inputNodeIds, lg, planner);
             isPlanned = true;
         }
 
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
         memManager.init();
 
-        for (const auto &pair : compiled.nodesMap)
+        for (const auto &node : graph.nodes)
         {
-            uint32_t nodeId = pair.first;
-            const TensorNode &node = pair.second;
+            uint32_t nodeId = node.id;
 
             if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
             {
@@ -255,10 +226,10 @@ public:
         }
 
         std::vector<uint32_t> inputNodeIds;
-        for (const auto &pair : compiled.nodesMap)
+        for (const auto &node : graph.nodes)
         {
-            uint32_t nodeId = pair.first;
-            if (pair.second.opType == OpType::INPUT)
+            uint32_t nodeId = node.id;
+            if (node.opType == OpType::INPUT)
             {
                 if (graph.weightSources.count(nodeId) == 0 && graph.constantStaging.count(nodeId) == 0)
                 {
@@ -266,19 +237,8 @@ public:
                 }
             }
         }
-        ensureCacheCoverage(inputNodeIds);
 
-        for (const auto &pair : compiled.nodesMap)
-        {
-            uint32_t id = pair.first;
-            if (id >= graph.nodes.size())
-            {
-                graph.nodes.resize(id + 1);
-            }
-            graph.nodes[id] = pair.second;
-        }
-
-        executor = std::make_unique<Executor>(compiled, memManager, graph);
+        executor = std::make_unique<Executor>(memManager, graph);
         isCompiled = true;
         graph.constantStaging.clear();
     }
@@ -288,7 +248,7 @@ public:
     {
         if (inputDiffs.empty())
         {
-            return DirtyBucket{};
+            return CompiledGraph{};
         }
 
         std::unordered_map<uint32_t, std::vector<Region>> canonicalRegions;
@@ -389,25 +349,18 @@ public:
             memManager.write(graph.nodes[nodeId].backend, nodeId, newData, sizeBytes);
         }
 
-        CompiledGraph graph = findBestBucket(inputDiffs);
-        executor->run(inputs, graph);
+        CompiledGraph compiledLocal = findBestBucket(inputDiffs);
+        std::string key = encodeCacheKey(inputDiffs); // TODO: properly canonicalize inputDiffs
+        auto bIt = cachedBuckets.find(key);
+        DirtyBucket bucket = bIt != cachedBuckets.end() ? bIt->second : DirtyBucket{};
+
+        executor->run(inputs, compiledLocal, bucket);
     }
 
     const void *getOutput(uint32_t nodeId) const
     {
-        if (isCompiled && nodeId == rootId && !compiled.instructions.empty())
-        {
-            nodeId = compiled.instructions.back().nodeId;
-        }
-
         Backend backend = graph.nodes[nodeId].backend;
         uint64_t baseOffset = graph.nodes[nodeId].view.shape.empty() ? 0 : graph.nodes[nodeId].view.baseOffset;
-
-        if (isCompiled && compiled.nodesMap.find(nodeId) != compiled.nodesMap.end())
-        {
-            backend = compiled.nodesMap.at(nodeId).backend;
-            baseOffset = compiled.nodesMap.at(nodeId).view.shape.empty() ? 0 : compiled.nodesMap.at(nodeId).view.baseOffset;
-        }
 
         auto &buf = memManager.buffers.at(backend);
         auto it = buf.allocationMap.find(nodeId);
@@ -558,7 +511,7 @@ public:
         return ss.str();
     }
 
-    void ensureCacheCoverage(const std::vector<uint32_t> &inputNodeIds, LogicalGraph &lg)
+    void ensureCacheCoverage(const std::vector<uint32_t> &inputNodeIds, LogicalGraph &lg, Planner &planner)
     {
         std::cout << "getting dirty slices" << std::endl;
         struct InputOption
@@ -679,7 +632,7 @@ public:
 
             std::string key = encodeCacheKey(atomicOutputRegions);
 
-            if (dirtyCache.find(key) == dirtyCache.end())
+            if (cachedGraphs.find(key) == cachedGraphs.end())
             {
                 propagateDirtyRegionsAtomic(atomicTopo, graph, atomicOutputRegions, atomicInputRegions);
                 DirtyBucket bucket;
@@ -687,6 +640,8 @@ public:
                 bucket.inputSlices = atomicInputRegions;
                 CompiledGraph compiled = planner.planPhysical(rootId, lg, atomicOutputRegions, atomicInputRegions);
                 saveCacheEntry(key, compiled, bucket);
+                cachedGraphs[key] = compiled;
+                cachedBuckets[key] = bucket;
             }
 
             int p = static_cast<int>(indices.size()) - 1;
@@ -707,8 +662,8 @@ public:
         const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions) const
     {
         std::string key = encodeCacheKey(inputRegions);
-        auto it = dirtyCache.find(key);
-        if (it != dirtyCache.end())
+        auto it = cachedGraphs.find(key);
+        if (it != cachedGraphs.end())
         {
             return &it->second;
         }

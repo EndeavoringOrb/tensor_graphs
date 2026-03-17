@@ -671,6 +671,7 @@ public:
 
         std::unordered_map<uint32_t, Backend> bestAssignments;
         std::unordered_map<uint32_t, uint64_t> bestKernelAssignments;
+        std::unordered_map<uint32_t, std::vector<uint64_t>> bestPartialKernelAssignments;
         std::unordered_map<uint32_t, uint32_t> bestSelectedNodes;
         std::unordered_map<uint64_t, std::vector<AdapterOp>> bestEdgeAdapters;
 
@@ -693,6 +694,7 @@ public:
 
             bestAssignments[hPhysId] = strat->backend;
             bestKernelAssignments[hPhysId] = strat->kernelId;
+            bestPartialKernelAssignments[hPhysId] = strat->partialKernelIds;
             bestSelectedNodes[hLogId] = strat->selectedNodeId;
 
             compiled.logicalNodeMap[strat->selectedNodeId] = strat->nodeId;
@@ -990,6 +992,12 @@ public:
                 Error::throw_err("[Planner.plan] CRITICAL: Missing kernel assignment for node " + std::to_string(id));
             }
 
+            std::vector<uint64_t> finalPartialKernels;
+            if (bestPartialKernelAssignments.count(hId))
+            {
+                finalPartialKernels = bestPartialKernelAssignments.at(hId);
+            }
+
             const KernelEntry &kEntry = KernelRegistry::get().getKernel(finalKernelId);
 
             // TODO: Long-term fix — defer kernel selection until after adapter
@@ -1022,6 +1030,15 @@ public:
                         Error::throw_err("[Planner.plan] CRITICAL: Planned inplace kernel but refCount > 1 for node " + std::to_string(input0Id) + ", and no non-inplace fallback kernel found.\n" + toString(node));
                     }
                     finalKernelId = fallbackId;
+
+                    for (size_t pkIdx = 0; pkIdx < finalPartialKernels.size(); ++pkIdx)
+                    {
+                        const KernelEntry &pkEntry = KernelRegistry::get().getKernel(finalPartialKernels[pkIdx]);
+                        if (pkEntry.inplace)
+                        {
+                            finalPartialKernels[pkIdx] = finalKernelId;
+                        }
+                    }
                 }
             }
 
@@ -1030,6 +1047,7 @@ public:
             OpInstruction inst;
             inst.nodeId = id;
             inst.kernelId = finalKernelId;
+            inst.partialKernelIds = finalPartialKernels;
             inst.inputNodeIds = compiled.nodesMap.at(id).parentIds;
             inst.backend = assignedBackend;
             inst.inplaceInputIndex = kEntryFinal.inplace ? 0 : -1;
@@ -1174,8 +1192,8 @@ private:
                            std::unordered_map<std::string, std::vector<std::shared_ptr<BeamStrategy>>> &memo,
                            std::unordered_map<uint32_t, std::string> &structHashMemo,
                            const std::unordered_map<uint32_t, uint32_t> &estimatedRefCounts,
-                           const std::unordered_map<uint32_t, std::vector<Region>> &atomicDirtyOutputRegions,
-                           const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &atomicDirtyInputRegions)
+                           const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
+                           const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions)
     {
         std::string nodeHash = Hashing::structuralHash(nodeId, graph, structHashMemo);
         if (memo.count(nodeHash))
@@ -1238,6 +1256,36 @@ private:
                     std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
                         target.opType, target.opName, backend, inputNodes, target, estimatedRefCounts);
 
+                    std::vector<uint64_t> bestPartialKernels;
+                    auto rIt = dirtyOutputRegions.find(nodeId);
+                    if (rIt != dirtyOutputRegions.end() && !rIt->second.empty())
+                    {
+                        const auto &regions = rIt->second;
+                        for (size_t rIdx = 0; rIdx < regions.size(); ++rIdx)
+                        {
+                            const Region &outReg = regions[rIdx];
+                            TensorNode partialTarget = target;
+                            for (size_t d = 0; d < outReg.region.size(); ++d)
+                            {
+                                partialTarget.shape[d] = outReg.region[d].stop - outReg.region[d].start;
+                            }
+                            uint64_t bestPartKernel = UINT64_MAX;
+                            float bestPartCost = std::numeric_limits<float>::infinity();
+                            std::vector<uint64_t> matchingPartKernels = KernelRegistry::get().findMatchingKernels(
+                                partialTarget.opType, partialTarget.opName, backend, inputNodes, partialTarget, estimatedRefCounts);
+                            for (uint64_t pk : matchingPartKernels)
+                            {
+                                float c = costModel.estimateCost(partialTarget, inputNodes, graph, pk);
+                                if (c < bestPartCost || bestPartKernel == UINT64_MAX)
+                                {
+                                    bestPartCost = c;
+                                    bestPartKernel = pk;
+                                }
+                            }
+                            bestPartialKernels.push_back(bestPartKernel);
+                        }
+                    }
+
                     for (uint64_t kernelId : matchingKernels)
                     {
                         float cost = costModel.estimateCost(target, inputNodes, graph, kernelId);
@@ -1250,6 +1298,14 @@ private:
                         strat->selectedNodeId = targetId;
                         strat->backend = backend;
                         strat->kernelId = kernelId;
+
+                        std::vector<uint64_t> stratPartialKernels = bestPartialKernels;
+                        for (auto &pk : stratPartialKernels)
+                        {
+                            if (pk == UINT64_MAX)
+                                pk = kernelId;
+                        }
+                        strat->partialKernelIds = stratPartialKernels;
 
                         candidates.push_back(strat);
                     }
@@ -1295,6 +1351,54 @@ private:
                                 adaptedInputNodes.push_back(adaptedNode);
                             }
 
+                            std::vector<uint64_t> bestPartialKernels;
+                            auto rIt = dirtyOutputRegions.find(nodeId);
+                            if (rIt != dirtyOutputRegions.end() && !rIt->second.empty())
+                            {
+                                const auto &regions = rIt->second;
+                                auto slicesIt = dirtyInputRegions.find(nodeId);
+                                for (size_t rIdx = 0; rIdx < regions.size(); ++rIdx)
+                                {
+                                    const Region &outReg = regions[rIdx];
+                                    TensorNode partialTarget = target;
+                                    for (size_t d = 0; d < outReg.region.size(); ++d)
+                                    {
+                                        partialTarget.shape[d] = outReg.region[d].stop - outReg.region[d].start;
+                                    }
+
+                                    std::vector<TensorNode> partialInputs = adaptedInputNodes;
+                                    if (slicesIt != dirtyInputRegions.end() && rIdx < slicesIt->second.size())
+                                    {
+                                        for (size_t pIdx = 0; pIdx < partialInputs.size(); ++pIdx)
+                                        {
+                                            if (pIdx < slicesIt->second[rIdx].size() && !slicesIt->second[rIdx][pIdx].empty())
+                                            {
+                                                const Region &inReg = slicesIt->second[rIdx][pIdx][0];
+                                                for (size_t d = 0; d < inReg.region.size(); ++d)
+                                                {
+                                                    partialInputs[pIdx].shape[d] = inReg.region[d].stop - inReg.region[d].start;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    uint64_t bestPartKernel = UINT64_MAX;
+                                    float bestPartCost = std::numeric_limits<float>::infinity();
+                                    std::vector<uint64_t> matchingPartKernels = KernelRegistry::get().findMatchingKernels(
+                                        partialTarget.opType, partialTarget.opName, backend, partialInputs, partialTarget, estimatedRefCounts);
+                                    for (uint64_t pk : matchingPartKernels)
+                                    {
+                                        float c = costModel.estimateCost(partialTarget, partialInputs, graph, pk);
+                                        if (c < bestPartCost || bestPartKernel == UINT64_MAX)
+                                        {
+                                            bestPartCost = c;
+                                            bestPartKernel = pk;
+                                        }
+                                    }
+                                    bestPartialKernels.push_back(bestPartKernel);
+                                }
+                            }
+
                             std::vector<uint64_t> matchingKernels = KernelRegistry::get().findMatchingKernels(
                                 target.opType, target.opName, backend, adaptedInputNodes, target, estimatedRefCounts);
 
@@ -1307,6 +1411,15 @@ private:
                                 strat->selectedNodeId = targetId;
                                 strat->backend = backend;
                                 strat->kernelId = kernelId;
+
+                                std::vector<uint64_t> stratPartialKernels = bestPartialKernels;
+                                for (auto &pk : stratPartialKernels)
+                                {
+                                    if (pk == UINT64_MAX)
+                                        pk = kernelId;
+                                }
+                                strat->partialKernelIds = stratPartialKernels;
+
                                 strat->nodeCost = targetCost;
 
                                 float totalEdgeCost = 0.0f;
