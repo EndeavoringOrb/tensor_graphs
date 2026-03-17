@@ -128,8 +128,10 @@ def analyze(graph_file, records_file):
                 break
 
         est_time = 0.0
-        k_id = inst["kernelId"]
-        recs = records.get(k_id, [])
+        k_ids = inst.get("kernelIds", [])
+        k_id = k_ids[0] if k_ids else None # TODO: iterate over all kernels
+
+        recs = records.get(k_id, []) if k_id else []
         if recs:
             best_rec = min(
                 recs,
@@ -270,7 +272,7 @@ def analyze(graph_file, records_file):
 
     kernel_shape_rows = []
     for (name, kid, shape), stats in k_shape_stats.items():
-        kernel_label = f"{name} ({kid[:8]}...)"
+        kernel_label = f"{name} ({kid[:8]}...)" if kid else f"{name} (None)"
         kernel_shape_rows.append(
             (
                 kernel_label,

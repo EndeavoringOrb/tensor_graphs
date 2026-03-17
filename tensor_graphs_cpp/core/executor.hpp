@@ -144,13 +144,13 @@ public:
                 computeRegions = regionIt->second;
                 nPartial++;
 
-                if (!inst.partialKernelIds.empty() && inst.partialKernelIds.size() == computeRegions.size())
+                if (inst.kernelIds.size() == computeRegions.size())
                 {
-                    computeKernels = inst.partialKernelIds;
+                    computeKernels = inst.kernelIds;
                 }
                 else
                 {
-                    computeKernels.assign(computeRegions.size(), inst.kernelId);
+                    computeKernels.assign(computeRegions.size(), inst.kernelIds.empty() ? 0 : inst.kernelIds.back());
                 }
             }
             else
@@ -161,7 +161,7 @@ public:
                     full.region.push_back({0, dim});
                 }
                 computeRegions = {full};
-                computeKernels = {inst.kernelId};
+                computeKernels = {inst.kernelIds.empty() ? 0 : inst.kernelIds.back()};
             }
 
             auto slicesIt = bucket.inputSlices.find(inst.nodeId);
@@ -194,7 +194,7 @@ public:
 
                     if (!isFullRegion && slicesIt != bucket.inputSlices.end() && rIdx < slicesIt->second.size() && pIdx < slicesIt->second[rIdx].size() && !slicesIt->second[rIdx][pIdx].empty())
                     {
-                        const Region &inputSlice = slicesIt->second[rIdx][pIdx][0];
+                        const Region &inputSlice = slicesIt->second[rIdx][pIdx].region[0];
 
                         TensorView slicedView = inView;
                         uint64_t elementSize = getDTypeSize(inNode.dtype);

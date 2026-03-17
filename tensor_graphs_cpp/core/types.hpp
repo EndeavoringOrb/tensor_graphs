@@ -172,11 +172,13 @@ struct Dim
 struct Region
 {
     std::vector<Dim> region;
+
     bool empty() const
     {
         return region.empty();
     }
 };
+
 
 inline bool regionsMatch(const Region &r1, const Region &r2)
 {
@@ -554,8 +556,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(StorageType, {
 struct OpInstruction
 {
     uint32_t nodeId;
-    uint64_t kernelId;
-    std::vector<uint64_t> partialKernelIds;
+    std::vector<uint64_t> kernelIds;
     std::vector<uint32_t> inputNodeIds;
     int32_t inplaceInputIndex; // -1 if not inplace
     Backend backend;
@@ -594,8 +595,7 @@ struct BeamStrategy
     uint32_t nodeId;         // The original node ID this strategy resolves
     uint32_t selectedNodeId; // The actual fused/replaced node ID chosen
     Backend backend;         // Backend chosen for this node
-    uint64_t kernelId;       // Kernel chosen for this node
-    std::vector<uint64_t> partialKernelIds;
+    std::vector<uint64_t> kernelIds;
 
     // Pointers tracking the selected parent paths
     std::vector<std::shared_ptr<BeamStrategy>> parentStrategies;
@@ -660,21 +660,17 @@ inline void from_json(const json &j, TensorNode &n)
 
 inline void to_json(json &j, const OpInstruction &i)
 {
-    std::stringstream ss;
-    ss << "0x" << std::hex << i.kernelId;
-
-    json pKernels = json::array();
-    for (uint64_t pk : i.partialKernelIds)
+    json kIds = json::array();
+    for (uint64_t k : i.kernelIds)
     {
         std::stringstream pss;
-        pss << "0x" << std::hex << pk;
-        pKernels.push_back(pss.str());
+        pss << "0x" << std::hex << k;
+        kIds.push_back(pss.str());
     }
 
     j = json{
         {"nodeId", i.nodeId},
-        {"kernelId", ss.str()},
-        {"partialKernelIds", pKernels},
+        {"kernelIds", kIds},
         {"inputNodeIds", i.inputNodeIds},
         {"inplaceInputIndex", i.inplaceInputIndex},
         {"backend", i.backend}};
@@ -682,12 +678,11 @@ inline void to_json(json &j, const OpInstruction &i)
 inline void from_json(const json &j, OpInstruction &i)
 {
     i.nodeId = j.at("nodeId").get<uint32_t>();
-    i.kernelId = std::stoull(j.at("kernelId").get<std::string>(), nullptr, 16);
 
-    i.partialKernelIds.clear();
-    for (const auto &pkStr : j.at("partialKernelIds"))
+    i.kernelIds.clear();
+    for (const auto &pkStr : j.at("kernelIds"))
     {
-        i.partialKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
+        i.kernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
     }
 
     i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();

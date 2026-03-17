@@ -670,8 +670,7 @@ public:
         std::cout << "\nbest recipe cost: " << bestRecipe->cost << " ms" << std::endl;
 
         std::unordered_map<uint32_t, Backend> bestAssignments;
-        std::unordered_map<uint32_t, uint64_t> bestKernelAssignments;
-        std::unordered_map<uint32_t, std::vector<uint64_t>> bestPartialKernelAssignments;
+        std::unordered_map<uint32_t, std::vector<uint64_t>> bestKernelAssignments;
         std::unordered_map<uint32_t, uint32_t> bestSelectedNodes;
         std::unordered_map<uint64_t, std::vector<AdapterOp>> bestEdgeAdapters;
 
@@ -693,8 +692,7 @@ public:
             uint32_t hPhysId = getHashId(hPhys);
 
             bestAssignments[hPhysId] = strat->backend;
-            bestKernelAssignments[hPhysId] = strat->kernelId;
-            bestPartialKernelAssignments[hPhysId] = strat->partialKernelIds;
+            bestKernelAssignments[hPhysId] = strat->kernelIds;
             bestSelectedNodes[hLogId] = strat->selectedNodeId;
 
             compiled.logicalNodeMap[strat->selectedNodeId] = strat->nodeId;
@@ -872,7 +870,7 @@ public:
 
                             std::string adapterHash = Hashing::structuralHash(adapterNode.id, graph, structHashMemo);
                             uint32_t adapterHashId = getHashId(adapterHash);
-                            bestKernelAssignments[adapterHashId] = adapter.kernelId;
+                            bestKernelAssignments[adapterHashId] = {adapter.kernelId};
                             bestAssignments[adapterHashId] = adapter.backend;
                             std::vector<TensorNode> adapterInputs = {graph.nodes[currentPid]};
                             compiled.nodeCosts[adapterNode.id] = costModel.estimateCost(adapterNode, adapterInputs, graph, adapter.kernelId);
@@ -944,7 +942,7 @@ public:
 
                                 std::string adapterHash = Hashing::structuralHash(adapterNode.id, graph, structHashMemo);
                                 uint32_t adapterHashId = getHashId(adapterHash);
-                                bestKernelAssignments[adapterHashId] = adapter.kernelId;
+                                bestKernelAssignments[adapterHashId] = {adapter.kernelId};
                                 bestAssignments[adapterHashId] = adapter.backend;
 
                                 std::vector<TensorNode> adapterInputs = {compiled.nodesMap.count(currentPid) ? compiled.nodesMap.at(currentPid) : graph.nodes[currentPid]};
@@ -986,19 +984,18 @@ public:
                 assignedBackend = bestAssignments.at(hId);
             }
 
-            uint64_t finalKernelId = bestKernelAssignments.count(hId) ? bestKernelAssignments.at(hId) : UINT64_MAX;
-            if (finalKernelId == UINT64_MAX)
+            std::vector<uint64_t> finalKernelIds;
+            if (bestKernelAssignments.count(hId))
+            {
+                finalKernelIds = bestKernelAssignments.at(hId);
+            }
+
+            if (finalKernelIds.empty())
             {
                 Error::throw_err("[Planner.plan] CRITICAL: Missing kernel assignment for node " + std::to_string(id));
             }
 
-            std::vector<uint64_t> finalPartialKernels;
-            if (bestPartialKernelAssignments.count(hId))
-            {
-                finalPartialKernels = bestPartialKernelAssignments.at(hId);
-            }
-
-            const KernelEntry &kEntry = KernelRegistry::get().getKernel(finalKernelId);
+            const KernelEntry &kEntry = KernelRegistry::get().getKernel(finalKernelIds.back());
 
             // TODO: Long-term fix — defer kernel selection until after adapter
             // insertion so actual refCounts are known, or re-run beam search
@@ -1029,25 +1026,23 @@ public:
                     {
                         Error::throw_err("[Planner.plan] CRITICAL: Planned inplace kernel but refCount > 1 for node " + std::to_string(input0Id) + ", and no non-inplace fallback kernel found.\n" + toString(node));
                     }
-                    finalKernelId = fallbackId;
 
-                    for (size_t pkIdx = 0; pkIdx < finalPartialKernels.size(); ++pkIdx)
+                    for (size_t pkIdx = 0; pkIdx < finalKernelIds.size(); ++pkIdx)
                     {
-                        const KernelEntry &pkEntry = KernelRegistry::get().getKernel(finalPartialKernels[pkIdx]);
+                        const KernelEntry &pkEntry = KernelRegistry::get().getKernel(finalKernelIds[pkIdx]);
                         if (pkEntry.inplace)
                         {
-                            finalPartialKernels[pkIdx] = finalKernelId;
+                            finalKernelIds[pkIdx] = fallbackId;
                         }
                     }
                 }
             }
 
-            const KernelEntry &kEntryFinal = KernelRegistry::get().getKernel(finalKernelId);
+            const KernelEntry &kEntryFinal = KernelRegistry::get().getKernel(finalKernelIds.back());
 
             OpInstruction inst;
             inst.nodeId = id;
-            inst.kernelId = finalKernelId;
-            inst.partialKernelIds = finalPartialKernels;
+            inst.kernelIds = finalKernelIds;
             inst.inputNodeIds = compiled.nodesMap.at(id).parentIds;
             inst.backend = assignedBackend;
             inst.inplaceInputIndex = kEntryFinal.inplace ? 0 : -1;
@@ -1211,7 +1206,7 @@ private:
             strat->nodeId = nodeId;
             strat->selectedNodeId = nodeId;
             strat->backend = node.backend;
-            strat->kernelId = UINT64_MAX;
+            strat->kernelIds = {};
             memo[nodeHash].push_back(strat);
             return;
         }
@@ -1297,15 +1292,18 @@ private:
                         strat->nodeId = nodeId;
                         strat->selectedNodeId = targetId;
                         strat->backend = backend;
-                        strat->kernelId = kernelId;
 
-                        std::vector<uint64_t> stratPartialKernels = bestPartialKernels;
-                        for (auto &pk : stratPartialKernels)
+                        std::vector<uint64_t> stratKernelIds = bestPartialKernels;
+                        for (auto &pk : stratKernelIds)
                         {
                             if (pk == UINT64_MAX)
                                 pk = kernelId;
                         }
-                        strat->partialKernelIds = stratPartialKernels;
+                        if (stratKernelIds.empty())
+                        {
+                            stratKernelIds.push_back(kernelId);
+                        }
+                        strat->kernelIds = stratKernelIds;
 
                         candidates.push_back(strat);
                     }
@@ -1373,7 +1371,7 @@ private:
                                         {
                                             if (pIdx < slicesIt->second[rIdx].size() && !slicesIt->second[rIdx][pIdx].empty())
                                             {
-                                                const Region &inReg = slicesIt->second[rIdx][pIdx][0];
+                                                const Region &inReg = slicesIt->second[rIdx][pIdx].region[0];
                                                 for (size_t d = 0; d < inReg.region.size(); ++d)
                                                 {
                                                     partialInputs[pIdx].shape[d] = inReg.region[d].stop - inReg.region[d].start;
@@ -1410,15 +1408,18 @@ private:
                                 strat->nodeId = nodeId;
                                 strat->selectedNodeId = targetId;
                                 strat->backend = backend;
-                                strat->kernelId = kernelId;
 
-                                std::vector<uint64_t> stratPartialKernels = bestPartialKernels;
-                                for (auto &pk : stratPartialKernels)
+                                std::vector<uint64_t> stratKernelIds = bestPartialKernels;
+                                for (auto &pk : stratKernelIds)
                                 {
                                     if (pk == UINT64_MAX)
                                         pk = kernelId;
                                 }
-                                strat->partialKernelIds = stratPartialKernels;
+                                if (stratKernelIds.empty())
+                                {
+                                    stratKernelIds.push_back(kernelId);
+                                }
+                                strat->kernelIds = stratKernelIds;
 
                                 strat->nodeCost = targetCost;
 
