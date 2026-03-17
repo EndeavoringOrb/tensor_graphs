@@ -24,3 +24,11 @@ automatically reject dirty region cache .jsonl if invalid kernel ids
 make ctrl-c safe (cudafree or whatever)
 
 replace throw error with wrapper that first prints message (windows doesn't print the error message for some reason)
+
+
+bench crashing after gather
+```text
+[41/81] [CPU] GATHER (0x2f916246689c6344), Out DType: F32, Out Shape: [1, 4, 640], Out Strides: [5120, 640, 1] -> 0.000411 ms
+double free or corruption (!prev)
+Aborted (core dumped)
+```
