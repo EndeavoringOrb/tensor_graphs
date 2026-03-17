@@ -112,7 +112,7 @@ struct MemBlock
     uint64_t sizeBytes;
     uint32_t nodeId; // Use UINT32_MAX to denote a free segment
     StorageType storageType;
-    int32_t refCount;
+    uint32_t refCount;
     bool isLocked;
     float cost; // Track compute cost
 

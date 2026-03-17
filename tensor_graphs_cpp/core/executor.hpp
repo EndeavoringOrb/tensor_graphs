@@ -14,24 +14,16 @@
 class Executor
 {
 private:
-    CompiledGraph compiled;
     MemoryManager &memManager;
     const Graph &graph;
     std::unordered_map<uint32_t, float> nodeCosts;
 
 public:
-    Executor(CompiledGraph cg, MemoryManager &mm, const Graph &g)
-        : compiled(std::move(cg)), memManager(mm), graph(g)
-    {
-        if (compiled.nodeCosts.empty())
-        {
-            Error::throw_err("[Executor] Critical Error: CompiledGraph contains no nodeCosts. "
-                             "Execution cannot proceed as memory eviction requires cost metadata.");
-        }
-    }
+    Executor(MemoryManager &mm, const Graph &g)
+        : memManager(mm), graph(g) {}
 
     void run(const std::unordered_map<uint32_t, const void *> &inputs,
-             const DirtyBucket &bucket)
+             const CompiledGraph &compiled, const DirtyBucket &bucket)
     {
         std::cout << "running..." << std::endl;
 
@@ -72,7 +64,7 @@ public:
                             // Lock clean nodes that are in cache
                             auto &outBuf = memManager.buffers.at(pNode.backend);
                             auto blockIt = outBuf.allocationMap.at(pId);
-                            blockIt->refCount = compiled.refCounts[nodeId];
+                            blockIt->refCount = compiled.refCounts.at(nodeId);
                             blockIt->isLocked = true;
                         }
                     }
@@ -110,7 +102,7 @@ public:
             if (!isDirty && inCache)
             {
                 auto blockIt = outBuf.allocationMap.at(nodeId);
-                blockIt->refCount = compiled.refCounts[nodeId];
+                blockIt->refCount = compiled.refCounts.at(nodeId);
                 blockIt->isLocked = true;
                 for (uint32_t inId : inst.inputNodeIds)
                 {
@@ -144,12 +136,12 @@ public:
             {
                 uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
                 float cost = compiled.nodeCosts.at(inst.nodeId);
-                memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts[inst.nodeId], cost, &parentMap, &compiled.nodeCosts);
+                memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts.at(inst.nodeId), cost, &parentMap, &compiled.nodeCosts);
             }
 
             // Ensure output is locked
             auto outBlockIt = outBuf.allocationMap.at(inst.nodeId);
-            outBlockIt->refCount = compiled.refCounts[inst.nodeId];
+            outBlockIt->refCount = compiled.refCounts.at(inst.nodeId);
             outBlockIt->isLocked = true;
 
             // 4. EXECUTE KERNEL

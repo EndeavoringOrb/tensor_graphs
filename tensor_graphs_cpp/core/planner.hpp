@@ -56,14 +56,14 @@ void propagateDirtyRegionsAtomic(
         else
             dirtyOutputRegions[nodeId] = {};
 
-        dirtyInputRegions[nodeId] = backProp.backward(node, graph, dirtyOutputRegions[nodeId]);
+        dirtyInputRegions[nodeId] = propagator.backward(node, graph, dirtyOutputRegions[nodeId]);
     }
 }
 
 class Planner
 {
 private:
-    uint32_t currentGeneration = 0; // Used for extremely fast cycle-free DAG DFS
+    uint32_t currentGeneration = 0;
 
     std::unordered_map<std::string, uint32_t> hashToId;
     uint32_t getHashId(const std::string &h)
@@ -84,6 +84,208 @@ private:
         float cost;
     };
 
+    std::vector<AdapterChain> getSliceAdapterChains(const TensorNode &pNode, Backend pBackend, Backend targetBackend, const Region &region, const Graph &graph, const std::unordered_map<uint32_t, uint32_t> &refCounts, CostModel &costModel)
+    {
+        std::vector<AdapterChain> chains;
+
+        std::vector<uint32_t> starts, ends, steps, sliceShape;
+        for (size_t i = 0; i < pNode.shape.size(); ++i)
+        {
+            if (i < region.region.size())
+            {
+                starts.push_back(region.region[i].start);
+                ends.push_back(region.region[i].stop);
+                steps.push_back(1);
+                sliceShape.push_back(region.region[i].stop - region.region[i].start);
+            }
+            else
+            {
+                starts.push_back(0);
+                ends.push_back(pNode.shape[i]);
+                steps.push_back(1);
+                sliceShape.push_back(pNode.shape[i]);
+            }
+        }
+
+        auto evalKernelMulti = [&](OpType op, Backend opBackend, const std::vector<TensorNode> &inputsList, TensorNode &output, uint64_t &bestK, float &bestCost)
+        {
+            output.id = 999999;
+            output.opType = op;
+            output.opName = "";
+            output.backend = opBackend;
+            output.storageType = StorageType::TRANSIENT;
+            if (op == OpType::CONTIGUOUS || op == OpType::SLICE || op == OpType::SCATTER)
+            {
+                output.view.strides = TensorView::calcContiguousStrides(output.shape);
+            }
+
+            std::vector<uint64_t> kernels = KernelRegistry::get().findMatchingKernels(op, "", opBackend, inputsList, output, refCounts);
+            bestCost = std::numeric_limits<float>::infinity();
+            bestK = UINT64_MAX;
+            for (uint64_t k : kernels)
+            {
+                float c = costModel.estimateCost(output, inputsList, graph, k);
+                if (c < bestCost || bestK == UINT64_MAX)
+                {
+                    bestCost = c;
+                    bestK = k;
+                }
+            }
+        };
+
+        TensorNode sliceOut = pNode;
+        sliceOut.shape = sliceShape;
+        sliceOut.dtype = pNode.dtype;
+
+        TensorNode dStarts, dEnds, dSteps;
+        dStarts.dtype = DType::INT32;
+        dStarts.shape = {(uint32_t)starts.size()};
+        dEnds.dtype = DType::INT32;
+        dEnds.shape = {(uint32_t)ends.size()};
+        dSteps.dtype = DType::INT32;
+        dSteps.shape = {(uint32_t)steps.size()};
+
+        std::vector<TensorNode> sliceInputs = {pNode, dStarts, dEnds, dSteps};
+
+        uint64_t kSlice;
+        float cSlice;
+        evalKernelMulti(OpType::SLICE, pBackend, sliceInputs, sliceOut, kSlice, cSlice);
+
+        if (kSlice == UINT64_MAX)
+            return chains;
+
+        AdapterOp sliceOp = {OpType::SLICE, kSlice, pBackend, true, starts, ends, steps, sliceShape, 0};
+
+        TensorNode contigOut = sliceOut;
+        uint64_t kContig;
+        float cContig;
+        evalKernelMulti(OpType::CONTIGUOUS, pBackend, {sliceOut}, contigOut, kContig, cContig);
+        if (kContig == UINT64_MAX)
+            return chains;
+
+        AdapterOp contigOp = {OpType::CONTIGUOUS, kContig, pBackend, false, {}, {}, {}, sliceShape, 0};
+
+        if (pBackend == targetBackend)
+        {
+            chains.push_back({{sliceOp, contigOp}, targetBackend, true, cSlice + cContig});
+        }
+        else
+        {
+            TensorNode copyOut = contigOut;
+            uint64_t kCopy;
+            float cCopy;
+            evalKernelMulti(OpType::COPY_TO, targetBackend, {contigOut}, copyOut, kCopy, cCopy);
+            if (kCopy != UINT64_MAX)
+            {
+                AdapterOp copyOp = {OpType::COPY_TO, kCopy, targetBackend, false, {}, {}, {}, sliceShape, 0};
+                chains.push_back({{sliceOp, contigOp, copyOp}, targetBackend, true, cSlice + cContig + cCopy});
+            }
+        }
+
+        return chains;
+    }
+
+    std::vector<AdapterChain> getScatterAdapterChains(const TensorNode &updatesNode, Backend updatesBackend, const TensorNode &targetNode, Backend targetBackend, const Region &region, const Graph &graph, const std::unordered_map<uint32_t, uint32_t> &refCounts, CostModel &costModel)
+    {
+        std::vector<AdapterChain> chains;
+
+        std::vector<uint32_t> starts, ends, steps;
+        for (size_t i = 0; i < targetNode.shape.size(); ++i)
+        {
+            if (i < region.region.size())
+            {
+                starts.push_back(region.region[i].start);
+                ends.push_back(region.region[i].stop);
+                steps.push_back(1);
+            }
+            else
+            {
+                starts.push_back(0);
+                ends.push_back(targetNode.shape[i]);
+                steps.push_back(1);
+            }
+        }
+
+        auto evalKernelMulti = [&](OpType op, Backend opBackend, const std::vector<TensorNode> &inputsList, TensorNode &output, uint64_t &bestK, float &bestCost)
+        {
+            output.id = 999999;
+            output.opType = op;
+            output.opName = "";
+            output.backend = opBackend;
+            output.storageType = StorageType::TRANSIENT;
+            if (op == OpType::CONTIGUOUS || op == OpType::SCATTER)
+            {
+                output.view.strides = TensorView::calcContiguousStrides(output.shape);
+            }
+
+            std::vector<uint64_t> kernels = KernelRegistry::get().findMatchingKernels(op, "", opBackend, inputsList, output, refCounts);
+            bestCost = std::numeric_limits<float>::infinity();
+            bestK = UINT64_MAX;
+            for (uint64_t k : kernels)
+            {
+                float c = costModel.estimateCost(output, inputsList, graph, k);
+                if (c < bestCost || bestK == UINT64_MAX)
+                {
+                    bestCost = c;
+                    bestK = k;
+                }
+            }
+        };
+
+        std::vector<AdapterOp> baseOps;
+        float baseCost = 0.0f;
+        TensorNode currentUpdates = updatesNode;
+        currentUpdates.backend = updatesBackend;
+
+        if (updatesBackend != targetBackend)
+        {
+            TensorNode copyOut = currentUpdates;
+            uint64_t kCopy;
+            float cCopy;
+            evalKernelMulti(OpType::COPY_TO, targetBackend, {currentUpdates}, copyOut, kCopy, cCopy);
+            if (kCopy != UINT64_MAX)
+            {
+                AdapterOp copyOp = {OpType::COPY_TO, kCopy, targetBackend, false, {}, {}, {}, currentUpdates.shape, 0};
+                baseOps.push_back(copyOp);
+                baseCost += cCopy;
+                currentUpdates.backend = targetBackend;
+            }
+            else
+            {
+                return chains;
+            }
+        }
+
+        TensorNode dStarts, dEnds, dSteps;
+        dStarts.dtype = DType::INT32;
+        dStarts.shape = {(uint32_t)starts.size()};
+        dEnds.dtype = DType::INT32;
+        dEnds.shape = {(uint32_t)ends.size()};
+        dSteps.dtype = DType::INT32;
+        dSteps.shape = {(uint32_t)steps.size()};
+
+        TensorNode targetNodeBackend = targetNode;
+        targetNodeBackend.backend = targetBackend;
+
+        std::vector<TensorNode> scatterInputs = {targetNodeBackend, currentUpdates, dStarts, dEnds, dSteps};
+
+        TensorNode scatterOut = targetNode;
+        scatterOut.backend = targetBackend;
+
+        uint64_t kScatter;
+        float cScatter;
+        evalKernelMulti(OpType::SCATTER, targetBackend, scatterInputs, scatterOut, kScatter, cScatter);
+
+        if (kScatter != UINT64_MAX)
+        {
+            AdapterOp scatterOp = {OpType::SCATTER, kScatter, targetBackend, true, starts, ends, steps, targetNode.shape, targetNode.id};
+            baseOps.push_back(scatterOp);
+            chains.push_back({baseOps, targetBackend, true, baseCost + cScatter});
+        }
+
+        return chains;
+    }
+
     std::vector<AdapterChain> getAdapterChains(const TensorNode &pNode, Backend pBackend, Backend targetBackend, const Graph &graph, const std::unordered_map<uint32_t, uint32_t> &refCounts, CostModel &costModel)
     {
         std::vector<AdapterChain> chains;
@@ -91,7 +293,7 @@ private:
 
         auto evalKernel = [&](OpType op, Backend opBackend, const TensorNode &input, TensorNode &output, uint64_t &bestK, float &bestCost)
         {
-            output = input; // copy properties
+            output = input;
             output.id = input.id;
             output.opType = op;
             output.opName = "";
@@ -209,6 +411,7 @@ public:
 
     LogicalGraph planLogical(uint32_t rootId, Graph &graph)
     {
+        LogicalGraph lg;
         std::cout << "[Planner.plan] initial sort..." << std::endl;
         std::unordered_map<uint32_t, std::string> structHashMemo;
         std::unordered_map<uint32_t, std::string> patternHashMemo;
@@ -267,7 +470,6 @@ public:
             patternsByRootOp[patternRootOp].push_back(i);
         }
 
-        std::unordered_map<std::string, std::vector<uint32_t>> fusionMap;
 #ifdef FUSE_OPS
         Rewrite::CommutativeRule cr;
         Rewrite::DistributiveRule dr;
@@ -299,7 +501,7 @@ public:
                 if (eqId != nodeId)
                 {
                     rewrites++;
-                    fusionMap[hash].push_back(eqId);
+                    lg.fusionMap[hash].push_back(eqId);
                 }
 
                 prop.inferShapeRecursive(eqId, graph);
@@ -342,7 +544,7 @@ public:
 
                                 graph.nodes.push_back(fusedNode);
 
-                                fusionMap[hash].push_back(fusedNode.id);
+                                lg.fusionMap[hash].push_back(fusedNode.id);
                                 fusionMatches++;
                             }
                         }
@@ -351,11 +553,11 @@ public:
             }
         }
         std::cout << std::endl
-                  << "# Rewrites: " << fusionMap.size() << std::endl;
+                  << "# Rewrites: " << lg.fusionMap.size() << std::endl;
         std::cout << "# Fusion matches: " << fusionMatches << std::endl;
 #endif
         std::cout << "[Planner.plan] doing augmented topo sort..." << std::endl;
-        std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, fusionMap, graph, structHashMemo);
+        std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, lg.fusionMap, graph, structHashMemo);
 
         std::cout << "[Planner.plan] inferring shapes for augmented graph..." << std::endl;
         inferShapes(sortedNodes, graph);
@@ -414,25 +616,32 @@ public:
         }
 
         // TODO: don't copy all these structs, build them on the LogicalGraph
-        LogicalGraph lg;
+
         lg.graph = graph;
-        lg.fusionMap = fusionMap;
         lg.estimatedRefCounts = estimatedRefCounts;
         return lg;
     }
 
     CompiledGraph planPhysical(uint32_t rootId, LogicalGraph &lg, const std::unordered_map<uint32_t, std::vector<Region>> &atomicDirtyOutputRegions, const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &atomicDirtyInputRegions)
     {
+        Graph &graph = lg.graph;
+        std::vector<uint32_t> topo = topologicalSort(rootId, graph);
+
+        std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions = atomicDirtyOutputRegions;
+        std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions = atomicDirtyInputRegions;
         propagateDirtyRegionsAtomic(topo, graph, dirtyOutputRegions, dirtyInputRegions);
         std::unordered_map<std::string, std::vector<std::shared_ptr<BeamStrategy>>> memo;
+        std::unordered_map<uint32_t, std::string> structHashMemo;
 
         std::cout << "[Planner.plan] planning nodes..." << std::endl;
+        std::vector<uint32_t> sortedNodes = getAugmentedTopologicalSort(topo, lg.fusionMap, graph, structHashMemo);
+
         uint32_t nodeIdx = 0;
         for (uint32_t nodeId : sortedNodes)
         {
             nodeIdx++;
             std::cout << nodeIdx << "/" << sortedNodes.size() << "\r";
-            planNodeIterative(nodeId, lg.graph, lg.fusionMap, memo, structHashMemo, lg.estimatedRefCounts, dirtyOutputRegions, dirtyInputRegions);
+            planNodeIterative(nodeId, graph, lg.fusionMap, memo, structHashMemo, lg.estimatedRefCounts, dirtyOutputRegions, dirtyInputRegions);
         }
 
         std::string rootHash = Hashing::structuralHash(rootId, graph, structHashMemo);
@@ -592,6 +801,58 @@ public:
                                 adapterNode.view.baseOffset = 0;
                             }
 
+                            if (adapter.isSliceOrScatter)
+                            {
+                                adapterNode.shape = adapter.outShape;
+                                adapterNode.view.shape = adapter.outShape;
+                                adapterNode.view.strides = TensorView::calcContiguousStrides(adapter.outShape);
+                                adapterNode.view.baseOffset = 0;
+
+                                uint32_t startsId = graph.allocateId();
+                                uint32_t endsId = graph.allocateId();
+                                uint32_t stepsId = graph.allocateId();
+
+                                auto createConst = [&](uint32_t id, const std::vector<uint32_t> &vec)
+                                {
+                                    TensorNode cNode;
+                                    cNode.id = id;
+                                    cNode.opType = OpType::INPUT;
+                                    cNode.storageType = StorageType::PERSISTENT;
+                                    cNode.dtype = DType::INT32;
+                                    cNode.shape = {(uint32_t)vec.size()};
+                                    cNode.backend = adapter.backend;
+                                    cNode.view.shape = cNode.shape;
+                                    cNode.view.strides = {1};
+                                    cNode.view.baseOffset = 0;
+
+                                    if (id >= graph.nodes.size())
+                                        graph.nodes.resize(id + 1);
+                                    graph.nodes[id] = cNode;
+                                    compiled.nodesMap[id] = cNode;
+
+                                    std::vector<uint8_t> bytes(vec.size() * sizeof(uint32_t));
+                                    std::memcpy(bytes.data(), vec.data(), bytes.size());
+                                    graph.constantStaging[id] = bytes;
+                                };
+
+                                createConst(startsId, adapter.sliceStarts);
+                                createConst(endsId, adapter.sliceEnds);
+                                createConst(stepsId, adapter.sliceSteps);
+
+                                if (adapter.opType == OpType::SLICE)
+                                {
+                                    adapterNode.parentIds = {currentPid, startsId, endsId, stepsId};
+                                }
+                                else if (adapter.opType == OpType::SCATTER)
+                                {
+                                    adapterNode.parentIds = {adapter.scatterTargetId, currentPid, startsId, endsId, stepsId};
+                                    compiled.refCounts[adapter.scatterTargetId]++;
+                                }
+                                compiled.refCounts[startsId]++;
+                                compiled.refCounts[endsId]++;
+                                compiled.refCounts[stepsId]++;
+                            }
+
                             if (adapterNode.id >= graph.nodes.size())
                             {
                                 graph.nodes.resize(adapterNode.id + 1);
@@ -621,14 +882,12 @@ public:
                 }
                 else
                 {
-                    // Safety net for DAG divergence:
-                    // If the parent's assigned backend differs from this node's backend, we MUST dynamically insert adapters.
                     uint32_t currentPid = chosenPid;
                     Backend parentBackend = compiled.nodesMap.count(chosenPid) ? compiled.nodesMap.at(chosenPid).backend : graph.nodes[chosenPid].backend;
 
                     if (parentBackend != mappedNode.backend)
                     {
-                        auto fallbackChains = getAdapterChains(compiled.nodesMap.count(chosenPid) ? compiled.nodesMap.at(chosenPid) : graph.nodes[chosenPid], parentBackend, mappedNode.backend, graph, compiled.refCounts, costModel);
+                        auto fallbackChains = getAdapterChains(compiled.nodesMap.count(chosenPid) ? compiled.nodesMap.at(chosenPid) : graph.nodes[chosenPid], parentBackend, mappedNode.backend, graph, lg.estimatedRefCounts, costModel);
                         if (fallbackChains.empty())
                         {
                             Error::throw_err("No valid adapter chain found during DAG safety fallback");

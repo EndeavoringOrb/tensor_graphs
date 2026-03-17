@@ -103,6 +103,7 @@ enum class OpType : uint32_t
     COPY_TO,
     IM2COL,
     CONTIGUOUS,
+    SCATTER,
 
     FUSED
 };
@@ -123,10 +124,6 @@ enum class StorageType : uint32_t
     TRANSIENT,
     PERSISTENT
 };
-
-// ---------------------------------------------------------
-// CUSTOM ERROR TYPES
-// ---------------------------------------------------------
 
 struct TensorGraphError : public std::runtime_error
 {
@@ -199,14 +196,13 @@ struct TensorView
     std::vector<int64_t> strides; // Strides in terms of elements, not bytes
     DType dtype;
 
-    // Check if the physical layout perfectly matches the logical layout
     bool isContiguous() const
     {
         int64_t expectedStride = 1;
         for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
         {
             if (shape[i] == 1)
-                continue; // Stride doesn't matter for size 1
+                continue;
             if (strides[i] != expectedStride)
                 return false;
             expectedStride *= shape[i];
@@ -214,7 +210,6 @@ struct TensorView
         return true;
     }
 
-    // Helper to generate default contiguous strides for a given shape
     static std::vector<int64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
     {
         std::vector<int64_t> newStrides(targetShape.size());
@@ -327,6 +322,10 @@ inline const char *toString(OpType op)
         return "COPY_TO";
     case OpType::IM2COL:
         return "IM2COL";
+    case OpType::CONTIGUOUS:
+        return "CONTIGUOUS";
+    case OpType::SCATTER:
+        return "SCATTER";
     case OpType::FUSED:
         return "FUSED";
     default:
@@ -365,32 +364,12 @@ inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toSt
 inline std::ostream &operator<<(std::ostream &os, Backend backend) { return os << toString(backend); }
 inline std::ostream &operator<<(std::ostream &os, StorageType storage) { return os << toString(storage); }
 
-// ---------------------------------------------------------------------------
-// DirtyBucket — one cached propagation result for a specific input region combo
-// ---------------------------------------------------------------------------
-
 struct DirtyBucket
 {
-    /*
-    cached forward
-    node id -> list of dirty output regions
-    */
     std::unordered_map<uint32_t, std::vector<Region>> regions;
-
-    /*
-    cached backward
-    Outer key is node ID. Inner vector is per-output-region, each entry is a vector of per-parent required regions.
-    node id -> input slices
-    input slices[output region idx][parent idx][dirty input region idx]
-    */
     std::unordered_map<uint32_t, std::vector<std::vector<Region>>> inputSlices;
 };
 
-// Add this before the #endif if there is one, or at the end of types.hpp
-
-// ---------------------------------------------------------
-// ZERO-DEPENDENCY SHA-256 IMPLEMENTATION
-// ---------------------------------------------------------
 class SHA256
 {
 private:
@@ -524,7 +503,6 @@ public:
     }
 };
 
-// Enable JSON serialization for Enums
 NLOHMANN_JSON_SERIALIZE_ENUM(DType, {
                                         {DType::FLOAT32, "FLOAT32"},
                                         {DType::INT32, "INT32"},
@@ -556,6 +534,8 @@ NLOHMANN_JSON_SERIALIZE_ENUM(OpType, {
                                          {OpType::FILL, "FILL"},
                                          {OpType::COPY_TO, "COPY_TO"},
                                          {OpType::IM2COL, "IM2COL"},
+                                         {OpType::CONTIGUOUS, "CONTIGUOUS"},
+                                         {OpType::SCATTER, "SCATTER"},
                                          {OpType::FUSED, "FUSED"},
                                      })
 
@@ -592,6 +572,13 @@ struct AdapterOp
     OpType opType;
     uint64_t kernelId;
     Backend backend;
+
+    bool isSliceOrScatter = false;
+    std::vector<uint32_t> sliceStarts;
+    std::vector<uint32_t> sliceEnds;
+    std::vector<uint32_t> sliceSteps;
+    std::vector<uint32_t> outShape;
+    uint32_t scatterTargetId = 0;
 };
 
 struct BeamStrategy
@@ -616,7 +603,6 @@ struct BeamStrategy
     }
 };
 
-// Serialization for helper structs
 inline void to_json(json &j, const Dim &d) { j = json{d.start, d.stop}; }
 inline void from_json(const json &j, Dim &d)
 {
@@ -745,10 +731,3 @@ inline void from_json(const json &j, CompiledGraph &cg)
             cg.logicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
     }
 }
-
-struct LogicalGraph
-{
-    Graph graph;
-    std::unordered_map<std::string, uint32_t> fusionMap;
-    std::unordered_map<uint32_t, uint32_t> estimatedRefCounts;
-};

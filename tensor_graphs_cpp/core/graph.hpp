@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <sstream>
 
-struct MemoryManager; // Forward declaration
+struct MemoryManager;
 
 struct Graph
 {
@@ -15,7 +15,6 @@ struct Graph
     std::unordered_map<std::string, std::shared_ptr<SafetensorsLoader>> loaders;     // Mapping of path -> Loader instance
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
 
-    // NEW: Lightweight staging area for small constants (e.g., 2.718 for e)
     std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
 
     uint32_t allocateId() noexcept { return count++; }
@@ -31,27 +30,20 @@ struct Graph
     uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype)
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
-
-        // 1. Atomic ID generation
         uint32_t id = allocateId();
-
-        // 2. Compute content hash directly from raw bytes (O(1), no I/O)
         SHA256 sha;
         sha.update(static_cast<const uint8_t *>(dataPtr), sizeBytes);
 
-        // 3. Stash the bytes in staging area
         std::vector<uint8_t> buffer(sizeBytes);
         std::memcpy(buffer.data(), dataPtr, sizeBytes);
         constantStaging[id] = std::move(buffer);
 
-        // 4. Create View (baseOffset remains 0 until materialization)
         TensorView view;
         view.shape = shape;
         view.strides = TensorView::calcContiguousStrides(shape);
         view.baseOffset = 0;
         view.dtype = dtype;
 
-        // 5. Create the input node with this view
         uint32_t nodeId = inputWithId(id, shape, dtype, view, StorageType::PERSISTENT);
         nodes[nodeId].contentHash = sha.digest();
         return nodeId;
@@ -59,7 +51,6 @@ struct Graph
 
     uint32_t weight(const std::string &path, const std::string &name)
     {
-        // 1. Ensure loader exists and tensor is present
         registerLoader(path);
         auto &loader = loaders.at(path);
         if (!loader->hasTensor(name))
@@ -68,21 +59,15 @@ struct Graph
         }
 
         const auto &meta = loader->getMetadata(name);
-
-        // 2. Atomic ID generation
         uint32_t id = allocateId();
-
-        // 3. Track source for later materialization
         weightSources[id] = {path, name};
 
-        // 4. Create View (baseOffset remains 0 until materialization)
         TensorView view;
         view.shape = meta.shape;
         view.strides = TensorView::calcContiguousStrides(meta.shape);
         view.baseOffset = 0;
         view.dtype = meta.dtype;
 
-        // 5. Identity of a weight is its file + name! No disk I/O needed here.
         uint32_t nodeId = inputWithId(id, meta.shape, meta.dtype, view, StorageType::PERSISTENT);
         SHA256 sha;
         sha.update(path + "::" + name);
@@ -334,6 +319,41 @@ struct Graph
         return node.id;
     }
 
+    uint32_t scatter(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3, uint32_t id4)
+    {
+        if (nodes[id2].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.scatter] Expected INT32 for starts, got: " << toString(nodes[id2].dtype);
+            Error::throw_err(ss.str());
+        }
+        if (nodes[id3].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.scatter] Expected INT32 for ends, got: " << toString(nodes[id3].dtype);
+            Error::throw_err(ss.str());
+        }
+        if (nodes[id4].dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.scatter] Expected INT32 for steps, got: " << toString(nodes[id4].dtype);
+            Error::throw_err(ss.str());
+        }
+        if (nodes[id0].dtype != nodes[id1].dtype)
+        {
+            std::stringstream ss;
+            ss << "[Graph.scatter] DType mismatch between target (" << toString(nodes[id0].dtype) << ") and updates (" << toString(nodes[id1].dtype) << ")";
+            Error::throw_err(ss.str());
+        }
+        TensorNode node = TensorNode();
+        node.id = allocateId();
+        node.opType = OpType::SCATTER;
+        node.dtype = nodes[id0].dtype;
+        node.parentIds = {id0, id1, id2, id3, id4};
+        nodes.push_back(node);
+        return node.id;
+    }
+
     uint32_t concat(std::vector<uint32_t> ids, uint32_t id1)
     {
         if (ids.size() == 0)
@@ -377,7 +397,6 @@ struct Graph
         return node.id;
     }
 
-    // input, # repeats, axis
     uint32_t repeat(uint32_t id0, uint32_t repeats_id, uint32_t axis_id)
     {
         if (nodes[repeats_id].dtype != DType::INT32)
@@ -521,4 +540,11 @@ struct Graph
         nodes.push_back(node);
         return node.id;
     }
+};
+
+struct LogicalGraph
+{
+    Graph graph;
+    std::unordered_map<std::string, std::vector<uint32_t>> fusionMap;
+    std::unordered_map<uint32_t, uint32_t> estimatedRefCounts;
 };

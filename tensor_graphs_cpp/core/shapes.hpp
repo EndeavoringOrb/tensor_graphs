@@ -120,21 +120,17 @@ struct ShapePropagator
         if (nodeId >= graph.nodes.size())
             return;
 
-        // If shape is already populated (and it's not a RESHAPE which sometimes needs re-eval), skip
         if (!graph.nodes[nodeId].shape.empty() && graph.nodes[nodeId].opType != OpType::RESHAPE)
             return;
 
-        // Input nodes are the base case and should already be statically sized
         if (graph.nodes[nodeId].opType == OpType::INPUT)
             return;
 
-        // Ensure all parents have their shapes inferred first
         for (uint32_t pid : graph.nodes[nodeId].parentIds)
         {
             inferShapeRecursive(pid, graph);
         }
 
-        // Infer the shape of the current node
         inferShape(nodeId, graph);
     }
 
@@ -207,6 +203,7 @@ struct ShapePropagator
         case OpType::TRIU:
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
+        case OpType::SCATTER:
         {
             graph.nodes[nodeId].shape = graph.nodes[graph.nodes[nodeId].parentIds[0]].shape;
             break;
@@ -1031,6 +1028,7 @@ struct ShapePropagator
         case OpType::TRIU:
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
+        case OpType::SCATTER:
             return forwardElementwise(node, graph, parentRegions);
         case OpType::DOT:
             return forwardDot(node, graph, parentRegions);
@@ -1074,6 +1072,7 @@ struct ShapePropagator
         case OpType::TRIU:
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
+        case OpType::SCATTER:
             return backwardElementwise(node, outputRegions);
         case OpType::DOT:
             return backwardDot(node, graph, outputRegions);
