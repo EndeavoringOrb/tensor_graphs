@@ -179,7 +179,6 @@ struct Region
     }
 };
 
-
 inline bool regionsMatch(const Region &r1, const Region &r2)
 {
     if (r1.region.size() != r2.region.size())
@@ -720,30 +719,27 @@ inline void from_json(const json &j, CompiledGraph &cg)
     cg.instructions = j.at("instructions").get<std::vector<OpInstruction>>();
 
     cg.refCounts.clear();
-    if (j.contains("refCounts"))
-    {
-        for (const auto &item : j.at("refCounts").items())
+    for (const auto &item : j.at("refCounts").items())
             cg.refCounts[std::stoul(item.key())] = item.value().get<uint32_t>();
-    }
 
     cg.nodesMap.clear();
-    if (j.contains("nodesMap"))
-    {
-        for (const auto &item : j.at("nodesMap").items())
+    for (const auto &item : j.at("nodesMap").items())
             cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
-    }
 
     cg.nodeCosts.clear();
-    if (j.contains("nodeCosts"))
+    for (const auto &item : j.at("nodeCosts").items())
     {
-        for (const auto &item : j.at("nodeCosts").items())
+        if (item.value().is_null())
+        {
+            cg.nodeCosts[std::stoul(item.key())] = std::numeric_limits<float>::infinity();
+        }
+        else
+        {
             cg.nodeCosts[std::stoul(item.key())] = item.value().get<float>();
+        }
     }
 
     cg.logicalNodeMap.clear();
-    if (j.contains("logicalNodeMap"))
-    {
-        for (const auto &item : j.at("logicalNodeMap").items())
-            cg.logicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
-    }
+    for (const auto &item : j.at("logicalNodeMap").items())
+        cg.logicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
 }

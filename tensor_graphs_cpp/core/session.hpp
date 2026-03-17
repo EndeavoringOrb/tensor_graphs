@@ -658,6 +658,7 @@ public:
         auto it = cachedGraphs.find(key);
         if (it != cachedGraphs.end())
         {
+            std::cout << "found cached graph for input regions\n" << std::flush;
             return &it->second;
         }
         return nullptr;

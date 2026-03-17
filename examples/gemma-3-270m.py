@@ -289,8 +289,8 @@ def main():
     # 3. Setup Logic
 
     # Generation Loop Params
-    max_new_tokens = 128
-    MAX_SEQ_LEN = 128
+    max_new_tokens = 4
+    MAX_SEQ_LEN = 32
 
     # --- BUILD GRAPH ---
     cfg = GEMMA3_CONFIG_270M
