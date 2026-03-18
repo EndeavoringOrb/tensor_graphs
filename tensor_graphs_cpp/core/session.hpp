@@ -184,8 +184,7 @@ public:
                 }
             }
             Planner planner(costModel, 4ULL * 1024 * 1024 * 1024);
-            LogicalGraph lg = planner.planLogical(rootId, graph);
-            ensureCacheCoverage(inputNodeIds, lg, planner);
+            ensureCacheCoverage(inputNodeIds, planner);
             isPlanned = true;
         }
 
@@ -498,7 +497,7 @@ public:
         return ss.str();
     }
 
-    void ensureCacheCoverage(const std::vector<uint32_t> &inputNodeIds, LogicalGraph &lg, Planner &planner)
+    void ensureCacheCoverage(const std::vector<uint32_t> &inputNodeIds, Planner &planner)
     {
         std::cout << "getting dirty slices" << std::endl;
         struct InputOption
@@ -627,7 +626,7 @@ public:
                 DirtyBucket bucket;
                 bucket.regions = atomicOutputRegions;
                 bucket.inputSlices = atomicInputRegions;
-                CompiledGraph compiled = planner.planPhysical(rootId, lg, atomicOutputRegions, atomicInputRegions);
+                CompiledGraph compiled = planner.plan(rootId, graph, atomicOutputRegions, atomicInputRegions);
                 saveCacheEntry(key, compiled, bucket);
                 cachedGraphs[key] = compiled;
                 cachedBuckets[key] = bucket;

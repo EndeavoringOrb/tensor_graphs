@@ -555,7 +555,8 @@ NLOHMANN_JSON_SERIALIZE_ENUM(StorageType, {
 struct OpInstruction
 {
     uint32_t nodeId;
-    std::vector<uint64_t> kernelIds;
+    uint64_t fullKernelId = 0;
+    std::vector<uint64_t> cachedKernelIds;
     std::vector<uint32_t> inputNodeIds;
     int32_t inplaceInputIndex; // -1 if not inplace
     Backend backend;
@@ -570,41 +571,6 @@ struct CompiledGraph
     std::unordered_map<uint32_t, uint32_t> logicalNodeMap;
 };
 
-struct AdapterOp
-{
-    OpType opType;
-    uint64_t kernelId;
-    Backend backend;
-
-    bool isSliceOrScatter = false;
-    std::vector<uint32_t> sliceStarts;
-    std::vector<uint32_t> sliceEnds;
-    std::vector<uint32_t> sliceSteps;
-    std::vector<uint32_t> outShape;
-    uint32_t scatterTargetId = 0;
-};
-
-struct BeamStrategy
-{
-    float cost;                      // Total cumulative cost (deduplicated)
-    float nodeCost = 0.0f;           // The cost of THIS specific node's kernel
-    float edgeCost = 0.0f;           // The cost of all adapter chains linking to parents
-    mutable uint32_t visitedGen = 0; // Ensures deduplication during DFS cost accumulation
-
-    uint32_t nodeId;         // The original node ID this strategy resolves
-    uint32_t selectedNodeId; // The actual fused/replaced node ID chosen
-    Backend backend;         // Backend chosen for this node
-    std::vector<uint64_t> kernelIds;
-
-    // Pointers tracking the selected parent paths
-    std::vector<std::shared_ptr<BeamStrategy>> parentStrategies;
-    std::vector<std::vector<AdapterOp>> parentAdapters;
-
-    bool operator<(const BeamStrategy &other) const
-    {
-        return cost < other.cost;
-    }
-};
 
 inline void to_json(json &j, const Dim &d) { j = json{d.start, d.stop}; }
 inline void from_json(const json &j, Dim &d)
@@ -659,17 +625,25 @@ inline void from_json(const json &j, TensorNode &n)
 
 inline void to_json(json &j, const OpInstruction &i)
 {
-    json kIds = json::array();
-    for (uint64_t k : i.kernelIds)
+    json fullId;
+    {
+        std::stringstream pss;
+        pss << "0x" << std::hex << i.fullKernelId;
+        fullId = pss.str();
+    }
+
+    json cachedIds = json::array();
+    for (uint64_t k : i.cachedKernelIds)
     {
         std::stringstream pss;
         pss << "0x" << std::hex << k;
-        kIds.push_back(pss.str());
+        cachedIds.push_back(pss.str());
     }
 
     j = json{
         {"nodeId", i.nodeId},
-        {"kernelIds", kIds},
+        {"fullKernelId", fullId},
+        {"cachedKernelIds", cachedIds},
         {"inputNodeIds", i.inputNodeIds},
         {"inplaceInputIndex", i.inplaceInputIndex},
         {"backend", i.backend}};
@@ -677,11 +651,33 @@ inline void to_json(json &j, const OpInstruction &i)
 inline void from_json(const json &j, OpInstruction &i)
 {
     i.nodeId = j.at("nodeId").get<uint32_t>();
-
-    i.kernelIds.clear();
-    for (const auto &pkStr : j.at("kernelIds"))
+    if (j.contains("fullKernelId"))
     {
-        i.kernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
+        i.fullKernelId = std::stoull(j.at("fullKernelId").get<std::string>(), nullptr, 16);
+    }
+    else
+    {
+        i.fullKernelId = 0;
+    }
+
+    i.cachedKernelIds.clear();
+    if (j.contains("cachedKernelIds"))
+    {
+        for (const auto &pkStr : j.at("cachedKernelIds"))
+        {
+            i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
+        }
+    }
+    else if (j.contains("kernelIds"))
+    {
+        for (const auto &pkStr : j.at("kernelIds"))
+        {
+            i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
+        }
+        if (!i.cachedKernelIds.empty())
+        {
+            i.fullKernelId = i.cachedKernelIds.back();
+        }
     }
 
     i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();

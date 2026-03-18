@@ -119,12 +119,13 @@ public:
         Backend backend,
         const std::vector<TensorNode> &inputs,
         const TensorNode &output,
-        const std::unordered_map<uint32_t, uint32_t> &refCounts = {}) const
+        const std::unordered_map<uint32_t, uint32_t> &refCounts = {},
+        bool referenceOnly = false) const
     {
         std::vector<uint64_t> matches;
         for (const auto &entry : entries)
         {
-            if (referenceOnlyMode && !entry.isReference)
+            if ((referenceOnlyMode || referenceOnly) && !entry.isReference)
                 continue;
 
             if (entry.opType != op || entry.backend != backend)

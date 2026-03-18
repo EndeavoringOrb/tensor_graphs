@@ -153,13 +153,13 @@ public:
                 computeRegions = regionIt2->second;
                 nPartial++;
 
-                if (inst.kernelIds.size() == computeRegions.size())
+                if (inst.cachedKernelIds.size() == computeRegions.size())
                 {
-                    computeKernels = inst.kernelIds;
+                    computeKernels = inst.cachedKernelIds;
                 }
                 else
                 {
-                    computeKernels.assign(computeRegions.size(), inst.kernelIds.empty() ? 0 : inst.kernelIds.back());
+                    computeKernels.assign(computeRegions.size(), inst.fullKernelId);
                 }
             }
             else
@@ -170,7 +170,7 @@ public:
                     full.region.push_back({0, dim});
                 }
                 computeRegions = {full};
-                computeKernels = {inst.kernelIds.empty() ? 0 : inst.kernelIds.back()};
+                computeKernels = {inst.fullKernelId};
             }
 
             auto slicesIt = bucket.inputSlices.find(logicalId);
