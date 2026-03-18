@@ -10,20 +10,28 @@
 
 struct ENodeKey
 {
+    OpType opType;
     uint64_t kernelUid = 0;
+    uint32_t leafId = UINT32_MAX; // Used only for INPUT nodes to prevent bad merges
     std::vector<uint32_t> children;
 
     bool operator==(const ENodeKey &other) const
     {
-        return kernelUid == other.kernelUid && children == other.children;
+        return opType == other.opType &&
+               kernelUid == other.kernelUid &&
+               leafId == other.leafId &&
+               children == other.children;
     }
 };
 
+// TODO: make generic hashing thing and use it instead of this custom hash
 struct ENodeKeyHash
 {
     size_t operator()(const ENodeKey &key) const noexcept
     {
         size_t h = std::hash<uint64_t>{}(key.kernelUid);
+        h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(key.opType)) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>{}(key.leafId) + 0x9e3779b9 + (h << 6) + (h >> 2);
         for (uint32_t c : key.children)
         {
             h ^= std::hash<uint32_t>{}(c) + 0x9e3779b9 + (h << 6) + (h >> 2);
@@ -79,7 +87,12 @@ public:
             child = find(child);
         }
 
-        ENodeKey key{node.kernelUid, node.children};
+        ENodeKey key{
+            node.opType,
+            node.kernelUid,
+            node.opType == OpType::INPUT ? node.nodeId : UINT32_MAX,
+            node.children};
+
         auto it = hashcons.find(key);
         if (it != hashcons.end())
         {
@@ -131,9 +144,13 @@ public:
         }
         classes[rb].enodes.clear();
 
-        if (classes[ra].shape != classes[rb].shape || classes[ra].dtype != classes[rb].dtype)
+        if (classes[ra].shape != classes[rb].shape)
         {
-            Error::throw_err("EClass merge shape/dtype mismatch.");
+            Error::throw_err("EClass merge shape mismatch.");
+        }
+        if (classes[ra].dtype != classes[rb].dtype)
+        {
+            Error::throw_err("EClass merge dtype mismatch.");
         }
 
         classes[ra].contiguous = classes[ra].contiguous && classes[rb].contiguous;
@@ -154,7 +171,13 @@ public:
             {
                 child = find(child);
             }
-            ENodeKey key{node.kernelUid, node.children};
+
+            ENodeKey key{
+                node.opType,
+                node.kernelUid,
+                node.opType == OpType::INPUT ? node.nodeId : UINT32_MAX,
+                node.children};
+
             auto it = newHash.find(key);
             if (it != newHash.end())
             {

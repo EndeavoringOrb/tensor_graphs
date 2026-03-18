@@ -432,11 +432,6 @@ private:
                 pattern.rootId = entry.factory(pattern.variables, pattern.graph);
                 pattern.dtypes = entry.dtypes;
                 pattern.dummyShapes = entry.dummyShapes;
-                ShapePropagator prop;
-                for (uint32_t nodeId : topologicalSortStatic(pattern.rootId, pattern.graph))
-                {
-                    prop.inferShape(nodeId, pattern.graph);
-                }
                 patterns.push_back(std::move(pattern));
             }
         }
@@ -457,7 +452,7 @@ private:
             for (const auto &pattern : patterns)
             {
                 std::unordered_map<uint32_t, uint32_t> binding;
-                if (matchPattern(m.nodeId, graph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes, pattern.dummyShapes))
+                if (matchPattern(m.nodeId, graph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes))
                 {
                     std::vector<uint32_t> inputs;
                     inputs.reserve(pattern.variables.size());
@@ -484,31 +479,11 @@ private:
             return node.id;
         }
 
-        static std::vector<uint32_t> topologicalSortStatic(uint32_t rootId, const Graph &graph)
-        {
-            std::vector<uint32_t> order;
-            std::unordered_set<uint32_t> visited;
-            auto visit = [&](auto &self, uint32_t node) -> void
-            {
-                if (visited.count(node))
-                    return;
-                visited.insert(node);
-                for (uint32_t pid : graph.nodes[node].parentIds)
-                {
-                    self(self, pid);
-                }
-                order.push_back(node);
-            };
-            visit(visit, rootId);
-            return order;
-        }
-
         static bool matchPattern(uint32_t concreteId, const Graph &mainGraph,
                                  uint32_t patternId, const Graph &patternGraph,
                                  const std::vector<uint32_t> &patternVariables,
                                  std::unordered_map<uint32_t, uint32_t> &binding,
-                                 const std::vector<DType> &patternDtypes,
-                                 const std::vector<std::vector<uint32_t>> &dummyShapes)
+                                 const std::vector<DType> &patternDtypes)
         {
             auto itVar = std::find(patternVariables.begin(), patternVariables.end(), patternId);
             if (itVar != patternVariables.end())
@@ -516,8 +491,6 @@ private:
                 size_t varIdx = static_cast<size_t>(std::distance(patternVariables.begin(), itVar));
                 const TensorNode &cNode = mainGraph.nodes[concreteId];
                 if (varIdx < patternDtypes.size() && cNode.dtype != patternDtypes[varIdx])
-                    return false;
-                if (varIdx < dummyShapes.size() && cNode.shape.size() != dummyShapes[varIdx].size())
                     return false;
 
                 if (binding.count(patternId))
@@ -538,12 +511,9 @@ private:
             if (cNode.parentIds.size() != pNode.parentIds.size())
                 return false;
 
-            if (!pNode.shape.empty() && !cNode.shape.empty() && pNode.shape.size() != cNode.shape.size())
-                return false;
-
             for (size_t i = 0; i < cNode.parentIds.size(); ++i)
             {
-                if (!matchPattern(cNode.parentIds[i], mainGraph, pNode.parentIds[i], patternGraph, patternVariables, binding, patternDtypes, dummyShapes))
+                if (!matchPattern(cNode.parentIds[i], mainGraph, pNode.parentIds[i], patternGraph, patternVariables, binding, patternDtypes))
                 {
                     return false;
                 }
@@ -604,13 +574,17 @@ private:
                     if (!rule->predicate(match, graph, egraph, nodeToEClass, refCounts))
                         continue;
 
+                    size_t oldSize = graph.nodes.size();
                     std::vector<uint32_t> newNodes = rule->apply(match, graph);
-                    for (uint32_t newId : newNodes)
+                    if (newNodes.empty())
                     {
-                        if (newId >= graph.nodes.size())
-                            continue;
+                        continue;
+                    }
+                    for (size_t i = oldSize; i < graph.nodes.size(); ++i)
+                    {
+                        uint32_t newId = static_cast<uint32_t>(i);
                         ShapePropagator prop;
-                        prop.inferShape(newId, graph);
+                        prop.inferShapeRecursive(newId, graph);
                         ensureContiguousView(graph.nodes[newId]);
 
                         if (!nodeToEClass.count(newId))
@@ -623,16 +597,16 @@ private:
                             nodeToEClass[newId] = eclassId;
                         }
 
-                        bool added = addReferenceEnode(graph, egraph, nodeToEClass, refCounts, newId);
-                        if (!added)
-                            continue;
-
+                        addBasicEnode(graph, egraph, nodeToEClass, refCounts, newId);
+                        nextWorklist.push_back(newId);
+                    }
+                    for (uint32_t newId : newNodes)
+                    {
                         if (nodeToEClass.count(nodeId) && nodeToEClass.count(newId))
                         {
                             egraph.merge(nodeToEClass[nodeId], nodeToEClass[newId]);
                             nodeToEClass[newId] = egraph.find(nodeToEClass[nodeId]);
                         }
-                        nextWorklist.push_back(newId);
                     }
                 }
             }
@@ -684,10 +658,10 @@ private:
         }
     }
 
-    bool addReferenceEnode(const Graph &graph, EGraph &egraph,
-                           const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                           const std::unordered_map<uint32_t, uint32_t> &refCounts,
-                           uint32_t nodeId)
+    bool addBasicEnode(const Graph &graph, EGraph &egraph,
+                       const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
+                       const std::unordered_map<uint32_t, uint32_t> &refCounts,
+                       uint32_t nodeId)
     {
         const TensorNode &node = graph.nodes[nodeId];
         if (node.opType == OpType::INPUT)
@@ -698,7 +672,7 @@ private:
             inputs.push_back(graph.nodes[pid]);
 
         std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(
-            node.opType, node.opName, node.backend, inputs, node, refCounts, true);
+            node.opType, node.opName, node.backend, inputs, node, refCounts, false);
         if (refs.empty())
             return false;
 
