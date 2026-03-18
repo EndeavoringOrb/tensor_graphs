@@ -289,7 +289,7 @@ public:
         return canonicalRegions;
     }
 
-    void run(const std::unordered_map<uint32_t, const void *> &inputs)
+    const void *run(const std::unordered_map<uint32_t, const void *> &inputs)
     {
         if (!isCompiled)
         {
@@ -335,41 +335,24 @@ public:
 
         auto canonicalDiffs = canonicalizeInputDiffs(inputDiffs);
         const CompiledGraph *cached = lookupCache(canonicalDiffs);
-        CompiledGraph compiledLocal = cached ? *cached : CompiledGraph{};
+        const CompiledGraph compiledLocal = cached ? *cached : CompiledGraph{};
 
         std::string key = encodeCacheKey(canonicalDiffs);
         auto bIt = cachedBuckets.find(key);
         DirtyBucket bucket = bIt != cachedBuckets.end() ? bIt->second : DirtyBucket{};
 
         executor->run(inputs, compiledLocal, bucket);
-    }
 
-    const void *getOutput(uint32_t nodeId) const
-    {
-        Backend backend = graph.nodes[nodeId].backend;
-        uint64_t baseOffset = graph.nodes[nodeId].view.shape.empty() ? 0 : graph.nodes[nodeId].view.baseOffset;
-
-        auto &buf = memManager.buffers.at(backend);
-        auto it = buf.allocationMap.find(nodeId);
-
-        if (it == buf.allocationMap.end())
-            Error::throw_err("[Session.getOutput] nodeId " + std::to_string(nodeId) + " not found in memory");
-
-        uint64_t offset = it->second->offset;
-
-#ifdef USE_CUDA
-        if (backend == Backend::CUDA)
+        // get output
+        const OpInstruction &lastInst = compiledLocal.instructions[compiledLocal.instructions.size() - 1];
+        uint32_t lastNodeId = lastInst.nodeId;
+        Backend backend = lastInst.backend;
+        if (!memManager.has(backend, lastNodeId))
         {
-            cudaDeviceSynchronize();
+            Error::throw_err("[Session.run] execution output nodeId " + std::to_string(lastNodeId) + " not found in memory");
         }
-#endif
-
-        return buf.arena_ptr + offset + baseOffset;
-    }
-
-    const void *getRootOutput() const
-    {
-        return getOutput(rootId);
+        TensorView view = memManager.getView(compiledLocal.nodesMap.at(lastNodeId));
+        return memManager.buffers.at(backend).arena_ptr + view.baseOffset;
     }
 
     std::vector<Region> computeInputDiff(

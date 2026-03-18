@@ -576,12 +576,11 @@ int main()
 
         // 2. Run inference
         auto start = std::chrono::high_resolution_clock::now();
-        session.run(inputs);
+        const float *device_output_ptr = static_cast<const float *>(session.run(inputs));
         auto end = std::chrono::high_resolution_clock::now();
         float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
 
-        // 3. Extract output and perform Argmax sampling
-        const float *device_output_ptr = static_cast<const float *>(session.getOutput(logits_id));
+        // 3. Perform Argmax sampling
         if (!device_output_ptr)
         {
             Error::throw_err("Failed to retrieve output.");
