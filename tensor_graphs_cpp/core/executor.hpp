@@ -270,7 +270,7 @@ public:
                 memManager.release(compiled.nodesMap.at(inId).backend, inId);
             }
 
-            std::cout << instIdx << "/" << compiled.instructions.size() << ", #part: " << nPartial << "\r";
+            std::cout << instIdx << "/" << compiled.instructions.size() << ", #part: " << nPartial << "\r" << std::flush;
         }
     }
 };

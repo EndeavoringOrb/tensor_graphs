@@ -584,8 +584,7 @@ int main()
         const float *device_output_ptr = static_cast<const float *>(session.getOutput(logits_id));
         if (!device_output_ptr)
         {
-            std::cerr << "Failed to retrieve output." << std::endl;
-            break;
+            Error::throw_err("Failed to retrieve output.");
         }
 
         const float *output_ptr = device_output_ptr;

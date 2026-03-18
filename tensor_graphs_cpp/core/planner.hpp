@@ -134,8 +134,8 @@ public:
             egraph.addENode(eclassId, enode);
         }
 
-        saturate(graph, egraph, nodeToEClass, refCounts);
-        addKernelVariants(graph, egraph, nodeToEClass, refCounts);
+        saturate(topo, graph, egraph, nodeToEClass, refCounts);
+        addKernelVariants(graph, egraph, nodeToEClass, refCounts); // TODO: remove this call and the function? What is this doing that saturate is not?
 
         auto extraction = extractBest(rootId, graph, egraph, nodeToEClass, refCounts);
 
@@ -148,6 +148,7 @@ private:
     {
         uint32_t enodeId = 0;
         float cost = std::numeric_limits<float>::infinity();
+        bool valid = false;
     };
 
     struct ExtractionResult
@@ -523,7 +524,7 @@ private:
         }
     };
 
-    void saturate(Graph &graph, EGraph &egraph,
+    void saturate(const std::vector<uint32_t> &topo, Graph &graph, EGraph &egraph,
                   std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
                   const std::unordered_map<uint32_t, uint32_t> &refCounts)
     {
@@ -550,12 +551,7 @@ private:
         rules.emplace_back(std::make_unique<CopyElimRule>());
         rules.emplace_back(std::make_unique<ContiguityRule>());
 
-        std::vector<uint32_t> worklist;
-        worklist.reserve(graph.nodes.size());
-        for (uint32_t i = 0; i < graph.nodes.size(); ++i)
-        {
-            worklist.push_back(i);
-        }
+        std::vector<uint32_t> worklist = topo;
 
         size_t iterations = 0;
         const size_t maxIterations = 3;
@@ -708,12 +704,13 @@ private:
 
             for (uint32_t enodeId : cls.enodes)
             {
-                const ENode &enode = egraph.getENodes()[enodeId];
+                const ENode &enode = egraph.getENodes()[enodeId]; // TODO: make EGraph::getENode(uint32_t enodeId) function
                 if (enode.opType == OpType::INPUT)
                 {
                     ExtractChoice c;
                     c.enodeId = enodeId;
                     c.cost = 0.0f;
+                    c.valid = true;
                     if (c.cost < best.cost)
                         best = c;
                     continue;
@@ -726,7 +723,7 @@ private:
                 for (uint32_t childEClass : enode.children)
                 {
                     ExtractChoice childChoice = solve(childEClass);
-                    if (!std::isfinite(childChoice.cost))
+                    if (!childChoice.valid)
                     {
                         childValid = false;
                         break;
@@ -767,17 +764,16 @@ private:
                     continue;
 
                 float kernelCost = costModel.estimateCost(outNode, inputs, graph, enode.kernelUid);
-                if (!std::isfinite(kernelCost))
-                    continue;
 
                 ExtractChoice c;
                 c.enodeId = enodeId;
                 c.cost = childrenCost + kernelCost;
-                if (c.cost < best.cost)
+                c.valid = true;
+                if (!best.valid || c.cost < best.cost)
                     best = c;
             }
 
-            if (!std::isfinite(best.cost))
+            if (!best.valid)
             {
                 best.cost = std::numeric_limits<float>::infinity();
             }
@@ -796,7 +792,7 @@ private:
         for (const auto &kv : choice)
         {
             const ExtractChoice &c = kv.second;
-            if (c.enodeId < egraph.getENodes().size())
+            if (c.valid && c.enodeId < egraph.getENodes().size())
             {
                 result.eclassToNodeId[kv.first] = egraph.getENodes()[c.enodeId].nodeId;
             }
@@ -889,9 +885,9 @@ private:
 
             uint32_t eclassId = nodeToEClass.at(nodeId);
             auto choiceIt = extraction.choiceByEClass.find(egraph.find(eclassId));
-            if (choiceIt == extraction.choiceByEClass.end())
+            if (choiceIt == extraction.choiceByEClass.end() || !choiceIt->second.valid)
             {
-                Error::throw_err("Missing extraction choice for node " + std::to_string(nodeId));
+                Error::throw_err("Missing or invalid extraction choice for node " + std::to_string(nodeId));
             }
 
             const ExtractChoice &choice = choiceIt->second;

@@ -335,8 +335,8 @@ public:
         auto canonicalDiffs = canonicalizeInputDiffs(inputDiffs);
         const CompiledGraph *cached = lookupCache(canonicalDiffs);
         CompiledGraph compiledLocal = cached ? *cached : CompiledGraph{};
-        
-        std::string key = encodeCacheKey(canonicalDiffs); 
+
+        std::string key = encodeCacheKey(canonicalDiffs);
         auto bIt = cachedBuckets.find(key);
         DirtyBucket bucket = bIt != cachedBuckets.end() ? bIt->second : DirtyBucket{};
 
@@ -352,7 +352,7 @@ public:
         auto it = buf.allocationMap.find(nodeId);
 
         if (it == buf.allocationMap.end())
-            return nullptr;
+            Error::throw_err("[Session.getOutput] nodeId " + std::to_string(nodeId) + " not found in memory");
 
         uint64_t offset = it->second->offset;
 
@@ -653,7 +653,8 @@ public:
         auto it = cachedGraphs.find(key);
         if (it != cachedGraphs.end())
         {
-            std::cout << "found cached graph for input regions\n" << std::flush;
+            std::cout << "found cached graph for input regions\n"
+                      << std::flush;
             return &it->second;
         }
         return nullptr;
