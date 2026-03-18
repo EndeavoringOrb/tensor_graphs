@@ -279,7 +279,7 @@ def main():
 
     compile_binary("main.cpp")
     compile_binary("bench.cpp")
-    # compile_binary("test.cpp")
+    compile_binary("test.cpp")
 
 
 if __name__ == "__main__":

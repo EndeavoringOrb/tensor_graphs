@@ -146,11 +146,11 @@ public:
 
         if (classes[ra].shape != classes[rb].shape)
         {
-            Error::throw_err("EClass merge shape mismatch.");
+            Error::throw_err("EClass merge shape mismatch: " + toString(classes[ra].shape) + ", " + toString(classes[rb].shape));
         }
         if (classes[ra].dtype != classes[rb].dtype)
         {
-            Error::throw_err("EClass merge dtype mismatch.");
+            Error::throw_err("EClass merge dtype mismatch: " + (std::string)toString(classes[ra].dtype) + ", " + toString(classes[rb].dtype));
         }
 
         classes[ra].contiguous = classes[ra].contiguous && classes[rb].contiguous;
