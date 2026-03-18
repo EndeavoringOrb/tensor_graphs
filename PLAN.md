@@ -1,7 +1,7 @@
 # E-Graph Planner Migration Plan
 
 Scope: tensor_graphs_cpp only. Replace planner + kernel selection with custom e-graph implementation.
-Do not commit anything, only edit files. Keep editing until the solution is fully fleshed out according to this plan. Do not ask the user for input, do not run special commands that require approval, the user will only be back to supervise in the morning, you have the whole night to work. Just keep going until it is finished, don't stop for anything.
+Do not commit anything, only edit files. Keep editing until the solution is fully fleshed out according to this plan. Do not ask the user for input, do not run special commands outside of reading/writing/searching files, the user will only be back to supervise in the morning, you have the whole night to work. Just keep going until it is finished, don't stop for anything.
 Do NOT edit this PLAN.md file.
 
 ## Goals
