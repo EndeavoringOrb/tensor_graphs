@@ -1,8 +1,9 @@
 # E-Graph Planner Migration Plan
 
 Scope: tensor_graphs_cpp only. Replace planner + kernel selection with custom e-graph implementation.
-Do not commit anything, only edit files. Keep editing until the solution is fully fleshed out according to this plan. Do not ask the user for input, do not run special commands outside of (1) reading/writing/searching files (2) python build.py --debug (3) tensor_graphs_cpp/main.exe (4) tensor_graphs_cpp/bench.exe (5) debugging tensor_graphs_cpp/main.exe or tensor_graphs_cpp/bench.exe, the user will only be back to supervise in the morning, you have the whole night to work. Just keep going until it is finished, don't stop for anything.
+Do not commit anything, only edit files. Keep editing until the solution is fully fleshed out according to this plan. Do not ask the user for input, do not run special commands outside of (1) reading/writing/searching files (2) python build.py, python build.py --debug, python build.py --cuda --debug (3) tensor_graphs_cpp/main (4) tensor_graphs_cpp/bench (5) gdb tensor_graphs_cpp/main (6) gdb tensor_graphs_cpp/bench, the user will only be back to supervise in the morning, you have the whole night to work. Just keep going until it is finished, don't stop for anything.
 Do NOT edit this PLAN.md file.
+No placeholder code. No simplified code.
 
 ## Goals
 - Use e-graph saturation to explore rewrites, fusions, adapters, and kernel variants.
@@ -69,3 +70,14 @@ Do NOT edit this PLAN.md file.
 ### 9) Cleanup and Integration
 - Remove/retire: BeamStrategy, AdapterChain, edgeCost, augmented topo sort, and adapter insertion in planner.
 - Update `Session` (`core/session.hpp`) to call the new planner and prepass, keeping cache mechanics intact.
+
+### 10) Verification
+- Build, Run, if error then run with gdb -> find error -> fix -> repeat
+- Check output tokens are `236888, 564, 236789, 236757, 9775, 531` for tensor_graphs_cpp/main with input tokens `2, 9259`. Make sure this works for `python build.py` and `python build.py --cuda`. For both cpu and gpu builds, make sure it works with nothing benchmarked, and all kernels benchmarked.
+- Nothing benchmarked:
+  1. `rm benchmarks/*`
+  2. `tensor_graphs_cpp/main`
+- Everything benchmarked:
+  1. `tensor_graphs_cpp/main`
+  2. `tensor_graphs_cpp/bench`
+  3. Repeat running main then bench until bench doesn't bench any new kernels and says there are no kernels left to bench.
