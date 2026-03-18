@@ -56,7 +56,7 @@ int main()
 
         // 1. Force the planner to ONLY use reference kernels for baseline evaluation
         KernelRegistry::get().setReferenceOnly(true);
-        Session sess_ref(g_ref, mem_ref, out_ref, "");
+        Session sess_ref(g_ref, mem_ref, out_ref, "", 1);
         sess_ref.run(in_ref);
         const float *res_ref = static_cast<const float *>(sess_ref.getOutput(out_ref));
         uint64_t elements = countElements(g_ref.nodes[out_ref].shape);
@@ -64,7 +64,7 @@ int main()
 
         // 2. Allow the planner to use general/fused optimizations
         KernelRegistry::get().setReferenceOnly(false);
-        Session sess_tgt(g_tgt, mem_tgt, out_tgt, "");
+        Session sess_tgt(g_tgt, mem_tgt, out_tgt, "", 1);
         sess_tgt.run(in_tgt);
         const float *res_tgt = static_cast<const float *>(sess_tgt.getOutput(out_tgt));
 

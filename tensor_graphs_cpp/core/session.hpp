@@ -134,6 +134,7 @@ private:
     uint32_t rootId;
     bool isPlanned;
     bool isCompiled;
+    uint32_t nBucketSizes = 0;
 
     std::string cachePath;
     std::unordered_map<std::string, CompiledGraph> cachedGraphs;
@@ -142,8 +143,8 @@ private:
     std::unordered_map<uint32_t, std::vector<uint8_t>> previousInputData;
 
 public:
-    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "")
-        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile)
+    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0)
+        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes)
     {
         loadCache();
     }
@@ -435,14 +436,24 @@ public:
         return {r};
     }
 
-    static std::vector<Dim> generateSlicesForDim(uint32_t dimLen)
+    static std::vector<Dim> generateSlicesForDim(uint32_t dimLen, uint32_t nBucketSizes = 0)
     {
         std::set<std::pair<uint32_t, uint32_t>> unique;
         uint32_t maxSize = 1;
         while (maxSize < dimLen)
             maxSize *= 2;
+        uint32_t startSize = 1;
+        if (nBucketSizes != 0)
+        {
+            startSize = maxSize;
+            for (int i = 0; i < nBucketSizes; i++)
+            {
+                startSize /= 2;
+            }
+            startSize = std::max(startSize, 1U);
+        }
 
-        for (uint32_t size = 1; size <= maxSize; size *= 2)
+        for (uint32_t size = startSize; size <= maxSize; size *= 2)
         {
             for (uint32_t i = 0; i < dimLen; i += size)
             {
@@ -516,7 +527,7 @@ public:
             opt.nodeId = nodeId;
             for (uint32_t dimLen : graph.nodes[nodeId].shape)
             {
-                opt.dimSlices.push_back(generateSlicesForDim(dimLen));
+                opt.dimSlices.push_back(generateSlicesForDim(dimLen, nBucketSizes));
             }
             inputOptions.push_back(opt);
         }

@@ -329,6 +329,7 @@ private:
             node.opType = src.opType;
             node.opName = src.opName;
             node.dtype = src.dtype;
+            node.shape = src.shape;
             node.parentIds = parents;
             node.backend = backend;
             graph.nodes.push_back(node);
