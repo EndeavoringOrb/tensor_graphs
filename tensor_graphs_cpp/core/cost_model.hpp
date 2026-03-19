@@ -228,7 +228,7 @@ struct CostModel
         auto it = records.find(kernelUid);
         if (it == records.end() || it->second.empty())
         {
-#ifndef DEBUG
+#if DEBUG_DETAILED
             std::cout << "[CostModel.estimateCost] WARNING: No records found for kernelUid: 0x"
                       << std::hex << kernelUid << std::dec << std::endl;
 
