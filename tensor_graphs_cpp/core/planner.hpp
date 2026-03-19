@@ -127,10 +127,11 @@ public:
                     for (uint32_t pid : node.parentIds)
                         inputs.push_back(graph.nodes[pid]);
                     std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(node.opType, node.opName, node.backend, inputs, node, refCounts, true);
-                    if (!refs.empty())
+                    if (refs.empty())
                     {
-                        enode.kernelUid = refs.front();
+                        Error::throw_err("No reference kernel found for SLICE/CONTIGUOUS node.\n" + toString(node, graph));
                     }
+                    enode.kernelUid = refs.front();
                 }
                 egraph.addENode(eclassId, enode);
                 continue;
@@ -837,7 +838,8 @@ private:
                     ensureContiguousView(inNode);
                     inputs.push_back(inNode);
                 }
-                if (!childValid) {
+                if (!childValid)
+                {
                     std::cout << "DEBUG: childValid=false for enode " << enodeId << ", node " << enode.nodeId << " OP: " << toString(enode.opType) << "\n";
                     continue;
                 }
@@ -853,7 +855,8 @@ private:
                             break;
                         }
                     }
-                    if (!backendMatch) {
+                    if (!backendMatch)
+                    {
                         std::cout << "DEBUG: Backend mismatch for enode " << enodeId << " (node " << enode.nodeId << ")\n";
                         continue;
                     }
@@ -867,7 +870,8 @@ private:
                     continue;
 
                 const KernelEntry &entry = KernelRegistry::get().getKernel(enode.kernelUid);
-                if (!entry.match(inputs, outNode, refCounts)) {
+                if (!entry.match(inputs, outNode, refCounts))
+                {
                     std::cout << "DEBUG: entry.match failed in extractBest for enode " << enodeId << ", node " << enode.nodeId << " OP: " << toString(enode.opType) << "\n";
                     continue;
                 }
