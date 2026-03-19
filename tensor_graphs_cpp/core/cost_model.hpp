@@ -27,6 +27,7 @@
 
 // Uncomment the following line to enable logging calls to `benchmarks/calls.jsonl`
 #define TENSOR_GRAPHS_LOG_COST_CALLS
+#define DEBUG_DETAILED 0
 
 struct Record
 {
@@ -158,7 +159,7 @@ struct CostModel
                 estimatedTime = r.runTime * (static_cast<float>(targetElements) / static_cast<float>(recElements));
             }
         }
-#ifdef DEBUG_DETAILED
+#if DEBUG_DETAILED
         if (bestDist == std::numeric_limits<float>::infinity() || estimatedTime == std::numeric_limits<float>::infinity())
         {
             std::cout << "[CostModel.interpolate] WARNING: inf cost" << std::endl;

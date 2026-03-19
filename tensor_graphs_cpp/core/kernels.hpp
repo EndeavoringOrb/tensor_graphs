@@ -8,6 +8,8 @@
 #include <string>
 #include <unordered_map>
 
+#define DEBUG_DETAILED 0
+
 // A matching function checks the context of the requested operation to determine
 // if the kernel supports the specific layout, rank, dimensions, or dtypes.
 using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts);
@@ -139,7 +141,7 @@ public:
                 matches.push_back(entry.uid);
             }
         }
-#ifdef DEBUG_DETAILED
+#if DEBUG_DETAILED
         if (matches.size() == 0)
         {
             std::stringstream ss;

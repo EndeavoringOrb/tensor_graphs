@@ -13,8 +13,6 @@
 #include <json.hpp>
 using json = nlohmann::json;
 
-#undef DEBUG_DETAILED
-
 namespace Error
 {
     template <typename T = std::runtime_error, typename... Args>
