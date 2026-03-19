@@ -191,9 +191,11 @@ public:
 
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
         memManager.init();
+        ProgressTimer timer(graph.nodes.size(), "");
 
         for (const auto &node : graph.nodes)
         {
+            timer.tick();
             uint32_t nodeId = node.id;
 
             if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
