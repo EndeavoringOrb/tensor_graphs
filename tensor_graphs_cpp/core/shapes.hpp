@@ -120,7 +120,7 @@ struct ShapePropagator
         if (nodeId >= graph.nodes.size())
             return;
 
-        if (!graph.nodes[nodeId].shape.empty() && graph.nodes[nodeId].opType != OpType::RESHAPE)
+        if (!graph.nodes[nodeId].shape.empty())
             return;
 
         if (graph.nodes[nodeId].opType == OpType::INPUT)
@@ -136,7 +136,7 @@ struct ShapePropagator
 
     void inferShape(uint32_t nodeId, Graph &graph)
     {
-        if (!graph.nodes[nodeId].shape.empty() && graph.nodes[nodeId].opType != OpType::RESHAPE)
+        if (!graph.nodes[nodeId].shape.empty())
             return;
         if (graph.nodes[nodeId].opType == OpType::INPUT)
             return;
@@ -951,7 +951,10 @@ struct ShapePropagator
 
             if (ov_start >= ov_stop)
             {
-                res[i] = {};
+                Region inBox = outputRegions[0];
+                inBox.region[axis].start = 0;
+                inBox.region[axis].stop = 0;
+                res[i] = {inBox};
             }
             else
             {
@@ -1025,11 +1028,21 @@ struct ShapePropagator
         case OpType::COS:
         case OpType::NEGATE:
         case OpType::CAST:
-        case OpType::TRIU:
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
-        case OpType::SCATTER:
             return forwardElementwise(node, graph, parentRegions);
+        case OpType::TRIU:
+        {
+            if (!parentRegions[1].empty())
+                return makeFull(node.shape);
+            return parentRegions[0];
+        }
+        case OpType::SCATTER:
+        {
+            if (!parentRegions[1].empty() || !parentRegions[2].empty() || !parentRegions[3].empty() || !parentRegions[4].empty())
+                return makeFull(node.shape);
+            return parentRegions[0];
+        }
         case OpType::DOT:
             return forwardDot(node, graph, parentRegions);
         case OpType::SUM:
@@ -1069,11 +1082,13 @@ struct ShapePropagator
         case OpType::COS:
         case OpType::NEGATE:
         case OpType::CAST:
-        case OpType::TRIU:
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
-        case OpType::SCATTER:
             return backwardElementwise(node, outputRegions);
+        case OpType::TRIU:
+            return {outputRegions, makeFull(graph.nodes[node.parentIds[1]].shape)};
+        case OpType::SCATTER:
+            return {outputRegions, makeFull(graph.nodes[node.parentIds[1]].shape), makeFull(graph.nodes[node.parentIds[2]].shape), makeFull(graph.nodes[node.parentIds[3]].shape), makeFull(graph.nodes[node.parentIds[4]].shape)};
         case OpType::DOT:
             return backwardDot(node, graph, outputRegions);
         case OpType::SUM:

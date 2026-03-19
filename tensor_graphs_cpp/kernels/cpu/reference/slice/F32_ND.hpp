@@ -5,16 +5,24 @@
 
 inline bool matchSliceF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
-    return inputs.size() == 4 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && inputs[0].view.isContiguous() && output.view.isContiguous();
+    (void)refCounts;
+    return inputs.size() == 4 &&
+           inputs[0].dtype == output.dtype &&
+           inputs[1].dtype == DType::INT32 &&
+           inputs[2].dtype == DType::INT32 &&
+           inputs[3].dtype == DType::INT32 &&
+           inputs[0].view.isContiguous() &&
+           output.view.isContiguous();
 }
 
 inline void runSliceF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
                            const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
+    const uint8_t *in = static_cast<const uint8_t *>(inputs[0]);
     const int32_t *starts = static_cast<const int32_t *>(inputs[1]);
     const int32_t *steps = static_cast<const int32_t *>(inputs[3]);
-    float *out = static_cast<float *>(outputs[0]);
+    uint8_t *out = static_cast<uint8_t *>(outputs[0]);
+    const uint64_t elementSize = getDTypeSize(inViews[0].dtype);
 
     uint64_t n = countElements(outViews[0].shape);
     const auto &out_shape = outViews[0].shape;
@@ -43,7 +51,7 @@ inline void runSliceF32_ND(const std::vector<const void *> &inputs, const std::v
 
             in_idx += (s + coord * st) * in_strides[d];
         }
-        out[idx] = in[in_idx];
+        std::memcpy(out + idx * elementSize, in + in_idx * elementSize, elementSize);
     }
 }
 

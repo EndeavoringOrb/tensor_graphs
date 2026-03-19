@@ -18,7 +18,7 @@ namespace Error
     template <typename T = std::runtime_error, typename... Args>
     [[noreturn]] inline void throw_err(const std::string &msg, Args &&...args)
     {
-        std::cerr << "\n[TensorGraph Error] " << msg << std::endl;
+        std::cerr << "\n[TensorGraph Error] " << msg << std::endl << std::flush;
         throw T(msg, std::forward<Args>(args)...);
     }
 }

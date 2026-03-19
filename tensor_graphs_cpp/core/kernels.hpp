@@ -139,7 +139,7 @@ public:
                 matches.push_back(entry.uid);
             }
         }
-#ifdef DEBUG
+#ifdef DEBUG_DETAILED
         if (matches.size() == 0)
         {
             std::stringstream ss;
@@ -187,7 +187,7 @@ public:
             if (entry.uid == uid)
                 return entry;
         }
-        Error::throw_err("Invalid kernel UID");
+        Error::throw_err("Invalid kernel UID " + std::to_string(uid));
     }
 
 private:

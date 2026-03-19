@@ -158,7 +158,7 @@ struct CostModel
                 estimatedTime = r.runTime * (static_cast<float>(targetElements) / static_cast<float>(recElements));
             }
         }
-#ifdef DEBUG
+#ifdef DEBUG_DETAILED
         if (bestDist == std::numeric_limits<float>::infinity() || estimatedTime == std::numeric_limits<float>::infinity())
         {
             std::cout << "[CostModel.interpolate] WARNING: inf cost" << std::endl;
@@ -227,7 +227,7 @@ struct CostModel
         auto it = records.find(kernelUid);
         if (it == records.end() || it->second.empty())
         {
-#ifdef DEBUG
+#ifndef DEBUG
             std::cout << "[CostModel.estimateCost] WARNING: No records found for kernelUid: 0x"
                       << std::hex << kernelUid << std::dec << std::endl;
 
