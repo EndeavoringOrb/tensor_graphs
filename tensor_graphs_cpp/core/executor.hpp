@@ -178,6 +178,14 @@ public:
             for (size_t rIdx = 0; rIdx < computeRegions.size(); ++rIdx)
             {
                 const Region &outRegion = computeRegions[rIdx];
+                if (computeKernels[rIdx] == 0) {
+                    std::cout << "\n[Executor Error] Found kernel UID 0 for node " << inst.nodeId 
+                              << " at region index " << rIdx << "\n" << toString(node) << std::endl;
+                    std::cout << "Cached kernel IDs size: " << inst.cachedKernelIds.size() << std::endl;
+                    for (size_t i = 0; i < inst.cachedKernelIds.size(); ++i) {
+                        std::cout << "  [" << i << "]: " << inst.cachedKernelIds[i] << std::endl;
+                    }
+                }
                 const KernelEntry &kernel = KernelRegistry::get().getKernel(computeKernels[rIdx]);
 
                 bool isFullRegion = true;

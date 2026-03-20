@@ -1063,7 +1063,12 @@ private:
                         auto cIt = extraction.choiceByEClass.find(egraph.find(eclassId));
                         if (cIt != extraction.choiceByEClass.end() && cIt->second.valid)
                         {
-                            inst.cachedKernelIds.push_back(egraph.getENodes()[cIt->second.enodeId].kernelUid);
+                            uint64_t uid = egraph.getENodes()[cIt->second.enodeId].kernelUid;
+                            if (uid == 0 && graph.nodes[partialNodeId].opType != OpType::INPUT) {
+                                std::cout << "\n[Planner Warning] Assigning kernel UID 0 to partial node " << partialNodeId 
+                                          << " (" << toString(graph.nodes[partialNodeId].opType) << ") for parent node " << nodeId << std::endl;
+                            }
+                            inst.cachedKernelIds.push_back(uid);
                         }
                         else
                         {

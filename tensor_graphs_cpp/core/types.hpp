@@ -657,14 +657,6 @@ inline void from_json(const json &j, OpInstruction &i)
     {
         i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
     }
-    for (const auto &pkStr : j.at("kernelIds"))
-    {
-        i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
-    }
-    if (!i.cachedKernelIds.empty())
-    {
-        i.fullKernelId = i.cachedKernelIds.back();
-    }
 
     i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();
     i.inplaceInputIndex = j.at("inplaceInputIndex").get<int32_t>();
