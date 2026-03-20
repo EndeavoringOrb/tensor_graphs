@@ -665,21 +665,71 @@ public:
             return;
 
         std::string line;
+        bool hasValidCache = false;
+        bool hasInvalidCache = false;
+        std::unordered_map<std::string, CompiledGraph> tempGraphs;
+        std::unordered_map<std::string, DirtyBucket> tempBuckets;
+
         while (std::getline(file, line))
         {
             if (line.empty())
                 continue;
-            json entry = json::parse(line);
+            json entry;
+            entry = json::parse(line);
 
             if (entry.contains("key"))
             {
                 std::string key = entry["key"].get<std::string>();
                 CompiledGraph graph;
                 from_json(entry["graph"], graph);
-                cachedGraphs[key] = std::move(graph);
-                cachedBuckets[key] = dirty_cache_json::bucketFromJson(entry["bucket"]);
-                isPlanned = true;
+
+                // Verify kernel IDs are still valid
+                bool valid = true;
+                for (const auto &inst : graph.instructions)
+                {
+                    if (inst.fullKernelId == 0 || !KernelRegistry::get().hasKernel(inst.fullKernelId))
+                    {
+                        valid = false;
+                        break;
+                    }
+                    for (uint64_t kid : inst.cachedKernelIds)
+                    {
+                        if (kid == 0 || !KernelRegistry::get().hasKernel(kid))
+                        {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if (!valid)
+                        break;
+                }
+
+                if (!valid)
+                {
+                    hasInvalidCache = true;
+                    break;
+                }
+
+                tempGraphs[key] = std::move(graph);
+                tempBuckets[key] = dirty_cache_json::bucketFromJson(entry["bucket"]);
+                hasValidCache = true;
             }
+        }
+
+        // If the cache contains any mismatch (e.g. from an old build format or UID 0)
+        if (hasInvalidCache)
+        {
+            std::cout << "[Session.loadCache] Invalid or stale cache detected. Ignoring entire cache to force recompilation." << std::endl;
+            // Clear the file so we overwrite it instead of appending to a file full of stale entries
+            std::ofstream clearFile(cachePath, std::ios::trunc);
+            return;
+        }
+
+        if (hasValidCache)
+        {
+            cachedGraphs = std::move(tempGraphs);
+            cachedBuckets = std::move(tempBuckets);
+            isPlanned = true;
         }
     }
 

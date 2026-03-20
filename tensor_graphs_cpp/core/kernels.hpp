@@ -192,6 +192,16 @@ public:
         Error::throw_err("Invalid kernel UID " + std::to_string(uid));
     }
 
+    bool hasKernel(uint64_t uid) const
+    {
+        for (const auto &entry : entries)
+        {
+            if (entry.uid == uid)
+                return true;
+        }
+        return false;
+    }
+
 private:
     std::vector<KernelEntry> entries;
     bool referenceOnlyMode = false;
