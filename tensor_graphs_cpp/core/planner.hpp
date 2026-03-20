@@ -148,7 +148,8 @@ public:
                 Error::throw_err("No reference kernel found for node " + toString(node));
             }
 
-            if (refs.front() == 0) {
+            if (refs.front() == 0)
+            {
                 std::cout << "[Planner Error] findMatchingKernels returned UID 0 for node " << toString(node) << std::endl;
             }
 
@@ -1068,9 +1069,12 @@ private:
                         if (cIt != extraction.choiceByEClass.end() && cIt->second.valid)
                         {
                             uint64_t uid = egraph.getENodes()[cIt->second.enodeId].kernelUid;
-                            if (uid == 0 && graph.nodes[partialNodeId].opType != OpType::INPUT) {
-                                std::cout << "\n[Planner Warning] Assigning kernel UID 0 to partial node " << partialNodeId 
-                                          << " (" << toString(graph.nodes[partialNodeId].opType) << ") for parent node " << nodeId << std::endl;
+                            if (uid == 0)
+                            {
+                                std::stringstream ss;
+                                ss << "\n[Planner Warning] Assigning kernel UID 0 to partial node " << partialNodeId
+                                   << " (" << toString(graph.nodes[partialNodeId].opType) << ") for parent node " << nodeId;
+                                Error::throw_err(ss.str());
                             }
                             inst.cachedKernelIds.push_back(uid);
                         }
