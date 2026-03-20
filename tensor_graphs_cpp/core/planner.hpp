@@ -111,7 +111,7 @@ public:
         {
             const TensorNode &node = graph.nodes[nodeId];
             uint32_t eclassId = nodeToEClass[nodeId];
-            if (node.opType == OpType::INPUT || node.opType == OpType::CONTIGUOUS || node.opType == OpType::SLICE)
+            if (node.opType == OpType::INPUT || node.opType == OpType::CONTIGUOUS || node.opType == OpType::SLICE) // TODO: why contiguous and slice here? can these be moved to general non-input handling?
             {
                 ENode enode;
                 enode.nodeId = nodeId;
@@ -145,7 +145,11 @@ public:
                 node.opType, node.opName, node.backend, inputs, node, refCounts, true);
             if (refs.empty())
             {
-                Error::throw_err("No reference kernel found for node " + std::to_string(nodeId));
+                Error::throw_err("No reference kernel found for node " + toString(node));
+            }
+
+            if (refs.front() == 0) {
+                std::cout << "[Planner Error] findMatchingKernels returned UID 0 for node " << toString(node) << std::endl;
             }
 
             ENode enode;
