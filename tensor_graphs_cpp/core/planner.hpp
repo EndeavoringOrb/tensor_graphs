@@ -647,7 +647,6 @@ private:
                     }
 
                     TensorNode partialOut = graph.nodes[nodeId];
-                    partialOut.id = graph.allocateId();
                     partialOut.parentIds = partialInputs;
                     for (size_t d = 0; d < outReg.region.size(); ++d)
                     {
@@ -667,6 +666,7 @@ private:
                         }
                     }
 
+                    partialOut.id = graph.allocateId();
                     partialOut.view.shape.clear();
                     graph.nodes.push_back(partialOut);
                     partialNodes.push_back(partialOut.id);
