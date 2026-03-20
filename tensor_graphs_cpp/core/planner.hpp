@@ -845,7 +845,6 @@ private:
                 }
                 if (!childValid)
                 {
-                    std::cout << "DEBUG: childValid=false for enode " << enodeId << ", node " << enode.nodeId << " OP: " << toString(enode.opType) << "\n";
                     continue;
                 }
 
@@ -862,7 +861,6 @@ private:
                     }
                     if (!backendMatch)
                     {
-                        std::cout << "DEBUG: Backend mismatch for enode " << enodeId << " (node " << enode.nodeId << ")\n";
                         continue;
                     }
                 }
@@ -877,7 +875,6 @@ private:
                 const KernelEntry &entry = KernelRegistry::get().getKernel(enode.kernelUid);
                 if (!entry.match(inputs, outNode, refCounts))
                 {
-                    std::cout << "DEBUG: entry.match failed in extractBest for enode " << enodeId << ", node " << enode.nodeId << " OP: " << toString(enode.opType) << "\n";
                     continue;
                 }
 
