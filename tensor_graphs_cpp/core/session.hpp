@@ -97,27 +97,21 @@ namespace dirty_cache_json
     {
         DirtyBucket bucket;
 
-        if (obj.contains("regions"))
+        for (auto it = obj["regions"].begin(); it != obj["regions"].end(); ++it)
         {
-            for (auto it = obj["regions"].begin(); it != obj["regions"].end(); ++it)
-            {
-                uint32_t nodeId = std::stoul(it.key());
-                bucket.regions[nodeId] = regionsFromJson(it.value());
-            }
+            uint32_t nodeId = std::stoul(it.key());
+            bucket.regions[nodeId] = regionsFromJson(it.value());
         }
 
-        if (obj.contains("input_slices"))
+        for (auto it = obj["input_slices"].begin(); it != obj["input_slices"].end(); ++it)
         {
-            for (auto it = obj["input_slices"].begin(); it != obj["input_slices"].end(); ++it)
+            uint32_t nodeId = std::stoul(it.key());
+            std::vector<std::vector<Region>> perNode;
+            for (const auto &perParent : it.value())
             {
-                uint32_t nodeId = std::stoul(it.key());
-                std::vector<std::vector<Region>> perNode;
-                for (const auto &perParent : it.value())
-                {
-                    perNode.push_back(regionsFromJson(perParent));
-                }
-                bucket.inputSlices[nodeId] = perNode;
+                perNode.push_back(regionsFromJson(perParent));
             }
+            bucket.inputSlices[nodeId] = perNode;
         }
 
         return bucket;
@@ -677,43 +671,40 @@ public:
             json entry;
             entry = json::parse(line);
 
-            if (entry.contains("key"))
-            {
-                std::string key = entry["key"].get<std::string>();
-                CompiledGraph graph;
-                from_json(entry["graph"], graph);
+            std::string key = entry["key"].get<std::string>();
+            CompiledGraph graph;
+            from_json(entry["graph"], graph);
 
-                // Verify kernel IDs are still valid
-                bool valid = true;
-                for (const auto &inst : graph.instructions)
+            // Verify kernel IDs are still valid
+            bool valid = true;
+            for (const auto &inst : graph.instructions)
+            {
+                if (inst.fullKernelId == 0 || !KernelRegistry::get().hasKernel(inst.fullKernelId))
                 {
-                    if (inst.fullKernelId == 0 || !KernelRegistry::get().hasKernel(inst.fullKernelId))
+                    valid = false;
+                    break;
+                }
+                for (uint64_t kid : inst.cachedKernelIds)
+                {
+                    if (kid == 0 || !KernelRegistry::get().hasKernel(kid))
                     {
                         valid = false;
                         break;
                     }
-                    for (uint64_t kid : inst.cachedKernelIds)
-                    {
-                        if (kid == 0 || !KernelRegistry::get().hasKernel(kid))
-                        {
-                            valid = false;
-                            break;
-                        }
-                    }
-                    if (!valid)
-                        break;
                 }
-
                 if (!valid)
-                {
-                    hasInvalidCache = true;
                     break;
-                }
-
-                tempGraphs[key] = std::move(graph);
-                tempBuckets[key] = dirty_cache_json::bucketFromJson(entry["bucket"]);
-                hasValidCache = true;
             }
+
+            if (!valid)
+            {
+                hasInvalidCache = true;
+                break;
+            }
+
+            tempGraphs[key] = std::move(graph);
+            tempBuckets[key] = dirty_cache_json::bucketFromJson(entry["bucket"]);
+            hasValidCache = true;
         }
 
         // If the cache contains any mismatch (e.g. from an old build format or UID 0)

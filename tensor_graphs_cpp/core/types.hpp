@@ -18,7 +18,8 @@ namespace Error
     template <typename T = std::runtime_error, typename... Args>
     [[noreturn]] inline void throw_err(const std::string &msg, Args &&...args)
     {
-        std::cerr << "\n[TensorGraph Error] " << msg << std::endl << std::flush;
+        std::cerr << "\n[TensorGraph Error] " << msg << std::endl
+                  << std::flush;
         throw T(msg, std::forward<Args>(args)...);
     }
 }
@@ -571,7 +572,6 @@ struct CompiledGraph
     std::unordered_map<uint32_t, uint32_t> logicalNodeMap;
 };
 
-
 inline void to_json(json &j, const Dim &d) { j = json{d.start, d.stop}; }
 inline void from_json(const json &j, Dim &d)
 {
@@ -651,33 +651,19 @@ inline void to_json(json &j, const OpInstruction &i)
 inline void from_json(const json &j, OpInstruction &i)
 {
     i.nodeId = j.at("nodeId").get<uint32_t>();
-    if (j.contains("fullKernelId"))
-    {
-        i.fullKernelId = std::stoull(j.at("fullKernelId").get<std::string>(), nullptr, 16);
-    }
-    else
-    {
-        i.fullKernelId = 0;
-    }
-
+    i.fullKernelId = std::stoull(j.at("fullKernelId").get<std::string>(), nullptr, 16);
     i.cachedKernelIds.clear();
-    if (j.contains("cachedKernelIds"))
+    for (const auto &pkStr : j.at("cachedKernelIds"))
     {
-        for (const auto &pkStr : j.at("cachedKernelIds"))
-        {
-            i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
-        }
+        i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
     }
-    else if (j.contains("kernelIds"))
+    for (const auto &pkStr : j.at("kernelIds"))
     {
-        for (const auto &pkStr : j.at("kernelIds"))
-        {
-            i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
-        }
-        if (!i.cachedKernelIds.empty())
-        {
-            i.fullKernelId = i.cachedKernelIds.back();
-        }
+        i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
+    }
+    if (!i.cachedKernelIds.empty())
+    {
+        i.fullKernelId = i.cachedKernelIds.back();
     }
 
     i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();
@@ -716,11 +702,11 @@ inline void from_json(const json &j, CompiledGraph &cg)
 
     cg.refCounts.clear();
     for (const auto &item : j.at("refCounts").items())
-            cg.refCounts[std::stoul(item.key())] = item.value().get<uint32_t>();
+        cg.refCounts[std::stoul(item.key())] = item.value().get<uint32_t>();
 
     cg.nodesMap.clear();
     for (const auto &item : j.at("nodesMap").items())
-            cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
+        cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
 
     cg.nodeCosts.clear();
     for (const auto &item : j.at("nodeCosts").items())
