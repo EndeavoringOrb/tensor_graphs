@@ -167,10 +167,10 @@ public:
         {
             std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
             std::vector<uint32_t> inputNodeIds;
-            for (const auto &pair : graph.nodes)
+            for (const auto &node : graph.nodes)
             {
-                uint32_t nodeId = pair.id;
-                if (pair.opType == OpType::INPUT)
+                uint32_t nodeId = node.id;
+                if (node.opType == OpType::INPUT)
                 {
                     if (graph.weightSources.count(nodeId) == 0 && graph.constantStaging.count(nodeId) == 0)
                     {
@@ -185,42 +185,52 @@ public:
 
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
         memManager.init();
-        ProgressTimer timer(graph.nodes.size(), "");
 
-        for (const auto &node : graph.nodes)
+        // Prune the materialization step to only touch nodes actually used in any CompiledGraph
+        std::unordered_set<uint32_t> countSet;
+        for (const auto &pair : cachedGraphs)
         {
-            timer.tick();
-            uint32_t nodeId = node.id;
-
-            if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
+            for (const auto &nodePair : pair.second.nodesMap)
             {
-                uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
-
-                uint64_t offset = memManager.allocate(node.backend, nodeId, sizeBytes, StorageType::PERSISTENT);
-
-                if (graph.constantStaging.count(nodeId))
+                const TensorNode &node = nodePair.second;
+                if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
                 {
-                    memManager.write(node.backend, nodeId, graph.constantStaging[nodeId].data(), sizeBytes);
-                }
-                else if (graph.weightSources.count(nodeId))
-                {
-                    const auto &source = graph.weightSources.at(nodeId);
-                    auto &loader = graph.loaders.at(source.first);
-                    uint8_t *destPtr = memManager.buffers.at(node.backend).arena_ptr + offset;
-                    loader->loadTensor(source.second, destPtr, sizeBytes);
+                    countSet.insert(node.id);
                 }
             }
         }
 
-        std::vector<uint32_t> inputNodeIds;
-        for (const auto &node : graph.nodes)
+        ProgressTimer timer(countSet.size(), "");
+        std::unordered_set<uint32_t> materialized;
+
+        for (const auto &pair : cachedGraphs)
         {
-            uint32_t nodeId = node.id;
-            if (node.opType == OpType::INPUT)
+            for (const auto &nodePair : pair.second.nodesMap)
             {
-                if (graph.weightSources.count(nodeId) == 0 && graph.constantStaging.count(nodeId) == 0)
+                const TensorNode &node = nodePair.second;
+                uint32_t nodeId = node.id;
+
+                if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
                 {
-                    inputNodeIds.push_back(nodeId);
+                    if (materialized.insert(nodeId).second)
+                    {
+                        timer.tick();
+                        uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+
+                        uint64_t offset = memManager.allocate(node.backend, nodeId, sizeBytes, StorageType::PERSISTENT);
+
+                        if (graph.constantStaging.count(nodeId))
+                        {
+                            memManager.write(node.backend, nodeId, graph.constantStaging[nodeId].data(), sizeBytes);
+                        }
+                        else if (graph.weightSources.count(nodeId))
+                        {
+                            const auto &source = graph.weightSources.at(nodeId);
+                            auto &loader = graph.loaders.at(source.first);
+                            uint8_t *destPtr = memManager.buffers.at(node.backend).arena_ptr + offset;
+                            loader->loadTensor(source.second, destPtr, sizeBytes);
+                        }
+                    }
                 }
             }
         }
@@ -634,6 +644,8 @@ public:
             if (p < 0)
                 break;
         }
+
+        saveGraphState();
     }
 
     const CompiledGraph *lookupCache(
@@ -661,61 +673,98 @@ public:
         std::string line;
         bool hasValidCache = false;
         bool hasInvalidCache = false;
+        bool sawCompiledGraph = false;
         std::string invalidCacheReason = "";
         std::unordered_map<std::string, CompiledGraph> tempGraphs;
         std::unordered_map<std::string, DirtyBucket> tempBuckets;
+        std::unordered_map<uint32_t, std::vector<uint8_t>> tempStaging;
 
         while (std::getline(file, line))
         {
             if (line.empty())
                 continue;
             json entry;
-            entry = json::parse(line);
-
-            std::string key = entry["key"].get<std::string>();
-            CompiledGraph graph;
-            from_json(entry["graph"], graph);
-
-            // Verify kernel IDs are still valid
-            bool valid = true;
-            for (const auto &inst : graph.instructions)
+            try
             {
-                if (inst.fullKernelId == 0 || !KernelRegistry::get().hasKernel(inst.fullKernelId))
+                entry = json::parse(line);
+            }
+            catch (const std::exception &e)
+            {
+                hasInvalidCache = true;
+                invalidCacheReason = "[Session.loadCache]: JSON parse error: " + std::string(e.what());
+                break;
+            }
+
+            std::string type = entry["type"].get<std::string>();
+
+            if (type == "constants")
+            {
+                sawCompiledGraph = true;
+                for (auto it = entry["constants"].begin(); it != entry["constants"].end(); ++it)
                 {
-                    if (inst.fullKernelId == 0) {
-                        invalidCacheReason = "Kernel ID 0 found in cached graph for inst.fullKernelId\n" + toString(inst);
-                    } else {
-                        invalidCacheReason = "Kernel ID " + std::to_string(inst.fullKernelId) + " not found in kernel registry for inst.fullKernelId\n" + toString(inst);
-                    }
-                    valid = false;
-                    break;
+                    uint32_t nodeId = std::stoul(it.key());
+                    tempStaging[nodeId] = it.value().get<std::vector<uint8_t>>();
                 }
-                for (uint64_t kid : inst.cachedKernelIds)
+            }
+            else if (type == "compiled_bucket")
+            {
+                std::string key = entry["key"].get<std::string>();
+                CompiledGraph cg;
+                from_json(entry["graph"], cg);
+
+                // Verify kernel IDs are still valid
+                bool valid = true;
+                for (const auto &inst : cg.instructions)
                 {
-                    if (kid == 0 || !KernelRegistry::get().hasKernel(kid))
+                    if (inst.fullKernelId == 0 || !KernelRegistry::get().hasKernel(inst.fullKernelId))
                     {
-                        if (kid == 0) {
-                            invalidCacheReason = "Kernel ID 0 found in cached graph for inst.cachedKernelIds" + std::to_string(kid) + "\n" + toString(inst);
-                        } else {
-                            invalidCacheReason = "Kernel ID " + std::to_string(kid) + " not found in kernel registry for inst.cachedKernelIds" + std::to_string(kid) + "\n" + toString(inst);
+                        if (inst.fullKernelId == 0)
+                        {
+                            invalidCacheReason = "Kernel ID 0 found in cached graph for inst.fullKernelId\n" + toString(inst);
+                        }
+                        else
+                        {
+                            invalidCacheReason = "Kernel ID " + std::to_string(inst.fullKernelId) + " not found in kernel registry for inst.fullKernelId\n" + toString(inst);
                         }
                         valid = false;
                         break;
                     }
+                    for (uint64_t kid : inst.cachedKernelIds)
+                    {
+                        if (kid == 0 || !KernelRegistry::get().hasKernel(kid))
+                        {
+                            if (kid == 0)
+                            {
+                                invalidCacheReason = "Kernel ID 0 found in cached graph for inst.cachedKernelIds\n" + toString(inst);
+                            }
+                            else
+                            {
+                                invalidCacheReason = "Kernel ID " + std::to_string(kid) + " not found in kernel registry for inst.cachedKernelIds\n" + toString(inst);
+                            }
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if (!valid)
+                        break;
                 }
+
                 if (!valid)
+                {
+                    hasInvalidCache = true;
                     break;
-            }
+                }
 
-            if (!valid)
-            {
-                hasInvalidCache = true;
-                break;
+                tempGraphs[key] = std::move(cg);
+                tempBuckets[key] = dirty_cache_json::bucketFromJson(entry["bucket"]);
+                hasValidCache = true;
             }
+        }
 
-            tempGraphs[key] = std::move(graph);
-            tempBuckets[key] = dirty_cache_json::bucketFromJson(entry["bucket"]);
-            hasValidCache = true;
+        if (!sawCompiledGraph && hasValidCache)
+        {
+            hasInvalidCache = true;
+            invalidCacheReason = "Cache file missing 'constants' metadata (interrupted compilation).";
         }
 
         // If the cache contains any mismatch (e.g. from an old build format or UID 0)
@@ -733,6 +782,10 @@ public:
             cachedGraphs = std::move(tempGraphs);
             cachedBuckets = std::move(tempBuckets);
             isPlanned = true;
+            for (const auto &pair : tempStaging)
+            {
+                graph.constantStaging[pair.first] = pair.second;
+            }
         }
     }
 
@@ -745,10 +798,45 @@ public:
         if (!file.is_open())
             return;
 
+        json bucketEntry;
+        bucketEntry["type"] = "compiled_bucket";
+        bucketEntry["key"] = key;
+        to_json(bucketEntry["graph"], graph);
+        bucketEntry["bucket"] = dirty_cache_json::bucketToJson(bucket);
+
+        file << bucketEntry.dump() << "\n";
+    }
+
+    void saveGraphState() const
+    {
+        if (cachePath.empty())
+            return;
+
+        std::ofstream file(cachePath, std::ios::app);
+        if (!file.is_open())
+            return;
+
         json entry;
-        entry["key"] = key;
-        to_json(entry["graph"], graph);
-        entry["bucket"] = dirty_cache_json::bucketToJson(bucket);
+        entry["type"] = "constants";
+
+        json constantsObj = json::object();
+        std::unordered_set<uint32_t> neededConstants;
+        for (const auto &pair : cachedGraphs)
+        {
+            for (const auto &nodePair : pair.second.nodesMap)
+            {
+                if (graph.constantStaging.count(nodePair.first))
+                {
+                    neededConstants.insert(nodePair.first);
+                }
+            }
+        }
+
+        for (uint32_t nodeId : neededConstants)
+        {
+            constantsObj[std::to_string(nodeId)] = graph.constantStaging.at(nodeId);
+        }
+        entry["constants"] = constantsObj;
 
         file << entry.dump() << "\n";
     }
