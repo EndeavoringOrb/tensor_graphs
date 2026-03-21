@@ -10,7 +10,7 @@ struct MemoryManager;
 
 struct Graph
 {
-    std::vector<TensorNode> nodes;
+    std::deque<TensorNode> nodes;
     std::unordered_map<std::string, std::shared_ptr<SafetensorsLoader>> loaders;     // Mapping of path -> Loader instance
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
 
