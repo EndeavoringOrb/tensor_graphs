@@ -5,6 +5,7 @@
 #include <vector>
 #include <stdexcept>
 #include <sstream>
+#include <deque>
 
 struct MemoryManager;
 
