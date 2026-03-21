@@ -130,9 +130,6 @@ struct DeviceBuffer
     uint64_t sizeBytes;
     bool initialized = false;
 
-    // Sparse representation
-    std::unordered_map<uint32_t, std::vector<uint8_t>> sparseData;
-
     std::list<MemBlock> blocks;
     std::unordered_map<uint32_t, std::list<MemBlock>::iterator> allocationMap;
 
@@ -167,7 +164,7 @@ struct DeviceBuffer
     DeviceBuffer(DeviceBuffer &&other) noexcept
         : backend(other.backend), cpu_arena(std::move(other.cpu_arena)),
           arena_ptr(other.arena_ptr), sizeBytes(other.sizeBytes),
-          initialized(other.initialized), sparseData(std::move(other.sparseData)),
+          initialized(other.initialized),
           blocks(std::move(other.blocks)), allocationMap(std::move(other.allocationMap))
     {
         other.arena_ptr = nullptr;
@@ -186,7 +183,6 @@ struct DeviceBuffer
             arena_ptr = other.arena_ptr;
             sizeBytes = other.sizeBytes;
             initialized = other.initialized;
-            sparseData = std::move(other.sparseData);
             blocks = std::move(other.blocks);
             allocationMap = std::move(other.allocationMap);
 
@@ -260,97 +256,46 @@ struct DeviceBuffer
         }
 #endif
         initialized = true;
-
-        for (const auto &pair : sparseData)
-        {
-            uint32_t nodeId = pair.first;
-            auto it = allocationMap.find(nodeId);
-            if (it != allocationMap.end())
-            {
-#ifdef USE_CUDA
-                if (backend == Backend::CUDA)
-                {
-                    cudaMemcpy(arena_ptr + it->second->offset, pair.second.data(), pair.second.size(), cudaMemcpyHostToDevice);
-                }
-                else
-                {
-                    std::memcpy(arena_ptr + it->second->offset, pair.second.data(), pair.second.size());
-                }
-#else
-                std::memcpy(arena_ptr + it->second->offset, pair.second.data(), pair.second.size());
-#endif
-            }
-        }
-        sparseData.clear();
     }
 
     void write(uint32_t nodeId, const void *data, uint64_t size)
     {
-        if (!initialized)
+        auto it = allocationMap.find(nodeId);
+        if (it != allocationMap.end())
         {
-            std::vector<uint8_t> buf(size);
-            std::memcpy(buf.data(), data, size);
-            sparseData[nodeId] = std::move(buf);
-        }
-        else
-        {
-            auto it = allocationMap.find(nodeId);
-            if (it != allocationMap.end())
-            {
 #ifdef USE_CUDA
-                if (backend == Backend::CUDA)
-                {
-                    cudaMemcpy(arena_ptr + it->second->offset, data, size, cudaMemcpyHostToDevice);
-                }
-                else
-                {
-                    std::memcpy(arena_ptr + it->second->offset, data, size);
-                }
-#else
-                std::memcpy(arena_ptr + it->second->offset, data, size);
-#endif
+            if (backend == Backend::CUDA)
+            {
+                cudaMemcpy(arena_ptr + it->second->offset, data, size, cudaMemcpyHostToDevice);
             }
             else
             {
-                Error::throw_err("Cannot write to unallocated node");
+                std::memcpy(arena_ptr + it->second->offset, data, size);
             }
+#else
+            std::memcpy(arena_ptr + it->second->offset, data, size);
+#endif
+        }
+        else
+        {
+            Error::throw_err("Cannot write to unallocated node");
         }
     }
 
     const uint8_t *read(uint32_t nodeId) const
     {
-        if (!initialized)
+        auto it = allocationMap.find(nodeId);
+        if (it != allocationMap.end())
         {
-            auto it = sparseData.find(nodeId);
-            if (it != sparseData.end())
-            {
-                return it->second.data();
-            }
-            return nullptr;
-        }
-        else
-        {
-            auto it = allocationMap.find(nodeId);
-            if (it != allocationMap.end())
-            {
 #ifdef USE_CUDA
-                if (backend == Backend::CUDA)
-                {
-                    cudaDeviceSynchronize();
-                }
-#endif
-                return arena_ptr + it->second->offset;
+            if (backend == Backend::CUDA)
+            {
+                cudaDeviceSynchronize();
             }
-            return nullptr;
+#endif
+            return arena_ptr + it->second->offset;
         }
-    }
-
-    void unload(uint32_t nodeId)
-    {
-        if (!initialized)
-        {
-            sparseData.erase(nodeId);
-        }
+        return nullptr;
     }
 
     std::list<MemBlock>::iterator findFreeSlot(uint64_t _sizeBytes)
@@ -623,11 +568,6 @@ struct MemoryManager
     const uint8_t *read(Backend backend, uint32_t nodeId) const
     {
         return buffers.at(backend).read(nodeId);
-    }
-
-    void unload(Backend backend, uint32_t nodeId)
-    {
-        buffers.at(backend).unload(nodeId);
     }
 
     void release(Backend backend, uint32_t nodeId)
