@@ -106,7 +106,8 @@ int main()
             std::string valB = j["buildContextId"].get<std::string>();
             bool checkA = valA == HW_TAG;
             bool checkB = valB == BUILD_CONTEXT_ID_STRING;
-            if (checkA && checkB)
+            bool hasKernel = KernelRegistry::get().hasKernel(r.kernelUid);
+            if (checkA && checkB && hasKernel)
             {
                 toBenchmark.push_back(j);
             }
