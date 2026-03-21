@@ -79,8 +79,8 @@ PYBIND11_MODULE(tg_cpp, m)
     // --- Graph Building ---
     py::class_<Graph>(m, "Graph")
         .def(py::init<>())
-        .def_readwrite("count", &Graph::count)
-        .def("allocateId", &Graph::allocateId)
+        .def_property_readonly("count", [](const Graph &g) { return (uint32_t)g.nodes.size(); })
+        .def("allocate_node", [](Graph &g) { return g.allocateNode().id; })
         .def("constant", [](Graph &g, const std::vector<uint32_t> &shape, py::buffer b, DType dtype)
              {
             py::buffer_info info = b.request();

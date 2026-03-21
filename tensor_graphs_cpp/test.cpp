@@ -295,7 +295,8 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
 
     for (size_t i = 0; i < kernel.numInputs; ++i)
     {
-        // uint32_t id = graph.allocateId();
+        TensorNode &node = graph.allocateNode();
+        uint32_t id = node.id;
         DType dtype = kernel.dtypes[i];
         uint64_t elements = countElements(kernel.dummyShapes[i]);
         uint64_t sizeBytes = elements * getDTypeSize(dtype);
@@ -311,7 +312,6 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         bool isConstantParam = (kernel.opName == "Repeat_Inplace" && i > 0) ||
                                (kernel.opName == "Reshape_Inplace" && i == 1);
 
-        uint32_t id;
         if (isConstantParam)
         {
             // Create constant node for shape inference
@@ -328,14 +328,14 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                     constData[j] = static_cast<int32_t>(kernel.dummyShapes[0][j]);
             }
 
-            id = graph.constant(kernel.dummyShapes[i], constData.data(), dtype);
+            graph.constant(node, kernel.dummyShapes[i], constData.data(), dtype);
             // Resize rawData[i] to hold the bytes and copy directly
             result.rawData[i].resize(sizeBytes);
             std::memcpy(result.rawData[i].data(), constData.data(), sizeBytes);
         }
         else
         {
-            id = graph.input(kernel.dummyShapes[i], dtype, view, StorageType::PERSISTENT);
+            graph.input(node, kernel.dummyShapes[i], dtype, view, StorageType::PERSISTENT);
 
             // Generate random data - resize based on dtype size
             result.rawData[i].resize(sizeBytes);

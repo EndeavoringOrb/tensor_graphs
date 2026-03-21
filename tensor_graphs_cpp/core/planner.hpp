@@ -356,16 +356,15 @@ private:
 
         static uint32_t addNodeLike(Graph &graph, const TensorNode &src, const std::vector<uint32_t> &parents, Backend backend)
         {
-            TensorNode node;
-            node.id = graph.allocateId();
+            TensorNode &node = graph.allocateNode();
+            uint32_t id = node.id;
             node.opType = src.opType;
             node.opName = src.opName;
             node.dtype = src.dtype;
             node.shape = src.shape;
             node.parentIds = parents;
             node.backend = backend;
-            graph.nodes.push_back(node);
-            return node.id;
+            return id;
         }
     };
 
@@ -454,7 +453,8 @@ private:
 
                 for (size_t i = 0; i < entry.numInputs; ++i)
                 {
-                    uint32_t inId = pattern.graph.allocateId();
+                    TensorNode &node = pattern.graph.allocateNode();
+                    uint32_t inId = node.id;
                     TensorView view;
                     view.shape = entry.dummyShapes[i];
                     view.strides = TensorView::calcContiguousStrides(view.shape);
@@ -501,16 +501,15 @@ private:
 
         static uint32_t addFusedNode(Graph &graph, const std::string &opName, const std::vector<uint32_t> &parents, const TensorNode &refNode)
         {
-            TensorNode node;
-            node.id = graph.allocateId();
+            TensorNode &node = graph.allocateNode();
+            uint32_t id = node.id;
             node.opType = OpType::FUSED;
             node.opName = opName;
             node.dtype = refNode.dtype;
             node.shape = refNode.shape;
             node.parentIds = parents;
             node.backend = refNode.backend;
-            graph.nodes.push_back(node);
-            return node.id;
+            return id;
         }
 
         static bool matchPattern(uint32_t concreteId, const Graph &mainGraph,
@@ -646,30 +645,31 @@ private:
                         }
                     }
 
-                    TensorNode partialOut = graph.nodes[nodeId];
-                    partialOut.parentIds = partialInputs;
+                    TensorNode &newNode = graph.allocateNode();
+                    uint32_t newId = newNode.id;
+                    newNode = graph.nodes[nodeId];
+                    newNode.id = newId;
+                    newNode.parentIds = partialInputs;
                     for (size_t d = 0; d < outReg.region.size(); ++d)
                     {
-                        partialOut.shape[d] = outReg.region[d].stop - outReg.region[d].start;
+                        newNode.shape[d] = outReg.region[d].stop - outReg.region[d].start;
                     }
 
                     // Decouple shape constants for operators that define output shape via an input node
-                    if (partialOut.opType == OpType::RESHAPE || partialOut.opType == OpType::FILL)
+                    if (newNode.opType == OpType::RESHAPE || newNode.opType == OpType::FILL)
                     {
-                        if (partialOut.parentIds.size() > 1)
+                        if (newNode.parentIds.size() > 1)
                         {
                             std::vector<int32_t> newDims;
-                            for (uint32_t d : partialOut.shape)
+                            for (uint32_t d : newNode.shape)
                                 newDims.push_back(static_cast<int32_t>(d));
                             uint32_t newShapeId = graph.constant({static_cast<uint32_t>(newDims.size())}, newDims.data(), DType::INT32);
-                            partialOut.parentIds[1] = newShapeId;
+                            newNode.parentIds[1] = newShapeId;
                         }
                     }
 
-                    partialOut.id = graph.allocateId();
-                    partialOut.view.shape.clear();
-                    graph.nodes.push_back(partialOut);
-                    partialNodes.push_back(partialOut.id);
+                    newNode.view.shape.clear();
+                    partialNodes.push_back(newId);
                 }
                 partialNodesMap[nodeId] = partialNodes;
             }

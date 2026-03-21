@@ -536,7 +536,7 @@ int main()
     Graph g;
 
     // Setup input node
-    uint32_t inputIdsId = g.allocateId();
+    uint32_t inputIdsId = g.allocateNode().id;
     uint64_t sizeBytes = maxSeqLen * getDTypeSize(DType::INT32);
     mem.allocate(Backend::CPU, inputIdsId, sizeBytes, StorageType::PERSISTENT);
 

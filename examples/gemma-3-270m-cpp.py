@@ -617,7 +617,7 @@ def main():
     graph = tg_cpp.Graph()
     MAX_SEQ_LEN = 128
 
-    input_ids_id = graph.allocateId()
+    input_ids_id = graph.allocate_node()
     mem.allocate(
         tg_cpp.Backend.CPU, input_ids_id, MAX_SEQ_LEN * 4, tg_cpp.StorageType.PERSISTENT
     )
