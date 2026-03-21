@@ -26,7 +26,8 @@ void fillRandom(void *ptr, size_t elements, DType dtype)
 
     switch (dtype)
     {
-    case DType::FLOAT32: {
+    case DType::FLOAT32:
+    {
         float *fptr = static_cast<float *>(ptr);
         std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
         for (size_t i = 0; i < elements; ++i)
@@ -35,7 +36,8 @@ void fillRandom(void *ptr, size_t elements, DType dtype)
         }
         break;
     }
-    case DType::INT32: {
+    case DType::INT32:
+    {
         int32_t *iptr = static_cast<int32_t *>(ptr);
         std::uniform_int_distribution<int32_t> dist(1, 10);
         for (size_t i = 0; i < elements; ++i)
@@ -44,7 +46,8 @@ void fillRandom(void *ptr, size_t elements, DType dtype)
         }
         break;
     }
-    case DType::BOOL: {
+    case DType::BOOL:
+    {
         bool *bptr = static_cast<bool *>(ptr);
         std::uniform_int_distribution<int> dist(0, 1);
         for (size_t i = 0; i < elements; ++i)
@@ -64,13 +67,13 @@ void fillRandom(void *ptr, size_t elements, DType dtype)
     }
 }
 
-bool compareOutputs(const float *a, const float *b, size_t elements, float eps = 1e-4f)
+bool compareOutputs(const float *ref, const float *test, size_t elements, float eps = 1e-4f)
 {
     for (size_t i = 0; i < elements; ++i)
     {
-        if (std::abs(a[i] - b[i]) > eps)
+        if (std::abs(ref[i] - test[i]) > eps)
         {
-            std::cout << "\nMismatch at index " << i << ": " << a[i] << " != " << b[i] << std::endl;
+            std::cout << "\nMismatch at index " << i << ": (ref)" << ref[i] << " != (test)" << test[i] << std::endl;
             return false;
         }
     }
@@ -146,7 +149,7 @@ std::vector<float> executeReferenceGraph(
     {
         const TensorNode &node = graph.nodes[nodeId];
 
-        // INPUT nodes: copy from input data
+        // INPUT nodes: copy from input data or constant staging
         if (node.opType == OpType::INPUT)
         {
             auto it = inputData.find(nodeId);
@@ -154,9 +157,32 @@ std::vector<float> executeReferenceGraph(
             {
                 results[nodeId] = it->second;
             }
+            else if (graph.constantStaging.count(nodeId))
+            {
+                const auto &bytes = graph.constantStaging.at(nodeId);
+                uint64_t numElements = bytes.size() / getDTypeSize(node.dtype);
+                results[nodeId].resize(numElements);
+
+                if (node.dtype == DType::FLOAT32)
+                {
+                    std::memcpy(results[nodeId].data(), bytes.data(), bytes.size());
+                }
+                else if (node.dtype == DType::INT32)
+                {
+                    const int32_t *src = reinterpret_cast<const int32_t *>(bytes.data());
+                    for (uint64_t i = 0; i < numElements; ++i)
+                    {
+                        results[nodeId][i] = static_cast<float>(src[i]);
+                    }
+                }
+                else
+                {
+                    std::fill(results[nodeId].begin(), results[nodeId].end(), 1.0f);
+                }
+            }
             else
             {
-                // For constant nodes without explicit input, allocate zero-initialized buffer
+                // For other input nodes, default to 1.0f
                 size_t elements = countElements(node.shape);
                 results[nodeId].resize(elements, 1.0f);
             }
@@ -346,8 +372,10 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             std::vector<int32_t> constData(elements);
             if (kernel.opName == "Repeat_Inplace")
             {
-                if (i == 1) constData[0] = 2;  // repeats = 2
-                if (i == 2) constData[0] = 0;  // axis = 0
+                if (i == 1)
+                    constData[0] = 2; // repeats = 2
+                if (i == 2)
+                    constData[0] = 0; // axis = 0
             }
             else if (kernel.opName == "Reshape_Inplace")
             {
@@ -372,21 +400,26 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
 
         // Store in inputData map for reference graph execution
         // Need to convert rawData to float vector for inputData
-        if (dtype == DType::FLOAT32) {
+        if (dtype == DType::FLOAT32)
+        {
             result.inputData[id] = std::vector<float>(
-                reinterpret_cast<float*>(result.rawData[i].data()),
-                reinterpret_cast<float*>(result.rawData[i].data() + sizeBytes)
-            );
-        } else if (dtype == DType::INT32) {
+                reinterpret_cast<float *>(result.rawData[i].data()),
+                reinterpret_cast<float *>(result.rawData[i].data() + sizeBytes));
+        }
+        else if (dtype == DType::INT32)
+        {
             // Convert int32 to float for reference execution comparison
             std::vector<float> floatData;
             floatData.reserve(elements);
-            const int32_t* intData = reinterpret_cast<const int32_t*>(result.rawData[i].data());
-            for (uint64_t j = 0; j < elements; ++j) {
+            const int32_t *intData = reinterpret_cast<const int32_t *>(result.rawData[i].data());
+            for (uint64_t j = 0; j < elements; ++j)
+            {
                 floatData.push_back(static_cast<float>(intData[j]));
             }
             result.inputData[id] = floatData;
-        } else {
+        }
+        else
+        {
             // For other dtypes, just create a zero-initialized float buffer
             result.inputData[id].resize(elements, 0.0f);
         }
