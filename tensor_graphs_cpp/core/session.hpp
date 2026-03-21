@@ -661,6 +661,7 @@ public:
         std::string line;
         bool hasValidCache = false;
         bool hasInvalidCache = false;
+        std::string invalidCacheReason = "";
         std::unordered_map<std::string, CompiledGraph> tempGraphs;
         std::unordered_map<std::string, DirtyBucket> tempBuckets;
 
@@ -681,6 +682,11 @@ public:
             {
                 if (inst.fullKernelId == 0 || !KernelRegistry::get().hasKernel(inst.fullKernelId))
                 {
+                    if (inst.fullKernelId == 0) {
+                        invalidCacheReason = "Kernel ID 0 found in cached graph for inst.fullKernelId\n" + toString(inst);
+                    } else {
+                        invalidCacheReason = "Kernel ID " + std::to_string(inst.fullKernelId) + " not found in kernel registry for inst.fullKernelId\n" + toString(inst);
+                    }
                     valid = false;
                     break;
                 }
@@ -688,6 +694,11 @@ public:
                 {
                     if (kid == 0 || !KernelRegistry::get().hasKernel(kid))
                     {
+                        if (kid == 0) {
+                            invalidCacheReason = "Kernel ID 0 found in cached graph for inst.cachedKernelIds" + std::to_string(kid) + "\n" + toString(inst);
+                        } else {
+                            invalidCacheReason = "Kernel ID " + std::to_string(kid) + " not found in kernel registry for inst.cachedKernelIds" + std::to_string(kid) + "\n" + toString(inst);
+                        }
                         valid = false;
                         break;
                     }
@@ -710,7 +721,8 @@ public:
         // If the cache contains any mismatch (e.g. from an old build format or UID 0)
         if (hasInvalidCache)
         {
-            std::cout << "[Session.loadCache] Invalid or stale cache detected. Ignoring entire cache to force recompilation." << std::endl;
+            std::cout << "[Session.loadCache] invalid or stale cache detected. ignoring entire cache to force recompilation." << std::endl;
+            std::cout << "[Session.loadCache] invalid cache reason: " << invalidCacheReason << std::endl;
             // Clear the file so we overwrite it instead of appending to a file full of stale entries
             std::ofstream clearFile(cachePath, std::ios::trunc);
             return;

@@ -127,3 +127,16 @@ std::string toString(const Region &reg)
     }
     return ss.str();
 }
+
+std::string toString(const OpInstruction &inst)
+{
+    std::stringstream ss;
+    ss << "OpInstruction\n"
+       << "  Node ID: " << inst.nodeId << "\n"
+       << "  Full Kernel ID: " << inst.fullKernelId << "\n"
+       << "  Cached Kernel IDs: " << toString(inst.cachedKernelIds) << "\n"
+       << "  Input Node IDs: " << toString(inst.inputNodeIds) << "\n"
+       << "  Inplace Input Index: " << inst.inplaceInputIndex << "\n"
+       << "  Backend: " << inst.backend << "\n";
+    return ss.str();
+}
