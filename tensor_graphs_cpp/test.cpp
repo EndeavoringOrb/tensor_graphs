@@ -225,7 +225,8 @@ std::vector<float> executeReferenceGraph(
 std::vector<float> executeFusedKernel(
     const KernelEntry &kernel,
     const std::vector<std::vector<uint8_t>> &inputData,
-    size_t expectedOutElements)
+    size_t expectedOutElements,
+    const std::vector<uint32_t> &outShape)
 {
     if (inputData.size() != kernel.numInputs)
     {
@@ -251,18 +252,45 @@ std::vector<float> executeFusedKernel(
     // Allocate output buffer based on expected size from reference graph
     std::vector<float> output(expectedOutElements);
 
-    // For in-place kernels, copy the input that will be modified to the output buffer
+    // For in-place kernels, handle view kernels vs regular in-place
     if (kernel.inplace && kernel.numInputs > 0)
     {
-        // inputData[0] is now uint8_t, need to reinterpret as float
-        output.resize(expectedOutElements);
-        std::memcpy(output.data(), inputData[0].data(), expectedOutElements * sizeof(float));
+        if (kernel.inferView)
+        {
+            // View-based materialization: populated output by reading from input[0] using inferred view
+            std::vector<TensorNode> dummyInputs(kernel.numInputs);
+            for (size_t i = 0; i < kernel.numInputs; ++i)
+            {
+                dummyInputs[i].id = (uint32_t)i;
+                dummyInputs[i].shape = kernel.dummyShapes[i];
+                dummyInputs[i].view = inputViews[i];
+                dummyInputs[i].dtype = kernel.dtypes[i];
+            }
+            TensorNode dummyOutput;
+            dummyOutput.shape = outShape;
+            dummyOutput.dtype = DType::FLOAT32;
+
+            TensorView view = kernel.inferView(dummyOutput, dummyInputs);
+
+            const float *src = reinterpret_cast<const float *>(inputData[0].data());
+            for (size_t i = 0; i < expectedOutElements; ++i)
+            {
+                output[i] = src[getStridedIndex(i, view.shape, view.strides)];
+            }
+        }
+        else
+        {
+            // Regular in-place: copy the input that will be modified to the output buffer
+            size_t inputSize = (inputData[0].size() / sizeof(float));
+            size_t copyElements = std::min(expectedOutElements, inputSize);
+            std::memcpy(output.data(), inputData[0].data(), copyElements * sizeof(float));
+        }
     }
 
     std::vector<void *> outputPtrs = {output.data()};
     TensorView outView;
-    outView.shape = kernel.dummyShapes[0];
-    outView.strides = TensorView::calcContiguousStrides(kernel.dummyShapes[0]);
+    outView.shape = outShape;
+    outView.strides = TensorView::calcContiguousStrides(outShape);
     outView.baseOffset = 0;
     outView.dtype = DType::FLOAT32; // Assume FP32 output for fused kernels
     std::vector<TensorView> outputViews = {outView};
@@ -420,7 +448,7 @@ int main()
 
             // ========== FUSED KERNEL EXECUTION ==========
             // Execute fused kernel directly
-            std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refOutput.size());
+            std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refOutput.size(), refGraph.nodes[rootId].shape);
 
             // ========== COMPARE ==========
             size_t elements = refOutput.size();
