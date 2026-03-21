@@ -219,12 +219,12 @@ std::vector<float> executeReferenceGraph(
  * with prepared input/output buffers.
  *
  * @param kernel The fused kernel to execute
- * @param inputData Input data buffers
+ * @param inputData Input data buffers (type-erased uint8_t vectors)
  * @param expectedOutElements Expected number of output elements (from reference graph)
  */
 std::vector<float> executeFusedKernel(
     const KernelEntry &kernel,
-    const std::vector<std::vector<float>> &inputData,
+    const std::vector<std::vector<uint8_t>> &inputData,
     size_t expectedOutElements)
 {
     if (inputData.size() != kernel.numInputs)
@@ -254,7 +254,9 @@ std::vector<float> executeFusedKernel(
     // For in-place kernels, copy the input that will be modified to the output buffer
     if (kernel.inplace && kernel.numInputs > 0)
     {
-        output = inputData[0];
+        // inputData[0] is now uint8_t, need to reinterpret as float
+        output.resize(expectedOutElements);
+        std::memcpy(output.data(), inputData[0].data(), expectedOutElements * sizeof(float));
     }
 
     std::vector<void *> outputPtrs = {output.data()};
@@ -282,7 +284,7 @@ struct TestInputs
 {
     std::vector<uint32_t> inputIds;
     std::unordered_map<uint32_t, std::vector<float>> inputData;
-    std::vector<std::vector<float>> rawData; // For fused kernel execution
+    std::vector<std::vector<uint8_t>> rawData; // For fused kernel execution - type-erased bytes
 };
 
 TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
@@ -293,7 +295,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
 
     for (size_t i = 0; i < kernel.numInputs; ++i)
     {
-        uint32_t id = graph.allocateId();
+        // uint32_t id = graph.allocateId();
         DType dtype = kernel.dtypes[i];
         uint64_t elements = countElements(kernel.dummyShapes[i]);
         uint64_t sizeBytes = elements * getDTypeSize(dtype);
@@ -309,6 +311,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         bool isConstantParam = (kernel.opName == "Repeat_Inplace" && i > 0) ||
                                (kernel.opName == "Reshape_Inplace" && i == 1);
 
+        uint32_t id;
         if (isConstantParam)
         {
             // Create constant node for shape inference
@@ -326,20 +329,39 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             }
 
             id = graph.constant(kernel.dummyShapes[i], constData.data(), dtype);
-            result.rawData[i].resize(elements);
+            // Resize rawData[i] to hold the bytes and copy directly
+            result.rawData[i].resize(sizeBytes);
             std::memcpy(result.rawData[i].data(), constData.data(), sizeBytes);
         }
         else
         {
-            graph.inputWithId(id, kernel.dummyShapes[i], dtype, view, StorageType::PERSISTENT);
+            id = graph.input(kernel.dummyShapes[i], dtype, view, StorageType::PERSISTENT);
 
-            // Generate random data
-            result.rawData[i].resize(elements);
+            // Generate random data - resize based on dtype size
+            result.rawData[i].resize(sizeBytes);
             fillRandom(result.rawData[i].data(), elements, dtype);
         }
 
         // Store in inputData map for reference graph execution
-        result.inputData[id] = result.rawData[i];
+        // Need to convert rawData to float vector for inputData
+        if (dtype == DType::FLOAT32) {
+            result.inputData[id] = std::vector<float>(
+                reinterpret_cast<float*>(result.rawData[i].data()),
+                reinterpret_cast<float*>(result.rawData[i].data() + sizeBytes)
+            );
+        } else if (dtype == DType::INT32) {
+            // Convert int32 to float for reference execution comparison
+            std::vector<float> floatData;
+            floatData.reserve(elements);
+            const int32_t* intData = reinterpret_cast<const int32_t*>(result.rawData[i].data());
+            for (uint64_t j = 0; j < elements; ++j) {
+                floatData.push_back(static_cast<float>(intData[j]));
+            }
+            result.inputData[id] = floatData;
+        } else {
+            // For other dtypes, just create a zero-initialized float buffer
+            result.inputData[id].resize(elements, 0.0f);
+        }
         result.inputIds[i] = id;
     }
 
