@@ -79,7 +79,7 @@ def get_compiler_cmd(fname: str):
             ]
 
             if DEBUG_MODE:
-                cmd.extend(["-g", "-O0", "-DDEBUG"])
+                cmd.extend(["-g", "-O0", "-DDEBUG", "-fno-omit-frame-pointer"])
             else:
                 cmd.extend(["-O3"])
 
