@@ -321,7 +321,56 @@ std::vector<float> executeFusedKernel(
     outView.dtype = DType::FLOAT32; // Assume FP32 output for fused kernels
     std::vector<TensorView> outputViews = {outView};
 
+    // Run
+#ifdef USE_CUDA
+    if (kernel.backend == Backend::CUDA)
+    {
+        std::vector<void *> d_inputs;
+        std::vector<void *> d_outputs;
+
+        // Allocate and copy inputs to device
+        for (size_t i = 0; i < inputData.size(); ++i)
+        {
+            void *d_ptr = nullptr;
+            cudaMalloc(&d_ptr, inputData[i].size());
+            cudaMemcpy(d_ptr, inputData[i].data(), inputData[i].size(), cudaMemcpyHostToDevice);
+            d_inputs.push_back(d_ptr);
+        }
+
+        // Allocate output on device
+        void *d_out = nullptr;
+        uint64_t outBytes = expectedOutElements * sizeof(float);
+        cudaMalloc(&d_out, outBytes);
+        // If it's in-place, we need to copy the starting state
+        if (kernel.inplace)
+        {
+            cudaMemcpy(d_out, output.data(), outBytes, cudaMemcpyHostToDevice);
+        }
+        d_outputs.push_back(d_out);
+
+        // Map pointers for the run function
+        std::vector<const void *> d_input_ptrs;
+        for (void *p : d_inputs)
+            d_input_ptrs.push_back(p);
+
+        kernel.run(d_input_ptrs, d_outputs, inputViews, outputViews);
+        cudaDeviceSynchronize();
+
+        // Copy result back
+        cudaMemcpy(output.data(), d_out, outBytes, cudaMemcpyDeviceToHost);
+
+        // Cleanup
+        for (void *p : d_inputs)
+            cudaFree(p);
+        cudaFree(d_out);
+    }
+    else
+    {
+        kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+    }
+#else
     kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+#endif
 
     return output;
 }
