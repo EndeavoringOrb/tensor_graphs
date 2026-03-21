@@ -6,6 +6,11 @@ import subprocess
 import shutil
 from pathlib import Path
 
+from rich.console import Console
+from rich.panel import Panel
+
+console = Console()
+
 # --- Configuration ---
 ROOT_DIR = Path("tensor_graphs_cpp")
 GENERATED_DIR = ROOT_DIR / "generated"
@@ -150,7 +155,7 @@ def generate_kernel_uids(core_seed):
             f.write(f"    constexpr uint64_t {name} = {uid};\n")
         f.write("}\n")
 
-    print(f"Generated {len(kernel_map)} Kernel UIDs.")
+    console.print(f"[dim]Generated {len(kernel_map)} Kernel UIDs.[/dim]")
     return kernel_map
 
 
@@ -211,7 +216,7 @@ def generate_kernel_includes(core_seed):
         f.write(f"#undef REGISTER_KERNEL_INPLACE\n")
         f.write(f"#undef REGISTER_KERNEL_INPLACE_VIEW\n")
 
-    print(f"Generated {len(kernel_entries)} Kernel Includes with UID injection.")
+    console.print(f"[dim]Generated {len(kernel_entries)} Kernel Includes with UID injection.[/dim]")
 
 
 def generate_build_context():
@@ -228,13 +233,11 @@ def generate_build_context():
         f.write(f"// Mode: {'Debug' if DEBUG_MODE else 'Release'}\n")
         f.write(f"constexpr uint64_t BUILD_CONTEXT_ID = 0x{ctx_hash[:16]}ULL;\n")
 
-    print(
-        f"Build Context ID: 0x{ctx_hash[:16]} ({'DEBUG' if DEBUG_MODE else 'RELEASE'})"
-    )
+    console.print(f"[dim]Build Context ID: 0x{ctx_hash[:16]} ({'DEBUG' if DEBUG_MODE else 'RELEASE'})[/dim]")
 
 
 def compile_binary(fname: str):
-    print(f"\nCompiling {fname}...")
+    console.print(f"\n[bold blue]Compiling {fname}...[/bold blue]")
     compiler_args_str = " ".join(get_compiler_cmd(fname))
 
     if os.name == "nt":
@@ -244,17 +247,25 @@ def compile_binary(fname: str):
     else:
         full_command = compiler_args_str
 
-    print(f"Executing: {full_command}")
     result = subprocess.run(full_command, capture_output=True, text=True, shell=True)
 
     if result.returncode != 0:
-        print("\n--- COMPILER ERROR ---")
-        print(result.stdout)
-        print(result.stderr)
+        console.print(
+            Panel(
+                f"[red]{result.stdout}[/red]\n\n[red]{result.stderr}[/red]",
+                title="[bold red]COMPILER ERROR[/bold red]",
+                border_style="red",
+            )
+        )
         sys.exit(1)
     else:
-        print("\n--- BUILD SUCCESS ---")
-        print(result.stdout)
+        console.print(
+            Panel(
+                f"[green]{result.stdout}[/green]" if result.stdout.strip() else "[green]No output[/green]",
+                title="[bold green]BUILD SUCCESS[/bold green]",
+                border_style="green",
+            )
+        )
 
 
 def main():
@@ -271,7 +282,7 @@ def main():
     USE_CUDA = args.cuda
     DEBUG_MODE = args.debug
 
-    print(f"Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...")
+    console.print(f"\n[bold cyan]Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...[/bold cyan]\n")
     core_seed = generate_core_seed()
     generate_kernel_uids(core_seed)
     generate_kernel_includes(core_seed)
