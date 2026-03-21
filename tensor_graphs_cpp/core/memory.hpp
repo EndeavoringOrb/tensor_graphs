@@ -27,6 +27,7 @@ struct InterruptManager
 {
     static inline std::vector<DeviceBuffer *> buffers;
     static inline std::mutex mtx;
+    static inline volatile sig_atomic_t g_interrupted = 0;
 
     static void registerBuffer(DeviceBuffer *buf)
     {
@@ -47,6 +48,16 @@ struct InterruptManager
     static void cleanup(); // Implemented at the bottom of the file
 
     static void handleSigInt(int signum); // Implemented at the bottom of the file
+
+    static bool isInterrupted()
+    {
+        return g_interrupted != 0;
+    }
+
+    static void resetInterruptFlag()
+    {
+        g_interrupted = 0;
+    }
 
     static void hook()
     {
@@ -716,6 +727,5 @@ inline void InterruptManager::cleanup()
 inline void InterruptManager::handleSigInt(int signum)
 {
     std::cerr << "\n[TensorGraph] Caught interrupt signal (" << signum << "). Cleaning up..." << std::endl;
-    cleanup();
-    std::exit(signum);
+    g_interrupted = 1;  // Just set the flag - cleanup happens in main thread
 }

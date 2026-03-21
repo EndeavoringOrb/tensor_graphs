@@ -15,12 +15,11 @@ class Executor
 {
 private:
     MemoryManager &memManager;
-    const Graph &graph;
     std::unordered_map<uint32_t, float> nodeCosts;
 
 public:
-    Executor(MemoryManager &mm, const Graph &g)
-        : memManager(mm), graph(g) {}
+    Executor(MemoryManager &mm)
+        : memManager(mm) {}
 
     void run(const std::unordered_map<uint32_t, const void *> &inputs,
              const CompiledGraph &compiled, const DirtyBucket &bucket)
@@ -81,6 +80,14 @@ public:
         uint32_t nPartial = 0;
         for (const OpInstruction &inst : compiled.instructions)
         {
+            // Check for interrupt signal at each instruction boundary
+            if (InterruptManager::isInterrupted())
+            {
+                std::cerr << "\n[Executor] Interrupt detected, aborting execution..." << std::endl;
+                InterruptManager::cleanup();
+                std::exit(SIGINT);
+            }
+
             instIdx++;
             const uint32_t nodeId = inst.nodeId;
             uint32_t logicalId = getLogicalId(nodeId);

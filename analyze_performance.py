@@ -65,17 +65,31 @@ def load_records(filepath):
     return records
 
 
-def load_compiled_graph(filepath):
+def load_compiled_graphs(filepath):
+    """Load all compiled_bucket entries from the cache file.
+
+    Returns a list of (key, compiled_graph, bucket) tuples.
+    The cache format is JSONL with entries of type 'compiled_bucket' and 'constants'.
+    """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Could not find {filepath}")
+
+    graphs = []
     with open(filepath, "r") as f:
         for line in f:
             if not line.strip():
                 continue
             entry = json.loads(line)
-            if entry.get("type") == "compiled_graph":
-                return entry["data"]
-    raise ValueError(f"No compiled_graph entry found in {filepath}")
+            if entry.get("type") == "compiled_bucket":
+                key = entry["key"]
+                graph_data = entry["graph"]
+                bucket_data = entry["bucket"]
+                graphs.append((key, graph_data, bucket_data))
+
+    if not graphs:
+        raise ValueError(f"No compiled_bucket entries found in {filepath}")
+
+    return graphs
 
 
 def print_dynamic_table(data_rows, headers, col_widths=None):
@@ -98,73 +112,102 @@ def print_dynamic_table(data_rows, headers, col_widths=None):
 def analyze(graph_file, records_file):
     records = load_records(records_file)
     try:
-        cg = load_compiled_graph(graph_file)
+        graphs = load_compiled_graphs(graph_file)
     except Exception as e:
         print(f"Error loading graph: {e}")
         return
 
-    nodes_map = cg["nodesMap"]
-    instructions = cg["instructions"]
-    ref_counts = cg.get("refCounts", {})
+    if not graphs:
+        print("No compiled graphs found in cache file")
+        return
+
+    print(f"Analyzing {len(graphs)} compiled bucket(s)...")
+
+    # Aggregate trace data from all compiled buckets
     trace = []
 
-    for inst in instructions:
-        out_node_id = inst["nodeId"]
-        out_node = nodes_map[str(out_node_id)]
-        in_nodes = [nodes_map[str(nid)] for nid in inst["inputNodeIds"]]
+    for key, cg, bucket in graphs:
+        nodes_map = cg["nodesMap"]
+        instructions = cg["instructions"]
+        ref_counts = cg["refCounts"]
 
-        target_elems = count_elements(out_node["shape"])
-        out_bytes = target_elems * dtype_size(out_node["dtype"])
-        in_bytes = sum(
-            count_elements(n["shape"]) * dtype_size(n["dtype"]) for n in in_nodes
-        )
+        for inst in instructions:
+            out_node_id = inst["nodeId"]
+            out_node = nodes_map[str(out_node_id)]
+            in_nodes = [nodes_map[str(nid)] for nid in inst["inputNodeIds"]]
 
-        is_inplace_candidate = False
-        for nid in inst["inputNodeIds"]:
-            in_node = nodes_map[str(nid)]
-            count = int(ref_counts.get(str(nid), 0))
-            if count == 1 and in_node["shape"] == out_node["shape"]:
-                is_inplace_candidate = True
-                break
-
-        est_time = 0.0
-        k_ids = inst.get("kernelIds", [])
-        k_id = k_ids[0] if k_ids else None # TODO: iterate over all kernels
-
-        recs = records.get(k_id, []) if k_id else []
-        if recs:
-            best_rec = min(
-                recs,
-                key=lambda r: abs(target_elems - count_elements(r["outputShapes"][0])),
+            target_elems = count_elements(out_node["shape"])
+            out_bytes = target_elems * dtype_size(out_node["dtype"])
+            in_bytes = sum(
+                count_elements(n["shape"]) * dtype_size(n["dtype"]) for n in in_nodes
             )
-            rec_elems = count_elements(best_rec["outputShapes"][0])
-            if rec_elems > 0:
-                est_time = best_rec["runTime"] * (target_elems / rec_elems)
 
-        op_type = out_node["opType"]
-        in_shapes = [n["shape"] for n in in_nodes]
-        flops = estimate_flops(op_type, target_elems, in_shapes)
-        name = (
-            op_type
-            if op_type != "FUSED"
-            else f'FUSED_{out_node.get("opName", "UNKNOWN")}'
-        )
+            is_inplace_candidate = False
+            for nid in inst["inputNodeIds"]:
+                in_node = nodes_map[str(nid)]
+                count = int(ref_counts.get(str(nid), 0))
+                if count == 1 and in_node["shape"] == out_node["shape"]:
+                    is_inplace_candidate = True
+                    break
 
-        trace.append(
-            {
-                "name": name,
-                "kernelId": k_id,
-                "shape": tuple(out_node["shape"]),
-                "in_shapes": tuple(tuple(s) for s in in_shapes),
-                "out_node_id": out_node_id,
-                "in_node_ids": inst["inputNodeIds"],
-                "time": est_time,
-                "bytes_read": in_bytes,
-                "bytes_written": out_bytes,
-                "flops": flops,
-                "inplace": is_inplace_candidate,
-            }
-        )
+            est_time = 0.0
+            # Collect all kernel IDs: fullKernelId + all cachedKernelIds
+            all_k_ids = []
+            cached_k_ids = inst.get("cachedKernelIds", [])
+            all_k_ids.extend(cached_k_ids)
+            if not all_k_ids:
+                full_k_id = inst.get("fullKernelId")
+                if full_k_id:
+                    all_k_ids.append(full_k_id)
+
+            for k_id in all_k_ids:
+                recs = records.get(k_id, [])
+                # Try to find an exact matching record across all kernel IDs
+                best_rec = None
+                matched_k_id = None
+
+                for rec in recs:
+                    # Check for exact shape, dtype, and strides match
+                    if (
+                        rec["outputShapes"][0] == out_node["shape"]
+                        and rec["outputDTypes"][0] == out_node["dtype"]
+                        and rec["outputStrides"][0] == out_node["view"]["strides"]
+                    ):
+                        best_rec = rec
+                        matched_k_id = k_id
+                        break
+                if not best_rec:
+                    continue
+
+                if best_rec:
+                    est_time = best_rec["runTime"]
+
+                op_type = out_node["opType"]
+                in_shapes = [n["shape"] for n in in_nodes]
+                flops = estimate_flops(op_type, target_elems, in_shapes)
+                name = (
+                    op_type
+                    if op_type != "FUSED"
+                    else f'FUSED_{out_node.get("opName", "UNKNOWN")}'
+                )
+
+                trace.append(
+                    {
+                        "name": name,
+                        "kernelId": matched_k_id,
+                        "shape": tuple(out_node["shape"]),
+                        "in_shapes": tuple(tuple(s) for s in in_shapes),
+                        "out_node_id": out_node_id,
+                        "in_node_ids": inst["inputNodeIds"],
+                        "time": est_time,
+                        "bytes_read": in_bytes,
+                        "bytes_written": out_bytes,
+                        "flops": flops,
+                        "inplace": is_inplace_candidate,
+                    }
+                )
+
+    print(f"Collected {len(trace):,} traces.")
 
     # 1. Arithmetic Intensity
     print("\n" + "=" * 80 + "\n1. ARITHMETIC INTENSITY ANALYSIS\n" + "=" * 80)
@@ -297,7 +340,15 @@ def analyze(graph_file, records_file):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--graph", default="dirty_region_caches/gemma-3-270m-cpp.jsonl")
-    parser.add_argument("--records", default="benchmarks/records.jsonl")
+    parser.add_argument(
+        "--graph",
+        default="dirty_region_caches/gemma-3-270m-cpp.jsonl",
+        help="Path to the cache file (JSONL format with compiled_bucket entries)",
+    )
+    parser.add_argument(
+        "--records",
+        default="benchmarks/records.jsonl",
+        help="Path to the benchmark records file (JSONL format)",
+    )
     args = parser.parse_args()
     analyze(args.graph, args.records)

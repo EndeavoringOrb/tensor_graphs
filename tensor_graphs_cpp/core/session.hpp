@@ -235,7 +235,7 @@ public:
             }
         }
 
-        executor = std::make_unique<Executor>(memManager, graph);
+        executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
         graph.constantStaging.clear();
     }
