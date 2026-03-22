@@ -169,11 +169,7 @@ std::vector<float> executeReferenceGraph(
                 }
                 else if (node.dtype == DType::INT32)
                 {
-                    const int32_t *src = reinterpret_cast<const int32_t *>(bytes.data());
-                    for (uint64_t i = 0; i < numElements; ++i)
-                    {
-                        results[nodeId][i] = static_cast<float>(src[i]);
-                    }
+                    std::memcpy(results[nodeId].data(), bytes.data(), bytes.size());
                 }
                 else
                 {
@@ -476,8 +472,6 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             fillRandom(result.rawData[i].data(), elements, dtype);
         }
 
-        // Store in inputData map for reference graph execution
-        // Need to convert rawData to float vector for inputData
         if (dtype == DType::FLOAT32)
         {
             result.inputData[id] = std::vector<float>(
@@ -486,14 +480,8 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         }
         else if (dtype == DType::INT32)
         {
-            // Convert int32 to float for reference execution comparison
-            std::vector<float> floatData;
-            floatData.reserve(elements);
-            const int32_t *intData = reinterpret_cast<const int32_t *>(result.rawData[i].data());
-            for (uint64_t j = 0; j < elements; ++j)
-            {
-                floatData.push_back(static_cast<float>(intData[j]));
-            }
+            std::vector<float> floatData(elements);
+            std::memcpy(floatData.data(), result.rawData[i].data(), sizeBytes);
             result.inputData[id] = floatData;
         }
         else
