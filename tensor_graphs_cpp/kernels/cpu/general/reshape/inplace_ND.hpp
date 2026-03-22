@@ -37,4 +37,4 @@ inline uint32_t refFactoryReshapeInplaceND(const std::vector<uint32_t> &inputs, 
     return graph.reshape(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL_INPLACE_VIEW("Reshape_Inplace", 2, {Backend::CPU, Backend::CUDA}, matchReshapeInplaceND, runReshapeInplaceND, refFactoryReshapeInplaceND, inferViewReshapeInplace, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {false, false});
+REGISTER_KERNEL_INPLACE_VIEW("Reshape_Inplace", 2, matchReshapeInplaceND, runReshapeInplaceND, refFactoryReshapeInplaceND, inferViewReshapeInplace, {Backend::CPU, Backend::CUDA}, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {false, false});

@@ -19,4 +19,4 @@ inline void runArangeI32_ND(const std::vector<const void *> &inputs, const std::
         out[i] = start + static_cast<int32_t>(i) * step;
 }
 
-REGISTER_REF_KERNEL(OpType::ARANGE, {Backend::CPU}, matchArangeI32_ND, runArangeI32_ND);
+REGISTER_REF_KERNEL(OpType::ARANGE, matchArangeI32_ND, runArangeI32_ND, {Backend::CPU});

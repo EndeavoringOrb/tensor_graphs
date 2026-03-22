@@ -55,4 +55,4 @@ inline void runSliceF32_ND(const std::vector<const void *> &inputs, const std::v
     }
 }
 
-REGISTER_REF_KERNEL(OpType::SLICE, {Backend::CPU}, matchSliceF32_ND, runSliceF32_ND);
+REGISTER_REF_KERNEL(OpType::SLICE, matchSliceF32_ND, runSliceF32_ND, {Backend::CPU});

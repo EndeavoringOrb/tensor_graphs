@@ -143,13 +143,7 @@ inline uint32_t refFactoryPermute_CUDA_ND(const std::vector<uint32_t> &inputs, G
 }
 
 // Register as a named general kernel
-REGISTER_KERNEL(
-    "Permute_CUDA_Contiguous",
-    2,
-    {Backend::CUDA},
-    matchPermute_CUDA_ND,
-    runPermute_CUDA_ND,
-    refFactoryPermute_CUDA_ND,
+REGISTER_KERNEL("Permute_CUDA_Contiguous", 2, matchPermute_CUDA_ND, runPermute_CUDA_ND, refFactoryPermute_CUDA_ND, {Backend::CUDA},
     {DType::FLOAT32, DType::INT32}, // Data, Indices
     {{1024, 640}, {2}},             // Dummy shapes
     {true, true},                   // Contiguity requirements for match

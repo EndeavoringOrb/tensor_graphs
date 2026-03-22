@@ -108,13 +108,7 @@ inline uint32_t refFactoryDotF32_3D_CUDA(const std::vector<uint32_t> &inputs, Gr
  * Inputs: 2
  * Backend: CUDA
  */
-REGISTER_KERNEL(
-    "Dot_F32_3D_CUDA",
-    2,
-    {Backend::CUDA},
-    matchDotF32_3D_CUDA,
-    runDotF32_3D_CUDA,
-    refFactoryDotF32_3D_CUDA,
+REGISTER_KERNEL("Dot_F32_3D_CUDA", 2, matchDotF32_3D_CUDA, runDotF32_3D_CUDA, refFactoryDotF32_3D_CUDA, {Backend::CUDA},
     {DType::FLOAT32, DType::FLOAT32},
     {{2, 8, 16}, {2, 16, 8}}, {true, true});
 
