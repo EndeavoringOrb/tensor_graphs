@@ -111,16 +111,8 @@ public:
         {
             const TensorNode &node = graph.nodes[nodeId];
             uint32_t eclassId = nodeToEClass[nodeId];
-            if (node.opType == OpType::INPUT || node.opType == OpType::CONTIGUOUS || node.opType == OpType::SLICE) // TODO: why contiguous and slice here? can these be moved to general non-input handling?
+            if (node.opType == OpType::INPUT || node.opType == OpType::CONTIGUOUS || node.opType == OpType::SLICE)
             {
-                ENode enode;
-                enode.nodeId = nodeId;
-                enode.kernelUid = 0;
-                enode.opType = node.opType;
-                enode.backend = node.backend;
-                for (uint32_t pid : node.parentIds)
-                    enode.children.push_back(nodeToEClass[pid]);
-
                 if (node.opType != OpType::INPUT)
                 {
                     std::vector<TensorNode> inputs;
@@ -131,9 +123,29 @@ public:
                     {
                         Error::throw_err("No reference kernel found for SLICE/CONTIGUOUS node.\n" + toString(node, graph));
                     }
-                    enode.kernelUid = refs.front();
+                    for (uint64_t uid : refs)
+                    {
+                        ENode enode;
+                        enode.nodeId = nodeId;
+                        enode.kernelUid = uid;
+                        enode.opType = node.opType;
+                        enode.backend = node.backend;
+                        for (uint32_t pid : node.parentIds)
+                            enode.children.push_back(nodeToEClass[pid]);
+                        egraph.addENode(eclassId, enode);
+                    }
                 }
-                egraph.addENode(eclassId, enode);
+                else
+                {
+                    ENode enode;
+                    enode.nodeId = nodeId;
+                    enode.kernelUid = 0;
+                    enode.opType = node.opType;
+                    enode.backend = node.backend;
+                    for (uint32_t pid : node.parentIds)
+                        enode.children.push_back(nodeToEClass[pid]);
+                    egraph.addENode(eclassId, enode);
+                }
                 continue;
             }
 
@@ -148,21 +160,19 @@ public:
                 Error::throw_err("No reference kernel found for node " + toString(node));
             }
 
-            if (refs.front() == 0)
+            for (uint64_t uid : refs)
             {
-                std::cout << "[Planner Error] findMatchingKernels returned UID 0 for node " << toString(node) << std::endl;
+                ENode enode;
+                enode.nodeId = nodeId;
+                enode.kernelUid = uid;
+                enode.opType = node.opType;
+                enode.opName = node.opName;
+                enode.backend = node.backend;
+                for (uint32_t pid : node.parentIds)
+                    enode.children.push_back(nodeToEClass[pid]);
+
+                egraph.addENode(eclassId, enode);
             }
-
-            ENode enode;
-            enode.nodeId = nodeId;
-            enode.kernelUid = refs.front();
-            enode.opType = node.opType;
-            enode.opName = node.opName;
-            enode.backend = node.backend;
-            for (uint32_t pid : node.parentIds)
-                enode.children.push_back(nodeToEClass[pid]);
-
-            egraph.addENode(eclassId, enode);
         }
 
         saturate(topo, graph, egraph, nodeToEClass, refCounts);
@@ -293,81 +303,6 @@ private:
         }
     };
 
-    struct AdapterRule : public Rule
-    {
-        bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
-        {
-            if (nodeId >= graph.nodes.size())
-                return false;
-            const auto &node = graph.nodes[nodeId];
-            if (node.opType == OpType::INPUT || node.opType == OpType::COPY_TO)
-                return false;
-            out.nodeId = nodeId;
-            return true;
-        }
-
-        bool predicate(const RuleMatch &m, const Graph &graph, const EGraph &egraph,
-                       const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                       const std::unordered_map<uint32_t, uint32_t> &refCounts) const override
-        {
-            (void)egraph;
-            (void)nodeToEClass;
-            (void)refCounts;
-#ifndef USE_CUDA
-            (void)m;
-            (void)graph;
-            return false;
-#else
-            const TensorNode &node = graph.nodes[m.nodeId];
-            if (node.backend != Backend::CPU)
-                return false;
-            std::vector<TensorNode> inputs;
-            for (uint32_t pid : node.parentIds)
-                inputs.push_back(graph.nodes[pid]);
-
-            TensorNode out = node;
-            out.backend = Backend::CUDA;
-            return !KernelRegistry::get()
-                        .findMatchingKernels(node.opType, node.opName, Backend::CUDA, inputs, out, refCounts)
-                        .empty();
-#endif
-        }
-
-        std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
-        {
-#ifndef USE_CUDA
-            (void)m;
-            (void)graph;
-            return {};
-#else
-            const TensorNode &node = graph.nodes[m.nodeId];
-            std::vector<uint32_t> gpuParents;
-            for (uint32_t pid : node.parentIds)
-            {
-                uint32_t copyId = graph.copyto(pid, Backend::CUDA);
-                gpuParents.push_back(copyId);
-            }
-
-            uint32_t gpuNode = addNodeLike(graph, node, gpuParents, Backend::CUDA);
-            uint32_t backToCpu = graph.copyto(gpuNode, Backend::CPU);
-            return {backToCpu};
-#endif
-        }
-
-        static uint32_t addNodeLike(Graph &graph, const TensorNode &src, const std::vector<uint32_t> &parents, Backend backend)
-        {
-            TensorNode &node = graph.allocateNode();
-            uint32_t id = node.id;
-            node.opType = src.opType;
-            node.opName = src.opName;
-            node.dtype = src.dtype;
-            node.shape = src.shape;
-            node.parentIds = parents;
-            node.backend = backend;
-            return id;
-        }
-    };
-
     struct CopyElimRule : public Rule
     {
         bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
@@ -392,39 +327,6 @@ private:
             const TensorNode &node = graph.nodes[m.nodeId];
             const TensorNode &parent = graph.nodes[node.parentIds[0]];
             return {parent.parentIds[0]};
-        }
-    };
-
-    struct ContiguityRule : public Rule
-    {
-        bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
-        {
-            if (nodeId >= graph.nodes.size())
-                return false;
-            const auto &node = graph.nodes[nodeId];
-            if (node.opType == OpType::CONTIGUOUS)
-                return false;
-            out.nodeId = nodeId;
-            return true;
-        }
-
-        bool predicate(const RuleMatch &m, const Graph &graph, const EGraph &egraph,
-                       const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                       const std::unordered_map<uint32_t, uint32_t> &refCounts) const override
-        {
-            (void)graph;
-            (void)refCounts;
-            auto it = nodeToEClass.find(m.nodeId);
-            if (it == nodeToEClass.end())
-                return false;
-            const EClass &cls = egraph.getEClass(it->second);
-            return !cls.contiguous;
-        }
-
-        std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
-        {
-            uint32_t contigId = graph.contiguous(m.nodeId);
-            return {contigId};
         }
     };
 
@@ -483,6 +385,8 @@ private:
         std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
         {
             std::vector<uint32_t> results;
+            const TensorNode &refNode = graph.nodes[m.nodeId];
+
             for (const auto &pattern : patterns)
             {
                 std::unordered_map<uint32_t, uint32_t> binding;
@@ -492,23 +396,98 @@ private:
                     inputs.reserve(pattern.variables.size());
                     for (uint32_t var : pattern.variables)
                         inputs.push_back(binding[var]);
-                    uint32_t fusedId = addFusedNode(graph, pattern.opName, inputs, graph.nodes[m.nodeId]);
-                    results.push_back(fusedId);
+
+                    for (const auto &kernel : KernelRegistry::get().getAllKernels())
+                    {
+                        if (kernel.opType == OpType::FUSED && kernel.opName == pattern.opName)
+                        {
+                            uint32_t newNode = addFusedNode(graph, kernel, inputs, refNode);
+                            if (newNode != UINT32_MAX)
+                                results.push_back(newNode);
+                        }
+                    }
                 }
             }
             return results;
         }
 
-        static uint32_t addFusedNode(Graph &graph, const std::string &opName, const std::vector<uint32_t> &parents, const TensorNode &refNode)
+        uint32_t addFusedNode(Graph &graph, const KernelEntry &kernel, const std::vector<uint32_t> &parentIds, const TensorNode &refNode) const
         {
+            std::vector<uint32_t> adaptedParents;
+            for (size_t i = 0; i < parentIds.size(); ++i)
+            {
+                uint32_t pid = parentIds[i];
+                const TensorNode &parent = graph.nodes[pid];
+
+                bool needCopy = (parent.backend != kernel.backend); // TODO: update once KernelEntry stores expected per-input backend
+                bool needContig = false;
+                if (i < kernel.requiresContiguous.size())
+                {
+                    needContig = kernel.requiresContiguous[i] && !parent.view.isContiguous();
+                }
+
+                if (!needCopy && !needContig)
+                {
+                    adaptedParents.push_back(pid);
+                    continue;
+                }
+
+                uint32_t currentId = pid;
+                if (needCopy && needContig)
+                {
+                    TensorNode dummyCopyOut = parent;
+                    dummyCopyOut.backend = kernel.backend;
+                    bool copyWorks = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", kernel.backend, {parent}, dummyCopyOut, {}, false).empty();
+
+                    TensorNode dummyContigOut = dummyCopyOut;
+                    dummyContigOut.view.strides = TensorView::calcContiguousStrides(dummyContigOut.shape);
+                    bool contigWorksAfterCopy = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", kernel.backend, {dummyCopyOut}, dummyContigOut, {}, false).empty();
+
+                    if (copyWorks && contigWorksAfterCopy)
+                    {
+                        currentId = graph.copyto(currentId, kernel.backend);
+                        currentId = graph.contiguous(currentId);
+                    }
+                    else
+                    {
+                        TensorNode dummyContigOut2 = parent;
+                        dummyContigOut2.view.strides = TensorView::calcContiguousStrides(dummyContigOut2.shape);
+                        bool contigWorks = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", parent.backend, {parent}, dummyContigOut2, {}, false).empty();
+
+                        TensorNode dummyCopyOut2 = dummyContigOut2;
+                        dummyCopyOut2.backend = kernel.backend;
+                        bool copyWorksAfterContig = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", kernel.backend, {dummyContigOut2}, dummyCopyOut2, {}, false).empty();
+
+                        if (contigWorks && copyWorksAfterContig)
+                        {
+                            currentId = graph.contiguous(currentId);
+                            currentId = graph.copyto(currentId, kernel.backend);
+                        }
+                        else
+                        {
+                            Error::throw_err("No valid adapter chain for copyto and contiguous");
+                        }
+                    }
+                }
+                else if (needCopy)
+                {
+                    currentId = graph.copyto(currentId, kernel.backend);
+                }
+                else if (needContig)
+                {
+                    currentId = graph.contiguous(currentId);
+                }
+                adaptedParents.push_back(currentId);
+            }
+
             TensorNode &node = graph.allocateNode();
             uint32_t id = node.id;
-            node.opType = OpType::FUSED;
-            node.opName = opName;
+            node.opType = kernel.opType;
+            node.opName = kernel.opName;
             node.dtype = refNode.dtype;
             node.shape = refNode.shape;
-            node.parentIds = parents;
-            node.backend = refNode.backend;
+            node.parentIds = adaptedParents;
+            node.backend = kernel.backend;
             return id;
         }
 
@@ -556,6 +535,7 @@ private:
         }
     };
 
+    // TODO: insert scatter or concat on outgoing side so we don't need to do any slicing in executor
     void applyDirtyPrepass(
         uint32_t rootId,
         Graph &graph,
@@ -689,6 +669,7 @@ private:
         Rewrite::DivMulRule dmr;
         Rewrite::DivAddRule dar;
 
+        // TODO: make some sort of rule registry so I don't have to update this every time I add/remove a rule
         std::vector<std::unique_ptr<Rule>> rules;
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&cr));
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&dr));
@@ -699,9 +680,7 @@ private:
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&dmr));
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&dar));
         rules.emplace_back(std::make_unique<FusionRule>());
-        rules.emplace_back(std::make_unique<AdapterRule>());
         rules.emplace_back(std::make_unique<CopyElimRule>());
-        rules.emplace_back(std::make_unique<ContiguityRule>());
 
         std::vector<uint32_t> worklist = topo;
 
@@ -781,15 +760,18 @@ private:
         if (refs.empty())
             return false;
 
-        ENode enode;
-        enode.nodeId = nodeId;
-        enode.kernelUid = refs.front();
-        enode.opType = node.opType;
-        enode.opName = node.opName;
-        enode.backend = node.backend;
-        for (uint32_t pid : node.parentIds)
-            enode.children.push_back(nodeToEClass.at(pid));
-        egraph.addENode(nodeToEClass.at(nodeId), enode);
+        for (uint64_t uid : refs)
+        {
+            ENode enode;
+            enode.nodeId = nodeId;
+            enode.kernelUid = uid;
+            enode.opType = node.opType;
+            enode.opName = node.opName;
+            enode.backend = node.backend;
+            for (uint32_t pid : node.parentIds)
+                enode.children.push_back(nodeToEClass.at(pid));
+            egraph.addENode(nodeToEClass.at(nodeId), enode);
+        }
         return true;
     }
 

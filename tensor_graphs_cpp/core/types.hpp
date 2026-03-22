@@ -207,8 +207,6 @@ struct TensorView
         int64_t expectedStride = 1;
         for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
         {
-            if (shape[i] == 1)
-                continue;
             if (strides[i] != expectedStride)
                 return false;
             expectedStride *= shape[i];
