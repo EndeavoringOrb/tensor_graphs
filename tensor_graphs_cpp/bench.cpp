@@ -237,8 +237,16 @@ int main()
                     else if (r.inputDTypes[idx] == DType::INT32)
                     {
                         int32_t *iptr = reinterpret_cast<int32_t *>(inData[idx].data());
-                        for (size_t k = 0; k < elements; ++k)
-                            iptr[k] = 1;
+                        if (kernel.opType == OpType::PERMUTE)
+                        {
+                            for (size_t k = 0; k < elements; ++k)
+                                iptr[k] = k;
+                        }
+                        else
+                        {
+                            for (size_t k = 0; k < elements; ++k)
+                                iptr[k] = 1;
+                        }
                     }
                     else if (r.inputDTypes[idx] == DType::BF16)
                     {
