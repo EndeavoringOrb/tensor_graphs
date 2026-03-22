@@ -13,19 +13,18 @@
 
 namespace PermuteCUDA
 {
-    constexpr int MAX_RANK = 4;
+    constexpr int MAX_RANK = 8;
 
     struct PermuteParams
     {
         uint32_t rank;
-        uint32_t out_dims[MAX_RANK];
-        uint32_t out_strides[MAX_RANK];
-        uint32_t in_strides_permuted[MAX_RANK]; // Input strides reordered to match output dims
+        uint64_t out_strides[MAX_RANK];
+        uint64_t in_strides_permuted[MAX_RANK]; // Input strides reordered to match output dims
     };
 
     __global__ void permute_kernel(const float *__restrict__ src, float *__restrict__ dst, uint64_t numElements, PermuteParams p)
     {
-        uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        uint64_t idx = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
         if (idx >= numElements)
             return;
 
@@ -33,16 +32,16 @@ namespace PermuteCUDA
         uint64_t src_idx = 0;
 
 // Traverse dimensions to calculate source index
-// We logicially "unravel" the output index into coordinates,
+// We logically "unravel" the output index into coordinates,
 // then "ravel" them using input strides reordered by the permutation.
 #pragma unroll
         for (int i = 0; i < MAX_RANK; ++i)
         {
             if (i >= p.rank)
                 break;
-            uint32_t coord = temp / p.out_strides[i];
+            uint64_t coord = temp / p.out_strides[i];
             temp %= p.out_strides[i];
-            src_idx += (uint64_t)coord * p.in_strides_permuted[i];
+            src_idx += coord * p.in_strides_permuted[i];
         }
 
         dst[idx] = src[src_idx];
@@ -70,6 +69,10 @@ inline bool matchPermute_CUDA_ND(const std::vector<TensorNode> &inputs, const Te
 
     // Check rank limits
     if (data.shape.size() > PermuteCUDA::MAX_RANK || data.shape.size() == 0)
+        return false;
+
+    // Check permutation tensor shape matches data rank
+    if (perm.shape.size() != 1 || perm.shape[0] != data.shape.size())
         return false;
 
     // Strict requirement: input and output must be contiguous for this specific kernel
@@ -104,18 +107,30 @@ inline void runPermute_CUDA_ND(const std::vector<const void *> &inputs, const st
 
     for (uint32_t i = 0; i < p.rank; ++i)
     {
-        p.out_dims[i] = outViews[0].shape[i];
-        p.out_strides[i] = (uint32_t)out_strides_contig[i];
+        p.out_strides[i] = (uint64_t)out_strides_contig[i];
 
         // The i-th dimension of the output corresponds to the h_perm[i]-th dimension of the input
         int32_t input_dim_idx = h_perm[i];
-        p.in_strides_permuted[i] = (uint32_t)in_strides_contig[input_dim_idx];
+        
+        // Safety check for permutation indices
+        if (input_dim_idx < 0 || (uint32_t)input_dim_idx >= p.rank) {
+            Error::throw_err("Invalid permutation index: " + std::to_string(input_dim_idx) + " for rank " + std::to_string(p.rank));
+        }
+
+        p.in_strides_permuted[i] = (uint64_t)in_strides_contig[input_dim_idx];
     }
 
     int blockSize = 256;
-    int gridSize = (int)((numElements + blockSize - 1) / blockSize);
+    uint32_t gridSize = (uint32_t)((numElements + blockSize - 1) / blockSize);
 
     PermuteCUDA::permute_kernel<<<gridSize, blockSize>>>(src, dst, numElements, p);
+    
+    // Check for launch errors
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+    {
+        Error::throw_err("CUDA kernel launch failed in Permute_CUDA_Contiguous: " + std::string(cudaGetErrorString(err)));
+    }
 }
 
 /**

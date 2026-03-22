@@ -127,7 +127,8 @@ struct CostModel
             total++;
             auto j = json::parse(line);
             Record r = j.get<Record>();
-            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID)
+            bool hasKernel = KernelRegistry::get().hasKernel(r.kernelUid);
+            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID || !hasKernel)
                 continue;
             valid++;
             records[r.kernelUid].push_back(r);

@@ -22,6 +22,10 @@ inline bool matchPermuteF32_ND_naive(const std::vector<TensorNode> &inputs, cons
     if (inputs[1].dtype != DType::INT32)
         return false;
 
+    // Check permutation tensor shape matches data rank
+    if (inputs[1].shape.size() != 1 || inputs[1].shape[0] != inputs[0].shape.size())
+        return false;
+
     return true;
 }
 
@@ -66,8 +70,13 @@ inline void runPermuteF32_ND_naive(const std::vector<const void *> &inputs, cons
 
         // Map to input coordinates using permutation
         uint64_t inIdx = 0;
-        for (size_t i = 0; i < coord.size(); ++i)
-            inIdx += coord[i] * inStrides[perm[i]];
+        for (size_t i = 0; i < coord.size(); ++i) {
+            int32_t p_dim = perm[i];
+            if (p_dim < 0 || (size_t)p_dim >= inShape.size()) {
+                Error::throw_err("Invalid permutation index: " + std::to_string(p_dim) + " for rank " + std::to_string(inShape.size()));
+            }
+            inIdx += coord[i] * inStrides[p_dim];
+        }
 
         dst[outIdx] = src[inIdx];
     }

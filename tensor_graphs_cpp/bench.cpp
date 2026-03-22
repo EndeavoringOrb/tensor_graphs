@@ -346,7 +346,13 @@ int main()
             bool anyInputCuda = std::any_of(inIsCuda.begin(), inIsCuda.end(), [](bool b){ return b; });
             if (anyInputCuda || isOutputCuda)
             {
-                cudaDeviceSynchronize();
+                cudaError_t err = cudaDeviceSynchronize();
+                if (err != cudaSuccess) {
+                    // Critical: if a kernel crashed, we must reset the error state 
+                    // or subsequent cudaMalloc/cudaMemcpy calls will fail.
+                    // However, illegal memory access is often unrecoverable without context reset.
+                    throw std::runtime_error("CUDA Synchronization failed: " + std::string(cudaGetErrorString(err)));
+                }
             }
 #endif
             auto end = std::chrono::high_resolution_clock::now();
