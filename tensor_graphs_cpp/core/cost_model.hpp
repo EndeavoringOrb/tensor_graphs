@@ -2,6 +2,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
+#include "core/kernels.hpp"
 #include "core/misc.hpp"
 #include "generated/build_context.gen.hpp"
 #include <vector>
