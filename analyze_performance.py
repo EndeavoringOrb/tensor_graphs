@@ -146,7 +146,11 @@ def analyze(graph_file, records_file):
             for nid in inst["inputNodeIds"]:
                 in_node = nodes_map[str(nid)]
                 count = int(ref_counts.get(str(nid), 0))
-                if count == 1 and in_node["shape"] == out_node["shape"] and in_node["dtype"] == out_node["dtype"]: # TODO: generalize so just dtype size has to match (INT32 and FLOAT32 have same size so can be inplace)
+                if (
+                    count == 1
+                    and in_node["shape"] == out_node["shape"]
+                    and in_node["dtype"] == out_node["dtype"]
+                ):  # TODO: generalize so just dtype size has to match (INT32 and FLOAT32 have same size so can be inplace)
                     is_inplace_candidate = True
                     break
 
@@ -209,26 +213,6 @@ def analyze(graph_file, records_file):
 
     print(f"Collected {len(trace):,} traces.")
 
-    # 1. Arithmetic Intensity
-    print("\n" + "=" * 80 + "\n1. ARITHMETIC INTENSITY ANALYSIS\n" + "=" * 80)
-    ai_stats = collections.defaultdict(lambda: {"flops": 0, "bytes": 0, "time": 0.0})
-    for t in trace:
-        ai_stats[t["name"]]["flops"] += t["flops"]
-        ai_stats[t["name"]]["bytes"] += t["bytes_read"] + t["bytes_written"]
-        ai_stats[t["name"]]["time"] += t["time"]
-
-    ai_list = []
-    for name, stats in ai_stats.items():
-        intensity = stats["flops"] / stats["bytes"] if stats["bytes"] > 0 else 0
-        bound = "Memory Bound" if intensity < 2.0 else "Compute Bound"
-        if intensity == 0:
-            bound = "Memory (Data Move)"
-        ai_list.append((name, f"{intensity:.4f}", f"{stats['time']:.2f}", bound))
-    ai_list.sort(key=lambda x: float(x[1]))
-    print_dynamic_table(
-        ai_list, ["Operation", "Intensity (FLOPs/Byte)", "Time (ms)", "Bound"]
-    )
-
     # 2 & 3. N-Grams
     print("\n" + "=" * 80 + "\n2 & 3. N-GRAM ANALYSIS\n" + "=" * 80)
     ngram_data = {
@@ -261,41 +245,6 @@ def analyze(graph_file, records_file):
         )[:10]
         rows_time = [(k, v["count"], f"{v['time']:.2f} ms") for k, v in top_time]
         print_dynamic_table(rows_time, ["Chain", "Count", "Total Time"])
-
-    # 4. Shape-Preserving
-    print("\n" + "=" * 80 + "\n4. SHAPE-PRESERVING SUBGRAPHS\n" + "=" * 80)
-    ew_ops = {"ADD", "MUL", "DIVIDE", "POWER", "SIN", "COS", "NEGATE", "CAST", "TRIU"}
-    subgraphs, current_sg = [], []
-    for t in trace:
-        is_sp = (t["name"] in ew_ops or t["name"].startswith("FUSED_")) and all(
-            in_s == t["shape"] for in_s in t["in_shapes"]
-        )
-        if is_sp:
-            current_sg.append(t)
-        else:
-            if len(current_sg) > 1:
-                subgraphs.append(list(current_sg))
-            current_sg = []
-    if len(current_sg) > 1:
-        subgraphs.append(list(current_sg))
-
-    for is_inplace in [True, False]:
-        label = "INPLACE" if is_inplace else "NOT INPLACE"
-        print(f"\n--- {label} SHAPE-PRESERVING SUBGRAPHS ---")
-        agg_shape = collections.defaultdict(lambda: {"time": 0.0, "count": 0})
-        for sg in subgraphs:
-            if all(n["inplace"] for n in sg) == is_inplace:
-                chain_shape = f"{' -> '.join(n['name'] for n in sg)} | {sg[0]['shape']}"
-                agg_shape[chain_shape]["time"] += sum(n["time"] for n in sg)
-                agg_shape[chain_shape]["count"] += 1
-        shape_rows = sorted(
-            [(k, v["count"], f"{v['time']:.2f}") for k, v in agg_shape.items()],
-            key=lambda x: float(x[2]),
-            reverse=True,
-        )[:10]
-        print_dynamic_table(
-            shape_rows, ["Chain | Shape", "Occurrences", "Total Time (ms)"]
-        )
 
     # 5. Top Kernels (Grouped by Kernel ID + Shape)
     print("\n" + "=" * 80 + "\n5. TOP KERNELS BY SHAPE & ID\n" + "=" * 80)
