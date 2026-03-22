@@ -433,7 +433,7 @@ private:
                 uint32_t pid = parentIds[i];
                 const TensorNode &parent = graph.nodes[pid];
 
-                bool needCopy = (parent.backend != kernel.backend); // TODO: update once KernelEntry stores expected per-input backend
+                bool needCopy = (parent.backend != kernel.inputBackends[i]);
                 bool needContig = false;
                 if (i < kernel.requiresContiguous.size())
                 {
@@ -450,16 +450,16 @@ private:
                 if (needCopy && needContig)
                 {
                     TensorNode dummyCopyOut = parent;
-                    dummyCopyOut.backend = kernel.backend;
-                    bool copyWorks = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", kernel.backend, {parent}, dummyCopyOut, {}, false).empty();
+                    dummyCopyOut.backend = kernel.inputBackends[i];
+                    bool copyWorks = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", kernel.inputBackends[i], {parent}, dummyCopyOut, {}, false).empty();
 
                     TensorNode dummyContigOut = dummyCopyOut;
                     dummyContigOut.view.strides = TensorView::calcContiguousStrides(dummyContigOut.shape);
-                    bool contigWorksAfterCopy = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", kernel.backend, {dummyCopyOut}, dummyContigOut, {}, false).empty();
+                    bool contigWorksAfterCopy = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", kernel.inputBackends[i], {dummyCopyOut}, dummyContigOut, {}, false).empty();
 
                     if (copyWorks && contigWorksAfterCopy)
                     {
-                        currentId = graph.copyto(currentId, kernel.backend);
+                        currentId = graph.copyto(currentId, kernel.inputBackends[i]);
                         currentId = graph.contiguous(currentId);
                     }
                     else
@@ -469,23 +469,23 @@ private:
                         bool contigWorks = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", parent.backend, {parent}, dummyContigOut2, {}, false).empty();
 
                         TensorNode dummyCopyOut2 = dummyContigOut2;
-                        dummyCopyOut2.backend = kernel.backend;
-                        bool copyWorksAfterContig = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", kernel.backend, {dummyContigOut2}, dummyCopyOut2, {}, false).empty();
+                        dummyCopyOut2.backend = kernel.inputBackends[i];
+                        bool copyWorksAfterContig = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", kernel.inputBackends[i], {dummyContigOut2}, dummyCopyOut2, {}, false).empty();
 
                         if (contigWorks && copyWorksAfterContig)
                         {
                             currentId = graph.contiguous(currentId);
-                            currentId = graph.copyto(currentId, kernel.backend);
+                            currentId = graph.copyto(currentId, kernel.inputBackends[i]);
                         }
                         else
                         {
-                            Error::throw_err("No valid adapter chain for copyto and contiguous");
+                            Error::throw_err("No valid adapter chain for copyto (" + toString(parent.backend) + " -> " + toString(kernel.inputBackends[i]) + ") and contiguous");
                         }
                     }
                 }
                 else if (needCopy)
                 {
-                    currentId = graph.copyto(currentId, kernel.backend);
+                    currentId = graph.copyto(currentId, kernel.inputBackends[i]);
                 }
                 else if (needContig)
                 {
@@ -865,9 +865,21 @@ private:
                 if (enode.opType != OpType::COPY_TO)
                 {
                     bool backendMatch = true;
-                    for (const auto &inNode : inputs)
+                    const KernelEntry *entry = nullptr;
+                    if (enode.kernelUid != 0)
                     {
-                        if (inNode.backend != enode.backend)
+                        entry = &KernelRegistry::get().getKernel(enode.kernelUid);
+                    }
+
+                    for (size_t i = 0; i < inputs.size(); ++i)
+                    {
+                        Backend expectedBack = enode.backend;
+                        if (entry && i < entry->inputBackends.size())
+                        {
+                            expectedBack = entry->inputBackends[i];
+                        }
+
+                        if (inputs[i].backend != expectedBack)
                         {
                             backendMatch = false;
                             break;

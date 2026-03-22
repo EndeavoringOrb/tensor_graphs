@@ -77,6 +77,7 @@ struct KernelEntry
     std::string opName;
     uint32_t numInputs;
     Backend backend;
+    std::vector<Backend> inputBackends;
     MatchFunc match;
     KernelFunc run;
     ReferenceFactory refFactory;
@@ -106,9 +107,15 @@ public:
                         bool inplace, bool isReference, InferViewFunc inferView,
                         const std::vector<DType> &dtypes,
                         const std::vector<std::vector<uint32_t>> &dummyShapes,
-                        const std::vector<bool> &contiguous)
+                        const std::vector<bool> &contiguous,
+                        const std::vector<Backend> &inputBackends = {})
     {
-        entries.push_back({uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, inferView, dtypes, dummyShapes, contiguous});
+        std::vector<Backend> inBacks = inputBackends;
+        if (inBacks.empty() && numInputs > 0)
+        {
+            inBacks.assign(numInputs, backend);
+        }
+        entries.push_back({uid, op, opName, numInputs, backend, inBacks, match, run, refFactory, inplace, isReference, inferView, dtypes, dummyShapes, contiguous});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory, dtypes, dummyShapes);
@@ -134,6 +141,21 @@ public:
                 continue;
 
             if (op == OpType::FUSED && entry.opName != opName)
+                continue;
+
+            bool inputBackendsMatch = true;
+            if (!inputs.empty() && !entry.inputBackends.empty())
+            {
+                for (size_t i = 0; i < inputs.size() && i < entry.inputBackends.size(); ++i)
+                {
+                    if (inputs[i].backend != entry.inputBackends[i])
+                    {
+                        inputBackendsMatch = false;
+                        break;
+                    }
+                }
+            }
+            if (!inputBackendsMatch)
                 continue;
 
             if (entry.match(inputs, output, refCounts))
@@ -214,9 +236,10 @@ struct KernelRegistrar
                     bool inplace, bool isReference, InferViewFunc inferView = nullptr,
                     const std::vector<DType> &dtypes = {},
                     const std::vector<std::vector<uint32_t>> &dummyShapes = {},
-                    const std::vector<bool> &contiguous = {})
+                    const std::vector<bool> &contiguous = {},
+                    const std::vector<Backend> &inputBackends = {})
     {
-        KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, inferView, dtypes, dummyShapes, contiguous);
+        KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backend, match, run, refFactory, inplace, isReference, inferView, dtypes, dummyShapes, contiguous, inputBackends);
     }
 };
 
