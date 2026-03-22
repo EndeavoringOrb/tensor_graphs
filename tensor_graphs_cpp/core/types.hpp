@@ -274,7 +274,7 @@ inline DType fromString(const std::string &str)
     Error::throw_err("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for that instead of generic runtime_error
 }
 
-inline const char *toString(OpType op)
+inline std::string toString(OpType op)
 {
     switch (op)
     {
@@ -335,7 +335,7 @@ inline const char *toString(OpType op)
     }
 }
 
-inline const char *toString(Backend backend)
+inline std::string toString(Backend backend)
 {
     switch (backend)
     {
@@ -348,7 +348,7 @@ inline const char *toString(Backend backend)
     }
 }
 
-inline const char *toString(StorageType storage)
+inline std::string toString(StorageType storage)
 {
     switch (storage)
     {
