@@ -247,8 +247,27 @@ int main()
                         int32_t *iptr = reinterpret_cast<int32_t *>(inData[idx].data());
                         if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos) // TODO: make the check based on reference graph instead of name
                         {
-                            for (size_t k = 0; k < elements; ++k)
-                                iptr[k] = k;
+                            if (idx == 1 && r.inputShapes.size() > 0 && r.outputShapes.size() > 0 && 
+                                r.inputShapes[0].size() == r.outputShapes[0].size() && elements == r.inputShapes[0].size()) 
+                            {
+                                std::vector<bool> used(elements, false);
+                                for (size_t k = 0; k < elements; ++k) {
+                                    size_t found_d = k; // default fallback
+                                    for(size_t d = 0; d < elements; ++d) {
+                                        if(!used[d] && r.inputShapes[0][d] == r.outputShapes[0][k]) {
+                                            found_d = d;
+                                            break;
+                                        }
+                                    }
+                                    used[found_d] = true;
+                                    iptr[k] = found_d;
+                                }
+                            }
+                            else 
+                            {
+                                for (size_t k = 0; k < elements; ++k)
+                                    iptr[k] = k;
+                            }
                         }
                         else
                         {
