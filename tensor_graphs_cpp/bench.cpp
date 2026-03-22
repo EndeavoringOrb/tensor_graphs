@@ -6,6 +6,7 @@
 #include <chrono>
 #include <filesystem>
 #include <cstring>
+#include <algorithm>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -342,7 +343,8 @@ int main()
                 kernel.run(inPtrs, outPtrs, inViews, outViews);
             }
 #ifdef USE_CUDA
-            if (isInputCuda || isOutputCuda)
+            bool anyInputCuda = std::any_of(inIsCuda.begin(), inIsCuda.end(), [](bool b){ return b; });
+            if (anyInputCuda || isOutputCuda)
             {
                 cudaDeviceSynchronize();
             }
