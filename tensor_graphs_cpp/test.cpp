@@ -327,14 +327,27 @@ std::vector<float> executeFusedKernel(
     {
         std::vector<void *> d_inputs;
         std::vector<void *> d_outputs;
+        std::vector<bool> inputOnDevice(kernel.numInputs, false);
 
-        // Allocate and copy inputs to device
+        // Allocate and copy inputs to device if needed
         for (size_t i = 0; i < inputData.size(); ++i)
         {
-            void *d_ptr = nullptr;
-            cudaMalloc(&d_ptr, inputData[i].size());
-            cudaMemcpy(d_ptr, inputData[i].data(), inputData[i].size(), cudaMemcpyHostToDevice);
-            d_inputs.push_back(d_ptr);
+            Backend expectedBack = Backend::CUDA;
+            if (i < kernel.inputBackends.size()) expectedBack = kernel.inputBackends[i];
+
+            if (expectedBack == Backend::CUDA)
+            {
+                void *d_ptr = nullptr;
+                cudaMalloc(&d_ptr, inputData[i].size());
+                cudaMemcpy(d_ptr, inputData[i].data(), inputData[i].size(), cudaMemcpyHostToDevice);
+                d_inputs.push_back(d_ptr);
+                inputOnDevice[i] = true;
+            }
+            else
+            {
+                d_inputs.push_back(const_cast<uint8_t *>(inputData[i].data()));
+                inputOnDevice[i] = false;
+            }
         }
 
         // Allocate output on device
@@ -360,8 +373,11 @@ std::vector<float> executeFusedKernel(
         cudaMemcpy(output.data(), d_out, outBytes, cudaMemcpyDeviceToHost);
 
         // Cleanup
-        for (void *p : d_inputs)
-            cudaFree(p);
+        for (size_t i = 0; i < d_inputs.size(); ++i)
+        {
+            if (inputOnDevice[i])
+                cudaFree(d_inputs[i]);
+        }
         cudaFree(d_out);
     }
     else
@@ -413,7 +429,8 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         // For Repeat and Reshape operations, constant parameters must be created via graph.constant()
         // so they're available in constantStaging for shape inference
         bool isConstantParam = (kernel.opName == "Repeat_Inplace" && i > 0) ||
-                               (kernel.opName == "Reshape_Inplace" && i == 1);
+                               (kernel.opName == "Reshape_Inplace" && i == 1) ||
+                               (kernel.opName == "Permute_CUDA_Contiguous" && i == 1);
 
         if (isConstantParam)
         {
@@ -431,6 +448,18 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 // For reshape, use the dummy shape values
                 for (size_t j = 0; j < elements; ++j)
                     constData[j] = static_cast<int32_t>(kernel.dummyShapes[0][j]);
+            }
+            else if (kernel.opName == "Permute_CUDA_Contiguous")
+            {
+                // For permute, use a swap permutation if rank=2, otherwise identity
+                size_t rank = kernel.dummyShapes[0].size();
+                for (size_t j = 0; j < elements; ++j)
+                {
+                    if (rank == 2)
+                        constData[j] = (j == 0 ? 1 : 0);
+                    else
+                        constData[j] = (int32_t)j;
+                }
             }
 
             graph.constant(node, kernel.dummyShapes[i], constData.data(), dtype);

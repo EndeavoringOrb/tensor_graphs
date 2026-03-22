@@ -150,24 +150,30 @@ int main()
             std::vector<TensorView> outViews(r.outputShapes.size());
 
 #ifdef USE_CUDA
-            bool isInputCuda = kernel.backend == Backend::CUDA;
+            std::vector<bool> inIsCuda(r.inputShapes.size(), false);
+            for(size_t idx = 0; idx < r.inputShapes.size(); ++idx) {
+                if (idx < kernel.inputBackends.size())
+                    inIsCuda[idx] = (kernel.inputBackends[idx] == Backend::CUDA);
+                else
+                    inIsCuda[idx] = (kernel.backend == Backend::CUDA);
+            }
             bool isOutputCuda = kernel.backend == Backend::CUDA;
 
             if (kernel.opType == OpType::COPY_TO)
             {
                 if (kernel.backend == Backend::CUDA)
                 {
-                    isInputCuda = false;
+                    inIsCuda.assign(inIsCuda.size(), false);
                     isOutputCuda = true;
                 }
                 else
                 {
-                    isInputCuda = true;
+                    inIsCuda.assign(inIsCuda.size(), true);
                     isOutputCuda = false;
                 }
             }
 #else
-            bool isInputCuda = false;
+            std::vector<bool> inIsCuda(r.inputShapes.size(), false);
             bool isOutputCuda = false;
 #endif
 
@@ -176,14 +182,14 @@ int main()
             {
                 std::vector<const void *> &inPtrs;
                 std::vector<void *> &outPtrs;
-                bool isInputCuda;
+                const std::vector<bool> &inIsCuda;
                 bool isOutputCuda;
                 ~CudaCleanup()
                 {
 #ifdef USE_CUDA
                     for (size_t idx = 0; idx < inPtrs.size(); ++idx)
                     {
-                        if (isInputCuda && inPtrs[idx])
+                        if (idx < inIsCuda.size() && inIsCuda[idx] && inPtrs[idx])
                             cudaFree(const_cast<void *>(inPtrs[idx]));
                     }
                     for (size_t idx = 0; idx < outPtrs.size(); ++idx)
@@ -193,7 +199,7 @@ int main()
                     }
 #endif
                 }
-            } cleanup{inPtrs, outPtrs, isInputCuda, isOutputCuda};
+            } cleanup{inPtrs, outPtrs, inIsCuda, isOutputCuda};
 
             for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
@@ -245,7 +251,7 @@ int main()
                     }
                 }
 
-                if (isInputCuda)
+                if (inIsCuda[idx])
                 {
 #ifdef USE_CUDA
                     void *d_ptr = nullptr;
