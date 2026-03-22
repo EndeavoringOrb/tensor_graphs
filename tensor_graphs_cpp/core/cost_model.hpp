@@ -43,6 +43,8 @@ struct Record
     std::vector<DType> inputDTypes;
     std::vector<DType> outputDTypes;
     std::vector<std::vector<uint8_t>> inputConstants;
+    std::vector<Backend> backends;
+    std::vector<Backend> inputBackends;
     float runTime;
 };
 
@@ -63,6 +65,8 @@ inline void to_json(json &j, const Record &r)
         {"inputDTypes", r.inputDTypes},
         {"outputDTypes", r.outputDTypes},
         {"inputConstants", r.inputConstants},
+        {"backends", r.backends},
+        {"inputBackends", r.inputBackends},
         {"runTime", r.runTime}};
 }
 
@@ -80,6 +84,9 @@ inline void from_json(const json &j, Record &r)
     r.inputDTypes = j.at("inputDTypes").get<std::vector<DType>>();
     r.outputDTypes = j.at("outputDTypes").get<std::vector<DType>>();
     r.inputConstants = j.at("inputConstants").get<std::vector<std::vector<uint8_t>>>();
+    r.backends = j.at("backends").get<std::vector<Backend>>();
+    r.inputBackends = j.at("inputBackends").get<std::vector<Backend>>();
+
     r.runTime = j.at("runTime").get<float>();
 }
 
@@ -210,6 +217,9 @@ struct CostModel
             r.inputDTypes = inDTypes;
             r.outputDTypes = outDTypes;
             r.inputConstants = inConstants;
+            const auto& entry = KernelRegistry::get().getKernel(kernelUid);
+            r.backends = entry.backends;
+            r.inputBackends = entry.inputBackends;
             r.runTime = 0.0f;
 
             json callObj = r;

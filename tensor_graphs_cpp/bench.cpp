@@ -58,6 +58,8 @@ int main()
             keyObj["outputShapes"] = r.outputShapes;
             keyObj["inputStrides"] = r.inputStrides;
             keyObj["outputStrides"] = r.outputStrides;
+            keyObj["backends"] = r.backends;
+            keyObj["inputBackends"] = r.inputBackends;
             std::string key = keyObj.dump();
             recordedKeys.insert(key);
         }
@@ -98,6 +100,8 @@ int main()
         keyObj["outputShapes"] = r.outputShapes;
         keyObj["inputStrides"] = r.inputStrides;
         keyObj["outputStrides"] = r.outputStrides;
+        keyObj["backends"] = r.backends;
+        keyObj["inputBackends"] = r.inputBackends;
         std::string key = keyObj.dump();
 
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
