@@ -45,6 +45,23 @@ inline std::string toString(const std::vector<int64_t> &shape)
     return ss.str();
 }
 
+inline std::string toString(const TensorNode &node, const std::string &prefix = "")
+{
+    std::stringstream ss;
+    ss << prefix << "Node " << node.id << " [" << toString(node.opType);
+    if (node.opType == OpType::FUSED)
+    {
+        ss << " (" << node.opName << ")";
+    }
+    ss << "]\n"
+       << prefix << "  DType:        " << toString(node.dtype) << "\n"
+       << prefix << "  Shape:        " << toString(node.shape) << "\n"
+       << prefix << "  Backend:      " << node.backend << "\n"
+       << prefix << "  Contiguous:   " << (node.view.isContiguous() ? "true" : "false") << "\n"
+       << prefix << "  Storage Type: " << toString(node.storageType);
+    return ss.str();
+}
+
 /**
  * Helper to format a TensorNode's metadata and its parents' metadata into a string.
  * This encapsulates the logging logic used in estimateCost and interpolate.
@@ -73,7 +90,8 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
                 const auto &parent = graph.nodes[pid];
                 ss << "\n"
                    << prefix << "    [" << i << "] Parent ID " << pid
-                   << " (" << toString(parent.opType) << ", " << toString(parent.shape) << ")";
+                   << "\n"
+                   << toString(parent, (std::string) "    ");
             }
             else
             {
@@ -82,23 +100,6 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
             }
         }
     }
-    return ss.str();
-}
-
-inline std::string toString(const TensorNode &node, const std::string &prefix = "")
-{
-    std::stringstream ss;
-    ss << prefix << "Node " << node.id << " [" << toString(node.opType);
-    if (node.opType == OpType::FUSED)
-    {
-        ss << " (" << node.opName << ")";
-    }
-    ss << "]\n"
-       << prefix << "  DType:        " << toString(node.dtype) << "\n"
-       << prefix << "  Shape:        " << toString(node.shape) << "\n"
-       << prefix << "  Backend:      " << node.backend << "\n"
-       << prefix << "  Contiguous:   " << (node.view.isContiguous() ? "true" : "false") << "\n"
-       << prefix << "  Storage Type: " << toString(node.storageType);
     return ss.str();
 }
 

@@ -35,3 +35,10 @@ Aborted (core dumped)
 rewrite rules:
 -swap order of copyto & contiguous if kernels exist
 -swap order of copyto & scatter if kernels exist
+
+
+PERFORMANCE:
+-rewrite rules
+-specialized kernels
+-parallel graph execution
+-constant folding?

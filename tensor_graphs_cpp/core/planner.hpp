@@ -189,6 +189,7 @@ private:
         uint32_t enodeId = 0;
         float cost = std::numeric_limits<float>::infinity();
         bool valid = false;
+        TensorView view;
     };
 
     struct ExtractionResult
@@ -326,7 +327,20 @@ private:
         {
             const TensorNode &node = graph.nodes[m.nodeId];
             const TensorNode &parent = graph.nodes[node.parentIds[0]];
-            return {parent.parentIds[0]};
+            uint32_t grandparentId = parent.parentIds[0];
+
+            std::vector<uint32_t> results;
+            // E.g. copyto(copyto(X, GPU), CPU) => X
+            if (node.backend == graph.nodes[grandparentId].backend)
+            {
+                results.push_back(grandparentId);
+            }
+            // E.g. copyto(copyto(X, GPU), GPU) => copyto(X, GPU)
+            if (node.backend == parent.backend)
+            {
+                results.push_back(node.parentIds[0]);
+            }
+            return results;
         }
     };
 
@@ -488,6 +502,12 @@ private:
             node.shape = refNode.shape;
             node.parentIds = adaptedParents;
             node.backend = kernel.backend;
+
+            if (node.backend != refNode.backend)
+            {
+                id = graph.copyto(id, refNode.backend);
+            }
+
             return id;
         }
 
@@ -600,7 +620,7 @@ private:
 
                             if (isFullInput)
                             {
-                                partialInputs.push_back(inId);
+                                partialInputs.push_back(graph.contiguous(inId));
                             }
                             else
                             {
@@ -614,7 +634,8 @@ private:
                                 uint32_t startsId = graph.constant({(uint32_t)starts.size()}, starts.data(), DType::INT32);
                                 uint32_t endsId = graph.constant({(uint32_t)ends.size()}, ends.data(), DType::INT32);
                                 uint32_t stepsId = graph.constant({(uint32_t)steps.size()}, steps.data(), DType::INT32);
-                                uint32_t sliceId = graph.slice(inId, startsId, endsId, stepsId);
+                                uint32_t safeInId = graph.contiguous(inId);
+                                uint32_t sliceId = graph.slice(safeInId, startsId, endsId, stepsId);
                                 uint32_t contigId = graph.contiguous(sliceId);
                                 partialInputs.push_back(contigId);
                             }
@@ -802,6 +823,9 @@ private:
                     c.enodeId = enodeId;
                     c.cost = 0.0f;
                     c.valid = true;
+                    TensorNode inNode = graph.nodes[enode.nodeId];
+                    ensureContiguousView(inNode);
+                    c.view = inNode.view;
                     if (c.cost < best.cost)
                         best = c;
                     continue;
@@ -822,7 +846,15 @@ private:
                     childrenCost += childChoice.cost;
                     const ENode &childEnode = egraph.getENodes()[childChoice.enodeId];
                     TensorNode inNode = graph.nodes[childEnode.nodeId];
-                    ensureContiguousView(inNode);
+                    inNode.backend = childEnode.backend;
+                    if (childChoice.view.shape.size() > 0)
+                    {
+                        inNode.view = childChoice.view;
+                    }
+                    else
+                    {
+                        ensureContiguousView(inNode);
+                    }
                     inputs.push_back(inNode);
                 }
                 if (!childValid)
@@ -855,6 +887,19 @@ private:
                     continue;
 
                 const KernelEntry &entry = KernelRegistry::get().getKernel(enode.kernelUid);
+
+                if (entry.inplace)
+                {
+                    if (entry.inferView)
+                    {
+                        outNode.view = entry.inferView(outNode, inputs);
+                    }
+                    else if (!inputs.empty())
+                    {
+                        outNode.view = inputs[0].view;
+                    }
+                }
+
                 if (!entry.match(inputs, outNode, refCounts))
                 {
                     continue;
@@ -866,6 +911,7 @@ private:
                 c.enodeId = enodeId;
                 c.cost = childrenCost + kernelCost;
                 c.valid = true;
+                c.view = outNode.view;
                 if (!best.valid || c.cost < best.cost)
                     best = c;
             }

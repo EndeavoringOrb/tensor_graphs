@@ -146,7 +146,7 @@ def analyze(graph_file, records_file):
             for nid in inst["inputNodeIds"]:
                 in_node = nodes_map[str(nid)]
                 count = int(ref_counts.get(str(nid), 0))
-                if count == 1 and in_node["shape"] == out_node["shape"]:
+                if count == 1 and in_node["shape"] == out_node["shape"] and in_node["dtype"] == out_node["dtype"]: # TODO: generalize so just dtype size has to match (INT32 and FLOAT32 have same size so can be inplace)
                     is_inplace_candidate = True
                     break
 

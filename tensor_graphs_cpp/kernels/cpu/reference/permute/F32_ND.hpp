@@ -1,4 +1,4 @@
-// File: tensor_graphs_cpp/kernels/cpu/reference/permute/F32_ND.hpp
+// File: tensor_graphs_cpp/kernels/cpu/reference/permute/F32_ND_naive.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -6,16 +6,12 @@
 #include <cstring> // For memcpy
 
 /**
- * KERNEL: PERMUTE F32 ND (OPTIMIZED REFERENCE)
- * Reorders the dimensions of the input tensor.
- *
- * Optimizations applied:
- * 1. Replaced linear iteration + division with recursive coordinate iteration.
- * 2. Unrolled inner loop for vectorization and pointer arithmetic.
- * 3. Added fast-path checks for contiguous inner dimensions.
+ * KERNEL: PERMUTE F32 ND (NAIVE REFERENCE)
+ * Reorders the dimensions of the input tensor using simple linear index mapping.
+ * No recursion, no stride precomputation, no inner-loop unrolling.
  */
 
-inline bool matchPermuteF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchPermuteF32_ND_naive(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     // Inputs: Data (0), Permutation Indices (1)
     if (inputs.size() != 2)
@@ -29,110 +25,52 @@ inline bool matchPermuteF32_ND(const std::vector<TensorNode> &inputs, const Tens
     return true;
 }
 
-inline void runPermuteF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                             const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runPermuteF32_ND_naive(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
+                                   const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
 {
-    const float *src_base = static_cast<const float *>(inputs[0]);
+    const float *src = static_cast<const float *>(inputs[0]);
     const int32_t *perm = static_cast<const int32_t *>(inputs[1]);
-    float *dst_base = static_cast<float *>(outputs[0]);
+    float *dst = static_cast<float *>(outputs[0]);
 
+    const auto &inShape = inViews[0].shape;
     const auto &outShape = outViews[0].shape;
-    uint32_t ndim = static_cast<uint32_t>(outShape.size());
 
-    // Fast exit for scalars or empty tensors
     uint64_t numElements = countElements(outShape);
     if (numElements == 0)
         return;
-    if (ndim == 0)
+    if (outShape.empty())
     {
-        *dst_base = *src_base;
+        *dst = *src;
         return;
     }
 
-    // Pre-calculate metadata on the stack to avoid vector overhead in loops
-    // Assuming a reasonable max rank (e.g., 16) for stack allocation
-    constexpr int MAX_DIM = 16;
-    if (ndim > MAX_DIM)
-        return; // Fallback or error handling for excessive rank
+    // Naive approach: for each element in output, compute its corresponding index in input
+    std::vector<int64_t> inStrides(inShape.size(), 1);
+    for (int i = (int)inShape.size() - 2; i >= 0; --i)
+        inStrides[i] = inStrides[i + 1] * inShape[i + 1];
 
-    int64_t outShapeStack[MAX_DIM];
-    int64_t outStrideStack[MAX_DIM];
-    int64_t inStrideStack[MAX_DIM]; // Strides of input corresponding to output dimensions
+    std::vector<int64_t> outStrides(outShape.size(), 1);
+    for (int i = (int)outShape.size() - 2; i >= 0; --i)
+        outStrides[i] = outStrides[i + 1] * outShape[i + 1];
 
-    // Prepare data on stack
-    for (uint32_t i = 0; i < ndim; ++i)
+    for (uint64_t outIdx = 0; outIdx < numElements; ++outIdx)
     {
-        outShapeStack[i] = outShape[i];
-        outStrideStack[i] = outViews[0].strides[i];
+        // Convert linear index to output coordinates
+        std::vector<int64_t> coord(outShape.size());
+        uint64_t tmp = outIdx;
+        for (size_t i = 0; i < outShape.size(); ++i)
+        {
+            coord[i] = tmp / outStrides[i];
+            tmp %= outStrides[i];
+        }
 
-        // Map output dimension 'i' to input dimension 'perm[i]'
-        uint32_t in_dim = static_cast<uint32_t>(perm[i]);
-        inStrideStack[i] = inViews[0].strides[in_dim];
+        // Map to input coordinates using permutation
+        uint64_t inIdx = 0;
+        for (size_t i = 0; i < coord.size(); ++i)
+            inIdx += coord[i] * inStrides[perm[i]];
+
+        dst[outIdx] = src[inIdx];
     }
-
-    // Recursive functor to iterate through dimensions
-    // This avoids the expensive integer division/modulo in the inner loop of the original code
-    // We process dimensions from outer (0) to inner (ndim-1)
-    // The innermost dimension is handled separately for optimization
-
-    // We use a manual stack-based approach or recursion.
-    // Recursion is cleaner and depth is limited by ndim.
-
-    // Note: We capture stack arrays by reference/pointer.
-    // To avoid function call overhead in the critical path, we can use a lambda or force inline.
-
-    auto recursive_iterate = [&](auto& self, int dim, float *dst_ptr, const float *src_ptr) -> void
-    {
-        if (dim == static_cast<int>(ndim) - 1)
-        {
-            // Innermost dimension loop
-            int64_t size = outShapeStack[dim];
-            int64_t d_stride = outStrideStack[dim];
-            int64_t s_stride = inStrideStack[dim];
-
-            // Optimization: Fast path for contiguous inner dimension
-            if (d_stride == 1 && s_stride == 1)
-            {
-                std::memcpy(dst_ptr, src_ptr, size * sizeof(float));
-            }
-            // Optimization: Output contiguous (common case, writing to a dense slice)
-            else if (d_stride == 1)
-            {
-                for (int64_t i = 0; i < size; ++i)
-                {
-                    dst_ptr[i] = *src_ptr;
-                    src_ptr += s_stride;
-                }
-            }
-            // General strided case
-            else
-            {
-                for (int64_t i = 0; i < size; ++i)
-                {
-                    *dst_ptr = *src_ptr;
-                    dst_ptr += d_stride;
-                    src_ptr += s_stride;
-                }
-            }
-        }
-        else
-        {
-            // Outer dimensions: recurse
-            int64_t size = outShapeStack[dim];
-            int64_t d_stride = outStrideStack[dim];
-            int64_t s_stride = inStrideStack[dim];
-
-            for (int64_t i = 0; i < size; ++i)
-            {
-                self(self, dim + 1, dst_ptr, src_ptr);
-                dst_ptr += d_stride;
-                src_ptr += s_stride;
-            }
-        }
-    };
-
-    // Start iteration
-    recursive_iterate(recursive_iterate, 0, dst_base, src_base);
 }
 
-REGISTER_REF_KERNEL(OpType::PERMUTE, Backend::CPU, matchPermuteF32_ND, runPermuteF32_ND);
+REGISTER_REF_KERNEL(OpType::PERMUTE, Backend::CPU, matchPermuteF32_ND_naive, runPermuteF32_ND_naive);
