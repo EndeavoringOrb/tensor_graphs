@@ -237,7 +237,7 @@ int main()
                     else if (r.inputDTypes[idx] == DType::INT32)
                     {
                         int32_t *iptr = reinterpret_cast<int32_t *>(inData[idx].data());
-                        if (kernel.opType == OpType::PERMUTE)
+                        if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos) // TODO: make the check based on reference graph instead of name
                         {
                             for (size_t k = 0; k < elements; ++k)
                                 iptr[k] = k;
