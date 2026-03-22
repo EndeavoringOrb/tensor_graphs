@@ -111,7 +111,7 @@ inline uint32_t refFactoryDotF32_3D_CUDA(const std::vector<uint32_t> &inputs, Gr
 REGISTER_KERNEL(
     "Dot_F32_3D_CUDA",
     2,
-    Backend::CUDA,
+    {Backend::CUDA},
     matchDotF32_3D_CUDA,
     runDotF32_3D_CUDA,
     refFactoryDotF32_3D_CUDA,

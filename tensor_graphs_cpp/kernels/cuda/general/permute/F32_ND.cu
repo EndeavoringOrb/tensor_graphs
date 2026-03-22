@@ -146,7 +146,7 @@ inline uint32_t refFactoryPermute_CUDA_ND(const std::vector<uint32_t> &inputs, G
 REGISTER_KERNEL(
     "Permute_CUDA_Contiguous",
     2,
-    Backend::CUDA,
+    {Backend::CUDA},
     matchPermute_CUDA_ND,
     runPermute_CUDA_ND,
     refFactoryPermute_CUDA_ND,

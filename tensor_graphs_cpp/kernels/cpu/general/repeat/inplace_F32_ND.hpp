@@ -50,4 +50,4 @@ inline uint32_t refFactoryRepeatF32_Inplace_ND(const std::vector<uint32_t> &inpu
     return graph.repeat(inputs[0], inputs[1], inputs[2]);
 }
 
-REGISTER_KERNEL_INPLACE_VIEW("Repeat_Inplace", 3, Backend::CPU, matchRepeatF32_Inplace_ND, runRepeatF32_Inplace_ND, refFactoryRepeatF32_Inplace_ND, inferViewRepeatF32_Inplace, {DType::FLOAT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}}, {false, false, false});
+REGISTER_KERNEL_INPLACE_VIEW("Repeat_Inplace", 3, {Backend::CPU, Backend::CUDA}, matchRepeatF32_Inplace_ND, runRepeatF32_Inplace_ND, refFactoryRepeatF32_Inplace_ND, inferViewRepeatF32_Inplace, {DType::FLOAT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}}, {false, false, false});

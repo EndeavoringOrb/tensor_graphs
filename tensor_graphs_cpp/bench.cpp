@@ -152,17 +152,25 @@ int main()
 
 #ifdef USE_CUDA
             std::vector<bool> inIsCuda(r.inputShapes.size(), false);
-            for(size_t idx = 0; idx < r.inputShapes.size(); ++idx) {
+            bool runCuda = false;
+            for (Backend b : kernel.backends)
+            {
+                if (b == Backend::CUDA)
+                    runCuda = true;
+            }
+
+            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+            {
                 if (idx < kernel.inputBackends.size())
                     inIsCuda[idx] = (kernel.inputBackends[idx] == Backend::CUDA);
                 else
-                    inIsCuda[idx] = (kernel.backend == Backend::CUDA);
+                    inIsCuda[idx] = runCuda;
             }
-            bool isOutputCuda = kernel.backend == Backend::CUDA;
+            bool isOutputCuda = runCuda;
 
             if (kernel.opType == OpType::COPY_TO)
             {
-                if (kernel.backend == Backend::CUDA)
+                if (runCuda)
                 {
                     inIsCuda.assign(inIsCuda.size(), false);
                     isOutputCuda = true;
@@ -332,8 +340,14 @@ int main()
                 outViews[idx].dtype = r.outputDTypes[idx];
             }
 
-            std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "] "
-                      << "[" << toString(kernel.backend) << "] " // Added Backend
+            std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "][";
+            for (size_t bidx = 0; bidx < kernel.backends.size(); ++bidx)
+            {
+                if (bidx > 0)
+                    std::cout << ",";
+                std::cout << toString(kernel.backends[bidx]);
+            }
+            std::cout << "] "
                       << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
                       << " (0x" << std::hex << kernelUid << std::dec << ")"
                       << ", Out DType: " << toString(outViews[0].dtype) // Added DType

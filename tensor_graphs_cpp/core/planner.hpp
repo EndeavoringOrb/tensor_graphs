@@ -415,9 +415,12 @@ private:
                     {
                         if (kernel.opType == OpType::FUSED && kernel.opName == pattern.opName)
                         {
-                            uint32_t newNode = addFusedNode(graph, kernel, inputs, refNode);
-                            if (newNode != UINT32_MAX)
-                                results.push_back(newNode);
+                            for (Backend targetBackend : kernel.backends)
+                            {
+                                uint32_t newNode = addFusedNode(graph, kernel, targetBackend, inputs, refNode);
+                                if (newNode != UINT32_MAX)
+                                    results.push_back(newNode);
+                            }
                         }
                     }
                 }
@@ -425,7 +428,7 @@ private:
             return results;
         }
 
-        uint32_t addFusedNode(Graph &graph, const KernelEntry &kernel, const std::vector<uint32_t> &parentIds, const TensorNode &refNode) const
+        uint32_t addFusedNode(Graph &graph, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &parentIds, const TensorNode &refNode) const
         {
             std::vector<uint32_t> adaptedParents;
             for (size_t i = 0; i < parentIds.size(); ++i)
@@ -433,7 +436,13 @@ private:
                 uint32_t pid = parentIds[i];
                 const TensorNode &parent = graph.nodes[pid];
 
-                bool needCopy = (parent.backend != kernel.inputBackends[i]);
+                Backend expectedBackend = targetBackend;
+                if (i < kernel.inputBackends.size())
+                {
+                    expectedBackend = kernel.inputBackends[i];
+                }
+
+                bool needCopy = (parent.backend != expectedBackend);
                 bool needContig = false;
                 if (i < kernel.requiresContiguous.size())
                 {
@@ -450,16 +459,16 @@ private:
                 if (needCopy && needContig)
                 {
                     TensorNode dummyCopyOut = parent;
-                    dummyCopyOut.backend = kernel.inputBackends[i];
-                    bool copyWorks = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", kernel.inputBackends[i], {parent}, dummyCopyOut, {}, false).empty();
+                    dummyCopyOut.backend = expectedBackend;
+                    bool copyWorks = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", expectedBackend, {parent}, dummyCopyOut, {}, false).empty();
 
                     TensorNode dummyContigOut = dummyCopyOut;
                     dummyContigOut.view.strides = TensorView::calcContiguousStrides(dummyContigOut.shape);
-                    bool contigWorksAfterCopy = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", kernel.inputBackends[i], {dummyCopyOut}, dummyContigOut, {}, false).empty();
+                    bool contigWorksAfterCopy = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", expectedBackend, {dummyCopyOut}, dummyContigOut, {}, false).empty();
 
                     if (copyWorks && contigWorksAfterCopy)
                     {
-                        currentId = graph.copyto(currentId, kernel.inputBackends[i]);
+                        currentId = graph.copyto(currentId, expectedBackend);
                         currentId = graph.contiguous(currentId);
                     }
                     else
@@ -469,23 +478,23 @@ private:
                         bool contigWorks = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", parent.backend, {parent}, dummyContigOut2, {}, false).empty();
 
                         TensorNode dummyCopyOut2 = dummyContigOut2;
-                        dummyCopyOut2.backend = kernel.inputBackends[i];
-                        bool copyWorksAfterContig = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", kernel.inputBackends[i], {dummyContigOut2}, dummyCopyOut2, {}, false).empty();
+                        dummyCopyOut2.backend = expectedBackend;
+                        bool copyWorksAfterContig = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", expectedBackend, {dummyContigOut2}, dummyCopyOut2, {}, false).empty();
 
                         if (contigWorks && copyWorksAfterContig)
                         {
                             currentId = graph.contiguous(currentId);
-                            currentId = graph.copyto(currentId, kernel.inputBackends[i]);
+                            currentId = graph.copyto(currentId, expectedBackend);
                         }
                         else
                         {
-                            Error::throw_err("No valid adapter chain for copyto (" + toString(parent.backend) + " -> " + toString(kernel.inputBackends[i]) + ") and contiguous");
+                            Error::throw_err("No valid adapter chain for copyto (" + toString(parent.backend) + " -> " + toString(expectedBackend) + ") and contiguous");
                         }
                     }
                 }
                 else if (needCopy)
                 {
-                    currentId = graph.copyto(currentId, kernel.inputBackends[i]);
+                    currentId = graph.copyto(currentId, expectedBackend);
                 }
                 else if (needContig)
                 {
@@ -501,7 +510,7 @@ private:
             node.dtype = refNode.dtype;
             node.shape = refNode.shape;
             node.parentIds = adaptedParents;
-            node.backend = kernel.backend;
+            node.backend = targetBackend;
 
             if (node.backend != refNode.backend)
             {

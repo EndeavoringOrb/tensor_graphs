@@ -81,4 +81,4 @@ inline void runContiguous_ND(const std::vector<const void *> &inputs, const std:
     }
 }
 
-REGISTER_REF_KERNEL(OpType::CONTIGUOUS, Backend::CPU, matchContiguous_ND, runContiguous_ND);
+REGISTER_REF_KERNEL(OpType::CONTIGUOUS, {Backend::CPU}, matchContiguous_ND, runContiguous_ND);

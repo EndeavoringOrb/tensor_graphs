@@ -193,19 +193,19 @@ def generate_kernel_includes(core_seed):
             f.write(f"#undef REGISTER_KERNEL_INPLACE_VIEW\n")
 
             f.write(
-                f"#define REGISTER_REF_KERNEL(op, back, m, r) REGISTER_REF_KERNEL_INTERNAL({uid}, op, back, m, r)\n"
+                f"#define REGISTER_REF_KERNEL(op, backends, m, r) REGISTER_REF_KERNEL_INTERNAL({uid}, op, backends, m, r)\n"
             )
             f.write(
-                f"#define REGISTER_REF_KERNEL_INPLACE(op, back, m, r) REGISTER_REF_KERNEL_INPLACE_INTERNAL({uid}, op, back, m, r)\n"
+                f"#define REGISTER_REF_KERNEL_INPLACE(op, backends, m, r) REGISTER_REF_KERNEL_INPLACE_INTERNAL({uid}, op, backends, m, r)\n"
             )
             f.write(
-                f"#define REGISTER_KERNEL(name, n, back, m, r, ref, ...) REGISTER_KERNEL_INTERNAL({uid}, name, n, back, m, r, ref, __VA_ARGS__)\n"
+                f"#define REGISTER_KERNEL(name, n, backends, m, r, ref, ...) REGISTER_KERNEL_INTERNAL({uid}, name, n, backends, m, r, ref, __VA_ARGS__)\n"
             )
             f.write(
-                f"#define REGISTER_KERNEL_INPLACE(name, n, back, m, r, ref, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, name, n, back, m, r, ref, __VA_ARGS__)\n"
+                f"#define REGISTER_KERNEL_INPLACE(name, n, backends, m, r, ref, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, name, n, backends, m, r, ref, __VA_ARGS__)\n"
             )
             f.write(
-                f"#define REGISTER_KERNEL_INPLACE_VIEW(name, n, back, m, r, ref, inview, ...) REGISTER_KERNEL_INPLACE_VIEW_INTERNAL({uid}, name, n, back, m, r, ref, inview, __VA_ARGS__)\n"
+                f"#define REGISTER_KERNEL_INPLACE_VIEW(name, n, backends, m, r, ref, inview, ...) REGISTER_KERNEL_INPLACE_VIEW_INTERNAL({uid}, name, n, backends, m, r, ref, inview, __VA_ARGS__)\n"
             )
             f.write(f'#include "{inc_path}"\n\n')
 

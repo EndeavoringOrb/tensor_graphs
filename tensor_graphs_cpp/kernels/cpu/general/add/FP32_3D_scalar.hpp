@@ -89,4 +89,4 @@ inline uint32_t refFactoryAdd3D_Scalar(const std::vector<uint32_t> &inputs, Grap
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL("Add_3D_Scalar", 2, Backend::CPU, matchAddFP32_3D_Scalar, runAddFP32_3D_Scalar, refFactoryAdd3D_Scalar, {DType::FLOAT32, DType::FLOAT32}, {{1, 128, 640}, {1}}, {true, true});
+REGISTER_KERNEL("Add_3D_Scalar", 2, {Backend::CPU}, matchAddFP32_3D_Scalar, runAddFP32_3D_Scalar, refFactoryAdd3D_Scalar, {DType::FLOAT32, DType::FLOAT32}, {{1, 128, 640}, {1}}, {true, true});

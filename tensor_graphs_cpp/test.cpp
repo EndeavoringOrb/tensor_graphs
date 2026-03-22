@@ -319,7 +319,14 @@ std::vector<float> executeFusedKernel(
 
     // Run
 #ifdef USE_CUDA
-    if (kernel.backend == Backend::CUDA)
+    bool runCuda = false;
+    for (Backend b : kernel.backends)
+    {
+        if (b == Backend::CUDA)
+            runCuda = true;
+    }
+
+    if (runCuda)
     {
         std::vector<void *> d_inputs;
         std::vector<void *> d_outputs;
@@ -329,7 +336,8 @@ std::vector<float> executeFusedKernel(
         for (size_t i = 0; i < inputData.size(); ++i)
         {
             Backend expectedBack = Backend::CUDA;
-            if (i < kernel.inputBackends.size()) expectedBack = kernel.inputBackends[i];
+            if (i < kernel.inputBackends.size())
+                expectedBack = kernel.inputBackends[i];
 
             if (expectedBack == Backend::CUDA)
             {
