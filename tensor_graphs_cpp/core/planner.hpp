@@ -73,6 +73,12 @@ public:
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions)
     {
+        if (InterruptManager::isInterrupted())
+        {
+            std::cerr << "\n[Executor] Interrupt detected, aborting execution..." << std::endl;
+            InterruptManager::cleanup();
+            std::exit(SIGINT);
+        }
         std::unordered_map<uint32_t, std::vector<uint32_t>> partialNodesMap;
         applyDirtyPrepass(rootId, graph, dirtyOutputRegions, dirtyInputRegions, partialNodesMap);
 

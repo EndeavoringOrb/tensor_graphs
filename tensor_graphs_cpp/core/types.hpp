@@ -246,7 +246,7 @@ inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape, DType dtype)
     return countElements(shape) * getDTypeSize(dtype);
 }
 
-inline const char *toString(DType dtype)
+inline std::string toString(DType dtype)
 {
     switch (dtype)
     {

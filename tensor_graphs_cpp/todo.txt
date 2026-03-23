@@ -1,10 +1,3 @@
-add compile time DEBUG ifdef flag
--check nan
-
-more fused ops
-
-test.cpp
-
 examples/gemma-3-270m-cpp.py
 
 graph parallel
@@ -17,25 +10,9 @@ allow finer user control over dirty bucket caching. Maybe they know a certain in
 
 main.exe should create benchmarks/ folder
 
-automatically reject dirty region cache .jsonl if invalid kernel ids
-
-make ctrl-c safe (cudafree or whatever)
-
-replace throw error with wrapper that first prints message (windows doesn't print the error message for some reason)
-
-
-bench crashing after gather
-```text
-[41/81] [CPU] GATHER (0x2f916246689c6344), Out DType: F32, Out Shape: [1, 4, 640], Out Strides: [5120, 640, 1] -> 0.000411 ms
-double free or corruption (!prev)
-Aborted (core dumped)
-```
-
-
 rewrite rules:
 -swap order of copyto & contiguous if kernels exist
 -swap order of copyto & scatter if kernels exist
-
 
 PERFORMANCE:
 -rewrite rules
