@@ -1,0 +1,96 @@
+graph
+a = input shape=(4)
+b = weight/input shape=(4)
+c = weight/input shape=(4)
+d = add(a,b) shape=(4)
+e = mul(c,d) shape=(4)
+f = mul(e,e) shape=(4)
+
+CASE 0: NO FUSION, UNLIMITED CACHE
+init mem
+mem: 0/inf []
+allocate for a
+mem: 4/inf [a,a,a,a]
+compute a = input
+allocate for b
+mem: 8/inf [a,a,a,a,b,b,b,b]
+compute b = weight/input
+allocate for c
+mem: 12/inf [a,a,a,a,b,b,b,b,c,c,c,c]
+compute c = weight/input
+
+bucket a:[0,4]
+a in mem -> yes
+set cache clean a [n,n,n,n]
+is b in cache? yes
+set cache clean b [y,y,y,y]
+is c in cache? yes
+set cache clean c [y,y,y,y]
+is d in cache? no
+is e in cache? no
+allocate for d
+mem: 16/inf [a,a,a,a,b,b,b,b,c,c,c,c,d,d,d,d]
+compute d = add(a,b) shape=(4)
+allocate for e
+mem: 20/inf [a,a,a,a,b,b,b,b,c,c,c,c,d,d,d,d,e,e,e,e]
+compute e = mul(c,d) shape=(4)
+allocate for f
+mem: 24/inf [a,a,a,a,b,b,b,b,c,c,c,c,d,d,d,d,e,e,e,e,f,f,f,f]
+compute f = mul(e,e) shape=(4)
+
+bucket a:[0,1]
+is a in cache? yes
+set cache clean a [n,y,y,y]
+is b in cache? yes
+set cache clean b [y,y,y,y]
+is c in cache? yes
+set cache clean c [y,y,y,y]
+is d in cache? yes
+set cache clean d [n,y,y,y]
+is e in cache? yes
+set cache clean e [n,y,y,y]
+is f in cache? yes
+set cache clean f [n,y,y,y]
+compute d[0:1] = add(a[0:1],b[0:1]) shape=(1)
+set cache d[0:1]
+compute e[0:1] = mul(c[0:1],d[0:1]) shape=(1)
+set cache e[0:1]
+compute f[0:1] = mul(e[0:1],e[0:1]) shape=(1)
+set cache f[0:1]
+
+CASE 1: NO FUSION, CACHE SIZE 4*5=20
+init mem
+set cache a -> 4/20
+set cache b -> 8/20
+set cache c -> 12/20
+
+bucket a:[0,4]
+is a in cache? yes
+set cache clean a [n,n,n,n]
+is b in cache? yes
+set cache clean b [y,y,y,y]
+is c in cache? yes
+set cache clean c [y,y,y,y]
+is d in cache? no
+is e in cache? no
+compute d = add(a,b) shape=(4)
+set cache d -> 16/20
+compute e = mul(c,d) shape=(4)
+set cache e -> 20/20
+compute e = mul(c,d) shape=(4)
+
+bucket a:[0,1]
+is a in cache? yes
+set cache clean a [n,y,y,y]
+is b in cache? yes
+set cache clean b [y,y,y,y]
+is c in cache? yes
+set cache clean c [y,y,y,y]
+is d in cache? no
+is e in cache? yes
+set cache clean e [n,y,y,y]
+compute d = add(a,b) shape=(4)
+evict cache e -> remaining 4
+set cache d -> remaining 0
+compute e[0:1] = mul(c[0:1],d[0:1]) shape=(1)
+set cache e[0:1]

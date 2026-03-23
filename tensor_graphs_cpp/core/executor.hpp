@@ -166,7 +166,7 @@ public:
                 }
                 else
                 {
-                    computeKernels.assign(computeRegions.size(), inst.fullKernelId);
+                    Error::throw_err("[Executor.run] have " + std::to_string(computeRegions.size()) + " regions, but only " + std::to_string(inst.cachedKernelIds.size()) + " kernels.")
                 }
             }
             else
