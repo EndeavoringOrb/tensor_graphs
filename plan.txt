@@ -1,59 +1,22 @@
-This caches the dirty region propagation on GraphSession. I would like it to also cache the instructions and memory offsets so that there is no allocation logic at runtime. For the memory caching, the weights (persistent storage) will not change. The maximum size for the buffer will be known, we will allocate memory for the maximum possible bucket shape and then just pass a sliced view to the kernel. The maximum bucket shape just spans the whole user input, because the user input shapes will be constant every run() call, just different dirty slices. I think I want a global static map where each node has a unique fixed offset, with the added constraint of a maximum memory size. So it is "what is the fastest I can make this run given I have this much memory". So maybe some memory regions will be overwritten, which means nodes may need to be recomputed even if they are clean, but it allows us to stay under the memory limit because we reuse that memory. Different buckets can just slice into a node's cache memory differently based on the dirty region (but each bucket will know the memory views it needs, so we don't need to slice memory dynamically at runtime).
-In the end, the use case (at least for LLMs) is likely to be (prefill bucket -> 1 tok bucket -> 1 tok bucket -> ...) so perhaps the framework can measure runs over time (like have a counter for which buckets are run the most) and adjust to optimize the sum of the runtimes? So the cached instruction/memory sets could be conditional, like "if node X still in memory, skip to instruction 5" but over time, we optimize which nodes get cached and the overall average runtime decreases?
-For tracking memory validity, for each bucket we can keep a boolean array is_valid for each node. We also store an invalidates index for each node (which other nodes share the same space) that indexes into a list of sets. is_valid should be a global state though, like buckets should be able to re-use cached computation from each other so somehow setting is_valid = True needs to affect other bucket is_valid, but we can't just have one single is_valid for all buckets because we need to somehow invalidate if buckets share a node and it is overwritten.
-for op in precompiled_bucket_plan:
-    if is_valid[bucket][op.id]:
-        continue # op is cached, skip computation!
-    
-    op.kernel(*op.args)
-    
-    is_valid[bucket][op.id] = True
-    for other_bucket, aliased_id in invalidates_ids[op.invalidates]:
-        is_valid[other_bucket][aliased_id] = False
+Right now the framework assumes that you need to either cache a whole node or not cache it at all. And I was having problems trying to figure out how to fall back from dirty slice instructions to full slice instructions in the case where an output is not cached. But I don't need to do that. I can just compile the dirty graph as a stand-alone graph that doesn't need to fall back if I work backwards using inputSlices starting at the root. So (1) forward pass to get dirty region of root node (2) backward pass using input slices to find the "needed" regions (3) plan based on "needed" regions and then you won't need to fall back. And in executor do (1) backward pass to mark instructions as live or not based on the cache state (2) iterate over instructions, skip any instructions marked not live due to downstream cache. No fallback needed.
 
-There can be an offline global optimizer where the more time the user runs it, the better solutions it will find. It will know what to optimize based on the runtime bucket trace log from the current runtime plans (list of all bucket calls so we can measure transition probabilities). Like the user calls session.optimize or something. It should be purely offline, save plan to json or something. If session.optimize hasn't been called yet (so there is no history of bucket transitions), session.run should call optimize just to get a functioning instruction set, even though it will not be optimized because there are no transition probabilities. I don't like having legacy/fallback code.
-parse transition logs
-for each bucket:
-    for each node:
-        cost = calc_recompute_cost(node, bucket)
-        reuse_cost = sum(prob * calc_recompute_cost(node, other_bucket) for prob, other_bucket in transitions)
-        final_node_score = cost + reuse_score
-When packing memory, sort nodes by final_node_score desc, then once you only have scratch_size memory remaining, the remaining low score nodes are forced to share/alias memory which will trigger the is_valid invalidations. If it is not possible to figure out a plan given scratch_size, error and tell the user they need to increase scratch size.
+1. forward pass all the way through to get dirty region for root node
+2. backward pass to determine needed regions
+needed[rootId] = root dirty region
+updateNeeded(nodeId,Graph graph, ShapeProp prop,<uint32_t, std::vector<Region>> needed)
+  node = graph.nodes[nodeId]
+  parentNeeded = prop.backward(needed[nodeId])
+  for i in range(node.parentIds):
+    currentNeeded = needed.find or []
+    needed[node.parentIds[i]] = mergeRegions(currentNeeded, parentNeeded[i]) // for now mergeRegions can be a placeholder that just concats the region lists
+    updateNeeded(node.parentIds[i],graph,prop,needed)
 
-Maybe we can switch memory from LRU to cost-aware priority where cost of a node is recursive cost of all dirty slices of parents (basically how much time it will take to recompute this node).
-For now, don't worry about multi-graph memory sharing.
-For now, I want to stay in Python but avoid dictionary lookups and logic inside the hot loop.
-
-MAKE MEMORY AN INSTRUCTION
-d=b*c
-x=a+d
-x=a+b*c
-
-runA0 a=dirty,b=dirty,c=clean
-alloc a 0:1
-a = inp a
-alloc b 1:2
-b = inp b
-alloc c 2:3
-c = inp c
-alloc d 3:4
-d=b*c
-alloc x 4:5
-x=a+d
-
-runA1 a=dirty,b=clean,c=clean
-alloc a 0:1 CACHED
-a = inp a
-alloc b 1:2 CACHED
-b = inp b CACHED
-alloc c 2:3 CACHED
-c = inp c CACHED
-alloc d 3:4 CACHED
-d=b*c CACHED
-alloc x 4:5 CACHED
-x=a+d
-
-for inst in instructions:
-    if cached:
-        continue
-    compute(inputs, outputs)
+and then for cache, we just optimize "which combination of nodes being in cache is most valuable given the # of times each bucket has been run in historical logs" AND THEN WE KNOW WHAT IS CACHED AT COMPILE TIME AND WE CAN SKIP UNNEEDED INSTRUCTIONS RAAAAAHHHHHHHHHHHHHHHHHHHHH AND EXECUTION WILL JUST BE A STUPID ASS FOR LOOP WITH KERNELS AND MEMORY POINTERS RAAHHHHHHHHHHHHHHHHHHHHHHH (and some memory alloc stuff but it'll be super clean). Still need to have 2 options. Cause stuff like sum will expand needed regions. Imagine add -> pow -> mul -> sum -> add. updateNeeded, everything before sum will be full. But if we have cache, then we can get away with just computing slices of add,pow,mul before sum (this is what kv cache does I think).
+Slow version for planning:
+iterate over all combinations of cached/uncached for each node
+  do dry runs of all kernels, if any go over mem limit (or cannot find room to alloc) then skip // need other ways to prune combinations as early as possible otherwise this will take forever
+  plan all buckets for this specific combination // planning is different for different cache combinations because it allows different slices of cached stuff (see add,pow,mul in example above). will need to insert slice/scatter. can also add rewrite rule that scatter->slice can be cut out to merge two sliced ops in a row.
+  runtime_score = sum(bucket.runTime * n_calls[bucket.id_or_something] for bucket in buckets)
+  if runtime_score is best
+    store runtime_score
+    store bucket plans
