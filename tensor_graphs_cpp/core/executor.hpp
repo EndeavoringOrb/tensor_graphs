@@ -26,60 +26,18 @@ public:
     {
         std::cout << "running..." << std::endl;
 
-        auto getLogicalId = [&](uint32_t physId)
-        {
-            auto it = compiled.logicalNodeMap.find(physId);
-            return it != compiled.logicalNodeMap.end() ? it->second : physId;
-        };
-
         std::unordered_map<uint32_t, std::vector<uint32_t>> parentMap;
         for (const auto &pair : compiled.nodesMap)
         {
             parentMap[pair.first] = pair.second.parentIds;
         }
 
-        std::unordered_set<uint32_t> neededNodes;
-        if (!compiled.instructions.empty())
-        {
-            neededNodes.insert(compiled.instructions.back().nodeId);
-        }
-
-        for (auto it = compiled.instructions.rbegin(); it != compiled.instructions.rend(); ++it)
-        {
-            uint32_t nodeId = it->nodeId;
-            uint32_t logicalId = getLogicalId(nodeId);
-            const TensorNode &node = compiled.nodesMap.at(nodeId);
-            auto regionIt = bucket.regions.find(logicalId);
-            bool isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
-            bool inCache = memManager.has(it->backend, nodeId);
-            if (neededNodes.count(nodeId))
-            {
-                if (isDirty || !inCache)
-                {
-                    for (uint32_t pId : it->inputNodeIds)
-                    {
-                        neededNodes.insert(pId);
-                        const TensorNode &pNode = compiled.nodesMap.at(pId);
-                        uint32_t pLogicalId = getLogicalId(pId);
-                        regionIt = bucket.regions.find(pLogicalId);
-                        isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
-                        inCache = memManager.has(pNode.backend, pId);
-                        if (!isDirty && inCache)
-                        {
-                            auto &outBuf = memManager.buffers.at(pNode.backend);
-                            auto blockIt = outBuf.allocationMap.at(pId);
-                            blockIt->refCount = compiled.refCounts.at(pId);
-                            blockIt->isLocked = true;
-                        }
-                    }
-                }
-            }
-        }
-
         uint32_t instIdx = 0;
         uint32_t nPartial = 0;
-        for (const OpInstruction &inst : compiled.instructions)
+        for (size_t idx = 0; idx < compiled.instructions.size(); ++idx)
         {
+            const OpInstruction &inst = compiled.instructions[idx];
+
             // Check for interrupt signal at each instruction boundary
             if (InterruptManager::isInterrupted())
             {
@@ -90,84 +48,72 @@ public:
 
             instIdx++;
             const uint32_t nodeId = inst.nodeId;
-            uint32_t logicalId = getLogicalId(nodeId);
+            uint32_t logicalId = compiled.getLogicalId(nodeId);
             const TensorNode &node = compiled.nodesMap.at(nodeId);
             auto &outBuf = memManager.buffers.at(node.backend);
-
-            auto regionIt = bucket.regions.find(logicalId);
-            bool isDirty = (regionIt != bucket.regions.end() && !regionIt->second.empty());
-            bool inCache = memManager.has(inst.backend, nodeId);
-            bool isNeeded = neededNodes.count(nodeId);
-
-            // Pruned node (e.g. its child was fully cached and clean)
-            // TODO: release this memory before execution loop
-            if (!isNeeded)
-            {
-                for (uint32_t inId : inst.inputNodeIds)
-                {
-                    memManager.release(compiled.nodesMap.at(inId).backend, inId);
-                }
-                continue;
-            }
-
-            if (!isDirty && inCache)
-            {
-                auto blockIt = outBuf.allocationMap.at(nodeId);
-                blockIt->refCount = compiled.refCounts.at(nodeId);
-                blockIt->isLocked = true;
-                for (uint32_t inId : inst.inputNodeIds)
-                {
-                    memManager.release(compiled.nodesMap.at(inId).backend, inId);
-                }
-                continue;
-            }
 
             struct ResolvedInput
             {
                 const void *ptr;
                 TensorView view;
+                uint32_t allocationId;
             };
             std::vector<ResolvedInput> resolvedInputs;
             for (uint32_t inId : inst.inputNodeIds)
             {
                 const TensorNode &inNode = compiled.nodesMap.at(inId);
-                resolvedInputs.push_back({memManager.buffers.at(inNode.backend).arena_ptr + memManager.buffers.at(inNode.backend).getOffset(inId),
-                                          memManager.getView(inNode)});
+                uint32_t activeInId = compiled.getLogicalId(inId);
+
+                TensorView safeView = inNode.view;
+                if (safeView.shape.empty() && !inNode.shape.empty())
+                {
+                    safeView.shape = inNode.shape;
+                    safeView.strides = TensorView::calcContiguousStrides(inNode.shape);
+                    safeView.dtype = inNode.dtype;
+                    safeView.baseOffset = 0;
+                }
+                safeView.baseOffset += memManager.buffers.at(inNode.backend).getOffset(activeInId);
+
+                resolvedInputs.push_back({memManager.buffers.at(inNode.backend).arena_ptr + safeView.baseOffset, safeView, activeInId});
             }
 
+            const bool isEndOfLogicalChain = (idx + 1 == compiled.instructions.size()) ||
+                                             (compiled.instructions[idx + 1].logicalNodeId != logicalId);
+            const uint32_t outputMemId = (logicalId != UINT32_MAX && (logicalId == nodeId || isEndOfLogicalChain))
+                                             ? logicalId
+                                             : nodeId;
+
+            uint32_t memId = outputMemId;
             if (inst.inplaceInputIndex >= 0)
             {
                 uint32_t srcId = inst.inputNodeIds[inst.inplaceInputIndex];
-                memManager.transferOwnership(inst.backend, srcId, inst.nodeId);
+                uint32_t activeSrcId = srcId;
+                uint32_t srcLogicalId = compiled.getLogicalId(srcId);
+                if (!memManager.has(inst.backend, srcId) && memManager.has(inst.backend, srcLogicalId))
+                {
+                    activeSrcId = srcLogicalId;
+                }
+                memManager.transferOwnership(inst.backend, activeSrcId, outputMemId);
             }
-            else if (!inCache)
+            else
             {
                 uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
                 float cost = compiled.nodeCosts.at(inst.nodeId);
-                memManager.allocate(inst.backend, inst.nodeId, sizeBytes, StorageType::TRANSIENT, compiled.refCounts.at(inst.nodeId), cost, &parentMap, &compiled.nodeCosts);
+                memManager.allocate(inst.backend, outputMemId, sizeBytes, inst.outputStorageType, compiled.refCounts.at(inst.nodeId), cost, &parentMap, &compiled.nodeCosts);
             }
 
-            auto outBlockIt = outBuf.allocationMap.at(inst.nodeId);
+            auto outBlockIt = outBuf.allocationMap.at(memId);
             outBlockIt->refCount = compiled.refCounts.at(inst.nodeId);
             outBlockIt->isLocked = true;
 
             std::vector<Region> computeRegions;
             std::vector<uint64_t> computeKernels;
 
-            if (isDirty && inCache)
+            if (!inst.outputRegions.empty())
             {
-                auto regionIt2 = bucket.regions.find(logicalId);
-                computeRegions = regionIt2->second;
+                computeRegions = inst.outputRegions;
+                computeKernels = inst.cachedKernelIds;
                 nPartial++;
-
-                if (inst.cachedKernelIds.size() == computeRegions.size())
-                {
-                    computeKernels = inst.cachedKernelIds;
-                }
-                else
-                {
-                    Error::throw_err("[Executor.run] have " + std::to_string(computeRegions.size()) + " regions, but only " + std::to_string(inst.cachedKernelIds.size()) + " kernels.")
-                }
             }
             else
             {
@@ -180,30 +126,25 @@ public:
                 computeKernels = {inst.fullKernelId};
             }
 
-            auto slicesIt = bucket.inputSlices.find(logicalId);
+            const std::vector<std::vector<Region>> *instructionSlices = !inst.inputSlices.empty() ? &inst.inputSlices : nullptr;
 
             for (size_t rIdx = 0; rIdx < computeRegions.size(); ++rIdx)
             {
                 const Region &outRegion = computeRegions[rIdx];
-                if (computeKernels[rIdx] == 0) {
-                    std::cout << "\n[Executor Error] Found kernel UID 0 for node " << inst.nodeId 
-                              << " at region index " << rIdx << "\n" << toString(node) << std::endl;
+                if (computeKernels[rIdx] == 0)
+                {
+                    std::cout << "\n[Executor Error] Found kernel UID 0 for node " << inst.nodeId
+                              << " at region index " << rIdx << "\n"
+                              << toString(node) << std::endl;
                     std::cout << "Cached kernel IDs size: " << inst.cachedKernelIds.size() << std::endl;
-                    for (size_t i = 0; i < inst.cachedKernelIds.size(); ++i) {
+                    for (size_t i = 0; i < inst.cachedKernelIds.size(); ++i)
+                    {
                         std::cout << "  [" << i << "]: " << inst.cachedKernelIds[i] << std::endl;
                     }
                 }
                 const KernelEntry &kernel = KernelRegistry::get().getKernel(computeKernels[rIdx]);
 
-                bool isFullRegion = true;
-                for (size_t d = 0; d < outRegion.region.size(); ++d)
-                {
-                    if (outRegion.region[d].start != 0 || outRegion.region[d].stop != node.shape[d])
-                    {
-                        isFullRegion = false;
-                        break;
-                    }
-                }
+                const bool fullRegion = isFullRegion(outRegion, node.shape);
 
                 std::vector<const void *> kernelInputs;
                 std::vector<TensorView> kernelInViews;
@@ -216,9 +157,9 @@ public:
 
                     TensorView inView = resolvedInputs[pIdx].view;
 
-                    if (!isFullRegion && slicesIt != bucket.inputSlices.end() && pIdx < slicesIt->second.size() && rIdx < slicesIt->second[pIdx].size() && !slicesIt->second[pIdx][rIdx].empty())
+                    if (!fullRegion && instructionSlices && pIdx < instructionSlices->size() && rIdx < (*instructionSlices)[pIdx].size() && !(*instructionSlices)[pIdx][rIdx].empty())
                     {
-                        const Region &inputSlice = slicesIt->second[pIdx][rIdx];
+                        const Region &inputSlice = (*instructionSlices)[pIdx][rIdx];
 
                         TensorView slicedView = inView;
                         uint64_t elementSize = getDTypeSize(inNode.dtype);
@@ -239,7 +180,7 @@ public:
                     }
                     else
                     {
-                        kernelInputs.push_back(inBuf.arena_ptr + inView.baseOffset);
+                        kernelInputs.push_back(resolvedInputs[pIdx].ptr);
                         kernelInViews.push_back(inView);
                     }
                 }
@@ -247,9 +188,24 @@ public:
                 std::vector<void *> kernelOutputs;
                 std::vector<TensorView> kernelOutViews;
 
-                TensorView outView = memManager.getView(node);
+                TensorView outView;
+                {
+                    uint64_t arenaOffset = outBuf.getOffset(outputMemId);
+                    if (node.view.shape.empty())
+                    {
+                        outView.baseOffset = arenaOffset;
+                        outView.shape = node.shape;
+                        outView.strides = TensorView::calcContiguousStrides(node.shape);
+                        outView.dtype = node.dtype;
+                    }
+                    else
+                    {
+                        outView = node.view;
+                        outView.baseOffset += arenaOffset;
+                    }
+                }
 
-                if (!isFullRegion)
+                if (!fullRegion)
                 {
                     uint64_t elementSize = getDTypeSize(node.dtype);
                     uint64_t extraOffset = 0;
@@ -268,12 +224,17 @@ public:
                 kernelOutputs.push_back(outBuf.arena_ptr + outView.baseOffset);
                 kernelOutViews.push_back(outView);
 
-                for (uint32_t inId : inst.inputNodeIds)
+                for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
                 {
-                    Debug::checkNan(compiled.nodesMap.at(inId), memManager, "Kernel Input: " + std::to_string(inId));
+                    const uint32_t inId = inst.inputNodeIds[i];
+                    TensorNode debugInput = compiled.nodesMap.at(inId);
+                    debugInput.id = resolvedInputs[i].allocationId;
+                    Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId));
                 }
                 kernel.run(kernelInputs, kernelOutputs, kernelInViews, kernelOutViews);
-                Debug::checkNan(compiled.nodesMap.at(inst.nodeId), memManager, "Kernel Output: " + std::to_string(inst.nodeId));
+                TensorNode debugOutput = compiled.nodesMap.at(inst.nodeId);
+                debugOutput.id = outputMemId;
+                Debug::checkNan(debugOutput, memManager, "Kernel Output: " + std::to_string(inst.nodeId));
             }
 
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
@@ -282,7 +243,21 @@ public:
                     continue;
 
                 uint32_t inId = inst.inputNodeIds[i];
-                memManager.release(compiled.nodesMap.at(inId).backend, inId);
+                uint32_t activeInId = inId;
+                uint32_t inLogicalId = compiled.getLogicalId(inId);
+                if (!memManager.has(compiled.nodesMap.at(inId).backend, inId) && memManager.has(compiled.nodesMap.at(inId).backend, inLogicalId))
+                {
+                    activeInId = inLogicalId;
+                }
+                memManager.release(compiled.nodesMap.at(inId).backend, activeInId);
+            }
+
+            if (outputMemId == inst.nodeId && inst.logicalNodeId != UINT32_MAX && inst.logicalNodeId != inst.nodeId)
+            {
+                if (isEndOfLogicalChain && memManager.has(inst.backend, inst.nodeId))
+                {
+                    memManager.transferOwnership(inst.backend, inst.nodeId, inst.logicalNodeId);
+                }
             }
 
             std::cout << instIdx << "/" << compiled.instructions.size() << ", #part: " << nPartial << "\r" << std::flush;

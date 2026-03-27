@@ -46,7 +46,7 @@ inline void runContiguous_ND(const std::vector<const void *> &inputs, const std:
         // Scalar or empty
         if (countElements(shape) == 1)
         {
-            std::memcpy(dst, src_base + view.baseOffset, elementSize);
+            std::memcpy(dst, src_base, elementSize);
         }
         return;
     }
@@ -57,8 +57,7 @@ inline void runContiguous_ND(const std::vector<const void *> &inputs, const std:
 
     for (uint64_t i = 0; i < totalElements; ++i)
     {
-        // Calculate source pointer for current coordinate
-        uint64_t offset = view.baseOffset;
+        uint64_t offset = 0;
         for (size_t d = 0; d < coords.size(); ++d)
         {
             offset += static_cast<uint64_t>(coords[d]) * strides[d];

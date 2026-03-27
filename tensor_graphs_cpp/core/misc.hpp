@@ -141,3 +141,34 @@ std::string toString(const OpInstruction &inst)
        << "  Backend: " << inst.backend << "\n";
     return ss.str();
 }
+
+// calculate binomial coefficient "n choose k"
+uint64_t binom(uint64_t n, uint64_t k)
+{
+    if (k > n)
+        return 0;
+    k = std::min(k, n - k); // symmetry
+
+    uint64_t result = 1;
+
+    for (uint64_t i = 1; i <= k; ++i)
+    {
+        uint64_t num = n - k + i; // grows
+        uint64_t den = i;
+
+        uint64_t g = std::gcd(num, den);
+        num /= g;
+        den /= g;
+
+        // reduce result with denominator before multiplying
+        g = std::gcd(result, den);
+        result /= g;
+        den /= g;
+
+        // now safe to multiply
+        result *= num;
+        result /= den;
+    }
+
+    return result;
+}

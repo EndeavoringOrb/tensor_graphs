@@ -4,15 +4,17 @@
 #include "core/kernels.hpp"
 #include <cstring>
 
-inline bool matchScatterF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchScatterF32_ND_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
-    return inputs.size() == 5 &&
-           inputs[0].dtype == DType::FLOAT32 &&
-           inputs[1].dtype == DType::FLOAT32 &&
-           output.dtype == DType::FLOAT32;
+    if (inputs.size() != 5) return false;
+    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32) return false;
+    if (inputs[0].storageType == StorageType::PERSISTENT) return false;
+    auto it = refCounts.find(inputs[0].id);
+    if (it == refCounts.end() || it->second != 1) return false;
+    return true;
 }
 
-inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
+inline void runInplaceScatterF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
 {
     const float *target = static_cast<const float *>(inputs[0]);
@@ -66,4 +68,4 @@ inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std:
     }
 }
 
-REGISTER_REF_KERNEL(OpType::SCATTER, matchScatterF32_ND, runScatterF32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL_INPLACE(OpType::SCATTER, matchScatterF32_ND_Inplace, runInplaceScatterF32_ND, {Backend::CPU});

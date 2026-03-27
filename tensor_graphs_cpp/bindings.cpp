@@ -79,8 +79,10 @@ PYBIND11_MODULE(tg_cpp, m)
     // --- Graph Building ---
     py::class_<Graph>(m, "Graph")
         .def(py::init<>())
-        .def_property_readonly("count", [](const Graph &g) { return (uint32_t)g.nodes.size(); })
-        .def("allocate_node", [](Graph &g) { return g.allocateNode().id; })
+        .def_property_readonly("count", [](const Graph &g)
+                               { return (uint32_t)g.nodes.size(); })
+        .def("allocate_node", [](Graph &g)
+             { return g.allocateNode().id; })
         .def("constant", [](Graph &g, const std::vector<uint32_t> &shape, py::buffer b, DType dtype)
              {
             py::buffer_info info = b.request();
@@ -135,22 +137,5 @@ PYBIND11_MODULE(tg_cpp, m)
                 infos.push_back(b.request());
                 c_inputs[nodeId] = infos.back().ptr;
             }
-            self.run(c_inputs); })
-        .def("get_output", [](Session &self, uint32_t nodeId, Graph &g) -> py::array
-             {
-            const void* ptr = self.getOutput(nodeId);
-            if (!ptr) throw std::runtime_error("Output pointer is null. Did the session run?");
-
-            // Retrieve metadata to build correct NumPy view
-            const auto& node = g.nodes[nodeId];
-            std::vector<ssize_t> shape;
-            for(auto d : node.shape) shape.push_back(d);
-            
-            std::vector<ssize_t> strides;
-            uint64_t elementSize = getDTypeSize(node.dtype);
-            // tg_cpp uses element strides, NumPy uses byte strides
-            auto elementStrides = TensorView::calcContiguousStrides(node.shape);
-            for(auto s : elementStrides) strides.push_back(s * elementSize);
-
-            return py::array(py::dtype(dtype_to_numpy_format(node.dtype)), shape, strides, ptr); }, py::arg("nodeId"), py::arg("graph"));
+            self.run(c_inputs); });
 }

@@ -9,19 +9,44 @@
 
 struct MemoryManager;
 
+struct IdAllocator
+{
+    uint32_t nextId = 0;
+    uint32_t allocate() { return nextId++; }
+};
+
 struct Graph
 {
-    std::deque<TensorNode> nodes;
+    std::unordered_map<uint32_t, TensorNode> nodes;
+    std::shared_ptr<IdAllocator> allocator;
     std::unordered_map<std::string, std::shared_ptr<SafetensorsLoader>> loaders;     // Mapping of path -> Loader instance
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
 
     std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
 
+    Graph() : allocator(std::make_shared<IdAllocator>()) {}
+
+    bool hasNode(uint32_t id) const
+    {
+        return nodes.find(id) != nodes.end();
+    }
+
+    TensorNode &getNode(uint32_t id)
+    {
+        return nodes.at(id);
+    }
+
+    const TensorNode &getNode(uint32_t id) const
+    {
+        return nodes.at(id);
+    }
+
     TensorNode &allocateNode()
     {
-        nodes.emplace_back();
-        nodes.back().id = static_cast<uint32_t>(nodes.size() - 1);
-        return nodes.back();
+        uint32_t id = allocator->allocate();
+        nodes[id] = TensorNode();
+        nodes[id].id = id;
+        return nodes[id];
     }
 
     void registerLoader(const std::string &path)
@@ -112,17 +137,21 @@ struct Graph
 
     uint32_t inputWithId(uint32_t id, std::vector<uint32_t> shape, DType dtype, TensorView view, StorageType storageType = StorageType::PERSISTENT)
     {
-        if (id >= nodes.size())
+        if (id >= allocator->nextId)
         {
-            nodes.resize(id + 1);
+            allocator->nextId = id + 1;
+        }
+        if (!hasNode(id))
+        {
+            nodes[id] = TensorNode();
             nodes[id].id = id;
         }
-        return input(nodes[id], shape, dtype, view, storageType);
+        return input(getNode(id), shape, dtype, view, storageType);
     }
 
     uint32_t contiguous(uint32_t id0)
     {
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::CONTIGUOUS;
         node.dtype = dtype;
@@ -132,13 +161,13 @@ struct Graph
 
     uint32_t add(uint32_t id0, uint32_t id1)
     {
-        if (nodes[id0].dtype != nodes[id1].dtype)
+        if (getNode(id0).dtype != getNode(id1).dtype)
         {
             std::stringstream ss;
-            ss << "[Graph.add] DType mismatch: " << nodes[id0].dtype << ", " << nodes[id1].dtype;
+            ss << "[Graph.add] DType mismatch: " << getNode(id0).dtype << ", " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::ADD;
         node.dtype = dtype;
@@ -148,13 +177,13 @@ struct Graph
 
     uint32_t mul(uint32_t id0, uint32_t id1)
     {
-        if (nodes[id0].dtype != nodes[id1].dtype)
+        if (getNode(id0).dtype != getNode(id1).dtype)
         {
             std::stringstream ss;
-            ss << "[Graph.mul] DType mismatch: " << nodes[id0].dtype << ", " << nodes[id1].dtype;
+            ss << "[Graph.mul] DType mismatch: " << getNode(id0).dtype << ", " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::MUL;
         node.dtype = dtype;
@@ -164,13 +193,13 @@ struct Graph
 
     uint32_t div(uint32_t id0, uint32_t id1)
     {
-        if (nodes[id0].dtype != nodes[id1].dtype)
+        if (getNode(id0).dtype != getNode(id1).dtype)
         {
             std::stringstream ss;
-            ss << "[Graph.div] DType mismatch: " << nodes[id0].dtype << ", " << nodes[id1].dtype;
+            ss << "[Graph.div] DType mismatch: " << getNode(id0).dtype << ", " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::DIVIDE;
         node.dtype = dtype;
@@ -180,13 +209,13 @@ struct Graph
 
     uint32_t dot(uint32_t id0, uint32_t id1)
     {
-        if (nodes[id0].dtype != nodes[id1].dtype)
+        if (getNode(id0).dtype != getNode(id1).dtype)
         {
             std::stringstream ss;
-            ss << "[Graph.dot] DType mismatch: " << nodes[id0].dtype << ", " << nodes[id1].dtype;
+            ss << "[Graph.dot] DType mismatch: " << getNode(id0).dtype << ", " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::DOT;
         node.dtype = dtype;
@@ -196,7 +225,7 @@ struct Graph
 
     uint32_t sin(uint32_t id0)
     {
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::SIN;
         node.dtype = dtype;
@@ -206,7 +235,7 @@ struct Graph
 
     uint32_t cos(uint32_t id0)
     {
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::COS;
         node.dtype = dtype;
@@ -216,7 +245,7 @@ struct Graph
 
     uint32_t neg(uint32_t id0)
     {
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::NEGATE;
         node.dtype = dtype;
@@ -226,13 +255,13 @@ struct Graph
 
     uint32_t pow(uint32_t id0, uint32_t id1)
     {
-        if (nodes[id0].dtype != nodes[id1].dtype)
+        if (getNode(id0).dtype != getNode(id1).dtype)
         {
             std::stringstream ss;
-            ss << "[Graph.pow] DType mismatch: " << nodes[id0].dtype << ", " << nodes[id1].dtype;
+            ss << "[Graph.pow] DType mismatch: " << getNode(id0).dtype << ", " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::POWER;
         node.dtype = dtype;
@@ -242,13 +271,13 @@ struct Graph
 
     uint32_t sum(uint32_t id0, uint32_t id1)
     {
-        if (nodes[id1].dtype != DType::INT32)
+        if (getNode(id1).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.sum] Expected " << DType::INT32 << " for input 1, got: " << nodes[id1].dtype;
+            ss << "[Graph.sum] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.id = node.id; // redundant but following pattern
         node.opType = OpType::SUM;
@@ -259,13 +288,13 @@ struct Graph
 
     uint32_t max(uint32_t id0, uint32_t id1)
     {
-        if (nodes[id1].dtype != DType::INT32)
+        if (getNode(id1).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.max] Expected " << DType::INT32 << " for input 1, got: " << nodes[id1].dtype;
+            ss << "[Graph.max] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::MAX;
         node.dtype = dtype;
@@ -275,13 +304,13 @@ struct Graph
 
     uint32_t reshape(uint32_t id0, uint32_t id1)
     {
-        if (nodes[id1].dtype != DType::INT32)
+        if (getNode(id1).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.reshape] Expected " << DType::INT32 << " for input 1, got: " << nodes[id1].dtype;
+            ss << "[Graph.reshape] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::RESHAPE;
         node.dtype = dtype;
@@ -291,13 +320,13 @@ struct Graph
 
     uint32_t permute(uint32_t id0, uint32_t id1)
     {
-        if (nodes[id1].dtype != DType::INT32)
+        if (getNode(id1).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.permute] Expected " << DType::INT32 << " for input 1, got: " << nodes[id1].dtype;
+            ss << "[Graph.permute] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::PERMUTE;
         node.dtype = dtype;
@@ -307,25 +336,25 @@ struct Graph
 
     uint32_t slice(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3)
     {
-        if (nodes[id1].dtype != DType::INT32)
+        if (getNode(id1).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.slice] Expected " << DType::INT32 << " for input 1, got: " << nodes[id1].dtype;
+            ss << "[Graph.slice] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        if (nodes[id2].dtype != DType::INT32)
+        if (getNode(id2).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.slice] Expected " << DType::INT32 << " for input 2, got: " << nodes[id2].dtype;
+            ss << "[Graph.slice] Expected " << DType::INT32 << " for input 2, got: " << getNode(id2).dtype;
             Error::throw_err(ss.str());
         }
-        if (nodes[id3].dtype != DType::INT32)
+        if (getNode(id3).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.slice] Expected " << DType::INT32 << " for input 3, got: " << nodes[id3].dtype;
+            ss << "[Graph.slice] Expected " << DType::INT32 << " for input 3, got: " << getNode(id3).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::SLICE;
         node.dtype = dtype;
@@ -335,31 +364,31 @@ struct Graph
 
     uint32_t scatter(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3, uint32_t id4)
     {
-        if (nodes[id2].dtype != DType::INT32)
+        if (getNode(id2).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] Expected INT32 for starts, got: " << toString(nodes[id2].dtype);
+            ss << "[Graph.scatter] Expected INT32 for starts, got: " << toString(getNode(id2).dtype);
             Error::throw_err(ss.str());
         }
-        if (nodes[id3].dtype != DType::INT32)
+        if (getNode(id3).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] Expected INT32 for ends, got: " << toString(nodes[id3].dtype);
+            ss << "[Graph.scatter] Expected INT32 for ends, got: " << toString(getNode(id3).dtype);
             Error::throw_err(ss.str());
         }
-        if (nodes[id4].dtype != DType::INT32)
+        if (getNode(id4).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] Expected INT32 for steps, got: " << toString(nodes[id4].dtype);
+            ss << "[Graph.scatter] Expected INT32 for steps, got: " << toString(getNode(id4).dtype);
             Error::throw_err(ss.str());
         }
-        if (nodes[id0].dtype != nodes[id1].dtype)
+        if (getNode(id0).dtype != getNode(id1).dtype)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] DType mismatch between target (" << toString(nodes[id0].dtype) << ") and updates (" << toString(nodes[id1].dtype) << ")";
+            ss << "[Graph.scatter] DType mismatch between target (" << toString(getNode(id0).dtype) << ") and updates (" << toString(getNode(id1).dtype) << ")";
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::SCATTER;
         node.dtype = dtype;
@@ -376,20 +405,20 @@ struct Graph
         for (int i = 0; i < ids.size(); i++)
         {
             uint32_t id = ids[i];
-            if (nodes[ids[0]].dtype != nodes[id].dtype)
+            if (getNode(ids[0]).dtype != getNode(id).dtype)
             {
                 std::stringstream ss;
-                ss << "[Graph.concat] DType mismatch between tensor 0 and tensor " << i << ": " << nodes[ids[0]].dtype << ", " << nodes[id].dtype;
+                ss << "[Graph.concat] DType mismatch between tensor 0 and tensor " << i << ": " << getNode(ids[0]).dtype << ", " << getNode(id).dtype;
                 Error::throw_err(ss.str());
             }
         }
-        if (nodes[id1].dtype != DType::INT32)
+        if (getNode(id1).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.concat] Expected " << DType::INT32 << " for input 1, got: " << nodes[id1].dtype;
+            ss << "[Graph.concat] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[ids[0]].dtype;
+        DType dtype = getNode(ids[0]).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::CONCAT;
         node.dtype = dtype;
@@ -409,19 +438,19 @@ struct Graph
 
     uint32_t repeat(uint32_t id0, uint32_t repeats_id, uint32_t axis_id)
     {
-        if (nodes[repeats_id].dtype != DType::INT32)
+        if (getNode(repeats_id).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.repeat] Expected " << DType::INT32 << " for input 1, got: " << nodes[repeats_id].dtype;
+            ss << "[Graph.repeat] Expected " << DType::INT32 << " for input 1, got: " << getNode(repeats_id).dtype;
             Error::throw_err(ss.str());
         }
-        if (nodes[axis_id].dtype != DType::INT32)
+        if (getNode(axis_id).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.repeat] Expected " << DType::INT32 << " for input 2, got: " << nodes[axis_id].dtype;
+            ss << "[Graph.repeat] Expected " << DType::INT32 << " for input 2, got: " << getNode(axis_id).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::REPEAT;
         node.dtype = dtype;
@@ -431,22 +460,22 @@ struct Graph
 
     uint32_t arange(uint32_t id1, uint32_t id2, uint32_t id3)
     {
-        if (nodes[id1].dtype != DType::INT32)
+        if (getNode(id1).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.arange] Expected " << DType::INT32 << " for input 1, got: " << nodes[id1].dtype;
+            ss << "[Graph.arange] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
-        if (nodes[id2].dtype != DType::INT32)
+        if (getNode(id2).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.arange] Expected " << DType::INT32 << " for input 2, got: " << nodes[id2].dtype;
+            ss << "[Graph.arange] Expected " << DType::INT32 << " for input 2, got: " << getNode(id2).dtype;
             Error::throw_err(ss.str());
         }
-        if (nodes[id3].dtype != DType::INT32)
+        if (getNode(id3).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.arange] Expected " << DType::INT32 << " for input 3, got: " << nodes[id3].dtype;
+            ss << "[Graph.arange] Expected " << DType::INT32 << " for input 3, got: " << getNode(id3).dtype;
             Error::throw_err(ss.str());
         }
         TensorNode &node = allocateNode();
@@ -458,13 +487,13 @@ struct Graph
 
     uint32_t triu(uint32_t id0, uint32_t k_id)
     {
-        if (nodes[k_id].dtype != DType::INT32)
+        if (getNode(k_id).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.triu] Expected " << DType::INT32 << " for input 1, got: " << nodes[k_id].dtype;
+            ss << "[Graph.triu] Expected " << DType::INT32 << " for input 1, got: " << getNode(k_id).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::TRIU;
         node.dtype = dtype;
@@ -474,13 +503,13 @@ struct Graph
 
     uint32_t gather(uint32_t id0, uint32_t indices_id)
     {
-        if (nodes[indices_id].dtype != DType::INT32)
+        if (getNode(indices_id).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.gather] Expected " << DType::INT32 << " for input 1, got: " << nodes[indices_id].dtype;
+            ss << "[Graph.gather] Expected " << DType::INT32 << " for input 1, got: " << getNode(indices_id).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::GATHER;
         node.dtype = dtype;
@@ -490,13 +519,13 @@ struct Graph
 
     uint32_t fill(uint32_t value_id, uint32_t shape_id)
     {
-        if (nodes[shape_id].dtype != DType::INT32)
+        if (getNode(shape_id).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.fill] Expected " << DType::INT32 << " for input 1, got: " << nodes[shape_id].dtype;
+            ss << "[Graph.fill] Expected " << DType::INT32 << " for input 1, got: " << getNode(shape_id).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[value_id].dtype;
+        DType dtype = getNode(value_id).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::FILL;
         node.dtype = dtype;
@@ -506,7 +535,7 @@ struct Graph
 
     uint32_t copyto(uint32_t id0, Backend backend)
     {
-        DType dtype = nodes[id0].dtype;
+        DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::COPY_TO;
         node.dtype = dtype;
@@ -517,25 +546,25 @@ struct Graph
 
     uint32_t im2col(uint32_t input_id, uint32_t kernel_size_id, uint32_t stride_id, uint32_t padding_id)
     {
-        if (nodes[kernel_size_id].dtype != DType::INT32)
+        if (getNode(kernel_size_id).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.im2col] Expected " << DType::INT32 << " for input 1, got: " << nodes[kernel_size_id].dtype;
+            ss << "[Graph.im2col] Expected " << DType::INT32 << " for input 1, got: " << getNode(kernel_size_id).dtype;
             Error::throw_err(ss.str());
         }
-        if (nodes[stride_id].dtype != DType::INT32)
+        if (getNode(stride_id).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.im2col] Expected " << DType::INT32 << " for input 2, got: " << nodes[stride_id].dtype;
+            ss << "[Graph.im2col] Expected " << DType::INT32 << " for input 2, got: " << getNode(stride_id).dtype;
             Error::throw_err(ss.str());
         }
-        if (nodes[padding_id].dtype != DType::INT32)
+        if (getNode(padding_id).dtype != DType::INT32)
         {
             std::stringstream ss;
-            ss << "[Graph.im2col] Expected " << DType::INT32 << " for input 3, got: " << nodes[padding_id].dtype;
+            ss << "[Graph.im2col] Expected " << DType::INT32 << " for input 3, got: " << getNode(padding_id).dtype;
             Error::throw_err(ss.str());
         }
-        DType dtype = nodes[input_id].dtype;
+        DType dtype = getNode(input_id).dtype;
         TensorNode &node = allocateNode();
         node.opType = OpType::IM2COL;
         node.dtype = dtype;

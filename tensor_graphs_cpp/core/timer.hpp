@@ -19,12 +19,15 @@ struct ProgressTimer
     double minInterval; // seconds
     const char *label;
 
+    bool has_total;
+
     ProgressTimer(size_t total_, const char *label_ = "", double minInterval_ = 2)
         : start(clock::now()),
           last_print(start),
           total(total_),
           minInterval(minInterval_),
-          label(label_) {}
+          label(label_),
+          has_total(total_ > 0) {}
 
     inline void tick(size_t increment = 1)
     {
@@ -33,33 +36,65 @@ struct ProgressTimer
         auto now = clock::now();
         double since_last = std::chrono::duration<double>(now - last_print).count();
 
-        // Always print on completion, otherwise throttle
-        if (since_last < minInterval && current < total)
-            return;
+        // If total is known: always print on completion, otherwise throttle
+        if (has_total)
+        {
+            if (since_last < minInterval && current < total)
+                return;
+        }
+        else
+        {
+            if (since_last < minInterval)
+                return;
+        }
 
         last_print = now;
 
         double elapsed = std::chrono::duration<double>(now - start).count();
         double rate = current / (elapsed > 0.0 ? elapsed : 1e-9);
-        double eta = (total > current) ? (total - current) / rate : 0.0;
 
-        std::cout << label
-                  << current << "/" << total
-                  << " ETA: " << eta << "s\r" << std::flush;
+        std::cout << label;
+
+        if (has_total)
+        {
+            double eta = (total > current) ? (total - current) / rate : 0.0;
+
+            std::cout << current << "/" << total
+                      << " ETA: " << eta << "s";
+        }
+        else
+        {
+            std::cout << current
+                      << " (" << rate << " it/s, "
+                      << elapsed << "s)";
+        }
+
+        std::cout << "\r" << std::flush;
     }
 
     ~ProgressTimer()
     {
         auto end = clock::now();
         double elapsed = std::chrono::duration<double>(end - start).count();
+
         std::cout << "\n"
-                  << label << "done in " << elapsed << "s\n";
+                  << label;
+
+        if (has_total)
+        {
+            std::cout << "done " << current << "/" << total;
+        }
+        else
+        {
+            std::cout << "done " << current;
+        }
+
+        std::cout << " in " << elapsed << "s\n";
     }
 };
 
 #else
 
-// Fully compiled out (no overhead, no branches)
 struct ProgressTimer
 {
     ProgressTimer(size_t, const char * = "", double = 0.0) {}

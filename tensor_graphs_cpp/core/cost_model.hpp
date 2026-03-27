@@ -12,6 +12,7 @@
 #include <iostream>
 #include <cmath>
 #include <limits>
+#include <filesystem>
 
 // TODO: make hardware detection better
 #if defined(USE_CUDA)
@@ -100,6 +101,7 @@ struct CostModel
     {
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS
         const std::string path = "benchmarks/calls.jsonl";
+        std::filesystem::create_directories(std::filesystem::path(path).parent_path());
         {
             std::ifstream inFile(path);
             if (inFile.is_open())

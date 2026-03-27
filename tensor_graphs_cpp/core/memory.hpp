@@ -228,6 +228,20 @@ struct DeviceBuffer
         }
     }
 
+    void freeAllocation(std::list<MemBlock>::iterator it)
+    {
+        if (it == blocks.end() || it->isFree())
+            return;
+
+        allocationMap.erase(it->nodeId);
+        it->nodeId = UINT32_MAX;
+        it->storageType = StorageType::TRANSIENT;
+        it->refCount = 0;
+        it->isLocked = false;
+        it->cost = 0.0f;
+        mergeFreeBlocks();
+    }
+
     void init()
     {
         if (initialized)
@@ -462,16 +476,14 @@ struct DeviceBuffer
         // 2. See if there is space already available
         auto slotIt = findFreeSlot(_sizeBytes);
 
-        // 3. If no space, try evict
+        // 3. If no space, compact free segments once and retry.
         if (slotIt == blocks.end())
         {
-            if (tryEvict(_sizeBytes, parentMap, nodeCosts, globalCacheState))
-            {
-                slotIt = findFreeSlot(_sizeBytes);
-            }
+            mergeFreeBlocks();
+            slotIt = findFreeSlot(_sizeBytes);
         }
 
-        // 4. If still no space, eviction failed.
+        // 4. If still no space, allocation failed.
         if (slotIt == blocks.end())
         {
             Error::throw_err<MemoryAllocationError>("Cannot allocate: Not enough contiguous space.", _sizeBytes);
@@ -592,10 +604,10 @@ struct MemoryManager
                 if (it->second->refCount > 0)
                 {
                     it->second->refCount--;
-                    // If no one else needs this node, unlock it for eviction
+                    // Transients are reclaimed as soon as the last consumer releases them.
                     if (it->second->refCount == 0)
                     {
-                        it->second->isLocked = false;
+                        buf.freeAllocation(it->second);
                     }
                 }
             }
@@ -630,7 +642,7 @@ struct MemoryManager
         }
     }
 
-    TensorView getView(const TensorNode &node) const
+    TensorView getView(const TensorNode &node, const CompiledGraph &compiled = {}) const
     {
         auto it = buffers.find(node.backend);
         if (it == buffers.end())
@@ -639,7 +651,7 @@ struct MemoryManager
         }
 
         const DeviceBuffer &buf = it->second;
-        uint64_t arenaOffset = buf.getOffset(node.id);
+        uint64_t arenaOffset = buf.getOffset(compiled.getLogicalId(node.id));
 
         // If the node already has view metadata (shape/strides), we use it.
         // Otherwise, we create a default contiguous view based on the node's shape.
@@ -710,6 +722,21 @@ struct MemoryManager
     {
         const DeviceBuffer &buf = buffers.at(backend);
         return (buf.allocationMap.find(nodeId) != buf.allocationMap.end());
+    }
+
+    uint64_t getCapacity(Backend backend) const
+    {
+        return buffers.at(backend).sizeBytes;
+    }
+
+    std::unordered_map<Backend, uint64_t> getBufferSizes() const
+    {
+        std::unordered_map<Backend, uint64_t> sizes;
+        for (const auto &pair : buffers)
+        {
+            sizes[pair.first] = pair.second.sizeBytes;
+        }
+        return sizes;
     }
 };
 

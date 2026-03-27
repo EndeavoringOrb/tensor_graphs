@@ -27,31 +27,28 @@ inline void runSliceF32_ND(const std::vector<const void *> &inputs, const std::v
     uint64_t n = countElements(outViews[0].shape);
     const auto &out_shape = outViews[0].shape;
     const auto &in_shape = inViews[0].shape;
+    int ndim = static_cast<int>(out_shape.size());
 
-    std::vector<uint64_t> out_strides(out_shape.size(), 1);
-    std::vector<uint64_t> in_strides(in_shape.size(), 1);
-    for (int d = static_cast<int>(out_shape.size()) - 2; d >= 0; --d)
-        out_strides[d] = out_strides[d + 1] * out_shape[d + 1];
-    for (int d = static_cast<int>(in_shape.size()) - 2; d >= 0; --d)
-        in_strides[d] = in_strides[d + 1] * in_shape[d + 1];
-
-    for (uint64_t idx = 0; idx < n; ++idx)
+    for (uint64_t i = 0; i < n; ++i)
     {
-        uint64_t temp = idx;
-        uint64_t in_idx = 0;
-        for (size_t d = 0; d < out_shape.size(); ++d)
+        uint64_t temp = i;
+        uint64_t in_phys_idx = 0;
+        for (int d = ndim - 1; d >= 0; --d)
         {
-            uint64_t coord = temp / out_strides[d];
-            temp %= out_strides[d];
+            uint32_t coord = temp % out_shape[d];
+            temp /= out_shape[d];
 
-            int32_t s = (d < inViews[1].shape[0]) ? starts[d] : 0;
+            int32_t s = (d < (int)inViews[1].shape[0]) ? starts[d] : 0;
             if (s < 0)
                 s += in_shape[d];
-            int32_t st = (d < inViews[3].shape[0]) ? steps[d] : 1;
+            int32_t st = (d < (int)inViews[3].shape[0]) ? steps[d] : 1;
 
-            in_idx += (s + coord * st) * in_strides[d];
+            uint32_t in_coord = s + coord * st;
+            in_phys_idx += (uint64_t)in_coord * inViews[0].strides[d];
         }
-        std::memcpy(out + idx * elementSize, in + in_idx * elementSize, elementSize);
+
+        uint64_t out_phys_idx = getStridedIndex(i, out_shape, outViews[0].strides);
+        std::memcpy(out + out_phys_idx * elementSize, in + in_phys_idx * elementSize, elementSize);
     }
 }
 

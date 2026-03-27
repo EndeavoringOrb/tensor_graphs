@@ -48,9 +48,30 @@ eclass: {full_operation(input), scatter(sliced_operation, cached_operation)}
 
 Optimizing search space of cached/uncached combinations:
 -max mem check: for each device (sum of memory used by combination + peak memory used by plan < max_memory_bytes)
--maybe do it like knapsack eviction? we just iterate over each node, try add it. for each new node we try cache, we need to evaluate current cost saved and cost saved with new node. To evaluate a given combination, we plan all buckets using that combination and then calculate runtime_score. similar to tryEvict, but we can have an early return if a given combination fails the max mem check. In worst case where nothing returns early, for N nodes, the runtime is O(N*(# window options)) where (# window options) <= N. So I think worst case is O(N^2) which is much better than O(2^N). But this is greedy and might not find the optimal solution.
 -find lower/upper bound on # of cached nodes. this transforms it O(2^N) -> O(2^(N_UPPER-N_LOWER)).
 --to find upper bound: sort nodes by mem size, accumulate from smallest to largest until adding the next one would put you over the memory limit where the memory limit is sum(memory limit for each device)
 --to find lower bound: call plan with no cached nodes, see peak memory it requires, then same as to find upper limit but subtract the memory limit by peak mem
 
 For memory management during execution, we won't need the complex tryEvict logic anymore. Cached nodes will be locked, any other transient nodes will be locked according to refCount. If we can't find a slot, defragment memory. If we still can't find a spot after defrag, then throw error, but that won't happen because the extraction is memory-aware.
+
+to find peak mem:
+```
+current_mem = sum(cached nodes)
+peak_mem = 0
+
+for node in topo_order:
+    // allocate output
+    if node not in cached nodes:
+      current_mem += size[node]
+
+    // parents might die after this op
+    for p in parents[node]:
+        uses[p]--
+        if uses[p] == 0 and p not in cached nodes:
+            current_mem -= size[p]
+
+    peak_mem = max(peak_mem, current_mem)
+```
+
+
+allow user to specify needed output slice??? like for llm decode, we only need 1 token from the output I think

@@ -14,6 +14,8 @@
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/shapes.hpp"
+#include "core/planner.hpp"
+#include "core/session.hpp"
 #include "core/loaders/safetensors.hpp"
 
 #include "generated/kernels_all.gen.hpp"
@@ -100,6 +102,661 @@ bool compareOutputs(const int32_t *ref, const int32_t *test, size_t elements, fl
         }
     }
     return true;
+}
+
+Region makeRegion(std::initializer_list<Dim> dims)
+{
+    Region r;
+    r.region.assign(dims.begin(), dims.end());
+    return r;
+}
+
+bool regionListEquals(const std::vector<Region> &actual, const std::vector<Region> &expected)
+{
+    const auto a = normalizeRegions(actual);
+    const auto e = normalizeRegions(expected);
+    if (a.size() != e.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        if (!regionsMatch(a[i], e[i]))
+            return false;
+    }
+    return true;
+}
+
+void assertRegionListEquals(const std::vector<Region> &actual, const std::vector<Region> &expected, const std::string &label)
+{
+    if (!regionListEquals(actual, expected))
+    {
+        std::stringstream ss;
+        ss << "[RegionTest] " << label << " expected " << encodeRegionList(expected)
+           << " but got " << encodeRegionList(actual);
+        Error::throw_err(ss.str());
+    }
+}
+
+void runRegionMergeTests()
+{
+    {
+        std::vector<Region> actual = mergeRegions({makeRegion({{0, 2}}), makeRegion({{2, 4}})});
+        assertRegionListEquals(actual, {makeRegion({{0, 4}})}, "1D adjacent merge");
+    }
+
+    {
+        std::vector<Region> actual = mergeRegions({
+            makeRegion({{0, 4}, {0, 2}}),
+            makeRegion({{0, 2}, {2, 4}}),
+            makeRegion({{2, 4}, {2, 4}}),
+        });
+        assertRegionListEquals(actual, {
+                                           makeRegion({{0, 4}, {0, 2}}),
+                                           makeRegion({{0, 4}, {2, 4}}),
+                                       },
+                               "two-step 2D merge");
+    }
+
+    {
+        std::vector<Region> actual = mergeRegions({
+            makeRegion({{0, 4}, {0, 2}}),
+            makeRegion({{0, 4}, {2, 4}}),
+        });
+        assertRegionListEquals(actual, {makeRegion({{0, 4}, {0, 4}})}, "full 2D merge");
+    }
+
+    {
+        std::vector<Region> forwardA = mergeRegions({
+            makeRegion({{2, 4}, {0, 1}}),
+            makeRegion({{0, 2}, {0, 1}}),
+        });
+        std::vector<Region> forwardB = mergeRegions({
+            makeRegion({{0, 2}, {0, 1}}),
+            makeRegion({{2, 4}, {0, 1}}),
+        });
+        if (encodeRegionList(forwardA) != encodeRegionList(forwardB))
+        {
+            Error::throw_err("[RegionTest] merge ordering is not deterministic");
+        }
+    }
+}
+
+void runShapePropagationTests()
+{
+    ShapePropagator prop;
+
+    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
+    {
+        TensorNode &node = graph.allocateNode();
+        return graph.constant(node, {(uint32_t)values.size()}, values.data(), DType::INT32);
+    };
+
+    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
+    {
+        TensorNode &node = graph.allocateNode();
+        TensorView view;
+        view.shape = shape;
+        view.strides = TensorView::calcContiguousStrides(shape);
+        view.baseOffset = 0;
+        view.dtype = DType::FLOAT32;
+        return graph.input(node, shape, DType::FLOAT32, view, StorageType::PERSISTENT);
+    };
+
+    {
+        Graph graph;
+        uint32_t x = makeFloatInput(graph, {4, 5});
+        uint32_t axis = makeIntConst(graph, {1});
+        uint32_t sumId = graph.sum(x, axis);
+        prop.inferShapeRecursive(sumId, graph);
+        auto forward = prop.forward(graph.nodes[sumId], graph, {{makeRegion({{1, 3}, {2, 4}})}, {}});
+        assertRegionListEquals(forward, {makeRegion({{1, 3}, {0, 1}})}, "SUM forward");
+        auto backward = prop.backward(graph.nodes[sumId], graph, {makeRegion({{1, 3}, {0, 1}})});
+        assertRegionListEquals(backward[0], {makeRegion({{1, 3}, {0, 5}})}, "SUM backward input");
+        assertRegionListEquals(backward[1], makeFull(graph.nodes[axis].shape), "SUM backward axis");
+    }
+
+    {
+        Graph graph;
+        uint32_t x = makeFloatInput(graph, {4, 5});
+        uint32_t axis = makeIntConst(graph, {1});
+        uint32_t maxId = graph.max(x, axis);
+        prop.inferShapeRecursive(maxId, graph);
+        auto forward = prop.forward(graph.nodes[maxId], graph, {{makeRegion({{0, 4}, {1, 3}})}, {}});
+        assertRegionListEquals(forward, {makeRegion({{0, 4}, {0, 1}})}, "MAX forward");
+        auto backward = prop.backward(graph.nodes[maxId], graph, {makeRegion({{0, 4}, {0, 1}})});
+        assertRegionListEquals(backward[0], {makeRegion({{0, 4}, {0, 5}})}, "MAX backward input");
+    }
+
+    {
+        Graph graph;
+        uint32_t x = makeFloatInput(graph, {2, 3});
+        uint32_t dims = makeIntConst(graph, {1, 0});
+        uint32_t permId = graph.permute(x, dims);
+        prop.inferShapeRecursive(permId, graph);
+        auto forward = prop.forward(graph.nodes[permId], graph,
+                                    {{makeRegion({{0, 1}, {1, 3}}), makeRegion({{1, 2}, {0, 2}})}, {}});
+        assertRegionListEquals(forward, {
+                                           makeRegion({{1, 3}, {0, 1}}),
+                                           makeRegion({{0, 2}, {1, 2}}),
+                                       },
+                               "PERMUTE forward");
+        auto backward = prop.backward(graph.nodes[permId], graph,
+                                      {makeRegion({{1, 3}, {0, 1}}), makeRegion({{0, 2}, {1, 2}})});
+        assertRegionListEquals(backward[0], {
+                                               makeRegion({{0, 1}, {1, 3}}),
+                                               makeRegion({{1, 2}, {0, 2}}),
+                                           },
+                               "PERMUTE backward input");
+    }
+
+    {
+        Graph graph;
+        uint32_t a = makeFloatInput(graph, {2, 2});
+        uint32_t b = makeFloatInput(graph, {2, 2});
+        uint32_t axis = makeIntConst(graph, {0});
+        uint32_t concatId = graph.concat({a, b}, axis);
+        prop.inferShapeRecursive(concatId, graph);
+        auto forward = prop.forward(graph.nodes[concatId], graph,
+                                    {{makeRegion({{0, 1}, {0, 2}})}, {makeRegion({{1, 2}, {1, 2}})}, {}});
+        assertRegionListEquals(forward, {
+                                           makeRegion({{0, 1}, {0, 2}}),
+                                           makeRegion({{3, 4}, {1, 2}}),
+                                       },
+                               "CONCAT forward");
+        auto backward = prop.backward(graph.nodes[concatId], graph,
+                                      {makeRegion({{0, 1}, {0, 2}}), makeRegion({{3, 4}, {1, 2}})});
+        assertRegionListEquals(backward[0], {makeRegion({{0, 1}, {0, 2}})}, "CONCAT backward left");
+        assertRegionListEquals(backward[1], {makeRegion({{1, 2}, {1, 2}})}, "CONCAT backward right");
+    }
+
+    {
+        Graph graph;
+        uint32_t x = makeFloatInput(graph, {2, 2});
+        uint32_t repeats = makeIntConst(graph, {3});
+        uint32_t axis = makeIntConst(graph, {0});
+        uint32_t repeatId = graph.repeat(x, repeats, axis);
+        prop.inferShapeRecursive(repeatId, graph);
+        auto forward = prop.forward(graph.nodes[repeatId], graph, {{makeRegion({{1, 2}, {0, 2}})}, {}, {}});
+        assertRegionListEquals(forward, {makeRegion({{3, 6}, {0, 2}})}, "REPEAT forward");
+        auto backward = prop.backward(graph.nodes[repeatId], graph, {makeRegion({{3, 6}, {0, 2}})});
+        assertRegionListEquals(backward[0], {makeRegion({{1, 2}, {0, 2}})}, "REPEAT backward input");
+    }
+
+    {
+        Graph graph;
+        uint32_t x = makeFloatInput(graph, {8});
+        uint32_t starts = makeIntConst(graph, {2});
+        uint32_t ends = makeIntConst(graph, {6});
+        uint32_t steps = makeIntConst(graph, {1});
+        uint32_t sliceId = graph.slice(x, starts, ends, steps);
+        prop.inferShapeRecursive(sliceId, graph);
+        auto forward = prop.forward(graph.nodes[sliceId], graph, {{makeRegion({{2, 3}}), makeRegion({{5, 6}})}, {}, {}, {}});
+        assertRegionListEquals(forward, {makeRegion({{0, 1}}), makeRegion({{3, 4}})}, "SLICE forward");
+        auto backward = prop.backward(graph.nodes[sliceId], graph, {makeRegion({{0, 1}}), makeRegion({{3, 4}})});
+        assertRegionListEquals(backward[0], {makeRegion({{2, 3}}), makeRegion({{5, 6}})}, "SLICE backward input");
+    }
+
+    {
+        Graph graph;
+        uint32_t target = makeFloatInput(graph, {8});
+        uint32_t updates = makeFloatInput(graph, {4});
+        uint32_t starts = makeIntConst(graph, {2});
+        uint32_t ends = makeIntConst(graph, {6});
+        uint32_t steps = makeIntConst(graph, {1});
+        uint32_t scatterId = graph.scatter(target, updates, starts, ends, steps);
+        prop.inferShapeRecursive(scatterId, graph);
+        auto forward = prop.forward(graph.nodes[scatterId], graph, {{makeRegion({{0, 2}})}, {makeRegion({{1, 3}})}, {}, {}, {}});
+        assertRegionListEquals(forward, {makeRegion({{0, 2}}), makeRegion({{3, 5}})}, "SCATTER forward");
+        auto backward = prop.backward(graph.nodes[scatterId], graph, {makeRegion({{3, 5}})});
+        assertRegionListEquals(backward[0], {makeRegion({{3, 5}})}, "SCATTER backward target");
+        assertRegionListEquals(backward[1], {makeRegion({{1, 3}})}, "SCATTER backward updates");
+    }
+
+    {
+        Graph graph;
+        uint32_t data = makeFloatInput(graph, {4, 3});
+        uint32_t idx = makeIntConst(graph, {2});
+        uint32_t gatherId = graph.gather(data, idx);
+        prop.inferShapeRecursive(gatherId, graph);
+        auto forward = prop.forward(graph.nodes[gatherId], graph, {{makeRegion({{1, 3}, {0, 3}})}, {makeRegion({{0, 2}})}});
+        assertRegionListEquals(forward, {makeRegion({{0, 2}, {0, 3}})}, "GATHER forward");
+        auto backward = prop.backward(graph.nodes[gatherId], graph, {makeRegion({{0, 2}, {1, 3}})});
+        assertRegionListEquals(backward[0], {makeRegion({{2, 3}, {1, 3}})}, "GATHER backward data");
+        assertRegionListEquals(backward[1], {makeRegion({{0, 2}})}, "GATHER backward idx");
+    }
+
+    {
+        Graph graph;
+        uint32_t data = makeFloatInput(graph, {4, 3});
+        uint32_t idxSrc = makeIntConst(graph, {1, 3, 0, 2});
+        uint32_t sliceStart = makeIntConst(graph, {0});
+        uint32_t sliceEnd = makeIntConst(graph, {2});
+        uint32_t sliceStep = makeIntConst(graph, {1});
+        uint32_t idx = graph.slice(idxSrc, sliceStart, sliceEnd, sliceStep);
+        prop.inferShapeRecursive(idx, graph);
+        uint32_t gatherId = graph.gather(data, idx);
+        prop.inferShapeRecursive(gatherId, graph);
+        auto backward = prop.backward(graph.nodes[gatherId], graph, {makeRegion({{0, 2}, {0, 3}})});
+        assertRegionListEquals(backward[0], {makeRegion({{1, 2}, {0, 3}}), makeRegion({{3, 4}, {0, 3}})}, "GATHER backward sliced indices data");
+        assertRegionListEquals(backward[1], {makeRegion({{0, 2}})}, "GATHER backward sliced indices idx");
+    }
+}
+
+void runRewriteTests()
+{
+    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
+    {
+        TensorNode &node = graph.allocateNode();
+        return graph.constant(node, {(uint32_t)values.size()}, values.data(), DType::INT32);
+    };
+
+    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape, Backend backend = Backend::CPU) -> uint32_t
+    {
+        TensorNode &node = graph.allocateNode();
+        TensorView view;
+        view.shape = shape;
+        view.strides = TensorView::calcContiguousStrides(shape);
+        view.baseOffset = 0;
+        view.dtype = DType::FLOAT32;
+        uint32_t id = graph.input(node, shape, DType::FLOAT32, view, StorageType::PERSISTENT);
+        graph.nodes[id].backend = backend;
+        return id;
+    };
+
+    auto findEquivalent = [](const std::vector<uint32_t> &equivalents, const Graph &graph, OpType opType) -> bool
+    {
+        for (uint32_t id : equivalents)
+        {
+            if (id < graph.nodes.size() && graph.nodes[id].opType == opType)
+                return true;
+        }
+        return false;
+    };
+
+    {
+        Graph graph;
+        uint32_t x = makeFloatInput(graph, {2, 2}, Backend::CPU);
+        uint32_t copy = graph.copyto(x, Backend::CUDA);
+        graph.nodes[copy].backend = Backend::CUDA;
+        uint32_t contig = graph.contiguous(copy);
+        graph.nodes[contig].backend = Backend::CUDA;
+
+        Rewrite::CopyToContiguousReorderRule rule(true);
+        std::unordered_map<uint32_t, std::string> memo;
+        std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(contig, graph, {&rule}, memo);
+        if (!findEquivalent(equivalents, graph, OpType::COPY_TO))
+            Error::throw_err("[RewriteTest] contiguous(copyto(x)) should rewrite to copyto(contiguous(x))");
+
+        Graph graph2;
+        uint32_t x2 = makeFloatInput(graph2, {2, 2}, Backend::CPU);
+        uint32_t contig2 = graph2.contiguous(x2);
+        graph2.nodes[contig2].backend = Backend::CPU;
+        uint32_t copy2 = graph2.copyto(contig2, Backend::CUDA);
+        graph2.nodes[copy2].backend = Backend::CUDA;
+
+        std::unordered_map<uint32_t, std::string> memo2;
+        equivalents = Rewrite::generateAllEquivalents(copy2, graph2, {&rule}, memo2);
+        if (!findEquivalent(equivalents, graph2, OpType::CONTIGUOUS))
+            Error::throw_err("[RewriteTest] copyto(contiguous(x)) should rewrite to contiguous(copyto(x))");
+    }
+
+    {
+        Graph graph;
+        uint32_t target = makeFloatInput(graph, {4}, Backend::CPU);
+        uint32_t updates = makeFloatInput(graph, {2}, Backend::CPU);
+        uint32_t starts = makeIntConst(graph, {1});
+        uint32_t ends = makeIntConst(graph, {3});
+        uint32_t steps = makeIntConst(graph, {1});
+
+        uint32_t scatter = graph.scatter(target, updates, starts, ends, steps);
+        graph.nodes[scatter].backend = Backend::CPU;
+        uint32_t copy = graph.copyto(scatter, Backend::CUDA);
+        graph.nodes[copy].backend = Backend::CUDA;
+
+        Rewrite::CopyToScatterReorderRule rule(true);
+        std::unordered_map<uint32_t, std::string> memo;
+        std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(copy, graph, {&rule}, memo);
+        if (!findEquivalent(equivalents, graph, OpType::SCATTER))
+            Error::throw_err("[RewriteTest] copyto(scatter(...)) should rewrite to scatter(copyto(...))");
+
+        Graph graph2;
+        uint32_t target2 = makeFloatInput(graph2, {4}, Backend::CPU);
+        uint32_t updates2 = makeFloatInput(graph2, {2}, Backend::CPU);
+        uint32_t starts2 = makeIntConst(graph2, {1});
+        uint32_t ends2 = makeIntConst(graph2, {3});
+        uint32_t steps2 = makeIntConst(graph2, {1});
+
+        uint32_t copyTarget = graph2.copyto(target2, Backend::CUDA);
+        graph2.nodes[copyTarget].backend = Backend::CUDA;
+        uint32_t scatter2 = graph2.scatter(copyTarget, updates2, starts2, ends2, steps2);
+        graph2.nodes[scatter2].backend = Backend::CUDA;
+
+        std::unordered_map<uint32_t, std::string> memo2;
+        equivalents = Rewrite::generateAllEquivalents(scatter2, graph2, {&rule}, memo2);
+        if (!findEquivalent(equivalents, graph2, OpType::COPY_TO))
+            Error::throw_err("[RewriteTest] scatter(copyto(...)) should rewrite to copyto(scatter(...))");
+    }
+
+    {
+        Graph graph;
+        uint32_t target = makeFloatInput(graph, {4}, Backend::CPU);
+        uint32_t updates1 = makeFloatInput(graph, {2}, Backend::CPU);
+        uint32_t updates2 = makeFloatInput(graph, {2}, Backend::CPU);
+        uint32_t regionStarts = makeIntConst(graph, {1});
+        uint32_t regionEnds = makeIntConst(graph, {3});
+        uint32_t regionSteps = makeIntConst(graph, {1});
+        uint32_t fullStarts = makeIntConst(graph, {0});
+        uint32_t fullEnds = makeIntConst(graph, {2});
+        uint32_t fullSteps = makeIntConst(graph, {1});
+
+        uint32_t scatter1 = graph.scatter(target, updates1, regionStarts, regionEnds, regionSteps);
+        graph.nodes[scatter1].backend = Backend::CPU;
+        uint32_t slice1 = graph.slice(scatter1, regionStarts, regionEnds, regionSteps);
+        graph.nodes[slice1].backend = Backend::CPU;
+        uint32_t scatter2 = graph.scatter(slice1, updates2, fullStarts, fullEnds, fullSteps);
+        graph.nodes[scatter2].backend = Backend::CPU;
+        uint32_t slice2 = graph.slice(scatter2, fullStarts, fullEnds, fullSteps);
+        graph.nodes[slice2].backend = Backend::CPU;
+
+        Rewrite::ScatterSliceElimRule rule;
+        std::unordered_map<uint32_t, std::string> memo;
+        std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(slice2, graph, {&rule}, memo);
+        bool foundUpdates2 = false;
+        for (uint32_t id : equivalents)
+        {
+            if (id == updates2)
+            {
+                foundUpdates2 = true;
+                break;
+            }
+        }
+        if (!foundUpdates2)
+            Error::throw_err("[RewriteTest] expected the outer partial-update chain to collapse to the final update node");
+    }
+}
+
+std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph);
+
+void runExecutorTests()
+{
+    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
+    {
+        TensorNode &node = graph.allocateNode();
+        TensorView view;
+        view.shape = shape;
+        view.strides = TensorView::calcContiguousStrides(shape);
+        view.baseOffset = 0;
+        view.dtype = DType::FLOAT32;
+        return graph.input(node, shape, DType::FLOAT32, view, StorageType::PERSISTENT);
+    };
+
+    Graph graph;
+    uint32_t a = makeFloatInput(graph, {4, 4});
+    uint32_t b = makeFloatInput(graph, {4, 4});
+    uint32_t root = graph.add(a, b);
+
+    ShapePropagator prop;
+    std::vector<uint32_t> topo = topologicalSort({root}, graph);
+    for (uint32_t nodeId : topo)
+        prop.inferShape(nodeId, graph);
+
+    std::random_device rd;
+    std::filesystem::path tempDir = std::filesystem::temp_directory_path() /
+                                    ("tensor_graphs_executor_test_" + std::to_string(rd()));
+    std::filesystem::create_directories(tempDir);
+    std::filesystem::path cachePath = tempDir / "cache.jsonl";
+
+    MemoryManager mem({{Backend::CPU, 1024 * 1024}});
+    Session sess(graph, mem, root, cachePath.string());
+
+    std::vector<float> a0(16, 1.0f);
+    std::vector<float> b0(16, 2.0f);
+    std::vector<float> expected0(16, 3.0f);
+
+    std::cout << "[ExecutorTest] run 1" << std::endl;
+    const float *out0 = static_cast<const float *>(sess.run({{a, a0.data()}, {b, b0.data()}}));
+    std::cout << "[ExecutorTest] run 1 ptr=" << static_cast<const void *>(out0)
+              << " first=" << (out0 ? out0[0] : -999.0f) << std::endl;
+    if (!out0 || !compareOutputs(expected0.data(), out0, expected0.size()))
+        Error::throw_err("[ExecutorTest] first full run returned an incorrect result");
+    std::cout << "[ExecutorTest] run 1 ok" << std::endl;
+
+    std::vector<float> a1 = a0;
+    for (size_t i = 0; i < 4; ++i)
+        a1[i] = 5.0f;
+
+    std::vector<float> expected1 = expected0;
+    for (size_t i = 0; i < 4; ++i)
+        expected1[i] = 7.0f;
+
+    std::cout << "[ExecutorTest] run 2" << std::endl;
+    const float *out1 = static_cast<const float *>(sess.run({{a, a1.data()}, {b, b0.data()}}));
+    if (!out1 || !compareOutputs(expected1.data(), out1, expected1.size()))
+        Error::throw_err("[ExecutorTest] second partial cached run returned an incorrect result");
+    std::cout << "[ExecutorTest] run 2 ok" << std::endl;
+
+    std::cout << "[ExecutorTest] run 3" << std::endl;
+    const float *out2 = static_cast<const float *>(sess.run({{a, a1.data()}, {b, b0.data()}}));
+    if (!out2 || !compareOutputs(expected1.data(), out2, expected1.size()))
+        Error::throw_err("[ExecutorTest] clean cached run returned an incorrect result");
+    std::cout << "[ExecutorTest] run 3 ok" << std::endl;
+}
+
+std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph);
+
+void runMemoryPolicyTests()
+{
+    {
+        MemoryManager mem({{Backend::CPU, 24}});
+        mem.init();
+
+        mem.allocate(Backend::CPU, 1, 8, StorageType::TRANSIENT, 1);
+        mem.allocate(Backend::CPU, 2, 8, StorageType::TRANSIENT, 1);
+        mem.release(Backend::CPU, 1);
+        mem.release(Backend::CPU, 2);
+
+        if (mem.has(Backend::CPU, 1) || mem.has(Backend::CPU, 2))
+            Error::throw_err("[MemoryTest] transient releases should free their allocations");
+
+        mem.allocate(Backend::CPU, 3, 16, StorageType::TRANSIENT, 1);
+        if (!mem.has(Backend::CPU, 3))
+            Error::throw_err("[MemoryTest] allocator should reuse compacted free space without eviction");
+    }
+
+    {
+        MemoryManager mem({{Backend::CPU, 16}});
+        mem.init();
+
+        mem.allocate(Backend::CPU, 10, 8, StorageType::PINNED, 1);
+        mem.release(Backend::CPU, 10);
+        if (!mem.has(Backend::CPU, 10))
+            Error::throw_err("[MemoryTest] pinned allocations should remain resident after release");
+    }
+
+    {
+        Graph graph;
+        TensorNode &aNode = graph.allocateNode();
+        TensorNode &bNode = graph.allocateNode();
+
+        TensorView view;
+        view.shape = {2, 2};
+        view.strides = TensorView::calcContiguousStrides(view.shape);
+        view.baseOffset = 0;
+        view.dtype = DType::FLOAT32;
+        uint32_t a = graph.input(aNode, {2, 2}, DType::FLOAT32, view, StorageType::PERSISTENT);
+        uint32_t b = graph.input(bNode, {2, 2}, DType::FLOAT32, view, StorageType::PERSISTENT);
+        uint32_t root = graph.add(a, b);
+        graph.nodes[root].backend = Backend::CPU;
+
+        ShapePropagator prop;
+        std::vector<uint32_t> topo = topologicalSort({root}, graph);
+        for (uint32_t nodeId : topo)
+            prop.inferShape(nodeId, graph);
+
+        std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions;
+        dirtyOutputRegions[root] = {makeRegion({{0, 2}, {0, 2}})};
+
+        CostModel costModel;
+        costModel.load("benchmarks/records.jsonl");
+        Planner planner(costModel, {{Backend::CPU, 64}});
+        CompiledGraph compiled = planner.plan(root, graph, dirtyOutputRegions, {}, {root});
+
+        if (compiled.instructions.empty())
+            Error::throw_err("[MemoryTest] planner should emit at least one instruction");
+
+        const OpInstruction &inst = compiled.instructions.back();
+        if (inst.logicalNodeId != root || inst.outputStorageType != StorageType::PINNED)
+            Error::throw_err("[MemoryTest] cached root outputs should be marked pinned in the compiled plan");
+    }
+}
+
+std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph);
+
+void runPlannerTests()
+{
+    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
+    {
+        TensorNode &node = graph.allocateNode();
+        return graph.constant(node, {(uint32_t)values.size()}, values.data(), DType::INT32);
+    };
+
+    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
+    {
+        TensorNode &node = graph.allocateNode();
+        TensorView view;
+        view.shape = shape;
+        view.strides = TensorView::calcContiguousStrides(shape);
+        view.baseOffset = 0;
+        view.dtype = DType::FLOAT32;
+        return graph.input(node, shape, DType::FLOAT32, view, StorageType::PERSISTENT);
+    };
+
+    Graph graph;
+    uint32_t a = makeFloatInput(graph, {4, 5});
+    uint32_t b = makeFloatInput(graph, {4, 5});
+    uint32_t c = makeFloatInput(graph, {4, 5});
+    uint32_t d = makeFloatInput(graph, {4, 5});
+    uint32_t e = makeFloatInput(graph, {4, 1});
+    uint32_t axis = makeIntConst(graph, {1});
+
+    uint32_t add0 = graph.add(a, b);
+    uint32_t pow0 = graph.pow(add0, c);
+    uint32_t mul0 = graph.mul(pow0, d);
+    uint32_t sum0 = graph.sum(mul0, axis);
+    uint32_t root = graph.add(sum0, e);
+
+    ShapePropagator prop;
+    std::vector<uint32_t> topo = topologicalSort({root}, graph);
+    for (uint32_t nodeId : topo)
+        prop.inferShape(nodeId, graph);
+
+    std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions;
+    dirtyOutputRegions[root] = {makeRegion({{1, 3}, {0, 1}})};
+
+    PlanningRegionState uncached = derivePlanningRegions(root, graph, dirtyOutputRegions, {});
+    PlanningRegionState cached = derivePlanningRegions(root, graph, dirtyOutputRegions, {pow0, mul0});
+
+    assertRegionListEquals(uncached.needed[root], {makeRegion({{1, 3}, {0, 1}})}, "planner root needed");
+    assertRegionListEquals(uncached.needed[sum0], {makeRegion({{1, 3}, {0, 1}})}, "planner sum needed");
+    assertRegionListEquals(uncached.needed[mul0], {makeRegion({{1, 3}, {0, 5}})}, "planner mul needed");
+    assertRegionListEquals(uncached.needed[pow0], {makeRegion({{1, 3}, {0, 5}})}, "planner pow needed");
+
+    assertRegionListEquals(uncached.recompute[mul0], {makeRegion({{1, 3}, {0, 5}})}, "planner uncached mul recompute");
+    assertRegionListEquals(uncached.recompute[pow0], {makeRegion({{1, 3}, {0, 5}})}, "planner uncached pow recompute");
+
+    if (cached.recompute.count(mul0) != 0 || cached.recompute.count(pow0) != 0)
+    {
+        Error::throw_err("[PlannerTest] cached nodes should not require recompute when their dirty output is clean");
+    }
+
+    assertRegionListEquals(cached.needed[mul0], {makeRegion({{1, 3}, {0, 5}})}, "planner cached mul needed");
+    assertRegionListEquals(cached.needed[pow0], {makeRegion({{1, 3}, {0, 5}})}, "planner cached pow needed");
+
+    {
+        Graph graph2;
+        uint32_t a2 = makeFloatInput(graph2, {4, 5});
+        uint32_t b2 = makeFloatInput(graph2, {4, 5});
+        uint32_t c2 = makeFloatInput(graph2, {4, 5});
+        uint32_t d2 = makeFloatInput(graph2, {4, 5});
+        uint32_t e2 = makeFloatInput(graph2, {4, 1});
+        uint32_t axis2 = makeIntConst(graph2, {1});
+
+        uint32_t add1 = graph2.add(a2, b2);
+        uint32_t pow1 = graph2.pow(add1, c2);
+        uint32_t mul1 = graph2.mul(pow1, d2);
+        uint32_t sum1 = graph2.sum(mul1, axis2);
+        uint32_t root1 = graph2.add(sum1, e2);
+
+        ShapePropagator prop2;
+        std::vector<uint32_t> topo2 = topologicalSort({root1}, graph2);
+        for (uint32_t nodeId : topo2)
+            prop2.inferShape(nodeId, graph2);
+
+        std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions2;
+        std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions2;
+        dirtyOutputRegions2[a2] = {
+            makeRegion({{0, 1}, {0, 5}}),
+            makeRegion({{2, 3}, {0, 5}}),
+        };
+        propagateDirtyRegionsAtomic(topo2, graph2, dirtyOutputRegions2, dirtyInputRegions2);
+
+        PlanningRegionState multiRegionState = derivePlanningRegions(root1, graph2, dirtyOutputRegions2, {mul1});
+        CacheAwarePlanningGraph rebuilt = buildCacheAwarePlanningGraph(root1, graph2, multiRegionState, {mul1});
+
+        const auto partialIt = rebuilt.logicalPartialNodeMap.find(mul1);
+        const auto scatterIt = rebuilt.logicalScatterNodeMap.find(mul1);
+        if (partialIt == rebuilt.logicalPartialNodeMap.end() || partialIt->second.size() != 2)
+            Error::throw_err("[PlannerTest] expected two partial mul kernels for multi-region cached rebuild");
+        if (scatterIt == rebuilt.logicalScatterNodeMap.end() || scatterIt->second.size() != 2)
+            Error::throw_err("[PlannerTest] expected two scatter nodes for multi-region cached rebuild");
+        if (rebuilt.logicalToPhysicalNodeMap.at(mul1) != scatterIt->second.back())
+            Error::throw_err("[PlannerTest] final mul mapping should point at the last scatter node");
+
+        const TensorNode &firstScatter = rebuilt.graph.nodes[scatterIt->second.front()];
+        const TensorNode &finalScatter = rebuilt.graph.nodes[scatterIt->second.back()];
+        if (firstScatter.opType != OpType::SCATTER || firstScatter.parentIds[0] != mul1)
+            Error::throw_err("[PlannerTest] first scatter should target the logical mul placeholder");
+        if (finalScatter.opType != OpType::SCATTER || finalScatter.parentIds[0] != scatterIt->second.front())
+            Error::throw_err("[PlannerTest] scatter chain should preserve intermediate parent links");
+
+        size_t logicalMulConsumers = 0;
+        for (const TensorNode &node : rebuilt.graph.nodes)
+        {
+            for (uint32_t parentId : node.parentIds)
+            {
+                if (parentId == mul1)
+                {
+                    logicalMulConsumers++;
+                    if (node.opType != OpType::SCATTER)
+                        Error::throw_err("[PlannerTest] logical mul placeholder should only feed scatter nodes");
+                }
+            }
+        }
+        if (logicalMulConsumers != 1)
+            Error::throw_err("[PlannerTest] logical mul placeholder should have exactly one direct scatter consumer");
+
+        for (uint32_t partialId : partialIt->second)
+        {
+            const TensorNode &partialNode = rebuilt.graph.nodes[partialId];
+            if (partialNode.opType != OpType::MUL)
+                Error::throw_err("[PlannerTest] cached rebuild produced a non-MUL partial node");
+
+            bool sawSliceChain = false;
+            for (uint32_t parentId : partialNode.parentIds)
+            {
+                const TensorNode &parentNode = rebuilt.graph.nodes[parentId];
+                if (parentNode.opType == OpType::CONTIGUOUS &&
+                    !parentNode.parentIds.empty() &&
+                    rebuilt.graph.nodes[parentNode.parentIds[0]].opType == OpType::SLICE)
+                {
+                    sawSliceChain = true;
+                    break;
+                }
+            }
+
+            if (!sawSliceChain)
+                Error::throw_err("[PlannerTest] expected slice -> contiguous inputs on cached partial MUL rebuild");
+        }
+    }
 }
 
 // Topological sort of graph nodes from given roots
@@ -769,6 +1426,12 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 int main()
 {
     runPythonTests();
+    runRegionMergeTests();
+    runShapePropagationTests();
+    runRewriteTests();
+    runMemoryPolicyTests();
+    runPlannerTests();
+    runExecutorTests();
 
     std::cout << "Running Non-Reference Kernel Tests..." << std::endl;
 

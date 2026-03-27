@@ -10,6 +10,9 @@
 #include <cctype>
 #include <memory>
 #include <list>
+#include <algorithm>
+#include <map>
+#include <iomanip>
 #include <json.hpp>
 using json = nlohmann::json;
 
@@ -123,7 +126,8 @@ enum class Backend : uint32_t
 enum class StorageType : uint32_t
 {
     TRANSIENT,
-    PERSISTENT
+    PERSISTENT,
+    PINNED
 };
 
 struct TensorGraphError : public std::runtime_error
@@ -164,6 +168,17 @@ struct MemoryAllocationError : public TensorGraphError
         : TensorGraphError(msg), requestedSize(size) {}
 };
 
+struct MemoryExhaustedError : public std::runtime_error
+{
+    uint64_t requestedMemory;
+    uint64_t availableMemory;
+
+    MemoryExhaustedError(uint64_t requested, uint64_t available)
+        : std::runtime_error("Memory exhausted: requested " + std::to_string(requested) +
+                             " bytes, available " + std::to_string(available) + " bytes"),
+          requestedMemory(requested), availableMemory(available) {}
+};
+
 struct Dim
 {
     uint32_t start;
@@ -180,6 +195,80 @@ struct Region
     }
 };
 
+inline bool regionsMatch(const Region &r1, const Region &r2);
+
+inline void to_json(json &j, const Region &r)
+{
+    j = json::array();
+    for (const auto &dim : r.region)
+        j.push_back(json::array({dim.start, dim.stop}));
+}
+
+inline void from_json(const json &j, Region &r)
+{
+    r.region.clear();
+    for (const auto &dimJson : j)
+    {
+        r.region.push_back({dimJson[0].get<uint32_t>(), dimJson[1].get<uint32_t>()});
+    }
+}
+
+inline std::string encodeRegion(const Region &r)
+{
+    std::stringstream ss;
+    ss << "(";
+    for (size_t i = 0; i < r.region.size(); ++i)
+    {
+        if (i > 0)
+            ss << ",";
+        ss << r.region[i].start << "-" << r.region[i].stop;
+    }
+    ss << ")";
+    return ss.str();
+}
+
+inline bool isFullRegion(const Region &r, const std::vector<uint32_t> &shape)
+{
+    if (r.region.size() != shape.size())
+        return false;
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (r.region[i].start != 0 || r.region[i].stop != shape[i])
+            return false;
+    }
+    return true;
+}
+
+inline std::vector<Region> normalizeRegions(std::vector<Region> regions)
+{
+    std::sort(regions.begin(), regions.end(), [](const Region &a, const Region &b)
+              {
+                  if (a.region.size() != b.region.size())
+                      return a.region.size() < b.region.size();
+                  for (size_t i = 0; i < a.region.size(); ++i)
+                  {
+                      if (a.region[i].start != b.region[i].start)
+                          return a.region[i].start < b.region[i].start;
+                      if (a.region[i].stop != b.region[i].stop)
+                          return a.region[i].stop < b.region[i].stop;
+                  }
+                  return false; });
+
+    regions.erase(std::unique(regions.begin(), regions.end(), [](const Region &a, const Region &b)
+                              { return regionsMatch(a, b); }),
+                  regions.end());
+    return regions;
+}
+
+inline std::string encodeRegionList(const std::vector<Region> &regions)
+{
+    std::stringstream ss;
+    const std::vector<Region> canonical = normalizeRegions(regions);
+    for (const auto &r : canonical)
+        ss << encodeRegion(r);
+    return ss.str();
+}
+
 inline bool regionsMatch(const Region &r1, const Region &r2)
 {
     if (r1.region.size() != r2.region.size())
@@ -193,6 +282,149 @@ inline bool regionsMatch(const Region &r1, const Region &r2)
         }
     }
     return true;
+}
+
+// Check if two intervals overlap or are adjacent
+inline bool intervalsOverlapOrAdjacent(const Dim &a, const Dim &b)
+{
+    return a.stop >= b.start && b.stop >= a.start;
+}
+
+// Merge overlapping/adjacent intervals in 1D
+// Example: [(0,2), (2,4)] -> [(0,4)]
+inline std::vector<Dim> mergeIntervals1D(const std::vector<Dim> &dims)
+{
+    if (dims.empty())
+        return {};
+
+    std::vector<Dim> sorted = dims;
+    std::sort(sorted.begin(), sorted.end(), [](const Dim &a, const Dim &b)
+              { return a.start < b.start; });
+
+    std::vector<Dim> merged;
+    merged.push_back(sorted[0]);
+
+    for (size_t i = 1; i < sorted.size(); ++i)
+    {
+        Dim &last = merged.back();
+        if (intervalsOverlapOrAdjacent(last, sorted[i]))
+        {
+            // Merge
+            last.stop = std::max(last.stop, sorted[i].stop);
+        }
+        else
+        {
+            merged.push_back(sorted[i]);
+        }
+    }
+    return merged;
+}
+
+inline std::string regionGroupKeyExcludingDim(const Region &region, size_t excludeDim)
+{
+    std::stringstream ss;
+    for (size_t i = 0; i < region.region.size(); ++i)
+    {
+        if (i == excludeDim)
+            continue;
+        ss << region.region[i].start << "-" << region.region[i].stop << "|";
+    }
+    return ss.str();
+}
+
+inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regions, size_t mergeDim)
+{
+    if (regions.empty())
+        return {};
+
+    std::map<std::string, std::vector<Region>> groups;
+    for (const auto &region : regions)
+    {
+        groups[regionGroupKeyExcludingDim(region, mergeDim)].push_back(region);
+    }
+
+    std::vector<Region> merged;
+    for (const auto &groupPair : groups)
+    {
+        std::vector<Region> group = groupPair.second;
+        std::sort(group.begin(), group.end(), [mergeDim](const Region &a, const Region &b)
+                  {
+                      if (a.region.size() != b.region.size())
+                          return a.region.size() < b.region.size();
+                      for (size_t i = 0; i < a.region.size(); ++i)
+                      {
+                          if (i == mergeDim)
+                              continue;
+                          if (a.region[i].start != b.region[i].start)
+                              return a.region[i].start < b.region[i].start;
+                          if (a.region[i].stop != b.region[i].stop)
+                              return a.region[i].stop < b.region[i].stop;
+                      }
+                      if (a.region[mergeDim].start != b.region[mergeDim].start)
+                          return a.region[mergeDim].start < b.region[mergeDim].start;
+                      return a.region[mergeDim].stop < b.region[mergeDim].stop; });
+
+        Region current = group.front();
+        for (size_t i = 1; i < group.size(); ++i)
+        {
+            if (intervalsOverlapOrAdjacent(current.region[mergeDim], group[i].region[mergeDim]))
+            {
+                current.region[mergeDim].start = std::min(current.region[mergeDim].start, group[i].region[mergeDim].start);
+                current.region[mergeDim].stop = std::max(current.region[mergeDim].stop, group[i].region[mergeDim].stop);
+            }
+            else
+            {
+                merged.push_back(current);
+                current = group[i];
+            }
+        }
+        merged.push_back(current);
+    }
+
+    return normalizeRegions(std::move(merged));
+}
+
+// Merge regions by repeatedly coalescing along each dimension when all other
+// dimensions are identical and the merge dimension overlaps or is adjacent.
+//
+// Examples:
+// f([(0,2),(2,4)]) -> [(0,4)]
+// f([((0,4),(0,2)),((0,2),(2,4)),((2,4),(2,4))]) -> [((0,4),(0,2)),((0,4),(2,4))]
+// f([((0,4),(0,2)),((0,4),(2,4))]) -> [((0,4),(0,4))]
+inline std::vector<Region> mergeRegions(const std::vector<Region> &regions)
+{
+    if (regions.empty())
+        return {};
+
+    std::vector<Region> result = normalizeRegions(regions);
+    if (result.empty())
+        return result;
+
+    const size_t rank = result.front().region.size();
+    for (size_t dim = 0; dim < rank; ++dim)
+    {
+        std::vector<Region> next = mergeRegionsAlongDim(result, dim);
+        if (encodeRegionList(next) != encodeRegionList(result))
+        {
+            result = std::move(next);
+            break;
+        }
+    }
+
+    return normalizeRegions(std::move(result));
+}
+
+// Merge two vectors of regions together
+inline std::vector<Region> mergeRegions(const std::vector<Region> &regions1, const std::vector<Region> &regions2)
+{
+    if (regions1.empty())
+        return regions2;
+    if (regions2.empty())
+        return regions1;
+
+    std::vector<Region> combined = regions1;
+    combined.insert(combined.end(), regions2.begin(), regions2.end());
+    return mergeRegions(combined);
 }
 
 struct TensorView
@@ -356,6 +588,8 @@ inline std::string toString(StorageType storage)
         return "TRANSIENT";
     case StorageType::PERSISTENT:
         return "PERSISTENT";
+    case StorageType::PINNED:
+        return "PINNED";
     default:
         return "UNKNOWN_STORAGE";
     }
@@ -368,6 +602,10 @@ inline std::ostream &operator<<(std::ostream &os, StorageType storage) { return 
 
 struct DirtyBucket
 {
+    // Canonical meaning:
+    // - regions[nodeId] is the logical output region list for nodeId.
+    // - inputSlices[nodeId][parentIndex][regionIndex] is the corresponding
+    //   parent slice needed to compute regions[nodeId][regionIndex].
     std::unordered_map<uint32_t, std::vector<Region>> regions;
     std::unordered_map<uint32_t, std::vector<std::vector<Region>>> inputSlices;
 };
@@ -549,16 +787,21 @@ NLOHMANN_JSON_SERIALIZE_ENUM(Backend, {
 NLOHMANN_JSON_SERIALIZE_ENUM(StorageType, {
                                               {StorageType::TRANSIENT, "TRANSIENT"},
                                               {StorageType::PERSISTENT, "PERSISTENT"},
+                                              {StorageType::PINNED, "PINNED"},
                                           })
 
 struct OpInstruction
 {
     uint32_t nodeId;
+    uint32_t logicalNodeId = UINT32_MAX;
     uint64_t fullKernelId = 0;
     std::vector<uint64_t> cachedKernelIds;
     std::vector<uint32_t> inputNodeIds;
     int32_t inplaceInputIndex; // -1 if not inplace
     Backend backend;
+    StorageType outputStorageType = StorageType::TRANSIENT;
+    std::vector<Region> outputRegions;
+    std::vector<std::vector<Region>> inputSlices;
 };
 
 struct CompiledGraph
@@ -567,7 +810,16 @@ struct CompiledGraph
     std::unordered_map<uint32_t, uint32_t> refCounts;
     std::unordered_map<uint32_t, TensorNode> nodesMap;
     std::unordered_map<uint32_t, float> nodeCosts;
-    std::unordered_map<uint32_t, uint32_t> logicalNodeMap;
+    // Canonical direction:
+    // compiled physical node id -> original logical node id.
+    std::unordered_map<uint32_t, uint32_t> physicalToLogicalNodeMap;
+    std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
+
+    const uint32_t getLogicalId(uint32_t id) const
+    {
+        auto it = physicalToLogicalNodeMap.find(id);
+        return it != physicalToLogicalNodeMap.end() ? it->second : id;
+    }
 };
 
 inline void to_json(json &j, const Dim &d) { j = json{d.start, d.stop}; }
@@ -640,15 +892,20 @@ inline void to_json(json &j, const OpInstruction &i)
 
     j = json{
         {"nodeId", i.nodeId},
+        {"logicalNodeId", i.logicalNodeId},
         {"fullKernelId", fullId},
         {"cachedKernelIds", cachedIds},
         {"inputNodeIds", i.inputNodeIds},
         {"inplaceInputIndex", i.inplaceInputIndex},
-        {"backend", i.backend}};
+        {"backend", i.backend},
+        {"outputStorageType", i.outputStorageType},
+        {"outputRegions", i.outputRegions},
+        {"inputSlices", i.inputSlices}};
 }
 inline void from_json(const json &j, OpInstruction &i)
 {
     i.nodeId = j.at("nodeId").get<uint32_t>();
+    i.logicalNodeId = j.contains("logicalNodeId") ? j.at("logicalNodeId").get<uint32_t>() : UINT32_MAX;
     i.fullKernelId = std::stoull(j.at("fullKernelId").get<std::string>(), nullptr, 16);
     i.cachedKernelIds.clear();
     for (const auto &pkStr : j.at("cachedKernelIds"))
@@ -659,6 +916,9 @@ inline void from_json(const json &j, OpInstruction &i)
     i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();
     i.inplaceInputIndex = j.at("inplaceInputIndex").get<int32_t>();
     i.backend = j.at("backend").get<Backend>();
+    i.outputStorageType = j.contains("outputStorageType") ? j.at("outputStorageType").get<StorageType>() : StorageType::TRANSIENT;
+    i.outputRegions = j.contains("outputRegions") ? j.at("outputRegions").get<std::vector<Region>>() : std::vector<Region>{};
+    i.inputSlices = j.contains("inputSlices") ? j.at("inputSlices").get<std::vector<std::vector<Region>>>() : std::vector<std::vector<Region>>{};
 }
 inline void to_json(json &j, const CompiledGraph &cg)
 {
@@ -675,15 +935,20 @@ inline void to_json(json &j, const CompiledGraph &cg)
         nodeCosts[std::to_string(kv.first)] = kv.second;
 
     json logicalMap = json::object();
-    for (const auto &kv : cg.logicalNodeMap)
+    for (const auto &kv : cg.physicalToLogicalNodeMap)
         logicalMap[std::to_string(kv.first)] = kv.second;
+
+    json constStaging = json::object();
+    for (const auto &kv : cg.constantStaging)
+        constStaging[std::to_string(kv.first)] = kv.second;
 
     j = json{
         {"instructions", cg.instructions},
         {"refCounts", refCounts},
         {"nodesMap", nodesMap},
         {"nodeCosts", nodeCosts},
-        {"logicalNodeMap", logicalMap}};
+        {"physicalToLogicalNodeMap", logicalMap},
+        {"constantStaging", constStaging}};
 }
 
 inline void from_json(const json &j, CompiledGraph &cg)
@@ -711,7 +976,11 @@ inline void from_json(const json &j, CompiledGraph &cg)
         }
     }
 
-    cg.logicalNodeMap.clear();
-    for (const auto &item : j.at("logicalNodeMap").items())
-        cg.logicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
+    cg.physicalToLogicalNodeMap.clear();
+    for (const auto &item : j.at("physicalToLogicalNodeMap").items())
+        cg.physicalToLogicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
+
+    cg.constantStaging.clear();
+    for (const auto &item : j.at("constantStaging").items())
+        cg.constantStaging[std::stoul(item.key())] = item.value().get<std::vector<uint8_t>>();
 }
