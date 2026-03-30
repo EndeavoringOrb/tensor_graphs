@@ -19,3 +19,5 @@ PERFORMANCE:
 -specialized kernels
 -parallel graph execution
 -constant folding?
+
+is it properly slicing backward gather for the first gather with gather(embeddings, input_seq)?

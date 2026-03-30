@@ -523,7 +523,7 @@ struct ShapePropagator
             {
                 if (s0[1] != s1[0])
                     Error::throw_err("DOT: K-dim mismatch [M,K] @ [K,N]");
-                graph.nodes[nodeId].shape = {s0[0], s1[1]};
+                graph.getNode(nodeId).shape = {s0[0], s1[1]};
             }
             else if (r0 == 3)
             {
@@ -688,6 +688,9 @@ struct ShapePropagator
                 if (end < 0)
                     end += s0[i];
                 out_shape[i] = std::max(0, (end - start + step - 1) / step);
+                if (out_shape[i] == 0) {
+                    Error::throw_err("Zero-sized dimension in tensor shape!" + toString(graph.getNode(nodeId), graph, ""));
+                }
             }
             graph.getNode(nodeId).shape = out_shape;
             break;
@@ -704,6 +707,12 @@ struct ShapePropagator
             break; // TODO: we should never hit this, only infer shapes for atomic, fused should inherit from atomic that it is replacing
         default:
             break;
+        }
+        for (auto d : graph.getNode(nodeId).shape)
+        {
+            if (d == 0) {
+                Error::throw_err("Zero-sized dimension in tensor shape!" + toString(graph.getNode(nodeId), graph, ""));
+            }
         }
     }
 
@@ -818,8 +827,8 @@ struct ShapePropagator
         if (outputRegions.empty())
             return {{}, {}};
 
-        const auto &sA = graph.nodes[node.parentIds[0]].shape;
-        const auto &sB = graph.nodes[node.parentIds[1]].shape;
+        const auto &sA = graph.getNode(node.parentIds[0]).shape;
+        const auto &sB = graph.getNode(node.parentIds[1]).shape;
 
         std::vector<Region> reqA, reqB;
         for (const auto &outBox : outputRegions)
@@ -855,7 +864,7 @@ struct ShapePropagator
         if (rA.empty())
             return {};
 
-        const auto &sA = graph.nodes[node.parentIds[0]].shape;
+        const auto &sA = graph.getNode(node.parentIds[0]).shape;
         const auto &outShape = node.shape;
 
         std::vector<Region> outBoxes;
@@ -934,8 +943,8 @@ struct ShapePropagator
     {
         if (outputRegions.empty())
             return {{}, {}};
-        const auto &sA = graph.nodes[node.parentIds[0]].shape;
-        const auto &sShape = graph.nodes[node.parentIds[1]].shape;
+        const auto &sA = graph.getNode(node.parentIds[0]).shape;
+        const auto &sShape = graph.getNode(node.parentIds[1]).shape;
 
         std::vector<Region> inBoxes;
         for (const auto &reg : outputRegions)
@@ -1015,7 +1024,7 @@ struct ShapePropagator
         if (rA.empty())
             return {};
 
-        const auto &sA = graph.nodes[node.parentIds[0]].shape;
+        const auto &sA = graph.getNode(node.parentIds[0]).shape;
         int32_t axis = getConstantInt32(node.parentIds[1], graph)[0];
         if (axis < 0)
             axis += sA.size();
@@ -1052,7 +1061,7 @@ struct ShapePropagator
         if (outputRegions.empty())
             return {{}, {}};
 
-        const auto &sA = graph.nodes[node.parentIds[0]].shape;
+        const auto &sA = graph.getNode(node.parentIds[0]).shape;
         int32_t axis = getConstantInt32(node.parentIds[1], graph)[0];
         if (axis < 0)
             axis += sA.size();
@@ -1081,7 +1090,7 @@ struct ShapePropagator
             }
             inBoxes.push_back(inBox);
         }
-        return {mergeRegions(inBoxes), makeFull(graph.nodes[node.parentIds[1]].shape)};
+        return {mergeRegions(inBoxes), makeFull(graph.getNode(node.parentIds[1]).shape)};
     }
 
     std::vector<Region> forwardPermute(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
@@ -1127,7 +1136,7 @@ struct ShapePropagator
             }
             inBoxes.push_back(inBox);
         }
-        return {mergeRegions(inBoxes), makeFull(graph.nodes[node.parentIds[1]].shape)};
+        return {mergeRegions(inBoxes), makeFull(graph.getNode(node.parentIds[1]).shape)};
     }
 
     std::vector<Region> forwardGather(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
@@ -1137,8 +1146,8 @@ struct ShapePropagator
         if (dataReg.empty() && idxReg.empty())
             return {};
 
-        const auto &dataShape = graph.nodes[node.parentIds[0]].shape;
-        const auto &idxShape = graph.nodes[node.parentIds[1]].shape;
+        const auto &dataShape = graph.getNode(node.parentIds[0]).shape;
+        const auto &idxShape = graph.getNode(node.parentIds[1]).shape;
         const auto &outShape = node.shape;
 
         uint32_t idxRank = idxShape.size();
@@ -1209,8 +1218,8 @@ struct ShapePropagator
         if (outputRegions.empty())
             return {{}, {}};
 
-        const auto &dataShape = graph.nodes[node.parentIds[0]].shape;
-        const auto &idxShape = graph.nodes[node.parentIds[1]].shape;
+        const auto &dataShape = graph.getNode(node.parentIds[0]).shape;
+        const auto &idxShape = graph.getNode(node.parentIds[1]).shape;
         uint32_t idxRank = idxShape.size();
         std::vector<Region> dataBoxes;
         std::vector<Region> idxBoxes;
@@ -1321,7 +1330,7 @@ struct ShapePropagator
         uint32_t current_offset = 0;
         for (size_t i = 0; i < node.parentIds.size() - 1; ++i)
         {
-            const auto &pShape = graph.nodes[node.parentIds[i]].shape;
+            const auto &pShape = graph.getNode(node.parentIds[i]).shape;
             const auto &pReg = parentRegions[i];
             for (const auto &region : pReg)
             {
@@ -1353,7 +1362,7 @@ struct ShapePropagator
         uint32_t current_offset = 0;
         for (size_t i = 0; i < node.parentIds.size() - 1; ++i)
         {
-            const auto &pShape = graph.nodes[node.parentIds[i]].shape;
+            const auto &pShape = graph.getNode(node.parentIds[i]).shape;
             uint32_t in_dim = pShape[axis];
             uint32_t in_end = current_offset + in_dim;
 
@@ -1376,7 +1385,7 @@ struct ShapePropagator
             res[i] = mergeRegions(inBoxes);
             current_offset = in_end;
         }
-        res.back() = makeFull(graph.nodes[node.parentIds.back()].shape);
+        res.back() = makeFull(graph.getNode(node.parentIds.back()).shape);
         return res;
     }
 
@@ -1386,7 +1395,7 @@ struct ShapePropagator
         if (rA.empty())
             return {};
 
-        const auto &sA = graph.nodes[node.parentIds[0]].shape;
+        const auto &sA = graph.getNode(node.parentIds[0]).shape;
 
         int32_t repeats = getConstantInt32(node.parentIds[1], graph)[0];
         int32_t axis = getConstantInt32(node.parentIds[2], graph)[0];
@@ -1410,7 +1419,7 @@ struct ShapePropagator
         if (outputRegions.empty())
             return {{}, {}, {}};
 
-        const auto &sA = graph.nodes[node.parentIds[0]].shape;
+        const auto &sA = graph.getNode(node.parentIds[0]).shape;
         int32_t repeats = getConstantInt32(node.parentIds[1], graph)[0];
         int32_t axis = getConstantInt32(node.parentIds[2], graph)[0];
         if (axis < 0)
@@ -1425,7 +1434,7 @@ struct ShapePropagator
             inBoxes.push_back(inBox);
         }
 
-        return {mergeRegions(inBoxes), makeFull(graph.nodes[node.parentIds[1]].shape), makeFull(graph.nodes[node.parentIds[2]].shape)};
+        return {mergeRegions(inBoxes), makeFull(graph.getNode(node.parentIds[1]).shape), makeFull(graph.getNode(node.parentIds[2]).shape)};
     }
 
     std::vector<Region> forwardSlice(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
@@ -1434,7 +1443,7 @@ struct ShapePropagator
         if (rA.empty())
             return {};
 
-        const auto &shape = graph.nodes[node.parentIds[0]].shape;
+        const auto &shape = graph.getNode(node.parentIds[0]).shape;
         auto starts = getConstantInt32(node.parentIds[1], graph);
         auto ends = getConstantInt32(node.parentIds[2], graph);
         auto steps = getConstantInt32(node.parentIds[3], graph);
@@ -1450,7 +1459,7 @@ struct ShapePropagator
         if (outputRegions.empty())
             return {{}, {}, {}, {}};
 
-        const auto &shape = graph.nodes[node.parentIds[0]].shape;
+        const auto &shape = graph.getNode(node.parentIds[0]).shape;
         auto starts = getConstantInt32(node.parentIds[1], graph);
         auto ends = getConstantInt32(node.parentIds[2], graph);
         auto steps = getConstantInt32(node.parentIds[3], graph);
@@ -1459,7 +1468,7 @@ struct ShapePropagator
         for (const auto &region : outputRegions)
             inBoxes.push_back(mapSliceRegionBackward(region, shape, starts, ends, steps));
 
-        return {mergeRegions(inBoxes), makeFull(graph.nodes[node.parentIds[1]].shape), makeFull(graph.nodes[node.parentIds[2]].shape), makeFull(graph.nodes[node.parentIds[3]].shape)};
+        return {mergeRegions(inBoxes), makeFull(graph.getNode(node.parentIds[1]).shape), makeFull(graph.getNode(node.parentIds[2]).shape), makeFull(graph.getNode(node.parentIds[3]).shape)};
     }
 
     std::vector<Region> forwardScatter(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
@@ -1469,7 +1478,7 @@ struct ShapePropagator
         if (targetRegions.empty() && updateRegions.empty())
             return {};
 
-        const auto &targetShape = graph.nodes[node.parentIds[0]].shape;
+        const auto &targetShape = graph.getNode(node.parentIds[0]).shape;
         auto starts = getConstantInt32(node.parentIds[2], graph);
         auto ends = getConstantInt32(node.parentIds[3], graph);
         auto steps = getConstantInt32(node.parentIds[4], graph);
@@ -1487,7 +1496,7 @@ struct ShapePropagator
         if (outputRegions.empty())
             return {{}, {}, {}, {}, {}};
 
-        const auto &targetShape = graph.nodes[node.parentIds[0]].shape;
+        const auto &targetShape = graph.getNode(node.parentIds[0]).shape;
         auto starts = getConstantInt32(node.parentIds[2], graph);
         auto ends = getConstantInt32(node.parentIds[3], graph);
         auto steps = getConstantInt32(node.parentIds[4], graph);
@@ -1500,14 +1509,14 @@ struct ShapePropagator
             updateBoxes.push_back(mapSliceRegionForward(region, targetShape, starts, ends, steps));
         }
 
-        return {mergeRegions(targetBoxes), mergeRegions(updateBoxes), makeFull(graph.nodes[node.parentIds[2]].shape), makeFull(graph.nodes[node.parentIds[3]].shape), makeFull(graph.nodes[node.parentIds[4]].shape)};
+        return {mergeRegions(targetBoxes), mergeRegions(updateBoxes), makeFull(graph.getNode(node.parentIds[2]).shape), makeFull(graph.getNode(node.parentIds[3]).shape), makeFull(graph.getNode(node.parentIds[4]).shape)};
     }
 
     std::vector<Region> forward(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
     {
         for (uint32_t pid : node.parentIds)
         {
-            if (pid >= graph.nodes.size())
+            if (!graph.hasNode(pid))
             {
                 std::stringstream ss;
                 ss << "[ShapePropagator.forward] Invalid parent ID " << pid << " for OpType " << node.opType;
@@ -1583,7 +1592,7 @@ struct ShapePropagator
         case OpType::CONTIGUOUS:
             return backwardElementwise(node, outputRegions);
         case OpType::TRIU:
-            return {mergeRegions(outputRegions), makeFull(graph.nodes[node.parentIds[1]].shape)};
+            return {mergeRegions(outputRegions), makeFull(graph.getNode(node.parentIds[1]).shape)};
         case OpType::SCATTER:
             return backwardScatter(node, graph, outputRegions);
         case OpType::DOT:

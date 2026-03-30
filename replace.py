@@ -6,25 +6,25 @@ def parse_patches(patch_file):
     with open(patch_file, "r", encoding="utf-8") as f:
         content = f.read()
 
-    chunks = content.split("====")
-    if len(chunks) % 2 != 0:
-        raise ValueError("Patch file must contain pairs of old/new separated by ====")
+    chunks = [c.strip() for c in content.split("```")]
+    chunks = [c for c in chunks if c]
 
     patches = []
-    for i in range(0, len(chunks), 2):
-        old = chunks[i].strip("\n")
-        new = chunks[i + 1].strip("\n")
-        patches.append((old, new))
+    for c in chunks:
+        parts = c.split("\n====\n")
+        if len(parts) != 2:
+            print(f"Patch must contain pairs of old/new separated by ====: {c}")
+            continue
+        old, new = parts
+        old = old[old.find("\n"):]
+        patches.append((old.strip(), new.strip()))
 
     return patches
 
 
 def process_file(path, patches, dry_run=False):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            original = f.read()
-    except Exception:
-        return False
+    with open(path, "r", encoding="utf-8") as f:
+        original = f.read()
 
     modified = original
     any_change = False
@@ -62,12 +62,12 @@ def walk_and_apply(root, patches, extensions=None, dry_run=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("directory")
-    parser.add_argument("patch_file")
+    parser.add_argument("--directory", default="tensor_graphs_cpp")
+    parser.add_argument("--patch_file", default="tmp.md")
     parser.add_argument("--ext", nargs="*", default=[".cpp", ".hpp", ".cu"])
     parser.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args()
 
     patches = parse_patches(args.patch_file)
-    walk_and_apply(args.directory, patches, args.ext, args.dry_run)
+    walk_and_apply(args.directory, patches, args.ext, False)

@@ -471,6 +471,16 @@ struct TensorNode
     TensorView view;
     StorageType storageType = StorageType::TRANSIENT;
     std::string contentHash;
+
+    Region fullRegion() const
+    {
+        Region region = Region();
+        for (const uint32_t dimSize : shape)
+        {
+            region.region.push_back({0, dimSize});
+        }
+        return region;
+    }
 };
 
 inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape, DType dtype)
@@ -800,8 +810,6 @@ struct OpInstruction
     int32_t inplaceInputIndex; // -1 if not inplace
     Backend backend;
     StorageType outputStorageType = StorageType::TRANSIENT;
-    std::vector<Region> outputRegions;
-    std::vector<std::vector<Region>> inputSlices;
 };
 
 struct CompiledGraph
@@ -898,9 +906,7 @@ inline void to_json(json &j, const OpInstruction &i)
         {"inputNodeIds", i.inputNodeIds},
         {"inplaceInputIndex", i.inplaceInputIndex},
         {"backend", i.backend},
-        {"outputStorageType", i.outputStorageType},
-        {"outputRegions", i.outputRegions},
-        {"inputSlices", i.inputSlices}};
+        {"outputStorageType", i.outputStorageType}};
 }
 inline void from_json(const json &j, OpInstruction &i)
 {
@@ -917,8 +923,6 @@ inline void from_json(const json &j, OpInstruction &i)
     i.inplaceInputIndex = j.at("inplaceInputIndex").get<int32_t>();
     i.backend = j.at("backend").get<Backend>();
     i.outputStorageType = j.contains("outputStorageType") ? j.at("outputStorageType").get<StorageType>() : StorageType::TRANSIENT;
-    i.outputRegions = j.contains("outputRegions") ? j.at("outputRegions").get<std::vector<Region>>() : std::vector<Region>{};
-    i.inputSlices = j.contains("inputSlices") ? j.at("inputSlices").get<std::vector<std::vector<Region>>>() : std::vector<std::vector<Region>>{};
 }
 inline void to_json(json &j, const CompiledGraph &cg)
 {

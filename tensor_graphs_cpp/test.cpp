@@ -207,11 +207,11 @@ void runShapePropagationTests()
         uint32_t axis = makeIntConst(graph, {1});
         uint32_t sumId = graph.sum(x, axis);
         prop.inferShapeRecursive(sumId, graph);
-        auto forward = prop.forward(graph.nodes[sumId], graph, {{makeRegion({{1, 3}, {2, 4}})}, {}});
+        auto forward = prop.forward(graph.getNode(sumId), graph, {{makeRegion({{1, 3}, {2, 4}})}, {}});
         assertRegionListEquals(forward, {makeRegion({{1, 3}, {0, 1}})}, "SUM forward");
-        auto backward = prop.backward(graph.nodes[sumId], graph, {makeRegion({{1, 3}, {0, 1}})});
+        auto backward = prop.backward(graph.getNode(sumId), graph, {makeRegion({{1, 3}, {0, 1}})});
         assertRegionListEquals(backward[0], {makeRegion({{1, 3}, {0, 5}})}, "SUM backward input");
-        assertRegionListEquals(backward[1], makeFull(graph.nodes[axis].shape), "SUM backward axis");
+        assertRegionListEquals(backward[1], makeFull(graph.getNode(axis).shape), "SUM backward axis");
     }
 
     {
@@ -220,9 +220,9 @@ void runShapePropagationTests()
         uint32_t axis = makeIntConst(graph, {1});
         uint32_t maxId = graph.max(x, axis);
         prop.inferShapeRecursive(maxId, graph);
-        auto forward = prop.forward(graph.nodes[maxId], graph, {{makeRegion({{0, 4}, {1, 3}})}, {}});
+        auto forward = prop.forward(graph.getNode(maxId), graph, {{makeRegion({{0, 4}, {1, 3}})}, {}});
         assertRegionListEquals(forward, {makeRegion({{0, 4}, {0, 1}})}, "MAX forward");
-        auto backward = prop.backward(graph.nodes[maxId], graph, {makeRegion({{0, 4}, {0, 1}})});
+        auto backward = prop.backward(graph.getNode(maxId), graph, {makeRegion({{0, 4}, {0, 1}})});
         assertRegionListEquals(backward[0], {makeRegion({{0, 4}, {0, 5}})}, "MAX backward input");
     }
 
@@ -232,14 +232,14 @@ void runShapePropagationTests()
         uint32_t dims = makeIntConst(graph, {1, 0});
         uint32_t permId = graph.permute(x, dims);
         prop.inferShapeRecursive(permId, graph);
-        auto forward = prop.forward(graph.nodes[permId], graph,
+        auto forward = prop.forward(graph.getNode(permId), graph,
                                     {{makeRegion({{0, 1}, {1, 3}}), makeRegion({{1, 2}, {0, 2}})}, {}});
         assertRegionListEquals(forward, {
                                            makeRegion({{1, 3}, {0, 1}}),
                                            makeRegion({{0, 2}, {1, 2}}),
                                        },
                                "PERMUTE forward");
-        auto backward = prop.backward(graph.nodes[permId], graph,
+        auto backward = prop.backward(graph.getNode(permId), graph,
                                       {makeRegion({{1, 3}, {0, 1}}), makeRegion({{0, 2}, {1, 2}})});
         assertRegionListEquals(backward[0], {
                                                makeRegion({{0, 1}, {1, 3}}),
@@ -255,14 +255,14 @@ void runShapePropagationTests()
         uint32_t axis = makeIntConst(graph, {0});
         uint32_t concatId = graph.concat({a, b}, axis);
         prop.inferShapeRecursive(concatId, graph);
-        auto forward = prop.forward(graph.nodes[concatId], graph,
+        auto forward = prop.forward(graph.getNode(concatId), graph,
                                     {{makeRegion({{0, 1}, {0, 2}})}, {makeRegion({{1, 2}, {1, 2}})}, {}});
         assertRegionListEquals(forward, {
                                            makeRegion({{0, 1}, {0, 2}}),
                                            makeRegion({{3, 4}, {1, 2}}),
                                        },
                                "CONCAT forward");
-        auto backward = prop.backward(graph.nodes[concatId], graph,
+        auto backward = prop.backward(graph.getNode(concatId), graph,
                                       {makeRegion({{0, 1}, {0, 2}}), makeRegion({{3, 4}, {1, 2}})});
         assertRegionListEquals(backward[0], {makeRegion({{0, 1}, {0, 2}})}, "CONCAT backward left");
         assertRegionListEquals(backward[1], {makeRegion({{1, 2}, {1, 2}})}, "CONCAT backward right");
@@ -275,9 +275,9 @@ void runShapePropagationTests()
         uint32_t axis = makeIntConst(graph, {0});
         uint32_t repeatId = graph.repeat(x, repeats, axis);
         prop.inferShapeRecursive(repeatId, graph);
-        auto forward = prop.forward(graph.nodes[repeatId], graph, {{makeRegion({{1, 2}, {0, 2}})}, {}, {}});
+        auto forward = prop.forward(graph.getNode(repeatId), graph, {{makeRegion({{1, 2}, {0, 2}})}, {}, {}});
         assertRegionListEquals(forward, {makeRegion({{3, 6}, {0, 2}})}, "REPEAT forward");
-        auto backward = prop.backward(graph.nodes[repeatId], graph, {makeRegion({{3, 6}, {0, 2}})});
+        auto backward = prop.backward(graph.getNode(repeatId), graph, {makeRegion({{3, 6}, {0, 2}})});
         assertRegionListEquals(backward[0], {makeRegion({{1, 2}, {0, 2}})}, "REPEAT backward input");
     }
 
@@ -289,9 +289,9 @@ void runShapePropagationTests()
         uint32_t steps = makeIntConst(graph, {1});
         uint32_t sliceId = graph.slice(x, starts, ends, steps);
         prop.inferShapeRecursive(sliceId, graph);
-        auto forward = prop.forward(graph.nodes[sliceId], graph, {{makeRegion({{2, 3}}), makeRegion({{5, 6}})}, {}, {}, {}});
+        auto forward = prop.forward(graph.getNode(sliceId), graph, {{makeRegion({{2, 3}}), makeRegion({{5, 6}})}, {}, {}, {}});
         assertRegionListEquals(forward, {makeRegion({{0, 1}}), makeRegion({{3, 4}})}, "SLICE forward");
-        auto backward = prop.backward(graph.nodes[sliceId], graph, {makeRegion({{0, 1}}), makeRegion({{3, 4}})});
+        auto backward = prop.backward(graph.getNode(sliceId), graph, {makeRegion({{0, 1}}), makeRegion({{3, 4}})});
         assertRegionListEquals(backward[0], {makeRegion({{2, 3}}), makeRegion({{5, 6}})}, "SLICE backward input");
     }
 
@@ -304,9 +304,9 @@ void runShapePropagationTests()
         uint32_t steps = makeIntConst(graph, {1});
         uint32_t scatterId = graph.scatter(target, updates, starts, ends, steps);
         prop.inferShapeRecursive(scatterId, graph);
-        auto forward = prop.forward(graph.nodes[scatterId], graph, {{makeRegion({{0, 2}})}, {makeRegion({{1, 3}})}, {}, {}, {}});
+        auto forward = prop.forward(graph.getNode(scatterId), graph, {{makeRegion({{0, 2}})}, {makeRegion({{1, 3}})}, {}, {}, {}});
         assertRegionListEquals(forward, {makeRegion({{0, 2}}), makeRegion({{3, 5}})}, "SCATTER forward");
-        auto backward = prop.backward(graph.nodes[scatterId], graph, {makeRegion({{3, 5}})});
+        auto backward = prop.backward(graph.getNode(scatterId), graph, {makeRegion({{3, 5}})});
         assertRegionListEquals(backward[0], {makeRegion({{3, 5}})}, "SCATTER backward target");
         assertRegionListEquals(backward[1], {makeRegion({{1, 3}})}, "SCATTER backward updates");
     }
@@ -317,9 +317,9 @@ void runShapePropagationTests()
         uint32_t idx = makeIntConst(graph, {2});
         uint32_t gatherId = graph.gather(data, idx);
         prop.inferShapeRecursive(gatherId, graph);
-        auto forward = prop.forward(graph.nodes[gatherId], graph, {{makeRegion({{1, 3}, {0, 3}})}, {makeRegion({{0, 2}})}});
+        auto forward = prop.forward(graph.getNode(gatherId), graph, {{makeRegion({{1, 3}, {0, 3}})}, {makeRegion({{0, 2}})}});
         assertRegionListEquals(forward, {makeRegion({{0, 2}, {0, 3}})}, "GATHER forward");
-        auto backward = prop.backward(graph.nodes[gatherId], graph, {makeRegion({{0, 2}, {1, 3}})});
+        auto backward = prop.backward(graph.getNode(gatherId), graph, {makeRegion({{0, 2}, {1, 3}})});
         assertRegionListEquals(backward[0], {makeRegion({{2, 3}, {1, 3}})}, "GATHER backward data");
         assertRegionListEquals(backward[1], {makeRegion({{0, 2}})}, "GATHER backward idx");
     }
@@ -335,7 +335,7 @@ void runShapePropagationTests()
         prop.inferShapeRecursive(idx, graph);
         uint32_t gatherId = graph.gather(data, idx);
         prop.inferShapeRecursive(gatherId, graph);
-        auto backward = prop.backward(graph.nodes[gatherId], graph, {makeRegion({{0, 2}, {0, 3}})});
+        auto backward = prop.backward(graph.getNode(gatherId), graph, {makeRegion({{0, 2}, {0, 3}})});
         assertRegionListEquals(backward[0], {makeRegion({{1, 2}, {0, 3}}), makeRegion({{3, 4}, {0, 3}})}, "GATHER backward sliced indices data");
         assertRegionListEquals(backward[1], {makeRegion({{0, 2}})}, "GATHER backward sliced indices idx");
     }
@@ -358,7 +358,7 @@ void runRewriteTests()
         view.baseOffset = 0;
         view.dtype = DType::FLOAT32;
         uint32_t id = graph.input(node, shape, DType::FLOAT32, view, StorageType::PERSISTENT);
-        graph.nodes[id].backend = backend;
+        graph.getNode(id).backend = backend;
         return id;
     };
 
@@ -366,7 +366,7 @@ void runRewriteTests()
     {
         for (uint32_t id : equivalents)
         {
-            if (id < graph.nodes.size() && graph.nodes[id].opType == opType)
+            if (id < graph.nodes.size() && graph.getNode(id).opType == opType)
                 return true;
         }
         return false;
@@ -376,9 +376,9 @@ void runRewriteTests()
         Graph graph;
         uint32_t x = makeFloatInput(graph, {2, 2}, Backend::CPU);
         uint32_t copy = graph.copyto(x, Backend::CUDA);
-        graph.nodes[copy].backend = Backend::CUDA;
+        graph.getNode(copy).backend = Backend::CUDA;
         uint32_t contig = graph.contiguous(copy);
-        graph.nodes[contig].backend = Backend::CUDA;
+        graph.getNode(contig).backend = Backend::CUDA;
 
         Rewrite::CopyToContiguousReorderRule rule(true);
         std::unordered_map<uint32_t, std::string> memo;
@@ -408,9 +408,9 @@ void runRewriteTests()
         uint32_t steps = makeIntConst(graph, {1});
 
         uint32_t scatter = graph.scatter(target, updates, starts, ends, steps);
-        graph.nodes[scatter].backend = Backend::CPU;
+        graph.getNode(scatter).backend = Backend::CPU;
         uint32_t copy = graph.copyto(scatter, Backend::CUDA);
-        graph.nodes[copy].backend = Backend::CUDA;
+        graph.getNode(copy).backend = Backend::CUDA;
 
         Rewrite::CopyToScatterReorderRule rule(true);
         std::unordered_map<uint32_t, std::string> memo;
@@ -434,43 +434,6 @@ void runRewriteTests()
         equivalents = Rewrite::generateAllEquivalents(scatter2, graph2, {&rule}, memo2);
         if (!findEquivalent(equivalents, graph2, OpType::COPY_TO))
             Error::throw_err("[RewriteTest] scatter(copyto(...)) should rewrite to copyto(scatter(...))");
-    }
-
-    {
-        Graph graph;
-        uint32_t target = makeFloatInput(graph, {4}, Backend::CPU);
-        uint32_t updates1 = makeFloatInput(graph, {2}, Backend::CPU);
-        uint32_t updates2 = makeFloatInput(graph, {2}, Backend::CPU);
-        uint32_t regionStarts = makeIntConst(graph, {1});
-        uint32_t regionEnds = makeIntConst(graph, {3});
-        uint32_t regionSteps = makeIntConst(graph, {1});
-        uint32_t fullStarts = makeIntConst(graph, {0});
-        uint32_t fullEnds = makeIntConst(graph, {2});
-        uint32_t fullSteps = makeIntConst(graph, {1});
-
-        uint32_t scatter1 = graph.scatter(target, updates1, regionStarts, regionEnds, regionSteps);
-        graph.nodes[scatter1].backend = Backend::CPU;
-        uint32_t slice1 = graph.slice(scatter1, regionStarts, regionEnds, regionSteps);
-        graph.nodes[slice1].backend = Backend::CPU;
-        uint32_t scatter2 = graph.scatter(slice1, updates2, fullStarts, fullEnds, fullSteps);
-        graph.nodes[scatter2].backend = Backend::CPU;
-        uint32_t slice2 = graph.slice(scatter2, fullStarts, fullEnds, fullSteps);
-        graph.nodes[slice2].backend = Backend::CPU;
-
-        Rewrite::ScatterSliceElimRule rule;
-        std::unordered_map<uint32_t, std::string> memo;
-        std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(slice2, graph, {&rule}, memo);
-        bool foundUpdates2 = false;
-        for (uint32_t id : equivalents)
-        {
-            if (id == updates2)
-            {
-                foundUpdates2 = true;
-                break;
-            }
-        }
-        if (!foundUpdates2)
-            Error::throw_err("[RewriteTest] expected the outer partial-update chain to collapse to the final update node");
     }
 }
 
@@ -585,7 +548,7 @@ void runMemoryPolicyTests()
         uint32_t a = graph.input(aNode, {2, 2}, DType::FLOAT32, view, StorageType::PERSISTENT);
         uint32_t b = graph.input(bNode, {2, 2}, DType::FLOAT32, view, StorageType::PERSISTENT);
         uint32_t root = graph.add(a, b);
-        graph.nodes[root].backend = Backend::CPU;
+        graph.getNode(root).backend = Backend::CPU;
 
         ShapePropagator prop;
         std::vector<uint32_t> topo = topologicalSort({root}, graph);
@@ -711,16 +674,17 @@ void runPlannerTests()
         if (rebuilt.logicalToPhysicalNodeMap.at(mul1) != scatterIt->second.back())
             Error::throw_err("[PlannerTest] final mul mapping should point at the last scatter node");
 
-        const TensorNode &firstScatter = rebuilt.graph.nodes[scatterIt->second.front()];
-        const TensorNode &finalScatter = rebuilt.graph.nodes[scatterIt->second.back()];
+        const TensorNode &firstScatter = rebuilt.graph.getNode(scatterIt->second.front());
+        const TensorNode &finalScatter = rebuilt.graph.getNode(scatterIt->second.back());
         if (firstScatter.opType != OpType::SCATTER || firstScatter.parentIds[0] != mul1)
             Error::throw_err("[PlannerTest] first scatter should target the logical mul placeholder");
         if (finalScatter.opType != OpType::SCATTER || finalScatter.parentIds[0] != scatterIt->second.front())
             Error::throw_err("[PlannerTest] scatter chain should preserve intermediate parent links");
 
         size_t logicalMulConsumers = 0;
-        for (const TensorNode &node : rebuilt.graph.nodes)
+        for (const auto &pair : rebuilt.graph.nodes)
         {
+            const TensorNode &node = pair.second;
             for (uint32_t parentId : node.parentIds)
             {
                 if (parentId == mul1)
@@ -736,17 +700,17 @@ void runPlannerTests()
 
         for (uint32_t partialId : partialIt->second)
         {
-            const TensorNode &partialNode = rebuilt.graph.nodes[partialId];
+            const TensorNode &partialNode = rebuilt.graph.getNode(partialId);
             if (partialNode.opType != OpType::MUL)
                 Error::throw_err("[PlannerTest] cached rebuild produced a non-MUL partial node");
 
             bool sawSliceChain = false;
             for (uint32_t parentId : partialNode.parentIds)
             {
-                const TensorNode &parentNode = rebuilt.graph.nodes[parentId];
+                const TensorNode &parentNode = rebuilt.graph.getNode(parentId);
                 if (parentNode.opType == OpType::CONTIGUOUS &&
                     !parentNode.parentIds.empty() &&
-                    rebuilt.graph.nodes[parentNode.parentIds[0]].opType == OpType::SLICE)
+                    rebuilt.graph.getNode(parentNode.parentIds[0]).opType == OpType::SLICE)
                 {
                     sawSliceChain = true;
                     break;
@@ -770,9 +734,9 @@ std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const 
         if (visited.count(node))
             return;
         visited.insert(node);
-        if (node < graph.nodes.size())
+        if (graph.hasNode(node))
         {
-            for (uint32_t pid : graph.nodes[node].parentIds)
+            for (uint32_t pid : graph.getNode(node).parentIds)
             {
                 self(self, pid);
             }
@@ -843,7 +807,7 @@ std::vector<float> executeReferenceGraph(
 
     for (uint32_t nodeId : topo)
     {
-        const TensorNode &node = graph.nodes[nodeId];
+        const TensorNode &node = graph.getNode(nodeId);
         uint64_t elemSize = getDTypeSize(node.dtype);
 
         // INPUT nodes: copy from input data or constant staging
@@ -899,7 +863,7 @@ std::vector<float> executeReferenceGraph(
             }
             inputPtrs.push_back(resultIt->second.data());
             inputViews.push_back(views[pid]);
-            TensorNode inNode = graph.nodes[pid];
+            TensorNode inNode = graph.getNode(pid);
             inNode.view = views[pid];
             inputNodes.push_back(inNode);
         }
@@ -956,31 +920,31 @@ std::vector<float> executeReferenceGraph(
         kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
     }
 
-    uint64_t numRootElems = countElements(graph.nodes[rootId].shape);
+    uint64_t numRootElems = countElements(graph.getNode(rootId).shape);
     std::vector<float> finalOut(numRootElems, 0.0f);
     TensorView rootView = views[rootId];
 
     for (size_t i = 0; i < numRootElems; ++i)
     {
         uint64_t idx = getStridedIndex(i, rootView.shape, rootView.strides);
-        if (graph.nodes[rootId].dtype == DType::FLOAT32)
+        if (graph.getNode(rootId).dtype == DType::FLOAT32)
         {
             std::memcpy(&finalOut[i], results[rootId].data() + idx * 4, 4);
         }
-        else if (graph.nodes[rootId].dtype == DType::INT32)
+        else if (graph.getNode(rootId).dtype == DType::INT32)
         {
             int32_t val;
             std::memcpy(&val, results[rootId].data() + idx * 4, 4);
             finalOut[i] = static_cast<float>(val);
         }
-        else if (graph.nodes[rootId].dtype == DType::BF16)
+        else if (graph.getNode(rootId).dtype == DType::BF16)
         {
             uint16_t val;
             std::memcpy(&val, results[rootId].data() + idx * 2, 2);
             uint32_t f32_bits = static_cast<uint32_t>(val) << 16;
             std::memcpy(&finalOut[i], &f32_bits, 4);
         }
-        else if (graph.nodes[rootId].dtype == DType::BOOL)
+        else if (graph.getNode(rootId).dtype == DType::BOOL)
         {
             uint8_t val;
             std::memcpy(&val, results[rootId].data() + idx, 1);
@@ -1490,7 +1454,7 @@ int main()
 
             // ========== FUSED KERNEL EXECUTION ==========
             // Execute fused kernel directly
-            std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refOutput.size(), refGraph.nodes[rootId].shape);
+            std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refOutput.size(), refGraph.getNode(rootId).shape);
 
             // ========== COMPARE ==========
             if (fusedOutput.size() != elements)

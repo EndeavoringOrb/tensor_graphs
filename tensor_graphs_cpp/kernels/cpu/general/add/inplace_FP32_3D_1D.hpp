@@ -78,8 +78,8 @@ inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     uint32_t id3D = inputs[0];
     uint32_t id1D = inputs[1];
 
-    auto shape3D = graph.nodes[id3D].shape;
-    auto shape1D = graph.nodes[id1D].shape;
+    auto shape3D = graph.getNode(id3D).shape;
+    auto shape1D = graph.getNode(id1D).shape;
 
     // 1. Reshape 1D -> [1, 1, D]
     int32_t reshape_dims[] = {1, 1, (int32_t)shape1D[0]};

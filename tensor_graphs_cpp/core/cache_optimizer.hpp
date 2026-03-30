@@ -115,9 +115,9 @@ static std::unordered_map<Backend, uint64_t> calculateCachedResidentMemoryByBack
     std::unordered_map<Backend, uint64_t> residentByBackend;
     for (uint32_t nodeId : cachedNodes)
     {
-        if (nodeId >= graph.nodes.size())
+        if (!graph.hasNode(nodeId))
             continue;
-        const TensorNode &node = graph.nodes[nodeId];
+        const TensorNode &node = graph.getNode(nodeId);
         if (node.shape.empty())
             continue;
         residentByBackend[node.backend] += getSizeBytes(node.shape, node.dtype);
@@ -130,8 +130,9 @@ static std::vector<uint32_t> collectCacheableNodes(const Graph &graph)
     std::vector<uint32_t> cacheableNodes;
     cacheableNodes.reserve(graph.nodes.size());
 
-    for (const TensorNode &node : graph.nodes)
+    for (const auto &pair : graph.nodes)
     {
+        const TensorNode &node = pair.second;
         if (node.opType == OpType::INPUT || node.shape.empty())
             continue;
         cacheableNodes.push_back(node.id);
@@ -148,9 +149,9 @@ static std::unordered_map<uint32_t, uint64_t> buildLogicalNodeMemorySizes(
     std::unordered_map<uint32_t, uint64_t> nodeMemorySizes;
     for (uint32_t nodeId : nodeIds)
     {
-        if (nodeId >= graph.nodes.size())
+        if (!graph.hasNode(nodeId))
             continue;
-        const TensorNode &node = graph.nodes[nodeId];
+        const TensorNode &node = graph.getNode(nodeId);
         if (node.shape.empty())
             continue;
         nodeMemorySizes[nodeId] = getSizeBytes(node.shape, node.dtype);
@@ -217,7 +218,7 @@ static size_t findUpperBound(
         auto sizeIt = nodeMemorySizes.find(nodeId);
         if (sizeIt == nodeMemorySizes.end())
             continue;
-        sizesByBackend[graph.nodes[nodeId].backend].push_back(sizeIt->second);
+        sizesByBackend[graph.getNode(nodeId).backend].push_back(sizeIt->second);
     }
 
     size_t upperBound = 0;
@@ -352,10 +353,6 @@ static const BucketPlanMemoEntry &getOrPlanBucket(
     catch (const MemoryExhaustedError &)
     {
         entry.memoryFailed = true;
-    }
-    catch (const std::exception &e)
-    {
-        std::cerr << "[CacheOptimizer] Plan failed for bucket " << bucket.key << ": " << e.what() << std::endl;
     }
 
     return memo.emplace(memoKey, std::move(entry)).first->second;

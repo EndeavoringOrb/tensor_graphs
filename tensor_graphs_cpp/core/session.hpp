@@ -168,8 +168,9 @@ private:
     std::vector<uint32_t> collectInputNodeIds() const
     {
         std::vector<uint32_t> inputNodeIds;
-        for (const TensorNode &node : graph.nodes)
+        for (const auto &pair : graph.nodes)
         {
+            const TensorNode &node = pair.second;
             if (node.opType != OpType::INPUT)
                 continue;
             if (graph.weightSources.count(node.id) != 0 || graph.constantStaging.count(node.id) != 0)
@@ -190,9 +191,9 @@ private:
             if (visited.count(nodeId))
                 return;
             visited.insert(nodeId);
-            if (nodeId < graph.nodes.size())
+            if (graph.hasNode(nodeId))
             {
-                for (uint32_t parentId : graph.nodes[nodeId].parentIds)
+                for (uint32_t parentId : graph.getNode(nodeId).parentIds)
                     self(self, parentId);
             }
             atomicTopo.push_back(nodeId);
@@ -202,15 +203,15 @@ private:
         ShapePropagator prop;
         for (uint32_t nodeId : atomicTopo)
         {
-            if (nodeId >= graph.nodes.size())
+            if (!graph.hasNode(nodeId))
                 continue;
 
             prop.inferShape(nodeId, graph);
-            if (graph.nodes[nodeId].view.shape.empty() && !graph.nodes[nodeId].shape.empty())
+            if (graph.getNode(nodeId).view.shape.empty() && !graph.getNode(nodeId).shape.empty())
             {
-                graph.nodes[nodeId].view.shape = graph.nodes[nodeId].shape;
-                graph.nodes[nodeId].view.strides = TensorView::calcContiguousStrides(graph.nodes[nodeId].shape);
-                graph.nodes[nodeId].view.dtype = graph.nodes[nodeId].dtype;
+                graph.getNode(nodeId).view.shape = graph.getNode(nodeId).shape;
+                graph.getNode(nodeId).view.strides = TensorView::calcContiguousStrides(graph.getNode(nodeId).shape);
+                graph.getNode(nodeId).view.dtype = graph.getNode(nodeId).dtype;
             }
         }
 
@@ -267,12 +268,12 @@ private:
 
         for (uint32_t nodeId : inputNodeIds)
         {
-            if (graph.nodes[nodeId].opType != OpType::INPUT)
+            if (graph.getNode(nodeId).opType != OpType::INPUT)
                 continue;
 
             InputOption option;
             option.nodeId = nodeId;
-            for (uint32_t dimLen : graph.nodes[nodeId].shape)
+            for (uint32_t dimLen : graph.getNode(nodeId).shape)
             {
                 option.dimSlices.push_back(generateSlicesForDim(dimLen, nBucketSizes));
             }
@@ -282,7 +283,7 @@ private:
         if (inputOptions.empty())
         {
             DirtyBucket bucket;
-            bucket.regions[rootId] = makeFull(graph.nodes[rootId].shape);
+            bucket.regions[rootId] = makeFull(graph.getNode(rootId).shape);
             return {{"", bucket}};
         }
 
@@ -593,7 +594,7 @@ public:
 
             for (size_t d = 0; d < box.region.size(); ++d)
             {
-                uint32_t dimLen = graph.nodes[nodeId].shape[d];
+                uint32_t dimLen = graph.getNode(nodeId).shape[d];
                 uint32_t start = box.region[d].start;
                 uint32_t stop = box.region[d].stop;
 
@@ -645,7 +646,7 @@ public:
             uint32_t nodeId = pair.first;
             const void *newData = pair.second;
 
-            if (graph.nodes[nodeId].opType != OpType::INPUT)
+            if (graph.getNode(nodeId).opType != OpType::INPUT)
                 continue;
 
             const void *oldData = nullptr;
@@ -655,7 +656,7 @@ public:
                 oldData = prevIt->second.data();
             }
 
-            auto diff = computeInputDiff(oldData, newData, graph.nodes[nodeId].shape, graph.nodes[nodeId].dtype);
+            auto diff = computeInputDiff(oldData, newData, graph.getNode(nodeId).shape, graph.getNode(nodeId).dtype);
             std::cout << "Input Diffs " << pair.first << ": " << std::endl;
             for (uint32_t i = 0; i < diff.size(); i++)
             {
@@ -667,26 +668,27 @@ public:
                 inputDiffs[nodeId] = diff;
             }
 
-            uint64_t sizeBytes = getSizeBytes(graph.nodes[nodeId].shape, graph.nodes[nodeId].dtype);
+            uint64_t sizeBytes = getSizeBytes(graph.getNode(nodeId).shape, graph.getNode(nodeId).dtype);
             auto &stored = previousInputData[nodeId];
             stored.resize(sizeBytes);
             std::memcpy(stored.data(), newData, sizeBytes);
 
-            memManager.write(graph.nodes[nodeId].backend, nodeId, newData, sizeBytes);
+            memManager.write(graph.getNode(nodeId).backend, nodeId, newData, sizeBytes);
         }
 
         auto canonicalDiffs = canonicalizeInputDiffs(inputDiffs);
         if (inputDiffs.empty())
         {
-            const TensorNode &rootNode = graph.nodes.at(rootId);
+            const TensorNode &rootNode = graph.getNode(rootId);
             if (memManager.has(rootNode.backend, rootId))
             {
                 return memManager.read(rootNode.backend, rootId);
             }
         }
 
-        for (const TensorNode &node : graph.nodes)
+        for (const auto &pair : graph.nodes)
         {
+            const TensorNode &node = pair.second;
             if (node.opType == OpType::INPUT && graph.weightSources.count(node.id) == 0 && graph.constantStaging.count(node.id) == 0)
             {
                 if (canonicalDiffs.find(node.id) == canonicalDiffs.end())
@@ -898,7 +900,7 @@ public:
             std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
             for (uint32_t inId : inputNodeIds)
             {
-                fullInputRegions[inId] = makeFull(graph.nodes[inId].shape);
+                fullInputRegions[inId] = makeFull(graph.getNode(inId).shape);
             }
             std::string fullKey = encodeCacheKey(fullInputRegions);
             // Override the optimized plan for the full key with the baseline (recompute-all) plan
@@ -934,6 +936,7 @@ public:
         persistCache();
     }
 
+    // TODO: fall back to larger buckets if exact match doesn't exist
     const CompiledGraph *lookupCache(
         const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions) const
     {

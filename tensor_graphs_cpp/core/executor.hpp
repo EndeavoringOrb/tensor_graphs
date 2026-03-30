@@ -33,7 +33,6 @@ public:
         }
 
         uint32_t instIdx = 0;
-        uint32_t nPartial = 0;
         for (size_t idx = 0; idx < compiled.instructions.size(); ++idx)
         {
             const OpInstruction &inst = compiled.instructions[idx];
@@ -106,136 +105,49 @@ public:
             outBlockIt->refCount = compiled.refCounts.at(inst.nodeId);
             outBlockIt->isLocked = true;
 
-            std::vector<Region> computeRegions;
-            std::vector<uint64_t> computeKernels;
+            const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.fullKernelId);
 
-            if (!inst.outputRegions.empty())
+            std::vector<const void *> kernelInputs;
+            std::vector<TensorView> kernelInViews;
+
+            for (size_t pIdx = 0; pIdx < inst.inputNodeIds.size(); ++pIdx)
             {
-                computeRegions = inst.outputRegions;
-                computeKernels = inst.cachedKernelIds;
-                nPartial++;
+                kernelInputs.push_back(resolvedInputs[pIdx].ptr);
+                kernelInViews.push_back(resolvedInputs[pIdx].view);
+            }
+
+            std::vector<void *> kernelOutputs;
+            std::vector<TensorView> kernelOutViews;
+
+            TensorView outView;
+            uint64_t arenaOffset = outBuf.getOffset(outputMemId);
+            if (node.view.shape.empty())
+            {
+                outView.baseOffset = arenaOffset;
+                outView.shape = node.shape;
+                outView.strides = TensorView::calcContiguousStrides(node.shape);
+                outView.dtype = node.dtype;
             }
             else
             {
-                Region full;
-                for (uint32_t dim : node.shape)
-                {
-                    full.region.push_back({0, dim});
-                }
-                computeRegions = {full};
-                computeKernels = {inst.fullKernelId};
+                outView = node.view;
+                outView.baseOffset += arenaOffset;
             }
 
-            const std::vector<std::vector<Region>> *instructionSlices = !inst.inputSlices.empty() ? &inst.inputSlices : nullptr;
+            kernelOutputs.push_back(outBuf.arena_ptr + outView.baseOffset);
+            kernelOutViews.push_back(outView);
 
-            for (size_t rIdx = 0; rIdx < computeRegions.size(); ++rIdx)
+            for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {
-                const Region &outRegion = computeRegions[rIdx];
-                if (computeKernels[rIdx] == 0)
-                {
-                    std::cout << "\n[Executor Error] Found kernel UID 0 for node " << inst.nodeId
-                              << " at region index " << rIdx << "\n"
-                              << toString(node) << std::endl;
-                    std::cout << "Cached kernel IDs size: " << inst.cachedKernelIds.size() << std::endl;
-                    for (size_t i = 0; i < inst.cachedKernelIds.size(); ++i)
-                    {
-                        std::cout << "  [" << i << "]: " << inst.cachedKernelIds[i] << std::endl;
-                    }
-                }
-                const KernelEntry &kernel = KernelRegistry::get().getKernel(computeKernels[rIdx]);
-
-                const bool fullRegion = isFullRegion(outRegion, node.shape);
-
-                std::vector<const void *> kernelInputs;
-                std::vector<TensorView> kernelInViews;
-
-                for (size_t pIdx = 0; pIdx < inst.inputNodeIds.size(); ++pIdx)
-                {
-                    uint32_t inId = inst.inputNodeIds[pIdx];
-                    const TensorNode &inNode = compiled.nodesMap.at(inId);
-                    auto &inBuf = memManager.buffers.at(inNode.backend);
-
-                    TensorView inView = resolvedInputs[pIdx].view;
-
-                    if (!fullRegion && instructionSlices && pIdx < instructionSlices->size() && rIdx < (*instructionSlices)[pIdx].size() && !(*instructionSlices)[pIdx][rIdx].empty())
-                    {
-                        const Region &inputSlice = (*instructionSlices)[pIdx][rIdx];
-
-                        TensorView slicedView = inView;
-                        uint64_t elementSize = getDTypeSize(inNode.dtype);
-
-                        uint64_t extraOffset = 0;
-                        for (size_t d = 0; d < inputSlice.region.size() && d < slicedView.strides.size(); ++d)
-                        {
-                            extraOffset += inputSlice.region[d].start * static_cast<uint64_t>(slicedView.strides[d]);
-                        }
-                        slicedView.baseOffset += extraOffset * elementSize;
-
-                        for (size_t d = 0; d < inputSlice.region.size() && d < slicedView.shape.size(); ++d)
-                        {
-                            slicedView.shape[d] = inputSlice.region[d].stop - inputSlice.region[d].start;
-                        }
-                        kernelInputs.push_back(inBuf.arena_ptr + slicedView.baseOffset);
-                        kernelInViews.push_back(slicedView);
-                    }
-                    else
-                    {
-                        kernelInputs.push_back(resolvedInputs[pIdx].ptr);
-                        kernelInViews.push_back(inView);
-                    }
-                }
-
-                std::vector<void *> kernelOutputs;
-                std::vector<TensorView> kernelOutViews;
-
-                TensorView outView;
-                {
-                    uint64_t arenaOffset = outBuf.getOffset(outputMemId);
-                    if (node.view.shape.empty())
-                    {
-                        outView.baseOffset = arenaOffset;
-                        outView.shape = node.shape;
-                        outView.strides = TensorView::calcContiguousStrides(node.shape);
-                        outView.dtype = node.dtype;
-                    }
-                    else
-                    {
-                        outView = node.view;
-                        outView.baseOffset += arenaOffset;
-                    }
-                }
-
-                if (!fullRegion)
-                {
-                    uint64_t elementSize = getDTypeSize(node.dtype);
-                    uint64_t extraOffset = 0;
-                    for (size_t d = 0; d < outRegion.region.size() && d < outView.strides.size(); ++d)
-                    {
-                        extraOffset += outRegion.region[d].start * static_cast<uint64_t>(outView.strides[d]);
-                    }
-                    outView.baseOffset += extraOffset * elementSize;
-
-                    for (size_t d = 0; d < outRegion.region.size() && d < outView.shape.size(); ++d)
-                    {
-                        outView.shape[d] = outRegion.region[d].stop - outRegion.region[d].start;
-                    }
-                }
-
-                kernelOutputs.push_back(outBuf.arena_ptr + outView.baseOffset);
-                kernelOutViews.push_back(outView);
-
-                for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
-                {
-                    const uint32_t inId = inst.inputNodeIds[i];
-                    TensorNode debugInput = compiled.nodesMap.at(inId);
-                    debugInput.id = resolvedInputs[i].allocationId;
-                    Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId));
-                }
-                kernel.run(kernelInputs, kernelOutputs, kernelInViews, kernelOutViews);
-                TensorNode debugOutput = compiled.nodesMap.at(inst.nodeId);
-                debugOutput.id = outputMemId;
-                Debug::checkNan(debugOutput, memManager, "Kernel Output: " + std::to_string(inst.nodeId));
+                const uint32_t inId = inst.inputNodeIds[i];
+                TensorNode debugInput = compiled.nodesMap.at(inId);
+                debugInput.id = resolvedInputs[i].allocationId;
+                Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId));
             }
+            kernel.run(kernelInputs, kernelOutputs, kernelInViews, kernelOutViews);
+            TensorNode debugOutput = compiled.nodesMap.at(inst.nodeId);
+            debugOutput.id = outputMemId;
+            Debug::checkNan(debugOutput, memManager, "Kernel Output: " + std::to_string(inst.nodeId));
 
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {
@@ -260,7 +172,7 @@ public:
                 }
             }
 
-            std::cout << instIdx << "/" << compiled.instructions.size() << ", #part: " << nPartial << "\r" << std::flush;
+            std::cout << instIdx << "/" << compiled.instructions.size() << "\r" << std::flush;
         }
     }
 };

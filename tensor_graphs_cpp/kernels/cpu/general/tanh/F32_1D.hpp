@@ -43,7 +43,7 @@ uint32_t refFactoryTanh(const std::vector<uint32_t> &inputs, Graph &graph)
     if (inputs.size() != 1)
         Error::throw_err("Tanh requires 1 input");
     uint32_t x = inputs[0];
-    uint32_t n_elements = graph.nodes[x].shape[0];
+    uint32_t n_elements = graph.getNode(x).shape[0];
 
     // Create Constant 'e' as a scalar
     float e_val = 2.718281828459f;

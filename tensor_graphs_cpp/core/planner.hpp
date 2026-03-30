@@ -30,9 +30,9 @@ void propagateDirtyRegionsAtomic(
 
     for (uint32_t nodeId : topo)
     {
-        if (nodeId >= graph.nodes.size())
+        if (!graph.hasNode(nodeId))
             continue;
-        const TensorNode &node = graph.nodes[nodeId];
+        const TensorNode &node = graph.getNode(nodeId);
         if (node.opType == OpType::INPUT)
             continue;
 
@@ -95,7 +95,7 @@ static void updateNeeded(
     ShapePropagator &prop,
     std::unordered_map<uint32_t, std::vector<Region>> &needed)
 {
-    if (rootId >= graph.nodes.size())
+    if (!graph.hasNode(rootId))
         return;
 
     std::vector<uint32_t> worklist = {rootId};
@@ -107,10 +107,10 @@ static void updateNeeded(
         worklist.pop_back();
         queued.erase(nodeId);
 
-        if (nodeId >= graph.nodes.size())
+        if (!graph.hasNode(nodeId))
             continue;
 
-        const TensorNode &node = graph.nodes[nodeId];
+        const TensorNode &node = graph.getNode(nodeId);
         if (node.opType == OpType::INPUT)
             continue;
 
@@ -125,10 +125,10 @@ static void updateNeeded(
                 continue;
 
             uint32_t parentId = node.parentIds[i];
-            if (parentId >= graph.nodes.size())
+            if (!graph.hasNode(parentId))
                 continue;
 
-            const TensorNode &parentNode = graph.nodes[parentId];
+            const TensorNode &parentNode = graph.getNode(parentId);
             if (parentNode.opType == OpType::INPUT)
                 continue;
 
@@ -290,6 +290,8 @@ private:
             return parentIdx == 0;
         case OpType::SCATTER:
             return parentIdx < 2;
+        case OpType::GATHER:
+            return parentIdx == 1;
         default:
             return true;
         }
@@ -297,7 +299,7 @@ private:
 
     void convertLogicalNodeToPlaceholder(uint32_t logicalId)
     {
-        TensorNode &placeholder = result.graph.nodes[logicalId];
+        TensorNode &placeholder = result.graph.getNode(logicalId);
         placeholder.opType = OpType::INPUT;
         placeholder.parentIds.clear();
         placeholder.view.shape = placeholder.shape;
@@ -319,7 +321,7 @@ private:
 
     void retargetPartialShapeInputs(uint32_t newNodeId, const TensorNode &sourceNode, const Region &outRegion)
     {
-        TensorNode &newNode = result.graph.nodes[newNodeId];
+        TensorNode &newNode = result.graph.getNode(newNodeId);
         const std::vector<uint32_t> outShape = getRegionShape(outRegion);
 
         if (sourceNode.opType == OpType::RESHAPE || sourceNode.opType == OpType::FILL)
@@ -392,21 +394,44 @@ private:
         if (inputRegion.empty())
             return physicalParentId;
 
-        const TensorNode &sourceParent = sourceGraph.nodes[sourceNode.parentIds[parentIdx]];
+        const TensorNode &sourceParent = sourceGraph.getNode(sourceNode.parentIds[parentIdx]);
         uint32_t safeParentId = result.graph.contiguous(physicalParentId);
-        if (isFullRegion(inputRegion, sourceParent.shape))
-            return safeParentId;
 
-        uint32_t startsId = addRegionStarts(inputRegion);
-        uint32_t endsId = addRegionEnds(inputRegion);
-        uint32_t stepsId = addRegionSteps(inputRegion);
+        Region producerRegion;
+        auto it = result.physicalOutputRegions.find(physicalParentId);
+        if (it != result.physicalOutputRegions.end())
+        {
+            producerRegion = it->second.front();
+        }
+        else
+        {
+            auto fullRegions = makeFull(sourceParent.shape);
+            if (!fullRegions.empty())
+            {
+                producerRegion = fullRegions.front();
+            }
+        }
+
+        Region localSlice = inputRegion;
+        for (size_t d = 0; d < localSlice.region.size(); ++d)
+        {
+            if (d < producerRegion.region.size())
+            {
+                localSlice.region[d].start -= producerRegion.region[d].start;
+                localSlice.region[d].stop -= producerRegion.region[d].start;
+            }
+        }
+
+        uint32_t startsId = addRegionStarts(localSlice);
+        uint32_t endsId = addRegionEnds(localSlice);
+        uint32_t stepsId = addRegionSteps(localSlice);
         uint32_t sliceId = result.graph.slice(safeParentId, startsId, endsId, stepsId);
         return result.graph.contiguous(sliceId);
     }
 
     PartialCloneResult buildPartialClone(uint32_t logicalId, const Region &outRegion)
     {
-        const TensorNode &sourceNode = sourceGraph.nodes[logicalId];
+        const TensorNode &sourceNode = sourceGraph.getNode(logicalId);
         std::vector<std::vector<Region>> parentRegions = prop.backward(sourceNode, sourceGraph, {outRegion});
 
         std::vector<uint32_t> partialParents;
@@ -420,7 +445,7 @@ private:
         }
 
         uint32_t partialId = cloneNode(sourceNode, partialParents);
-        TensorNode &partialNode = result.graph.nodes[partialId];
+        TensorNode &partialNode = result.graph.getNode(partialId);
         partialNode.shape = getRegionShape(outRegion);
         partialNode.view.shape.clear();
         partialNode.view.strides.clear();
@@ -439,10 +464,10 @@ private:
         if (memoIt != memoizedPhysicalIds.end())
             return memoIt->second;
 
-        if (logicalId >= sourceGraph.nodes.size())
+        if (!sourceGraph.hasNode(logicalId))
             return logicalId;
 
-        const TensorNode &sourceNode = sourceGraph.nodes[logicalId];
+        const TensorNode &sourceNode = sourceGraph.getNode(logicalId);
         if (sourceNode.opType == OpType::INPUT)
         {
             result.logicalToPhysicalNodeMap[logicalId] = logicalId;
@@ -478,42 +503,45 @@ private:
             return rebuiltId;
         }
 
-        convertLogicalNodeToPlaceholder(logicalId);
-        uint32_t currentId = logicalId;
-
-        for (const Region &recomputeRegion : recomputeRegions)
+        if (cachedNodes.count(logicalId))
         {
-            PartialCloneResult partial = buildPartialClone(logicalId, recomputeRegion);
-            result.logicalPartialNodeMap[logicalId].push_back(partial.nodeId);
+            convertLogicalNodeToPlaceholder(logicalId);
+            uint32_t currentId = logicalId;
 
-            uint32_t startsId = addRegionStarts(recomputeRegion);
-            uint32_t endsId = addRegionEnds(recomputeRegion);
-            uint32_t stepsId = addRegionSteps(recomputeRegion);
-            uint32_t scatterId = result.graph.scatter(currentId, partial.nodeId, startsId, endsId, stepsId);
-
-            result.logicalScatterNodeMap[logicalId].push_back(scatterId);
-            result.physicalToLogicalNodeMap[scatterId] = logicalId;
-            result.physicalOutputRegions[scatterId] = {recomputeRegion};
-
-            std::vector<std::vector<Region>> scatterInputSlices(5);
-            scatterInputSlices[0] = {recomputeRegion};
-
-            Region updateRegion = recomputeRegion;
-            for (size_t d = 0; d < updateRegion.region.size(); ++d)
+            for (const Region &recomputeRegion : recomputeRegions)
             {
-                uint32_t shift = updateRegion.region[d].start;
-                updateRegion.region[d].start -= shift;
-                updateRegion.region[d].stop -= shift;
+                PartialCloneResult partial = buildPartialClone(logicalId, recomputeRegion);
+                result.logicalPartialNodeMap[logicalId].push_back(partial.nodeId);
+
+                uint32_t startsId = addRegionStarts(recomputeRegion);
+                uint32_t endsId = addRegionEnds(recomputeRegion);
+                uint32_t stepsId = addRegionSteps(recomputeRegion);
+                uint32_t scatterId = result.graph.scatter(currentId, partial.nodeId, startsId, endsId, stepsId);
+
+                result.logicalScatterNodeMap[logicalId].push_back(scatterId);
+                result.physicalToLogicalNodeMap[scatterId] = logicalId;
+                result.physicalOutputRegions[scatterId] = {sourceNode.fullRegion()};
+
+                currentId = scatterId;
             }
-            scatterInputSlices[1] = {updateRegion};
-            result.physicalInputSlices[scatterId] = scatterInputSlices;
 
-            currentId = scatterId;
+            result.logicalToPhysicalNodeMap[logicalId] = currentId;
+            memoizedPhysicalIds[logicalId] = currentId;
+            return currentId;
         }
-
-        result.logicalToPhysicalNodeMap[logicalId] = currentId;
-        memoizedPhysicalIds[logicalId] = currentId;
-        return currentId;
+        else
+        {
+            if (recomputeRegions.size() > 1)
+            {
+                Error::throw_err("Uncached nodes with multiple recompute regions are not supported yet!");
+            }
+            PartialCloneResult partial = buildPartialClone(logicalId, recomputeRegions.front());
+            result.logicalToPhysicalNodeMap[logicalId] = partial.nodeId;
+            result.physicalToLogicalNodeMap[partial.nodeId] = logicalId;
+            result.physicalOutputRegions[partial.nodeId] = recomputeRegions;
+            memoizedPhysicalIds[logicalId] = partial.nodeId;
+            return partial.nodeId;
+        }
     }
 };
 
@@ -565,7 +593,7 @@ public:
 
         for (uint32_t nodeId : topo)
         {
-            TensorNode &node = planningGraph.graph.nodes[nodeId];
+            TensorNode &node = planningGraph.graph.getNode(nodeId);
             ensureContiguousView(node);
             uint32_t refCount = 0;
             auto rcIt = refCounts.find(nodeId);
@@ -579,7 +607,7 @@ public:
         // Seed with reference kernels only
         for (uint32_t nodeId : topo)
         {
-            const TensorNode &node = planningGraph.graph.nodes[nodeId];
+            const TensorNode &node = planningGraph.graph.getNode(nodeId);
             uint32_t eclassId = nodeToEClass[nodeId];
             if (node.opType == OpType::INPUT || node.opType == OpType::CONTIGUOUS || node.opType == OpType::SLICE)
             {
@@ -587,7 +615,7 @@ public:
                 {
                     std::vector<TensorNode> inputs;
                     for (uint32_t pid : node.parentIds)
-                        inputs.push_back(planningGraph.graph.nodes[pid]);
+                        inputs.push_back(planningGraph.graph.getNode(pid));
                     std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(node.opType, node.opName, node.backend, inputs, node, refCounts, true);
                     if (refs.empty())
                     {
@@ -621,13 +649,13 @@ public:
 
             std::vector<TensorNode> inputs;
             for (uint32_t pid : node.parentIds)
-                inputs.push_back(planningGraph.graph.nodes[pid]);
+                inputs.push_back(planningGraph.graph.getNode(pid));
 
             std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(
                 node.opType, node.opName, node.backend, inputs, node, refCounts, true);
             if (refs.empty())
             {
-                Error::throw_err("No reference kernel found for node " + toString(node));
+                Error::throw_err("No reference kernel found for node " + toString(node, planningGraph.graph, ""));
             }
 
             for (uint64_t uid : refs)
@@ -709,11 +737,11 @@ private:
         for (uint32_t nodeId : topo)
         {
             propagator.inferShape(nodeId, graph);
-            if (graph.nodes[nodeId].view.shape.empty() && !graph.nodes[nodeId].shape.empty())
+            if (graph.getNode(nodeId).view.shape.empty() && !graph.getNode(nodeId).shape.empty())
             {
-                graph.nodes[nodeId].view.shape = graph.nodes[nodeId].shape;
-                graph.nodes[nodeId].view.strides = TensorView::calcContiguousStrides(graph.nodes[nodeId].shape);
-                graph.nodes[nodeId].view.dtype = graph.nodes[nodeId].dtype;
+                graph.getNode(nodeId).view.shape = graph.getNode(nodeId).shape;
+                graph.getNode(nodeId).view.strides = TensorView::calcContiguousStrides(graph.getNode(nodeId).shape);
+                graph.getNode(nodeId).view.dtype = graph.getNode(nodeId).dtype;
             }
         }
     }
@@ -723,7 +751,7 @@ private:
         std::unordered_map<uint32_t, uint32_t> refCounts;
         for (uint32_t nodeId : topo)
         {
-            for (uint32_t pid : graph.nodes[nodeId].parentIds)
+            for (uint32_t pid : graph.getNode(nodeId).parentIds)
             {
                 refCounts[pid]++;
             }
@@ -741,7 +769,7 @@ private:
             if (visited.count(node))
                 return;
             visited.insert(node);
-            for (uint32_t pid : graph.nodes[node].parentIds)
+            for (uint32_t pid : graph.getNode(node).parentIds)
             {
                 self(self, pid);
             }
@@ -796,15 +824,15 @@ private:
     {
         bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
         {
-            if (nodeId >= graph.nodes.size())
+            if (!graph.hasNode(nodeId))
                 return false;
-            const auto &node = graph.nodes[nodeId];
+            const auto &node = graph.getNode(nodeId);
             if (node.opType != OpType::COPY_TO || node.parentIds.empty())
                 return false;
             uint32_t parentId = node.parentIds[0];
-            if (parentId >= graph.nodes.size())
+            if (!graph.hasNode(parentId))
                 return false;
-            const auto &parent = graph.nodes[parentId];
+            const auto &parent = graph.getNode(parentId);
             if (parent.opType != OpType::COPY_TO || parent.parentIds.empty())
                 return false;
             out.nodeId = nodeId;
@@ -813,13 +841,13 @@ private:
 
         std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
         {
-            const TensorNode &node = graph.nodes[m.nodeId];
-            const TensorNode &parent = graph.nodes[node.parentIds[0]];
+            const TensorNode &node = graph.getNode(m.nodeId);
+            const TensorNode &parent = graph.getNode(node.parentIds[0]);
             uint32_t grandparentId = parent.parentIds[0];
 
             std::vector<uint32_t> results;
             // E.g. copyto(copyto(X, GPU), CPU) => X
-            if (node.backend == graph.nodes[grandparentId].backend)
+            if (node.backend == graph.getNode(grandparentId).backend)
             {
                 results.push_back(grandparentId);
             }
@@ -876,9 +904,9 @@ private:
 
         bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
         {
-            if (nodeId >= graph.nodes.size())
+            if (!graph.hasNode(nodeId))
                 return false;
-            if (graph.nodes[nodeId].opType == OpType::INPUT)
+            if (graph.getNode(nodeId).opType == OpType::INPUT)
                 return false;
             out.nodeId = nodeId;
             return true;
@@ -887,7 +915,7 @@ private:
         std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
         {
             std::vector<uint32_t> results;
-            const TensorNode &refNode = graph.nodes[m.nodeId];
+            const TensorNode &refNode = graph.getNode(m.nodeId);
 
             for (const auto &pattern : patterns)
             {
@@ -922,7 +950,7 @@ private:
             for (size_t i = 0; i < parentIds.size(); ++i)
             {
                 uint32_t pid = parentIds[i];
-                const TensorNode &parent = graph.nodes[pid];
+                const TensorNode &parent = graph.getNode(pid);
 
                 Backend expectedBackend = targetBackend;
                 if (i < kernel.inputBackends.size())
@@ -1018,7 +1046,7 @@ private:
             if (itVar != patternVariables.end())
             {
                 size_t varIdx = static_cast<size_t>(std::distance(patternVariables.begin(), itVar));
-                const TensorNode &cNode = mainGraph.nodes[concreteId];
+                const TensorNode &cNode = mainGraph.getNode(concreteId);
                 if (varIdx < patternDtypes.size() && cNode.dtype != patternDtypes[varIdx])
                     return false;
 
@@ -1030,8 +1058,8 @@ private:
                 return true;
             }
 
-            const auto &cNode = mainGraph.nodes[concreteId];
-            const auto &pNode = patternGraph.nodes[patternId];
+            const auto &cNode = mainGraph.getNode(concreteId);
+            const auto &pNode = patternGraph.getNode(patternId);
 
             if (cNode.opType != pNode.opType)
                 return false;
@@ -1052,6 +1080,40 @@ private:
         }
     };
 
+    uint32_t ensureNodeInEGraph(uint32_t nodeId, Graph &graph, EGraph &egraph,
+                                std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
+                                const std::unordered_map<uint32_t, uint32_t> &refCounts)
+    {
+        if (nodeToEClass.count(nodeId))
+        {
+            return egraph.find(nodeToEClass[nodeId]);
+        }
+
+        const TensorNode &node = graph.getNode(nodeId);
+
+        // First, ensure all parents are in the EGraph (Recursive call)
+        for (uint32_t pid : node.parentIds)
+        {
+            ensureNodeInEGraph(pid, graph, egraph, nodeToEClass, refCounts);
+        }
+
+        // Register this node's EClass
+        uint32_t refCount = 0;
+        auto rcIt = refCounts.find(nodeId);
+        if (rcIt != refCounts.end())
+            refCount = rcIt->second;
+
+        ensureContiguousView(graph.getNode(nodeId));
+        uint32_t eclassId = egraph.addEClass(node.shape, node.dtype, refCount, node.view.isContiguous());
+        egraph.getEClass(eclassId).backends.insert(node.backend);
+        nodeToEClass[nodeId] = eclassId;
+
+        // Add the Enode for this specific physical implementation
+        addBasicEnode(graph, egraph, nodeToEClass, refCounts, nodeId);
+
+        return eclassId;
+    }
+
     void saturate(const std::vector<uint32_t> &topo, Graph &graph, EGraph &egraph,
                   std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
                   const std::unordered_map<uint32_t, uint32_t> &refCounts)
@@ -1066,7 +1128,6 @@ private:
         Rewrite::DivAddRule dar;
         Rewrite::CopyToContiguousReorderRule ccr;
         Rewrite::CopyToScatterReorderRule csr;
-        Rewrite::ScatterSliceElimRule sser;
 
         // TODO: make some sort of rule registry so I don't have to update this every time I add/remove a rule
         std::vector<std::unique_ptr<Rule>> rules;
@@ -1080,7 +1141,6 @@ private:
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&dar));
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&ccr));
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&csr));
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&sser));
         rules.emplace_back(std::make_unique<FusionRule>());
         rules.emplace_back(std::make_unique<CopyElimRule>());
 
@@ -1109,22 +1169,15 @@ private:
                     {
                         continue;
                     }
-                    for (size_t i = oldSize; i < graph.nodes.size(); ++i)
+                    // We only want to process new nodes. But nodes are now an unordered_map, so looping by size is broken.
+                    // However, we already have `newNodes` list from `rule->apply`
+                    for (uint32_t newId : newNodes)
                     {
-                        uint32_t newId = static_cast<uint32_t>(i);
                         ShapePropagator prop;
                         prop.inferShapeRecursive(newId, graph);
-                        ensureContiguousView(graph.nodes[newId]);
+                        ensureContiguousView(graph.getNode(newId));
 
-                        if (!nodeToEClass.count(newId))
-                        {
-                            uint32_t refCount = 0;
-                            auto rcIt = refCounts.find(newId);
-                            if (rcIt != refCounts.end())
-                                refCount = rcIt->second;
-                            uint32_t eclassId = egraph.addEClass(graph.nodes[newId].shape, graph.nodes[newId].dtype, refCount, graph.nodes[newId].view.isContiguous());
-                            nodeToEClass[newId] = eclassId;
-                        }
+                        ensureNodeInEGraph(newId, graph, egraph, nodeToEClass, refCounts);
 
                         addBasicEnode(graph, egraph, nodeToEClass, refCounts, newId);
                         nextWorklist.push_back(newId);
@@ -1149,13 +1202,13 @@ private:
                        const std::unordered_map<uint32_t, uint32_t> &refCounts,
                        uint32_t nodeId)
     {
-        const TensorNode &node = graph.nodes[nodeId];
+        const TensorNode &node = graph.getNode(nodeId);
         if (node.opType == OpType::INPUT)
             return false;
 
         std::vector<TensorNode> inputs;
         for (uint32_t pid : node.parentIds)
-            inputs.push_back(graph.nodes[pid]);
+            inputs.push_back(graph.getNode(pid));
 
         std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(
             node.opType, node.opName, node.backend, inputs, node, refCounts, false);
@@ -1205,7 +1258,7 @@ private:
             }
 
             // Parents might die after this op
-            const TensorNode &node = graph.nodes[nodeId];
+            const TensorNode &node = graph.getNode(nodeId);
             for (uint32_t parentId : node.parentIds)
             {
                 auto useIt = uses.find(parentId);
@@ -1258,7 +1311,7 @@ private:
                     c.enodeId = enodeId;
                     c.cost = 0.0f;
                     c.valid = true;
-                    TensorNode inNode = graph.nodes[enode.nodeId];
+                    TensorNode inNode = graph.getNode(enode.nodeId);
                     ensureContiguousView(inNode);
                     c.view = inNode.view;
                     c.memSize = getSizeBytes(inNode.shape, inNode.dtype);
@@ -1281,7 +1334,7 @@ private:
                     }
                     childrenCost += childChoice.cost;
                     const ENode &childEnode = egraph.getENodes()[childChoice.enodeId];
-                    TensorNode inNode = graph.nodes[childEnode.nodeId];
+                    TensorNode inNode = graph.getNode(childEnode.nodeId);
                     inNode.backend = childEnode.backend;
                     if (childChoice.view.shape.size() > 0)
                     {
@@ -1327,7 +1380,7 @@ private:
                     }
                 }
 
-                TensorNode outNode = graph.nodes[enode.nodeId];
+                TensorNode outNode = graph.getNode(enode.nodeId);
                 outNode.backend = enode.backend;
                 ensureContiguousView(outNode);
 
@@ -1415,7 +1468,7 @@ private:
                 if (visited.count(nid))
                     return;
                 visited.insert(nid);
-                const TensorNode &node = graph.nodes[nid];
+                const TensorNode &node = graph.getNode(nid);
                 for (uint32_t pid : node.parentIds)
                 {
                     visit(pid);
@@ -1428,7 +1481,7 @@ private:
             std::unordered_map<uint32_t, uint32_t> uses = refCounts;
             for (uint32_t nodeId : topo)
             {
-                const TensorNode &node = graph.nodes[nodeId];
+                const TensorNode &node = graph.getNode(nodeId);
                 Backend backend = node.backend;
                 if (cachedNodes.find(nodeId) == cachedNodes.end())
                 {
@@ -1450,10 +1503,10 @@ private:
                             auto sizeIt = nodeMemorySizes.find(parentId);
                             if (sizeIt != nodeMemorySizes.end())
                             {
-                                peakMemByBackend[graph.nodes[parentId].backend] = std::max(
-                                    peakMemByBackend[graph.nodes[parentId].backend],
-                                    currentMemByBackend[graph.nodes[parentId].backend]);
-                                currentMemByBackend[graph.nodes[parentId].backend] -= sizeIt->second;
+                                peakMemByBackend[graph.getNode(parentId).backend] = std::max(
+                                    peakMemByBackend[graph.getNode(parentId).backend],
+                                    currentMemByBackend[graph.getNode(parentId).backend]);
+                                currentMemByBackend[graph.getNode(parentId).backend] -= sizeIt->second;
                             }
                         }
                     }
@@ -1467,7 +1520,7 @@ private:
                 auto it = nodeMemorySizes.find(cachedNodeId);
                 if (it != nodeMemorySizes.end())
                 {
-                    cachedMemByBackend[graph.nodes[cachedNodeId].backend] += it->second;
+                    cachedMemByBackend[graph.getNode(cachedNodeId).backend] += it->second;
                 }
             }
 
@@ -1531,7 +1584,7 @@ private:
             if (visited.count(nodeId))
                 return;
             visited.insert(nodeId);
-            for (uint32_t pid : graph.nodes[nodeId].parentIds)
+            for (uint32_t pid : graph.getNode(nodeId).parentIds)
             {
                 visit(mapToSelected(pid));
             }
@@ -1542,7 +1595,7 @@ private:
         std::unordered_map<uint32_t, uint32_t> compiledRefCounts;
         for (uint32_t nodeId : topo)
         {
-            for (uint32_t pid : graph.nodes[nodeId].parentIds)
+            for (uint32_t pid : graph.getNode(nodeId).parentIds)
             {
                 compiledRefCounts[mapToSelected(pid)]++;
             }
@@ -1553,14 +1606,14 @@ private:
 
         for (uint32_t nodeId : topo)
         {
-            compiled.nodesMap[nodeId] = graph.nodes[nodeId];
+            compiled.nodesMap[nodeId] = graph.getNode(nodeId);
             if (graph.constantStaging.count(nodeId))
                 compiled.constantStaging[nodeId] = graph.constantStaging.at(nodeId);
         }
 
         for (uint32_t nodeId : topo)
         {
-            const TensorNode &node = graph.nodes[nodeId];
+            const TensorNode &node = graph.getNode(nodeId);
             if (node.opType == OpType::INPUT)
                 continue;
 
@@ -1614,36 +1667,6 @@ private:
             inst.inplaceInputIndex = kEntry->inplace ? 0 : -1;
             const bool nodeIsFinalLogicalOutput = logicalToPhysicalNodeMap.count(logicalNodeId) && logicalToPhysicalNodeMap.at(logicalNodeId) == nodeId;
             inst.outputStorageType = (cachedNodes.count(logicalNodeId) && nodeIsFinalLogicalOutput) ? StorageType::PINNED : node.storageType;
-            auto outputRegionsIt = physicalOutputRegions.find(nodeId);
-            if (outputRegionsIt != physicalOutputRegions.end())
-            {
-                inst.outputRegions = outputRegionsIt->second;
-            }
-            else
-            {
-                auto dirtyIt = dirtyOutputRegions.find(logicalNodeId);
-                if (dirtyIt != dirtyOutputRegions.end())
-                    inst.outputRegions = dirtyIt->second;
-            }
-            auto inputSlicesIt = physicalInputSlices.find(nodeId);
-            if (inputSlicesIt != physicalInputSlices.end())
-            {
-                inst.inputSlices = inputSlicesIt->second;
-            }
-            else
-            {
-                auto dirtyInputIt = dirtyInputRegions.find(logicalNodeId);
-                if (dirtyInputIt != dirtyInputRegions.end())
-                    inst.inputSlices = dirtyInputIt->second;
-            }
-
-            const size_t regionCount = !inst.outputRegions.empty()
-                                           ? inst.outputRegions.size()
-                                           : (dirtyOutputRegions.count(logicalNodeId) ? dirtyOutputRegions.at(logicalNodeId).size() : 0);
-            if (regionCount > 0)
-            {
-                inst.cachedKernelIds.assign(regionCount, inst.fullKernelId);
-            }
 
             compiled.nodesMap[nodeId].backend = enode.backend;
             if (kEntry->inplace)
@@ -1675,11 +1698,6 @@ private:
             compiled.nodeCosts[nodeId] = costModel.estimateCost(costOut, costInputs, graph, enode.kernelUid);
 
             compiled.physicalToLogicalNodeMap[nodeId] = logicalNodeId;
-
-            if (!inst.cachedKernelIds.empty() && inst.cachedKernelIds.size() != regionCount)
-            {
-                Error::throw_err("[Planner.buildCompiledGraph] cachedKernelIds size does not match region count for node " + std::to_string(nodeId));
-            }
         }
 
         return compiled;

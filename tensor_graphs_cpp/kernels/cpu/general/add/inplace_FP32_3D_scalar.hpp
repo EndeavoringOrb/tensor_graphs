@@ -69,7 +69,7 @@ inline uint32_t refFactoryAdd3D_Scalar_Inplace(const std::vector<uint32_t> &inpu
     uint32_t id3D = inputs[0];
     uint32_t idScalar = inputs[1];
 
-    auto shape3D = graph.nodes[id3D].shape;
+    auto shape3D = graph.getNode(id3D).shape;
 
     // 1. Reshape Scalar -> [1, 1, 1]
     int32_t reshape_dims[] = {1, 1, 1};

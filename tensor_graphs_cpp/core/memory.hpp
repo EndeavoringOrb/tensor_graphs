@@ -323,6 +323,7 @@ struct DeviceBuffer
         return nullptr;
     }
 
+    // TODO: if no contiguous free block of _sizeBytes, but total free space is greater than _sizeBytes, do a defrag step to fit the new block. This should replace mergeFreeBlocks and be called inside findFreeSlot so dev doesn't have to worry about defrag then retry
     std::list<MemBlock>::iterator findFreeSlot(uint64_t _sizeBytes)
     {
         for (auto it = blocks.begin(); it != blocks.end(); ++it)
@@ -616,6 +617,8 @@ struct MemoryManager
 
     void transferOwnership(Backend backend, uint32_t srcId, uint32_t dstId)
     {
+        if (srcId == dstId) return;
+
         auto &buf = buffers.at(backend);
         auto srcIt = buf.allocationMap.find(srcId);
         if (srcIt != buf.allocationMap.end())

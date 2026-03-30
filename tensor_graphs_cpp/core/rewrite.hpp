@@ -432,46 +432,6 @@ namespace Rewrite
         }
     };
 
-    // Eliminate slice(scatter(X, Y, ...)) when the slice is selecting the full scattered region
-    // This simplifies: slice->contiguous->op->scatter->slice->contiguous->op->scatter
-    // to: slice->contiguous->op->op->scatter
-    struct ScatterSliceElimRule : public RewriteRule
-    {
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
-        {
-            // Match: slice(scatter(...))
-            if (graph.getNode(id).opType != OpType::SLICE || graph.getNode(id).parentIds.size() < 4)
-                return {};
-
-            uint32_t scatterId = graph.getNode(id).parentIds[0];
-            if (!graph.hasNode(scatterId))
-                return {};
-
-            const auto &scatterNode = graph.getNode(scatterId);
-            if (scatterNode.opType != OpType::SCATTER || scatterNode.parentIds.size() < 3)
-                return {};
-
-            // Get slice parameters (starts, ends, steps)
-            std::vector<int32_t> sliceStarts = getConstantInt32(graph.getNode(id).parentIds[1], graph);
-            std::vector<int32_t> sliceEnds = getConstantInt32(graph.getNode(id).parentIds[2], graph);
-            std::vector<int32_t> sliceSteps = getConstantInt32(graph.getNode(id).parentIds[3], graph);
-
-            // Get scatter parameters (starts, ends, steps)
-            std::vector<int32_t> scatterStarts = getConstantInt32(scatterNode.parentIds[2], graph);
-            std::vector<int32_t> scatterEnds = getConstantInt32(scatterNode.parentIds[3], graph);
-            std::vector<int32_t> scatterSteps = getConstantInt32(scatterNode.parentIds[4], graph);
-
-            // Check if slice bounds match scatter bounds exactly
-            if (sliceStarts != scatterStarts || sliceEnds != scatterEnds || sliceSteps != scatterSteps)
-                return {};
-
-            // The slice is selecting exactly what was scattered
-            // Return the partial computation that was scattered (scatterNode.parentIds[1])
-            uint32_t partialComputeId = scatterNode.parentIds[1];
-            return {partialComputeId};
-        }
-    };
-
     inline std::vector<uint32_t> generateAllEquivalents(uint32_t rootId, Graph &graph, const std::vector<const RewriteRule *> &rules, std::unordered_map<uint32_t, std::string> &memo)
     {
         std::vector<uint32_t> equivalents;

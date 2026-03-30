@@ -17,6 +17,20 @@ inline std::string toString(const std::vector<uint32_t> &shape)
     return ss.str();
 }
 
+inline std::string toString(const std::vector<int32_t> &shape)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << shape[i];
+    }
+    ss << "]";
+    return ss.str();
+}
+
 inline std::string toString(const std::vector<uint64_t> &shape)
 {
     std::stringstream ss;
@@ -85,9 +99,9 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
         for (size_t i = 0; i < node.parentIds.size(); ++i)
         {
             uint32_t pid = node.parentIds[i];
-            if (pid < graph.nodes.size())
+            if (graph.hasNode(pid))
             {
-                const auto &parent = graph.nodes[pid];
+                const auto &parent = graph.getNode(pid);
                 ss << "\n"
                    << prefix << "    [" << i << "] Parent ID " << pid
                    << "\n"
@@ -96,7 +110,7 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
             else
             {
                 ss << "\n"
-                   << prefix << "    [" << i << "] Parent ID " << pid << " [OUT OF BOUNDS]";
+                   << prefix << "[" << i << "] Parent ID " << pid << " [OUT OF BOUNDS/NOT FOUND]";
             }
         }
     }
@@ -135,7 +149,6 @@ std::string toString(const OpInstruction &inst)
     ss << "OpInstruction\n"
        << "  Node ID: " << inst.nodeId << "\n"
        << "  Full Kernel ID: " << inst.fullKernelId << "\n"
-       << "  Cached Kernel IDs: " << toString(inst.cachedKernelIds) << "\n"
        << "  Input Node IDs: " << toString(inst.inputNodeIds) << "\n"
        << "  Inplace Input Index: " << inst.inplaceInputIndex << "\n"
        << "  Backend: " << inst.backend << "\n";

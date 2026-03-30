@@ -4,7 +4,7 @@ Right now the framework assumes that you need to either cache a whole node or no
 2. backward pass to determine needed regions
 needed[rootId] = root dirty region
 updateNeeded(nodeId,Graph graph, ShapeProp prop,<uint32_t, std::vector<Region>> needed)
-  node = graph.nodes[nodeId]
+  node = graph.getNode(nodeId)
   parentNeeded = prop.backward(needed[nodeId])
   for i in range(node.parentIds):
     currentNeeded = needed.find or []
