@@ -323,8 +323,30 @@ struct DeviceBuffer
         return nullptr;
     }
 
-    // TODO: if no contiguous free block of _sizeBytes, but total free space is greater than _sizeBytes, do a defrag step to fit the new block. This should replace mergeFreeBlocks and be called inside findFreeSlot so dev doesn't have to worry about defrag then retry
-    std::list<MemBlock>::iterator findFreeSlot(uint64_t _sizeBytes)
+    void defrag()
+    {
+        uint64_t offset = 0;
+        for (auto it = blocks.begin(); it != blocks.end(); ++it)
+        {
+            if (it->offset > offset)
+            {
+#ifdef USE_CUDA
+                if (backend == Backend::CUDA)
+                {
+                    cudaMemcpy(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes, cudaMemcpyDeviceToDevice);
+                }
+                else
+                {
+                    std::memcpy(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes);
+                }
+#else
+                std::memcpy(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes);
+#endif
+            }
+        }
+    }
+
+    std::list<MemBlock>::iterator findFreeSlot(uint64_t _sizeBytes, bool tryDefrag = true)
     {
         for (auto it = blocks.begin(); it != blocks.end(); ++it)
         {
@@ -333,135 +355,18 @@ struct DeviceBuffer
                 return it;
             }
         }
+        if (tryDefrag) // TODO: store a boolean on DeviceBuffer that tracks if memory has been changed since last defrag, if not then we don't need to defrag again
+        {
+            mergeFreeBlocks();
+            defrag();
+            return findFreeSlot(_sizeBytes, false);
+        }
         return blocks.end();
-    }
-
-    bool tryEvict(uint64_t needed,
-                  const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr,
-                  const std::unordered_map<uint32_t, float> *nodeCosts = nullptr,
-                  const std::unordered_set<uint32_t> &globalCacheState = {})
-    {
-        auto left = blocks.begin();
-        auto right = blocks.begin();
-        uint64_t currentSize = 0;
-
-        auto bestLeft = blocks.end();
-        auto bestRight = blocks.end();
-        float bestCostLost = -1.0f;
-        uint64_t bestSize = std::numeric_limits<uint64_t>::max();
-
-        float currentTotalSaved = 0.0f;
-        if (parentMap && nodeCosts)
-        {
-            currentTotalSaved = calculateSavedCost(globalCacheState, *parentMap, *nodeCosts);
-        }
-
-        while (right != blocks.end())
-        {
-            // Locked blocks act as an impenetrable wall. Reset the window.
-            if (right->isLocked)
-            {
-                right++;
-                left = right;
-                currentSize = 0;
-                continue;
-            }
-
-            currentSize += right->sizeBytes;
-
-            // Once the window meets our size requirement, evaluate and shrink
-            while (currentSize >= needed)
-            {
-                float costLost = 0.0f;
-                if (parentMap && nodeCosts)
-                {
-                    std::unordered_set<uint32_t> windowNodes;
-                    auto tempIt = left;
-                    while (tempIt != std::next(right))
-                    {
-                        if (!tempIt->isFree())
-                        {
-                            windowNodes.insert(tempIt->nodeId);
-                        }
-                        tempIt++;
-                    }
-
-                    // Create hypothetical state simulating what remains if window is evicted
-                    std::unordered_set<uint32_t> cacheStateWithoutWindow = globalCacheState;
-                    for (uint32_t wn : windowNodes)
-                    {
-                        cacheStateWithoutWindow.erase(wn);
-                    }
-
-                    float newSaved = calculateSavedCost(cacheStateWithoutWindow, *parentMap, *nodeCosts);
-                    costLost = currentTotalSaved - newSaved;
-                }
-                else
-                {
-                    auto tempIt = left;
-                    while (tempIt != std::next(right))
-                    {
-                        if (!tempIt->isFree())
-                            costLost += tempIt->cost;
-                        tempIt++;
-                    }
-                }
-
-                // Save it if it is strictly cheaper (we lose less cached compute), OR same cost but wastes less physical space
-                if (bestCostLost < 0 || costLost < bestCostLost || (costLost == bestCostLost && currentSize < bestSize))
-                {
-                    bestCostLost = costLost;
-                    bestSize = currentSize;
-                    bestLeft = left;
-                    bestRight = right;
-                }
-
-                // Break early if we've shrunk it to a single block
-                if (left == right)
-                    break;
-
-                // Shrink from the left
-                currentSize -= left->sizeBytes;
-                left++;
-            }
-            right++;
-        }
-
-        if (bestLeft != blocks.end())
-        {
-            auto it = bestLeft;
-            uint64_t mergeOffset = bestLeft->offset;
-            auto end_evict = std::next(bestRight);
-
-            while (it != end_evict)
-            {
-                if (!it->isFree())
-                {
-                    allocationMap.erase(it->nodeId);
-                }
-                it++;
-            }
-
-            MemBlock mergedFree;
-            mergedFree.offset = mergeOffset;
-            mergedFree.sizeBytes = bestSize;
-            mergedFree.nodeId = UINT32_MAX;
-            mergedFree.cost = 0.0f;
-            mergedFree.isLocked = false;
-
-            blocks.insert(bestLeft, mergedFree);
-            blocks.erase(bestLeft, end_evict);
-
-            return true;
-        }
-
-        return false;
     }
 
     uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost,
                       const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr,
-                      const std::unordered_map<uint32_t, float> *nodeCosts = nullptr,
-                      const std::unordered_set<uint32_t> &globalCacheState = {})
+                      const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
     {
         // 1. If it's already cached, lock it and update
         auto mapIt = allocationMap.find(nodeId);
@@ -477,20 +382,13 @@ struct DeviceBuffer
         // 2. See if there is space already available
         auto slotIt = findFreeSlot(_sizeBytes);
 
-        // 3. If no space, compact free segments once and retry.
+        // 3. If no space, allocation failed.
         if (slotIt == blocks.end())
         {
-            mergeFreeBlocks();
-            slotIt = findFreeSlot(_sizeBytes);
+            Error::throw_err<MemoryAllocationError>("Cannot allocate: Not enough space.", _sizeBytes);
         }
 
-        // 4. If still no space, allocation failed.
-        if (slotIt == blocks.end())
-        {
-            Error::throw_err<MemoryAllocationError>("Cannot allocate: Not enough contiguous space.", _sizeBytes);
-        }
-
-        // 5. Claim the free slot
+        // 4. Claim the free slot
         if (slotIt->sizeBytes > _sizeBytes)
         {
             // Split the block (leaves leftovers as free space naturally)
@@ -556,46 +454,39 @@ struct MemoryManager
         }
     }
 
-    std::unordered_set<uint32_t> getGlobalCacheState() const
-    {
-        std::unordered_set<uint32_t> state;
-        for (const auto &pair : buffers)
-        {
-            for (const auto &alloc : pair.second.allocationMap)
-            {
-                state.insert(alloc.first);
-            }
-        }
-        return state;
-    }
-
     uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f, const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr, const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
     {
         auto it = buffers.find(backend);
         if (it == buffers.end())
-            Error::throw_err("Backend buffer not initialized in MemoryManager");
+            Error::throw_err("[MemoryManager.allocate] DeviceBuffer not initialized for backend " + toString(backend));
 
-        std::unordered_set<uint32_t> globalCacheState;
-        if (parentMap && nodeCosts)
-        {
-            globalCacheState = getGlobalCacheState();
-        }
-
-        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost, parentMap, nodeCosts, globalCacheState);
+        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost, parentMap, nodeCosts);
     }
 
     void write(Backend backend, uint32_t nodeId, const void *data, uint64_t size)
     {
+        auto it = buffers.find(backend);
+        if (it == buffers.end())
+            Error::throw_err("[MemoryManager.write] DeviceBuffer not initialized for backend " + toString(backend));
+
         buffers.at(backend).write(nodeId, data, size);
     }
 
     const uint8_t *read(Backend backend, uint32_t nodeId) const
     {
+        auto it = buffers.find(backend);
+        if (it == buffers.end())
+            Error::throw_err("[MemoryManager.read] DeviceBuffer not initialized for backend " + toString(backend));
+
         return buffers.at(backend).read(nodeId);
     }
 
     void release(Backend backend, uint32_t nodeId)
     {
+        auto bufIt = buffers.find(backend);
+        if (bufIt == buffers.end())
+            Error::throw_err("[MemoryManager.release] DeviceBuffer not initialized for backend " + toString(backend));
+
         auto &buf = buffers.at(backend);
         auto it = buf.allocationMap.find(nodeId);
         if (it != buf.allocationMap.end())
@@ -617,7 +508,8 @@ struct MemoryManager
 
     void transferOwnership(Backend backend, uint32_t srcId, uint32_t dstId)
     {
-        if (srcId == dstId) return;
+        if (srcId == dstId)
+            return;
 
         auto &buf = buffers.at(backend);
         auto srcIt = buf.allocationMap.find(srcId);
@@ -757,5 +649,5 @@ inline void InterruptManager::cleanup()
 inline void InterruptManager::handleSigInt(int signum)
 {
     std::cerr << "\n[TensorGraph] Caught interrupt signal (" << signum << "). Cleaning up..." << std::endl;
-    g_interrupted = 1;  // Just set the flag - cleanup happens in main thread
+    g_interrupted = 1; // Just set the flag - cleanup happens in main thread
 }
