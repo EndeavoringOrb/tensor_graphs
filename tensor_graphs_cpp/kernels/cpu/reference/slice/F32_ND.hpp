@@ -11,8 +11,8 @@ inline bool matchSliceF32_ND(const std::vector<TensorNode> &inputs, const Tensor
            inputs[1].dtype == DType::INT32 &&
            inputs[2].dtype == DType::INT32 &&
            inputs[3].dtype == DType::INT32 &&
-           inputs[0].view.isContiguous() &&
-           output.view.isContiguous();
+           isContiguous(inputs[0]) &&
+           isContiguous(output);
 }
 
 inline void runSliceF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
@@ -24,9 +24,9 @@ inline void runSliceF32_ND(const std::vector<const void *> &inputs, const std::v
     uint8_t *out = static_cast<uint8_t *>(outputs[0]);
     const uint64_t elementSize = getDTypeSize(inViews[0].dtype);
 
-    uint64_t n = countElements(outViews[0].shape);
-    const auto &out_shape = outViews[0].shape;
-    const auto &in_shape = inViews[0].shape;
+    uint64_t n = countElements(outViews[0].getShape());
+    const auto &out_shape = outViews[0].getShape();
+    const auto &in_shape = inViews[0].getShape();
     int ndim = static_cast<int>(out_shape.size());
 
     for (uint64_t i = 0; i < n; ++i)
@@ -38,10 +38,10 @@ inline void runSliceF32_ND(const std::vector<const void *> &inputs, const std::v
             uint32_t coord = temp % out_shape[d];
             temp /= out_shape[d];
 
-            int32_t s = (d < (int)inViews[1].shape[0]) ? starts[d] : 0;
+            int32_t s = (d < (int)inViews[1].getShape()[0]) ? starts[d] : 0;
             if (s < 0)
                 s += in_shape[d];
-            int32_t st = (d < (int)inViews[3].shape[0]) ? steps[d] : 1;
+            int32_t st = (d < (int)inViews[3].getShape()[0]) ? steps[d] : 1;
 
             uint32_t in_coord = s + coord * st;
             in_phys_idx += (uint64_t)in_coord * inViews[0].strides[d];

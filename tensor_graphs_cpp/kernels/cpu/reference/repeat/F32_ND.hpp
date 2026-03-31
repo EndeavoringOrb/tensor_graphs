@@ -18,10 +18,10 @@ inline void runRepeatF32_ND(const std::vector<const void *> &inputs, const std::
     int32_t axis = *static_cast<const int32_t *>(inputs[2]);
     float *dst = static_cast<float *>(outputs[0]);
 
-    int32_t ndim = static_cast<int32_t>(inViews[0].shape.size());
+    int32_t ndim = static_cast<int32_t>(inViews[0].getShape().size());
     if (axis < 0) axis += ndim;
 
-    const auto &outShape = outViews[0].shape;
+    const auto &outShape = outViews[0].getShape();
     uint64_t numElements = countElements(outShape);
 
     for (uint64_t i = 0; i < numElements; ++i)
@@ -37,11 +37,11 @@ inline void runRepeatF32_ND(const std::vector<const void *> &inputs, const std::
 
             uint32_t src_coord = (d == axis) ? (coord / repeats) : coord;
             src_flat += src_coord * stride;
-            stride *= inViews[0].shape[d];
+            stride *= inViews[0].getShape()[d];
         }
 
         dst[getStridedIndex(i, outShape, outViews[0].strides)] = 
-            src[getStridedIndex(src_flat, inViews[0].shape, inViews[0].strides)];
+            src[getStridedIndex(src_flat, inViews[0].getShape(), inViews[0].strides)];
     }
 }
 

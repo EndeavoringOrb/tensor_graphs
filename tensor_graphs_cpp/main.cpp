@@ -536,15 +536,9 @@ int main()
     Graph g;
 
     // Setup input node
-    uint32_t inputIdsId = g.allocateNode().id;
+    uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32, {}, StorageType::PERSISTENT);
     uint64_t sizeBytes = maxSeqLen * getDTypeSize(DType::INT32);
     mem.allocate(Backend::CPU, inputIdsId, sizeBytes, StorageType::PERSISTENT);
-
-    TensorView inputView;
-    inputView.shape = {1, maxSeqLen};
-    inputView.strides = TensorView::calcContiguousStrides(inputView.shape);
-    inputView.dtype = DType::INT32;
-    g.inputWithId(inputIdsId, {1, maxSeqLen}, DType::INT32, inputView, StorageType::PERSISTENT);
 
     std::cout << "Building Graph..." << std::endl;
     Gemma3Model model(cfg, maxSeqLen, g, mem, modelPath);

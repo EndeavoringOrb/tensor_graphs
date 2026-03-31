@@ -21,8 +21,8 @@ inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std:
     const int32_t *steps = static_cast<const int32_t *>(inputs[4]);
     float *out = static_cast<float *>(outputs[0]);
 
-    const auto &out_shape = outViews[0].shape;
-    const auto &upd_shape = inViews[1].shape;
+    const auto &out_shape = outViews[0].getShape();
+    const auto &upd_shape = inViews[1].getShape();
     uint64_t n_target = countElements(out_shape);
 
     // If target and out are different buffers, copy target to out first.
@@ -54,10 +54,10 @@ inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std:
             uint32_t coord = temp % upd_shape[d];
             temp /= upd_shape[d];
 
-            int32_t s = (d < (int)inViews[2].shape[0]) ? starts[d] : 0;
+            int32_t s = (d < (int)inViews[2].getShape()[0]) ? starts[d] : 0;
             if (s < 0)
                 s += out_shape[d];
-            int32_t st = (d < (int)inViews[4].shape[0]) ? steps[d] : 1;
+            int32_t st = (d < (int)inViews[4].getShape()[0]) ? steps[d] : 1;
 
             uint32_t target_coord = s + coord * st;
             out_phys_idx += (uint64_t)target_coord * outViews[0].strides[d];

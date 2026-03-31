@@ -69,9 +69,9 @@ inline std::string toString(const TensorNode &node, const std::string &prefix = 
     }
     ss << "]\n"
        << prefix << "  DType:        " << toString(node.dtype) << "\n"
-       << prefix << "  Shape:        " << toString(node.shape) << "\n"
+       << prefix << "  Shape:        " << toString(node.getShape()) << "\n"
        << prefix << "  Backend:      " << node.backend << "\n"
-       << prefix << "  Contiguous:   " << (node.view.isContiguous() ? "true" : "false") << "\n"
+       << prefix << "  Contiguous:   " << (isContiguous(node) ? "true" : "false") << "\n"
        << prefix << "  Storage Type: " << toString(node.storageType);
     return ss.str();
 }
@@ -85,9 +85,9 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
     std::stringstream ss;
     ss << prefix << "Node " << node.id << " [" << toString(node.opType) << "]\n"
        << prefix << "  DType:      " << toString(node.dtype) << "\n"
-       << prefix << "  Shape:      " << toString(node.shape) << "\n"
+       << prefix << "  Shape:      " << toString(node.getShape()) << "\n"
        << prefix << "  Backend:    " << node.backend << "\n"
-       << prefix << "  Contiguous: " << (node.view.isContiguous() ? "true" : "false") << "\n"
+       << prefix << "  Contiguous: " << (isContiguous(node) ? "true" : "false") << "\n"
        << prefix << "  Parents (" << node.parentIds.size() << "):";
 
     if (node.parentIds.empty())

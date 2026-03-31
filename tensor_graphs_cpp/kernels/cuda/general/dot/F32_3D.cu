@@ -39,9 +39,9 @@ inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const Ten
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
 
-    const auto &s0 = inputs[0].shape;
-    const auto &s1 = inputs[1].shape;
-    const auto &so = output.shape;
+    const auto &s0 = inputs[0].getShape();
+    const auto &s1 = inputs[1].getShape();
+    const auto &so = output.getShape();
 
     // Rank Check (Must be 3D)
     if (s0.size() != 3 || s1.size() != 3 || so.size() != 3)
@@ -70,10 +70,10 @@ void runDotF32_3D_CUDA(const std::vector<const void *> &inputs, const std::vecto
     const float *B = static_cast<const float *>(inputs[1]);
     float *Out = static_cast<float *>(outputs[0]);
 
-    uint64_t B_count = inViews[0].shape[0];
-    uint64_t M = inViews[0].shape[1];
-    uint64_t K = inViews[0].shape[2];
-    uint64_t N = inViews[1].shape[2];
+    uint64_t B_count = inViews[0].getShape()[0];
+    uint64_t M = inViews[0].getShape()[1];
+    uint64_t K = inViews[0].getShape()[2];
+    uint64_t N = inViews[1].getShape()[2];
 
     dim3 threads(16, 16);
     dim3 blocks((uint32_t)((N + threads.x - 1) / threads.x),

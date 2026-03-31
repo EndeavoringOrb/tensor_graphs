@@ -41,11 +41,10 @@ struct Graph
         return nodes.at(id);
     }
 
-    TensorNode &allocateNode()
+    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape = {}, std::vector<int64_t> _strides = {}, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "")
     {
         uint32_t id = allocator->allocate();
-        nodes[id] = TensorNode();
-        nodes[id].id = id;
+        nodes[id] = TensorNode(id, _opType, _opName, _dtype, _parentIds, _shape, _strides, _backend, _storageType, _contentHash);
         return nodes[id];
     }
 
@@ -57,35 +56,21 @@ struct Graph
         }
     }
 
-    uint32_t constant(TensorNode &node, const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype)
+    uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype)
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
-        uint32_t id = node.id;
+        
         SHA256 sha;
         sha.update(static_cast<const uint8_t *>(dataPtr), sizeBytes);
+
+        TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, {}, Backend::CPU, StorageType::PERSISTENT, sha.digest());
+        uint32_t id = node.id;
 
         std::vector<uint8_t> buffer(sizeBytes);
         std::memcpy(buffer.data(), dataPtr, sizeBytes);
         constantStaging[id] = std::move(buffer);
 
-        TensorView view;
-        view.shape = shape;
-        view.strides = TensorView::calcContiguousStrides(shape);
-        view.baseOffset = 0;
-        view.dtype = dtype;
-
-        node.opType = OpType::INPUT;
-        node.dtype = dtype;
-        node.shape = shape;
-        node.view = view;
-        node.storageType = StorageType::PERSISTENT;
-        node.contentHash = sha.digest();
         return id;
-    }
-
-    uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype)
-    {
-        return constant(allocateNode(), shape, dataPtr, dtype);
     }
 
     uint32_t weight(const std::string &path, const std::string &name)
@@ -97,65 +82,27 @@ struct Graph
             Error::throw_err("Tensor '" + name + "' not found in: " + path);
         }
 
+        SHA256 sha;
+        sha.update(path + "::" + name);
+
         const auto &meta = loader->getMetadata(name);
-        TensorNode &node = allocateNode();
+        TensorNode &node = allocateNode(OpType::INPUT, "", meta.dtype, {}, meta.shape, {}, Backend::CPU, StorageType::PERSISTENT, sha.digest());
         uint32_t id = node.id;
         weightSources[id] = {path, name};
 
-        TensorView view;
-        view.shape = meta.shape;
-        view.strides = TensorView::calcContiguousStrides(meta.shape);
-        view.baseOffset = 0;
-        view.dtype = meta.dtype;
-
-        node.opType = OpType::INPUT;
-        node.dtype = meta.dtype;
-        node.shape = meta.shape;
-        node.view = view;
-        node.storageType = StorageType::PERSISTENT;
-
-        SHA256 sha;
-        sha.update(path + "::" + name);
-        node.contentHash = sha.digest();
         return id;
     }
 
-    uint32_t input(TensorNode &node, std::vector<uint32_t> shape, DType dtype, TensorView view, StorageType storageType = StorageType::PERSISTENT)
+    uint32_t input(std::vector<uint32_t> shape, DType dtype, std::vector<int64_t> strides = {}, StorageType storageType = StorageType::PERSISTENT)
     {
-        node.opType = OpType::INPUT;
-        node.dtype = dtype;
-        node.shape = shape;
-        node.view = view;
-        node.storageType = storageType;
+        TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, Backend::CPU, storageType);
         return node.id;
-    }
-
-    uint32_t input(std::vector<uint32_t> shape, DType dtype, TensorView view, StorageType storageType = StorageType::PERSISTENT)
-    {
-        return input(allocateNode(), shape, dtype, view, storageType);
-    }
-
-    uint32_t inputWithId(uint32_t id, std::vector<uint32_t> shape, DType dtype, TensorView view, StorageType storageType = StorageType::PERSISTENT)
-    {
-        if (id >= allocator->nextId)
-        {
-            allocator->nextId = id + 1;
-        }
-        if (!hasNode(id))
-        {
-            nodes[id] = TensorNode();
-            nodes[id].id = id;
-        }
-        return input(getNode(id), shape, dtype, view, storageType);
     }
 
     uint32_t contiguous(uint32_t id0)
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::CONTIGUOUS;
-        node.dtype = dtype;
-        node.parentIds = {id0};
+        TensorNode &node = allocateNode(OpType::CONTIGUOUS, "", dtype, {id0});
         return node.id;
     }
 
@@ -168,10 +115,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::ADD;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1};
+        TensorNode &node = allocateNode(OpType::ADD, "", dtype, {id0, id1});
         return node.id;
     }
 
@@ -184,10 +128,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::MUL;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1};
+        TensorNode &node = allocateNode(OpType::MUL, "", dtype, {id0, id1});
         return node.id;
     }
 
@@ -200,10 +141,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::DIVIDE;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1};
+        TensorNode &node = allocateNode(OpType::DIVIDE, "", dtype, {id0, id1});
         return node.id;
     }
 
@@ -216,40 +154,28 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::DOT;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1};
+        TensorNode &node = allocateNode(OpType::DOT, "", dtype, {id0, id1});
         return node.id;
     }
 
     uint32_t sin(uint32_t id0)
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::SIN;
-        node.dtype = dtype;
-        node.parentIds = {id0};
+        TensorNode &node = allocateNode(OpType::SIN, "", dtype, {id0});
         return node.id;
     }
 
     uint32_t cos(uint32_t id0)
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::COS;
-        node.dtype = dtype;
-        node.parentIds = {id0};
+        TensorNode &node = allocateNode(OpType::COS, "", dtype, {id0});
         return node.id;
     }
 
     uint32_t neg(uint32_t id0)
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::NEGATE;
-        node.dtype = dtype;
-        node.parentIds = {id0};
+        TensorNode &node = allocateNode(OpType::NEGATE, "", dtype, {id0});
         return node.id;
     }
 
@@ -262,10 +188,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::POWER;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1};
+        TensorNode &node = allocateNode(OpType::POWER, "", dtype, {id0, id1});
         return node.id;
     }
 
@@ -278,11 +201,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.id = node.id; // redundant but following pattern
-        node.opType = OpType::SUM;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1};
+        TensorNode &node = allocateNode(OpType::SUM, "", dtype, {id0, id1});
         return node.id;
     }
 
@@ -295,10 +214,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::MAX;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1};
+        TensorNode &node = allocateNode(OpType::MAX, "", dtype, {id0, id1});
         return node.id;
     }
 
@@ -311,10 +227,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::RESHAPE;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1};
+        TensorNode &node = allocateNode(OpType::RESHAPE, "", dtype, {id0, id1});
         return node.id;
     }
 
@@ -327,10 +240,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::PERMUTE;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1};
+        TensorNode &node = allocateNode(OpType::PERMUTE, "", dtype, {id0, id1});
         return node.id;
     }
 
@@ -355,10 +265,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::SLICE;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1, id2, id3};
+        TensorNode &node = allocateNode(OpType::SLICE, "", dtype, {id0, id1, id2, id3});
         return node.id;
     }
 
@@ -389,10 +296,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::SCATTER;
-        node.dtype = dtype;
-        node.parentIds = {id0, id1, id2, id3, id4};
+        TensorNode &node = allocateNode(OpType::SCATTER, "", dtype, {id0, id1, id2, id3, id4});
         return node.id;
     }
 
@@ -419,20 +323,14 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(ids[0]).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::CONCAT;
-        node.dtype = dtype;
-        node.parentIds = ids;
-        node.parentIds.push_back(id1);
+        ids.push_back(id1);
+        TensorNode &node = allocateNode(OpType::CONCAT, "", dtype, ids);
         return node.id;
     }
 
     uint32_t cast(uint32_t id0, DType dtype)
     {
-        TensorNode &node = allocateNode();
-        node.opType = OpType::CAST;
-        node.dtype = dtype;
-        node.parentIds = {id0};
+        TensorNode &node = allocateNode(OpType::CAST, "", dtype, {id0});
         return node.id;
     }
 
@@ -451,10 +349,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::REPEAT;
-        node.dtype = dtype;
-        node.parentIds = {id0, repeats_id, axis_id};
+        TensorNode &node = allocateNode(OpType::REPEAT, "", dtype, {id0, repeats_id, axis_id});
         return node.id;
     }
 
@@ -478,10 +373,7 @@ struct Graph
             ss << "[Graph.arange] Expected " << DType::INT32 << " for input 3, got: " << getNode(id3).dtype;
             Error::throw_err(ss.str());
         }
-        TensorNode &node = allocateNode();
-        node.opType = OpType::ARANGE;
-        node.dtype = DType::INT32;
-        node.parentIds = {id1, id2, id3};
+        TensorNode &node = allocateNode(OpType::ARANGE, "", DType::INT32, {id1, id2, id3});
         return node.id;
     }
 
@@ -494,10 +386,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::TRIU;
-        node.dtype = dtype;
-        node.parentIds = {id0, k_id};
+        TensorNode &node = allocateNode(OpType::TRIU, "", dtype, {id0, k_id});
         return node.id;
     }
 
@@ -510,10 +399,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::GATHER;
-        node.dtype = dtype;
-        node.parentIds = {id0, indices_id};
+        TensorNode &node = allocateNode(OpType::GATHER, "", dtype, {id0, indices_id});
         return node.id;
     }
 
@@ -526,21 +412,14 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(value_id).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::FILL;
-        node.dtype = dtype;
-        node.parentIds = {value_id, shape_id};
+        TensorNode &node = allocateNode(OpType::FILL, "", dtype, {value_id, shape_id});
         return node.id;
     }
 
     uint32_t copyto(uint32_t id0, Backend backend)
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::COPY_TO;
-        node.dtype = dtype;
-        node.parentIds = {id0};
-        node.backend = backend;
+        TensorNode &node = allocateNode(OpType::COPY_TO, "", dtype, {id0}, {}, {}, backend);
         return node.id;
     }
 
@@ -565,10 +444,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(input_id).dtype;
-        TensorNode &node = allocateNode();
-        node.opType = OpType::IM2COL;
-        node.dtype = dtype;
-        node.parentIds = {input_id, kernel_size_id, stride_id, padding_id};
+        TensorNode &node = allocateNode(OpType::IM2COL, "", dtype, {input_id, kernel_size_id, stride_id, padding_id});
         return node.id;
     }
 };

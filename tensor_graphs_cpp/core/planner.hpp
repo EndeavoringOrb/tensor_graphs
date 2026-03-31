@@ -302,21 +302,13 @@ private:
         TensorNode &placeholder = result.graph.getNode(logicalId);
         placeholder.opType = OpType::INPUT;
         placeholder.parentIds.clear();
-        placeholder.view.shape = placeholder.shape;
-        placeholder.view.strides = TensorView::calcContiguousStrides(placeholder.shape);
-        placeholder.view.baseOffset = 0;
-        placeholder.view.dtype = placeholder.dtype;
         result.physicalToLogicalNodeMap[logicalId] = logicalId;
     }
 
     uint32_t cloneNode(const TensorNode &sourceNode, const std::vector<uint32_t> &parentIds)
     {
-        TensorNode &cloned = result.graph.allocateNode();
-        uint32_t clonedId = cloned.id;
-        cloned = sourceNode;
-        cloned.id = clonedId;
-        cloned.parentIds = parentIds;
-        return clonedId;
+        TensorNode &cloned = result.graph.allocateNode(sourceNode.opType, sourceNode.opName, sourceNode.dtype, parentIds, sourceNode.getShape(), sourceNode.strides, sourceNode.backend, sourceNode.storageType, sourceNode.contentHash);
+        return cloned.id;
     }
 
     void retargetPartialShapeInputs(uint32_t newNodeId, const TensorNode &sourceNode, const Region &outRegion)
@@ -405,7 +397,7 @@ private:
         }
         else
         {
-            auto fullRegions = makeFull(sourceParent.shape);
+            auto fullRegions = makeFull(sourceParent.getShape());
             if (!fullRegions.empty())
             {
                 producerRegion = fullRegions.front();
@@ -446,11 +438,7 @@ private:
 
         uint32_t partialId = cloneNode(sourceNode, partialParents);
         TensorNode &partialNode = result.graph.getNode(partialId);
-        partialNode.shape = getRegionShape(outRegion);
-        partialNode.view.shape.clear();
-        partialNode.view.strides.clear();
-        partialNode.view.baseOffset = 0;
-        partialNode.view.dtype = partialNode.dtype;
+        partialNode.setShape(getRegionShape(outRegion));
         retargetPartialShapeInputs(partialId, sourceNode, outRegion);
         result.physicalToLogicalNodeMap[partialId] = logicalId;
         result.physicalOutputRegions[partialId] = {outRegion};
@@ -487,7 +475,7 @@ private:
         }
 
         const std::vector<Region> recomputeRegions = normalizeRegions(recomputeIt->second);
-        const bool singleFullRegion = recomputeRegions.size() == 1 && isFullRegion(recomputeRegions.front(), sourceNode.shape);
+        const bool singleFullRegion = recomputeRegions.size() == 1 && isFullRegion(recomputeRegions.front(), sourceNode.getShape());
         if (singleFullRegion)
         {
             std::vector<uint32_t> rebuiltParents;
@@ -594,12 +582,11 @@ public:
         for (uint32_t nodeId : topo)
         {
             TensorNode &node = planningGraph.graph.getNode(nodeId);
-            ensureContiguousView(node);
             uint32_t refCount = 0;
             auto rcIt = refCounts.find(nodeId);
             if (rcIt != refCounts.end())
                 refCount = rcIt->second;
-            uint32_t eclassId = egraph.addEClass(node.shape, node.dtype, refCount, node.view.isContiguous());
+            uint32_t eclassId = egraph.addEClass(node.getShape(), node.dtype, refCount, isContiguous(node));
             egraph.getEClass(eclassId).backends.insert(node.backend);
             nodeToEClass[nodeId] = eclassId;
         }
@@ -699,7 +686,6 @@ private:
         uint32_t enodeId = 0;
         float cost = std::numeric_limits<float>::infinity();
         bool valid = false;
-        TensorView view;
         uint64_t memSize = 0; // Memory size for this node's output
     };
 
@@ -720,29 +706,12 @@ private:
         return std::numeric_limits<uint64_t>::max();
     }
 
-    static void ensureContiguousView(TensorNode &node)
-    {
-        if (node.view.shape.empty() && !node.shape.empty())
-        {
-            node.view.shape = node.shape;
-            node.view.strides = TensorView::calcContiguousStrides(node.shape);
-            node.view.dtype = node.dtype;
-            node.view.baseOffset = 0;
-        }
-    }
-
     void inferShapes(const std::vector<uint32_t> &topo, Graph &graph)
     {
         ShapePropagator propagator;
         for (uint32_t nodeId : topo)
         {
             propagator.inferShape(nodeId, graph);
-            if (graph.getNode(nodeId).view.shape.empty() && !graph.getNode(nodeId).shape.empty())
-            {
-                graph.getNode(nodeId).view.shape = graph.getNode(nodeId).shape;
-                graph.getNode(nodeId).view.strides = TensorView::calcContiguousStrides(graph.getNode(nodeId).shape);
-                graph.getNode(nodeId).view.dtype = graph.getNode(nodeId).dtype;
-            }
         }
     }
 
@@ -885,14 +854,7 @@ private:
 
                 for (size_t i = 0; i < entry.numInputs; ++i)
                 {
-                    TensorNode &node = pattern.graph.allocateNode();
-                    uint32_t inId = node.id;
-                    TensorView view;
-                    view.shape = entry.dummyShapes[i];
-                    view.strides = TensorView::calcContiguousStrides(view.shape);
-                    view.baseOffset = 0;
-                    view.dtype = entry.dtypes[i];
-                    pattern.graph.inputWithId(inId, view.shape, view.dtype, view);
+                    uint32_t inId = pattern.graph.input(entry.dummyShapes[i], entry.dtypes[i]);
                     pattern.variables.push_back(inId);
                 }
                 pattern.rootId = entry.factory(pattern.variables, pattern.graph);
@@ -962,7 +924,7 @@ private:
                 bool needContig = false;
                 if (i < kernel.requiresContiguous.size())
                 {
-                    needContig = kernel.requiresContiguous[i] && !parent.view.isContiguous();
+                    needContig = kernel.requiresContiguous[i] && !isContiguous(parent);
                 }
 
                 if (!needCopy && !needContig)
@@ -979,7 +941,7 @@ private:
                     bool copyWorks = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", expectedBackend, {parent}, dummyCopyOut, {}, false).empty();
 
                     TensorNode dummyContigOut = dummyCopyOut;
-                    dummyContigOut.view.strides = TensorView::calcContiguousStrides(dummyContigOut.shape);
+                    dummyContigOut.strides = calcContiguousStrides(dummyContigOut.getShape());
                     bool contigWorksAfterCopy = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", expectedBackend, {dummyCopyOut}, dummyContigOut, {}, false).empty();
 
                     if (copyWorks && contigWorksAfterCopy)
@@ -990,7 +952,7 @@ private:
                     else
                     {
                         TensorNode dummyContigOut2 = parent;
-                        dummyContigOut2.view.strides = TensorView::calcContiguousStrides(dummyContigOut2.shape);
+                        dummyContigOut2.strides = calcContiguousStrides(dummyContigOut2.getShape());
                         bool contigWorks = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", parent.backend, {parent}, dummyContigOut2, {}, false).empty();
 
                         TensorNode dummyCopyOut2 = dummyContigOut2;
@@ -1019,14 +981,8 @@ private:
                 adaptedParents.push_back(currentId);
             }
 
-            TensorNode &node = graph.allocateNode();
+            TensorNode &node = graph.allocateNode(kernel.opType, kernel.opName, refNode.dtype, adaptedParents, refNode.getShape(), {}, targetBackend);
             uint32_t id = node.id;
-            node.opType = kernel.opType;
-            node.opName = kernel.opName;
-            node.dtype = refNode.dtype;
-            node.shape = refNode.shape;
-            node.parentIds = adaptedParents;
-            node.backend = targetBackend;
 
             if (node.backend != refNode.backend)
             {
@@ -1103,8 +1059,7 @@ private:
         if (rcIt != refCounts.end())
             refCount = rcIt->second;
 
-        ensureContiguousView(graph.getNode(nodeId));
-        uint32_t eclassId = egraph.addEClass(node.shape, node.dtype, refCount, node.view.isContiguous());
+        uint32_t eclassId = egraph.addEClass(node.getShape(), node.dtype, refCount, isContiguous(node));
         egraph.getEClass(eclassId).backends.insert(node.backend);
         nodeToEClass[nodeId] = eclassId;
 
@@ -1175,7 +1130,6 @@ private:
                     {
                         ShapePropagator prop;
                         prop.inferShapeRecursive(newId, graph);
-                        ensureContiguousView(graph.getNode(newId));
 
                         ensureNodeInEGraph(newId, graph, egraph, nodeToEClass, refCounts);
 
@@ -1312,9 +1266,7 @@ private:
                     c.cost = 0.0f;
                     c.valid = true;
                     TensorNode inNode = graph.getNode(enode.nodeId);
-                    ensureContiguousView(inNode);
-                    c.view = inNode.view;
-                    c.memSize = getSizeBytes(inNode.shape, inNode.dtype);
+                    c.memSize = getSizeBytes(inNode.getShape(), inNode.dtype);
                     if (c.cost < best.cost)
                         best = c;
                     continue;
@@ -1336,14 +1288,6 @@ private:
                     const ENode &childEnode = egraph.getENodes()[childChoice.enodeId];
                     TensorNode inNode = graph.getNode(childEnode.nodeId);
                     inNode.backend = childEnode.backend;
-                    if (childChoice.view.shape.size() > 0)
-                    {
-                        inNode.view = childChoice.view;
-                    }
-                    else
-                    {
-                        ensureContiguousView(inNode);
-                    }
                     inputs.push_back(inNode);
                 }
                 if (!childValid)
@@ -1382,23 +1326,15 @@ private:
 
                 TensorNode outNode = graph.getNode(enode.nodeId);
                 outNode.backend = enode.backend;
-                ensureContiguousView(outNode);
 
                 if (enode.kernelUid == 0)
                     continue;
 
                 const KernelEntry &entry = KernelRegistry::get().getKernel(enode.kernelUid);
 
-                if (entry.inplace)
+                if (entry.inplace && entry.inferView)
                 {
-                    if (entry.inferView)
-                    {
-                        outNode.view = entry.inferView(outNode, inputs);
-                    }
-                    else if (!inputs.empty())
-                    {
-                        outNode.view = inputs[0].view;
-                    }
+                    entry.inferView(outNode, inputs);
                 }
 
                 if (!entry.match(inputs, outNode, refCounts))
@@ -1412,8 +1348,7 @@ private:
                 c.enodeId = enodeId;
                 c.cost = childrenCost + kernelCost;
                 c.valid = true;
-                c.view = outNode.view;
-                c.memSize = getSizeBytes(outNode.shape, outNode.dtype);
+                c.memSize = getSizeBytes(outNode.getShape(), outNode.dtype);
                 if (!best.valid || c.cost < best.cost)
                     best = c;
             }
@@ -1649,7 +1584,6 @@ private:
 
             TensorNode checkOutNode = compiled.nodesMap.at(nodeId);
             checkOutNode.backend = enode.backend;
-            ensureContiguousView(checkOutNode);
 
             const KernelEntry *kEntry = &KernelRegistry::get().getKernel(enode.kernelUid);
             if (kEntry->inplace && !kEntry->match(checkInputs, checkOutNode, compiledRefCounts))
@@ -1669,21 +1603,14 @@ private:
             inst.outputStorageType = (cachedNodes.count(logicalNodeId) && nodeIsFinalLogicalOutput) ? StorageType::PINNED : node.storageType;
 
             compiled.nodesMap[nodeId].backend = enode.backend;
-            if (kEntry->inplace)
+            if (kEntry->inplace && kEntry->inferView)
             {
                 std::vector<TensorNode> inplaceInputs;
                 inplaceInputs.reserve(inst.inputNodeIds.size());
                 for (uint32_t pid : inst.inputNodeIds)
                     inplaceInputs.push_back(compiled.nodesMap.at(pid));
 
-                if (kEntry->inferView)
-                {
-                    compiled.nodesMap[nodeId].view = kEntry->inferView(compiled.nodesMap[nodeId], inplaceInputs);
-                }
-                else if (!inplaceInputs.empty())
-                {
-                    compiled.nodesMap[nodeId].view = inplaceInputs[static_cast<size_t>(inst.inplaceInputIndex)].view;
-                }
+                kEntry->inferView(compiled.nodesMap[nodeId], inplaceInputs);
             }
 
             compiled.instructions.push_back(inst);

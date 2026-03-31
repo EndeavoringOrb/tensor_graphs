@@ -207,12 +207,6 @@ private:
                 continue;
 
             prop.inferShape(nodeId, graph);
-            if (graph.getNode(nodeId).view.shape.empty() && !graph.getNode(nodeId).shape.empty())
-            {
-                graph.getNode(nodeId).view.shape = graph.getNode(nodeId).shape;
-                graph.getNode(nodeId).view.strides = TensorView::calcContiguousStrides(graph.getNode(nodeId).shape);
-                graph.getNode(nodeId).view.dtype = graph.getNode(nodeId).dtype;
-            }
         }
 
         return atomicTopo;
@@ -236,7 +230,7 @@ private:
             if (memManager.has(node.backend, logicalId))
                 continue;
 
-            uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+            uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
             uint64_t offset = memManager.allocate(node.backend, logicalId, sizeBytes, StorageType::PERSISTENT);
 
             if (graph.constantStaging.count(node.id))
@@ -273,7 +267,7 @@ private:
 
             InputOption option;
             option.nodeId = nodeId;
-            for (uint32_t dimLen : graph.getNode(nodeId).shape)
+            for (uint32_t dimLen : graph.getNode(nodeId).getShape())
             {
                 option.dimSlices.push_back(generateSlicesForDim(dimLen, nBucketSizes));
             }
@@ -283,7 +277,7 @@ private:
         if (inputOptions.empty())
         {
             DirtyBucket bucket;
-            bucket.regions[rootId] = makeFull(graph.getNode(rootId).shape);
+            bucket.regions[rootId] = makeFull(graph.getNode(rootId).getShape());
             return {{"", bucket}};
         }
 
@@ -543,7 +537,7 @@ public:
                     if (materialized.insert(nodeId).second)
                     {
                         timer.tick();
-                        uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+                        uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
 
                         uint64_t offset = memManager.allocate(node.backend, logicalId, sizeBytes, StorageType::PERSISTENT);
 
@@ -594,7 +588,7 @@ public:
 
             for (size_t d = 0; d < box.region.size(); ++d)
             {
-                uint32_t dimLen = graph.getNode(nodeId).shape[d];
+                uint32_t dimLen = graph.getNode(nodeId).getShape()[d];
                 uint32_t start = box.region[d].start;
                 uint32_t stop = box.region[d].stop;
 
@@ -656,7 +650,7 @@ public:
                 oldData = prevIt->second.data();
             }
 
-            auto diff = computeInputDiff(oldData, newData, graph.getNode(nodeId).shape, graph.getNode(nodeId).dtype);
+            auto diff = computeInputDiff(oldData, newData, graph.getNode(nodeId).getShape(), graph.getNode(nodeId).dtype);
             std::cout << "Input Diffs " << pair.first << ": " << std::endl;
             for (uint32_t i = 0; i < diff.size(); i++)
             {
@@ -668,7 +662,7 @@ public:
                 inputDiffs[nodeId] = diff;
             }
 
-            uint64_t sizeBytes = getSizeBytes(graph.getNode(nodeId).shape, graph.getNode(nodeId).dtype);
+            uint64_t sizeBytes = getSizeBytes(graph.getNode(nodeId).getShape(), graph.getNode(nodeId).dtype);
             auto &stored = previousInputData[nodeId];
             stored.resize(sizeBytes);
             std::memcpy(stored.data(), newData, sizeBytes);
@@ -900,7 +894,7 @@ public:
             std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
             for (uint32_t inId : inputNodeIds)
             {
-                fullInputRegions[inId] = makeFull(graph.getNode(inId).shape);
+                fullInputRegions[inId] = makeFull(graph.getNode(inId).getShape());
             }
             std::string fullKey = encodeCacheKey(fullInputRegions);
             // Override the optimized plan for the full key with the baseline (recompute-all) plan

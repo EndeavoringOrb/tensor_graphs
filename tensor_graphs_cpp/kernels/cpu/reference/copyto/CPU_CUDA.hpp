@@ -33,19 +33,19 @@ __global__ void unpackKernelBytes(const uint8_t *__restrict__ src,
 
 inline bool matchCopyTo_CPU_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &)
 {
-    return (inputs.size() == 1 && inputs[0].backend == Backend::CPU && output.backend == Backend::CUDA && inputs[0].dtype == output.dtype && inputs[0].shape == output.shape);
+    return (inputs.size() == 1 && inputs[0].backend == Backend::CPU && output.backend == Backend::CUDA && inputs[0].dtype == output.dtype && inputs[0].getShape() == output.getShape());
 }
 
 inline void runCopyTo_CPU_CUDA(const std::vector<const void *> &inputs, const std::vector<void *> &outputs, const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
 {
     const uint8_t *src = static_cast<const uint8_t *>(inputs[0]);
     uint8_t *dst = static_cast<uint8_t *>(outputs[0]);
-    uint64_t numElements = countElements(inViews[0].shape);
+    uint64_t numElements = countElements(inViews[0].getShape());
     uint64_t elemSize = getDTypeSize(inViews[0].dtype);
     size_t bytes = numElements * elemSize;
 
-    bool srcContig = inViews[0].isContiguous();
-    bool dstContig = outViews[0].isContiguous();
+    bool srcContig = isContiguous(inViews[0]);
+    bool dstContig = isContiguous(outViews[0]);
 
     if (srcContig && dstContig)
     {
@@ -61,7 +61,7 @@ inline void runCopyTo_CPU_CUDA(const std::vector<const void *> &inputs, const st
         hostBuffer.resize(bytes);
         for (uint64_t i = 0; i < numElements; ++i)
         {
-            uint64_t srcIdx = getStridedIndex(i, inViews[0].shape, inViews[0].strides);
+            uint64_t srcIdx = getStridedIndex(i, inViews[0].getShape(), inViews[0].strides);
             std::memcpy(hostBuffer.data() + i * elemSize, src + srcIdx * elemSize, elemSize);
         }
         packedSrc = hostBuffer.data();
@@ -76,11 +76,11 @@ inline void runCopyTo_CPU_CUDA(const std::vector<const void *> &inputs, const st
     // Step 3: Unpack on GPU
     if (!dstContig)
     {
-        int ndim = (int)outViews[0].shape.size();
+        int ndim = (int)outViews[0].getShape().size();
         std::vector<uint64_t> h_dims(ndim), h_strides(ndim);
         for (int i = 0; i < ndim; ++i)
         {
-            h_dims[i] = outViews[0].shape[i];
+            h_dims[i] = outViews[0].getShape()[i];
             h_strides[i] = (uint64_t)outViews[0].strides[i];
         }
 

@@ -148,7 +148,7 @@ struct CostModel
 
     float interpolate(const std::vector<Record> &kernelRecords, const TensorNode &node, const Graph &graph)
     {
-        uint64_t targetElements = countElements(node.shape);
+        uint64_t targetElements = countElements(node);
         if (targetElements == 0)
             return 0.0f;
 
@@ -190,8 +190,8 @@ struct CostModel
         for (size_t i = 0; i < inputs.size(); ++i)
         {
             const auto &inNode = inputs[i];
-            inShapes[i] = inNode.shape;
-            inStrides[i] = inNode.view.shape.empty() ? TensorView::calcContiguousStrides(inNode.shape) : inNode.view.strides;
+            inShapes[i] = inNode.getShape();
+            inStrides[i] = inNode.strides;
             inDTypes[i] = inNode.dtype;
 
             // Check if this input corresponds to a persistent constant in the global graph
@@ -202,8 +202,8 @@ struct CostModel
                     inConstants[i] = stagingIt->second;
             }
         }
-        std::vector<std::vector<uint32_t>> outShapes = {node.shape};
-        std::vector<std::vector<int64_t>> outStrides = {node.view.shape.empty() ? TensorView::calcContiguousStrides(node.shape) : node.view.strides};
+        std::vector<std::vector<uint32_t>> outShapes = {node.getShape()};
+        std::vector<std::vector<int64_t>> outStrides = {node.strides};
         std::vector<DType> outDTypes = {node.dtype};
 
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS

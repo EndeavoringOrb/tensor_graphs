@@ -427,50 +427,56 @@ inline std::vector<Region> mergeRegions(const std::vector<Region> &regions1, con
     return mergeRegions(combined);
 }
 
-struct TensorView
+bool isContiguous(const std::vector<int64_t> &strides, const std::vector<uint32_t> &shape)
 {
-    uint64_t baseOffset = 0; // Offset into the MemoryManager's DeviceBuffer
-    std::vector<uint32_t> shape;
-    std::vector<int64_t> strides; // Strides in terms of elements, not bytes
-    DType dtype;
-
-    bool isContiguous() const
+    int64_t expectedStride = 1;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
     {
-        int64_t expectedStride = 1;
-        for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
-        {
-            if (strides[i] != expectedStride)
-                return false;
-            expectedStride *= shape[i];
-        }
-        return true;
+        if (strides[i] != expectedStride)
+            return false;
+        expectedStride *= shape[i];
     }
+    return true;
+}
 
-    static std::vector<int64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
+static std::vector<int64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
+{
+    std::vector<int64_t> newStrides(targetShape.size());
+    int64_t stride = 1;
+    for (int i = static_cast<int>(targetShape.size()) - 1; i >= 0; --i)
     {
-        std::vector<int64_t> newStrides(targetShape.size());
-        int64_t stride = 1;
-        for (int i = static_cast<int>(targetShape.size()) - 1; i >= 0; --i)
-        {
-            newStrides[i] = stride;
-            stride *= targetShape[i];
-        }
-        return newStrides;
+        newStrides[i] = stride;
+        stride *= targetShape[i];
     }
-};
+    return newStrides;
+}
 
 struct TensorNode
 {
+private:
+    std::vector<uint32_t> shape;
+
+public:
     uint32_t id;
     OpType opType;
     std::string opName; // Used if opType == OpType::FUSED
     DType dtype;
     std::vector<uint32_t> parentIds;
-    std::vector<uint32_t> shape;
+    std::vector<int64_t> strides;
     Backend backend = Backend::CPU;
-    TensorView view;
     StorageType storageType = StorageType::TRANSIENT;
     std::string contentHash;
+
+    TensorNode() {}
+
+    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<int64_t> _strides, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "")
+        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), backend(_backend), storageType(_storageType), contentHash(_contentHash)
+    {
+        if (strides.empty())
+        {
+            strides = calcContiguousStrides(shape);
+        }
+    }
 
     Region fullRegion() const
     {
@@ -481,7 +487,64 @@ struct TensorNode
         }
         return region;
     }
+
+    const std::vector<uint32_t> &getShape() const
+    {
+        return shape;
+    }
+
+    void setShape(const std::vector<uint32_t> &_shape)
+    {
+        shape = _shape;
+        if (strides.empty() || shape.size() != strides.size())
+            strides = calcContiguousStrides(_shape);
+    }
 };
+
+bool isContiguous(const TensorNode &node)
+{
+    return isContiguous(node.strides, node.getShape());
+}
+
+uint64_t countElements(const TensorNode &node)
+{
+    return countElements(node.getShape());
+}
+
+struct TensorView
+{
+private:
+    std::vector<uint32_t> shape;
+public:
+    uint64_t baseOffset = 0; // Offset into the MemoryManager's DeviceBuffer
+    std::vector<int64_t> strides; // Strides in terms of elements, not bytes
+    DType dtype;
+
+    TensorView() {}
+    TensorView(const TensorNode &node, uint64_t _baseOffset) : baseOffset(_baseOffset), shape(node.getShape()), strides(node.strides), dtype(node.dtype) {}
+
+    const std::vector<uint32_t> &getShape() const
+    {
+        return shape;
+    }
+
+    void setShape(const std::vector<uint32_t> &_shape)
+    {
+        shape = _shape;
+        if (strides.empty() || shape.size() != strides.size())
+            strides = calcContiguousStrides(_shape);
+    }
+};
+
+bool isContiguous(const TensorView &view)
+{
+    return isContiguous(view.strides, view.getShape());
+}
+
+uint64_t countElements(const TensorView &view)
+{
+    return countElements(view.getShape());
+}
 
 inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape, DType dtype)
 {
@@ -841,14 +904,14 @@ inline void to_json(json &j, const TensorView &v)
 {
     j = json{
         {"baseOffset", v.baseOffset},
-        {"shape", v.shape},
+        {"shape", v.getShape()},
         {"strides", v.strides},
         {"dtype", v.dtype}};
 }
 inline void from_json(const json &j, TensorView &v)
 {
     v.baseOffset = j.at("baseOffset").get<uint64_t>();
-    v.shape = j.at("shape").get<std::vector<uint32_t>>();
+    v.setShape(j.at("shape").get<std::vector<uint32_t>>());
     v.strides = j.at("strides").get<std::vector<int64_t>>();
     v.dtype = j.at("dtype").get<DType>();
 }
@@ -861,9 +924,9 @@ inline void to_json(json &j, const TensorNode &n)
         {"opName", n.opName},
         {"dtype", n.dtype},
         {"parentIds", n.parentIds},
-        {"shape", n.shape},
+        {"shape", n.getShape()},
+        {"strides", n.strides},
         {"backend", n.backend},
-        {"view", n.view},
         {"storageType", n.storageType},
         {"contentHash", n.contentHash}};
 }
@@ -874,9 +937,9 @@ inline void from_json(const json &j, TensorNode &n)
     n.opName = j.at("opName").get<std::string>();
     n.dtype = j.at("dtype").get<DType>();
     n.parentIds = j.at("parentIds").get<std::vector<uint32_t>>();
-    n.shape = j.at("shape").get<std::vector<uint32_t>>();
+    n.setShape(j.at("shape").get<std::vector<uint32_t>>());
+    n.strides = j.at("strides").get<std::vector<int64_t>>();
     n.backend = j.at("backend").get<Backend>();
-    n.view = j.at("view").get<TensorView>();
     n.storageType = j.at("storageType").get<StorageType>();
     n.contentHash = j.at("contentHash").get<std::string>();
 }

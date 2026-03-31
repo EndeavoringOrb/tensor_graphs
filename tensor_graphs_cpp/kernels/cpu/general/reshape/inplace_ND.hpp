@@ -6,7 +6,7 @@ inline bool matchReshapeInplaceND(const std::vector<TensorNode> &inputs, const T
 {
     if (inputs.size() != 2)
         return false;
-    if (!inputs[0].view.isContiguous())
+    if (!isContiguous(inputs[0]))
         return false;
     if (inputs[0].dtype != output.dtype)
         return false;
@@ -15,15 +15,13 @@ inline bool matchReshapeInplaceND(const std::vector<TensorNode> &inputs, const T
     auto it = refCounts.find(inputs[0].id);
     if (it == refCounts.end() || it->second != 1)
         return false;
-    return countElements(inputs[0].shape) == countElements(output.shape);
+    return countElements(inputs[0].getShape()) == countElements(output.getShape());
 }
 
-inline TensorView inferViewReshapeInplace(const TensorNode &node, const std::vector<TensorNode> &inputs)
+inline void inferViewReshapeInplace(TensorNode &node, const std::vector<TensorNode> &inputs)
 {
-    TensorView view = inputs[0].view;
-    view.shape = node.shape;
-    view.strides = TensorView::calcContiguousStrides(node.shape);
-    return view;
+    node.strides = calcContiguousStrides(node.getShape());
+    return;
 }
 
 inline void runReshapeInplaceND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

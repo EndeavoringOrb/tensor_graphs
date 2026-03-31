@@ -51,29 +51,15 @@ public:
             const TensorNode &node = compiled.nodesMap.at(nodeId);
             auto &outBuf = memManager.buffers.at(node.backend);
 
-            struct ResolvedInput
-            {
-                const void *ptr;
-                TensorView view;
-                uint32_t allocationId;
-            };
-            std::vector<ResolvedInput> resolvedInputs;
+            std::vector<const void *> kernelInputs;
+            std::vector<TensorView> kernelInViews;
             for (uint32_t inId : inst.inputNodeIds)
             {
                 const TensorNode &inNode = compiled.nodesMap.at(inId);
                 uint32_t activeInId = compiled.getLogicalId(inId);
-
-                TensorView safeView = inNode.view;
-                if (safeView.shape.empty() && !inNode.shape.empty())
-                {
-                    safeView.shape = inNode.shape;
-                    safeView.strides = TensorView::calcContiguousStrides(inNode.shape);
-                    safeView.dtype = inNode.dtype;
-                    safeView.baseOffset = 0;
-                }
-                safeView.baseOffset += memManager.buffers.at(inNode.backend).getOffset(activeInId);
-
-                resolvedInputs.push_back({memManager.buffers.at(inNode.backend).arena_ptr + safeView.baseOffset, safeView, activeInId});
+                TensorView view = memManager.getView(inNode, compiled);
+                kernelInViews.push_back(view);
+                kernelInputs.push_back(memManager.buffers.at(inNode.backend).arena_ptr + view.baseOffset);
             }
 
             const bool isEndOfLogicalChain = (idx + 1 == compiled.instructions.size()) ||
@@ -81,6 +67,11 @@ public:
             const uint32_t outputMemId = (logicalId != UINT32_MAX && (logicalId == nodeId || isEndOfLogicalChain))
                                              ? logicalId
                                              : nodeId;
+
+            uint64_t arenaOffset = outBuf.getOffset(outputMemId);
+            TensorView outView = memManager.getView(node, compiled);
+            std::vector<TensorView> kernelOutViews = {outView};
+            std::vector<void *> kernelOutputs = {outBuf.arena_ptr + outView.baseOffset};
 
             uint32_t memId = outputMemId;
             if (inst.inplaceInputIndex >= 0)
@@ -96,7 +87,7 @@ public:
             }
             else
             {
-                uint64_t sizeBytes = getSizeBytes(node.shape, node.dtype);
+                uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
                 float cost = compiled.nodeCosts.at(inst.nodeId);
                 memManager.allocate(inst.backend, outputMemId, sizeBytes, inst.outputStorageType, compiled.refCounts.at(inst.nodeId), cost, &parentMap, &compiled.nodeCosts);
             }
@@ -107,41 +98,11 @@ public:
 
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.fullKernelId);
 
-            std::vector<const void *> kernelInputs;
-            std::vector<TensorView> kernelInViews;
-
-            for (size_t pIdx = 0; pIdx < inst.inputNodeIds.size(); ++pIdx)
-            {
-                kernelInputs.push_back(resolvedInputs[pIdx].ptr);
-                kernelInViews.push_back(resolvedInputs[pIdx].view);
-            }
-
-            std::vector<void *> kernelOutputs;
-            std::vector<TensorView> kernelOutViews;
-
-            TensorView outView;
-            uint64_t arenaOffset = outBuf.getOffset(outputMemId);
-            if (node.view.shape.empty())
-            {
-                outView.baseOffset = arenaOffset;
-                outView.shape = node.shape;
-                outView.strides = TensorView::calcContiguousStrides(node.shape);
-                outView.dtype = node.dtype;
-            }
-            else
-            {
-                outView = node.view;
-                outView.baseOffset += arenaOffset;
-            }
-
-            kernelOutputs.push_back(outBuf.arena_ptr + outView.baseOffset);
-            kernelOutViews.push_back(outView);
-
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {
                 const uint32_t inId = inst.inputNodeIds[i];
                 TensorNode debugInput = compiled.nodesMap.at(inId);
-                debugInput.id = resolvedInputs[i].allocationId;
+                debugInput.id = compiled.getLogicalId(inId);
                 Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId));
             }
             kernel.run(kernelInputs, kernelOutputs, kernelInViews, kernelOutViews);

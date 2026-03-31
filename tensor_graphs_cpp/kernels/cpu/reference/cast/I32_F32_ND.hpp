@@ -19,11 +19,11 @@ inline bool matchCastI32_F32_ND(const std::vector<TensorNode> &inputs, const Ten
         return false;
 
     // Check Shape Identity
-    if (inputs[0].shape != output.shape)
+    if (inputs[0].getShape() != output.getShape())
         return false;
 
     // Reference implementation requires contiguity
-    if (!inputs[0].view.isContiguous() || !output.view.isContiguous())
+    if (!isContiguous(inputs[0]) || !isContiguous(output))
         return false;
 
     return true;
@@ -35,7 +35,7 @@ inline void runCastI32_F32_ND(const std::vector<const void *> &inputs, const std
     const int32_t *src = static_cast<const int32_t *>(inputs[0]);
     float *dst = static_cast<float *>(outputs[0]);
 
-    uint64_t numElements = countElements(inViews[0].shape);
+    uint64_t numElements = countElements(inViews[0].getShape());
 
     for (uint64_t i = 0; i < numElements; ++i)
     {

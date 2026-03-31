@@ -8,9 +8,9 @@ inline bool matchDotF32_3D(const std::vector<TensorNode> &inputs, const TensorNo
         return false;
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
-    const auto &s0 = inputs[0].shape;
-    const auto &s1 = inputs[1].shape;
-    const auto &so = output.shape;
+    const auto &s0 = inputs[0].getShape();
+    const auto &s1 = inputs[1].getShape();
+    const auto &so = output.getShape();
     if (s0.size() != 3 || s1.size() != 3 || so.size() != 3)
         return false;
     // A: [B, M, K], B: [B, K, N], Out: [B, M, N]
@@ -32,10 +32,10 @@ inline void runDotF32_3D(const std::vector<const void *> &inputs, const std::vec
     const auto &viewB = inViews[1];
     const auto &viewOut = outViews[0];
 
-    uint32_t B_count = viewA.shape[0];
-    uint32_t M = viewA.shape[1];
-    uint32_t K = viewA.shape[2];
-    uint32_t N = viewB.shape[2];
+    uint32_t B_count = viewA.getShape()[0];
+    uint32_t M = viewA.getShape()[1];
+    uint32_t K = viewA.getShape()[2];
+    uint32_t N = viewB.getShape()[2];
 
     // Strides for the reduction dimension K
     // In A [B, M, K], K is index 2

@@ -27,8 +27,7 @@ namespace Debug
         std::vector<uint8_t> hostData;
         if (node.backend == Backend::CUDA)
         {
-            TensorView view = mem.getView(node);
-            uint64_t numElements = countElements(view.shape);
+            uint64_t numElements = countElements(node);
             uint64_t sizeBytes = numElements * getDTypeSize(node.dtype);
             hostData.resize(sizeBytes);
             cudaMemcpy(hostData.data(), basePtr, sizeBytes, cudaMemcpyDeviceToHost);
@@ -36,8 +35,7 @@ namespace Debug
         }
 #endif
 
-        TensorView view = mem.getView(node);
-        uint64_t numElements = countElements(view.shape);
+        uint64_t numElements = countElements(node);
 
         // This check assumes contiguous layout for debugging simplicity.
         // If your tensor is heavily sliced/permuted, this might need a strided iterator.

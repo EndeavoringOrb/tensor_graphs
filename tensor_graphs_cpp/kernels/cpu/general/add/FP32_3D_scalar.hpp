@@ -20,13 +20,13 @@ inline bool matchAddFP32_3D_Scalar(const std::vector<TensorNode> &inputs, const 
         return false;
 
     // Rank Check: 3D + Scalar
-    if (in3D.shape.size() != 3 || inScalar.shape.size() != 1 || inScalar.shape[0] != 1)
+    if (in3D.getShape().size() != 3 || inScalar.getShape().size() != 1 || inScalar.getShape()[0] != 1)
         return false;
 
-    if (in3D.shape != output.shape)
+    if (in3D.getShape() != output.getShape())
         return false;
 
-    if (!in3D.view.isContiguous() || !output.view.isContiguous())
+    if (!isContiguous(in3D) || !isContiguous(output))
         return false;
 
     return true;
@@ -39,7 +39,7 @@ inline void runAddFP32_3D_Scalar(const std::vector<const void *> &inputs, const 
     float scalarValue = *static_cast<const float *>(inputs[1]);
     float *out = static_cast<float *>(outputs[0]);
 
-    uint64_t totalElements = countElements(inViews[0].shape);
+    uint64_t totalElements = countElements(inViews[0].getShape());
 
     for (uint64_t i = 0; i < totalElements; ++i)
     {
@@ -58,7 +58,7 @@ inline uint32_t refFactoryAdd3D_Scalar(const std::vector<uint32_t> &inputs, Grap
     uint32_t id3D = inputs[0];
     uint32_t idScalar = inputs[1];
 
-    auto shape3D = graph.getNode(id3D).shape;
+    auto shape3D = graph.getNode(id3D).getShape();
 
     // 1. Reshape Scalar -> [1, 1, 1]
     int32_t reshape_dims[] = {1, 1, 1};

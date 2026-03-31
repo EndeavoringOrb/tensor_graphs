@@ -23,7 +23,7 @@ using KernelFunc = void (*)(const std::vector<const void *> &inputs,
 
 using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph);
 
-using InferViewFunc = TensorView (*)(const TensorNode &node, const std::vector<TensorNode> &inputs);
+using InferViewFunc = void (*)(TensorNode &node, const std::vector<TensorNode> &inputs);
 
 struct ReferenceGraphEntry
 {

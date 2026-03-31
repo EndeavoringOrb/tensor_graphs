@@ -548,67 +548,7 @@ struct MemoryManager
         const DeviceBuffer &buf = it->second;
         uint64_t arenaOffset = buf.getOffset(compiled.getLogicalId(node.id));
 
-        // If the node already has view metadata (shape/strides), we use it.
-        // Otherwise, we create a default contiguous view based on the node's shape.
-        TensorView view;
-        if (node.view.shape.empty())
-        {
-            view.baseOffset = arenaOffset;
-            view.shape = node.shape;
-            view.strides = TensorView::calcContiguousStrides(node.shape);
-            view.dtype = node.dtype;
-        }
-        else
-        {
-            view = node.view;
-            // The view's baseOffset stored in the node is usually relative to the
-            // start of the allocation. We add the arena-relative offset here.
-            view.baseOffset += arenaOffset;
-        }
-
-        return view;
-    }
-
-    /**
-     * Creates a TensorView for a specific node and backend with a custom shape.
-     * This is typically used when a node needs to be interpreted as a different shape
-     * (like a reshape operation) or to initialize the view for a newly allocated input.
-     *
-     * @param backend The backend (device) where the tensor resides.
-     * @param nodeId The unique identifier for the tensor node.
-     * @param shape The desired shape for the view.
-     * @return A TensorView containing the physical arena offset, shape, and contiguous strides.
-     */
-    TensorView getView(Backend backend, const uint32_t nodeId, std::vector<uint32_t> shape, DType dtype) const
-    {
-        // 1. Find the device-specific buffer
-        auto it = buffers.find(backend);
-        if (it == buffers.end())
-        {
-            std::stringstream ss;
-            ss << "[MemoryManager.getView] Backend " << backend << " not initialized.";
-            Error::throw_err(ss.str());
-        }
-
-        const DeviceBuffer &buf = it->second;
-
-        // 2. Find the physical allocation block for this node
-        auto allocIt = buf.allocationMap.find(nodeId);
-        if (allocIt == buf.allocationMap.end())
-        {
-            std::stringstream ss;
-            ss << "[MemoryManager.getView] Node ID " << nodeId << " is not currently allocated on " << backend;
-            Error::throw_err(ss.str());
-        }
-
-        // 3. Construct the view
-        TensorView view;
-        // The baseOffset is the start of the block within the physical DeviceBuffer arena
-        view.baseOffset = allocIt->second->offset;
-        view.shape = std::move(shape);
-        // Standard contiguous layout calculation (row-major)
-        view.strides = TensorView::calcContiguousStrides(view.shape);
-        view.dtype = dtype;
+        TensorView view = TensorView(node, arenaOffset);
 
         return view;
     }

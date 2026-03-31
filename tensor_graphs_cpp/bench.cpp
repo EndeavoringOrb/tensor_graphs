@@ -317,7 +317,7 @@ int main()
                     inPtrs[idx] = inData[idx].data();
                 }
 
-                inViews[idx].shape = r.inputShapes[idx];
+                inViews[idx].setShape(r.inputShapes[idx]);
                 inViews[idx].strides = r.inputStrides[idx];
                 inViews[idx].baseOffset = 0;
                 inViews[idx].dtype = r.inputDTypes[idx];
@@ -357,7 +357,7 @@ int main()
                     outPtrs[idx] = outData[idx].data();
                 }
 
-                outViews[idx].shape = r.outputShapes[idx];
+                outViews[idx].setShape(r.outputShapes[idx]);
                 outViews[idx].strides = r.outputStrides[idx];
                 outViews[idx].baseOffset = 0;
                 outViews[idx].dtype = r.outputDTypes[idx];
@@ -374,7 +374,7 @@ int main()
                       << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
                       << " (0x" << std::hex << kernelUid << std::dec << ")"
                       << ", Out DType: " << toString(outViews[0].dtype) // Added DType
-                      << ", Out Shape: " << toString(outViews[0].shape)
+                      << ", Out Shape: " << toString(outViews[0].getShape())
                       << ", Out Strides: " << toString(outViews[0].strides) // Added Strides
                       << std::flush;
 

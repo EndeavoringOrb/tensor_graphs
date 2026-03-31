@@ -14,29 +14,26 @@ inline bool matchRepeatF32_Inplace_ND(const std::vector<TensorNode> &inputs, con
     if (it == refCounts.end() || it->second != 1)
         return false;
 
-    for (size_t d = 0; d < inputs[0].shape.size(); ++d)
+    for (size_t d = 0; d < inputs[0].getShape().size(); ++d)
     {
-        if (inputs[0].shape[d] != output.shape[d])
+        if (inputs[0].getShape()[d] != output.getShape()[d])
         {
-            if (inputs[0].shape[d] != 1)
+            if (inputs[0].getShape()[d] != 1)
                 return false;
         }
     }
     return true;
 }
 
-inline TensorView inferViewRepeatF32_Inplace(const TensorNode &node, const std::vector<TensorNode> &inputs)
+inline void inferViewRepeatF32_Inplace(TensorNode &node, const std::vector<TensorNode> &inputs)
 {
-    TensorView view = inputs[0].view;
-    view.shape = node.shape;
-    for (size_t d = 0; d < view.shape.size(); ++d)
+    for (size_t d = 0; d < node.getShape().size(); ++d)
     {
-        if (inputs[0].shape[d] != node.shape[d])
+        if (inputs[0].getShape()[d] != node.getShape()[d])
         {
-            view.strides[d] = 0;
+            node.strides[d] = 0;
         }
     }
-    return view;
 }
 
 inline void runRepeatF32_Inplace_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

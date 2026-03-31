@@ -186,19 +186,12 @@ void runShapePropagationTests()
 
     auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
     {
-        TensorNode &node = graph.allocateNode();
-        return graph.constant(node, {(uint32_t)values.size()}, values.data(), DType::INT32);
+        return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
     };
 
     auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
     {
-        TensorNode &node = graph.allocateNode();
-        TensorView view;
-        view.shape = shape;
-        view.strides = TensorView::calcContiguousStrides(shape);
-        view.baseOffset = 0;
-        view.dtype = DType::FLOAT32;
-        return graph.input(node, shape, DType::FLOAT32, view, StorageType::PERSISTENT);
+        return graph.input(shape, DType::FLOAT32, {}, StorageType::PERSISTENT);
     };
 
     {
@@ -211,7 +204,7 @@ void runShapePropagationTests()
         assertRegionListEquals(forward, {makeRegion({{1, 3}, {0, 1}})}, "SUM forward");
         auto backward = prop.backward(graph.getNode(sumId), graph, {makeRegion({{1, 3}, {0, 1}})});
         assertRegionListEquals(backward[0], {makeRegion({{1, 3}, {0, 5}})}, "SUM backward input");
-        assertRegionListEquals(backward[1], makeFull(graph.getNode(axis).shape), "SUM backward axis");
+        assertRegionListEquals(backward[1], makeFull(graph.getNode(axis).getShape()), "SUM backward axis");
     }
 
     {
@@ -345,19 +338,12 @@ void runRewriteTests()
 {
     auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
     {
-        TensorNode &node = graph.allocateNode();
-        return graph.constant(node, {(uint32_t)values.size()}, values.data(), DType::INT32);
+        return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
     };
 
     auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape, Backend backend = Backend::CPU) -> uint32_t
     {
-        TensorNode &node = graph.allocateNode();
-        TensorView view;
-        view.shape = shape;
-        view.strides = TensorView::calcContiguousStrides(shape);
-        view.baseOffset = 0;
-        view.dtype = DType::FLOAT32;
-        uint32_t id = graph.input(node, shape, DType::FLOAT32, view, StorageType::PERSISTENT);
+        uint32_t id = graph.input(shape, DType::FLOAT32, {}, StorageType::PERSISTENT);
         graph.getNode(id).backend = backend;
         return id;
     };
@@ -443,13 +429,7 @@ void runExecutorTests()
 {
     auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
     {
-        TensorNode &node = graph.allocateNode();
-        TensorView view;
-        view.shape = shape;
-        view.strides = TensorView::calcContiguousStrides(shape);
-        view.baseOffset = 0;
-        view.dtype = DType::FLOAT32;
-        return graph.input(node, shape, DType::FLOAT32, view, StorageType::PERSISTENT);
+        return graph.input(shape, DType::FLOAT32, {}, StorageType::PERSISTENT);
     };
 
     Graph graph;
@@ -537,16 +517,8 @@ void runMemoryPolicyTests()
 
     {
         Graph graph;
-        TensorNode &aNode = graph.allocateNode();
-        TensorNode &bNode = graph.allocateNode();
-
-        TensorView view;
-        view.shape = {2, 2};
-        view.strides = TensorView::calcContiguousStrides(view.shape);
-        view.baseOffset = 0;
-        view.dtype = DType::FLOAT32;
-        uint32_t a = graph.input(aNode, {2, 2}, DType::FLOAT32, view, StorageType::PERSISTENT);
-        uint32_t b = graph.input(bNode, {2, 2}, DType::FLOAT32, view, StorageType::PERSISTENT);
+        uint32_t a = graph.input({2, 2}, DType::FLOAT32, {}, StorageType::PERSISTENT);
+        uint32_t b = graph.input({2, 2}, DType::FLOAT32, {}, StorageType::PERSISTENT);
         uint32_t root = graph.add(a, b);
         graph.getNode(root).backend = Backend::CPU;
 
@@ -578,19 +550,12 @@ void runPlannerTests()
 {
     auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
     {
-        TensorNode &node = graph.allocateNode();
-        return graph.constant(node, {(uint32_t)values.size()}, values.data(), DType::INT32);
+        return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
     };
 
     auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
     {
-        TensorNode &node = graph.allocateNode();
-        TensorView view;
-        view.shape = shape;
-        view.strides = TensorView::calcContiguousStrides(shape);
-        view.baseOffset = 0;
-        view.dtype = DType::FLOAT32;
-        return graph.input(node, shape, DType::FLOAT32, view, StorageType::PERSISTENT);
+        return graph.input(shape, DType::FLOAT32, {}, StorageType::PERSISTENT);
     };
 
     Graph graph;
@@ -755,8 +720,7 @@ std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const 
 TensorView makeView(const TensorNode &node)
 {
     TensorView view;
-    view.shape = node.shape;
-    view.strides = TensorView::calcContiguousStrides(node.shape);
+    view.setShape(node.getShape());
     view.baseOffset = 0;
     view.dtype = node.dtype;
     return view;
@@ -764,14 +728,14 @@ TensorView makeView(const TensorNode &node)
 
 size_t getRequiredBufferSize(const TensorView &view)
 {
-    if (view.shape.empty())
+    if (view.getShape().empty())
         return 1;
     size_t maxOffset = 0;
-    for (size_t i = 0; i < view.shape.size(); ++i)
+    for (size_t i = 0; i < view.getShape().size(); ++i)
     {
-        if (view.shape[i] > 0)
+        if (view.getShape()[i] > 0)
         {
-            maxOffset += (view.shape[i] - 1) * view.strides[i];
+            maxOffset += (view.getShape()[i] - 1) * view.strides[i];
         }
     }
     return maxOffset + 1;
@@ -839,10 +803,10 @@ std::vector<float> executeReferenceGraph(
             }
 
             // Scatter rawBytes into results
-            uint64_t numElements = countElements(view.shape);
+            uint64_t numElements = countElements(view);
             for (size_t i = 0; i < numElements; ++i)
             {
-                uint64_t idx = getStridedIndex(i, view.shape, view.strides);
+                uint64_t idx = getStridedIndex(i, view.getShape(), view.strides);
                 std::memcpy(results[nodeId].data() + idx * elemSize,
                             rawBytes.data() + i * elemSize,
                             elemSize);
@@ -864,7 +828,6 @@ std::vector<float> executeReferenceGraph(
             inputPtrs.push_back(resultIt->second.data());
             inputViews.push_back(views[pid]);
             TensorNode inNode = graph.getNode(pid);
-            inNode.view = views[pid];
             inputNodes.push_back(inNode);
         }
 
@@ -877,7 +840,6 @@ std::vector<float> executeReferenceGraph(
         }
 
         TensorNode outNodeNC = node;
-        outNodeNC.view = outViewNonContig;
 
         auto refs_nc = KernelRegistry::get().findMatchingKernels(
             node.opType, node.opName, node.backend,
@@ -894,7 +856,6 @@ std::vector<float> executeReferenceGraph(
         else
         {
             TensorNode outNodeC = node;
-            outNodeC.view = outViewContig;
             auto refs_c = KernelRegistry::get().findMatchingKernels(
                 node.opType, node.opName, node.backend,
                 inputNodes, outNodeC, {}, true);
@@ -920,13 +881,13 @@ std::vector<float> executeReferenceGraph(
         kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
     }
 
-    uint64_t numRootElems = countElements(graph.getNode(rootId).shape);
+    uint64_t numRootElems = countElements(graph.getNode(rootId));
     std::vector<float> finalOut(numRootElems, 0.0f);
     TensorView rootView = views[rootId];
 
     for (size_t i = 0; i < numRootElems; ++i)
     {
-        uint64_t idx = getStridedIndex(i, rootView.shape, rootView.strides);
+        uint64_t idx = getStridedIndex(i, rootView.getShape(), rootView.strides);
         if (graph.getNode(rootId).dtype == DType::FLOAT32)
         {
             std::memcpy(&finalOut[i], results[rootId].data() + idx * 4, 4);
@@ -991,8 +952,7 @@ std::vector<float> executeFusedKernel(
     {
         inputPtrs.push_back(inputData[i].data());
         TensorView view;
-        view.shape = kernel.dummyShapes[i];
-        view.strides = TensorView::calcContiguousStrides(kernel.dummyShapes[i]);
+        view.setShape(kernel.dummyShapes[i]);
         view.baseOffset = 0;
         view.dtype = kernel.dtypes[i];
         inputViews.push_back(view);
@@ -1011,20 +971,20 @@ std::vector<float> executeFusedKernel(
             for (size_t i = 0; i < kernel.numInputs; ++i)
             {
                 dummyInputs[i].id = (uint32_t)i;
-                dummyInputs[i].shape = kernel.dummyShapes[i];
-                dummyInputs[i].view = inputViews[i];
+                dummyInputs[i].setShape(kernel.dummyShapes[i]);
+                dummyInputs[i].strides = inputViews[i].strides;
                 dummyInputs[i].dtype = kernel.dtypes[i];
             }
             TensorNode dummyOutput;
-            dummyOutput.shape = outShape;
+            dummyOutput.setShape(outShape);
             dummyOutput.dtype = DType::FLOAT32;
 
-            TensorView view = kernel.inferView(dummyOutput, dummyInputs);
+            kernel.inferView(dummyOutput, dummyInputs);
 
             const float *src = reinterpret_cast<const float *>(inputData[0].data());
             for (size_t i = 0; i < expectedOutElements; ++i)
             {
-                output[i] = src[getStridedIndex(i, view.shape, view.strides)];
+                output[i] = src[getStridedIndex(i, dummyOutput.getShape(), dummyOutput.strides)];
             }
         }
         else
@@ -1038,8 +998,8 @@ std::vector<float> executeFusedKernel(
 
     std::vector<void *> outputPtrs = {output.data()};
     TensorView outView;
-    outView.shape = outShape;
-    outView.strides = TensorView::calcContiguousStrides(outShape);
+    outView.setShape(outShape);
+    outView.strides = calcContiguousStrides(outShape);
     outView.baseOffset = 0;
     outView.dtype = DType::FLOAT32; // Assume FP32 output for fused kernels
     std::vector<TensorView> outputViews = {outView};
@@ -1141,17 +1101,10 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
 
     for (size_t i = 0; i < kernel.numInputs; ++i)
     {
-        TensorNode &node = graph.allocateNode();
-        uint32_t id = node.id;
+        uint32_t id = UINT32_MAX;
         DType dtype = kernel.dtypes[i];
         uint64_t elements = countElements(kernel.dummyShapes[i]);
         uint64_t sizeBytes = elements * getDTypeSize(dtype);
-
-        TensorView view;
-        view.shape = kernel.dummyShapes[i];
-        view.strides = TensorView::calcContiguousStrides(kernel.dummyShapes[i]);
-        view.baseOffset = 0;
-        view.dtype = dtype;
 
         // For Repeat and Reshape operations, constant parameters must be created via graph.constant()
         // so they're available in constantStaging for shape inference
@@ -1189,14 +1142,14 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 }
             }
 
-            graph.constant(node, kernel.dummyShapes[i], constData.data(), dtype);
+            id = graph.constant(kernel.dummyShapes[i], constData.data(), dtype);
             // Resize rawData[i] to hold the bytes and copy directly
             result.rawData[i].resize(sizeBytes);
             std::memcpy(result.rawData[i].data(), constData.data(), sizeBytes);
         }
         else
         {
-            graph.input(node, kernel.dummyShapes[i], dtype, view, StorageType::PERSISTENT);
+            id = graph.input(kernel.dummyShapes[i], dtype, {}, StorageType::PERSISTENT);
 
             // Generate random data - resize based on dtype size
             result.rawData[i].resize(sizeBytes);
@@ -1279,7 +1232,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 
             TensorView view;
             view.baseOffset = 0;
-            view.shape = shape;
+            view.setShape(shape);
             view.strides = strides;
             view.dtype = dtype;
             inViews.push_back(view);
@@ -1288,8 +1241,8 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             node.id = i;
             node.opType = OpType::INPUT;
             node.dtype = dtype;
-            node.shape = shape;
-            node.view = view;
+            node.setShape(shape);
+            node.strides = strides;
             node.backend = Backend::CPU;
             dummyInputNodes.push_back(node);
 
@@ -1315,7 +1268,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 
         TensorView outView;
         outView.baseOffset = 0;
-        outView.shape = outShape;
+        outView.setShape(outShape);
         outView.strides = outStrides;
         outView.dtype = outDType;
         std::vector<TensorView> outViews = {outView};
@@ -1323,8 +1276,8 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         TensorNode outNode;
         outNode.id = i;
         outNode.dtype = outDType;
-        outNode.shape = outShape;
-        outNode.view = outView;
+        outNode.setShape(outShape);
+        outNode.strides = outStrides;
         outNode.backend = Backend::CPU;
 
         std::cout << "Testing Python Ref " << testDir << " [" << toString(opType) << "] ... " << std::flush;
@@ -1454,7 +1407,7 @@ int main()
 
             // ========== FUSED KERNEL EXECUTION ==========
             // Execute fused kernel directly
-            std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refOutput.size(), refGraph.getNode(rootId).shape);
+            std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refOutput.size(), refGraph.getNode(rootId).getShape());
 
             // ========== COMPARE ==========
             if (fusedOutput.size() != elements)

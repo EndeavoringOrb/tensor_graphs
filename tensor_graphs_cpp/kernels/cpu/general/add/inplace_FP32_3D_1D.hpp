@@ -23,19 +23,19 @@ inline bool matchAddFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, co
         return false;
 
     // Check Ranks
-    if (in3D.shape.size() != 3 || in1D.shape.size() != 1 || output.shape.size() != 3)
+    if (in3D.getShape().size() != 3 || in1D.getShape().size() != 1 || output.getShape().size() != 3)
         return false;
 
     // The last dimension (D) must match
-    if (in3D.shape[2] != in1D.shape[0] || output.shape[2] != in1D.shape[0])
+    if (in3D.getShape()[2] != in1D.getShape()[0] || output.getShape()[2] != in1D.getShape()[0])
         return false;
 
     // In-place requires shape identity between input 3D and output
-    if (in3D.shape != output.shape)
+    if (in3D.getShape() != output.getShape())
         return false;
 
     // Reference implementation assumes contiguity for the large tensors
-    if (!in3D.view.isContiguous() || !in1D.view.isContiguous() || !output.view.isContiguous())
+    if (!isContiguous(in3D) || !isContiguous(in1D) || !isContiguous(output))
         return false;
 
     if (inputs[0].storageType == StorageType::PERSISTENT)
@@ -53,9 +53,9 @@ inline void runAddFP32_3D_1D_Inplace(const std::vector<const void *> &inputs, co
     float *data3D = static_cast<float *>(outputs[0]); // Modifying output directly
     const float *data1D = static_cast<const float *>(inputs[1]);
 
-    uint32_t B = outViews[0].shape[0];
-    uint32_t S = outViews[0].shape[1];
-    uint32_t D = outViews[0].shape[2];
+    uint32_t B = outViews[0].getShape()[0];
+    uint32_t S = outViews[0].getShape()[1];
+    uint32_t D = outViews[0].getShape()[2];
 
     uint64_t totalElements = (uint64_t)B * S * D;
 
@@ -78,8 +78,8 @@ inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     uint32_t id3D = inputs[0];
     uint32_t id1D = inputs[1];
 
-    auto shape3D = graph.getNode(id3D).shape;
-    auto shape1D = graph.getNode(id1D).shape;
+    auto shape3D = graph.getNode(id3D).getShape();
+    auto shape1D = graph.getNode(id1D).getShape();
 
     // 1. Reshape 1D -> [1, 1, D]
     int32_t reshape_dims[] = {1, 1, (int32_t)shape1D[0]};

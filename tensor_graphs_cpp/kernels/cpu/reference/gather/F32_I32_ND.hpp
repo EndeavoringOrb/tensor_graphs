@@ -19,11 +19,11 @@ inline bool matchGatherF32_I32_ND(const std::vector<TensorNode> &inputs, const T
         return false;
 
     // Simple check: data must be at least 1D
-    if (inputs[0].shape.empty())
+    if (inputs[0].getShape().empty())
         return false;
 
     // Reference implementation requires contiguity
-    if (!inputs[0].view.isContiguous() || !inputs[1].view.isContiguous() || !output.view.isContiguous())
+    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output))
         return false;
 
     return true;
@@ -36,8 +36,8 @@ inline void runGatherF32_I32_ND(const std::vector<const void *> &inputs, const s
     const int32_t *indices = static_cast<const int32_t *>(inputs[1]);
     float *out = static_cast<float *>(outputs[0]);
 
-    const std::vector<uint32_t> &dataShape = inViews[0].shape;
-    const std::vector<uint32_t> &idxShape = inViews[1].shape;
+    const std::vector<uint32_t> &dataShape = inViews[0].getShape();
+    const std::vector<uint32_t> &idxShape = inViews[1].getShape();
 
     uint32_t vocabSize = dataShape[0];
     uint64_t rowSize = 1;

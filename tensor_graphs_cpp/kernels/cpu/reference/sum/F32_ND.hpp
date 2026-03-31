@@ -14,8 +14,8 @@ inline void runSumF32_ND(const std::vector<const void *> &inputs, const std::vec
     int32_t axis = *static_cast<const int32_t *>(inputs[1]);
     float *out = static_cast<float *>(outputs[0]);
 
-    const auto &inShape = inViews[0].shape;
-    const auto &outShape = outViews[0].shape;
+    const auto &inShape = inViews[0].getShape();
+    const auto &outShape = outViews[0].getShape();
     int ndim = static_cast<int>(inShape.size());
     if (axis < 0)
         axis += ndim;

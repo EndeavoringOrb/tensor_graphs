@@ -17,10 +17,7 @@ namespace Rewrite
         node.backend = backend;
         if (makeContiguous)
         {
-            node.view.shape = source.shape;
-            node.view.strides = TensorView::calcContiguousStrides(source.shape);
-            node.view.baseOffset = 0;
-            node.view.dtype = source.dtype;
+            node.strides = calcContiguousStrides(source.getShape());
         }
         return node;
     }

@@ -8,7 +8,7 @@ inline bool matchAddNC_F32_ND(const std::vector<TensorNode> &inputs, const Tenso
         return false;
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
-    if (inputs[0].shape != inputs[1].shape || inputs[0].shape != output.shape)
+    if (inputs[0].getShape() != inputs[1].getShape() || inputs[0].getShape() != output.getShape())
         return false;
     return true;
 }
@@ -19,13 +19,13 @@ inline void runAddNC_F32_ND(const std::vector<const void *> &inputs, const std::
     const float *a = static_cast<const float *>(inputs[0]);
     const float *b = static_cast<const float *>(inputs[1]);
     float *out = static_cast<float *>(outputs[0]);
-    uint64_t numElements = countElements(inViews[0].shape);
+    uint64_t numElements = countElements(inViews[0].getShape());
 
     for (uint64_t i = 0; i < numElements; ++i)
     {
-        out[getStridedIndex(i, outViews[0].shape, outViews[0].strides)] =
-            a[getStridedIndex(i, inViews[0].shape, inViews[0].strides)] +
-            b[getStridedIndex(i, inViews[1].shape, inViews[1].strides)];
+        out[getStridedIndex(i, outViews[0].getShape(), outViews[0].strides)] =
+            a[getStridedIndex(i, inViews[0].getShape(), inViews[0].strides)] +
+            b[getStridedIndex(i, inViews[1].getShape(), inViews[1].strides)];
     }
 }
 

@@ -19,12 +19,12 @@ inline bool matchContiguous_ND(const std::vector<TensorNode> &inputs, const Tens
     // Check Dtypes and Shapes
     if (in.dtype != output.dtype)
         return false;
-    if (in.shape != output.shape)
+    if (in.getShape() != output.getShape())
         return false;
 
     // Input must not be contiguous (otherwise this kernel is redundant, though technically valid)
     // Output must be contiguous
-    if (!output.view.isContiguous())
+    if (!isContiguous(output))
         return false;
 
     return true;
@@ -37,7 +37,7 @@ inline void runContiguous_ND(const std::vector<const void *> &inputs, const std:
     uint8_t *dst = static_cast<uint8_t *>(outputs[0]);
 
     const auto &view = inViews[0];
-    const auto &shape = view.shape;
+    const auto &shape = view.getShape();
     const auto &strides = view.strides;
     uint64_t elementSize = getDTypeSize(view.dtype);
 

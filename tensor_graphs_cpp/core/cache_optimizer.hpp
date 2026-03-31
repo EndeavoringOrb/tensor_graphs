@@ -78,7 +78,7 @@ static std::unordered_map<Backend, uint64_t> calculatePlanPeakMemoryByBackend(
 
         if (cachedNodes.count(logicalNodeId) == 0)
         {
-            currentMemByBackend[backend] += getSizeBytes(node.shape, node.dtype);
+            currentMemByBackend[backend] += getSizeBytes(node.getShape(), node.dtype);
             peakMemByBackend[backend] = std::max(peakMemByBackend[backend], currentMemByBackend[backend]);
         }
 
@@ -97,7 +97,7 @@ static std::unordered_map<Backend, uint64_t> calculatePlanPeakMemoryByBackend(
             if (cachedNodes.count(logicalParentId) != 0)
                 continue;
 
-            uint64_t sizeBytes = getSizeBytes(parentNode.shape, parentNode.dtype);
+            uint64_t sizeBytes = getSizeBytes(parentNode.getShape(), parentNode.dtype);
             if (currentMemByBackend[parentNode.backend] >= sizeBytes)
                 currentMemByBackend[parentNode.backend] -= sizeBytes;
             else
@@ -118,9 +118,9 @@ static std::unordered_map<Backend, uint64_t> calculateCachedResidentMemoryByBack
         if (!graph.hasNode(nodeId))
             continue;
         const TensorNode &node = graph.getNode(nodeId);
-        if (node.shape.empty())
+        if (node.getShape().empty())
             continue;
-        residentByBackend[node.backend] += getSizeBytes(node.shape, node.dtype);
+        residentByBackend[node.backend] += getSizeBytes(node.getShape(), node.dtype);
     }
     return residentByBackend;
 }
@@ -133,7 +133,7 @@ static std::vector<uint32_t> collectCacheableNodes(const Graph &graph)
     for (const auto &pair : graph.nodes)
     {
         const TensorNode &node = pair.second;
-        if (node.opType == OpType::INPUT || node.shape.empty())
+        if (node.opType == OpType::INPUT || node.getShape().empty())
             continue;
         cacheableNodes.push_back(node.id);
     }
@@ -152,9 +152,9 @@ static std::unordered_map<uint32_t, uint64_t> buildLogicalNodeMemorySizes(
         if (!graph.hasNode(nodeId))
             continue;
         const TensorNode &node = graph.getNode(nodeId);
-        if (node.shape.empty())
+        if (node.getShape().empty())
             continue;
-        nodeMemorySizes[nodeId] = getSizeBytes(node.shape, node.dtype);
+        nodeMemorySizes[nodeId] = getSizeBytes(node.getShape(), node.dtype);
     }
     return nodeMemorySizes;
 }

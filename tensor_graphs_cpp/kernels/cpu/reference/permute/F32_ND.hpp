@@ -23,7 +23,7 @@ inline bool matchPermuteF32_ND_naive(const std::vector<TensorNode> &inputs, cons
         return false;
 
     // Check permutation tensor shape matches data rank
-    if (inputs[1].shape.size() != 1 || inputs[1].shape[0] != inputs[0].shape.size())
+    if (inputs[1].getShape().size() != 1 || inputs[1].getShape()[0] != inputs[0].getShape().size())
         return false;
 
     return true;
@@ -36,8 +36,8 @@ inline void runPermuteF32_ND_naive(const std::vector<const void *> &inputs, cons
     const int32_t *perm = static_cast<const int32_t *>(inputs[1]);
     float *dst = static_cast<float *>(outputs[0]);
 
-    const auto &inShape = inViews[0].shape;
-    const auto &outShape = outViews[0].shape;
+    const auto &inShape = inViews[0].getShape();
+    const auto &outShape = outViews[0].getShape();
 
     uint64_t numElements = countElements(outShape);
     if (numElements == 0)

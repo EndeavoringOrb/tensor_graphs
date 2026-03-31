@@ -68,15 +68,15 @@ inline bool matchPermute_CUDA_ND(const std::vector<TensorNode> &inputs, const Te
         return false;
 
     // Check rank limits
-    if (data.shape.size() > PermuteCUDA::MAX_RANK || data.shape.size() == 0)
+    if (data.getShape().size() > PermuteCUDA::MAX_RANK || data.getShape().size() == 0)
         return false;
 
     // Check permutation tensor shape matches data rank
-    if (perm.shape.size() != 1 || perm.shape[0] != data.shape.size())
+    if (perm.getShape().size() != 1 || perm.getShape()[0] != data.getShape().size())
         return false;
 
     // Strict requirement: input and output must be contiguous for this specific kernel
-    if (!data.view.isContiguous() || !output.view.isContiguous())
+    if (!isContiguous(data) || !isContiguous(output))
         return false;
 
     return true;
@@ -93,17 +93,17 @@ inline void runPermute_CUDA_ND(const std::vector<const void *> &inputs, const st
     const int32_t *h_perm = static_cast<const int32_t *>(inputs[1]);
     float *dst = static_cast<float *>(outputs[0]);
 
-    uint64_t numElements = countElements(outViews[0].shape);
+    uint64_t numElements = countElements(outViews[0].getShape());
     if (numElements == 0)
         return;
 
     PermuteCUDA::PermuteParams p;
-    p.rank = (uint32_t)outViews[0].shape.size();
+    p.rank = (uint32_t)outViews[0].getShape().size();
 
     // Calculate logical strides for a contiguous input
-    std::vector<int64_t> in_strides_contig = TensorView::calcContiguousStrides(inViews[0].shape);
+    std::vector<int64_t> in_strides_contig = calcContiguousStrides(inViews[0].getShape());
     // Calculate logical strides for a contiguous output
-    std::vector<int64_t> out_strides_contig = TensorView::calcContiguousStrides(outViews[0].shape);
+    std::vector<int64_t> out_strides_contig = calcContiguousStrides(outViews[0].getShape());
 
     for (uint32_t i = 0; i < p.rank; ++i)
     {
