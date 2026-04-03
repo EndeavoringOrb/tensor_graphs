@@ -310,64 +310,6 @@ private:
         return cloned.id;
     }
 
-    void retargetPartialShapeInputs(uint32_t newNodeId, const TensorNode &sourceNode, const Region &outRegion)
-    {
-        TensorNode &newNode = result.graph.getNode(newNodeId);
-        const std::vector<uint32_t> outShape = getRegionShape(outRegion);
-
-        if (sourceNode.opType == OpType::RESHAPE || sourceNode.opType == OpType::FILL)
-        {
-            if (newNode.parentIds.size() > 1)
-                newNode.parentIds[1] = addInt32Constant(toInt32Shape(outShape));
-            return;
-        }
-
-        if (sourceNode.opType == OpType::SLICE)
-        {
-            Region localRegion;
-            for (uint32_t dim : outShape)
-                localRegion.region.push_back({0, dim});
-            if (newNode.parentIds.size() > 3)
-            {
-                newNode.parentIds[1] = addRegionStarts(localRegion);
-                newNode.parentIds[2] = addRegionEnds(localRegion);
-                newNode.parentIds[3] = addRegionSteps(localRegion);
-            }
-            return;
-        }
-
-        if (sourceNode.opType == OpType::SCATTER)
-        {
-            Region localRegion;
-            for (uint32_t dim : outShape)
-                localRegion.region.push_back({0, dim});
-            if (newNode.parentIds.size() > 4)
-            {
-                newNode.parentIds[2] = addRegionStarts(localRegion);
-                newNode.parentIds[3] = addRegionEnds(localRegion);
-                newNode.parentIds[4] = addRegionSteps(localRegion);
-            }
-            return;
-        }
-
-        if (sourceNode.opType == OpType::ARANGE)
-        {
-            std::vector<int32_t> startVals = getConstantInt32(sourceNode.parentIds[0], sourceGraph);
-            std::vector<int32_t> stopVals = getConstantInt32(sourceNode.parentIds[1], sourceGraph);
-            std::vector<int32_t> stepVals = getConstantInt32(sourceNode.parentIds[2], sourceGraph);
-            if (!startVals.empty() && !stopVals.empty() && !stepVals.empty())
-            {
-                const int32_t baseStart = startVals[0];
-                const int32_t step = stepVals[0];
-                const int32_t localStart = baseStart + static_cast<int32_t>(outRegion.region[0].start) * step;
-                const int32_t localStop = baseStart + static_cast<int32_t>(outRegion.region[0].stop) * step;
-                newNode.parentIds[0] = addInt32Constant({localStart});
-                newNode.parentIds[1] = addInt32Constant({localStop});
-                newNode.parentIds[2] = addInt32Constant({step});
-            }
-        }
-    }
-
     uint32_t buildParentInputSlice(
         const TensorNode &sourceNode,
         size_t parentIdx,
@@ -378,44 +320,19 @@ private:
             return physicalParentId;
         if (parentRegions.empty())
             return physicalParentId;
-        if (parentRegions.size() != 1)
-            return physicalParentId;
+        if (parentRegions.size() != 1) // TODO: handle multiple parent regions, or change std::vector<Region> -> Region if none of the backwards give multiple regions
+            Error::throw_err("[CacheAwarePlanningGraphBuilder.buildParentInputSlice] expected parentRegions.size() == 1 but got " + std::to_string(parentRegions.size()));
 
         const Region &inputRegion = parentRegions.front();
         if (inputRegion.empty())
-            return physicalParentId;
+            Error::throw_err("[CacheAwarePlanningGraphBuilder.buildParentInputSlice] parent input region is empty");
 
         const TensorNode &sourceParent = sourceGraph.getNode(sourceNode.parentIds[parentIdx]);
         uint32_t safeParentId = result.graph.contiguous(physicalParentId);
 
-        Region producerRegion;
-        auto it = result.physicalOutputRegions.find(physicalParentId);
-        if (it != result.physicalOutputRegions.end())
-        {
-            producerRegion = it->second.front();
-        }
-        else
-        {
-            auto fullRegions = makeFull(sourceParent.getShape());
-            if (!fullRegions.empty())
-            {
-                producerRegion = fullRegions.front();
-            }
-        }
-
-        Region localSlice = inputRegion;
-        for (size_t d = 0; d < localSlice.region.size(); ++d)
-        {
-            if (d < producerRegion.region.size())
-            {
-                localSlice.region[d].start -= producerRegion.region[d].start;
-                localSlice.region[d].stop -= producerRegion.region[d].start;
-            }
-        }
-
-        uint32_t startsId = addRegionStarts(localSlice);
-        uint32_t endsId = addRegionEnds(localSlice);
-        uint32_t stepsId = addRegionSteps(localSlice);
+        uint32_t startsId = addRegionStarts(inputRegion);
+        uint32_t endsId = addRegionEnds(inputRegion);
+        uint32_t stepsId = addRegionSteps(inputRegion);
         uint32_t sliceId = result.graph.slice(safeParentId, startsId, endsId, stepsId);
         return result.graph.contiguous(sliceId);
     }
@@ -431,14 +348,13 @@ private:
         {
             uint32_t physicalParentId = buildLogicalNode(sourceNode.parentIds[parentIdx]);
             const std::vector<Region> emptyRegions;
-            const std::vector<Region> &regionsForParent = parentIdx < parentRegions.size() ? parentRegions[parentIdx] : emptyRegions;
+            const std::vector<Region> &regionsForParent = parentRegions[parentIdx];
             partialParents.push_back(buildParentInputSlice(sourceNode, parentIdx, physicalParentId, regionsForParent));
         }
 
         uint32_t partialId = cloneNode(sourceNode, partialParents);
         TensorNode &partialNode = result.graph.getNode(partialId);
         partialNode.setShape(getRegionShape(outRegion));
-        retargetPartialShapeInputs(partialId, sourceNode, outRegion);
         result.physicalToLogicalNodeMap[partialId] = logicalId;
         result.physicalOutputRegions[partialId] = {outRegion};
         result.physicalInputSlices[partialId] = parentRegions;
@@ -455,7 +371,7 @@ private:
             return logicalId;
 
         const TensorNode &sourceNode = sourceGraph.getNode(logicalId);
-        if (sourceNode.opType == OpType::INPUT)
+        if (sourceNode.opType == OpType::INPUT || sourceNode.opType == OpType::SLICE || sourceNode.opType == OpType::RESHAPE || sourceNode.opType == OpType::FILL || sourceNode.opType == OpType::SCATTER || sourceNode.opType == OpType::ARANGE)
         {
             result.logicalToPhysicalNodeMap[logicalId] = logicalId;
             result.physicalToLogicalNodeMap[logicalId] = logicalId;
@@ -474,21 +390,6 @@ private:
         }
 
         const std::vector<Region> recomputeRegions = normalizeRegions(recomputeIt->second);
-        const bool singleFullRegion = recomputeRegions.size() == 1 && isFullRegion(recomputeRegions.front(), sourceNode.getShape());
-        if (singleFullRegion)
-        {
-            std::vector<uint32_t> rebuiltParents;
-            rebuiltParents.reserve(sourceNode.parentIds.size());
-            for (uint32_t parentId : sourceNode.parentIds)
-                rebuiltParents.push_back(buildLogicalNode(parentId));
-
-            uint32_t rebuiltId = cloneNode(sourceNode, rebuiltParents);
-            result.logicalToPhysicalNodeMap[logicalId] = rebuiltId;
-            result.physicalToLogicalNodeMap[rebuiltId] = logicalId;
-            result.physicalOutputRegions[rebuiltId] = recomputeRegions;
-            memoizedPhysicalIds[logicalId] = rebuiltId;
-            return rebuiltId;
-        }
 
         if (cachedNodes.count(logicalId))
         {
