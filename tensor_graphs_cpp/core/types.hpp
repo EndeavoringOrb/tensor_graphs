@@ -496,8 +496,7 @@ public:
     void setShape(const std::vector<uint32_t> &_shape)
     {
         shape = _shape;
-        if (strides.empty() || shape.size() != strides.size())
-            strides = calcContiguousStrides(_shape);
+        strides = calcContiguousStrides(_shape);
     }
 };
 

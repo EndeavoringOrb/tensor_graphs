@@ -151,10 +151,10 @@ static PlanningRegionState derivePlanningRegions(
     ShapePropagator prop;
 
     auto rootIt = dirtyOutputRegions.find(rootId);
-    if (rootIt != dirtyOutputRegions.end())
-        state.needed[rootId] = mergeRegions(rootIt->second);
-    else
-        state.needed[rootId] = {};
+    if (rootIt == dirtyOutputRegions.end()) {
+        Error::throw_err("[derivePlanningRegions] Cannot find dirty region for output");
+    }
+    state.needed[rootId] = mergeRegions(rootIt->second);
 
     updateNeeded(rootId, graph, prop, state.needed);
 
@@ -169,7 +169,7 @@ static PlanningRegionState derivePlanningRegions(
         if (cachedNodes.count(nodeId))
         {
             if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty())
-                state.recompute[nodeId] = mergeRegions(dirtyIt->second);
+                state.recompute[nodeId] = mergeRegions(dirtyIt->second); // TODO: take AND of dirty & needed, then mergeRegions
         }
         else
         {

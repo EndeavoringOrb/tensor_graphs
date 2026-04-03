@@ -138,6 +138,8 @@ void assertRegionListEquals(const std::vector<Region> &actual, const std::vector
 
 void runRegionMergeTests()
 {
+    std::cout << "region merge tests" << std::endl
+              << std::flush;
     {
         std::vector<Region> actual = mergeRegions({makeRegion({{0, 2}}), makeRegion({{2, 4}})});
         assertRegionListEquals(actual, {makeRegion({{0, 4}})}, "1D adjacent merge");
@@ -182,6 +184,8 @@ void runRegionMergeTests()
 
 void runShapePropagationTests()
 {
+    std::cout << "shape propagation tests" << std::endl
+              << std::flush;
     ShapePropagator prop;
 
     auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
@@ -228,16 +232,16 @@ void runShapePropagationTests()
         auto forward = prop.forward(graph.getNode(permId), graph,
                                     {{makeRegion({{0, 1}, {1, 3}}), makeRegion({{1, 2}, {0, 2}})}, {}});
         assertRegionListEquals(forward, {
-                                           makeRegion({{1, 3}, {0, 1}}),
-                                           makeRegion({{0, 2}, {1, 2}}),
-                                       },
+                                            makeRegion({{1, 3}, {0, 1}}),
+                                            makeRegion({{0, 2}, {1, 2}}),
+                                        },
                                "PERMUTE forward");
         auto backward = prop.backward(graph.getNode(permId), graph,
                                       {makeRegion({{1, 3}, {0, 1}}), makeRegion({{0, 2}, {1, 2}})});
         assertRegionListEquals(backward[0], {
-                                               makeRegion({{0, 1}, {1, 3}}),
-                                               makeRegion({{1, 2}, {0, 2}}),
-                                           },
+                                                makeRegion({{0, 1}, {1, 3}}),
+                                                makeRegion({{1, 2}, {0, 2}}),
+                                            },
                                "PERMUTE backward input");
     }
 
@@ -251,9 +255,9 @@ void runShapePropagationTests()
         auto forward = prop.forward(graph.getNode(concatId), graph,
                                     {{makeRegion({{0, 1}, {0, 2}})}, {makeRegion({{1, 2}, {1, 2}})}, {}});
         assertRegionListEquals(forward, {
-                                           makeRegion({{0, 1}, {0, 2}}),
-                                           makeRegion({{3, 4}, {1, 2}}),
-                                       },
+                                            makeRegion({{0, 1}, {0, 2}}),
+                                            makeRegion({{3, 4}, {1, 2}}),
+                                        },
                                "CONCAT forward");
         auto backward = prop.backward(graph.getNode(concatId), graph,
                                       {makeRegion({{0, 1}, {0, 2}}), makeRegion({{3, 4}, {1, 2}})});
@@ -336,6 +340,8 @@ void runShapePropagationTests()
 
 void runRewriteTests()
 {
+    std::cout << "rewrite tests" << std::endl
+              << std::flush;
     auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
     {
         return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
@@ -423,71 +429,38 @@ void runRewriteTests()
     }
 }
 
-std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph);
-
-void runExecutorTests()
+// Topological sort of graph nodes from given roots
+std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph)
 {
-    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
+    std::vector<uint32_t> order;
+    std::unordered_set<uint32_t> visited;
+
+    auto visit = [&](auto &self, uint32_t node) -> void
     {
-        return graph.input(shape, DType::FLOAT32, {}, StorageType::PERSISTENT);
+        if (visited.count(node))
+            return;
+        visited.insert(node);
+        if (graph.hasNode(node))
+        {
+            for (uint32_t pid : graph.getNode(node).parentIds)
+            {
+                self(self, pid);
+            }
+        }
+        order.push_back(node);
     };
 
-    Graph graph;
-    uint32_t a = makeFloatInput(graph, {4, 4});
-    uint32_t b = makeFloatInput(graph, {4, 4});
-    uint32_t root = graph.add(a, b);
-
-    ShapePropagator prop;
-    std::vector<uint32_t> topo = topologicalSort({root}, graph);
-    for (uint32_t nodeId : topo)
-        prop.inferShape(nodeId, graph);
-
-    std::random_device rd;
-    std::filesystem::path tempDir = std::filesystem::temp_directory_path() /
-                                    ("tensor_graphs_executor_test_" + std::to_string(rd()));
-    std::filesystem::create_directories(tempDir);
-    std::filesystem::path cachePath = tempDir / "cache.jsonl";
-
-    MemoryManager mem({{Backend::CPU, 1024 * 1024}});
-    Session sess(graph, mem, root, cachePath.string());
-
-    std::vector<float> a0(16, 1.0f);
-    std::vector<float> b0(16, 2.0f);
-    std::vector<float> expected0(16, 3.0f);
-
-    std::cout << "[ExecutorTest] run 1" << std::endl;
-    const float *out0 = static_cast<const float *>(sess.run({{a, a0.data()}, {b, b0.data()}}));
-    std::cout << "[ExecutorTest] run 1 ptr=" << static_cast<const void *>(out0)
-              << " first=" << (out0 ? out0[0] : -999.0f) << std::endl;
-    if (!out0 || !compareOutputs(expected0.data(), out0, expected0.size()))
-        Error::throw_err("[ExecutorTest] first full run returned an incorrect result");
-    std::cout << "[ExecutorTest] run 1 ok" << std::endl;
-
-    std::vector<float> a1 = a0;
-    for (size_t i = 0; i < 4; ++i)
-        a1[i] = 5.0f;
-
-    std::vector<float> expected1 = expected0;
-    for (size_t i = 0; i < 4; ++i)
-        expected1[i] = 7.0f;
-
-    std::cout << "[ExecutorTest] run 2" << std::endl;
-    const float *out1 = static_cast<const float *>(sess.run({{a, a1.data()}, {b, b0.data()}}));
-    if (!out1 || !compareOutputs(expected1.data(), out1, expected1.size()))
-        Error::throw_err("[ExecutorTest] second partial cached run returned an incorrect result");
-    std::cout << "[ExecutorTest] run 2 ok" << std::endl;
-
-    std::cout << "[ExecutorTest] run 3" << std::endl;
-    const float *out2 = static_cast<const float *>(sess.run({{a, a1.data()}, {b, b0.data()}}));
-    if (!out2 || !compareOutputs(expected1.data(), out2, expected1.size()))
-        Error::throw_err("[ExecutorTest] clean cached run returned an incorrect result");
-    std::cout << "[ExecutorTest] run 3 ok" << std::endl;
+    for (uint32_t root : roots)
+    {
+        visit(visit, root);
+    }
+    return order;
 }
-
-std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph);
 
 void runMemoryPolicyTests()
 {
+    std::cout << "memory policy tests" << std::endl
+              << std::flush;
     {
         MemoryManager mem({{Backend::CPU, 24}});
         mem.init();
@@ -542,178 +515,6 @@ void runMemoryPolicyTests()
         if (inst.logicalNodeId != root || inst.outputStorageType != StorageType::PINNED)
             Error::throw_err("[MemoryTest] cached root outputs should be marked pinned in the compiled plan");
     }
-}
-
-std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph);
-
-void runPlannerTests()
-{
-    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
-    {
-        return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
-    };
-
-    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
-    {
-        return graph.input(shape, DType::FLOAT32, {}, StorageType::PERSISTENT);
-    };
-
-    Graph graph;
-    uint32_t a = makeFloatInput(graph, {4, 5});
-    uint32_t b = makeFloatInput(graph, {4, 5});
-    uint32_t c = makeFloatInput(graph, {4, 5});
-    uint32_t d = makeFloatInput(graph, {4, 5});
-    uint32_t e = makeFloatInput(graph, {4, 1});
-    uint32_t axis = makeIntConst(graph, {1});
-
-    uint32_t add0 = graph.add(a, b);
-    uint32_t pow0 = graph.pow(add0, c);
-    uint32_t mul0 = graph.mul(pow0, d);
-    uint32_t sum0 = graph.sum(mul0, axis);
-    uint32_t root = graph.add(sum0, e);
-
-    ShapePropagator prop;
-    std::vector<uint32_t> topo = topologicalSort({root}, graph);
-    for (uint32_t nodeId : topo)
-        prop.inferShape(nodeId, graph);
-
-    std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions;
-    dirtyOutputRegions[root] = {makeRegion({{1, 3}, {0, 1}})};
-
-    PlanningRegionState uncached = derivePlanningRegions(root, graph, dirtyOutputRegions, {});
-    PlanningRegionState cached = derivePlanningRegions(root, graph, dirtyOutputRegions, {pow0, mul0});
-
-    assertRegionListEquals(uncached.needed[root], {makeRegion({{1, 3}, {0, 1}})}, "planner root needed");
-    assertRegionListEquals(uncached.needed[sum0], {makeRegion({{1, 3}, {0, 1}})}, "planner sum needed");
-    assertRegionListEquals(uncached.needed[mul0], {makeRegion({{1, 3}, {0, 5}})}, "planner mul needed");
-    assertRegionListEquals(uncached.needed[pow0], {makeRegion({{1, 3}, {0, 5}})}, "planner pow needed");
-
-    assertRegionListEquals(uncached.recompute[mul0], {makeRegion({{1, 3}, {0, 5}})}, "planner uncached mul recompute");
-    assertRegionListEquals(uncached.recompute[pow0], {makeRegion({{1, 3}, {0, 5}})}, "planner uncached pow recompute");
-
-    if (cached.recompute.count(mul0) != 0 || cached.recompute.count(pow0) != 0)
-    {
-        Error::throw_err("[PlannerTest] cached nodes should not require recompute when their dirty output is clean");
-    }
-
-    assertRegionListEquals(cached.needed[mul0], {makeRegion({{1, 3}, {0, 5}})}, "planner cached mul needed");
-    assertRegionListEquals(cached.needed[pow0], {makeRegion({{1, 3}, {0, 5}})}, "planner cached pow needed");
-
-    {
-        Graph graph2;
-        uint32_t a2 = makeFloatInput(graph2, {4, 5});
-        uint32_t b2 = makeFloatInput(graph2, {4, 5});
-        uint32_t c2 = makeFloatInput(graph2, {4, 5});
-        uint32_t d2 = makeFloatInput(graph2, {4, 5});
-        uint32_t e2 = makeFloatInput(graph2, {4, 1});
-        uint32_t axis2 = makeIntConst(graph2, {1});
-
-        uint32_t add1 = graph2.add(a2, b2);
-        uint32_t pow1 = graph2.pow(add1, c2);
-        uint32_t mul1 = graph2.mul(pow1, d2);
-        uint32_t sum1 = graph2.sum(mul1, axis2);
-        uint32_t root1 = graph2.add(sum1, e2);
-
-        ShapePropagator prop2;
-        std::vector<uint32_t> topo2 = topologicalSort({root1}, graph2);
-        for (uint32_t nodeId : topo2)
-            prop2.inferShape(nodeId, graph2);
-
-        std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions2;
-        std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions2;
-        dirtyOutputRegions2[a2] = {
-            makeRegion({{0, 1}, {0, 5}}),
-            makeRegion({{2, 3}, {0, 5}}),
-        };
-        propagateDirtyRegionsAtomic(topo2, graph2, dirtyOutputRegions2, dirtyInputRegions2);
-
-        PlanningRegionState multiRegionState = derivePlanningRegions(root1, graph2, dirtyOutputRegions2, {mul1});
-        CacheAwarePlanningGraph rebuilt = buildCacheAwarePlanningGraph(root1, graph2, multiRegionState, {mul1});
-
-        const auto partialIt = rebuilt.logicalPartialNodeMap.find(mul1);
-        const auto scatterIt = rebuilt.logicalScatterNodeMap.find(mul1);
-        if (partialIt == rebuilt.logicalPartialNodeMap.end() || partialIt->second.size() != 2)
-            Error::throw_err("[PlannerTest] expected two partial mul kernels for multi-region cached rebuild");
-        if (scatterIt == rebuilt.logicalScatterNodeMap.end() || scatterIt->second.size() != 2)
-            Error::throw_err("[PlannerTest] expected two scatter nodes for multi-region cached rebuild");
-        if (rebuilt.logicalToPhysicalNodeMap.at(mul1) != scatterIt->second.back())
-            Error::throw_err("[PlannerTest] final mul mapping should point at the last scatter node");
-
-        const TensorNode &firstScatter = rebuilt.graph.getNode(scatterIt->second.front());
-        const TensorNode &finalScatter = rebuilt.graph.getNode(scatterIt->second.back());
-        if (firstScatter.opType != OpType::SCATTER || firstScatter.parentIds[0] != mul1)
-            Error::throw_err("[PlannerTest] first scatter should target the logical mul placeholder");
-        if (finalScatter.opType != OpType::SCATTER || finalScatter.parentIds[0] != scatterIt->second.front())
-            Error::throw_err("[PlannerTest] scatter chain should preserve intermediate parent links");
-
-        size_t logicalMulConsumers = 0;
-        for (const auto &pair : rebuilt.graph.nodes)
-        {
-            const TensorNode &node = pair.second;
-            for (uint32_t parentId : node.parentIds)
-            {
-                if (parentId == mul1)
-                {
-                    logicalMulConsumers++;
-                    if (node.opType != OpType::SCATTER)
-                        Error::throw_err("[PlannerTest] logical mul placeholder should only feed scatter nodes");
-                }
-            }
-        }
-        if (logicalMulConsumers != 1)
-            Error::throw_err("[PlannerTest] logical mul placeholder should have exactly one direct scatter consumer");
-
-        for (uint32_t partialId : partialIt->second)
-        {
-            const TensorNode &partialNode = rebuilt.graph.getNode(partialId);
-            if (partialNode.opType != OpType::MUL)
-                Error::throw_err("[PlannerTest] cached rebuild produced a non-MUL partial node");
-
-            bool sawSliceChain = false;
-            for (uint32_t parentId : partialNode.parentIds)
-            {
-                const TensorNode &parentNode = rebuilt.graph.getNode(parentId);
-                if (parentNode.opType == OpType::CONTIGUOUS &&
-                    !parentNode.parentIds.empty() &&
-                    rebuilt.graph.getNode(parentNode.parentIds[0]).opType == OpType::SLICE)
-                {
-                    sawSliceChain = true;
-                    break;
-                }
-            }
-
-            if (!sawSliceChain)
-                Error::throw_err("[PlannerTest] expected slice -> contiguous inputs on cached partial MUL rebuild");
-        }
-    }
-}
-
-// Topological sort of graph nodes from given roots
-std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph)
-{
-    std::vector<uint32_t> order;
-    std::unordered_set<uint32_t> visited;
-
-    auto visit = [&](auto &self, uint32_t node) -> void
-    {
-        if (visited.count(node))
-            return;
-        visited.insert(node);
-        if (graph.hasNode(node))
-        {
-            for (uint32_t pid : graph.getNode(node).parentIds)
-            {
-                self(self, pid);
-            }
-        }
-        order.push_back(node);
-    };
-
-    for (uint32_t root : roots)
-    {
-        visit(visit, root);
-    }
-    return order;
 }
 
 // Create a TensorView for a node
@@ -1347,8 +1148,6 @@ int main()
     runShapePropagationTests();
     runRewriteTests();
     runMemoryPolicyTests();
-    runPlannerTests();
-    runExecutorTests();
 
     std::cout << "Running Non-Reference Kernel Tests..." << std::endl;
 

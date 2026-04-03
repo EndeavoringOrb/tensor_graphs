@@ -68,12 +68,6 @@ public:
                                              ? logicalId
                                              : nodeId;
 
-            uint64_t arenaOffset = outBuf.getOffset(outputMemId);
-            TensorView outView = memManager.getView(node, compiled);
-            std::vector<TensorView> kernelOutViews = {outView};
-            std::vector<void *> kernelOutputs = {outBuf.arena_ptr + outView.baseOffset};
-
-            uint32_t memId = outputMemId;
             if (inst.inplaceInputIndex >= 0)
             {
                 uint32_t srcId = inst.inputNodeIds[inst.inplaceInputIndex];
@@ -92,7 +86,11 @@ public:
                 memManager.allocate(inst.backend, outputMemId, sizeBytes, inst.outputStorageType, compiled.refCounts.at(inst.nodeId), cost, &parentMap, &compiled.nodeCosts);
             }
 
-            auto outBlockIt = outBuf.allocationMap.at(memId);
+            TensorView outView = memManager.getView(node, compiled);
+            std::vector<TensorView> kernelOutViews = {outView};
+            std::vector<void *> kernelOutputs = {outBuf.arena_ptr + outView.baseOffset};
+
+            auto outBlockIt = outBuf.allocationMap.at(outputMemId);
             outBlockIt->refCount = compiled.refCounts.at(inst.nodeId);
             outBlockIt->isLocked = true;
 

@@ -174,9 +174,8 @@ static std::string encodeCachedNodeSet(const std::unordered_set<uint32_t> &cache
     return ss.str();
 }
 
-static float estimatePlanRuntime(const CompiledGraph &plan, CostModel &costModel)
+static float getPlanRuntime(const CompiledGraph &plan)
 {
-    (void)costModel;
     float totalCost = 0.0f;
     for (const auto &kv : plan.nodeCosts)
     {
@@ -198,7 +197,7 @@ static float calculateWeightedRuntimeScore(
     {
         auto countIt = bucketCallCounts.find(kv.first);
         uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
-        totalScore += static_cast<double>(estimatePlanRuntime(kv.second, costModel)) * static_cast<double>(callCount);
+        totalScore += static_cast<double>(getPlanRuntime(kv.second)) * static_cast<double>(callCount);
     }
     return static_cast<float>(totalScore);
 }
@@ -347,7 +346,7 @@ static const BucketPlanMemoEntry &getOrPlanBucket(
         Graph planningGraph = graph;
         Planner planner(costModel, memoryLimits);
         entry.plan = planner.plan(rootId, planningGraph, bucket.bucket.regions, bucket.bucket.inputSlices, cachedNodes);
-        entry.runtime = estimatePlanRuntime(entry.plan, costModel);
+        entry.runtime = getPlanRuntime(entry.plan);
         entry.valid = true;
     }
     catch (const MemoryExhaustedError &)
@@ -409,7 +408,7 @@ CacheOptimizationResult optimizeCacheCombination(
         {
             entry.valid = true;
             entry.plan = baselineIt->second;
-            entry.runtime = estimatePlanRuntime(entry.plan, costModel);
+            entry.runtime = getPlanRuntime(entry.plan);
         }
         else
         {
