@@ -151,7 +151,8 @@ static PlanningRegionState derivePlanningRegions(
     ShapePropagator prop;
 
     auto rootIt = dirtyOutputRegions.find(rootId);
-    if (rootIt == dirtyOutputRegions.end()) {
+    if (rootIt == dirtyOutputRegions.end())
+    {
         Error::throw_err("[derivePlanningRegions] Cannot find dirty region for output");
     }
     state.needed[rootId] = mergeRegions(rootIt->second);
@@ -169,7 +170,7 @@ static PlanningRegionState derivePlanningRegions(
         if (cachedNodes.count(nodeId))
         {
             if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty())
-                state.recompute[nodeId] = mergeRegions(dirtyIt->second); // TODO: take AND of dirty & needed, then mergeRegions
+                state.recompute[nodeId] = intersectRegionLists(dirtyIt->second, neededRegions);
         }
         else
         {
@@ -188,8 +189,6 @@ struct CacheAwarePlanningGraph
     std::unordered_map<uint32_t, uint32_t> physicalToLogicalNodeMap;
     std::unordered_map<uint32_t, std::vector<Region>> physicalOutputRegions;
     std::unordered_map<uint32_t, std::vector<std::vector<Region>>> physicalInputSlices;
-    std::unordered_map<uint32_t, std::vector<uint32_t>> logicalPartialNodeMap;
-    std::unordered_map<uint32_t, std::vector<uint32_t>> logicalScatterNodeMap;
 };
 
 inline std::vector<uint32_t> getRegionShape(const Region &region)
@@ -499,14 +498,12 @@ private:
             for (const Region &recomputeRegion : recomputeRegions)
             {
                 PartialCloneResult partial = buildPartialClone(logicalId, recomputeRegion);
-                result.logicalPartialNodeMap[logicalId].push_back(partial.nodeId);
 
                 uint32_t startsId = addRegionStarts(recomputeRegion);
                 uint32_t endsId = addRegionEnds(recomputeRegion);
                 uint32_t stepsId = addRegionSteps(recomputeRegion);
                 uint32_t scatterId = result.graph.scatter(currentId, partial.nodeId, startsId, endsId, stepsId);
 
-                result.logicalScatterNodeMap[logicalId].push_back(scatterId);
                 result.physicalToLogicalNodeMap[scatterId] = logicalId;
                 result.physicalOutputRegions[scatterId] = {sourceNode.fullRegion()};
 
