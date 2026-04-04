@@ -326,23 +326,47 @@ struct DeviceBuffer
     void defrag()
     {
         uint64_t offset = 0;
-        for (auto it = blocks.begin(); it != blocks.end(); ++it)
+        auto it = blocks.begin();
+        while (it != blocks.end())
         {
-            if (it->offset > offset)
+            if (it->isFree())
             {
-#ifdef USE_CUDA
-                if (backend == Backend::CUDA)
-                {
-                    cudaMemcpy(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes, cudaMemcpyDeviceToDevice);
-                }
-                else
-                {
-                    std::memcpy(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes);
-                }
-#else
-                std::memcpy(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes);
-#endif
+                it = blocks.erase(it);
             }
+            else
+            {
+                if (it->offset > offset)
+                {
+#ifdef USE_CUDA
+                    if (backend == Backend::CUDA)
+                    {
+                        cudaMemcpy(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes, cudaMemcpyDeviceToDevice);
+                    }
+                    else
+                    {
+                        std::memmove(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes);
+                    }
+#else
+                    std::memmove(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes);
+#endif
+                    it->offset = offset;
+                }
+                offset += it->sizeBytes;
+                ++it;
+            }
+        }
+
+        if (offset < sizeBytes)
+        {
+            MemBlock freeBlock;
+            freeBlock.offset = offset;
+            freeBlock.sizeBytes = sizeBytes - offset;
+            freeBlock.nodeId = UINT32_MAX;
+            freeBlock.storageType = StorageType::TRANSIENT;
+            freeBlock.refCount = 0;
+            freeBlock.isLocked = false;
+            freeBlock.cost = 0.0f;
+            blocks.push_back(freeBlock);
         }
     }
 

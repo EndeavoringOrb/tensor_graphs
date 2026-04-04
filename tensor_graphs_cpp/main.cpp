@@ -600,8 +600,15 @@ int main()
 
         float max_val = -FLT_MAX;
         int32_t argmax_idx = 0;
+        uint32_t firstNLogits = 20;
+        std::cout << "Step " << step + 1 << "\nFirst " << firstNLogits << " logits:\n";
         for (uint32_t i = 0; i < cfg.vocab_size; ++i)
         {
+            if (i < firstNLogits)
+            {
+                std::cout << i << ": " << logits_vec[i] << "\n";
+            }
+
             if (logits_vec[i] > max_val)
             {
                 max_val = logits_vec[i];
@@ -613,8 +620,9 @@ int main()
         tokens.push_back((uint32_t)argmax_idx);
 
         // Print progress
-        std::cout << "Step " << step + 1 << " | Token: " << argmax_idx
-                  << " | Latency: " << runtimeMs << "ms" << std::endl;
+        std::cout << "Argmax Token: " << argmax_idx
+                  << " | Latency: " << runtimeMs << "ms" << std::endl
+                  << std::flush;
     }
 
     std::cout << "\nFinal sequence length: " << tokens.size() << std::endl;

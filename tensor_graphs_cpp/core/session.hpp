@@ -708,11 +708,12 @@ public:
         // get output
         const OpInstruction &lastInst = compiled->instructions[compiled->instructions.size() - 1];
         Backend backend = lastInst.backend;
-        if (!memManager.has(backend, lastInst.logicalNodeId))
+        if (!memManager.has(backend, compiled->getLogicalId(lastInst.nodeId)))
         {
             Error::throw_err("[Session.run] execution output nodeId " + std::to_string(lastInst.logicalNodeId) + " not found in memory");
         }
         TensorView view = memManager.getView(compiled->nodesMap.at(lastInst.nodeId), *compiled);
+        std::cout << "final output view: " << toString(view) << "\n" << std::flush;
         return memManager.buffers.at(backend).arena_ptr + view.baseOffset;
     }
 
@@ -1037,9 +1038,7 @@ public:
                 for (const auto &instJson : entry["graph"]["instructions"])
                 {
                     if (!instJson.contains("logicalNodeId") ||
-                        !instJson.contains("cachedKernelIds") ||
-                        !instJson.contains("outputRegions") ||
-                        !instJson.contains("inputSlices"))
+                        !instJson.contains("cachedKernelIds"))
                     {
                         hasInvalidCache = true;
                         invalidCacheReason = "Compiled bucket entry is missing region-kernel metadata.";

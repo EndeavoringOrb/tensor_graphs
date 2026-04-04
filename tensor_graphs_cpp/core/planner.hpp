@@ -1230,7 +1230,7 @@ private:
 
                 const KernelEntry &entry = KernelRegistry::get().getKernel(enode.kernelUid);
 
-                if (entry.inplace && entry.inferView)
+                if (entry.inferView)
                 {
                     entry.inferView(outNode, inputs);
                 }
@@ -1501,7 +1501,7 @@ private:
             inst.outputStorageType = (cachedNodes.count(logicalNodeId) && nodeIsFinalLogicalOutput) ? StorageType::PINNED : node.storageType;
 
             compiled.nodesMap[nodeId].backend = enode.backend;
-            if (kEntry->inplace && kEntry->inferView)
+            if (kEntry->inferView)
             {
                 std::vector<TensorNode> inplaceInputs;
                 inplaceInputs.reserve(inst.inputNodeIds.size());

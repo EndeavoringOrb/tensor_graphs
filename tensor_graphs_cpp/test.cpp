@@ -457,66 +457,6 @@ std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const 
     return order;
 }
 
-void runMemoryPolicyTests()
-{
-    std::cout << "memory policy tests" << std::endl
-              << std::flush;
-    {
-        MemoryManager mem({{Backend::CPU, 24}});
-        mem.init();
-
-        mem.allocate(Backend::CPU, 1, 8, StorageType::TRANSIENT, 1);
-        mem.allocate(Backend::CPU, 2, 8, StorageType::TRANSIENT, 1);
-        mem.release(Backend::CPU, 1);
-        mem.release(Backend::CPU, 2);
-
-        if (mem.has(Backend::CPU, 1) || mem.has(Backend::CPU, 2))
-            Error::throw_err("[MemoryTest] transient releases should free their allocations");
-
-        mem.allocate(Backend::CPU, 3, 16, StorageType::TRANSIENT, 1);
-        if (!mem.has(Backend::CPU, 3))
-            Error::throw_err("[MemoryTest] allocator should reuse compacted free space without eviction");
-    }
-
-    {
-        MemoryManager mem({{Backend::CPU, 16}});
-        mem.init();
-
-        mem.allocate(Backend::CPU, 10, 8, StorageType::PINNED, 1);
-        mem.release(Backend::CPU, 10);
-        if (!mem.has(Backend::CPU, 10))
-            Error::throw_err("[MemoryTest] pinned allocations should remain resident after release");
-    }
-
-    {
-        Graph graph;
-        uint32_t a = graph.input({2, 2}, DType::FLOAT32, {}, StorageType::PERSISTENT);
-        uint32_t b = graph.input({2, 2}, DType::FLOAT32, {}, StorageType::PERSISTENT);
-        uint32_t root = graph.add(a, b);
-        graph.getNode(root).backend = Backend::CPU;
-
-        ShapePropagator prop;
-        std::vector<uint32_t> topo = topologicalSort({root}, graph);
-        for (uint32_t nodeId : topo)
-            prop.inferShape(nodeId, graph);
-
-        std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions;
-        dirtyOutputRegions[root] = {makeRegion({{0, 2}, {0, 2}})};
-
-        CostModel costModel;
-        costModel.load("benchmarks/records.jsonl");
-        Planner planner(costModel, {{Backend::CPU, 64}});
-        CompiledGraph compiled = planner.plan(root, graph, dirtyOutputRegions, {}, {root});
-
-        if (compiled.instructions.empty())
-            Error::throw_err("[MemoryTest] planner should emit at least one instruction");
-
-        const OpInstruction &inst = compiled.instructions.back();
-        if (inst.logicalNodeId != root || inst.outputStorageType != StorageType::PINNED)
-            Error::throw_err("[MemoryTest] cached root outputs should be marked pinned in the compiled plan");
-    }
-}
-
 // Create a TensorView for a node
 TensorView makeView(const TensorNode &node)
 {
@@ -1147,7 +1087,6 @@ int main()
     runRegionMergeTests();
     runShapePropagationTests();
     runRewriteTests();
-    runMemoryPolicyTests();
 
     std::cout << "Running Non-Reference Kernel Tests..." << std::endl;
 

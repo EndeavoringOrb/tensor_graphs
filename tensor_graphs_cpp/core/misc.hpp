@@ -155,6 +155,16 @@ std::string toString(const OpInstruction &inst)
     return ss.str();
 }
 
+std::string toString(const TensorView &view) {
+    std::stringstream ss;
+    ss << "TensorView\n"
+       << "  baseOffset: " << view.baseOffset << "\n"
+       << "  shape: " << toString(view.getShape()) << "\n"
+       << "  strides: " << toString(view.strides) << "\n"
+       << "  dtype: " << view.dtype << "\n";
+    return ss.str();
+}
+
 // calculate binomial coefficient "n choose k"
 uint64_t binom(uint64_t n, uint64_t k)
 {
