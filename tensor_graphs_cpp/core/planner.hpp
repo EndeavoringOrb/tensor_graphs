@@ -375,24 +375,6 @@ private:
             partialParents.push_back(buildParentInputSlice(sourceNode, parentIdx, physicalParentId, regionsForParent));
         }
 
-        if (sourceNode.opType == OpType::SLICE)
-        {
-            // The parent input has already been cropped to the exact bounding box needed.
-            // Replace starts, ends, steps with {0,0,0}, partial shape, and {1,1,1} so the partial slice acts as an identity view.
-            std::vector<int32_t> zeros(outRegion.region.size(), 0);
-            uint32_t newStarts = addInt32Constant(zeros);
-
-            std::vector<int32_t> outShape = toInt32Shape(getRegionShape(outRegion));
-            uint32_t newEnds = addInt32Constant(outShape);
-
-            std::vector<int32_t> ones(outRegion.region.size(), 1);
-            uint32_t newSteps = addInt32Constant(ones);
-
-            partialParents[1] = newStarts;
-            partialParents[2] = newEnds;
-            partialParents[3] = newSteps;
-        }
-
         uint32_t partialId = cloneNode(sourceNode, partialParents);
         TensorNode &partialNode = result.graph.getNode(partialId);
         partialNode.setShape(getRegionShape(outRegion));
