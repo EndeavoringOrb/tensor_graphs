@@ -118,6 +118,18 @@ static void updateNeeded(
         if (neededIt == needed.end() || neededIt->second.empty())
             continue;
 
+        // These operations rely on global coordinates or full context to compute correct values, so they cannot be partially evaluated.
+        bool forceFull = (node.opType == OpType::ARANGE ||
+                          node.opType == OpType::TRIU ||
+                          node.opType == OpType::IM2COL);
+
+        std::vector<Region> currentNeeded = neededIt->second;
+        if (forceFull)
+        {
+            currentNeeded = {node.fullRegion()};
+            needed[nodeId] = currentNeeded;
+        }
+
         std::vector<std::vector<Region>> parentNeeded = prop.backward(node, graph, neededIt->second);
         for (size_t i = 0; i < node.parentIds.size(); ++i)
         {
@@ -371,7 +383,7 @@ private:
             return logicalId;
 
         const TensorNode &sourceNode = sourceGraph.getNode(logicalId);
-        if (sourceNode.opType == OpType::INPUT || sourceNode.opType == OpType::SLICE || sourceNode.opType == OpType::RESHAPE || sourceNode.opType == OpType::FILL || sourceNode.opType == OpType::SCATTER || sourceNode.opType == OpType::ARANGE)
+        if (sourceNode.opType == OpType::INPUT)
         {
             result.logicalToPhysicalNodeMap[logicalId] = logicalId;
             result.physicalToLogicalNodeMap[logicalId] = logicalId;
@@ -409,6 +421,21 @@ private:
                 result.physicalOutputRegions[scatterId] = {sourceNode.fullRegion()};
 
                 currentId = scatterId;
+            }
+
+            for (auto &pair : result.graph.nodes)
+            {
+                if (pair.second.opType == OpType::SCATTER)
+                {
+                    continue;
+                }
+                for (uint32_t &pid : pair.second.parentIds)
+                {
+                    if (pid == logicalId)
+                    {
+                        pid = currentId;
+                    }
+                }
             }
 
             result.logicalToPhysicalNodeMap[logicalId] = currentId;
