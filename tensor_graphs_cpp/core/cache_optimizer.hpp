@@ -133,7 +133,7 @@ static std::vector<uint32_t> collectCacheableNodes(const Graph &graph)
     for (const auto &pair : graph.nodes)
     {
         const TensorNode &node = pair.second;
-        if (node.opType == OpType::INPUT || node.getShape().empty())
+        if (node.opType == OpType::INPUT || node.opType == OpType::PERMUTE || node.opType == OpType::REPEAT || node.opType == OpType::RESHAPE || node.opType == OpType::SLICE || node.getShape().empty())
             continue;
         cacheableNodes.push_back(node.id);
     }

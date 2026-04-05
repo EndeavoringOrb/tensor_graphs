@@ -713,7 +713,8 @@ public:
             Error::throw_err("[Session.run] execution output nodeId " + std::to_string(lastInst.logicalNodeId) + " not found in memory");
         }
         TensorView view = memManager.getView(compiled->nodesMap.at(lastInst.nodeId), *compiled);
-        std::cout << "final output view: " << toString(view) << "\n" << std::flush;
+        std::cout << "final output view: " << toString(view) << "\n"
+                  << std::flush;
         return memManager.buffers.at(backend).arena_ptr + view.baseOffset;
     }
 
@@ -723,6 +724,14 @@ public:
         const std::vector<uint32_t> &shape,
         DType dtype) const
     {
+        // Uncomment to use baseline full plan for every run
+        // Region full;
+        // for (uint32_t dim : shape)
+        // {
+        //     full.region.push_back({0, dim});
+        // }
+        // return {full};
+
         if (shape.empty())
             return {};
 
@@ -904,9 +913,11 @@ public:
                 Error::throw_err("[Session::ensureCacheCoverage] full key not in baseline plans");
             }
             cachedGraphs[fullKey] = baselinePlans.at(fullKey);
-            for (auto &inst : cachedGraphs[fullKey].instructions) {
+            for (auto &inst : cachedGraphs[fullKey].instructions)
+            {
                 uint32_t logicalId = cachedGraphs[fullKey].getLogicalId(inst.nodeId);
-                if (selectedCachedNodes.count(logicalId) != 0) {
+                if (selectedCachedNodes.count(logicalId) != 0)
+                {
                     inst.outputStorageType = StorageType::PINNED;
                 }
             }

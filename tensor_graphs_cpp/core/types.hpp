@@ -305,6 +305,7 @@ public:
     DType dtype;
     std::vector<uint32_t> parentIds;
     std::vector<int64_t> strides;
+    uint64_t viewOffset = 0;
     Backend backend = Backend::CPU;
     StorageType storageType = StorageType::TRANSIENT;
     std::string contentHash;
@@ -712,7 +713,8 @@ struct OpInstruction
     uint64_t fullKernelId = 0;
     std::vector<uint64_t> cachedKernelIds;
     std::vector<uint32_t> inputNodeIds;
-    int32_t inplaceInputIndex; // -1 if not inplace
+    int32_t inplaceInputIndex = -1; // -1 if not inplace
+    int32_t viewInputIndex = -1;    // -1 if not view
     Backend backend;
     StorageType outputStorageType = StorageType::TRANSIENT;
 };
@@ -768,6 +770,7 @@ inline void to_json(json &j, const TensorNode &n)
         {"parentIds", n.parentIds},
         {"shape", n.getShape()},
         {"strides", n.strides},
+        {"viewOffset", n.viewOffset},
         {"backend", n.backend},
         {"storageType", n.storageType},
         {"contentHash", n.contentHash}};
@@ -781,6 +784,7 @@ inline void from_json(const json &j, TensorNode &n)
     n.parentIds = j.at("parentIds").get<std::vector<uint32_t>>();
     n.setShape(j.at("shape").get<std::vector<uint32_t>>());
     n.strides = j.at("strides").get<std::vector<int64_t>>();
+    n.viewOffset = j.contains("viewOffset") ? j.at("viewOffset").get<uint64_t>() : 0;
     n.backend = j.at("backend").get<Backend>();
     n.storageType = j.at("storageType").get<StorageType>();
     n.contentHash = j.at("contentHash").get<std::string>();
@@ -810,6 +814,7 @@ inline void to_json(json &j, const OpInstruction &i)
         {"cachedKernelIds", cachedIds},
         {"inputNodeIds", i.inputNodeIds},
         {"inplaceInputIndex", i.inplaceInputIndex},
+        {"viewInputIndex", i.viewInputIndex},
         {"backend", i.backend},
         {"outputStorageType", i.outputStorageType}};
 }
@@ -826,6 +831,7 @@ inline void from_json(const json &j, OpInstruction &i)
 
     i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();
     i.inplaceInputIndex = j.at("inplaceInputIndex").get<int32_t>();
+    i.viewInputIndex = j.at("viewInputIndex").get<int32_t>();
     i.backend = j.at("backend").get<Backend>();
     i.outputStorageType = j.contains("outputStorageType") ? j.at("outputStorageType").get<StorageType>() : StorageType::TRANSIENT;
 }

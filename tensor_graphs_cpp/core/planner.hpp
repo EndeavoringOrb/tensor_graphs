@@ -121,7 +121,11 @@ static void updateNeeded(
         // These operations rely on global coordinates or full context to compute correct values, so they cannot be partially evaluated.
         bool forceFull = (node.opType == OpType::ARANGE ||
                           node.opType == OpType::TRIU ||
-                          node.opType == OpType::IM2COL);
+                          node.opType == OpType::IM2COL ||
+                          node.opType == OpType::RESHAPE ||
+                          node.opType == OpType::PERMUTE ||
+                          node.opType == OpType::REPEAT ||
+                          node.opType == OpType::FILL);
 
         std::vector<Region> currentNeeded = neededIt->second;
         if (forceFull)
@@ -177,9 +181,17 @@ static PlanningRegionState derivePlanningRegions(
         const std::vector<Region> &neededRegions = pair.second;
         if (neededRegions.empty())
             continue;
+        const TensorNode &node = graph.nodes.at(nodeId);
+        bool forceFull = (node.opType == OpType::ARANGE ||
+                          node.opType == OpType::TRIU ||
+                          node.opType == OpType::IM2COL ||
+                          node.opType == OpType::RESHAPE ||
+                          node.opType == OpType::PERMUTE ||
+                          node.opType == OpType::REPEAT ||
+                          node.opType == OpType::FILL);
 
         auto dirtyIt = dirtyOutputRegions.find(nodeId);
-        if (cachedNodes.count(nodeId))
+        if (cachedNodes.count(nodeId) && !forceFull)
         {
             if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty())
                 state.recompute[nodeId] = intersectRegionLists(dirtyIt->second, neededRegions);
@@ -199,7 +211,6 @@ struct CacheAwarePlanningGraph
     uint32_t physicalRootId = 0;
     std::unordered_map<uint32_t, uint32_t> logicalToPhysicalNodeMap;
     std::unordered_map<uint32_t, uint32_t> physicalToLogicalNodeMap;
-    std::unordered_map<uint32_t, std::vector<Region>> physicalOutputRegions;
     std::unordered_map<uint32_t, std::vector<std::vector<Region>>> physicalInputSlices;
 };
 
@@ -364,11 +375,28 @@ private:
             partialParents.push_back(buildParentInputSlice(sourceNode, parentIdx, physicalParentId, regionsForParent));
         }
 
+        if (sourceNode.opType == OpType::SLICE)
+        {
+            // The parent input has already been cropped to the exact bounding box needed.
+            // Replace starts, ends, steps with {0,0,0}, partial shape, and {1,1,1} so the partial slice acts as an identity view.
+            std::vector<int32_t> zeros(outRegion.region.size(), 0);
+            uint32_t newStarts = addInt32Constant(zeros);
+
+            std::vector<int32_t> outShape = toInt32Shape(getRegionShape(outRegion));
+            uint32_t newEnds = addInt32Constant(outShape);
+
+            std::vector<int32_t> ones(outRegion.region.size(), 1);
+            uint32_t newSteps = addInt32Constant(ones);
+
+            partialParents[1] = newStarts;
+            partialParents[2] = newEnds;
+            partialParents[3] = newSteps;
+        }
+
         uint32_t partialId = cloneNode(sourceNode, partialParents);
         TensorNode &partialNode = result.graph.getNode(partialId);
         partialNode.setShape(getRegionShape(outRegion));
         result.physicalToLogicalNodeMap[partialId] = logicalId;
-        result.physicalOutputRegions[partialId] = {outRegion};
         result.physicalInputSlices[partialId] = parentRegions;
         return {partialId, parentRegions};
     }
@@ -380,7 +408,9 @@ private:
             return memoIt->second;
 
         if (!sourceGraph.hasNode(logicalId))
-            return logicalId;
+        {
+            Error::throw_err("[CacheAwarePlanningGraphBuilder.buildLogicalNode] sourceGraph doesn't have node for logicalId");
+        }
 
         const TensorNode &sourceNode = sourceGraph.getNode(logicalId);
         if (sourceNode.opType == OpType::INPUT)
@@ -418,7 +448,6 @@ private:
                 uint32_t scatterId = result.graph.scatter(currentId, partial.nodeId, startsId, endsId, stepsId);
 
                 result.physicalToLogicalNodeMap[scatterId] = logicalId;
-                result.physicalOutputRegions[scatterId] = {sourceNode.fullRegion()};
 
                 currentId = scatterId;
             }
@@ -444,16 +473,10 @@ private:
         }
         else
         {
-            if (recomputeRegions.size() > 1)
-            {
-                Error::throw_err("Uncached nodes with multiple recompute regions are not supported yet!");
-            }
-            PartialCloneResult partial = buildPartialClone(logicalId, recomputeRegions.front());
-            result.logicalToPhysicalNodeMap[logicalId] = partial.nodeId;
-            result.physicalToLogicalNodeMap[partial.nodeId] = logicalId;
-            result.physicalOutputRegions[partial.nodeId] = recomputeRegions;
-            memoizedPhysicalIds[logicalId] = partial.nodeId;
-            return partial.nodeId;
+            result.logicalToPhysicalNodeMap[logicalId] = logicalId;
+            result.physicalToLogicalNodeMap[logicalId] = logicalId;
+            memoizedPhysicalIds[logicalId] = logicalId;
+            return logicalId;
         }
     }
 };
@@ -600,7 +623,6 @@ public:
             dirtyInputRegions,
             planningGraph.logicalToPhysicalNodeMap,
             planningGraph.physicalToLogicalNodeMap,
-            planningGraph.physicalOutputRegions,
             planningGraph.physicalInputSlices,
             cachedNodes);
     }
@@ -612,6 +634,8 @@ private:
         float cost = std::numeric_limits<float>::infinity();
         bool valid = false;
         uint64_t memSize = 0; // Memory size for this node's output
+        std::vector<int64_t> outStrides;
+        uint64_t outViewOffset = 0;
     };
 
     struct ExtractionResult
@@ -1192,6 +1216,8 @@ private:
                     c.valid = true;
                     TensorNode inNode = graph.getNode(enode.nodeId);
                     c.memSize = getSizeBytes(inNode.getShape(), inNode.dtype);
+                    c.outStrides = inNode.strides;
+                    c.outViewOffset = inNode.viewOffset;
                     if (c.cost < best.cost)
                         best = c;
                     continue;
@@ -1213,6 +1239,8 @@ private:
                     const ENode &childEnode = egraph.getENodes()[childChoice.enodeId];
                     TensorNode inNode = graph.getNode(childEnode.nodeId);
                     inNode.backend = childEnode.backend;
+                    inNode.strides = childChoice.outStrides;
+                    inNode.viewOffset = childChoice.outViewOffset;
                     inputs.push_back(inNode);
                 }
                 if (!childValid)
@@ -1259,7 +1287,7 @@ private:
 
                 if (entry.inferView)
                 {
-                    entry.inferView(outNode, inputs);
+                    entry.inferView(outNode, inputs, graph);
                 }
 
                 if (!entry.match(inputs, outNode, refCounts))
@@ -1274,6 +1302,8 @@ private:
                 c.cost = childrenCost + kernelCost;
                 c.valid = true;
                 c.memSize = getSizeBytes(outNode.getShape(), outNode.dtype);
+                c.outStrides = outNode.strides;
+                c.outViewOffset = outNode.viewOffset;
                 if (!best.valid || c.cost < best.cost)
                     best = c;
             }
@@ -1281,6 +1311,7 @@ private:
             if (!best.valid)
             {
                 best.cost = std::numeric_limits<float>::infinity();
+                Error::throw_err("[Planner.extractBest] could not find valid enode for EClass" + std::to_string(cls.id));
             }
             choice[eclassId] = best;
             return best;
@@ -1289,7 +1320,7 @@ private:
         auto it = nodeToEClass.find(rootId);
         if (it == nodeToEClass.end())
         {
-            Error::throw_err("Root node missing from egraph.");
+            Error::throw_err("[Planner.extractBest] Root node missing from egraph.");
         }
         solve(it->second);
 
@@ -1300,6 +1331,11 @@ private:
             {
                 result.eclassToNodeId[kv.first] = egraph.getENodes()[c.enodeId].nodeId;
             }
+        }
+
+        if (result.eclassToNodeId.count(it->second) == 0)
+        {
+            Error::throw_err("[Planner.extractBest] no valid extraction found");
         }
 
         // Memory validation: calculate peak memory with liveness
@@ -1417,7 +1453,6 @@ private:
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
         const std::unordered_map<uint32_t, uint32_t> &logicalToPhysicalNodeMap,
         const std::unordered_map<uint32_t, uint32_t> &physicalToLogicalNodeMap,
-        const std::unordered_map<uint32_t, std::vector<Region>> &physicalOutputRegions,
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &physicalInputSlices,
         const std::unordered_set<uint32_t> &cachedNodes)
     {
@@ -1438,19 +1473,34 @@ private:
         };
 
         std::vector<uint32_t> topo;
-        std::unordered_set<uint32_t> visited;
-        std::function<void(uint32_t)> visit = [&](uint32_t nodeId)
+        std::unordered_set<uint32_t> visited_classes;
+        std::function<void(uint32_t)> visit = [&](uint32_t eclassId)
         {
-            if (visited.count(nodeId))
+            eclassId = egraph.find(eclassId);
+            if (visited_classes.count(eclassId))
                 return;
-            visited.insert(nodeId);
-            for (uint32_t pid : graph.getNode(nodeId).parentIds)
+            visited_classes.insert(eclassId);
+
+            auto choiceIt = extraction.choiceByEClass.find(eclassId);
+            if (choiceIt == extraction.choiceByEClass.end() || !choiceIt->second.valid)
+                return;
+
+            const ExtractChoice &c = choiceIt->second;
+            const ENode &enode = egraph.getENodes()[c.enodeId];
+
+            for (uint32_t childEClass : enode.children)
             {
-                visit(mapToSelected(pid));
+                visit(childEClass);
             }
-            topo.push_back(nodeId);
+            topo.push_back(enode.nodeId);
         };
-        visit(rootId);
+
+        auto rootEClassIt = nodeToEClass.find(rootId);
+        if (rootEClassIt == nodeToEClass.end())
+        {
+            Error::throw_err("[Planner.buildCompiledGraph] Root node missing from nodeToEClass.");
+        }
+        visit(egraph.find(rootEClassIt->second));
 
         std::unordered_map<uint32_t, uint32_t> compiledRefCounts;
         for (uint32_t nodeId : topo)
@@ -1524,6 +1574,7 @@ private:
 
             inst.fullKernelId = kEntry->uid;
             inst.inplaceInputIndex = kEntry->inplace ? 0 : -1;
+            inst.viewInputIndex = kEntry->isView ? 0 : -1;
             const bool nodeIsFinalLogicalOutput = logicalToPhysicalNodeMap.count(logicalNodeId) && logicalToPhysicalNodeMap.at(logicalNodeId) == nodeId;
             inst.outputStorageType = (cachedNodes.count(logicalNodeId) && nodeIsFinalLogicalOutput) ? StorageType::PINNED : node.storageType;
 
@@ -1535,7 +1586,7 @@ private:
                 for (uint32_t pid : inst.inputNodeIds)
                     inplaceInputs.push_back(compiled.nodesMap.at(pid));
 
-                kEntry->inferView(compiled.nodesMap[nodeId], inplaceInputs);
+                kEntry->inferView(compiled.nodesMap[nodeId], inplaceInputs, graph);
             }
 
             compiled.instructions.push_back(inst);

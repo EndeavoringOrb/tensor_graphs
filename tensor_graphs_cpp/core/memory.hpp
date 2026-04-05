@@ -1,3 +1,4 @@
+// tensor_graphs_cpp/core/memory.hpp
 #pragma once
 #include "core/types.hpp"
 #include <vector>
@@ -233,12 +234,20 @@ struct DeviceBuffer
         if (it == blocks.end() || it->isFree())
             return;
 
-        allocationMap.erase(it->nodeId);
+        for (auto mapIt = allocationMap.begin(); mapIt != allocationMap.end();)
+        {
+            if (mapIt->second == it)
+            {
+                mapIt = allocationMap.erase(mapIt);
+            }
+            else
+            {
+                ++mapIt;
+            }
+        }
+
         it->nodeId = UINT32_MAX;
-        it->storageType = StorageType::TRANSIENT;
-        it->refCount = 0;
         it->isLocked = false;
-        it->cost = 0.0f;
         mergeFreeBlocks();
     }
 
@@ -460,6 +469,9 @@ struct DeviceBuffer
 struct MemoryManager
 {
     std::unordered_map<Backend, DeviceBuffer> buffers;
+    std::unordered_map<uint32_t, uint32_t> aliasMap;
+    std::unordered_map<uint32_t, uint32_t> aliasRefCounts;
+    std::unordered_map<uint32_t, StorageType> aliasStorageTypes;
 
     MemoryManager(std::unordered_map<Backend, uint64_t> bufferSizes)
     {
@@ -478,6 +490,15 @@ struct MemoryManager
         }
     }
 
+    void addAlias(Backend backend, uint32_t srcId, uint32_t dstId, uint32_t additionalRefs, StorageType storageType = StorageType::TRANSIENT)
+    {
+        if (srcId == dstId)
+            return;
+        aliasMap[dstId] = srcId;
+        aliasRefCounts[dstId] = additionalRefs;
+        aliasStorageTypes[dstId] = storageType;
+    }
+
     uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f, const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr, const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
     {
         auto it = buffers.find(backend);
@@ -493,7 +514,13 @@ struct MemoryManager
         if (it == buffers.end())
             Error::throw_err("[MemoryManager.write] DeviceBuffer not initialized for backend " + toString(backend));
 
-        buffers.at(backend).write(nodeId, data, size);
+        uint32_t targetId = nodeId;
+        while (aliasMap.find(targetId) != aliasMap.end())
+        {
+            targetId = aliasMap.at(targetId);
+        }
+
+        buffers.at(backend).write(targetId, data, size);
     }
 
     const uint8_t *read(Backend backend, uint32_t nodeId) const
@@ -502,11 +529,43 @@ struct MemoryManager
         if (it == buffers.end())
             Error::throw_err("[MemoryManager.read] DeviceBuffer not initialized for backend " + toString(backend));
 
-        return buffers.at(backend).read(nodeId);
+        uint32_t targetId = nodeId;
+        while (aliasMap.find(targetId) != aliasMap.end())
+        {
+            targetId = aliasMap.at(targetId);
+        }
+
+        return buffers.at(backend).read(targetId);
     }
 
     void release(Backend backend, uint32_t nodeId)
     {
+        auto aliasIt = aliasMap.find(nodeId);
+        if (aliasIt != aliasMap.end())
+        {
+            auto refIt = aliasRefCounts.find(nodeId);
+            if (refIt != aliasRefCounts.end() && refIt->second > 0)
+            {
+                refIt->second--;
+                if (refIt->second == 0)
+                {
+                    auto storageIt = aliasStorageTypes.find(nodeId);
+                    if (storageIt == aliasStorageTypes.end() || storageIt->second == StorageType::TRANSIENT)
+                    {
+                        uint32_t targetId = aliasIt->second;
+                        aliasMap.erase(aliasIt);
+                        aliasRefCounts.erase(refIt);
+                        if (storageIt != aliasStorageTypes.end())
+                        {
+                            aliasStorageTypes.erase(storageIt);
+                        }
+                        release(backend, targetId);
+                    }
+                }
+            }
+            return;
+        }
+
         auto bufIt = buffers.find(backend);
         if (bufIt == buffers.end())
             Error::throw_err("[MemoryManager.release] DeviceBuffer not initialized for backend " + toString(backend));
@@ -535,7 +594,37 @@ struct MemoryManager
         if (srcId == dstId)
             return;
 
+        auto dstAliasIt = aliasMap.find(dstId);
+        if (dstAliasIt != aliasMap.end())
+        {
+            aliasMap.erase(dstAliasIt);
+            aliasRefCounts.erase(dstId);
+            aliasStorageTypes.erase(dstId);
+        }
+
         auto &buf = buffers.at(backend);
+
+        auto aliasIt = aliasMap.find(srcId);
+        if (aliasIt != aliasMap.end())
+        {
+            aliasMap[dstId] = aliasIt->second;
+            aliasRefCounts[dstId] = aliasRefCounts[srcId];
+            aliasStorageTypes[dstId] = aliasStorageTypes[srcId];
+            aliasMap.erase(aliasIt);
+            aliasRefCounts.erase(srcId);
+            aliasStorageTypes.erase(srcId);
+
+            auto dstIt = buf.allocationMap.find(dstId);
+            if (dstIt != buf.allocationMap.end())
+            {
+                dstIt->second->nodeId = UINT32_MAX;
+                dstIt->second->isLocked = false;
+                buf.allocationMap.erase(dstIt);
+                buf.mergeFreeBlocks();
+            }
+            return;
+        }
+
         auto srcIt = buf.allocationMap.find(srcId);
         if (srcIt != buf.allocationMap.end())
         {
@@ -561,6 +650,14 @@ struct MemoryManager
         }
     }
 
+    uint32_t resolveAlias(uint32_t id) {
+        while (aliasMap.find(id) != aliasMap.end())
+        {
+            id = aliasMap.at(id);
+        }
+        return id;
+    }
+
     TensorView getView(const TensorNode &node, const CompiledGraph &compiled = {}) const
     {
         auto it = buffers.find(node.backend);
@@ -570,15 +667,29 @@ struct MemoryManager
         }
 
         const DeviceBuffer &buf = it->second;
-        uint64_t arenaOffset = buf.getOffset(compiled.getLogicalId(node.id));
+        uint32_t logicalId = compiled.getLogicalId(node.id);
 
-        TensorView view = TensorView(node, arenaOffset);
+        uint32_t targetId = logicalId;
+        while (aliasMap.find(targetId) != aliasMap.end())
+        {
+            targetId = aliasMap.at(targetId);
+        }
+
+        uint64_t arenaOffset = buf.getOffset(targetId);
+
+        TensorView view = TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype));
 
         return view;
     }
 
     bool has(Backend backend, uint32_t nodeId) const
     {
+        auto aliasIt = aliasMap.find(nodeId);
+        if (aliasIt != aliasMap.end())
+        {
+            return has(backend, aliasIt->second);
+        }
+
         const DeviceBuffer &buf = buffers.at(backend);
         return (buf.allocationMap.find(nodeId) != buf.allocationMap.end());
     }
@@ -596,6 +707,31 @@ struct MemoryManager
             sizes[pair.first] = pair.second.sizeBytes;
         }
         return sizes;
+    }
+
+    MemBlock getBlock(Backend backend, uint32_t nodeId, const CompiledGraph &compiled = {})
+    {
+        auto it = buffers.find(backend);
+        if (it == buffers.end())
+        {
+            Error::throw_err("[MemoryManager.getBlock] Backend buffer not initialized");
+        }
+
+        uint32_t logicalId = compiled.getLogicalId(nodeId);
+
+        uint32_t targetId = logicalId;
+        while (aliasMap.find(targetId) != aliasMap.end())
+        {
+            targetId = aliasMap.at(targetId);
+        }
+
+        const DeviceBuffer &buf = it->second;
+        auto bufIt = buf.allocationMap.find(targetId);
+        if (bufIt == buf.allocationMap.end())
+        {
+            Error::throw_err("[MemoryManager.getBlock] Buffer allocation map doesn't have targetId " + std::to_string(targetId));
+        }
+        return *buf.allocationMap.at(targetId);
     }
 };
 

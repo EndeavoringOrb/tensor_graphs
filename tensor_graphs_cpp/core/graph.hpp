@@ -59,7 +59,7 @@ struct Graph
     uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype)
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
-        
+
         SHA256 sha;
         sha.update(static_cast<const uint8_t *>(dataPtr), sizeBytes);
 
@@ -455,3 +455,17 @@ struct LogicalGraph
     std::unordered_map<std::string, std::vector<uint32_t>> fusionMap;
     std::unordered_map<uint32_t, uint32_t> estimatedRefCounts;
 };
+
+inline std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)
+{
+    if (graph.constantStaging.count(id))
+    {
+        const auto &data = graph.constantStaging.at(id);
+        std::vector<int32_t> res(data.size() / sizeof(int32_t));
+        std::memcpy(res.data(), data.data(), data.size());
+        return res;
+    }
+    std::stringstream ss;
+    ss << "Expected constant for shape inference but not found in staging. Node ID: " << id;
+    Error::throw_err(ss.str());
+}

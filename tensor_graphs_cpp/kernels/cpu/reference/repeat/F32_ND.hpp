@@ -1,48 +1,41 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/graph.hpp"
 
-inline bool matchRepeatF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchRepeatView(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
-    if (inputs.size() != 3) return false;
-    if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32) return false;
-    if (inputs[1].dtype != DType::INT32 || inputs[2].dtype != DType::INT32) return false;
-    return true; // Contiguity check removed
-}
+    // Inputs: Data (0), Repeats (1), Axis (2)
+    if (inputs.size() != 3)
+        return false;
 
-inline void runRepeatF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                            const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
-{
-    const float *src = static_cast<const float *>(inputs[0]);
-    int32_t repeats = *static_cast<const int32_t *>(inputs[1]);
-    int32_t axis = *static_cast<const int32_t *>(inputs[2]);
-    float *dst = static_cast<float *>(outputs[0]);
+    if (inputs[1].dtype != DType::INT32 || inputs[2].dtype != DType::INT32)
+        return false;
 
-    int32_t ndim = static_cast<int32_t>(inViews[0].getShape().size());
-    if (axis < 0) axis += ndim;
-
-    const auto &outShape = outViews[0].getShape();
-    uint64_t numElements = countElements(outShape);
-
-    for (uint64_t i = 0; i < numElements; ++i)
+    // Strides can only natively represent repeating a dimension if it originally had size 1.
+    for (size_t d = 0; d < inputs[0].getShape().size(); ++d)
     {
-        uint64_t temp = i;
-        uint64_t src_flat = 0;
-        uint64_t stride = 1;
-
-        for (int32_t d = ndim - 1; d >= 0; --d)
+        if (inputs[0].getShape()[d] != output.getShape()[d])
         {
-            uint32_t coord = temp % outShape[d];
-            temp /= outShape[d];
-
-            uint32_t src_coord = (d == axis) ? (coord / repeats) : coord;
-            src_flat += src_coord * stride;
-            stride *= inViews[0].getShape()[d];
+            if (inputs[0].getShape()[d] != 1)
+                return false;
         }
-
-        dst[getStridedIndex(i, outShape, outViews[0].strides)] = 
-            src[getStridedIndex(src_flat, inViews[0].getShape(), inViews[0].strides)];
     }
+    return true;
 }
 
-REGISTER_REF_KERNEL(OpType::REPEAT, matchRepeatF32_ND, runRepeatF32_ND, {Backend::CPU});
+inline void inferViewRepeat(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
+{
+    node.strides = inputs[0].strides;
+
+    for (size_t d = 0; d < node.getShape().size(); ++d)
+    {
+        if (inputs[0].getShape()[d] != node.getShape()[d])
+        {
+            node.strides[d] = 0;
+        }
+    }
+    node.viewOffset = inputs[0].viewOffset;
+}
+
+REGISTER_REF_KERNEL_VIEW(OpType::REPEAT, matchRepeatView, inferViewRepeat, {Backend::CPU, Backend::CUDA}, {DType::FLOAT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}}, {false, false, false});

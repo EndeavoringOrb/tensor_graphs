@@ -4,53 +4,32 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
-inline bool matchSliceF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchSliceView(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
-    (void)refCounts;
-    return inputs.size() == 4 &&
-           inputs[0].dtype == output.dtype &&
-           inputs[1].dtype == DType::INT32 &&
-           inputs[2].dtype == DType::INT32 &&
-           inputs[3].dtype == DType::INT32 &&
-           isContiguous(inputs[0]) &&
-           isContiguous(output);
+    return inputs.size() == 4;
 }
 
-inline void runSliceF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                           const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void inferViewSlice(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
 {
-    const uint8_t *in = static_cast<const uint8_t *>(inputs[0]);
-    const int32_t *starts = static_cast<const int32_t *>(inputs[1]);
-    const int32_t *steps = static_cast<const int32_t *>(inputs[3]);
-    uint8_t *out = static_cast<uint8_t *>(outputs[0]);
-    const uint64_t elementSize = getDTypeSize(inViews[0].dtype);
+    auto starts = getConstantInt32(inputs[1].id, graph);
+    auto steps = getConstantInt32(inputs[3].id, graph);
 
-    uint64_t n = countElements(outViews[0].getShape());
-    const auto &out_shape = outViews[0].getShape();
-    const auto &in_shape = inViews[0].getShape();
-    int ndim = static_cast<int>(out_shape.size());
+    node.strides.resize(inputs[0].strides.size());
+    uint64_t offset = inputs[0].viewOffset;
 
-    for (uint64_t i = 0; i < n; ++i)
+    for (size_t i = 0; i < inputs[0].strides.size(); ++i)
     {
-        uint64_t temp = i;
-        uint64_t in_phys_idx = 0;
-        for (int d = ndim - 1; d >= 0; --d)
-        {
-            uint32_t coord = temp % out_shape[d];
-            temp /= out_shape[d];
+        int32_t start = i < starts.size() ? starts[i] : 0;
+        int32_t step = i < steps.size() ? steps[i] : 1;
 
-            int32_t s = (d < (int)inViews[1].getShape()[0]) ? starts[d] : 0;
-            if (s < 0)
-                s += in_shape[d];
-            int32_t st = (d < (int)inViews[3].getShape()[0]) ? steps[d] : 1;
+        if (start < 0)
+            start += inputs[0].getShape()[i];
 
-            uint32_t in_coord = s + coord * st;
-            in_phys_idx += (uint64_t)in_coord * inViews[0].strides[d];
-        }
-
-        uint64_t out_phys_idx = getStridedIndex(i, out_shape, outViews[0].strides);
-        std::memcpy(out + out_phys_idx * elementSize, in + in_phys_idx * elementSize, elementSize);
+        offset += start * inputs[0].strides[i];
+        node.strides[i] = inputs[0].strides[i] * step;
     }
+
+    node.viewOffset = offset;
 }
 
-REGISTER_REF_KERNEL(OpType::SLICE, matchSliceF32_ND, runSliceF32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL_VIEW(OpType::SLICE, matchSliceView, inferViewSlice, {Backend::CPU, Backend::CUDA}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}, {1}}, {false, false, false, false});

@@ -155,7 +155,8 @@ std::string toString(const OpInstruction &inst)
     return ss.str();
 }
 
-std::string toString(const TensorView &view) {
+std::string toString(const TensorView &view)
+{
     std::stringstream ss;
     ss << "TensorView\n"
        << "  baseOffset: " << view.baseOffset << "\n"

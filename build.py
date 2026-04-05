@@ -188,9 +188,10 @@ def generate_kernel_includes(core_seed):
             f.write(f"// --- {inc_path} ---\n")
             f.write(f"#undef REGISTER_REF_KERNEL\n")
             f.write(f"#undef REGISTER_REF_KERNEL_INPLACE\n")
+            f.write(f"#undef REGISTER_REF_KERNEL_VIEW\n")
             f.write(f"#undef REGISTER_KERNEL\n")
             f.write(f"#undef REGISTER_KERNEL_INPLACE\n")
-            f.write(f"#undef REGISTER_KERNEL_INPLACE_VIEW\n")
+            f.write(f"#undef REGISTER_KERNEL_VIEW\n")
 
             f.write(
                 f"#define REGISTER_REF_KERNEL(op, m, r, ...) REGISTER_REF_KERNEL_INTERNAL({uid}, op, m, r, __VA_ARGS__)\n"
@@ -199,13 +200,16 @@ def generate_kernel_includes(core_seed):
                 f"#define REGISTER_REF_KERNEL_INPLACE(op, m, r, ...) REGISTER_REF_KERNEL_INPLACE_INTERNAL({uid}, op, m, r, __VA_ARGS__)\n"
             )
             f.write(
+                f"#define REGISTER_REF_KERNEL_VIEW(op, m, inview, ...) REGISTER_REF_KERNEL_VIEW_INTERNAL({uid}, op, m, inview, __VA_ARGS__)\n"
+            )
+            f.write(
                 f"#define REGISTER_KERNEL(name, n, m, r, ref, ...) REGISTER_KERNEL_INTERNAL({uid}, name, n, m, r, ref, __VA_ARGS__)\n"
             )
             f.write(
                 f"#define REGISTER_KERNEL_INPLACE(name, n, m, r, ref, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, name, n, m, r, ref, __VA_ARGS__)\n"
             )
             f.write(
-                f"#define REGISTER_KERNEL_INPLACE_VIEW(name, n, m, r, ref, inview, ...) REGISTER_KERNEL_INPLACE_VIEW_INTERNAL({uid}, name, n, m, r, ref, inview, __VA_ARGS__)\n"
+                f"#define REGISTER_KERNEL_VIEW(name, n, m, ref, inview, ...) REGISTER_KERNEL_VIEW_INTERNAL({uid}, name, n, m, ref, inview, __VA_ARGS__)\n"
             )
             f.write(f'#include "{inc_path}"\n\n')
 
@@ -215,8 +219,11 @@ def generate_kernel_includes(core_seed):
         f.write(f"#undef REGISTER_KERNEL\n")
         f.write(f"#undef REGISTER_KERNEL_INPLACE\n")
         f.write(f"#undef REGISTER_KERNEL_INPLACE_VIEW\n")
+        f.write(f"#undef REGISTER_KERNEL_VIEW\n")
 
-    console.print(f"[dim]Generated {len(kernel_entries)} Kernel Includes with UID injection.[/dim]")
+    console.print(
+        f"[dim]Generated {len(kernel_entries)} Kernel Includes with UID injection.[/dim]"
+    )
 
 
 def generate_build_context():
@@ -233,7 +240,9 @@ def generate_build_context():
         f.write(f"// Mode: {'Debug' if DEBUG_MODE else 'Release'}\n")
         f.write(f"constexpr uint64_t BUILD_CONTEXT_ID = 0x{ctx_hash[:16]}ULL;\n")
 
-    console.print(f"[dim]Build Context ID: 0x{ctx_hash[:16]} ({'DEBUG' if DEBUG_MODE else 'RELEASE'})[/dim]")
+    console.print(
+        f"[dim]Build Context ID: 0x{ctx_hash[:16]} ({'DEBUG' if DEBUG_MODE else 'RELEASE'})[/dim]"
+    )
 
 
 def compile_binary(fname: str):
@@ -261,7 +270,11 @@ def compile_binary(fname: str):
     else:
         console.print(
             Panel(
-                f"[green]{result.stdout}[/green]" if result.stdout.strip() else "[green]No output[/green]",
+                (
+                    f"[green]{result.stdout}[/green]"
+                    if result.stdout.strip()
+                    else "[green]No output[/green]"
+                ),
                 title="[bold green]BUILD SUCCESS[/bold green]",
                 border_style="green",
             )
@@ -282,7 +295,9 @@ def main():
     USE_CUDA = args.cuda
     DEBUG_MODE = args.debug
 
-    console.print(f"\n[bold cyan]Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...[/bold cyan]\n")
+    console.print(
+        f"\n[bold cyan]Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...[/bold cyan]\n"
+    )
     core_seed = generate_core_seed()
     generate_kernel_uids(core_seed)
     generate_kernel_includes(core_seed)
