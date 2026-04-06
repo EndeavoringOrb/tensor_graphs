@@ -54,7 +54,7 @@ inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const Ten
         return false;
 
     // Memory layout check
-    if (!inputs[0].view.isContiguous() || !inputs[1].view.isContiguous() || !output.view.isContiguous())
+    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output))
         return false;
 
     return true;

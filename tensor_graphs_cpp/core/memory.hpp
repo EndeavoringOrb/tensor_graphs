@@ -709,7 +709,7 @@ struct MemoryManager
         return sizes;
     }
 
-    MemBlock getBlock(Backend backend, uint32_t nodeId, const CompiledGraph &compiled = {})
+    MemBlock& getBlock(Backend backend, uint32_t nodeId, const CompiledGraph &compiled = {})
     {
         auto it = buffers.find(backend);
         if (it == buffers.end())

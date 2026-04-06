@@ -1302,7 +1302,6 @@ private:
             if (!best.valid)
             {
                 best.cost = std::numeric_limits<float>::infinity();
-                Error::throw_err("[Planner.extractBest] could not find valid enode for EClass" + std::to_string(cls.id));
             }
             choice[eclassId] = best;
             return best;

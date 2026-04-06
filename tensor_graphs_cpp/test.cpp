@@ -677,7 +677,8 @@ std::vector<float> executeFusedKernel(
     const KernelEntry &kernel,
     const std::vector<std::vector<uint8_t>> &inputData,
     size_t expectedOutElements,
-    const std::vector<uint32_t> &outShape)
+    const std::vector<uint32_t> &outShape,
+    const Graph &graph)
 {
     if (inputData.size() != kernel.numInputs)
     {
@@ -720,7 +721,7 @@ std::vector<float> executeFusedKernel(
             dummyOutput.setShape(outShape);
             dummyOutput.dtype = DType::FLOAT32;
 
-            kernel.inferView(dummyOutput, dummyInputs);
+            kernel.inferView(dummyOutput, dummyInputs, graph);
 
             const float *src = reinterpret_cast<const float *>(inputData[0].data());
             for (size_t i = 0; i < expectedOutElements; ++i)
@@ -1145,7 +1146,7 @@ int main()
 
             // ========== FUSED KERNEL EXECUTION ==========
             // Execute fused kernel directly
-            std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refOutput.size(), refGraph.getNode(rootId).getShape());
+            std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refOutput.size(), refGraph.getNode(rootId).getShape(), refGraph);
 
             // ========== COMPARE ==========
             if (fusedOutput.size() != elements)
