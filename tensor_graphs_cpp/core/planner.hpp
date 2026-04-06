@@ -764,6 +764,105 @@ private:
         }
     };
 
+    struct RemoveIdentityRepeatRule : public Rule
+    {
+        bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
+        {
+            if (!graph.hasNode(nodeId))
+                return false;
+            const TensorNode &node = graph.getNode(nodeId);
+            if (node.opType == OpType::REPEAT)
+            {
+                auto repVals = getConstantInt32(node.parentIds[1], graph);
+                if (!repVals.empty() && repVals[0] == 1)
+                {
+                    out.nodeId = nodeId;
+                    return true;
+                }
+            }
+            return false;
+        }
+        std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
+        {
+            return {graph.getNode(m.nodeId).parentIds[0]};
+        }
+    };
+
+    struct AddIdentityRepeatRule : public Rule
+    {
+        bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
+        {
+            if (!graph.hasNode(nodeId))
+                return false;
+            const TensorNode &node = graph.getNode(nodeId);
+            if (node.getShape().empty())
+                return false;
+            if (node.dtype == DType::INT32)
+                return false; // Avoid blowing up shapes/indices. TODO: make more robust check or just remove
+            out.nodeId = nodeId;
+            return true;
+        }
+
+        bool predicate(const RuleMatch &m, const Graph &graph, const EGraph &egraph,
+                       const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
+                       const std::unordered_map<uint32_t, uint32_t> &refCounts) const override
+        {
+            uint32_t eclassId = nodeToEClass.at(m.nodeId);
+            const EClass &cls = egraph.getEClass(eclassId);
+            const TensorNode &node = graph.getNode(m.nodeId);
+
+            for (size_t d = 0; d < node.getShape().size(); ++d)
+            {
+                if (node.getShape()[d] == 1)
+                {
+                    bool has_repeat = false;
+                    for (uint32_t enodeId : cls.enodes)
+                    {
+                        const ENode &en = egraph.getENodes()[enodeId];
+                        if (en.opType == OpType::REPEAT)
+                        {
+                            if (en.children.size() > 2)
+                            {
+                                uint32_t physId = en.nodeId;
+                                const TensorNode &pNode = graph.getNode(physId);
+                                auto repVals = getConstantInt32(pNode.parentIds[1], graph);
+                                auto axVals = getConstantInt32(pNode.parentIds[2], graph);
+                                if (!repVals.empty() && repVals[0] == 1 && !axVals.empty() && axVals[0] == static_cast<int32_t>(d))
+                                {
+                                    has_repeat = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!has_repeat)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
+        {
+            std::vector<uint32_t> results;
+            const TensorNode &node = graph.getNode(m.nodeId);
+            for (size_t d = 0; d < node.getShape().size(); ++d)
+            {
+                if (node.getShape()[d] == 1)
+                {
+                    int32_t rep = 1;
+                    int32_t ax = static_cast<int32_t>(d);
+                    uint32_t repNode = graph.constant({1}, &rep, DType::INT32);
+                    uint32_t axNode = graph.constant({1}, &ax, DType::INT32);
+                    uint32_t repId = graph.repeat(m.nodeId, repNode, axNode);
+                    graph.getNode(repId).setShape(node.getShape());
+                    results.push_back(repId);
+                }
+            }
+            return results;
+        }
+    };
+
     struct FusionRule : public Rule
     {
         struct Pattern
@@ -1025,6 +1124,8 @@ private:
         Rewrite::DivAddRule dar;
         Rewrite::CopyToContiguousReorderRule ccr;
         Rewrite::CopyToScatterReorderRule csr;
+        RemoveIdentityRepeatRule rirr;
+        AddIdentityRepeatRule airr;
 
         // TODO: make some sort of rule registry so I don't have to update this every time I add/remove a rule
         std::vector<std::unique_ptr<Rule>> rules;
@@ -1038,6 +1139,8 @@ private:
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&dar));
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&ccr));
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&csr));
+        rules.emplace_back(std::make_unique<RemoveIdentityRepeatRule>());
+        rules.emplace_back(std::make_unique<AddIdentityRepeatRule>());
         rules.emplace_back(std::make_unique<FusionRule>());
         rules.emplace_back(std::make_unique<CopyElimRule>());
 
@@ -1188,138 +1291,164 @@ private:
 
         std::unordered_map<uint32_t, ExtractChoice> &choice = result.choiceByEClass;
 
-        std::function<ExtractChoice(uint32_t)> solve = [&](uint32_t eclassId) -> ExtractChoice
+        // Initialize choices
+        for (const EClass &cls : egraph.getClasses())
         {
-            eclassId = egraph.find(eclassId);
-            auto it = choice.find(eclassId);
-            if (it != choice.end())
-                return it->second;
-
-            const EClass &cls = egraph.getEClass(eclassId);
-            ExtractChoice best;
-
-            for (uint32_t enodeId : cls.enodes)
+            if (cls.enodes.empty())
+                continue;
+            uint32_t canonId = egraph.find(cls.id);
+            if (choice.find(canonId) == choice.end())
             {
-                const ENode &enode = egraph.getENodes()[enodeId]; // TODO: make EGraph::getENode(uint32_t enodeId) function
-                if (enode.opType == OpType::INPUT)
-                {
-                    ExtractChoice c;
-                    c.enodeId = enodeId;
-                    c.cost = 0.0f;
-                    c.valid = true;
-                    TensorNode inNode = graph.getNode(enode.nodeId);
-                    c.memSize = getSizeBytes(inNode.getShape(), inNode.dtype);
-                    c.outStrides = inNode.strides;
-                    c.outViewOffset = inNode.viewOffset;
-                    if (c.cost < best.cost)
-                        best = c;
+                ExtractChoice c;
+                c.cost = std::numeric_limits<float>::infinity();
+                c.valid = false;
+                choice[canonId] = c;
+            }
+        }
+
+        bool changed = true;
+        int max_iters = 100000;
+        while (changed && max_iters-- > 0)
+        {
+            changed = false;
+            for (const EClass &cls : egraph.getClasses())
+            {
+                if (cls.enodes.empty())
                     continue;
-                }
+                uint32_t eclassId = egraph.find(cls.id);
 
-                float childrenCost = 0.0f;
-                std::vector<TensorNode> inputs;
-                inputs.reserve(enode.children.size());
-                bool childValid = true;
-                for (uint32_t childEClass : enode.children)
-                {
-                    ExtractChoice childChoice = solve(childEClass);
-                    if (!childChoice.valid)
-                    {
-                        childValid = false;
-                        break;
-                    }
-                    childrenCost += childChoice.cost;
-                    const ENode &childEnode = egraph.getENodes()[childChoice.enodeId];
-                    TensorNode inNode = graph.getNode(childEnode.nodeId);
-                    inNode.backend = childEnode.backend;
-                    inNode.strides = childChoice.outStrides;
-                    inNode.viewOffset = childChoice.outViewOffset;
-                    inputs.push_back(inNode);
-                }
-                if (!childValid)
-                {
-                    continue;
-                }
+                ExtractChoice best = choice[eclassId];
+                bool best_updated = false;
 
-                if (enode.opType != OpType::COPY_TO)
+                for (uint32_t enodeId : cls.enodes)
                 {
-                    bool backendMatch = true;
-                    const KernelEntry *entry = nullptr;
-                    if (enode.kernelUid != 0)
+                    const ENode &enode = egraph.getENodes()[enodeId]; // TODO: make EGraph::getENode(uint32_t enodeId) function
+                    if (enode.opType == OpType::INPUT)
                     {
-                        entry = &KernelRegistry::get().getKernel(enode.kernelUid);
-                    }
-
-                    for (size_t i = 0; i < inputs.size(); ++i)
-                    {
-                        Backend expectedBack = enode.backend;
-                        if (entry && i < entry->inputBackends.size())
+                        ExtractChoice c;
+                        c.enodeId = enodeId;
+                        c.cost = 0.0f;
+                        c.valid = true;
+                        TensorNode inNode = graph.getNode(enode.nodeId);
+                        c.memSize = getSizeBytes(inNode.getShape(), inNode.dtype);
+                        c.outStrides = inNode.strides;
+                        c.outViewOffset = inNode.viewOffset;
+                        if (!best.valid || c.cost < best.cost)
                         {
-                            expectedBack = entry->inputBackends[i];
+                            best = c;
+                            best_updated = true;
                         }
+                        continue;
+                    }
 
-                        if (inputs[i].backend != expectedBack)
+                    float childrenCost = 0.0f;
+                    std::vector<TensorNode> inputs;
+                    inputs.reserve(enode.children.size());
+                    bool childValid = true;
+
+                    for (uint32_t childEClass : enode.children)
+                    {
+                        uint32_t canonChild = egraph.find(childEClass);
+                        ExtractChoice childChoice = choice[canonChild];
+                        if (!childChoice.valid)
                         {
-                            backendMatch = false;
+                            childValid = false;
                             break;
                         }
+                        childrenCost += childChoice.cost;
+                        const ENode &childEnode = egraph.getENodes()[childChoice.enodeId];
+                        TensorNode inNode = graph.getNode(childEnode.nodeId);
+                        inNode.backend = childEnode.backend;
+                        inNode.strides = childChoice.outStrides;
+                        inNode.viewOffset = childChoice.outViewOffset;
+                        inputs.push_back(inNode);
                     }
-                    if (!backendMatch)
+
+                    if (!childValid)
+                        continue;
+
+                    if (enode.opType != OpType::COPY_TO)
+                    {
+                        bool backendMatch = true;
+                        const KernelEntry *entry = nullptr;
+                        if (enode.kernelUid != 0)
+                        {
+                            entry = &KernelRegistry::get().getKernel(enode.kernelUid);
+                        }
+
+                        for (size_t i = 0; i < inputs.size(); ++i)
+                        {
+                            Backend expectedBack = enode.backend;
+                            if (entry && i < entry->inputBackends.size())
+                            {
+                                expectedBack = entry->inputBackends[i];
+                            }
+
+                            if (inputs[i].backend != expectedBack)
+                            {
+                                backendMatch = false;
+                                break;
+                            }
+                        }
+                        if (!backendMatch)
+                        {
+                            continue;
+                        }
+                    }
+
+                    TensorNode outNode = graph.getNode(enode.nodeId);
+                    outNode.backend = enode.backend;
+
+                    if (enode.kernelUid == 0)
+                        continue;
+
+                    const KernelEntry &entry = KernelRegistry::get().getKernel(enode.kernelUid);
+
+                    if (entry.inferView)
+                    {
+                        entry.inferView(outNode, inputs, graph);
+                    }
+
+                    if (!entry.match(inputs, outNode, refCounts))
                     {
                         continue;
                     }
+
+                    if (entry.inplace && inputs[0].storageType != StorageType::TRANSIENT)
+                    {
+                        continue;
+                    }
+
+                    float kernelCost = costModel.estimateCost(outNode, inputs, graph, enode.kernelUid);
+
+                    ExtractChoice c;
+                    c.enodeId = enodeId;
+                    c.cost = childrenCost + kernelCost;
+                    c.valid = true;
+                    c.memSize = getSizeBytes(outNode.getShape(), outNode.dtype);
+                    c.outStrides = outNode.strides;
+                    c.outViewOffset = outNode.viewOffset;
+
+                    if (!best.valid || c.cost < best.cost - 1e-6f)
+                    {
+                        best = c;
+                        best_updated = true;
+                    }
                 }
 
-                TensorNode outNode = graph.getNode(enode.nodeId);
-                outNode.backend = enode.backend;
-
-                if (enode.kernelUid == 0)
-                    continue;
-
-                const KernelEntry &entry = KernelRegistry::get().getKernel(enode.kernelUid);
-
-                if (entry.inferView)
+                if (best_updated)
                 {
-                    entry.inferView(outNode, inputs, graph);
+                    choice[eclassId] = best;
+                    changed = true;
                 }
-
-                if (!entry.match(inputs, outNode, refCounts))
-                {
-                    continue;
-                }
-
-                if (entry.inplace && inputs[0].storageType != StorageType::TRANSIENT)
-                {
-                    continue;
-                }
-
-                float kernelCost = costModel.estimateCost(outNode, inputs, graph, enode.kernelUid);
-
-                ExtractChoice c;
-                c.enodeId = enodeId;
-                c.cost = childrenCost + kernelCost;
-                c.valid = true;
-                c.memSize = getSizeBytes(outNode.getShape(), outNode.dtype);
-                c.outStrides = outNode.strides;
-                c.outViewOffset = outNode.viewOffset;
-                if (!best.valid || c.cost < best.cost)
-                    best = c;
             }
-
-            if (!best.valid)
-            {
-                best.cost = std::numeric_limits<float>::infinity();
-            }
-            choice[eclassId] = best;
-            return best;
-        };
-
-        auto it = nodeToEClass.find(rootId);
-        if (it == nodeToEClass.end())
-        {
-            Error::throw_err("[Planner.extractBest] Root node missing from egraph.");
         }
-        solve(it->second);
+
+        if (changed)
+        {
+            std::cout << "\n[Planner.extractBest] WARNING: changed=true which means we hit max iterations instead of extracting absolute best\n"
+                      << std::flush;
+        }
 
         for (const auto &kv : choice)
         {
@@ -1330,7 +1459,14 @@ private:
             }
         }
 
-        if (result.eclassToNodeId.count(it->second) == 0)
+        auto rootIt = nodeToEClass.find(rootId);
+        if (rootIt == nodeToEClass.end())
+        {
+            Error::throw_err("[Planner.extractBest] Root node missing from egraph.");
+        }
+
+        uint32_t rootEClassId = egraph.find(rootIt->second);
+        if (result.eclassToNodeId.count(rootEClassId) == 0)
         {
             Error::throw_err("[Planner.extractBest] no valid extraction found");
         }

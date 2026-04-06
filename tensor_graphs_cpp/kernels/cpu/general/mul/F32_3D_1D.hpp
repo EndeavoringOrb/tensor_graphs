@@ -1,9 +1,10 @@
+// File: tensor_graphs_cpp/kernels/cpu/general/mul/FP32_3D_1D.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 #include <vector>
 
-inline bool matchAddFP32_3D_1D(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchMulFP32_3D_1D(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 2)
         return false;
@@ -20,7 +21,7 @@ inline bool matchAddFP32_3D_1D(const std::vector<TensorNode> &inputs, const Tens
     return true;
 }
 
-inline void runAddFP32_3D_1D(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
+inline void runMulFP32_3D_1D(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
 {
     const float *data3D = static_cast<const float *>(inputs[0]);
@@ -33,13 +34,13 @@ inline void runAddFP32_3D_1D(const std::vector<const void *> &inputs, const std:
     uint64_t totalElements = (uint64_t)B * S * D;
 
     for (uint64_t i = 0; i < totalElements; ++i)
-        out[i] = data3D[i] + data1D[i % D];
+        out[i] = data3D[i] * data1D[i % D];
 }
 
-inline uint32_t refFactoryAdd3D_1D(const std::vector<uint32_t> &inputs, Graph &graph)
+inline uint32_t refFactoryMul3D_1D(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
-        Error::throw_err("Fused Add 3D+1D requires 2 inputs");
+        Error::throw_err("Fused Mul 3D+1D requires 2 inputs");
 
     int32_t reshape_dims[] = {1, 1, 1}; // Dummy initialization, match doesn't care
     uint32_t out = graph.reshape(inputs[1], graph.constant({3}, reshape_dims, DType::INT32));
@@ -51,7 +52,7 @@ inline uint32_t refFactoryAdd3D_1D(const std::vector<uint32_t> &inputs, Graph &g
     out = graph.repeat(out, rN, graph.constant({1}, &b_axis, DType::INT32));
     out = graph.repeat(out, rN, graph.constant({1}, &s_axis, DType::INT32));
 
-    return graph.add(inputs[0], out);
+    return graph.mul(inputs[0], out);
 }
 
-REGISTER_KERNEL("Add_3D_1D", 2, matchAddFP32_3D_1D, runAddFP32_3D_1D, refFactoryAdd3D_1D, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true});
+REGISTER_KERNEL("Mul_3D_1D", 2, matchMulFP32_3D_1D, runMulFP32_3D_1D, refFactoryMul3D_1D, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true});
