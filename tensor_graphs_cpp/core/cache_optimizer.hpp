@@ -398,8 +398,10 @@ CacheOptimizationResult optimizeCacheCombination(
                     costModel,
                     memo);
 
-                if (!entry.valid)
+                if (!entry.valid) {
+                    timer.tick();
                     return;
+                }
 
                 plans[bucket.key] = entry.plan;
                 auto countIt = bucketCallCounts.find(bucket.key);
