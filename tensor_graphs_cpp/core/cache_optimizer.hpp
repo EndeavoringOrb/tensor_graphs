@@ -194,32 +194,37 @@ static size_t findUpperBound(
     if (cacheableNodes.empty())
         return 0;
 
-    std::unordered_map<Backend, std::vector<uint64_t>> sizesByBackend;
+    // Calculate total aggregate memory limit across all backends
+    uint64_t totalMemoryLimit = 0;
+    for (const auto &limitPair : memoryLimits)
+    {
+        totalMemoryLimit += limitPair.second;
+    }
+
+    // Collect all cacheable node sizes into a single list
+    std::vector<uint64_t> allSizes;
+    allSizes.reserve(cacheableNodes.size());
     for (uint32_t nodeId : cacheableNodes)
     {
         auto sizeIt = nodeMemorySizes.find(nodeId);
-        if (sizeIt == nodeMemorySizes.end())
-            continue;
-        sizesByBackend[graph.getNode(nodeId).backend].push_back(sizeIt->second);
+        if (sizeIt != nodeMemorySizes.end())
+            allSizes.push_back(sizeIt->second);
     }
 
-    size_t upperBound = 0;
-    for (const auto &limitPair : memoryLimits)
+    // Sort nodes by size (smallest first) to find the maximum possible count
+    std::sort(allSizes.begin(), allSizes.end());
+
+    size_t count = 0;
+    uint64_t used = 0;
+    for (uint64_t sizeBytes : allSizes)
     {
-        std::vector<uint64_t> &sizes = sizesByBackend[limitPair.first];
-        std::sort(sizes.begin(), sizes.end());
-
-        uint64_t used = 0;
-        for (uint64_t sizeBytes : sizes)
-        {
-            if (used + sizeBytes > limitPair.second)
-                break;
-            used += sizeBytes;
-            upperBound++;
-        }
+        if (used + sizeBytes > totalMemoryLimit)
+            break;
+        used += sizeBytes;
+        count++;
     }
 
-    return std::min(upperBound, cacheableNodes.size());
+    return count;
 }
 
 static size_t findLowerBound(
@@ -233,7 +238,15 @@ static size_t findLowerBound(
     if (cacheableNodes.empty())
         return 0;
 
-    std::unordered_map<Backend, uint64_t> maxPeaks;
+    // Calculate total aggregate memory limit
+    uint64_t totalMemoryLimit = 0;
+    for (const auto &limitPair : memoryLimits)
+    {
+        totalMemoryLimit += limitPair.second;
+    }
+
+    // Find the maximum aggregate peak memory usage among all baseline plans
+    uint64_t maxTotalPeak = 0;
     for (const BucketPlanRequest &bucket : buckets)
     {
         auto planIt = baselinePlans.find(bucket.key);
@@ -241,21 +254,46 @@ static size_t findLowerBound(
             continue;
 
         std::unordered_map<Backend, uint64_t> peaks = calculatePlanPeakMemoryByBackend(planIt->second, {});
-        for (const auto &peakPair : maxPeaks)
+        uint64_t bucketTotalPeak = 0;
+        for (const auto &pair : peaks)
         {
-            uint64_t peak = peaks[peakPair.first];
-            maxPeaks[peakPair.first] = std::max(
-                peakPair.second,
-                peak);
+            bucketTotalPeak += pair.second;
+        }
+
+        if (bucketTotalPeak > maxTotalPeak)
+        {
+            maxTotalPeak = bucketTotalPeak;
         }
     }
-    std::unordered_map<Backend, uint64_t> newMemoryLimits;
-    for (const auto &limitPair : memoryLimits)
+
+    // Headroom represents memory that is never touched by transient execution peaks
+    if (maxTotalPeak >= totalMemoryLimit)
+        return 0;
+
+    uint64_t headroom = totalMemoryLimit - maxTotalPeak;
+
+    // Use aggregate count logic against the calculated headroom
+    std::vector<uint64_t> allSizes;
+    allSizes.reserve(cacheableNodes.size());
+    for (uint32_t nodeId : cacheableNodes)
     {
-        newMemoryLimits[limitPair.first] = limitPair.second - maxPeaks[limitPair.first];
+        auto sizeIt = nodeMemorySizes.find(nodeId);
+        if (sizeIt != nodeMemorySizes.end())
+            allSizes.push_back(sizeIt->second);
+    }
+    std::sort(allSizes.begin(), allSizes.end());
+
+    size_t count = 0;
+    uint64_t used = 0;
+    for (uint64_t sizeBytes : allSizes)
+    {
+        if (used + sizeBytes > headroom)
+            break;
+        used += sizeBytes;
+        count++;
     }
 
-    return findUpperBound(cacheableNodes, nodeMemorySizes, graph, newMemoryLimits);
+    return count;
 }
 
 static const BucketPlanMemoEntry &getOrPlanBucket(
