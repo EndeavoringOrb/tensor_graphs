@@ -19,7 +19,7 @@ def load_jsonl(path):
     return data
 
 
-def analyze(cache_file, records_file):
+def analyze(cache_file, records_file, top_n=20):
     print(f"Loading benchmark records from: {records_file}")
     records = load_jsonl(records_file)
 
@@ -85,17 +85,18 @@ def analyze(cache_file, records_file):
     print(f"\nAnalyzed {bucket_count} compiled buckets.")
     print(f"Total Estimated Execution Time: {format_ms(total_estimated_time)}")
 
-    # 1. Top 20 Most Expensive Kernels
+    # 1. Top top_n Most Expensive Kernels
+    top_n = min(len(kernel_stats), top_n)
     print("\n" + "=" * 85)
     print(
-        f"{'Top 20 Kernels (Kernel ID + Shape)':<50} | {'Count':<6} | {'Total Time':<12} | {'Avg'}"
+        f"{f'Top {top_n} Kernels (Kernel ID + Shape)':<50} | {'Count':<6} | {'Total Time':<12} | {'Avg'}"
     )
     print("-" * 85)
 
     sorted_kernels = sorted(
         kernel_stats.items(), key=lambda x: x[1]["time"], reverse=True
     )
-    for (op_name, uid, shape), stats in sorted_kernels[:20]:
+    for (op_name, uid, shape), stats in sorted_kernels[:top_n]:
         label = f"{op_name} ({uid[:8]}...) {list(shape)}"
         avg = stats["time"] / stats["count"]
         print(
@@ -129,10 +130,25 @@ if __name__ == "__main__":
         default="benchmarks/records.jsonl",
         help="Path to the benchmark records file",
     )
+    parser.add_argument(
+        "--top_n",
+        "-n",
+        default=20,
+        help="Number of kernels to print",
+    )
     args = parser.parse_args()
 
     try:
-        analyze(args.graph, args.records)
+        args.top_n = int(args.top_n)
+    except Exception as e:
+        print(f"\n[Error] Invalid argument for --top_n")
+        import traceback
+
+        traceback.print_exc()
+        exit(0)
+
+    try:
+        analyze(args.graph, args.records, args.top_n)
     except Exception as e:
         print(f"\n[Error] Analysis failed: {e}")
         import traceback
