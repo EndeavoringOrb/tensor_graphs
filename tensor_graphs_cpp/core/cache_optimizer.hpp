@@ -108,23 +108,6 @@ static std::unordered_map<Backend, uint64_t> calculatePlanPeakMemoryByBackend(
     return peakMemByBackend;
 }
 
-static std::unordered_map<Backend, uint64_t> calculateCachedResidentMemoryByBackend(
-    const Graph &graph,
-    const std::unordered_set<uint32_t> &cachedNodes)
-{
-    std::unordered_map<Backend, uint64_t> residentByBackend;
-    for (uint32_t nodeId : cachedNodes)
-    {
-        if (!graph.hasNode(nodeId))
-            continue;
-        const TensorNode &node = graph.getNode(nodeId);
-        if (node.getShape().empty())
-            continue;
-        residentByBackend[node.backend] += getSizeBytes(node.getShape(), node.dtype);
-    }
-    return residentByBackend;
-}
-
 static std::vector<uint32_t> collectCacheableNodes(const Graph &graph)
 {
     std::vector<uint32_t> cacheableNodes;
@@ -275,53 +258,6 @@ static size_t findLowerBound(
     return findUpperBound(cacheableNodes, nodeMemorySizes, graph, newMemoryLimits);
 }
 
-static bool combinationFitsResidentBudget(
-    const std::unordered_map<Backend, uint64_t> &residentByBackend,
-    const std::unordered_map<Backend, uint64_t> &memoryLimits)
-{
-    for (const auto &limitPair : memoryLimits)
-    {
-        auto residentIt = residentByBackend.find(limitPair.first);
-        uint64_t resident = residentIt != residentByBackend.end() ? residentIt->second : 0;
-        if (resident > limitPair.second)
-            return false;
-    }
-    return true;
-}
-
-static bool combinationCanFitOptimistically(
-    const std::unordered_map<Backend, uint64_t> &residentByBackend,
-    const std::vector<BucketPlanRequest> &buckets,
-    const std::unordered_map<std::string, CompiledGraph> &baselinePlans,
-    const std::unordered_map<Backend, uint64_t> &memoryLimits)
-{
-    if (baselinePlans.empty())
-        return true;
-
-    for (const BucketPlanRequest &bucket : buckets)
-    {
-        auto baselineIt = baselinePlans.find(bucket.key);
-        if (baselineIt == baselinePlans.end())
-            continue;
-
-        std::unordered_map<Backend, uint64_t> peaks = calculatePlanPeakMemoryByBackend(baselineIt->second, {});
-        for (const auto &limitPair : memoryLimits)
-        {
-            uint64_t resident = residentByBackend.count(limitPair.first) ? residentByBackend.at(limitPair.first) : 0;
-            uint64_t optimisticTransient = peaks.count(limitPair.first) ? peaks.at(limitPair.first) : 0;
-            if (optimisticTransient > resident)
-                optimisticTransient -= resident;
-            else
-                optimisticTransient = 0;
-
-            if (resident + optimisticTransient > limitPair.second)
-                return false;
-        }
-    }
-
-    return true;
-}
-
 static const BucketPlanMemoEntry &getOrPlanBucket(
     uint32_t rootId,
     const Graph &graph,
@@ -447,13 +383,6 @@ CacheOptimizationResult optimizeCacheCombination(
         enumerateCombinations(cacheableNodes, k, 0, current, [&](const std::vector<uint32_t> &combination)
                               {
             std::unordered_set<uint32_t> cachedNodes(combination.begin(), combination.end());
-            std::unordered_map<Backend, uint64_t> residentByBackend = calculateCachedResidentMemoryByBackend(graph, cachedNodes);
-
-            if (!combinationFitsResidentBudget(residentByBackend, memoryLimits))
-                return;
-
-            if (!combinationCanFitOptimistically(residentByBackend, buckets, baselinePlans, memoryLimits))
-                return;
 
             double totalScore = 0.0;
             std::unordered_map<std::string, CompiledGraph> plans;
