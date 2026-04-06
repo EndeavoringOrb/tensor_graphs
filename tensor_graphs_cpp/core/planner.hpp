@@ -323,6 +323,7 @@ private:
     {
         TensorNode &placeholder = result.graph.getNode(logicalId);
         placeholder.opType = OpType::INPUT;
+        placeholder.storageType = StorageType::PINNED;
         placeholder.parentIds.clear();
         result.physicalToLogicalNodeMap[logicalId] = logicalId;
     }
@@ -484,7 +485,7 @@ public:
         Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
-        const std::unordered_set<uint32_t> &cachedNodes)
+        const std::unordered_set<uint32_t> &cachedNodes, bool doSaturate = true)
     {
         // Planning pipeline:
         // 1. seed the root dirty region
@@ -590,7 +591,10 @@ public:
             }
         }
 
-        saturate(topo, planningGraph.graph, egraph, nodeToEClass, refCounts);
+        if (doSaturate)
+        {
+            saturate(topo, planningGraph.graph, egraph, nodeToEClass, refCounts);
+        }
 
         auto extraction = extractBest(planningGraph.physicalRootId, planningGraph.graph, egraph, nodeToEClass, refCounts, maxMemoryByBackend, cachedNodes);
 
@@ -1273,6 +1277,11 @@ private:
                 }
 
                 if (!entry.match(inputs, outNode, refCounts))
+                {
+                    continue;
+                }
+
+                if (entry.inplace && inputs[0].storageType != StorageType::TRANSIENT)
                 {
                     continue;
                 }

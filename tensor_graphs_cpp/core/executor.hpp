@@ -57,17 +57,7 @@ public:
                                              ? logicalId
                                              : nodeId;
 
-            if (inst.inplaceInputIndex >= 0)
-            {
-                uint32_t srcId = compiled.getLogicalId(inst.inputNodeIds[inst.inplaceInputIndex]);
-                memManager.transferOwnership(inst.backend, srcId, outputMemId);
-            }
-            else if (inst.viewInputIndex >= 0)
-            {
-                uint32_t srcId = compiled.getLogicalId(inst.inputNodeIds[inst.viewInputIndex]);
-                memManager.addAlias(inst.backend, srcId, outputMemId, compiled.refCounts.at(inst.nodeId), inst.outputStorageType);
-            }
-            else
+            if (inst.inplaceInputIndex < 0 && inst.viewInputIndex < 0)
             {
                 uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
                 float cost = compiled.nodeCosts.at(inst.nodeId);
@@ -80,12 +70,32 @@ public:
             {
                 const TensorNode &inNode = compiled.nodesMap.at(inId);
                 TensorView view = memManager.getView(inNode, compiled);
-                if (memManager.has(inNode.backend, inId)) {
+                if (memManager.has(inNode.backend, inId))
+                {
                     view = memManager.getView(inNode);
                 }
-                
+
                 kernelInViews.push_back(view);
                 kernelInputs.push_back(memManager.buffers.at(inNode.backend).arena_ptr + view.baseOffset);
+            }
+
+            for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
+            {
+                const uint32_t inId = inst.inputNodeIds[i];
+                TensorNode debugInput = compiled.nodesMap.at(inId);
+                debugInput.id = compiled.getLogicalId(inId);
+                Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId), compiled);
+            }
+
+            if (inst.inplaceInputIndex >= 0)
+            {
+                uint32_t srcId = compiled.getLogicalId(inst.inputNodeIds[inst.inplaceInputIndex]);
+                memManager.transferOwnership(inst.backend, srcId, outputMemId);
+            }
+            else if (inst.viewInputIndex >= 0)
+            {
+                uint32_t srcId = compiled.getLogicalId(inst.inputNodeIds[inst.viewInputIndex]);
+                memManager.addAlias(inst.backend, srcId, outputMemId, compiled.refCounts.at(inst.nodeId), inst.outputStorageType);
             }
 
             auto it = memManager.buffers.find(node.backend);
@@ -109,13 +119,6 @@ public:
 
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.fullKernelId);
 
-            for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
-            {
-                const uint32_t inId = inst.inputNodeIds[i];
-                TensorNode debugInput = compiled.nodesMap.at(inId);
-                debugInput.id = compiled.getLogicalId(inId);
-                Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId), compiled);
-            }
             if (!kernel.isView)
             {
                 kernel.run(kernelInputs, kernelOutputs, kernelInViews, kernelOutViews);

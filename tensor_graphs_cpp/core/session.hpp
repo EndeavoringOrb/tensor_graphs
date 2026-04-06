@@ -212,11 +212,11 @@ private:
         return atomicTopo;
     }
 
-    CompiledGraph compileBucketPlan(const BucketPlanRequest &request, const std::unordered_set<uint32_t> &cachedNodes)
+    CompiledGraph compileBucketPlan(const BucketPlanRequest &request, const std::unordered_set<uint32_t> &cachedNodes, bool doSaturate = true)
     {
         Graph planningGraph = graph;
         Planner planner(costModel, memManager.getBufferSizes());
-        return planner.plan(rootId, planningGraph, request.bucket.regions, request.bucket.inputSlices, cachedNodes);
+        return planner.plan(rootId, planningGraph, request.bucket.regions, request.bucket.inputSlices, cachedNodes, doSaturate);
     }
 
     void materializePersistentInputsForPlan(const CompiledGraph &compiled)
@@ -876,7 +876,7 @@ public:
             baselineTimer.tick();
             try
             {
-                baselinePlans[bucket.key] = compileBucketPlan(bucket, {});
+                baselinePlans[bucket.key] = compileBucketPlan(bucket, {}, false);
             }
             catch (const MemoryExhaustedError &e)
             {

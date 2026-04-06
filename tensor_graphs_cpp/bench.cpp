@@ -251,14 +251,17 @@ int main()
                         int32_t *iptr = reinterpret_cast<int32_t *>(inData[idx].data());
                         if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos) // TODO: make the check based on reference graph instead of name
                         {
-                            if (idx == 1 && r.inputShapes.size() > 0 && r.outputShapes.size() > 0 && 
-                                r.inputShapes[0].size() == r.outputShapes[0].size() && elements == r.inputShapes[0].size()) 
+                            if (idx == 1 && r.inputShapes.size() > 0 && r.outputShapes.size() > 0 &&
+                                r.inputShapes[0].size() == r.outputShapes[0].size() && elements == r.inputShapes[0].size())
                             {
                                 std::vector<bool> used(elements, false);
-                                for (size_t k = 0; k < elements; ++k) {
+                                for (size_t k = 0; k < elements; ++k)
+                                {
                                     size_t found_d = k; // default fallback
-                                    for(size_t d = 0; d < elements; ++d) {
-                                        if(!used[d] && r.inputShapes[0][d] == r.outputShapes[0][k]) {
+                                    for (size_t d = 0; d < elements; ++d)
+                                    {
+                                        if (!used[d] && r.inputShapes[0][d] == r.outputShapes[0][k])
+                                        {
                                             found_d = d;
                                             break;
                                         }
@@ -267,7 +270,7 @@ int main()
                                     iptr[k] = found_d;
                                 }
                             }
-                            else 
+                            else
                             {
                                 for (size_t k = 0; k < elements; ++k)
                                     iptr[k] = k;
@@ -379,21 +382,29 @@ int main()
                       << std::flush;
 
             // Warmup
-            kernel.run(inPtrs, outPtrs, inViews, outViews);
+            if (!kernel.isView)
+            {
+                kernel.run(inPtrs, outPtrs, inViews, outViews);
+            }
 
             int iters = 1; // TODO: make this an arg, default to 15
             auto start = std::chrono::high_resolution_clock::now();
             for (int it = 0; it < iters; ++it)
             {
-                kernel.run(inPtrs, outPtrs, inViews, outViews);
+                if (!kernel.isView)
+                {
+                    kernel.run(inPtrs, outPtrs, inViews, outViews);
+                }
             }
 #ifdef USE_CUDA
-            bool anyInputCuda = std::any_of(inIsCuda.begin(), inIsCuda.end(), [](bool b){ return b; });
+            bool anyInputCuda = std::any_of(inIsCuda.begin(), inIsCuda.end(), [](bool b)
+                                            { return b; });
             if (anyInputCuda || isOutputCuda)
             {
                 cudaError_t err = cudaDeviceSynchronize();
-                if (err != cudaSuccess) {
-                    // Critical: if a kernel crashed, we must reset the error state 
+                if (err != cudaSuccess)
+                {
+                    // Critical: if a kernel crashed, we must reset the error state
                     // or subsequent cudaMalloc/cudaMemcpy calls will fail.
                     // However, illegal memory access is often unrecoverable without context reset.
                     throw std::runtime_error("CUDA Synchronization failed: " + std::string(cudaGetErrorString(err)));
