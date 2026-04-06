@@ -56,31 +56,25 @@ inline void runRMSNormF32_3D(const std::vector<const void *> &inputs, const std:
     }
 }
 
-inline uint32_t ref_rms_expand_scalar(Graph &g, uint32_t scalar_id, bool rep2 = false)
+// Helper: Broadcast a scalar to [B, S, 1] or [B, S, D]
+inline uint32_t ref_rms_broadcast_scalar(Graph &g, uint32_t scalar_id, uint32_t B, uint32_t S, uint32_t D, bool full_d = false)
 {
     int32_t shape_3d[] = {1, 1, 1};
     uint32_t out = g.reshape(scalar_id, g.constant({3}, shape_3d, DType::INT32));
-    int32_t rep = 1;
-    int32_t a0 = 0, a1 = 1, a2 = 2;
-    uint32_t rN = g.constant({1}, &rep, DType::INT32);
-    out = g.repeat(out, rN, g.constant({1}, &a0, DType::INT32));
-    out = g.repeat(out, rN, g.constant({1}, &a1, DType::INT32));
-    if (rep2)
-    {
-        out = g.repeat(out, rN, g.constant({1}, &a2, DType::INT32));
-    }
-    return out;
-}
 
-inline uint32_t ref_rms_expand_1d(Graph &g, uint32_t vec_id)
-{
-    int32_t shape_3d[] = {1, 1, 1}; // dummy
-    uint32_t out = g.reshape(vec_id, g.constant({3}, shape_3d, DType::INT32));
-    int32_t rep = 1;
-    int32_t a0 = 0, a1 = 1;
-    uint32_t rN = g.constant({1}, &rep, DType::INT32);
-    out = g.repeat(out, rN, g.constant({1}, &a0, DType::INT32));
-    out = g.repeat(out, rN, g.constant({1}, &a1, DType::INT32));
+    int32_t b_rep = (int32_t)B;
+    int32_t s_rep = (int32_t)S;
+    int32_t b_ax = 0, s_ax = 1;
+
+    out = g.repeat(out, g.constant({1}, &b_rep, DType::INT32), g.constant({1}, &b_ax, DType::INT32));
+    out = g.repeat(out, g.constant({1}, &s_rep, DType::INT32), g.constant({1}, &s_ax, DType::INT32));
+
+    if (full_d)
+    {
+        int32_t d_rep = (int32_t)D;
+        int32_t d_ax = 2;
+        out = g.repeat(out, g.constant({1}, &d_rep, DType::INT32), g.constant({1}, &d_ax, DType::INT32));
+    }
     return out;
 }
 
@@ -89,39 +83,52 @@ inline uint32_t refFactoryRMSNorm(const std::vector<uint32_t> &inputs, Graph &gr
     uint32_t x_id = inputs[0];
     uint32_t weight_id = inputs[1];
 
+    auto shapeX = graph.getNode(x_id).getShape();
+    uint32_t B = shapeX[0];
+    uint32_t S = shapeX[1];
+    uint32_t D = shapeX[2];
+
+    // 1. Compute Mean Square
     uint32_t x_sq = graph.mul(x_id, x_id);
     int32_t axis_val = -1;
     uint32_t axis_node = graph.constant({1}, &axis_val, DType::INT32);
-
     uint32_t sum_sq = graph.sum(x_sq, axis_node);
 
-    float n_val = 1.0f; // dummy
-    uint32_t n_node = ref_rms_expand_scalar(graph, graph.constant({1}, &n_val, DType::FLOAT32), false);
-
+    float d_float = (float)D;
+    uint32_t n_node = ref_rms_broadcast_scalar(graph, graph.constant({1}, &d_float, DType::FLOAT32), B, S, 1, false);
     uint32_t mean_sq = graph.div(sum_sq, n_node);
 
+    // 2. Compute inv_std: 1.0 / sqrt(mean_sq + eps)
     float eps = 1e-6f;
-    uint32_t eps_expanded = ref_rms_expand_scalar(graph, graph.constant({1}, &eps, DType::FLOAT32), false);
+    uint32_t eps_expanded = ref_rms_broadcast_scalar(graph, graph.constant({1}, &eps, DType::FLOAT32), B, S, 1, false);
     uint32_t mean_sq_plus_eps = graph.add(mean_sq, eps_expanded);
 
     float half_val = 0.5f;
-    uint32_t sqrt_node = ref_rms_expand_scalar(graph, graph.constant({1}, &half_val, DType::FLOAT32), false);
-    uint32_t std = graph.pow(mean_sq_plus_eps, sqrt_node);
+    uint32_t sqrt_exp = ref_rms_broadcast_scalar(graph, graph.constant({1}, &half_val, DType::FLOAT32), B, S, 1, false);
+    uint32_t std_dev = graph.pow(mean_sq_plus_eps, sqrt_exp);
 
     float one_val = 1.0f;
-    uint32_t one_fp32 = graph.constant({1}, &one_val, DType::FLOAT32);
-    uint32_t one_node = ref_rms_expand_scalar(graph, one_fp32, false);
-    uint32_t inv_std = graph.div(one_node, std);
+    uint32_t one_node = ref_rms_broadcast_scalar(graph, graph.constant({1}, &one_val, DType::FLOAT32), B, S, 1, false);
+    uint32_t inv_std = graph.div(one_node, std_dev);
 
-    int32_t rep = 1;
-    int32_t a2 = 2;
-    uint32_t inv_std_expanded = graph.repeat(inv_std, graph.constant({1}, &rep, DType::INT32), graph.constant({1}, &a2, DType::INT32));
-
+    // 3. Normalize: x * inv_std
+    int32_t d_rep = (int32_t)D;
+    int32_t d_ax = 2;
+    uint32_t inv_std_expanded = graph.repeat(inv_std, graph.constant({1}, &d_rep, DType::INT32), graph.constant({1}, &d_ax, DType::INT32));
     uint32_t x_norm = graph.mul(x_id, inv_std_expanded);
 
-    uint32_t weight_expanded = ref_rms_expand_1d(graph, weight_id);
-    uint32_t one_node_full = ref_rms_expand_scalar(graph, one_fp32, true);
-    uint32_t scale = graph.add(weight_expanded, one_node_full);
+    // 4. Scale: x_norm * (weight + 1.0)
+    // Expand weight [D] -> [1, 1, D] -> [B, S, D]
+    int32_t reshape_dims[] = {1, 1, (int32_t)D};
+    uint32_t w_reshaped = graph.reshape(weight_id, graph.constant({3}, reshape_dims, DType::INT32));
+    int32_t b_rep = (int32_t)B;
+    int32_t s_rep = (int32_t)S;
+    int32_t b_ax = 0, s_ax = 1;
+    uint32_t w_expanded = graph.repeat(w_reshaped, graph.constant({1}, &b_rep, DType::INT32), graph.constant({1}, &b_ax, DType::INT32));
+    w_expanded = graph.repeat(w_expanded, graph.constant({1}, &s_rep, DType::INT32), graph.constant({1}, &s_ax, DType::INT32));
+
+    uint32_t one_full = ref_rms_broadcast_scalar(graph, graph.constant({1}, &one_val, DType::FLOAT32), B, S, D, true);
+    uint32_t scale = graph.add(w_expanded, one_full);
 
     return graph.mul(x_norm, scale);
 }

@@ -36,15 +36,19 @@ inline uint32_t refFactoryMul3D_Scalar(const std::vector<uint32_t> &inputs, Grap
     if (inputs.size() != 2)
         Error::throw_err("Fused Mul 3D+Scalar requires 2 inputs");
 
+    const auto &shape3D = graph.getNode(inputs[0]).getShape();
+
+    // 1. Reshape [1] -> [1, 1, 1]
     int32_t reshape_dims[] = {1, 1, 1};
     uint32_t out = graph.reshape(inputs[1], graph.constant({3}, reshape_dims, DType::INT32));
 
-    int32_t rep = 1;
-    int32_t a0 = 0, a1 = 1, a2 = 2;
-    uint32_t rN = graph.constant({1}, &rep, DType::INT32);
-    out = graph.repeat(out, rN, graph.constant({1}, &a0, DType::INT32));
-    out = graph.repeat(out, rN, graph.constant({1}, &a1, DType::INT32));
-    out = graph.repeat(out, rN, graph.constant({1}, &a2, DType::INT32));
+    // 2. Repeat for B, S, and D
+    for (int i = 0; i < 3; ++i)
+    {
+        int32_t rep = (int32_t)shape3D[i];
+        int32_t axis = i;
+        out = graph.repeat(out, graph.constant({1}, &rep, DType::INT32), graph.constant({1}, &axis, DType::INT32));
+    }
 
     return graph.mul(inputs[0], out);
 }

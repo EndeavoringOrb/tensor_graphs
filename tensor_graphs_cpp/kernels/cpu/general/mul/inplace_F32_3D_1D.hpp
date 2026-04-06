@@ -46,15 +46,19 @@ inline uint32_t refFactoryMul3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     if (inputs.size() != 2)
         Error::throw_err("Fused Mul 3D+1D requires 2 inputs");
 
-    int32_t reshape_dims[] = {1, 1, 1}; // Dummy size
+    const auto &shape3D = graph.getNode(inputs[0]).getShape();
+    const auto &shape1D = graph.getNode(inputs[1]).getShape();
+
+    int32_t reshape_dims[] = {1, 1, (int32_t)shape1D[0]};
     uint32_t out = graph.reshape(inputs[1], graph.constant({3}, reshape_dims, DType::INT32));
 
-    int32_t rep = 1;
+    int32_t b_rep = (int32_t)shape3D[0];
     int32_t b_axis = 0;
+    out = graph.repeat(out, graph.constant({1}, &b_rep, DType::INT32), graph.constant({1}, &b_axis, DType::INT32));
+
+    int32_t s_rep = (int32_t)shape3D[1];
     int32_t s_axis = 1;
-    uint32_t rN = graph.constant({1}, &rep, DType::INT32);
-    out = graph.repeat(out, rN, graph.constant({1}, &b_axis, DType::INT32));
-    out = graph.repeat(out, rN, graph.constant({1}, &s_axis, DType::INT32));
+    out = graph.repeat(out, graph.constant({1}, &s_rep, DType::INT32), graph.constant({1}, &s_axis, DType::INT32));
 
     return graph.mul(inputs[0], out);
 }

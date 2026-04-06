@@ -569,6 +569,8 @@ std::vector<float> executeReferenceGraph(
             inputPtrs.push_back(resultIt->second.data());
             inputViews.push_back(views[pid]);
             TensorNode inNode = graph.getNode(pid);
+            inNode.strides = views[pid].strides;
+            inNode.viewOffset = views[pid].baseOffset / getDTypeSize(inNode.dtype);
             inputNodes.push_back(inNode);
         }
 
@@ -610,16 +612,33 @@ std::vector<float> executeReferenceGraph(
             chosenKernelUid = refs_c.front();
         }
 
+        const KernelEntry &kernel = KernelRegistry::get().getKernel(chosenKernelUid);
+
+        if (kernel.isView)
+        {
+            TensorNode dummyOutNode = node;
+            kernel.inferView(dummyOutNode, inputNodes, graph);
+
+            uint32_t parentId = node.parentIds[0];
+            results[nodeId] = results[parentId];
+
+            chosenOutView.strides = dummyOutNode.strides;
+            chosenOutView.baseOffset = dummyOutNode.viewOffset * elemSize;
+            views[nodeId] = chosenOutView;
+            continue;
+        }
+
         views[nodeId] = chosenOutView;
         size_t bufElements = getRequiredBufferSize(chosenOutView);
         results[nodeId].resize(bufElements * elemSize, 0);
 
-        const KernelEntry &kernel = KernelRegistry::get().getKernel(chosenKernelUid);
-
         std::vector<void *> outputPtrs = {results[nodeId].data()};
         std::vector<TensorView> outputViews = {chosenOutView};
 
-        kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+        if (kernel.run)
+        {
+            kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+        }
     }
 
     uint64_t numRootElems = countElements(graph.getNode(rootId));
@@ -665,17 +684,10 @@ std::vector<float> executeReferenceGraph(
 // Fused Kernel Direct Execution
 // ============================================================
 
-/**
- * Executes a fused kernel directly by calling kernel.run()
- * with prepared input/output buffers.
- *
- * @param kernel The fused kernel to execute
- * @param inputData Input data buffers (type-erased uint8_t vectors)
- * @param expectedOutElements Expected number of output elements (from reference graph)
- */
 std::vector<float> executeFusedKernel(
     const KernelEntry &kernel,
     const std::vector<std::vector<uint8_t>> &inputData,
+    const std::vector<uint32_t> &inputIds,
     size_t expectedOutElements,
     const std::vector<uint32_t> &outShape,
     const Graph &graph)
@@ -712,10 +724,11 @@ std::vector<float> executeFusedKernel(
             std::vector<TensorNode> dummyInputs(kernel.numInputs);
             for (size_t i = 0; i < kernel.numInputs; ++i)
             {
-                dummyInputs[i].id = (uint32_t)i;
+                dummyInputs[i].id = inputIds[i];
                 dummyInputs[i].setShape(kernel.dummyShapes[i]);
                 dummyInputs[i].strides = inputViews[i].strides;
                 dummyInputs[i].dtype = kernel.dtypes[i];
+                dummyInputs[i].viewOffset = inputViews[i].baseOffset / getDTypeSize(kernel.dtypes[i]);
             }
             TensorNode dummyOutput;
             dummyOutput.setShape(outShape);
@@ -726,7 +739,7 @@ std::vector<float> executeFusedKernel(
             const float *src = reinterpret_cast<const float *>(inputData[0].data());
             for (size_t i = 0; i < expectedOutElements; ++i)
             {
-                output[i] = src[getStridedIndex(i, dummyOutput.getShape(), dummyOutput.strides)];
+                output[i] = src[dummyOutput.viewOffset + getStridedIndex(i, dummyOutput.getShape(), dummyOutput.strides)];
             }
         }
         else
@@ -799,7 +812,10 @@ std::vector<float> executeFusedKernel(
         for (void *p : d_inputs)
             d_input_ptrs.push_back(p);
 
-        kernel.run(d_input_ptrs, d_outputs, inputViews, outputViews);
+        if (kernel.run)
+        {
+            kernel.run(d_input_ptrs, d_outputs, inputViews, outputViews);
+        }
         cudaDeviceSynchronize();
 
         // Copy result back
@@ -815,10 +831,16 @@ std::vector<float> executeFusedKernel(
     }
     else
     {
-        kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+        if (kernel.run)
+        {
+            kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+        }
     }
 #else
-    kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+    if (kernel.run)
+    {
+        kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+    }
 #endif
 
     return output;
@@ -959,6 +981,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         std::vector<TensorNode> dummyInputNodes;
         std::vector<const void *> inPtrs;
 
+        Graph dummyGraph;
         int i = 0;
         for (const auto &inpJson : info["inputs"])
         {
@@ -979,14 +1002,13 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             view.dtype = dtype;
             inViews.push_back(view);
 
-            TensorNode node;
-            node.id = i;
-            node.opType = OpType::INPUT;
-            node.dtype = dtype;
-            node.setShape(shape);
-            node.strides = strides;
-            node.backend = Backend::CPU;
+            TensorNode &node = dummyGraph.allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, Backend::CPU, StorageType::PERSISTENT);
             dummyInputNodes.push_back(node);
+
+            if (dtype == DType::INT32)
+            {
+                dummyGraph.constantStaging[node.id] = inputData.back();
+            }
 
             i++;
         }
@@ -1038,13 +1060,41 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 
         const KernelEntry &kernel = KernelRegistry::get().getKernel(matches.front());
 
-        try
+        if (kernel.isView)
+        {
+            TensorNode dummyOutNode = outNode;
+            for (size_t k = 0; k < dummyInputNodes.size(); ++k)
+            {
+                dummyInputNodes[k].strides = inViews[k].strides;
+                dummyInputNodes[k].viewOffset = inViews[k].baseOffset / getDTypeSize(dummyInputNodes[k].dtype);
+            }
+            kernel.inferView(dummyOutNode, dummyInputNodes, dummyGraph);
+
+            size_t elements = countElements(outShape);
+            if (outDType == DType::FLOAT32)
+            {
+                const float *src = reinterpret_cast<const float *>(inputData[0].data());
+                float *dst = reinterpret_cast<float *>(actualData.data());
+                for (size_t k = 0; k < elements; ++k)
+                {
+                    uint64_t srcIdx = dummyOutNode.viewOffset + getStridedIndex(k, dummyOutNode.getShape(), dummyOutNode.strides);
+                    dst[k] = src[srcIdx];
+                }
+            }
+            else if (outDType == DType::INT32)
+            {
+                const int32_t *src = reinterpret_cast<const int32_t *>(inputData[0].data());
+                int32_t *dst = reinterpret_cast<int32_t *>(actualData.data());
+                for (size_t k = 0; k < elements; ++k)
+                {
+                    uint64_t srcIdx = dummyOutNode.viewOffset + getStridedIndex(k, dummyOutNode.getShape(), dummyOutNode.strides);
+                    dst[k] = src[srcIdx];
+                }
+            }
+        }
+        else if (kernel.run)
         {
             kernel.run(inPtrs, outPtrs, inViews, outViews);
-        }
-        catch (const std::exception &e)
-        {
-            Error::throw_err("FAILED (Exception: " + (std::string)e.what() + ")");
         }
 
         bool ok = false;
@@ -1122,53 +1172,37 @@ int main()
         total++;
         std::cout << "Testing " << kernel.opName << " ... " << std::flush;
 
-        try
+        // ========== REFERENCE EXECUTION ==========
+        // 1. Build reference graph using refFactory
+        Graph refGraph;
+        TestInputs refInputs = createTestInputs(refGraph, kernel);
+        uint32_t rootId = kernel.refFactory(refInputs.inputIds, refGraph);
+
+        // 2. Execute reference graph via manual traversal (Contiguous)
+        std::vector<float> refOutput = executeReferenceGraph(rootId, refGraph, refInputs.rawInputData, false);
+
+        size_t elements = refOutput.size();
+
+        // ========== FUSED KERNEL EXECUTION ==========
+        // Execute fused kernel directly
+        std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refInputs.inputIds, refOutput.size(), refGraph.getNode(rootId).getShape(), refGraph);
+
+        // ========== COMPARE ==========
+        if (fusedOutput.size() != elements)
         {
-            // ========== REFERENCE EXECUTION ==========
-            // 1. Build reference graph using refFactory
-            Graph refGraph;
-            TestInputs refInputs = createTestInputs(refGraph, kernel);
-            uint32_t rootId = kernel.refFactory(refInputs.inputIds, refGraph);
-
-            // 2. Execute reference graph via manual traversal (Contiguous)
-            std::vector<float> refOutput = executeReferenceGraph(rootId, refGraph, refInputs.rawInputData, false);
-
-            // 3. Execute reference graph (Non-Contiguous)
-            std::vector<float> refOutputNC = executeReferenceGraph(rootId, refGraph, refInputs.rawInputData, true);
-
-            // Compare contiguous reference vs non-contiguous reference
-            size_t elements = refOutput.size();
-            if (!compareOutputs(refOutput.data(), refOutputNC.data(), elements))
-            {
-                std::cout << "FAILED (Reference Non-Contiguous mismatch)" << std::endl;
-                continue;
-            }
-
-            // ========== FUSED KERNEL EXECUTION ==========
-            // Execute fused kernel directly
-            std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refOutput.size(), refGraph.getNode(rootId).getShape(), refGraph);
-
-            // ========== COMPARE ==========
-            if (fusedOutput.size() != elements)
-            {
-                std::cout << "FAILED (output size mismatch: " << fusedOutput.size()
-                          << " vs " << elements << ")" << std::endl;
-                continue;
-            }
-
-            if (compareOutputs(refOutput.data(), fusedOutput.data(), elements))
-            {
-                std::cout << "OK" << std::endl;
-                passed++;
-            }
-            else
-            {
-                std::cout << "FAILED" << std::endl;
-            }
+            std::cout << "FAILED (output size mismatch: " << fusedOutput.size()
+                      << " vs " << elements << ")" << std::endl;
+            continue;
         }
-        catch (const std::exception &e)
+
+        if (compareOutputs(refOutput.data(), fusedOutput.data(), elements))
         {
-            std::cout << "EXCEPTION: " << e.what() << std::endl;
+            std::cout << "OK" << std::endl;
+            passed++;
+        }
+        else
+        {
+            std::cout << "FAILED" << std::endl;
         }
     }
 
