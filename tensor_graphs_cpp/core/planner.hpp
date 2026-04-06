@@ -857,7 +857,7 @@ private:
 
                 bool needCopy = (parent.backend != expectedBackend);
                 bool needContig = false;
-                if (i < kernel.requiresContiguous.size())
+                if (i < kernel.requiresContiguous.size()) // TODO: add error if not?
                 {
                     needContig = kernel.requiresContiguous[i] && !isContiguous(parent);
                 }
@@ -882,7 +882,9 @@ private:
                     if (copyWorks && contigWorksAfterCopy)
                     {
                         currentId = graph.copyto(currentId, expectedBackend);
+                        graph.getNode(currentId).setShape(parent.getShape());
                         currentId = graph.contiguous(currentId);
+                        graph.getNode(currentId).setShape(parent.getShape());
                     }
                     else
                     {
@@ -897,7 +899,9 @@ private:
                         if (contigWorks && copyWorksAfterContig)
                         {
                             currentId = graph.contiguous(currentId);
+                            graph.getNode(currentId).setShape(parent.getShape());
                             currentId = graph.copyto(currentId, expectedBackend);
+                            graph.getNode(currentId).setShape(parent.getShape());
                         }
                         else
                         {
@@ -908,10 +912,12 @@ private:
                 else if (needCopy)
                 {
                     currentId = graph.copyto(currentId, expectedBackend);
+                    graph.getNode(currentId).setShape(parent.getShape());
                 }
                 else if (needContig)
                 {
                     currentId = graph.contiguous(currentId);
+                    graph.getNode(currentId).setShape(parent.getShape());
                 }
                 adaptedParents.push_back(currentId);
             }
@@ -922,6 +928,7 @@ private:
             if (node.backend != refNode.backend)
             {
                 id = graph.copyto(id, refNode.backend);
+                graph.getNode(id).setShape(refNode.getShape());
             }
 
             return id;

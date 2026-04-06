@@ -112,7 +112,7 @@ public:
         std::vector<Backend> inBacks = inputBackends;
         if (inBacks.empty() && numInputs > 0 && !backends.empty())
         {
-            inBacks.assign(numInputs, backends[0]);
+            inBacks.assign(numInputs, backends[0]); // TODO: make input backends std::vector<std::vector<Backend>>
         }
         entries.push_back({uid, op, opName, numInputs, backends, inBacks, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous});
         if (refFactory && op == OpType::FUSED)

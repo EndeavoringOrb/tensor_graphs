@@ -539,7 +539,7 @@ int main()
 
     ModelConfig cfg;
 #if USE_CUDA
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 2ULL * 1024 * 1024 * 1024}, {Backend::CUDA, 2ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 16ULL * 1024 * 1024 * 1024}, {Backend::CUDA, 6ULL * 1024 * 1024 * 1024}};
 #else
     std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 16ULL * 1024 * 1024 * 1024}};
 #endif
