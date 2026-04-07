@@ -472,6 +472,7 @@ namespace Rewrite
                         node,
                         {});
 
+                    // TODO: does this break CUDA? why is extraction so finicky? what is a layout, how is it defined? is a layout (shape + strides)?
                     bool layoutSensitive = false;
                     for (uint64_t uid : matches)
                     {

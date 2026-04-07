@@ -13,6 +13,7 @@ struct ENodeKey
     OpType opType;
     uint64_t kernelUid = 0;
     uint32_t leafId = UINT32_MAX; // Used only for INPUT nodes to prevent bad merges
+    Backend backend = Backend::CPU;
     std::vector<uint32_t> children;
 
     bool operator==(const ENodeKey &other) const
@@ -20,6 +21,7 @@ struct ENodeKey
         return opType == other.opType &&
                kernelUid == other.kernelUid &&
                leafId == other.leafId &&
+               backend == other.backend &&
                children == other.children;
     }
 };
@@ -32,6 +34,7 @@ struct ENodeKeyHash
         size_t h = std::hash<uint64_t>{}(key.kernelUid);
         h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(key.opType)) + 0x9e3779b9 + (h << 6) + (h >> 2);
         h ^= std::hash<uint32_t>{}(key.leafId) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(key.backend)) + 0x9e3779b9 + (h << 6) + (h >> 2);
         for (uint32_t c : key.children)
         {
             h ^= std::hash<uint32_t>{}(c) + 0x9e3779b9 + (h << 6) + (h >> 2);
@@ -57,14 +60,14 @@ struct EClass
     std::vector<uint32_t> shape;
     DType dtype = DType::FLOAT32;
     bool contiguous = true;
-    std::unordered_set<Backend> backends;
+    Backend backend = Backend::CPU;
     uint32_t refCount = 0;
 };
 
 class EGraph
 {
 public:
-    uint32_t addEClass(const std::vector<uint32_t> &shape, DType dtype, uint32_t refCount, bool contiguous)
+    uint32_t addEClass(const std::vector<uint32_t> &shape, DType dtype, uint32_t refCount, bool contiguous, Backend backend)
     {
         uint32_t id = static_cast<uint32_t>(classes.size());
         EClass c;
@@ -73,6 +76,7 @@ public:
         c.dtype = dtype;
         c.refCount = refCount;
         c.contiguous = contiguous;
+        c.backend = backend;
         classes.push_back(std::move(c));
         parent.push_back(id);
         return id;
@@ -91,6 +95,7 @@ public:
             node.opType,
             node.kernelUid,
             node.opType == OpType::INPUT ? node.nodeId : UINT32_MAX,
+            node.backend,
             node.children};
 
         auto it = hashcons.find(key);
@@ -132,6 +137,13 @@ public:
         if (ra == rb)
             return;
 
+        // Strict physical equality check to prevent polluting downstream expectations
+        if (classes[ra].contiguous != classes[rb].contiguous ||
+            classes[ra].backend != classes[rb].backend)
+        {
+            return;
+        }
+
         if (classes[ra].enodes.size() < classes[rb].enodes.size())
             std::swap(ra, rb);
 
@@ -153,12 +165,7 @@ public:
             Error::throw_err("EClass merge dtype mismatch: " + (std::string)toString(classes[ra].dtype) + ", " + toString(classes[rb].dtype));
         }
 
-        classes[ra].contiguous = classes[ra].contiguous && classes[rb].contiguous;
         classes[ra].refCount = std::max(classes[ra].refCount, classes[rb].refCount);
-        for (Backend bkend : classes[rb].backends)
-        {
-            classes[ra].backends.insert(bkend);
-        }
     }
 
     void rebuild()
@@ -176,6 +183,7 @@ public:
                 node.opType,
                 node.kernelUid,
                 node.opType == OpType::INPUT ? node.nodeId : UINT32_MAX,
+                node.backend,
                 node.children};
 
             auto it = newHash.find(key);

@@ -517,8 +517,7 @@ public:
             auto rcIt = refCounts.find(nodeId);
             if (rcIt != refCounts.end())
                 refCount = rcIt->second;
-            uint32_t eclassId = egraph.addEClass(node.getShape(), node.dtype, refCount, isContiguous(node));
-            egraph.getEClass(eclassId).backends.insert(node.backend);
+            uint32_t eclassId = egraph.addEClass(node.getShape(), node.dtype, refCount, isContiguous(node), node.backend);
             nodeToEClass[nodeId] = eclassId;
         }
 
@@ -1100,8 +1099,7 @@ private:
         if (rcIt != refCounts.end())
             refCount = rcIt->second;
 
-        uint32_t eclassId = egraph.addEClass(node.getShape(), node.dtype, refCount, isContiguous(node));
-        egraph.getEClass(eclassId).backends.insert(node.backend);
+        uint32_t eclassId = egraph.addEClass(node.getShape(), node.dtype, refCount, isContiguous(node), node.backend);
         nodeToEClass[nodeId] = eclassId;
 
         // Add the Enode for this specific physical implementation
