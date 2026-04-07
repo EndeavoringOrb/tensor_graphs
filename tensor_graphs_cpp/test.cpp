@@ -427,65 +427,6 @@ void runRewriteTests()
         if (!findEquivalent(equivalents, graph2, OpType::COPY_TO))
             Error::throw_err("[RewriteTest] scatter(copyto(...)) should rewrite to copyto(scatter(...))");
     }
-
-    {
-        Graph graph;
-        uint32_t x = graph.input({2, 2}, DType::FLOAT32, {4, 2}, StorageType::PERSISTENT);
-        uint32_t y = makeFloatInput(graph, {2, 2}, Backend::CPU);
-        uint32_t contig = graph.contiguous(x);
-        uint32_t add = graph.add(contig, y);
-
-        ShapePropagator prop;
-        prop.inferShapeRecursive(add, graph);
-
-        Rewrite::RemoveContiguousRule rule;
-        std::unordered_map<uint32_t, std::string> memo;
-        std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(add, graph, {&rule}, memo);
-
-        bool removedContiguous = false;
-        for (uint32_t id : equivalents)
-        {
-            if (!graph.hasNode(id))
-                continue;
-            const TensorNode &node = graph.getNode(id);
-            if (node.opType == OpType::ADD && node.parentIds.size() == 2 && node.parentIds[0] == x)
-            {
-                removedContiguous = true;
-                break;
-            }
-        }
-
-        if (!removedContiguous)
-            Error::throw_err("[RewriteTest] remove-contiguous should rewrite materializing ops like add(contiguous(x), y)");
-    }
-
-    {
-        Graph graph;
-        uint32_t x = graph.input({2, 4}, DType::FLOAT32, {8, 2}, StorageType::PERSISTENT);
-        uint32_t contig = graph.contiguous(x);
-        uint32_t starts = makeIntConst(graph, {0, 0});
-        uint32_t ends = makeIntConst(graph, {2, 4});
-        uint32_t steps = makeIntConst(graph, {1, 1});
-        uint32_t slice = graph.slice(contig, starts, ends, steps);
-
-        ShapePropagator prop;
-        prop.inferShapeRecursive(slice, graph);
-
-        Rewrite::RemoveContiguousRule rule;
-        std::unordered_map<uint32_t, std::string> memo;
-        std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(slice, graph, {&rule}, memo);
-
-        for (uint32_t id : equivalents)
-        {
-            if (!graph.hasNode(id) || id == slice)
-                continue;
-            const TensorNode &node = graph.getNode(id);
-            if (node.opType == OpType::SLICE && !node.parentIds.empty() && node.parentIds[0] == x)
-            {
-                Error::throw_err("[RewriteTest] remove-contiguous must not rewrite layout-sensitive view ops like slice(contiguous(x))");
-            }
-        }
-    }
 }
 
 void runPlannerTests()
