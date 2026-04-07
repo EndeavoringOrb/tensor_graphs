@@ -66,4 +66,4 @@ inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std:
     }
 }
 
-REGISTER_REF_KERNEL(OpType::SCATTER, 5, matchScatterF32_ND, runScatterF32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL(OpType::SCATTER, 5, matchScatterF32_ND, runScatterF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {8}, {8}, {8}}, {false, false, false, false, false});

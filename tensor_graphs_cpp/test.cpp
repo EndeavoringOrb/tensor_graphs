@@ -427,6 +427,117 @@ void runRewriteTests()
         if (!findEquivalent(equivalents, graph2, OpType::COPY_TO))
             Error::throw_err("[RewriteTest] scatter(copyto(...)) should rewrite to copyto(scatter(...))");
     }
+
+    {
+        Graph graph;
+        uint32_t x = graph.input({2, 2}, DType::FLOAT32, {4, 2}, StorageType::PERSISTENT);
+        uint32_t y = makeFloatInput(graph, {2, 2}, Backend::CPU);
+        uint32_t contig = graph.contiguous(x);
+        uint32_t add = graph.add(contig, y);
+
+        ShapePropagator prop;
+        prop.inferShapeRecursive(add, graph);
+
+        Rewrite::RemoveContiguousRule rule;
+        std::unordered_map<uint32_t, std::string> memo;
+        std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(add, graph, {&rule}, memo);
+
+        bool removedContiguous = false;
+        for (uint32_t id : equivalents)
+        {
+            if (!graph.hasNode(id))
+                continue;
+            const TensorNode &node = graph.getNode(id);
+            if (node.opType == OpType::ADD && node.parentIds.size() == 2 && node.parentIds[0] == x)
+            {
+                removedContiguous = true;
+                break;
+            }
+        }
+
+        if (!removedContiguous)
+            Error::throw_err("[RewriteTest] remove-contiguous should rewrite materializing ops like add(contiguous(x), y)");
+    }
+
+    {
+        Graph graph;
+        uint32_t x = graph.input({2, 4}, DType::FLOAT32, {8, 2}, StorageType::PERSISTENT);
+        uint32_t contig = graph.contiguous(x);
+        uint32_t starts = makeIntConst(graph, {0, 0});
+        uint32_t ends = makeIntConst(graph, {2, 4});
+        uint32_t steps = makeIntConst(graph, {1, 1});
+        uint32_t slice = graph.slice(contig, starts, ends, steps);
+
+        ShapePropagator prop;
+        prop.inferShapeRecursive(slice, graph);
+
+        Rewrite::RemoveContiguousRule rule;
+        std::unordered_map<uint32_t, std::string> memo;
+        std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(slice, graph, {&rule}, memo);
+
+        for (uint32_t id : equivalents)
+        {
+            if (!graph.hasNode(id) || id == slice)
+                continue;
+            const TensorNode &node = graph.getNode(id);
+            if (node.opType == OpType::SLICE && !node.parentIds.empty() && node.parentIds[0] == x)
+            {
+                Error::throw_err("[RewriteTest] remove-contiguous must not rewrite layout-sensitive view ops like slice(contiguous(x))");
+            }
+        }
+    }
+}
+
+void runPlannerTests()
+{
+    std::cout << "planner tests" << std::endl
+              << std::flush;
+
+    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
+    {
+        return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
+    };
+
+    {
+        Graph graph;
+        uint32_t x = graph.input({2, 4}, DType::FLOAT32, {8, 2}, StorageType::PERSISTENT);
+        uint32_t contig = graph.contiguous(x);
+        uint32_t starts = makeIntConst(graph, {0, 0});
+        uint32_t ends = makeIntConst(graph, {2, 4});
+        uint32_t steps = makeIntConst(graph, {1, 1});
+        uint32_t slice = graph.slice(contig, starts, ends, steps);
+        uint32_t newShape = makeIntConst(graph, {8});
+        uint32_t reshape = graph.reshape(slice, newShape);
+
+        ShapePropagator prop;
+        prop.inferShapeRecursive(reshape, graph);
+
+        CostModel costModel;
+        Planner planner(costModel);
+
+        std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions;
+        dirtyOutputRegions[reshape] = makeFull(graph.getNode(reshape).getShape());
+        std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions;
+        std::unordered_set<uint32_t> cachedNodes;
+
+        try
+        {
+            planner.plan(reshape, graph, dirtyOutputRegions, dirtyInputRegions, cachedNodes, false);
+        }
+        catch (const std::exception &e)
+        {
+            Error::throw_err("[PlannerTest] baseline planning failed for reshape(slice(contiguous(x))). " + std::string(e.what()));
+        }
+
+        try
+        {
+            planner.plan(reshape, graph, dirtyOutputRegions, dirtyInputRegions, cachedNodes, true);
+        }
+        catch (const std::exception &e)
+        {
+            Error::throw_err("[PlannerTest] saturated planning failed after remove-contiguous rewrite. " + std::string(e.what()));
+        }
+    }
 }
 
 // Topological sort of graph nodes from given roots
@@ -1138,6 +1249,7 @@ int main()
     runRegionMergeTests();
     runShapePropagationTests();
     runRewriteTests();
+    runPlannerTests();
 
     std::cout << "Running Non-Reference Kernel Tests..." << std::endl;
 

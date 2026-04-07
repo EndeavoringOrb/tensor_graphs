@@ -26,4 +26,4 @@ inline void runMulF32_ND(const std::vector<const void *> &inputs, const std::vec
     }
 }
 
-REGISTER_REF_KERNEL(OpType::MUL, 2, matchMulF32_ND, runMulF32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL(OpType::MUL, 2, matchMulF32_ND, runMulF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{8, 32}, {8, 32}}, {false, false});

@@ -18,4 +18,4 @@ inline void runFillF32_ND(const std::vector<const void *> &inputs, const std::ve
         out[i] = val;
 }
 
-REGISTER_REF_KERNEL(OpType::FILL, 2, matchFillF32_ND, runFillF32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL(OpType::FILL, 2, matchFillF32_ND, runFillF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {false, false});

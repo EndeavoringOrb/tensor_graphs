@@ -38,4 +38,4 @@ inline void runNegF32_ND(const std::vector<const void *> &inputs, const std::vec
 }
 
 // Register as a CPU kernel for the NEGATE operation
-REGISTER_REF_KERNEL(OpType::NEGATE, 1, matchNegF32_ND, runNegF32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL(OpType::NEGATE, 1, matchNegF32_ND, runNegF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {false});

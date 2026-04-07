@@ -63,4 +63,4 @@ inline void runGatherF32_I32_ND(const std::vector<const void *> &inputs, const s
     }
 }
 
-REGISTER_REF_KERNEL(OpType::GATHER, 2, matchGatherF32_I32_ND, runGatherF32_I32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL(OpType::GATHER, 2, matchGatherF32_I32_ND, runGatherF32_I32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {8}}, {false, false});

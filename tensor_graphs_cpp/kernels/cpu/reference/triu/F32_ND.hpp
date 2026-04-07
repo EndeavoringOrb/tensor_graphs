@@ -32,4 +32,4 @@ inline void runTriuF32_ND(const std::vector<const void *> &inputs, const std::ve
     }
 }
 
-REGISTER_REF_KERNEL(OpType::TRIU, 2, matchTriuF32_ND, runTriuF32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL(OpType::TRIU, 2, matchTriuF32_ND, runTriuF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {false, false});

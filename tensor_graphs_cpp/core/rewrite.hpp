@@ -472,7 +472,21 @@ namespace Rewrite
                         node,
                         {});
 
-                    if (!matches.empty())
+                    bool layoutSensitive = false;
+                    for (uint64_t uid : matches)
+                    {
+                        const KernelEntry &entry = KernelRegistry::get().getKernel(uid);
+                        if (entry.isView || entry.inferView || entry.inplace)
+                        {
+                            layoutSensitive = true;
+                            break;
+                        }
+                    }
+
+                    // Layout-sensitive ops can be value-equivalent while producing different
+                    // output strides, which breaks extraction because an e-class stores only
+                    // one chosen layout per expression class.
+                    if (!matches.empty() && !layoutSensitive)
                     {
                         // Redundancy found! Create a new version of the node using the source directly.
                         std::vector<uint32_t> newParents = parents;
