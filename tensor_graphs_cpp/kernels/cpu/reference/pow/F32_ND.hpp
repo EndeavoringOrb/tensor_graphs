@@ -27,4 +27,4 @@ inline void runPowF32_ND(const std::vector<const void *> &inputs, const std::vec
     }
 }
 
-REGISTER_REF_KERNEL(OpType::POWER, matchPowF32_ND, runPowF32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL(OpType::POWER, 2, matchPowF32_ND, runPowF32_ND, {Backend::CPU});

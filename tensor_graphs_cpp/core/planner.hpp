@@ -1124,6 +1124,7 @@ private:
         Rewrite::DivAddRule dar;
         Rewrite::CopyToContiguousReorderRule ccr;
         Rewrite::CopyToScatterReorderRule csr;
+        Rewrite::RemoveContiguousRule rcr;
         RemoveIdentityRepeatRule rirr;
         AddIdentityRepeatRule airr;
 
@@ -1139,6 +1140,7 @@ private:
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&dar));
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&ccr));
         rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&csr));
+        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&rcr));
         rules.emplace_back(std::make_unique<RemoveIdentityRepeatRule>());
         rules.emplace_back(std::make_unique<AddIdentityRepeatRule>());
         rules.emplace_back(std::make_unique<FusionRule>());

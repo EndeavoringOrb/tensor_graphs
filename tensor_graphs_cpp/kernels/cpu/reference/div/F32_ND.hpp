@@ -26,4 +26,4 @@ inline void runDivF32_ND(const std::vector<const void *> &inputs, const std::vec
     }
 }
 
-REGISTER_REF_KERNEL(OpType::DIVIDE, matchDivF32_ND, runDivF32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL(OpType::DIVIDE, 2, matchDivF32_ND, runDivF32_ND, {Backend::CPU});

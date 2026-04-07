@@ -32,4 +32,4 @@ inline void inferViewSlice(TensorNode &node, const std::vector<TensorNode> &inpu
     node.viewOffset = offset;
 }
 
-REGISTER_REF_KERNEL_VIEW(OpType::SLICE, matchSliceView, inferViewSlice, {Backend::CPU, Backend::CUDA}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}, {1}}, {false, false, false, false});
+REGISTER_REF_KERNEL_VIEW(OpType::SLICE, 4, matchSliceView, inferViewSlice, {Backend::CPU, Backend::CUDA}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}, {1}}, {false, false, false, false});

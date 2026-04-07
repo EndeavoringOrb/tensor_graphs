@@ -429,6 +429,77 @@ namespace Rewrite
         }
     };
 
+    struct RemoveContiguousRule : public RewriteRule
+    {
+        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
+        {
+            if (!graph.hasNode(id))
+                return {};
+
+            const TensorNode &node = graph.getNode(id);
+
+            std::vector<uint32_t> results;
+            const auto &parents = node.parentIds;
+
+            for (size_t i = 0; i < parents.size(); ++i)
+            {
+                uint32_t parentId = parents[i];
+                if (!graph.hasNode(parentId))
+                    continue;
+
+                const TensorNode &parentNode = graph.getNode(parentId);
+
+                // Check if this parent is a 'contiguous' operation
+                if (parentNode.opType == OpType::CONTIGUOUS && !parentNode.parentIds.empty())
+                {
+                    uint32_t sourceId = parentNode.parentIds[0];
+
+                    // Construct hypothetical inputs: replace the CONTIGUOUS node with its source
+                    std::vector<TensorNode> hypoInputs;
+                    hypoInputs.reserve(parents.size());
+                    for (size_t j = 0; j < parents.size(); ++j)
+                    {
+                        uint32_t actualId = (i == j) ? sourceId : parents[j];
+                        hypoInputs.push_back(graph.getNode(actualId));
+                    }
+
+                    // Ask the registry: "Is there any kernel for this Op that supports these inputs?"
+                    auto matches = KernelRegistry::get().findMatchingKernels(
+                        node.opType,
+                        node.opName,
+                        node.backend,
+                        hypoInputs,
+                        node,
+                        {});
+
+                    if (!matches.empty())
+                    {
+                        // Redundancy found! Create a new version of the node using the source directly.
+                        std::vector<uint32_t> newParents = parents;
+                        newParents[i] = sourceId;
+
+                        // We use allocateNode to create a node with identical properties but different parents.
+                        uint32_t newNodeId = graph.allocateNode(
+                                                      node.opType,
+                                                      node.opName,
+                                                      node.dtype,
+                                                      newParents,
+                                                      node.getShape(),
+                                                      node.strides,
+                                                      node.backend,
+                                                      node.storageType,
+                                                      node.contentHash)
+                                                 .id;
+
+                        results.push_back(newNodeId);
+                    }
+                }
+            }
+
+            return results;
+        }
+    };
+
     inline std::vector<uint32_t> generateAllEquivalents(uint32_t rootId, Graph &graph, const std::vector<const RewriteRule *> &rules, std::unordered_map<uint32_t, std::string> &memo)
     {
         std::vector<uint32_t> equivalents;

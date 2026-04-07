@@ -26,4 +26,4 @@ inline void runAddF32_ND(const std::vector<const void *> &inputs, const std::vec
     }
 }
 
-REGISTER_REF_KERNEL(OpType::ADD, matchAddF32_ND, runAddF32_ND, {Backend::CPU});
+REGISTER_REF_KERNEL(OpType::ADD, 2, matchAddF32_ND, runAddF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{8, 32}, {8, 32}}, {false, false});

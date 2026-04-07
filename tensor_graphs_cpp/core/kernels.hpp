@@ -114,6 +114,22 @@ public:
         {
             inBacks.assign(numInputs, backends[0]); // TODO: make input backends std::vector<std::vector<Backend>>
         }
+        if (contiguous.size() != numInputs)
+        {
+            Error::throw_err("[KernelRegistry.registerKernel] expected contiguous.size() == " + std::to_string(numInputs) + " but got " + std::to_string(contiguous.size()) + ". Info:\n" + 
+            "  UID: " + std::to_string(uid) + "\n" + 
+            "  OpType: " + toString(op) + "\n" + 
+            "  OpName: " + opName + "\n" + 
+            "  # Inputs: " + std::to_string(numInputs) + "\n" + 
+            "  # Backends: " + std::to_string(backends.size()) + "\n" + 
+            "  # Input Backends: " + std::to_string(inBacks.size()) + "\n" + 
+            "  Inplace: " + std::to_string(inplace) + "\n" + 
+            "  Is View: " + std::to_string(isView) + "\n" + 
+            "  Is Reference: " + std::to_string(isReference) + "\n" + 
+            "  # DTypes: " + std::to_string(dtypes.size()) + "\n" + 
+            "  # Dummy Shapes: " + std::to_string(dummyShapes.size()) + "\n" + 
+            "  # Contiguous: " + std::to_string(contiguous.size()) + "\n");
+        }
         entries.push_back({uid, op, opName, numInputs, backends, inBacks, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous});
         if (refFactory && op == OpType::FUSED)
         {
@@ -167,6 +183,18 @@ public:
                 }
             }
             if (!inputBackendsMatch)
+                continue;
+
+            bool contigMatch = true;
+            for (size_t i = 0; i < inputs.size(); ++i)
+            {
+                if (entry.requiresContiguous[i] && !isContiguous(inputs[i]))
+                {
+                    contigMatch = false;
+                    break;
+                }
+            }
+            if (!contigMatch)
                 continue;
 
             if (entry.match(inputs, output, refCounts))
@@ -235,14 +263,14 @@ struct KernelRegistrar
 #define REGISTER_KERNEL_INPLACE_VIEW(opName, numInputs, match, run, refFactory, inferView, ...)
 #endif
 
-#define REGISTER_REF_KERNEL_INTERNAL(uid, op, match, run, ...) \
-    static KernelRegistrar _registrar_##run(uid, op, "", 0, match, run, nullptr, false, false, true, nullptr, __VA_ARGS__)
+#define REGISTER_REF_KERNEL_INTERNAL(uid, op, n, match, run, ...) \
+    static KernelRegistrar _registrar_##run(uid, op, "", n, match, run, nullptr, false, false, true, nullptr, __VA_ARGS__)
 
-#define REGISTER_REF_KERNEL_INPLACE_INTERNAL(uid, op, match, run, ...) \
-    static KernelRegistrar _registrar_##run(uid, op, "", 0, match, run, nullptr, true, false, true, nullptr, __VA_ARGS__)
+#define REGISTER_REF_KERNEL_INPLACE_INTERNAL(uid, op, n, match, run, ...) \
+    static KernelRegistrar _registrar_##run(uid, op, "", n, match, run, nullptr, true, false, true, nullptr, __VA_ARGS__)
 
-#define REGISTER_REF_KERNEL_VIEW_INTERNAL(uid, op, match, inferView, ...) \
-    static KernelRegistrar _registrar_##inferView(uid, op, "", 0, match, nullptr, nullptr, false, true, true, inferView, __VA_ARGS__)
+#define REGISTER_REF_KERNEL_VIEW_INTERNAL(uid, op, n, match, inferView, ...) \
+    static KernelRegistrar _registrar_##inferView(uid, op, "", n, match, nullptr, nullptr, false, true, true, inferView, __VA_ARGS__)
 
 #define REGISTER_KERNEL_INTERNAL(uid, opName, numInputs, match, run, refFactory, ...) \
     static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, numInputs, match, run, refFactory, false, false, false, nullptr, __VA_ARGS__)

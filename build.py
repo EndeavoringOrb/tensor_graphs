@@ -194,13 +194,13 @@ def generate_kernel_includes(core_seed):
             f.write(f"#undef REGISTER_KERNEL_VIEW\n")
 
             f.write(
-                f"#define REGISTER_REF_KERNEL(op, m, r, ...) REGISTER_REF_KERNEL_INTERNAL({uid}, op, m, r, __VA_ARGS__)\n"
+                f"#define REGISTER_REF_KERNEL(op, n, m, r, ...) REGISTER_REF_KERNEL_INTERNAL({uid}, op, n, m, r, __VA_ARGS__)\n"
             )
             f.write(
-                f"#define REGISTER_REF_KERNEL_INPLACE(op, m, r, ...) REGISTER_REF_KERNEL_INPLACE_INTERNAL({uid}, op, m, r, __VA_ARGS__)\n"
+                f"#define REGISTER_REF_KERNEL_INPLACE(op, n, m, r, ...) REGISTER_REF_KERNEL_INPLACE_INTERNAL({uid}, op, n, m, r, __VA_ARGS__)\n"
             )
             f.write(
-                f"#define REGISTER_REF_KERNEL_VIEW(op, m, inview, ...) REGISTER_REF_KERNEL_VIEW_INTERNAL({uid}, op, m, inview, __VA_ARGS__)\n"
+                f"#define REGISTER_REF_KERNEL_VIEW(op, n, m, inview, ...) REGISTER_REF_KERNEL_VIEW_INTERNAL({uid}, op, n, m, inview, __VA_ARGS__)\n"
             )
             f.write(
                 f"#define REGISTER_KERNEL(name, n, m, r, ref, ...) REGISTER_KERNEL_INTERNAL({uid}, name, n, m, r, ref, __VA_ARGS__)\n"
