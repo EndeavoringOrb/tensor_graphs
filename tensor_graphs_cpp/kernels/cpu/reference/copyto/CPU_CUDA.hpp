@@ -99,5 +99,5 @@ inline void runCopyTo_CPU_CUDA(const std::vector<const void *> &inputs, const st
     }
 }
 
-REGISTER_REF_KERNEL(OpType::COPY_TO, 1, matchCopyTo_CPU_CUDA, runCopyTo_CPU_CUDA, {Backend::CUDA}, {DType::FLOAT32}, {{8, 32}}, {false});
+REGISTER_REF_KERNEL(OpType::COPY_TO, 1, matchCopyTo_CPU_CUDA, runCopyTo_CPU_CUDA, {Backend::CUDA}, {DType::FLOAT32}, {{8, 32}}, {false}, {Backend::CPU});
 #endif

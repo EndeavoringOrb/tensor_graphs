@@ -44,7 +44,7 @@ struct Record
     std::vector<DType> outputDTypes;
     std::vector<std::vector<uint8_t>> inputConstants;
     std::vector<Backend> backends;
-    std::vector<Backend> inputBackends;
+    std::vector<std::vector<Backend>> inputBackends;
     float runTime;
 };
 
@@ -85,7 +85,7 @@ inline void from_json(const json &j, Record &r)
     r.outputDTypes = j.at("outputDTypes").get<std::vector<DType>>();
     r.inputConstants = j.at("inputConstants").get<std::vector<std::vector<uint8_t>>>();
     r.backends = j.at("backends").get<std::vector<Backend>>();
-    r.inputBackends = j.at("inputBackends").get<std::vector<Backend>>();
+    r.inputBackends = j.at("inputBackends").get<std::vector<std::vector<Backend>>>();
 
     r.runTime = j.at("runTime").get<float>();
 }

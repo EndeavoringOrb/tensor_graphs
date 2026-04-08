@@ -942,18 +942,30 @@ private:
         uint32_t addFusedNode(Graph &graph, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &parentIds, const TensorNode &refNode) const
         {
             std::vector<uint32_t> adaptedParents;
+            if (parentIds.size() != kernel.numInputs)
+            {
+                Error::throw_err("[addFusedNode] parentIds.size() != kernel.numInputs. Info:\n  Kernel: " + kernel.opName + "\n" +
+                                 "  Parent IDs: " + std::to_string(parentIds.size()) + "\n" +
+                                 "  Kernel Num Inputs: " + std::to_string(kernel.numInputs) + "\n");
+            }
             for (size_t i = 0; i < parentIds.size(); ++i)
             {
                 uint32_t pid = parentIds[i];
                 const TensorNode &parent = graph.getNode(pid);
 
-                Backend expectedBackend = targetBackend;
-                if (i < kernel.inputBackends.size())
+                Backend expectedBackend = kernel.inputBackends[i][0];
+                bool foundBackend = false;
+                for (Backend b : kernel.inputBackends[i])
                 {
-                    expectedBackend = kernel.inputBackends[i];
+                    if (parent.backend == b)
+                    {
+                        expectedBackend = parent.backend;
+                        foundBackend = true;
+                        break;
+                    }
                 }
 
-                bool needCopy = (parent.backend != expectedBackend);
+                bool needCopy = !foundBackend;
                 bool needContig = false;
                 if (i < kernel.requiresContiguous.size()) // TODO: add error if not?
                 {
@@ -1376,21 +1388,20 @@ private:
 
                         for (size_t i = 0; i < inputs.size(); ++i)
                         {
-                            Backend expectedBack = enode.backend;
-                            if (entry && i < entry->inputBackends.size())
+                            bool inputBackendMatch = false;
+                            for (uint32_t j = 0; j < entry->inputBackends[i].size(); j++)
                             {
-                                expectedBack = entry->inputBackends[i];
+                                if (inputs[i].backend == entry->inputBackends[i][j])
+                                {
+                                    inputBackendMatch = true;
+                                    break;
+                                }
                             }
-
-                            if (inputs[i].backend != expectedBack)
+                            backendMatch = backendMatch && inputBackendMatch;
+                            if (!backendMatch)
                             {
-                                backendMatch = false;
-                                break;
+                                continue;
                             }
-                        }
-                        if (!backendMatch)
-                        {
-                            continue;
                         }
                     }
 

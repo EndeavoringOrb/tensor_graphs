@@ -75,7 +75,7 @@ struct KernelEntry
     std::string opName;
     uint32_t numInputs;
     std::vector<Backend> backends;
-    std::vector<Backend> inputBackends;
+    std::vector<std::vector<Backend>> inputBackends;
     MatchFunc match;
     KernelFunc run;
     ReferenceFactory refFactory;
@@ -107,30 +107,41 @@ public:
                         const std::vector<DType> &dtypes,
                         const std::vector<std::vector<uint32_t>> &dummyShapes,
                         const std::vector<bool> &contiguous,
-                        const std::vector<Backend> &inputBackends = {})
+                        const std::vector<std::vector<Backend>> &inputBackends)
     {
-        std::vector<Backend> inBacks = inputBackends;
-        if (inBacks.empty() && numInputs > 0 && !backends.empty())
+        if (inputBackends.size() != numInputs)
         {
-            inBacks.assign(numInputs, backends[0]); // TODO: make input backends std::vector<std::vector<Backend>>
+            Error::throw_err("[KernelRegistry.registerKernel] expected inputBackends.size() == " + std::to_string(numInputs) + " but got " + std::to_string(inputBackends.size()) + ". Info:\n" +
+                             "  UID: " + std::to_string(uid) + "\n" +
+                             "  OpType: " + toString(op) + "\n" +
+                             "  OpName: " + opName + "\n" +
+                             "  # Inputs: " + std::to_string(numInputs) + "\n" +
+                             "  # Backends: " + std::to_string(backends.size()) + "\n" +
+                             "  # Input Backends: " + std::to_string(inputBackends.size()) + "\n" +
+                             "  Inplace: " + std::to_string(inplace) + "\n" +
+                             "  Is View: " + std::to_string(isView) + "\n" +
+                             "  Is Reference: " + std::to_string(isReference) + "\n" +
+                             "  # DTypes: " + std::to_string(dtypes.size()) + "\n" +
+                             "  # Dummy Shapes: " + std::to_string(dummyShapes.size()) + "\n" +
+                             "  # Contiguous: " + std::to_string(contiguous.size()) + "\n");
         }
         if (contiguous.size() != numInputs)
         {
-            Error::throw_err("[KernelRegistry.registerKernel] expected contiguous.size() == " + std::to_string(numInputs) + " but got " + std::to_string(contiguous.size()) + ". Info:\n" + 
-            "  UID: " + std::to_string(uid) + "\n" + 
-            "  OpType: " + toString(op) + "\n" + 
-            "  OpName: " + opName + "\n" + 
-            "  # Inputs: " + std::to_string(numInputs) + "\n" + 
-            "  # Backends: " + std::to_string(backends.size()) + "\n" + 
-            "  # Input Backends: " + std::to_string(inBacks.size()) + "\n" + 
-            "  Inplace: " + std::to_string(inplace) + "\n" + 
-            "  Is View: " + std::to_string(isView) + "\n" + 
-            "  Is Reference: " + std::to_string(isReference) + "\n" + 
-            "  # DTypes: " + std::to_string(dtypes.size()) + "\n" + 
-            "  # Dummy Shapes: " + std::to_string(dummyShapes.size()) + "\n" + 
-            "  # Contiguous: " + std::to_string(contiguous.size()) + "\n");
+            Error::throw_err("[KernelRegistry.registerKernel] expected contiguous.size() == " + std::to_string(numInputs) + " but got " + std::to_string(contiguous.size()) + ". Info:\n" +
+                             "  UID: " + std::to_string(uid) + "\n" +
+                             "  OpType: " + toString(op) + "\n" +
+                             "  OpName: " + opName + "\n" +
+                             "  # Inputs: " + std::to_string(numInputs) + "\n" +
+                             "  # Backends: " + std::to_string(backends.size()) + "\n" +
+                             "  # Input Backends: " + std::to_string(inputBackends.size()) + "\n" +
+                             "  Inplace: " + std::to_string(inplace) + "\n" +
+                             "  Is View: " + std::to_string(isView) + "\n" +
+                             "  Is Reference: " + std::to_string(isReference) + "\n" +
+                             "  # DTypes: " + std::to_string(dtypes.size()) + "\n" +
+                             "  # Dummy Shapes: " + std::to_string(dummyShapes.size()) + "\n" +
+                             "  # Contiguous: " + std::to_string(contiguous.size()) + "\n");
         }
-        entries.push_back({uid, op, opName, numInputs, backends, inBacks, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous});
+        entries.push_back({uid, op, opName, numInputs, backends, inputBackends, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory, dtypes, dummyShapes);
@@ -170,20 +181,26 @@ public:
             if (op == OpType::FUSED && entry.opName != opName)
                 continue;
 
-            bool inputBackendsMatch = true;
-            if (!inputs.empty() && !entry.inputBackends.empty())
+            if (inputs.size() != entry.inputBackends.size())
             {
-                for (size_t i = 0; i < inputs.size() && i < entry.inputBackends.size(); ++i)
+                Error::throw_err("[KernelRegistry.findMatchingKernels] expected # inputs to equal # input backends but got " + std::to_string(inputs.size()) + " inputs and " + std::to_string(entry.inputBackends.size()) + " input backends");
+            }
+            bool inputBackendsMatch = true;
+            for (uint32_t i = 0; i < inputs.size(); ++i)
+            {
+                bool currentInputMatch = false;
+                for (uint32_t j = 0; j < entry.inputBackends[i].size(); j++)
                 {
-                    if (inputs[i].backend != entry.inputBackends[i])
+                    if (inputs[i].backend == entry.inputBackends[i][j])
                     {
-                        inputBackendsMatch = false;
+                        currentInputMatch = true;
                         break;
                     }
                 }
+                inputBackendsMatch = inputBackendsMatch && currentInputMatch;
+                if (!inputBackendsMatch)
+                    continue;
             }
-            if (!inputBackendsMatch)
-                continue;
 
             bool contigMatch = true;
             for (size_t i = 0; i < inputs.size(); ++i)
@@ -239,7 +256,7 @@ struct KernelRegistrar
                     const std::vector<DType> &dtypes = {},
                     const std::vector<std::vector<uint32_t>> &dummyShapes = {},
                     const std::vector<bool> &contiguous = {},
-                    const std::vector<Backend> &inputBackends = {})
+                    const std::vector<std::vector<Backend>> &inputBackends = {})
     {
         KernelRegistry::get().registerKernel(uid, op, opName, numInputs, backends, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous, inputBackends);
     }
