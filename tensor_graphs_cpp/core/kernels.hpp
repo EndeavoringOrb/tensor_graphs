@@ -74,6 +74,7 @@ struct KernelEntry
     OpType opType;
     std::string opName;
     uint32_t numInputs;
+    bool isVariadic;
     std::vector<Backend> backends;
     std::vector<std::vector<Backend>> inputBackends;
     MatchFunc match;
@@ -109,7 +110,8 @@ public:
                         const std::vector<bool> &contiguous,
                         const std::vector<std::vector<Backend>> &inputBackends)
     {
-        if (inputBackends.size() != numInputs)
+        bool isVariadic = (op == OpType::CONCAT);
+        if (!isVariadic && inputBackends.size() != numInputs)
         {
             Error::throw_err("[KernelRegistry.registerKernel] expected inputBackends.size() == " + std::to_string(numInputs) + " but got " + std::to_string(inputBackends.size()) + ". Info:\n" +
                              "  UID: " + std::to_string(uid) + "\n" +
@@ -125,7 +127,7 @@ public:
                              "  # Dummy Shapes: " + std::to_string(dummyShapes.size()) + "\n" +
                              "  # Contiguous: " + std::to_string(contiguous.size()) + "\n");
         }
-        if (contiguous.size() != numInputs)
+        if (!isVariadic && contiguous.size() != numInputs)
         {
             Error::throw_err("[KernelRegistry.registerKernel] expected contiguous.size() == " + std::to_string(numInputs) + " but got " + std::to_string(contiguous.size()) + ". Info:\n" +
                              "  UID: " + std::to_string(uid) + "\n" +
@@ -141,7 +143,7 @@ public:
                              "  # Dummy Shapes: " + std::to_string(dummyShapes.size()) + "\n" +
                              "  # Contiguous: " + std::to_string(contiguous.size()) + "\n");
         }
-        entries.push_back({uid, op, opName, numInputs, backends, inputBackends, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous});
+        entries.push_back({uid, op, opName, numInputs, isVariadic, backends, inputBackends, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory, dtypes, dummyShapes);
@@ -181,17 +183,25 @@ public:
             if (op == OpType::FUSED && entry.opName != opName)
                 continue;
 
-            if (inputs.size() != entry.inputBackends.size())
+            if (entry.isVariadic)
+            {
+                if (inputs.size() < 2)
+                    continue; // Must have at least 1 tensor + 1 axis
+            }
+            else if (inputs.size() != entry.inputBackends.size())
             {
                 Error::throw_err("[KernelRegistry.findMatchingKernels] expected # inputs to equal # input backends but got " + std::to_string(inputs.size()) + " inputs and " + std::to_string(entry.inputBackends.size()) + " input backends");
             }
             bool inputBackendsMatch = true;
             for (uint32_t i = 0; i < inputs.size(); ++i)
             {
+                // Map to the correct rule index for variadic inputs
+                size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+
                 bool currentInputMatch = false;
-                for (uint32_t j = 0; j < entry.inputBackends[i].size(); j++)
+                for (uint32_t j = 0; j < entry.inputBackends[ruleIdx].size(); j++)
                 {
-                    if (inputs[i].backend == entry.inputBackends[i][j])
+                    if (inputs[i].backend == entry.inputBackends[ruleIdx][j])
                     {
                         currentInputMatch = true;
                         break;
@@ -199,13 +209,16 @@ public:
                 }
                 inputBackendsMatch = inputBackendsMatch && currentInputMatch;
                 if (!inputBackendsMatch)
-                    continue;
+                    break;
             }
+            if (!inputBackendsMatch)
+                continue;
 
             bool contigMatch = true;
             for (size_t i = 0; i < inputs.size(); ++i)
             {
-                if (entry.requiresContiguous[i] && !isContiguous(inputs[i]))
+                size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                if (entry.requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
                 {
                     contigMatch = false;
                     break;

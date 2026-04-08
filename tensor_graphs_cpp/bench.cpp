@@ -165,10 +165,26 @@ int main()
 
             for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
-                if (idx < kernel.inputBackends.size())
-                    inIsCuda[idx] = (kernel.inputBackends[idx] == Backend::CUDA);
+                size_t ruleIdx = idx;
+                if (kernel.isVariadic)
+                {
+                    ruleIdx = (idx == r.inputShapes.size() - 1) ? kernel.inputBackends.size() - 1 : 0;
+                }
+
+                if (ruleIdx < kernel.inputBackends.size())
+                {
+                    bool hasCuda = false;
+                    for (Backend b : kernel.inputBackends[ruleIdx])
+                    {
+                        if (b == Backend::CUDA)
+                            hasCuda = true;
+                    }
+                    inIsCuda[idx] = hasCuda;
+                }
                 else
+                {
                     inIsCuda[idx] = runCuda;
+                }
             }
             bool isOutputCuda = runCuda;
 

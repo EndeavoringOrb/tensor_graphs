@@ -429,6 +429,59 @@ namespace Rewrite
         }
     };
 
+    // op(contiguous(x)) -> op(x)
+    struct RemoveContiguousRule : public RewriteRule
+    {
+        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
+        {
+            if (!graph.hasNode(id))
+                return {};
+
+            TensorNode node = graph.getNode(id); // copy by value to avoid corruption if allocateNode triggers map rehashing
+
+            // INPUT nodes have no parents, so skip them
+            if (node.opType == OpType::INPUT)
+                return {};
+
+            bool hasContiguousParent = false;
+            std::vector<uint32_t> newParents = node.parentIds;
+
+            // Look for any parent that is a CONTIGUOUS operation
+            for (size_t i = 0; i < newParents.size(); ++i)
+            {
+                uint32_t pid = newParents[i];
+                if (graph.hasNode(pid))
+                {
+                    // Copy by value here as well just to be perfectly safe
+                    TensorNode parent = graph.getNode(pid);
+                    if (parent.opType == OpType::CONTIGUOUS && !parent.parentIds.empty())
+                    {
+                        // Bypass the CONTIGUOUS node, point directly to its source
+                        newParents[i] = parent.parentIds[0];
+                        hasContiguousParent = true;
+                    }
+                }
+            }
+
+            if (hasContiguousParent)
+            {
+                TensorNode &newNode = graph.allocateNode(
+                    node.opType,
+                    node.opName,
+                    node.dtype,
+                    newParents,
+                    node.getShape(),
+                    node.strides,
+                    node.backend,
+                    node.storageType,
+                    node.contentHash);
+                return {newNode.id};
+            }
+
+            return {};
+        }
+    };
+
     inline std::vector<uint32_t> generateAllEquivalents(uint32_t rootId, Graph &graph, const std::vector<const RewriteRule *> &rules, std::unordered_map<uint32_t, std::string> &memo)
     {
         std::vector<uint32_t> equivalents;
