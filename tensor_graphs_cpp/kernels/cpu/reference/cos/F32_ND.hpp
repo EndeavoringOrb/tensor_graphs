@@ -20,4 +20,4 @@ inline void runCosF32_ND(const std::vector<const void *> &inputs, const std::vec
         out[i] = std::cos(in[i]);
 }
 
-REGISTER_REF_KERNEL(OpType::COS, 1, matchCosF32_ND, runCosF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {false});
+REGISTER_REF_KERNEL(OpType::COS, 1, matchCosF32_ND, runCosF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {false}, {{Backend::CPU}});

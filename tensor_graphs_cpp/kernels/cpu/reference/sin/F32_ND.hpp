@@ -20,4 +20,4 @@ inline void runSinF32_ND(const std::vector<const void *> &inputs, const std::vec
         out[i] = std::sin(in[i]);
 }
 
-REGISTER_REF_KERNEL(OpType::SIN, 1, matchSinF32_ND, runSinF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {false});
+REGISTER_REF_KERNEL(OpType::SIN, 1, matchSinF32_ND, runSinF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {false}, {{Backend::CPU}});

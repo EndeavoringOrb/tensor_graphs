@@ -47,4 +47,4 @@ inline void runSumF32_ND(const std::vector<const void *> &inputs, const std::vec
     }
 }
 
-REGISTER_REF_KERNEL(OpType::SUM, 2, matchSumF32_ND, runSumF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {false, false});
+REGISTER_REF_KERNEL(OpType::SUM, 2, matchSumF32_ND, runSumF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});

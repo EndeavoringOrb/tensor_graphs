@@ -70,4 +70,4 @@ uint32_t refFactoryTanh(const std::vector<uint32_t> &inputs, Graph &graph)
     return graph.div(num, den);
 }
 
-REGISTER_KERNEL("Tanh", 1, matchTanhF32_1D, runTanhF32_1D, refFactoryTanh, {Backend::CPU}, {DType::FLOAT32}, {{1}}, {true});
+REGISTER_KERNEL("Tanh", 1, matchTanhF32_1D, runTanhF32_1D, refFactoryTanh, {Backend::CPU}, {DType::FLOAT32}, {{1}}, {true}, {{Backend::CPU}});

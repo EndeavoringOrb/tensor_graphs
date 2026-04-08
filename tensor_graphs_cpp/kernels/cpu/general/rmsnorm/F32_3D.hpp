@@ -133,4 +133,4 @@ inline uint32_t refFactoryRMSNorm(const std::vector<uint32_t> &inputs, Graph &gr
     return graph.mul(x_norm, scale);
 }
 
-REGISTER_KERNEL("RMSNorm", 2, matchRMSNormF32_3D, runRMSNormF32_3D, refFactoryRMSNorm, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true});
+REGISTER_KERNEL("RMSNorm", 2, matchRMSNormF32_3D, runRMSNormF32_3D, refFactoryRMSNorm, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});

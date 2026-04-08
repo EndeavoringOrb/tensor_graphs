@@ -104,4 +104,4 @@ inline uint32_t refFactoryGelu(const std::vector<uint32_t> &inputs, Graph &graph
     return graph.mul(term5, term4);
 }
 
-REGISTER_KERNEL("Gelu", 1, matchGeluF32_ND, runGeluF32_ND, refFactoryGelu, {Backend::CPU}, {DType::FLOAT32}, {{1, 1, 2048}}, {true});
+REGISTER_KERNEL("Gelu", 1, matchGeluF32_ND, runGeluF32_ND, refFactoryGelu, {Backend::CPU}, {DType::FLOAT32}, {{1, 1, 2048}}, {true}, {{Backend::CPU}});

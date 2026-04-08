@@ -53,4 +53,4 @@ inline uint32_t refFactoryMul3D_Scalar(const std::vector<uint32_t> &inputs, Grap
     return graph.mul(inputs[0], out);
 }
 
-REGISTER_KERNEL("Mul_3D_Scalar", 2, matchMulFP32_3D_Scalar, runMulFP32_3D_Scalar, refFactoryMul3D_Scalar, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true});
+REGISTER_KERNEL("Mul_3D_Scalar", 2, matchMulFP32_3D_Scalar, runMulFP32_3D_Scalar, refFactoryMul3D_Scalar, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});

@@ -147,7 +147,7 @@ REGISTER_KERNEL("Permute_CUDA_Contiguous", 2, matchPermute_CUDA_ND, runPermute_C
     {DType::FLOAT32, DType::INT32}, // Data, Indices
     {{1024, 640}, {2}},             // Dummy shapes
     {true, true},                   // Contiguity requirements for match
-    {Backend::CUDA, Backend::CPU}   // Input backends
+    {{Backend::CUDA}, {Backend::CPU}}   // Input backends
 );
 
 #endif

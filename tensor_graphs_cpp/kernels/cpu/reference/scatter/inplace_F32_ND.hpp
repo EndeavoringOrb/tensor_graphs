@@ -68,4 +68,4 @@ inline void runInplaceScatterF32_ND(const std::vector<const void *> &inputs, con
     }
 }
 
-REGISTER_REF_KERNEL_INPLACE(OpType::SCATTER, 5, matchScatterF32_ND_Inplace, runInplaceScatterF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {8}, {8}, {8}}, {false, false, false, false, false});
+REGISTER_REF_KERNEL_INPLACE(OpType::SCATTER, 5, matchScatterF32_ND_Inplace, runInplaceScatterF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {8}, {8}, {8}}, {false, false, false, false, false}, {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});

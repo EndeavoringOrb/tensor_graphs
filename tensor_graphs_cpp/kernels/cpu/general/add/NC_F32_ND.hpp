@@ -39,4 +39,4 @@ inline uint32_t refFactoryAddNC_F32_ND(const std::vector<uint32_t> &inputs, Grap
     return graph.add(id0, id1);
 }
 
-REGISTER_KERNEL("Add_NC_F32_ND", 2, matchAddNC_F32_ND, runAddNC_F32_ND, refFactoryAddNC_F32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1, 1, 1}}, {false, false});
+REGISTER_KERNEL("Add_NC_F32_ND", 2, matchAddNC_F32_ND, runAddNC_F32_ND, refFactoryAddNC_F32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1, 1, 1}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});

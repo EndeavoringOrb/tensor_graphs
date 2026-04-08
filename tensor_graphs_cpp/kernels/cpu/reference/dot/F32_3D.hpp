@@ -81,4 +81,4 @@ inline void runDotF32_3D(const std::vector<const void *> &inputs, const std::vec
     }
 }
 
-REGISTER_REF_KERNEL(OpType::DOT, 2, matchDotF32_3D, runDotF32_3D, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {false, false});
+REGISTER_REF_KERNEL(OpType::DOT, 2, matchDotF32_3D, runDotF32_3D, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});

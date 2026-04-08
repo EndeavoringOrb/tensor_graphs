@@ -63,4 +63,4 @@ inline uint32_t refFactoryMul3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     return graph.mul(inputs[0], out);
 }
 
-REGISTER_KERNEL_INPLACE("Mul_3D_1D_inplace", 2, matchMulFP32_3D_1D_Inplace, runMulFP32_3D_1D_Inplace, refFactoryMul3D_1D_Inplace, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true});
+REGISTER_KERNEL_INPLACE("Mul_3D_1D_inplace", 2, matchMulFP32_3D_1D_Inplace, runMulFP32_3D_1D_Inplace, refFactoryMul3D_1D_Inplace, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
