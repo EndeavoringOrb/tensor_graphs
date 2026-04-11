@@ -27,7 +27,7 @@ namespace Error
     }
 }
 
-inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape, const std::vector<int64_t> &strides)
+inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
 {
     uint64_t stridedIndex = 0;
     uint64_t temp = flatIndex;
@@ -269,7 +269,7 @@ inline std::string encodeRegionList(const std::vector<Region> &regions)
     return ss.str();
 }
 
-bool isContiguous(const std::vector<int64_t> &strides, const std::vector<uint32_t> &shape)
+bool isContiguous(const std::vector<uint64_t> &strides, const std::vector<uint32_t> &shape)
 {
     int64_t expectedStride = 1;
     for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
@@ -281,10 +281,10 @@ bool isContiguous(const std::vector<int64_t> &strides, const std::vector<uint32_
     return true;
 }
 
-static std::vector<int64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
+static std::vector<uint64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
 {
-    std::vector<int64_t> newStrides(targetShape.size());
-    int64_t stride = 1;
+    std::vector<uint64_t> newStrides(targetShape.size());
+    uint64_t stride = 1;
     for (int i = static_cast<int>(targetShape.size()) - 1; i >= 0; --i)
     {
         newStrides[i] = stride;
@@ -304,7 +304,7 @@ public:
     std::string opName; // Used if opType == OpType::FUSED
     DType dtype;
     std::vector<uint32_t> parentIds;
-    std::vector<int64_t> strides;
+    std::vector<uint64_t> strides;
     uint64_t viewOffset = 0;
     Backend backend = Backend::CPU;
     StorageType storageType = StorageType::TRANSIENT;
@@ -312,7 +312,7 @@ public:
 
     TensorNode() {}
 
-    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<int64_t> _strides, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "")
+    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "")
         : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), backend(_backend), storageType(_storageType), contentHash(_contentHash)
     {
         if (strides.empty())
@@ -360,7 +360,7 @@ private:
 
 public:
     uint64_t baseOffset = 0;      // Offset into the MemoryManager's DeviceBuffer
-    std::vector<int64_t> strides; // Strides in terms of elements, not bytes
+    std::vector<uint64_t> strides; // Strides in terms of elements, not bytes
     DType dtype;
 
     TensorView() {}
@@ -756,7 +756,7 @@ inline void from_json(const json &j, TensorView &v)
 {
     v.baseOffset = j.at("baseOffset").get<uint64_t>();
     v.setShape(j.at("shape").get<std::vector<uint32_t>>());
-    v.strides = j.at("strides").get<std::vector<int64_t>>();
+    v.strides = j.at("strides").get<std::vector<uint64_t>>();
     v.dtype = j.at("dtype").get<DType>();
 }
 
@@ -783,7 +783,7 @@ inline void from_json(const json &j, TensorNode &n)
     n.dtype = j.at("dtype").get<DType>();
     n.parentIds = j.at("parentIds").get<std::vector<uint32_t>>();
     n.setShape(j.at("shape").get<std::vector<uint32_t>>());
-    n.strides = j.at("strides").get<std::vector<int64_t>>();
+    n.strides = j.at("strides").get<std::vector<uint64_t>>();
     n.viewOffset = j.contains("viewOffset") ? j.at("viewOffset").get<uint64_t>() : 0;
     n.backend = j.at("backend").get<Backend>();
     n.storageType = j.at("storageType").get<StorageType>();

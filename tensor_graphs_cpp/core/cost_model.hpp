@@ -38,8 +38,8 @@ struct Record
 
     std::vector<std::vector<uint32_t>> inputShapes;
     std::vector<std::vector<uint32_t>> outputShapes;
-    std::vector<std::vector<int64_t>> inputStrides;
-    std::vector<std::vector<int64_t>> outputStrides;
+    std::vector<std::vector<uint64_t>> inputStrides;
+    std::vector<std::vector<uint64_t>> outputStrides;
     std::vector<DType> inputDTypes;
     std::vector<DType> outputDTypes;
     std::vector<std::vector<uint8_t>> inputConstants;
@@ -78,8 +78,8 @@ inline void from_json(const json &j, Record &r)
 
     r.inputShapes = j.at("inputShapes").get<std::vector<std::vector<uint32_t>>>();
     r.outputShapes = j.at("outputShapes").get<std::vector<std::vector<uint32_t>>>();
-    r.inputStrides = j.at("inputStrides").get<std::vector<std::vector<int64_t>>>();
-    r.outputStrides = j.at("outputStrides").get<std::vector<std::vector<int64_t>>>();
+    r.inputStrides = j.at("inputStrides").get<std::vector<std::vector<uint64_t>>>();
+    r.outputStrides = j.at("outputStrides").get<std::vector<std::vector<uint64_t>>>();
 
     r.inputDTypes = j.at("inputDTypes").get<std::vector<DType>>();
     r.outputDTypes = j.at("outputDTypes").get<std::vector<DType>>();
@@ -145,9 +145,8 @@ struct CostModel
         std::cout << "Loaded " << valid << " valid records out of " << total << " total records from " << benchmarkPath << std::endl;
     }
 
-    float interpolate(const std::vector<Record> &kernelRecords, const TensorNode &node, const Graph &graph)
+    float interpolate(const std::vector<Record> &kernelRecords, uint64_t targetElements)
     {
-        uint64_t targetElements = countElements(node);
         if (targetElements == 0)
             return 0.0f;
 
@@ -172,31 +171,19 @@ struct CostModel
         return (bestDist == std::numeric_limits<float>::infinity()) ? bestDist : estimatedTime;
     }
 
-    float estimateCost(const TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph, uint64_t kernelUid)
+    float estimateCost(
+        uint64_t kernelUid,
+        const std::vector<uint32_t> &outShape,
+        const std::vector<uint64_t> &_outStrides,
+        DType outDType,
+        const std::vector<std::vector<uint32_t>> &inShapes,
+        const std::vector<std::vector<uint64_t>> &inStrides,
+        const std::vector<DType> &inDTypes,
+        const std::vector<std::vector<uint8_t>> &inConstants)
     {
-        std::vector<std::vector<uint32_t>> inShapes(inputs.size());
-        std::vector<std::vector<int64_t>> inStrides(inputs.size());
-        std::vector<std::vector<uint8_t>> inConstants(inputs.size());
-        std::vector<DType> inDTypes(inputs.size());
-
-        for (size_t i = 0; i < inputs.size(); ++i)
-        {
-            const auto &inNode = inputs[i];
-            inShapes[i] = inNode.getShape();
-            inStrides[i] = inNode.strides;
-            inDTypes[i] = inNode.dtype;
-
-            // Check if this input corresponds to a persistent constant in the global graph
-            if (inNode.opType == OpType::INPUT && inNode.storageType == StorageType::PERSISTENT)
-            {
-                auto stagingIt = graph.constantStaging.find(inNode.id);
-                if (stagingIt != graph.constantStaging.end())
-                    inConstants[i] = stagingIt->second;
-            }
-        }
-        std::vector<std::vector<uint32_t>> outShapes = {node.getShape()};
-        std::vector<std::vector<int64_t>> outStrides = {node.strides};
-        std::vector<DType> outDTypes = {node.dtype};
+        std::vector<std::vector<uint32_t>> outShapes = {outShape};
+        std::vector<DType> outDTypes = {outDType};
+        const std::vector<std::vector<uint64_t>> outStrides = {_outStrides};
 
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS
         {
@@ -247,6 +234,7 @@ struct CostModel
             }
         }
 
-        return interpolate(it->second, node, graph);
+        uint64_t targetElements = countElements(outShape);
+        return interpolate(it->second, targetElements);
     }
 };

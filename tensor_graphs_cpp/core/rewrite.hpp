@@ -3,516 +3,298 @@
 #include "core/hashing.hpp"
 #include "core/kernels.hpp"
 #include "core/shapes.hpp"
+#include "core/egraph.hpp"
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
 #include <queue>
 #include <string>
 
-namespace Rewrite
+struct Rule
 {
-    inline TensorNode makeBackendAdjustedNode(const TensorNode &source, Backend backend, bool makeContiguous = false)
+    virtual ~Rule() = default;
+    virtual bool match(const EGraph &egraph, uint32_t eNodeIdx) const = 0;
+    virtual void apply(EGraph &egraph, uint32_t eNodeIdx) const = 0;
+};
+
+// a*(b+c) -> (a*b)+(a*c)
+struct DistributiveProperty : public Rule
+{
+    bool match(const EGraph &egraph, uint32_t eNodeIdx) const override
     {
-        TensorNode node = source;
-        node.backend = backend;
-        if (makeContiguous)
-        {
-            node.strides = calcContiguousStrides(source.getShape());
-        }
-        return node;
+        const ENode enode = egraph.getENodes()[eNodeIdx];
+        if (enode.opType != OpType::MUL || enode.children.size() != 2)
+            return false;
+
+        return hasOp(egraph, enode.children[0], OpType::ADD) ||
+               hasOp(egraph, enode.children[1], OpType::ADD);
     }
 
-    inline bool hasKernelMatch(OpType opType, const std::vector<TensorNode> &inputs, const TensorNode &output)
+    bool hasOp(const EGraph &egraph, uint32_t eclassId, OpType op) const
     {
-        return !KernelRegistry::get().findMatchingKernels(opType, "", output.backend, inputs, output, {}, false).empty();
+        for (uint32_t enodeId : egraph.getEClass(eclassId).enodes)
+        {
+            if (egraph.getENodes()[enodeId].opType == op)
+                return true;
+        }
+        return false;
     }
 
-    struct RewriteRule
+    uint32_t findOpNode(const EGraph &egraph, uint32_t eclassId, OpType op) const
     {
-        virtual ~RewriteRule() = default;
-        // Applies a rule to the node `id` in `graph`. Returns a list of newly created equivalent node IDs.
-        virtual std::vector<uint32_t> apply(uint32_t id, Graph &graph) const = 0;
-    };
-
-    struct CommutativeRule : public RewriteRule
-    {
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
+        for (uint32_t enodeId : egraph.getEClass(eclassId).enodes)
         {
-            if ((graph.getNode(id).opType == OpType::ADD || graph.getNode(id).opType == OpType::MUL) &&
-                graph.getNode(id).parentIds.size() == 2)
-            {
-                uint32_t p0 = graph.getNode(id).parentIds[0];
-                uint32_t p1 = graph.getNode(id).parentIds[1];
-                if (p0 != p1)
-                {
-                    uint32_t newId = (graph.getNode(id).opType == OpType::ADD) ? graph.add(p1, p0) : graph.mul(p1, p0);
-                    return {newId};
-                }
-            }
-            return {};
+            if (egraph.getENodes()[enodeId].opType == op)
+                return enodeId;
         }
-    };
+        return UINT32_MAX;
+    }
 
-    struct DistributiveRule : public RewriteRule
+    void apply(EGraph &egraph, uint32_t eNodeIdx) const override
     {
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
+        const ENode mulNode = egraph.getENodes()[eNodeIdx];
+        uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
+
+        uint32_t addNodeIdx = findOpNode(egraph, mulNode.children[0], OpType::ADD);
+        bool leftIsAdd = (addNodeIdx != UINT32_MAX);
+
+        if (!leftIsAdd)
         {
-            // Matches: a * (b + c) -> (a * b) + (a * c)
-            if (graph.getNode(id).opType == OpType::MUL && graph.getNode(id).parentIds.size() == 2)
-            {
-                for (int i = 0; i < 2; ++i)
-                {
-                    uint32_t a_id = graph.getNode(id).parentIds[i];
-                    uint32_t add_id = graph.getNode(id).parentIds[1 - i];
-
-                    if (graph.getNode(add_id).opType == OpType::ADD && graph.getNode(add_id).parentIds.size() == 2)
-                    {
-                        uint32_t b = graph.getNode(add_id).parentIds[0];
-                        uint32_t c = graph.getNode(add_id).parentIds[1];
-
-                        uint32_t mul1 = graph.mul(a_id, b);
-                        uint32_t mul2 = graph.mul(a_id, c);
-                        return {graph.add(mul1, mul2)};
-                    }
-                }
-            }
-            return {};
+            addNodeIdx = findOpNode(egraph, mulNode.children[1], OpType::ADD);
+            if (addNodeIdx == UINT32_MAX)
+                return;
         }
+
+        const ENode addNode = egraph.getENodes()[addNodeIdx];
+
+        uint32_t aClassId = leftIsAdd ? mulNode.children[1] : mulNode.children[0];
+        uint32_t bClassId = addNode.children[0];
+        uint32_t cClassId = addNode.children[1];
+
+        // --- 1. Create (a*b) and (a*c) ---
+        uint32_t abClass = egraph.addEClass(mulNode.shape, mulNode.strides, mulNode.dtype, mulNode.backend);
+        uint32_t acClass = egraph.addEClass(mulNode.shape, mulNode.strides, mulNode.dtype, mulNode.backend);
+
+        // Create (a*b)
+        ENode abNode;
+        abNode.kernelUid = mulNode.kernelUid;
+        abNode.opType = OpType::MUL;
+        abNode.opName = mulNode.opName;
+        abNode.children = leftIsAdd ? std::vector<uint32_t>{bClassId, aClassId} : std::vector<uint32_t>{aClassId, bClassId};
+        abNode.shape = mulNode.shape;
+        abNode.strides = mulNode.strides;
+        abNode.dtype = mulNode.dtype;
+        abNode.backend = mulNode.backend;
+        abClass = egraph.addENode(abClass, abNode);
+
+        // Create (a*c)
+        ENode acNode;
+        acNode.kernelUid = mulNode.kernelUid;
+        acNode.opType = OpType::MUL;
+        acNode.opName = mulNode.opName;
+        acNode.children = leftIsAdd ? std::vector<uint32_t>{cClassId, aClassId} : std::vector<uint32_t>{aClassId, cClassId};
+        acNode.shape = mulNode.shape;
+        acNode.strides = mulNode.strides;
+        acNode.dtype = mulNode.dtype;
+        acNode.backend = mulNode.backend;
+        acClass = egraph.addENode(acClass, acNode);
+
+        // --- 2. Create new ADD node ---
+        ENode newAddNode;
+        newAddNode.kernelUid = addNode.kernelUid;
+        newAddNode.opType = OpType::ADD;
+        newAddNode.opName = addNode.opName;
+        newAddNode.children = {abClass, acClass};
+        newAddNode.shape = mulNode.shape;
+        newAddNode.strides = mulNode.strides;
+        newAddNode.dtype = mulNode.dtype;
+        newAddNode.backend = mulNode.backend;
+
+        egraph.addENode(eclassId, newAddNode);
+    }
+};
+
+struct FusionRule : public Rule
+{
+    struct Pattern
+    {
+        std::string opName;
+        uint32_t rootId;
+        std::vector<uint32_t> variables;
+        std::vector<DType> dtypes;
+        std::vector<std::vector<uint32_t>> dummyShapes;
+        Graph graph;
     };
 
-    struct FactoringRule : public RewriteRule
-    {
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
-        {
-            // Matches: (a * b) + (a * c) -> a * (b + c)
-            if (graph.getNode(id).opType == OpType::ADD && graph.getNode(id).parentIds.size() == 2)
-            {
-                uint32_t m1_id = graph.getNode(id).parentIds[0];
-                uint32_t m2_id = graph.getNode(id).parentIds[1];
+    std::vector<Pattern> patterns;
 
-                if (graph.getNode(m1_id).opType == OpType::MUL && graph.getNode(m2_id).opType == OpType::MUL &&
-                    graph.getNode(m1_id).parentIds.size() == 2 && graph.getNode(m2_id).parentIds.size() == 2)
+    FusionRule()
+    {
+        const auto &refGraphs = ReferenceGraphRegistry::get().getAll();
+        for (const auto &pair : refGraphs)
+        {
+            Pattern pattern;
+            pattern.opName = pair.first;
+            const auto &entry = pair.second;
+
+            for (size_t i = 0; i < entry.numInputs; ++i)
+            {
+                uint32_t inId = pattern.graph.input(entry.dummyShapes[i], entry.dtypes[i]);
+                pattern.variables.push_back(inId);
+            }
+            pattern.rootId = entry.factory(pattern.variables, pattern.graph);
+            pattern.dtypes = entry.dtypes;
+            pattern.dummyShapes = entry.dummyShapes;
+            patterns.push_back(std::move(pattern));
+        }
+    }
+
+    bool match(const EGraph &egraph, uint32_t eNodeIdx) const override
+    {
+        for (const auto &pattern : patterns)
+        {
+            std::unordered_map<uint32_t, uint32_t> binding;
+            if (matchPattern(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void apply(EGraph &egraph, uint32_t eNodeIdx) const override
+    {
+        for (const auto &pattern : patterns)
+        {
+            std::unordered_map<uint32_t, uint32_t> binding;
+            if (matchPattern(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes))
+            {
+                std::vector<uint32_t> inputs;
+                inputs.reserve(pattern.variables.size());
+                for (uint32_t var : pattern.variables)
+                    inputs.push_back(binding[var]);
+
+                for (const auto &kernel : KernelRegistry::get().getAllKernels())
                 {
-                    for (int i = 0; i < 2; i++)
+                    if (kernel.opType == OpType::FUSED && kernel.opName == pattern.opName)
                     {
-                        for (int j = 0; j < 2; j++)
+                        for (Backend targetBackend : kernel.backends)
                         {
-                            if (graph.getNode(m1_id).parentIds[i] == graph.getNode(m2_id).parentIds[j])
-                            {
-                                uint32_t a = graph.getNode(m1_id).parentIds[i];
-                                uint32_t b = graph.getNode(m1_id).parentIds[1 - i];
-                                uint32_t c = graph.getNode(m2_id).parentIds[1 - j];
-
-                                uint32_t add_bc = graph.add(b, c);
-                                return {graph.mul(a, add_bc)};
-                            }
+                            addFusedNode(egraph, kernel, targetBackend, inputs, eNodeIdx);
                         }
                     }
                 }
             }
-            return {};
         }
-    };
-
-    struct AssociativeRule : public RewriteRule
-    {
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
-        {
-            std::vector<uint32_t> results;
-            if ((graph.getNode(id).opType == OpType::ADD || graph.getNode(id).opType == OpType::MUL) &&
-                graph.getNode(id).parentIds.size() == 2)
-            {
-                OpType op = graph.getNode(id).opType;
-                uint32_t a_id = graph.getNode(id).parentIds[0];
-                uint32_t b_id = graph.getNode(id).parentIds[1];
-
-                // (x op y) op z -> x op (y op z)
-                if (graph.getNode(a_id).opType == op && graph.getNode(a_id).parentIds.size() == 2)
-                {
-                    uint32_t x = graph.getNode(a_id).parentIds[0];
-                    uint32_t y = graph.getNode(a_id).parentIds[1];
-                    uint32_t z = b_id;
-
-                    uint32_t new_inner = (op == OpType::ADD) ? graph.add(y, z) : graph.mul(y, z);
-                    uint32_t new_outer = (op == OpType::ADD) ? graph.add(x, new_inner) : graph.mul(x, new_inner);
-                    results.push_back(new_outer);
-                }
-
-                // x op (y op z) -> (x op y) op z
-                if (graph.getNode(b_id).opType == op && graph.getNode(b_id).parentIds.size() == 2)
-                {
-                    uint32_t x = a_id;
-                    uint32_t y = graph.getNode(b_id).parentIds[0];
-                    uint32_t z = graph.getNode(b_id).parentIds[1];
-
-                    uint32_t new_inner = (op == OpType::ADD) ? graph.add(x, y) : graph.mul(x, y);
-                    uint32_t new_outer = (op == OpType::ADD) ? graph.add(new_inner, z) : graph.mul(new_inner, z);
-                    results.push_back(new_outer);
-                }
-            }
-            return results;
-        }
-    };
-
-    struct DoubleNegationRule : public RewriteRule
-    {
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
-        {
-            if (graph.getNode(id).opType == OpType::NEGATE && graph.getNode(id).parentIds.size() == 1)
-            {
-                uint32_t inner_id = graph.getNode(id).parentIds[0];
-                if (graph.getNode(inner_id).opType == OpType::NEGATE && graph.getNode(inner_id).parentIds.size() == 1)
-                {
-                    return {graph.getNode(inner_id).parentIds[0]};
-                }
-            }
-            return {};
-        }
-    };
-
-    struct NegateAddRule : public RewriteRule
-    {
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
-        {
-            if (graph.getNode(id).opType == OpType::NEGATE && graph.getNode(id).parentIds.size() == 1)
-            {
-                uint32_t inner_id = graph.getNode(id).parentIds[0];
-                if (graph.getNode(inner_id).opType == OpType::ADD && graph.getNode(inner_id).parentIds.size() == 2)
-                {
-                    uint32_t a = graph.getNode(inner_id).parentIds[0];
-                    uint32_t b = graph.getNode(inner_id).parentIds[1];
-                    uint32_t neg_a = graph.neg(a);
-                    uint32_t neg_b = graph.neg(b);
-                    return {graph.add(neg_a, neg_b)};
-                }
-            }
-            return {};
-        }
-    };
-
-    struct DivMulRule : public RewriteRule
-    {
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
-        {
-            if (graph.getNode(id).opType == OpType::MUL && graph.getNode(id).parentIds.size() == 2)
-            {
-                uint32_t a_id = graph.getNode(id).parentIds[0];
-                uint32_t b_id = graph.getNode(id).parentIds[1];
-
-                if (graph.getNode(a_id).opType == OpType::DIVIDE &&
-                    graph.getNode(a_id).parentIds.size() == 2 &&
-                    graph.getNode(a_id).parentIds[1] == b_id)
-                {
-                    return {graph.getNode(a_id).parentIds[0]};
-                }
-                if (graph.getNode(b_id).opType == OpType::DIVIDE &&
-                    graph.getNode(b_id).parentIds.size() == 2 &&
-                    graph.getNode(b_id).parentIds[1] == a_id)
-                {
-                    return {graph.getNode(b_id).parentIds[0]};
-                }
-            }
-            return {};
-        }
-    };
-
-    struct DivAddRule : public RewriteRule
-    {
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
-        {
-            // (a / c) + (b / c) -> (a + b) / c
-            if (graph.getNode(id).opType == OpType::ADD && graph.getNode(id).parentIds.size() == 2)
-            {
-                uint32_t d1_id = graph.getNode(id).parentIds[0];
-                uint32_t d2_id = graph.getNode(id).parentIds[1];
-
-                if (graph.getNode(d1_id).opType == OpType::DIVIDE && graph.getNode(d2_id).opType == OpType::DIVIDE &&
-                    graph.getNode(d1_id).parentIds.size() == 2 && graph.getNode(d2_id).parentIds.size() == 2)
-                {
-                    if (graph.getNode(d1_id).parentIds[1] == graph.getNode(d2_id).parentIds[1])
-                    {
-                        uint32_t a = graph.getNode(d1_id).parentIds[0];
-                        uint32_t b = graph.getNode(d2_id).parentIds[0];
-                        uint32_t c = graph.getNode(d1_id).parentIds[1];
-                        uint32_t add_ab = graph.add(a, b);
-                        return {graph.div(add_ab, c)};
-                    }
-                }
-            }
-            return {};
-        }
-    };
-
-    // Reorder copyto with contiguous when the matching kernels exist.
-    struct CopyToContiguousReorderRule : public RewriteRule
-    {
-        bool skipKernelChecks = false;
-
-        explicit CopyToContiguousReorderRule(bool skipKernelChecks = false)
-            : skipKernelChecks(skipKernelChecks) {}
-
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
-        {
-            if (!graph.hasNode(id))
-                return {};
-
-            const TensorNode &node = graph.getNode(id);
-
-            // contiguous(copyto(x, B)) -> copyto(contiguous(x), B)
-            if (node.opType == OpType::CONTIGUOUS && !node.parentIds.empty())
-            {
-                uint32_t copyId = node.parentIds[0];
-                if (!graph.hasNode(copyId))
-                    return {};
-                const TensorNode &copyNode = graph.getNode(copyId);
-                if (copyNode.opType != OpType::COPY_TO || copyNode.parentIds.empty())
-                    return {};
-
-                uint32_t sourceId = copyNode.parentIds[0];
-                if (!graph.hasNode(sourceId))
-                    return {};
-
-                const TensorNode &sourceNode = graph.getNode(sourceId);
-                if (!skipKernelChecks)
-                {
-                    TensorNode copyOutput = makeBackendAdjustedNode(sourceNode, copyNode.backend);
-                    if (!hasKernelMatch(OpType::COPY_TO, {sourceNode}, copyOutput))
-                        return {};
-
-                    TensorNode contigInput = makeBackendAdjustedNode(sourceNode, sourceNode.backend);
-                    TensorNode contigOutput = makeBackendAdjustedNode(sourceNode, sourceNode.backend, true);
-                    if (!hasKernelMatch(OpType::CONTIGUOUS, {contigInput}, contigOutput))
-                        return {};
-                }
-
-                uint32_t newContigId = graph.contiguous(sourceId);
-                graph.getNode(newContigId).backend = sourceNode.backend;
-                uint32_t newCopyId = graph.copyto(newContigId, copyNode.backend);
-                graph.getNode(newCopyId).backend = copyNode.backend;
-                return {newCopyId};
-            }
-
-            // copyto(contiguous(x), B) -> contiguous(copyto(x, B))
-            if (node.opType == OpType::COPY_TO && !node.parentIds.empty())
-            {
-                uint32_t contigId = node.parentIds[0];
-                if (!graph.hasNode(contigId))
-                    return {};
-                const TensorNode &contigNode = graph.getNode(contigId);
-                if (contigNode.opType != OpType::CONTIGUOUS || contigNode.parentIds.empty())
-                    return {};
-
-                uint32_t sourceId = contigNode.parentIds[0];
-                if (!graph.hasNode(sourceId))
-                    return {};
-
-                const TensorNode &sourceNode = graph.getNode(sourceId);
-                if (!skipKernelChecks)
-                {
-                    TensorNode copyOutput = makeBackendAdjustedNode(sourceNode, node.backend);
-                    if (!hasKernelMatch(OpType::COPY_TO, {sourceNode}, copyOutput))
-                        return {};
-
-                    TensorNode contigInput = makeBackendAdjustedNode(sourceNode, node.backend);
-                    TensorNode contigOutput = makeBackendAdjustedNode(sourceNode, node.backend, true);
-                    if (!hasKernelMatch(OpType::CONTIGUOUS, {contigInput}, contigOutput))
-                        return {};
-                }
-
-                uint32_t newCopyId = graph.copyto(sourceId, node.backend);
-                graph.getNode(newCopyId).backend = node.backend;
-                uint32_t newContigId = graph.contiguous(newCopyId);
-                graph.getNode(newContigId).backend = node.backend;
-                return {newContigId};
-            }
-
-            return {};
-        }
-    };
-
-    // Reorder copyto with scatter when the matching kernels exist.
-    struct CopyToScatterReorderRule : public RewriteRule
-    {
-        bool skipKernelChecks = false;
-
-        explicit CopyToScatterReorderRule(bool skipKernelChecks = false)
-            : skipKernelChecks(skipKernelChecks) {}
-
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
-        {
-            if (!graph.hasNode(id))
-                return {};
-
-            const TensorNode &node = graph.getNode(id);
-
-            // scatter(copyto(target, B), updates, ...) -> copyto(scatter(target, updates, ...), B)
-            if (node.opType == OpType::SCATTER && !node.parentIds.empty())
-            {
-                uint32_t copyId = node.parentIds[0];
-                if (!graph.hasNode(copyId))
-                    return {};
-                const TensorNode &copyNode = graph.getNode(copyId);
-                if (copyNode.opType != OpType::COPY_TO || copyNode.parentIds.empty())
-                    return {};
-
-                uint32_t sourceTargetId = copyNode.parentIds[0];
-                if (!graph.hasNode(sourceTargetId))
-                    return {};
-
-                const TensorNode &sourceTargetNode = graph.getNode(sourceTargetId);
-                if (!skipKernelChecks)
-                {
-                    std::vector<TensorNode> scatterInputs = {
-                        sourceTargetNode,
-                        graph.getNode(node.parentIds[1]),
-                        graph.getNode(node.parentIds[2]),
-                        graph.getNode(node.parentIds[3]),
-                        graph.getNode(node.parentIds[4]),
-                    };
-                    TensorNode scatterOutput = makeBackendAdjustedNode(sourceTargetNode, sourceTargetNode.backend);
-                    if (!hasKernelMatch(OpType::SCATTER, scatterInputs, scatterOutput))
-                        return {};
-
-                    TensorNode copyOutput = makeBackendAdjustedNode(sourceTargetNode, copyNode.backend);
-                    if (!hasKernelMatch(OpType::COPY_TO, {sourceTargetNode}, copyOutput))
-                        return {};
-                }
-
-                uint32_t newScatterId = graph.scatter(sourceTargetId, node.parentIds[1], node.parentIds[2], node.parentIds[3], node.parentIds[4]);
-                graph.getNode(newScatterId).backend = sourceTargetNode.backend;
-                uint32_t newCopyId = graph.copyto(newScatterId, copyNode.backend);
-                graph.getNode(newCopyId).backend = copyNode.backend;
-                return {newCopyId};
-            }
-
-            // copyto(scatter(target, updates, ...), B) -> scatter(copyto(target, B), updates, ...)
-            if (node.opType == OpType::COPY_TO && !node.parentIds.empty())
-            {
-                uint32_t scatterId = node.parentIds[0];
-                if (!graph.hasNode(scatterId))
-                    return {};
-                const TensorNode &scatterNode = graph.getNode(scatterId);
-                if (scatterNode.opType != OpType::SCATTER || scatterNode.parentIds.empty())
-                    return {};
-
-                uint32_t sourceTargetId = scatterNode.parentIds[0];
-                if (!graph.hasNode(sourceTargetId))
-                    return {};
-
-                const TensorNode &sourceTargetNode = graph.getNode(sourceTargetId);
-                if (!skipKernelChecks)
-                {
-                    std::vector<TensorNode> scatterInputs = {
-                        sourceTargetNode,
-                        graph.getNode(scatterNode.parentIds[1]),
-                        graph.getNode(scatterNode.parentIds[2]),
-                        graph.getNode(scatterNode.parentIds[3]),
-                        graph.getNode(scatterNode.parentIds[4]),
-                    };
-                    TensorNode scatterOutput = makeBackendAdjustedNode(sourceTargetNode, node.backend);
-                    if (!hasKernelMatch(OpType::SCATTER, scatterInputs, scatterOutput))
-                        return {};
-
-                    TensorNode copyOutput = makeBackendAdjustedNode(sourceTargetNode, node.backend);
-                    if (!hasKernelMatch(OpType::COPY_TO, {sourceTargetNode}, copyOutput))
-                        return {};
-                }
-
-                uint32_t newCopyId = graph.copyto(sourceTargetId, node.backend);
-                graph.getNode(newCopyId).backend = node.backend;
-                uint32_t newScatterId = graph.scatter(newCopyId, scatterNode.parentIds[1], scatterNode.parentIds[2], scatterNode.parentIds[3], scatterNode.parentIds[4]);
-                graph.getNode(newScatterId).backend = node.backend;
-                return {newScatterId};
-            }
-
-            return {};
-        }
-    };
-
-    // op(contiguous(x)) -> op(x)
-    struct RemoveContiguousRule : public RewriteRule
-    {
-        std::vector<uint32_t> apply(uint32_t id, Graph &graph) const override
-        {
-            if (!graph.hasNode(id))
-                return {};
-
-            TensorNode node = graph.getNode(id); // copy by value to avoid corruption if allocateNode triggers map rehashing
-
-            // INPUT nodes have no parents, so skip them
-            if (node.opType == OpType::INPUT)
-                return {};
-
-            bool hasContiguousParent = false;
-            std::vector<uint32_t> newParents = node.parentIds;
-
-            // Look for any parent that is a CONTIGUOUS operation
-            for (size_t i = 0; i < newParents.size(); ++i)
-            {
-                uint32_t pid = newParents[i];
-                if (graph.hasNode(pid))
-                {
-                    // Copy by value here as well just to be perfectly safe
-                    TensorNode parent = graph.getNode(pid);
-                    if (parent.opType == OpType::CONTIGUOUS && !parent.parentIds.empty())
-                    {
-                        // Bypass the CONTIGUOUS node, point directly to its source
-                        newParents[i] = parent.parentIds[0];
-                        hasContiguousParent = true;
-                    }
-                }
-            }
-
-            if (hasContiguousParent)
-            {
-                TensorNode &newNode = graph.allocateNode(
-                    node.opType,
-                    node.opName,
-                    node.dtype,
-                    newParents,
-                    node.getShape(),
-                    node.strides,
-                    node.backend,
-                    node.storageType,
-                    node.contentHash);
-                return {newNode.id};
-            }
-
-            return {};
-        }
-    };
-
-    inline std::vector<uint32_t> generateAllEquivalents(uint32_t rootId, Graph &graph, const std::vector<const RewriteRule *> &rules, std::unordered_map<uint32_t, std::string> &memo)
-    {
-        std::vector<uint32_t> equivalents;
-        std::unordered_set<std::string> seenHashes;
-        std::queue<uint32_t> worklist;
-
-        equivalents.push_back(rootId);
-        worklist.push(rootId);
-        seenHashes.insert(Hashing::patternHash(rootId, graph, memo));
-
-        while (!worklist.empty())
-        {
-            uint32_t current = worklist.front();
-            worklist.pop();
-
-            for (const auto *rule : rules)
-            {
-                std::vector<uint32_t> newNodes = rule->apply(current, graph);
-                for (uint32_t newNode : newNodes)
-                {
-                    std::string newHash = Hashing::patternHash(newNode, graph, memo);
-                    if (seenHashes.find(newHash) == seenHashes.end())
-                    {
-                        seenHashes.insert(newHash);
-                        equivalents.push_back(newNode);
-                        worklist.push(newNode);
-                    }
-                }
-            }
-        }
-        return equivalents;
     }
 
-} // namespace Rewrite
+    void addFusedNode(EGraph &egraph, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &parentIds, uint32_t eNodeIdx) const
+    {
+        std::vector<uint32_t> adaptedParents;
+        if (parentIds.size() != kernel.numInputs)
+        {
+            Error::throw_err("[addFusedNode] parentIds.size() != kernel.numInputs. Info:\n  Kernel: " + kernel.opName + "\n" +
+                             "  Parent IDs: " + std::to_string(parentIds.size()) + "\n" +
+                             "  Kernel Num Inputs: " + std::to_string(kernel.numInputs) + "\n");
+        }
+        for (size_t i = 0; i < parentIds.size(); ++i)
+        {
+            uint32_t pid = parentIds[i];
+            const EClass &parent = egraph.getEClass(pid);
+
+            Backend expectedBackend = kernel.inputBackends[i][0];
+            bool foundBackend = false;
+            for (Backend b : kernel.inputBackends[i])
+            {
+                if (parent.backend == b)
+                {
+                    expectedBackend = parent.backend;
+                    foundBackend = true;
+                    break;
+                }
+            }
+
+            bool needCopy = !foundBackend;
+            bool needContig = kernel.requiresContiguous[i] && !isContiguous(parent);
+
+            if (!needCopy && !needContig)
+            {
+                adaptedParents.push_back(pid); // TODO: CRITICAL, need to get refCounts from pattern, then adaptedParentRefCounts[pid]=parentENode.refCount + (1 - patternRefCounts[pid])
+                /*
+                0: a
+                1: op0(0)
+                2: op1(0)
+                3: op2(1, 2), opfused(0)
+                if you choose op2, a.refCount is 2
+                if you choose opfused, a.refCount is 1
+                2+(1-2)=1
+                can't just set to 1 because maybe there are other references outside of matched pattern
+                */
+                continue;
+            }
+            else
+            {
+                return; // TODO: insert copyto/contiguous nodes as needed
+            }
+        }
+
+        const ENode &oldENode = egraph.getENodes()[eNodeIdx];
+        // uint32_t eclassId = egraph.addEClass(oldENode.shape, oldENode.strides, oldENode.dtype, oldENode.backend, oldENode.refCount);
+        uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
+
+        ENode enode;
+        enode.kernelUid = kernel.uid;
+        enode.opType = oldENode.opType;
+        enode.opName = oldENode.opName;
+        for (uint32_t pid : adaptedParents)
+            enode.children.push_back(pid);
+        enode.shape = oldENode.shape;
+        enode.strides = oldENode.strides;
+        enode.dtype = oldENode.dtype;
+        enode.backend = oldENode.backend;
+        egraph.addENode(eclassId, enode);
+    }
+
+    static bool matchPattern(uint32_t eNodeIdx, const EGraph &egraph,
+                             uint32_t patternId, const Graph &patternGraph,
+                             const std::vector<uint32_t> &patternVariables,
+                             std::unordered_map<uint32_t, uint32_t> &binding,
+                             const std::vector<DType> &patternDtypes)
+    {
+        auto itVar = std::find(patternVariables.begin(), patternVariables.end(), patternId);
+        if (itVar != patternVariables.end())
+        {
+            size_t varIdx = static_cast<size_t>(std::distance(patternVariables.begin(), itVar));
+            const ENode &eNode = egraph.getENodes()[eNodeIdx];
+            if (varIdx < patternDtypes.size() && eNode.dtype != patternDtypes[varIdx])
+                return false;
+
+            if (binding.count(patternId))
+            {
+                return binding[patternId] == eNodeIdx;
+            }
+            binding[patternId] = eNodeIdx;
+            return true;
+        }
+
+        const ENode &eNode = egraph.getENodes()[eNodeIdx];
+        const auto &pNode = patternGraph.getNode(patternId);
+
+        if (eNode.opType != pNode.opType)
+            return false;
+        if (eNode.opType == OpType::FUSED && eNode.opName != pNode.opName)
+            return false;
+        if (eNode.children.size() != pNode.parentIds.size())
+            return false;
+
+        for (size_t i = 0; i < eNode.children.size(); ++i)
+        {
+            if (!matchPattern(eNode.children[i], egraph, pNode.parentIds[i], patternGraph, patternVariables, binding, patternDtypes))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+};

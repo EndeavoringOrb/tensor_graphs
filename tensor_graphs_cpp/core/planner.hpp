@@ -487,11 +487,6 @@ public:
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
         const std::unordered_set<uint32_t> &cachedNodes, bool doSaturate = true)
     {
-        // Planning pipeline:
-        // 1. seed the root dirty region
-        // 2. derive needed regions backward from the root
-        // 3. derive cache-aware recompute regions
-        // 4. saturate / extract / emit a compiled graph for this bucket
         if (InterruptManager::isInterrupted())
         {
             std::cerr << "\n[Executor] Interrupt detected, aborting execution..." << std::endl;
@@ -515,10 +510,19 @@ public:
             TensorNode &node = planningGraph.graph.getNode(nodeId);
             uint32_t refCount = 0;
             auto rcIt = refCounts.find(nodeId);
-            if (rcIt != refCounts.end())
-                refCount = rcIt->second;
-            uint32_t eclassId = egraph.addEClass(node.getShape(), node.dtype, refCount, isContiguous(node), node.backend);
+            if (rcIt == refCounts.end())
+            {
+                Error::throw_err("Node " + std::to_string(nodeId) + " not found in refCounts");
+            }
+            refCount = rcIt->second;
+            uint32_t eclassId = egraph.addEClass(node.getShape(), node.strides, node.dtype, node.backend);
             nodeToEClass[nodeId] = eclassId;
+
+            // Map constants directly to EGraph EClass
+            if (planningGraph.graph.constantStaging.count(nodeId))
+            {
+                egraph.constantStaging[eclassId] = planningGraph.graph.constantStaging.at(nodeId);
+            }
         }
 
         // Seed with reference kernels only
@@ -526,6 +530,14 @@ public:
         {
             const TensorNode &node = planningGraph.graph.getNode(nodeId);
             uint32_t eclassId = nodeToEClass[nodeId];
+            uint32_t refCount = 0;
+            auto rcIt = refCounts.find(nodeId);
+            if (rcIt == refCounts.end())
+            {
+                Error::throw_err("Node " + std::to_string(nodeId) + " not found in refCounts");
+            }
+            refCount = rcIt->second;
+
             if (node.opType == OpType::INPUT || node.opType == OpType::CONTIGUOUS || node.opType == OpType::SLICE)
             {
                 if (node.opType != OpType::INPUT)
@@ -541,24 +553,30 @@ public:
                     for (uint64_t uid : refs)
                     {
                         ENode enode;
-                        enode.nodeId = nodeId;
                         enode.kernelUid = uid;
                         enode.opType = node.opType;
-                        enode.backend = node.backend;
+                        enode.opName = node.opName;
                         for (uint32_t pid : node.parentIds)
                             enode.children.push_back(nodeToEClass[pid]);
+                        enode.shape = node.getShape();
+                        enode.strides = node.strides;
+                        enode.dtype = node.dtype;
+                        enode.backend = node.backend;
                         egraph.addENode(eclassId, enode);
                     }
                 }
                 else
                 {
                     ENode enode;
-                    enode.nodeId = nodeId;
                     enode.kernelUid = 0;
                     enode.opType = node.opType;
-                    enode.backend = node.backend;
+                    enode.opName = node.opName;
                     for (uint32_t pid : node.parentIds)
                         enode.children.push_back(nodeToEClass[pid]);
+                    enode.shape = node.getShape();
+                    enode.strides = node.strides;
+                    enode.dtype = node.dtype;
+                    enode.backend = node.backend;
                     egraph.addENode(eclassId, enode);
                 }
                 continue;
@@ -578,55 +596,72 @@ public:
             for (uint64_t uid : refs)
             {
                 ENode enode;
-                enode.nodeId = nodeId;
                 enode.kernelUid = uid;
                 enode.opType = node.opType;
                 enode.opName = node.opName;
-                enode.backend = node.backend;
                 for (uint32_t pid : node.parentIds)
                     enode.children.push_back(nodeToEClass[pid]);
-
+                enode.shape = node.getShape();
+                enode.strides = node.strides;
+                enode.dtype = node.dtype;
+                enode.backend = node.backend;
                 egraph.addENode(eclassId, enode);
             }
         }
 
         if (doSaturate)
         {
-            saturate(topo, planningGraph.graph, egraph, nodeToEClass, refCounts);
+            saturate(egraph);
         }
 
-        auto extraction = extractBest(planningGraph.physicalRootId, planningGraph.graph, egraph, nodeToEClass, refCounts, maxMemoryByBackend, cachedNodes);
+        std::unordered_map<uint32_t, uint32_t> eclassToLogical;
+        for (const auto &kv : nodeToEClass)
+        {
+            uint32_t physId = kv.first;
+            uint32_t ecl = egraph.find(kv.second);
+            if (planningGraph.physicalToLogicalNodeMap.count(physId))
+            {
+                eclassToLogical[ecl] = planningGraph.physicalToLogicalNodeMap.at(physId);
+            }
+            else
+            {
+                eclassToLogical[ecl] = physId;
+            }
+        }
+
+        auto extraction = extractBest(planningGraph.physicalRootId, egraph, nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical);
 
         return buildCompiledGraph(
             planningGraph.physicalRootId,
             planningGraph.graph,
             egraph,
             nodeToEClass,
-            refCounts,
             extraction,
-            dirtyOutputRegions,
-            dirtyInputRegions,
             planningGraph.logicalToPhysicalNodeMap,
             planningGraph.physicalToLogicalNodeMap,
-            planningGraph.physicalInputSlices,
-            cachedNodes);
+            cachedNodes,
+            eclassToLogical);
     }
 
 private:
+    struct ENodeInfo
+    {
+        float cost;
+        std::unordered_map<Backend, uint64_t> memSizes;
+        bool inplace;
+        int32_t inplace_idx;
+    };
+
     struct ExtractChoice
     {
         uint32_t enodeId = 0;
         float cost = std::numeric_limits<float>::infinity();
         bool valid = false;
-        uint64_t memSize = 0; // Memory size for this node's output
-        std::vector<int64_t> outStrides;
-        uint64_t outViewOffset = 0;
     };
 
     struct ExtractionResult
     {
         std::unordered_map<uint32_t, ExtractChoice> choiceByEClass;
-        std::unordered_map<uint32_t, uint32_t> eclassToNodeId;
     };
 
     CostModel &costModel;
@@ -682,905 +717,428 @@ private:
         return order;
     }
 
-    struct RuleMatch
+    void saturate(EGraph &egraph)
     {
-        uint32_t nodeId = 0;
-    };
-
-    struct Rule
-    {
-        virtual ~Rule() = default;
-        virtual bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const = 0;
-        virtual bool predicate(const RuleMatch &m, const Graph &graph, const EGraph &egraph,
-                               const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                               const std::unordered_map<uint32_t, uint32_t> &refCounts) const
-        {
-            (void)m;
-            (void)graph;
-            (void)egraph;
-            (void)nodeToEClass;
-            (void)refCounts;
-            return true;
-        }
-        virtual std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const = 0;
-    };
-
-    struct GraphRewriteRuleAdapter : public Rule
-    {
-        const Rewrite::RewriteRule *rule;
-        explicit GraphRewriteRuleAdapter(const Rewrite::RewriteRule *r) : rule(r) {}
-
-        bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
-        {
-            (void)graph;
-            out.nodeId = nodeId;
-            return true;
-        }
-
-        std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
-        {
-            return rule->apply(m.nodeId, graph);
-        }
-    };
-
-    struct CopyElimRule : public Rule
-    {
-        bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
-        {
-            if (!graph.hasNode(nodeId))
-                return false;
-            const auto &node = graph.getNode(nodeId);
-            if (node.opType != OpType::COPY_TO || node.parentIds.empty())
-                return false;
-            uint32_t parentId = node.parentIds[0];
-            if (!graph.hasNode(parentId))
-                return false;
-            const auto &parent = graph.getNode(parentId);
-            if (parent.opType != OpType::COPY_TO || parent.parentIds.empty())
-                return false;
-            out.nodeId = nodeId;
-            return true;
-        }
-
-        std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
-        {
-            const TensorNode &node = graph.getNode(m.nodeId);
-            const TensorNode &parent = graph.getNode(node.parentIds[0]);
-            uint32_t grandparentId = parent.parentIds[0];
-
-            std::vector<uint32_t> results;
-            // E.g. copyto(copyto(X, GPU), CPU) => X
-            if (node.backend == graph.getNode(grandparentId).backend)
-            {
-                results.push_back(grandparentId);
-            }
-            // E.g. copyto(copyto(X, GPU), GPU) => copyto(X, GPU)
-            if (node.backend == parent.backend)
-            {
-                results.push_back(node.parentIds[0]);
-            }
-            return results;
-        }
-    };
-
-    struct RemoveIdentityRepeatRule : public Rule
-    {
-        bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
-        {
-            if (!graph.hasNode(nodeId))
-                return false;
-            const TensorNode &node = graph.getNode(nodeId);
-            if (node.opType == OpType::REPEAT)
-            {
-                auto repVals = getConstantInt32(node.parentIds[1], graph);
-                if (!repVals.empty() && repVals[0] == 1)
-                {
-                    out.nodeId = nodeId;
-                    return true;
-                }
-            }
-            return false;
-        }
-        std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
-        {
-            return {graph.getNode(m.nodeId).parentIds[0]};
-        }
-    };
-
-    struct AddIdentityRepeatRule : public Rule
-    {
-        bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
-        {
-            if (!graph.hasNode(nodeId))
-                return false;
-            const TensorNode &node = graph.getNode(nodeId);
-            if (node.getShape().empty())
-                return false;
-            if (node.dtype == DType::INT32)
-                return false; // Avoid blowing up shapes/indices. TODO: make more robust check or just remove
-            out.nodeId = nodeId;
-            return true;
-        }
-
-        bool predicate(const RuleMatch &m, const Graph &graph, const EGraph &egraph,
-                       const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                       const std::unordered_map<uint32_t, uint32_t> &refCounts) const override
-        {
-            uint32_t eclassId = nodeToEClass.at(m.nodeId);
-            const EClass &cls = egraph.getEClass(eclassId);
-            const TensorNode &node = graph.getNode(m.nodeId);
-
-            for (size_t d = 0; d < node.getShape().size(); ++d)
-            {
-                if (node.getShape()[d] == 1)
-                {
-                    bool has_repeat = false;
-                    for (uint32_t enodeId : cls.enodes)
-                    {
-                        const ENode &en = egraph.getENodes()[enodeId];
-                        if (en.opType == OpType::REPEAT)
-                        {
-                            if (en.children.size() > 2)
-                            {
-                                uint32_t physId = en.nodeId;
-                                const TensorNode &pNode = graph.getNode(physId);
-                                auto repVals = getConstantInt32(pNode.parentIds[1], graph);
-                                auto axVals = getConstantInt32(pNode.parentIds[2], graph);
-                                if (!repVals.empty() && repVals[0] == 1 && !axVals.empty() && axVals[0] == static_cast<int32_t>(d))
-                                {
-                                    has_repeat = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if (!has_repeat)
-                        return true;
-                }
-            }
-            return false;
-        }
-
-        std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
-        {
-            std::vector<uint32_t> results;
-            const TensorNode &node = graph.getNode(m.nodeId);
-            for (size_t d = 0; d < node.getShape().size(); ++d)
-            {
-                if (node.getShape()[d] == 1)
-                {
-                    int32_t rep = 1;
-                    int32_t ax = static_cast<int32_t>(d);
-                    uint32_t repNode = graph.constant({1}, &rep, DType::INT32);
-                    uint32_t axNode = graph.constant({1}, &ax, DType::INT32);
-                    uint32_t repId = graph.repeat(m.nodeId, repNode, axNode);
-                    graph.getNode(repId).setShape(node.getShape());
-                    results.push_back(repId);
-                }
-            }
-            return results;
-        }
-    };
-
-    struct FusionRule : public Rule
-    {
-        struct Pattern
-        {
-            std::string opName;
-            uint32_t rootId;
-            std::vector<uint32_t> variables;
-            std::vector<DType> dtypes;
-            std::vector<std::vector<uint32_t>> dummyShapes;
-            Graph graph;
-        };
-
-        std::vector<Pattern> patterns;
-
-        FusionRule()
-        {
-            const auto &refGraphs = ReferenceGraphRegistry::get().getAll();
-            for (const auto &pair : refGraphs)
-            {
-                Pattern pattern;
-                pattern.opName = pair.first;
-                const auto &entry = pair.second;
-
-                for (size_t i = 0; i < entry.numInputs; ++i)
-                {
-                    uint32_t inId = pattern.graph.input(entry.dummyShapes[i], entry.dtypes[i]);
-                    pattern.variables.push_back(inId);
-                }
-                pattern.rootId = entry.factory(pattern.variables, pattern.graph);
-                pattern.dtypes = entry.dtypes;
-                pattern.dummyShapes = entry.dummyShapes;
-                patterns.push_back(std::move(pattern));
-            }
-        }
-
-        bool match(uint32_t nodeId, const Graph &graph, RuleMatch &out) const override
-        {
-            if (!graph.hasNode(nodeId))
-                return false;
-            if (graph.getNode(nodeId).opType == OpType::INPUT)
-                return false;
-            out.nodeId = nodeId;
-            return true;
-        }
-
-        std::vector<uint32_t> apply(const RuleMatch &m, Graph &graph) const override
-        {
-            std::vector<uint32_t> results;
-            const TensorNode &refNode = graph.getNode(m.nodeId);
-
-            for (const auto &pattern : patterns)
-            {
-                std::unordered_map<uint32_t, uint32_t> binding;
-                if (matchPattern(m.nodeId, graph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes))
-                {
-                    std::vector<uint32_t> inputs;
-                    inputs.reserve(pattern.variables.size());
-                    for (uint32_t var : pattern.variables)
-                        inputs.push_back(binding[var]);
-
-                    for (const auto &kernel : KernelRegistry::get().getAllKernels())
-                    {
-                        if (kernel.opType == OpType::FUSED && kernel.opName == pattern.opName)
-                        {
-                            for (Backend targetBackend : kernel.backends)
-                            {
-                                uint32_t newNode = addFusedNode(graph, kernel, targetBackend, inputs, refNode);
-                                if (newNode != UINT32_MAX)
-                                    results.push_back(newNode);
-                            }
-                        }
-                    }
-                }
-            }
-            return results;
-        }
-
-        uint32_t addFusedNode(Graph &graph, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &parentIds, const TensorNode &refNode) const
-        {
-            std::vector<uint32_t> adaptedParents;
-            if (parentIds.size() != kernel.numInputs)
-            {
-                Error::throw_err("[addFusedNode] parentIds.size() != kernel.numInputs. Info:\n  Kernel: " + kernel.opName + "\n" +
-                                 "  Parent IDs: " + std::to_string(parentIds.size()) + "\n" +
-                                 "  Kernel Num Inputs: " + std::to_string(kernel.numInputs) + "\n");
-            }
-            for (size_t i = 0; i < parentIds.size(); ++i)
-            {
-                uint32_t pid = parentIds[i];
-                const TensorNode &parent = graph.getNode(pid);
-
-                Backend expectedBackend = kernel.inputBackends[i][0];
-                bool foundBackend = false;
-                for (Backend b : kernel.inputBackends[i])
-                {
-                    if (parent.backend == b)
-                    {
-                        expectedBackend = parent.backend;
-                        foundBackend = true;
-                        break;
-                    }
-                }
-
-                bool needCopy = !foundBackend;
-                bool needContig = false;
-                if (i < kernel.requiresContiguous.size()) // TODO: add error if not?
-                {
-                    needContig = kernel.requiresContiguous[i] && !isContiguous(parent);
-                }
-
-                if (!needCopy && !needContig)
-                {
-                    adaptedParents.push_back(pid);
-                    continue;
-                }
-
-                uint32_t currentId = pid;
-                if (needCopy && needContig)
-                {
-                    TensorNode dummyCopyOut = parent;
-                    dummyCopyOut.backend = expectedBackend;
-                    bool copyWorks = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", expectedBackend, {parent}, dummyCopyOut, {}, false).empty();
-
-                    TensorNode dummyContigOut = dummyCopyOut;
-                    dummyContigOut.strides = calcContiguousStrides(dummyContigOut.getShape());
-                    bool contigWorksAfterCopy = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", expectedBackend, {dummyCopyOut}, dummyContigOut, {}, false).empty();
-
-                    if (copyWorks && contigWorksAfterCopy)
-                    {
-                        currentId = graph.copyto(currentId, expectedBackend);
-                        graph.getNode(currentId).setShape(parent.getShape());
-                        currentId = graph.contiguous(currentId);
-                        graph.getNode(currentId).setShape(parent.getShape());
-                    }
-                    else
-                    {
-                        TensorNode dummyContigOut2 = parent;
-                        dummyContigOut2.strides = calcContiguousStrides(dummyContigOut2.getShape());
-                        bool contigWorks = !KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", parent.backend, {parent}, dummyContigOut2, {}, false).empty();
-
-                        TensorNode dummyCopyOut2 = dummyContigOut2;
-                        dummyCopyOut2.backend = expectedBackend;
-                        bool copyWorksAfterContig = !KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", expectedBackend, {dummyContigOut2}, dummyCopyOut2, {}, false).empty();
-
-                        if (contigWorks && copyWorksAfterContig)
-                        {
-                            currentId = graph.contiguous(currentId);
-                            graph.getNode(currentId).setShape(parent.getShape());
-                            currentId = graph.copyto(currentId, expectedBackend);
-                            graph.getNode(currentId).setShape(parent.getShape());
-                        }
-                        else
-                        {
-                            Error::throw_err("No valid adapter chain for copyto (" + toString(parent.backend) + " -> " + toString(expectedBackend) + ") and contiguous");
-                        }
-                    }
-                }
-                else if (needCopy)
-                {
-                    currentId = graph.copyto(currentId, expectedBackend);
-                    graph.getNode(currentId).setShape(parent.getShape());
-                }
-                else if (needContig)
-                {
-                    currentId = graph.contiguous(currentId);
-                    graph.getNode(currentId).setShape(parent.getShape());
-                }
-                adaptedParents.push_back(currentId);
-            }
-
-            TensorNode &node = graph.allocateNode(kernel.opType, kernel.opName, refNode.dtype, adaptedParents, refNode.getShape(), {}, targetBackend);
-            uint32_t id = node.id;
-
-            if (node.backend != refNode.backend)
-            {
-                id = graph.copyto(id, refNode.backend);
-                graph.getNode(id).setShape(refNode.getShape());
-            }
-
-            return id;
-        }
-
-        static bool matchPattern(uint32_t concreteId, const Graph &mainGraph,
-                                 uint32_t patternId, const Graph &patternGraph,
-                                 const std::vector<uint32_t> &patternVariables,
-                                 std::unordered_map<uint32_t, uint32_t> &binding,
-                                 const std::vector<DType> &patternDtypes)
-        {
-            auto itVar = std::find(patternVariables.begin(), patternVariables.end(), patternId);
-            if (itVar != patternVariables.end())
-            {
-                size_t varIdx = static_cast<size_t>(std::distance(patternVariables.begin(), itVar));
-                const TensorNode &cNode = mainGraph.getNode(concreteId);
-                if (varIdx < patternDtypes.size() && cNode.dtype != patternDtypes[varIdx])
-                    return false;
-
-                if (binding.count(patternId))
-                {
-                    return binding[patternId] == concreteId;
-                }
-                binding[patternId] = concreteId;
-                return true;
-            }
-
-            const auto &cNode = mainGraph.getNode(concreteId);
-            const auto &pNode = patternGraph.getNode(patternId);
-
-            if (cNode.opType != pNode.opType)
-                return false;
-            if (cNode.opType == OpType::FUSED && cNode.opName != pNode.opName)
-                return false;
-            if (cNode.parentIds.size() != pNode.parentIds.size())
-                return false;
-
-            for (size_t i = 0; i < cNode.parentIds.size(); ++i)
-            {
-                if (!matchPattern(cNode.parentIds[i], mainGraph, pNode.parentIds[i], patternGraph, patternVariables, binding, patternDtypes))
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-    };
-
-    uint32_t ensureNodeInEGraph(uint32_t nodeId, Graph &graph, EGraph &egraph,
-                                std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                                const std::unordered_map<uint32_t, uint32_t> &refCounts)
-    {
-        if (nodeToEClass.count(nodeId))
-        {
-            return egraph.find(nodeToEClass[nodeId]);
-        }
-
-        const TensorNode &node = graph.getNode(nodeId);
-
-        // First, ensure all parents are in the EGraph (Recursive call)
-        for (uint32_t pid : node.parentIds)
-        {
-            ensureNodeInEGraph(pid, graph, egraph, nodeToEClass, refCounts);
-        }
-
-        // Register this node's EClass
-        uint32_t refCount = 0;
-        auto rcIt = refCounts.find(nodeId);
-        if (rcIt != refCounts.end())
-            refCount = rcIt->second;
-
-        uint32_t eclassId = egraph.addEClass(node.getShape(), node.dtype, refCount, isContiguous(node), node.backend);
-        nodeToEClass[nodeId] = eclassId;
-
-        // Add the Enode for this specific physical implementation
-        addBasicEnode(graph, egraph, nodeToEClass, refCounts, nodeId);
-
-        return eclassId;
-    }
-
-    void saturate(const std::vector<uint32_t> &topo, Graph &graph, EGraph &egraph,
-                  std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                  const std::unordered_map<uint32_t, uint32_t> &refCounts)
-    {
-        Rewrite::CommutativeRule cr;
-        Rewrite::DistributiveRule dr;
-        Rewrite::FactoringRule fr;
-        Rewrite::AssociativeRule ar;
-        Rewrite::DoubleNegationRule dnr;
-        Rewrite::NegateAddRule nar;
-        Rewrite::DivMulRule dmr;
-        Rewrite::DivAddRule dar;
-        Rewrite::CopyToContiguousReorderRule ccr;
-        Rewrite::CopyToScatterReorderRule csr;
-        // Rewrite::RemoveContiguousRule rcr;
-        RemoveIdentityRepeatRule rirr;
-        AddIdentityRepeatRule airr;
-
-        // TODO: make some sort of rule registry so I don't have to update this every time I add/remove a rule
         std::vector<std::unique_ptr<Rule>> rules;
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&cr));
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&dr));
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&fr));
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&ar));
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&dnr));
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&nar));
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&dmr));
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&dar));
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&ccr));
-        rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&csr));
-        // rules.emplace_back(std::make_unique<GraphRewriteRuleAdapter>(&rcr));
-        rules.emplace_back(std::make_unique<RemoveIdentityRepeatRule>());
-        rules.emplace_back(std::make_unique<AddIdentityRepeatRule>());
+        // rules.emplace_back(std::make_unique<DistributiveProperty>());
         rules.emplace_back(std::make_unique<FusionRule>());
-        rules.emplace_back(std::make_unique<CopyElimRule>());
-
-        std::vector<uint32_t> worklist = topo;
 
         size_t iterations = 0;
         const size_t maxIterations = 3;
-        while (!worklist.empty() && iterations < maxIterations)
+        bool changed = true;
+        uint32_t nMatches = 0;
+        while (changed)
         {
+            changed = false;
             iterations++;
-            std::vector<uint32_t> nextWorklist;
-            nextWorklist.reserve(worklist.size());
-            for (uint32_t nodeId : worklist)
+            uint32_t numENodes = egraph.getENodes().size();
+            for (uint32_t eNodeIdx = 0; eNodeIdx < numENodes; eNodeIdx++)
             {
                 for (const auto &rule : rules)
                 {
-                    RuleMatch match;
-                    if (!rule->match(nodeId, graph, match))
-                        continue;
-                    if (!rule->predicate(match, graph, egraph, nodeToEClass, refCounts))
+                    if (!rule->match(egraph, eNodeIdx))
                         continue;
 
-                    size_t oldSize = graph.nodes.size();
-                    std::vector<uint32_t> newNodes = rule->apply(match, graph);
-                    if (newNodes.empty())
-                    {
-                        continue;
-                    }
-                    // We only want to process new nodes. But nodes are now an unordered_map, so looping by size is broken.
-                    // However, we already have `newNodes` list from `rule->apply`
-                    for (uint32_t newId : newNodes)
-                    {
-                        ShapePropagator prop;
-                        prop.inferShapeRecursive(newId, graph);
-
-                        ensureNodeInEGraph(newId, graph, egraph, nodeToEClass, refCounts);
-
-                        addBasicEnode(graph, egraph, nodeToEClass, refCounts, newId);
-                        nextWorklist.push_back(newId);
-                    }
-                    for (uint32_t newId : newNodes)
-                    {
-                        if (nodeToEClass.count(nodeId) && nodeToEClass.count(newId))
-                        {
-                            egraph.merge(nodeToEClass[nodeId], nodeToEClass[newId]);
-                            nodeToEClass[newId] = egraph.find(nodeToEClass[nodeId]);
-                        }
-                    }
+                    rule->apply(egraph, eNodeIdx);
+                    nMatches++;
                 }
             }
             egraph.rebuild();
-            worklist = std::move(nextWorklist);
         }
+        std::cout << "Finished saturation with " + std::to_string(nMatches) + " matches\n"
+                  << std::flush;
     }
 
-    bool addBasicEnode(const Graph &graph, EGraph &egraph,
-                       const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                       const std::unordered_map<uint32_t, uint32_t> &refCounts,
-                       uint32_t nodeId)
+    std::unordered_map<uint32_t, uint32_t> build_ref_counts(const EGraph &egraph, const std::unordered_map<uint32_t, uint32_t> &selection_map, uint32_t root) const
     {
-        const TensorNode &node = graph.getNode(nodeId);
-        if (node.opType == OpType::INPUT)
-            return false;
-
-        std::vector<TensorNode> inputs;
-        for (uint32_t pid : node.parentIds)
-            inputs.push_back(graph.getNode(pid));
-
-        std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(
-            node.opType, node.opName, node.backend, inputs, node, refCounts, false);
-        if (refs.empty())
-            return false;
-
-        for (uint64_t uid : refs)
+        std::unordered_map<uint32_t, uint32_t> ref;
+        for (const auto &kv : selection_map)
         {
-            ENode enode;
-            enode.nodeId = nodeId;
-            enode.kernelUid = uid;
-            enode.opType = node.opType;
-            enode.opName = node.opName;
-            enode.backend = node.backend;
-            for (uint32_t pid : node.parentIds)
-                enode.children.push_back(nodeToEClass.at(pid));
-            egraph.addENode(nodeToEClass.at(nodeId), enode);
-        }
-        return true;
-    }
-
-    // Helper: Calculate peak memory usage with liveness tracking
-    // Used for memory-aware extraction and bounds calculation
-    uint64_t calculatePeakMemoryWithLiveness(
-        const std::vector<uint32_t> &topo,
-        const Graph &graph,
-        const std::unordered_map<uint32_t, uint64_t> &nodeMemorySizes,
-        const std::unordered_map<uint32_t, uint32_t> &refCounts,
-        const std::unordered_set<uint32_t> &cachedNodes) const
-    {
-        uint64_t currentMem = 0;
-        uint64_t peakMem = 0;
-
-        // Track remaining uses for each node
-        std::unordered_map<uint32_t, uint32_t> uses = refCounts;
-
-        for (uint32_t nodeId : topo)
-        {
-            // Allocate output (if not cached, cached nodes already in memory)
-            if (cachedNodes.find(nodeId) == cachedNodes.end())
+            uint32_t eclass = kv.first;
+            uint32_t sel = kv.second;
+            const ENode &node = egraph.getENodes()[egraph.getEClass(eclass).enodes[sel]];
+            for (uint32_t c : node.children)
             {
-                auto it = nodeMemorySizes.find(nodeId);
-                if (it != nodeMemorySizes.end())
+                ref[c]++;
+            }
+        }
+        ref[root]++;
+        return ref;
+    }
+
+    std::unordered_map<Backend, uint64_t> computePeakMemory(
+        const EGraph &egraph,
+        const std::unordered_map<uint32_t, uint32_t> &selection_map,
+        const std::vector<ENodeInfo> &enodeInfos,
+        uint32_t root,
+        const std::unordered_set<uint32_t> &cachedNodes,
+        const std::unordered_map<uint32_t, uint32_t> &eclassToLogical) const
+    {
+        auto ref = build_ref_counts(egraph, selection_map, root);
+        std::unordered_map<Backend, uint64_t> live_mem;
+        std::unordered_map<Backend, uint64_t> peak_mem;
+        std::unordered_set<uint32_t> visited;
+
+        std::function<void(uint32_t)> visit = [&](uint32_t eclass)
+        {
+            if (visited.count(eclass))
+                return;
+            visited.insert(eclass);
+
+            uint32_t sel = selection_map.at(eclass);
+            uint32_t enode_id = egraph.getEClass(eclass).enodes[sel];
+            const ENode &node = egraph.getENodes()[enode_id];
+            const ENodeInfo &info = enodeInfos[enode_id];
+
+            for (uint32_t c : node.children)
+            {
+                visit(c);
+            }
+
+            uint32_t logicalId = eclassToLogical.count(eclass) ? eclassToLogical.at(eclass) : UINT32_MAX;
+            bool isCached = (logicalId != UINT32_MAX && cachedNodes.count(logicalId));
+
+            if (!info.inplace && !isCached)
+            {
+                for (const auto &kv : info.memSizes)
                 {
-                    currentMem += it->second;
+                    live_mem[kv.first] += kv.second;
+                    peak_mem[kv.first] = std::max(peak_mem[kv.first], live_mem[kv.first]);
                 }
             }
 
-            // Parents might die after this op
-            const TensorNode &node = graph.getNode(nodeId);
-            for (uint32_t parentId : node.parentIds)
+            for (size_t i = 0; i < node.children.size(); ++i)
             {
-                auto useIt = uses.find(parentId);
-                if (useIt != uses.end())
+                uint32_t c = node.children[i];
+                ref[c]--;
+                if (ref[c] == 0)
                 {
-                    useIt->second--;
-                    if (useIt->second == 0 && cachedNodes.find(parentId) == cachedNodes.end())
+                    uint32_t child_sel = selection_map.at(c);
+                    uint32_t child_enode_id = egraph.getEClass(c).enodes[child_sel];
+                    const ENodeInfo &child_info = enodeInfos[child_enode_id];
+                    uint32_t child_logicalId = eclassToLogical.count(c) ? eclassToLogical.at(c) : UINT32_MAX;
+                    bool childIsCached = (child_logicalId != UINT32_MAX && cachedNodes.count(child_logicalId));
+
+                    if (info.inplace && (int)i == info.inplace_idx)
                     {
-                        auto sizeIt = nodeMemorySizes.find(parentId);
-                        if (sizeIt != nodeMemorySizes.end())
+                        continue;
+                    }
+
+                    if (!child_info.inplace && !childIsCached)
+                    {
+                        for (const auto &kv : child_info.memSizes)
                         {
-                            currentMem -= sizeIt->second;
+                            live_mem[kv.first] -= kv.second;
                         }
                     }
                 }
             }
+        };
 
-            peakMem = std::max(peakMem, currentMem);
-        }
-
-        return peakMem;
+        visit(root);
+        return peak_mem;
     }
 
-    ExtractionResult extractBest(const uint32_t rootId, const Graph &graph, EGraph &egraph,
+    ExtractionResult extractBest(const uint32_t rootId, EGraph &egraph,
                                  const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                                 const std::unordered_map<uint32_t, uint32_t> &refCounts,
                                  const std::unordered_map<Backend, uint64_t> &maxMemoryByBackend,
-                                 const std::unordered_set<uint32_t> &cachedNodes)
+                                 const std::unordered_set<uint32_t> &cachedNodes,
+                                 const std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
     {
-        ExtractionResult result;
-
-        std::unordered_map<uint32_t, ExtractChoice> &choice = result.choiceByEClass;
-
-        // Initialize choices
-        for (const EClass &cls : egraph.getClasses())
+        std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
+        for (size_t i = 0; i < egraph.getENodes().size(); ++i)
         {
-            if (cls.enodes.empty())
-                continue;
-            uint32_t canonId = egraph.find(cls.id);
-            if (choice.find(canonId) == choice.end())
+            const ENode &enode = egraph.getENodes()[i];
+            ENodeInfo info;
+            info.memSizes[enode.backend] = getSizeBytes(enode.shape, enode.dtype);
+            info.inplace = false;
+            info.inplace_idx = -1;
+
+            if (enode.kernelUid != 0)
             {
-                ExtractChoice c;
-                c.cost = std::numeric_limits<float>::infinity();
-                c.valid = false;
-                choice[canonId] = c;
-            }
-        }
-
-        bool changed = true;
-        int max_iters = 100000;
-        while (changed && max_iters-- > 0)
-        {
-            changed = false;
-            for (const EClass &cls : egraph.getClasses())
-            {
-                if (cls.enodes.empty())
-                    continue;
-                uint32_t eclassId = egraph.find(cls.id);
-
-                ExtractChoice best = choice[eclassId];
-                bool best_updated = false;
-
-                for (uint32_t enodeId : cls.enodes)
+                const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
+                info.inplace = kernel.inplace;
+                if (info.inplace && kernel.numInputs > 0)
                 {
-                    const ENode &enode = egraph.getENodes()[enodeId]; // TODO: make EGraph::getENode(uint32_t enodeId) function
-                    if (enode.opType == OpType::INPUT)
+                    info.inplace_idx = 0;
+                }
+            }
+
+            if (enode.opType == OpType::INPUT)
+            {
+                info.cost = 0.0f;
+            }
+            else if (enode.kernelUid != 0)
+            {
+                std::vector<std::vector<uint32_t>> inShapes;
+                std::vector<std::vector<uint64_t>> inStrides;
+                std::vector<DType> inDTypes;
+                std::vector<std::vector<uint8_t>> inConstants;
+
+                for (uint32_t childEClassId : enode.children)
+                {
+                    const EClass &childCls = egraph.getEClass(childEClassId);
+                    inShapes.push_back(childCls.shape);
+
+                    std::vector<uint64_t> strides_cast;
+                    for (uint64_t s : childCls.strides)
+                        strides_cast.push_back(s);
+                    inStrides.push_back(strides_cast);
+
+                    inDTypes.push_back(childCls.dtype);
+
+                    if (egraph.constantStaging.count(childEClassId))
                     {
-                        ExtractChoice c;
-                        c.enodeId = enodeId;
-                        c.cost = 0.0f;
-                        c.valid = true;
-                        TensorNode inNode = graph.getNode(enode.nodeId);
-                        c.memSize = getSizeBytes(inNode.getShape(), inNode.dtype);
-                        c.outStrides = inNode.strides;
-                        c.outViewOffset = inNode.viewOffset;
-                        if (!best.valid || c.cost < best.cost)
-                        {
-                            best = c;
-                            best_updated = true;
-                        }
-                        continue;
+                        inConstants.push_back(egraph.constantStaging.at(childEClassId));
                     }
-
-                    float childrenCost = 0.0f;
-                    std::vector<TensorNode> inputs;
-                    inputs.reserve(enode.children.size());
-                    bool childValid = true;
-
-                    for (uint32_t childEClass : enode.children)
+                    else
                     {
-                        uint32_t canonChild = egraph.find(childEClass);
-                        ExtractChoice childChoice = choice[canonChild];
-                        if (!childChoice.valid)
-                        {
-                            childValid = false;
-                            break;
-                        }
-                        childrenCost += childChoice.cost;
-                        const ENode &childEnode = egraph.getENodes()[childChoice.enodeId];
-                        TensorNode inNode = graph.getNode(childEnode.nodeId);
-                        inNode.backend = childEnode.backend;
-                        inNode.strides = childChoice.outStrides;
-                        inNode.viewOffset = childChoice.outViewOffset;
-                        inputs.push_back(inNode);
-                    }
-
-                    if (!childValid)
-                        continue;
-
-                    if (enode.opType != OpType::COPY_TO)
-                    {
-                        bool backendMatch = true;
-                        const KernelEntry *entry = nullptr;
-                        if (enode.kernelUid != 0)
-                        {
-                            entry = &KernelRegistry::get().getKernel(enode.kernelUid);
-                        }
-
-                        for (size_t i = 0; i < inputs.size(); ++i)
-                        {
-                            bool inputBackendMatch = false;
-                            for (uint32_t j = 0; j < entry->inputBackends[i].size(); j++)
-                            {
-                                if (inputs[i].backend == entry->inputBackends[i][j])
-                                {
-                                    inputBackendMatch = true;
-                                    break;
-                                }
-                            }
-                            backendMatch = backendMatch && inputBackendMatch;
-                            if (!backendMatch)
-                            {
-                                continue;
-                            }
-                        }
-                    }
-
-                    TensorNode outNode = graph.getNode(enode.nodeId);
-                    outNode.backend = enode.backend;
-
-                    if (enode.kernelUid == 0)
-                        continue;
-
-                    const KernelEntry &entry = KernelRegistry::get().getKernel(enode.kernelUid);
-
-                    if (entry.inferView)
-                    {
-                        entry.inferView(outNode, inputs, graph);
-                    }
-
-                    if (!entry.match(inputs, outNode, refCounts))
-                    {
-                        continue;
-                    }
-
-                    if (entry.inplace && inputs[0].storageType != StorageType::TRANSIENT)
-                    {
-                        continue;
-                    }
-
-                    float kernelCost = costModel.estimateCost(outNode, inputs, graph, enode.kernelUid);
-
-                    ExtractChoice c;
-                    c.enodeId = enodeId;
-                    c.cost = childrenCost + kernelCost;
-                    c.valid = true;
-                    c.memSize = getSizeBytes(outNode.getShape(), outNode.dtype);
-                    c.outStrides = outNode.strides;
-                    c.outViewOffset = outNode.viewOffset;
-
-                    if (!best.valid || c.cost < best.cost - 1e-6f)
-                    {
-                        best = c;
-                        best_updated = true;
+                        inConstants.push_back({});
                     }
                 }
 
-                if (best_updated)
-                {
-                    choice[eclassId] = best;
-                    changed = true;
-                }
+                info.cost = costModel.estimateCost(
+                    enode.kernelUid,
+                    enode.shape,
+                    enode.strides,
+                    enode.dtype,
+                    inShapes, inStrides, inDTypes, inConstants);
             }
-        }
-
-        if (changed)
-        {
-            std::cout << "\n[Planner.extractBest] WARNING: changed=true which means we hit max iterations instead of extracting absolute best\n"
-                      << std::flush;
-        }
-
-        for (const auto &kv : choice)
-        {
-            const ExtractChoice &c = kv.second;
-            if (c.valid && c.enodeId < egraph.getENodes().size())
+            else
             {
-                result.eclassToNodeId[kv.first] = egraph.getENodes()[c.enodeId].nodeId;
+                info.cost = std::numeric_limits<float>::infinity();
             }
+            enodeInfos[i] = info;
         }
 
         auto rootIt = nodeToEClass.find(rootId);
         if (rootIt == nodeToEClass.end())
         {
-            Error::throw_err("[Planner.extractBest] Root node missing from egraph.");
+            Error::throw_err("[Planner.extractBest] Root node missing from nodeToEClass.");
         }
-
         uint32_t rootEClassId = egraph.find(rootIt->second);
-        if (result.eclassToNodeId.count(rootEClassId) == 0)
-        {
-            Error::throw_err("[Planner.extractBest] no valid extraction found");
-        }
 
-        // Memory validation: calculate peak memory with liveness
-        if (!cachedNodes.empty() || !maxMemoryByBackend.empty())
+        std::unordered_map<uint32_t, uint32_t> selection_map;
+        std::vector<uint32_t> path;
+        std::vector<uint32_t> to_process = {rootEClassId};
+        std::vector<uint32_t> to_process_enode;
+        std::unordered_map<uint32_t, uint32_t> local_ref_counts;
+        std::unordered_set<uint32_t> need_single_ref;
+
+        float best_cost = std::numeric_limits<float>::infinity();
+        std::unordered_map<uint32_t, uint32_t> best_selection_map;
+
+        int max_iters = 10000;
+        ProgressTimer timer(max_iters, "extracting graphs ");
+        while (max_iters-- > 0)
         {
-            // Build node memory sizes map from extraction choices
-            std::unordered_map<uint32_t, uint64_t> nodeMemorySizes;
-            std::unordered_map<Backend, uint64_t> peakMemByBackend;
-            std::unordered_map<Backend, uint64_t> currentMemByBackend;
-            std::unordered_map<Backend, uint64_t> cachedMemByBackend;
-            for (const auto &kv : choice)
+            timer.tick();
+            bool valid = true;
+            std::string reason = "";
+            float current_cost = 0.0f;
+
+            for (auto const &kv : selection_map)
             {
-                const ExtractChoice &c = kv.second;
-                if (c.valid && c.enodeId < egraph.getENodes().size())
-                {
-                    uint32_t nodeId = egraph.getENodes()[c.enodeId].nodeId;
-                    nodeMemorySizes[nodeId] = c.memSize;
-                }
+                current_cost += enodeInfos[egraph.getEClass(kv.first).enodes[kv.second]].cost;
             }
 
-            // Get topological order
-            std::vector<uint32_t> topo;
-            std::unordered_set<uint32_t> visited;
-            std::function<void(uint32_t)> visit = [&](uint32_t nid)
+            while (!to_process.empty())
             {
-                if (visited.count(nid))
-                    return;
-                visited.insert(nid);
-                const TensorNode &node = graph.getNode(nid);
-                for (uint32_t pid : node.parentIds)
-                {
-                    visit(pid);
-                }
-                topo.push_back(nid);
-            };
-            visit(rootId);
+                uint32_t current = to_process.front();
+                to_process.erase(to_process.begin());
+                path.push_back(current);
 
-            // Calculate backend-local peak memory with liveness.
-            std::unordered_map<uint32_t, uint32_t> uses = refCounts;
-            for (uint32_t nodeId : topo)
-            {
-                const TensorNode &node = graph.getNode(nodeId);
-                Backend backend = node.backend;
-                if (cachedNodes.find(nodeId) == cachedNodes.end())
+                uint32_t sel = 0;
+                auto it = selection_map.find(current);
+                if (it != selection_map.end())
+                    sel = it->second;
+
+                const auto &enodes = egraph.getEClass(current).enodes;
+                if (sel >= enodes.size())
                 {
-                    auto sizeIt = nodeMemorySizes.find(nodeId);
-                    if (sizeIt != nodeMemorySizes.end())
+                    Error::throw_err("Invalid selection index in EGraph");
+                }
+
+                uint32_t enode_id = enodes[sel];
+                const ENode &node = egraph.getENodes()[enode_id];
+                const ENodeInfo &info = enodeInfos[enode_id];
+
+                if (info.inplace)
+                {
+                    uint32_t inplace_child = node.children[info.inplace_idx];
+                    if (need_single_ref.count(inplace_child))
                     {
-                        currentMemByBackend[backend] += sizeIt->second;
+                        valid = false;
+                        reason = "inplace";
+                        break;
+                    }
+                    need_single_ref.insert(inplace_child);
+                }
+
+                if (best_cost != std::numeric_limits<float>::infinity() && (current_cost + info.cost) >= best_cost)
+                {
+                    valid = false;
+                    reason = "cost=" + std::to_string(current_cost + info.cost);
+                    break;
+                }
+
+                selection_map[current] = sel;
+                current_cost += info.cost;
+
+                if (enodes.size() > sel + 1)
+                {
+                    if (std::find(to_process_enode.begin(), to_process_enode.end(), current) == to_process_enode.end())
+                    {
+                        to_process_enode.push_back(current);
                     }
                 }
 
-                for (uint32_t parentId : node.parentIds)
+                for (uint32_t child : node.children)
                 {
-                    auto useIt = uses.find(parentId);
-                    if (useIt != uses.end())
+                    local_ref_counts[child]++;
+                    if (need_single_ref.count(child) && local_ref_counts[child] > 1)
                     {
-                        useIt->second--;
-                        if (useIt->second == 0 && cachedNodes.find(parentId) == cachedNodes.end())
+                        valid = false;
+                        reason = "inplace_ref";
+                        break;
+                    }
+                }
+
+                std::vector<uint32_t> new_to_process;
+                for (uint32_t child : node.children)
+                {
+                    if (selection_map.find(child) == selection_map.end())
+                    {
+                        new_to_process.push_back(child);
+                    }
+                }
+                to_process.insert(to_process.begin(), new_to_process.begin(), new_to_process.end());
+            }
+
+            if (valid)
+            {
+                std::unordered_map<Backend, uint64_t> peak = computePeakMemory(egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical);
+                for (const auto &kv : maxMemoryByBackend)
+                {
+                    if (peak[kv.first] > kv.second)
+                    {
+                        valid = false;
+                        reason = "OOM";
+                        break;
+                    }
+                }
+            }
+
+            if (valid)
+            {
+                if (current_cost < best_cost)
+                {
+                    best_cost = current_cost;
+                    best_selection_map = selection_map;
+                    std::cout << "new best cost: " << best_cost << std::endl;
+                }
+            }
+            else
+            {
+#ifdef DEBUG
+                std::cout << "invalid graph (" << reason << ")" << std::endl;
+#endif
+            }
+
+            if (to_process_enode.empty())
+                break;
+
+            // backtrack
+            while (!path.empty())
+            {
+                uint32_t current = path.back();
+                path.pop_back();
+
+                if (selection_map.find(current) == selection_map.end())
+                    continue;
+                uint32_t sel = selection_map[current];
+                const auto &enodes = egraph.getEClass(current).enodes;
+                uint32_t enode_id = enodes[sel];
+                const ENode &node = egraph.getENodes()[enode_id];
+                const ENodeInfo &info = enodeInfos[enode_id];
+
+                for (uint32_t child : node.children)
+                {
+                    local_ref_counts[child]--;
+                    if (local_ref_counts[child] == 0)
+                        local_ref_counts.erase(child);
+                }
+
+                if (info.inplace)
+                {
+                    need_single_ref.erase(node.children[info.inplace_idx]);
+                }
+
+                if (sel + 1 < enodes.size())
+                {
+                    selection_map[current] = sel + 1;
+
+                    std::vector<uint32_t> keys_to_delete;
+                    for (const auto &kv : selection_map)
+                    {
+                        if (std::find(path.begin(), path.end(), kv.first) == path.end() && kv.first != current)
                         {
-                            auto sizeIt = nodeMemorySizes.find(parentId);
-                            if (sizeIt != nodeMemorySizes.end())
-                            {
-                                peakMemByBackend[graph.getNode(parentId).backend] = std::max(
-                                    peakMemByBackend[graph.getNode(parentId).backend],
-                                    currentMemByBackend[graph.getNode(parentId).backend]);
-                                currentMemByBackend[graph.getNode(parentId).backend] -= sizeIt->second;
-                            }
+                            keys_to_delete.push_back(kv.first);
                         }
                     }
+                    for (uint32_t k : keys_to_delete)
+                        selection_map.erase(k);
+
+                    auto it = std::remove(to_process_enode.begin(), to_process_enode.end(), current);
+                    if (it != to_process_enode.end())
+                        to_process_enode.erase(it, to_process_enode.end());
+
+                    if (enodes.size() > sel + 2)
+                    {
+                        to_process_enode.push_back(current);
+                    }
+
+                    to_process.clear();
+                    for (uint32_t eclass : path)
+                    {
+                        uint32_t n_id = egraph.getEClass(eclass).enodes[selection_map[eclass]];
+                        const ENode &n = egraph.getENodes()[n_id];
+                        std::vector<uint32_t> new_to_process;
+                        for (uint32_t child : n.children)
+                        {
+                            if (selection_map.find(child) == selection_map.end())
+                            {
+                                new_to_process.push_back(child);
+                            }
+                        }
+                        to_process.insert(to_process.begin(), new_to_process.begin(), new_to_process.end());
+                    }
+                    to_process.insert(to_process.begin(), current);
+                    break;
                 }
-
-                peakMemByBackend[backend] = std::max(peakMemByBackend[backend], currentMemByBackend[backend]);
-            }
-
-            for (uint32_t cachedNodeId : cachedNodes)
-            {
-                auto it = nodeMemorySizes.find(cachedNodeId);
-                if (it != nodeMemorySizes.end())
+                else
                 {
-                    cachedMemByBackend[graph.getNode(cachedNodeId).backend] += it->second;
+                    selection_map.erase(current);
+                    auto it = std::remove(to_process_enode.begin(), to_process_enode.end(), current);
+                    if (it != to_process_enode.end())
+                        to_process_enode.erase(it, to_process_enode.end());
                 }
             }
+        }
 
-            std::unordered_set<Backend> backends;
-            for (const auto &kv : peakMemByBackend)
-                backends.insert(kv.first);
-            for (const auto &kv : cachedMemByBackend)
-                backends.insert(kv.first);
-            for (const auto &kv : maxMemoryByBackend)
-                backends.insert(kv.first);
+        if (best_cost == std::numeric_limits<float>::infinity())
+        {
+            Error::throw_err("[Planner.extractBest] no valid extraction found under given constraints. try running bench");
+        }
 
-            for (Backend backend : backends)
-            {
-                uint64_t limit = getMemoryLimit(backend);
-                uint64_t required = peakMemByBackend[backend] + cachedMemByBackend[backend];
-                if (required > limit)
-                {
-                    throw MemoryExhaustedError(required, limit);
-                }
-            }
+        ExtractionResult result;
+        for (auto const &kv : best_selection_map)
+        {
+            ExtractChoice c;
+            c.enodeId = egraph.getEClass(kv.first).enodes[kv.second];
+            c.cost = enodeInfos[c.enodeId].cost;
+            c.valid = true;
+            result.choiceByEClass[kv.first] = c;
         }
 
         return result;
@@ -1591,30 +1149,13 @@ private:
         Graph &graph,
         EGraph &egraph,
         const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-        const std::unordered_map<uint32_t, uint32_t> &refCounts,
         const ExtractionResult &extraction,
-        const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
-        const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
         const std::unordered_map<uint32_t, uint32_t> &logicalToPhysicalNodeMap,
         const std::unordered_map<uint32_t, uint32_t> &physicalToLogicalNodeMap,
-        const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &physicalInputSlices,
-        const std::unordered_set<uint32_t> &cachedNodes)
+        const std::unordered_set<uint32_t> &cachedNodes,
+        const std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
     {
         CompiledGraph compiled;
-        auto mapToSelected = [&](uint32_t nodeId)
-        {
-            auto it = nodeToEClass.find(nodeId);
-            if (it == nodeToEClass.end())
-            {
-                Error::throw_err("[Planner.buildCompiledGraph] nodeToEClass does not have mapping for nodeId " + std::to_string(nodeId));
-            }
-
-            uint32_t eClassId = egraph.find(it->second);
-            auto sit = extraction.eclassToNodeId.find(eClassId);
-            if (sit != extraction.eclassToNodeId.end())
-                return sit->second;
-            Error::throw_err("[Planner.buildCompiledGraph] extraction.eclassToNodeId does not have mapping for eClassId " + std::to_string(eClassId));
-        };
 
         std::vector<uint32_t> topo;
         std::unordered_set<uint32_t> visited_classes;
@@ -1629,123 +1170,84 @@ private:
             if (choiceIt == extraction.choiceByEClass.end() || !choiceIt->second.valid)
                 return;
 
-            const ExtractChoice &c = choiceIt->second;
-            const ENode &enode = egraph.getENodes()[c.enodeId];
-
-            for (uint32_t childEClass : enode.children)
-            {
-                visit(childEClass);
-            }
-            topo.push_back(enode.nodeId);
+            const ENode &enode = egraph.getENodes()[choiceIt->second.enodeId];
+            for (uint32_t child : enode.children)
+                visit(child);
+            topo.push_back(eclassId);
         };
 
-        auto rootEClassIt = nodeToEClass.find(rootId);
-        if (rootEClassIt == nodeToEClass.end())
+        uint32_t rootEClassId = egraph.find(nodeToEClass.at(rootId));
+        visit(rootEClassId);
+
+        for (uint32_t eclassId : topo)
         {
-            Error::throw_err("[Planner.buildCompiledGraph] Root node missing from nodeToEClass.");
-        }
-        visit(egraph.find(rootEClassIt->second));
-
-        std::unordered_map<uint32_t, uint32_t> compiledRefCounts;
-        for (uint32_t nodeId : topo)
-        {
-            for (uint32_t pid : graph.getNode(nodeId).parentIds)
-            {
-                compiledRefCounts[mapToSelected(pid)]++;
-            }
-        }
-        compiledRefCounts[rootId] = std::max<uint32_t>(1, compiledRefCounts[rootId]);
-
-        compiled.refCounts = compiledRefCounts;
-
-        for (uint32_t nodeId : topo)
-        {
-            compiled.nodesMap[nodeId] = graph.getNode(nodeId);
-            if (graph.constantStaging.count(nodeId))
-                compiled.constantStaging[nodeId] = graph.constantStaging.at(nodeId);
-        }
-
-        for (uint32_t nodeId : topo)
-        {
-            const TensorNode &node = graph.getNode(nodeId);
-            if (node.opType == OpType::INPUT)
-                continue;
-
-            uint32_t logicalNodeId = nodeId;
-            auto logicalIt = physicalToLogicalNodeMap.find(nodeId);
-            if (logicalIt != physicalToLogicalNodeMap.end())
-            {
-                logicalNodeId = logicalIt->second;
-            }
-
-            uint32_t eclassId = nodeToEClass.at(nodeId);
-            auto choiceIt = extraction.choiceByEClass.find(egraph.find(eclassId));
-            if (choiceIt == extraction.choiceByEClass.end() || !choiceIt->second.valid)
-            {
-                Error::throw_err("Missing or invalid extraction choice for node " + std::to_string(nodeId));
-            }
-
-            const ExtractChoice &choice = choiceIt->second;
+            const ExtractChoice &choice = extraction.choiceByEClass.at(eclassId);
             const ENode &enode = egraph.getENodes()[choice.enodeId];
 
+            uint32_t logicalId = eclassToLogical.count(eclassId) ? eclassToLogical.at(eclassId) : UINT32_MAX;
+
+            TensorNode tNode;
+            tNode.id = eclassId;
+            tNode.opType = enode.opType;
+            tNode.opName = enode.opName;
+            tNode.dtype = enode.dtype;
+            tNode.setShape(enode.shape);
+            tNode.strides = enode.strides;
+            tNode.backend = enode.backend;
+            tNode.parentIds.reserve(enode.children.size());
+            for (uint32_t c : enode.children)
+                tNode.parentIds.push_back(egraph.find(c));
+
+            tNode.storageType = StorageType::TRANSIENT;
+            if (logicalId != UINT32_MAX && graph.hasNode(logicalId))
+            {
+                tNode.storageType = graph.getNode(logicalId).storageType;
+            }
+
+            compiled.nodesMap[eclassId] = tNode;
+            if (egraph.constantStaging.count(eclassId))
+            {
+                compiled.constantStaging[eclassId] = egraph.constantStaging.at(eclassId);
+            }
+
             OpInstruction inst;
-            inst.nodeId = nodeId;
-            inst.logicalNodeId = logicalNodeId;
-            inst.inputNodeIds.reserve(node.parentIds.size());
-            for (uint32_t pid : node.parentIds)
-                inst.inputNodeIds.push_back(mapToSelected(pid));
+            inst.nodeId = eclassId;
+            inst.logicalNodeId = logicalId;
+            inst.inputNodeIds = tNode.parentIds;
             inst.backend = enode.backend;
+            inst.fullKernelId = enode.kernelUid;
 
-            std::vector<TensorNode> checkInputs;
-            checkInputs.reserve(inst.inputNodeIds.size());
-            for (uint32_t pid : inst.inputNodeIds)
-                checkInputs.push_back(compiled.nodesMap.at(pid));
-
-            TensorNode checkOutNode = compiled.nodesMap.at(nodeId);
-            checkOutNode.backend = enode.backend;
-
-            const KernelEntry *kEntry = &KernelRegistry::get().getKernel(enode.kernelUid);
-            if (kEntry->inplace && !kEntry->match(checkInputs, checkOutNode, compiledRefCounts))
+            const KernelEntry *kEntry = nullptr;
+            if (enode.kernelUid != 0)
             {
-                auto altRefs = KernelRegistry::get().findMatchingKernels(
-                    node.opType, node.opName, enode.backend, checkInputs, checkOutNode, compiledRefCounts, false);
-                if (altRefs.empty())
-                {
-                    Error::throw_err("[Planner.buildCompiledGraph] No fallback kernel found for rejected inplace kernel");
-                }
-                kEntry = &KernelRegistry::get().getKernel(altRefs.front());
+                kEntry = &KernelRegistry::get().getKernel(enode.kernelUid);
+                inst.inplaceInputIndex = kEntry->inplace ? 0 : -1;
+                inst.viewInputIndex = kEntry->isView ? 0 : -1;
+            }
+            else
+            {
+                inst.inplaceInputIndex = -1;
+                inst.viewInputIndex = -1;
             }
 
-            inst.fullKernelId = kEntry->uid;
-            inst.inplaceInputIndex = kEntry->inplace ? 0 : -1;
-            inst.viewInputIndex = kEntry->isView ? 0 : -1;
-            const bool nodeIsFinalLogicalOutput = logicalToPhysicalNodeMap.count(logicalNodeId) && logicalToPhysicalNodeMap.at(logicalNodeId) == nodeId;
-            inst.outputStorageType = (cachedNodes.count(logicalNodeId) && nodeIsFinalLogicalOutput) ? StorageType::PINNED : node.storageType;
-
-            compiled.nodesMap[nodeId].backend = enode.backend;
-            if (kEntry->inferView)
-            {
-                std::vector<TensorNode> inplaceInputs;
-                inplaceInputs.reserve(inst.inputNodeIds.size());
-                for (uint32_t pid : inst.inputNodeIds)
-                    inplaceInputs.push_back(compiled.nodesMap.at(pid));
-
-                kEntry->inferView(compiled.nodesMap[nodeId], inplaceInputs, graph);
-            }
+            const bool nodeIsFinalLogicalOutput = logicalToPhysicalNodeMap.count(logicalId) && logicalToPhysicalNodeMap.at(logicalId) == rootId;
+            inst.outputStorageType = (cachedNodes.count(logicalId) && (logicalId != UINT32_MAX) && nodeIsFinalLogicalOutput) ? StorageType::PINNED : tNode.storageType;
 
             compiled.instructions.push_back(inst);
+            compiled.nodeCosts[eclassId] = choice.cost;
+            compiled.physicalToLogicalNodeMap[eclassId] = logicalId;
+        }
 
-            std::vector<TensorNode> costInputs;
-            costInputs.reserve(inst.inputNodeIds.size());
+        std::unordered_map<uint32_t, uint32_t> compiledRefCounts;
+        for (const auto &inst : compiled.instructions)
+        {
             for (uint32_t pid : inst.inputNodeIds)
             {
-                costInputs.push_back(compiled.nodesMap.at(pid));
+                compiledRefCounts[pid]++;
             }
-            TensorNode costOut = compiled.nodesMap.at(nodeId);
-            compiled.nodeCosts[nodeId] = costModel.estimateCost(costOut, costInputs, graph, enode.kernelUid);
-
-            compiled.physicalToLogicalNodeMap[nodeId] = logicalNodeId;
         }
+        compiledRefCounts[rootEClassId] = std::max<uint32_t>(1, compiledRefCounts[rootEClassId]);
+        compiled.refCounts = compiledRefCounts;
 
         return compiled;
     }

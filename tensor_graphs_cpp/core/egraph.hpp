@@ -8,21 +8,55 @@
 #include <limits>
 #include <algorithm>
 
+struct ENode
+{
+    uint64_t kernelUid = 0;
+    OpType opType = OpType::INPUT;
+    std::string opName;
+    std::vector<uint32_t> children; // list of child eclass ids
+    uint32_t leafId = UINT32_MAX;
+    std::vector<uint32_t> shape;
+    std::vector<uint64_t> strides;
+    DType dtype = DType::FLOAT32;
+    Backend backend = Backend::CPU;
+};
+
 struct ENodeKey
 {
-    OpType opType;
     uint64_t kernelUid = 0;
-    uint32_t leafId = UINT32_MAX; // Used only for INPUT nodes to prevent bad merges
-    Backend backend = Backend::CPU;
+    OpType opType;
+    std::string opName;
     std::vector<uint32_t> children;
+    uint32_t leafId = UINT32_MAX; // Used only for INPUT nodes to prevent bad merges
+    std::vector<uint32_t> shape;
+    std::vector<uint64_t> strides;
+    DType dtype = DType::FLOAT32;
+    Backend backend = Backend::CPU;
+
+    ENodeKey(const ENode enode)
+        : kernelUid(enode.kernelUid),
+          opType(enode.opType),
+          opName(enode.opName),
+          children(enode.children),
+          leafId(enode.leafId),
+          shape(enode.shape),
+          strides(enode.strides),
+          dtype(enode.dtype),
+          backend(enode.backend)
+    {
+    }
 
     bool operator==(const ENodeKey &other) const
     {
-        return opType == other.opType &&
-               kernelUid == other.kernelUid &&
+        return kernelUid == other.kernelUid &&
+               opType == other.opType &&
+               opName == other.opName &&
+               children == other.children &&
                leafId == other.leafId &&
-               backend == other.backend &&
-               children == other.children;
+               shape == other.shape &&
+               strides == other.strides &&
+               dtype == other.dtype &&
+               backend == other.backend;
     }
 };
 
@@ -32,25 +66,30 @@ struct ENodeKeyHash
     size_t operator()(const ENodeKey &key) const noexcept
     {
         size_t h = std::hash<uint64_t>{}(key.kernelUid);
-        h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(key.opType)) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<uint32_t>{}(key.leafId) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(key.backend)) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        for (uint32_t c : key.children)
+
+        auto hash_combine = [](size_t &h, size_t v)
         {
-            h ^= std::hash<uint32_t>{}(c) + 0x9e3779b9 + (h << 6) + (h >> 2);
-        }
+            h ^= v + 0x9e3779b9 + (h << 6) + (h >> 2);
+        };
+
+        hash_combine(h, std::hash<uint32_t>{}(static_cast<uint32_t>(key.opType)));
+        hash_combine(h, std::hash<std::string>{}(key.opName));
+        hash_combine(h, std::hash<uint32_t>{}(key.leafId));
+
+        for (uint32_t c : key.children)
+            hash_combine(h, std::hash<uint32_t>{}(c));
+
+        for (uint32_t s : key.shape)
+            hash_combine(h, std::hash<uint32_t>{}(s));
+
+        for (uint32_t s : key.strides)
+            hash_combine(h, std::hash<uint64_t>{}(s));
+
+        hash_combine(h, std::hash<uint32_t>{}(static_cast<uint32_t>(key.dtype)));
+        hash_combine(h, std::hash<uint32_t>{}(static_cast<uint32_t>(key.backend)));
+
         return h;
     }
-};
-
-struct ENode
-{
-    uint32_t nodeId = 0; // Graph node id associated with this enode
-    uint64_t kernelUid = 0;
-    OpType opType = OpType::INPUT;
-    std::string opName;
-    Backend backend = Backend::CPU;
-    std::vector<uint32_t> children;
 };
 
 struct EClass
@@ -58,24 +97,25 @@ struct EClass
     uint32_t id = 0;
     std::vector<uint32_t> enodes;
     std::vector<uint32_t> shape;
+    std::vector<uint64_t> strides;
     DType dtype = DType::FLOAT32;
-    bool contiguous = true;
     Backend backend = Backend::CPU;
-    uint32_t refCount = 0;
 };
 
 class EGraph
 {
 public:
-    uint32_t addEClass(const std::vector<uint32_t> &shape, DType dtype, uint32_t refCount, bool contiguous, Backend backend)
+    uint32_t nextLeafId = 0;
+    std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
+
+    uint32_t addEClass(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, DType dtype, Backend backend)
     {
         uint32_t id = static_cast<uint32_t>(classes.size());
         EClass c;
         c.id = id;
         c.shape = shape;
+        c.strides = strides;
         c.dtype = dtype;
-        c.refCount = refCount;
-        c.contiguous = contiguous;
         c.backend = backend;
         classes.push_back(std::move(c));
         parent.push_back(id);
@@ -91,12 +131,15 @@ public:
             child = find(child);
         }
 
-        ENodeKey key{
-            node.opType,
-            node.kernelUid,
-            node.opType == OpType::INPUT ? node.nodeId : UINT32_MAX,
-            node.backend,
-            node.children};
+        uint32_t leafId = UINT32_MAX;
+        if (node.opType == OpType::INPUT)
+        {
+            leafId = nextLeafId;
+            nextLeafId++;
+        }
+        node.leafId = leafId;
+
+        ENodeKey key = ENodeKey(node);
 
         auto it = hashcons.find(key);
         if (it != hashcons.end())
@@ -137,13 +180,6 @@ public:
         if (ra == rb)
             return;
 
-        // Strict physical equality check to prevent polluting downstream expectations
-        if (classes[ra].contiguous != classes[rb].contiguous ||
-            classes[ra].backend != classes[rb].backend)
-        {
-            return;
-        }
-
         if (classes[ra].enodes.size() < classes[rb].enodes.size())
             std::swap(ra, rb);
 
@@ -160,12 +196,18 @@ public:
         {
             Error::throw_err("EClass merge shape mismatch: " + toString(classes[ra].shape) + ", " + toString(classes[rb].shape));
         }
+        if (classes[ra].strides != classes[rb].strides)
+        {
+            Error::throw_err("EClass merge strides mismatch: " + toString(classes[ra].strides) + ", " + toString(classes[rb].strides));
+        }
         if (classes[ra].dtype != classes[rb].dtype)
         {
             Error::throw_err("EClass merge dtype mismatch: " + (std::string)toString(classes[ra].dtype) + ", " + toString(classes[rb].dtype));
         }
-
-        classes[ra].refCount = std::max(classes[ra].refCount, classes[rb].refCount);
+        if (classes[ra].backend != classes[rb].backend)
+        {
+            Error::throw_err("EClass merge backend mismatch: " + (std::string)toString(classes[ra].backend) + ", " + toString(classes[rb].backend));
+        }
     }
 
     void rebuild()
@@ -179,12 +221,7 @@ public:
                 child = find(child);
             }
 
-            ENodeKey key{
-                node.opType,
-                node.kernelUid,
-                node.opType == OpType::INPUT ? node.nodeId : UINT32_MAX,
-                node.backend,
-                node.children};
+            ENodeKey key = ENodeKey(node);
 
             auto it = newHash.find(key);
             if (it != newHash.end())
@@ -225,3 +262,8 @@ private:
     std::unordered_map<ENodeKey, uint32_t, ENodeKeyHash> hashcons;
     std::unordered_map<uint32_t, uint32_t> nodeToEClass;
 };
+
+bool isContiguous(const EClass &eclass)
+{
+    return isContiguous(eclass.strides, eclass.shape);
+}

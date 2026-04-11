@@ -41,7 +41,7 @@ struct Graph
         return nodes.at(id);
     }
 
-    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape = {}, std::vector<int64_t> _strides = {}, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::TRANSIENT, std::string _contentHash = "")
+    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {}, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::TRANSIENT, std::string _contentHash = "")
     {
         uint32_t id = allocator->allocate();
         nodes[id] = TensorNode(id, _opType, _opName, _dtype, _parentIds, _shape, _strides, _backend, _storageType, _contentHash);
@@ -93,7 +93,7 @@ struct Graph
         return id;
     }
 
-    uint32_t input(std::vector<uint32_t> shape, DType dtype, std::vector<int64_t> strides = {}, StorageType storageType = StorageType::PERSISTENT)
+    uint32_t input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {}, StorageType storageType = StorageType::PERSISTENT)
     {
         TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, Backend::CPU, storageType);
         return node.id;

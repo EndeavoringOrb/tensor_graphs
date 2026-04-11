@@ -103,7 +103,7 @@ def compute_peak_memory(egraph: EGraph, selection_map: Dict[int, int], root: int
     return peak_mem
 
 
-def extract_all(egraph: EGraph, root_id: int, max_mem_size: int):
+def extract_best(egraph: EGraph, root_id: int, max_mem_size: int):
     # state
     selection_map: Dict[int, int] = {}
     path: List[int] = []
@@ -281,6 +281,6 @@ eg.add_enode(6, "*", [0, 2], 4, 3, False)
 # Run extraction
 # ----------------------------
 
-best = extract_all(eg, root_id=4, max_mem_size=32)
+best = extract_best(eg, root_id=4, max_mem_size=32)
 
 print(f"\nBest selection map (cost={best[0]}):", best[1])
