@@ -928,7 +928,7 @@ private:
         float best_cost = std::numeric_limits<float>::infinity();
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
 
-        int max_iters = 10000;
+        int max_iters = 1000;
         ProgressTimer timer(max_iters, "extracting graphs ");
         while (max_iters-- > 0)
         {

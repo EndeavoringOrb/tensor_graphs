@@ -219,27 +219,90 @@ struct FusionRule : public Rule
 
             if (!needCopy && !needContig)
             {
-                adaptedParents.push_back(pid); // TODO: CRITICAL, need to get refCounts from pattern, then adaptedParentRefCounts[pid]=parentENode.refCount + (1 - patternRefCounts[pid])
-                /*
-                0: a
-                1: op0(0)
-                2: op1(0)
-                3: op2(1, 2), opfused(0)
-                if you choose op2, a.refCount is 2
-                if you choose opfused, a.refCount is 1
-                2+(1-2)=1
-                can't just set to 1 because maybe there are other references outside of matched pattern
-                */
+                // The planner's extraction phase evaluates inplace safety incrementally
+                // using local_ref_counts during path traversal. We do not need to modify
+                // static ENode refCounts here to ensure correct inplace checks.
+                adaptedParents.push_back(pid);
                 continue;
             }
             else
             {
-                return; // TODO: insert copyto/contiguous nodes as needed
+                uint32_t currentPid = pid;
+                EClass currentClass = parent;
+
+                if (needCopy)
+                {
+                    TensorNode inNode;
+                    inNode.opType = OpType::INPUT; // dummy
+                    inNode.dtype = currentClass.dtype;
+                    inNode.setShape(currentClass.shape);
+                    inNode.strides = currentClass.strides;
+                    inNode.backend = currentClass.backend;
+
+                    TensorNode outNode = inNode;
+                    outNode.opType = OpType::COPY_TO;
+                    outNode.backend = expectedBackend;
+
+                    auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", outNode.backend, {inNode}, outNode, {}, true);
+                    if (matches.empty())
+                        return; // cannot copy
+
+                    uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.dtype, outNode.backend);
+                    for (uint64_t uid : matches)
+                    {
+                        ENode copyNode;
+                        copyNode.kernelUid = uid;
+                        copyNode.opType = OpType::COPY_TO;
+                        copyNode.children = {currentPid};
+                        copyNode.shape = outNode.getShape();
+                        copyNode.strides = outNode.strides;
+                        copyNode.dtype = outNode.dtype;
+                        copyNode.backend = outNode.backend;
+                        egraph.addENode(newEClass, copyNode);
+                    }
+                    currentPid = newEClass;
+                    currentClass = egraph.getEClass(newEClass);
+                }
+
+                if (needContig)
+                {
+                    TensorNode inNode;
+                    inNode.opType = OpType::INPUT; // dummy
+                    inNode.dtype = currentClass.dtype;
+                    inNode.setShape(currentClass.shape);
+                    inNode.strides = currentClass.strides;
+                    inNode.backend = currentClass.backend;
+
+                    TensorNode outNode = inNode;
+                    outNode.opType = OpType::CONTIGUOUS;
+                    outNode.strides = calcContiguousStrides(outNode.getShape());
+
+                    auto matches = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", outNode.backend, {inNode}, outNode, {}, true);
+                    if (matches.empty())
+                        return; // cannot make contiguous
+
+                    uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.dtype, outNode.backend);
+                    for (uint64_t uid : matches)
+                    {
+                        ENode contigNode;
+                        contigNode.kernelUid = uid;
+                        contigNode.opType = OpType::CONTIGUOUS;
+                        contigNode.children = {currentPid};
+                        contigNode.shape = outNode.getShape();
+                        contigNode.strides = outNode.strides;
+                        contigNode.dtype = outNode.dtype;
+                        contigNode.backend = outNode.backend;
+                        egraph.addENode(newEClass, contigNode);
+                    }
+                    currentPid = newEClass;
+                    currentClass = egraph.getEClass(newEClass);
+                }
+
+                adaptedParents.push_back(currentPid);
             }
         }
 
         const ENode &oldENode = egraph.getENodes()[eNodeIdx];
-        // uint32_t eclassId = egraph.addEClass(oldENode.shape, oldENode.strides, oldENode.dtype, oldENode.backend, oldENode.refCount);
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
 
         ENode enode;
