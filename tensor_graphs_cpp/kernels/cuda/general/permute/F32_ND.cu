@@ -101,9 +101,9 @@ inline void runPermute_CUDA_ND(const std::vector<const void *> &inputs, const st
     p.rank = (uint32_t)outViews[0].getShape().size();
 
     // Calculate logical strides for a contiguous input
-    std::vector<int64_t> in_strides_contig = calcContiguousStrides(inViews[0].getShape());
+    std::vector<uint64_t> in_strides_contig = calcContiguousStrides(inViews[0].getShape());
     // Calculate logical strides for a contiguous output
-    std::vector<int64_t> out_strides_contig = calcContiguousStrides(outViews[0].getShape());
+    std::vector<uint64_t> out_strides_contig = calcContiguousStrides(outViews[0].getShape());
 
     for (uint32_t i = 0; i < p.rank; ++i)
     {
