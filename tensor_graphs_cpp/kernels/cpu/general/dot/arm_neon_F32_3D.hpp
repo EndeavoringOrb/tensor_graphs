@@ -1,6 +1,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
+#if defined(TG_HAS_NEON)
 #include <arm_neon.h> // ARM SIMD Intrinsics
 #include <thread>
 #include <vector>
@@ -136,5 +137,6 @@ inline uint32_t refFactoryDotF32_3D_Optimized(const std::vector<uint32_t> &input
 }
 
 // Register as a high-performance kernel instead of a reference kernel
-REGISTER_KERNEL("Dot_F32_3D_CPU_Optimized", 2, matchDotF32_3D_Optimized, runDotF32_3D_Optimized,
-                refFactoryDotF32_3D_Optimized, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Dot_F32_3D_CPU_Optimized", 2, matchDotF32_3D_Optimized, runDotF32_3D_Optimized, refFactoryDotF32_3D_Optimized, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+
+#endif // TG_HAS_NEON

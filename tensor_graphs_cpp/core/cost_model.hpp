@@ -16,15 +16,29 @@
 
 // TODO: make hardware detection better
 #if defined(USE_CUDA)
-#define HW_TAG "CUDA_Enabled"
-#elif defined(_WIN32) || defined(_WIN64)
-#define HW_TAG "Windows_x64"
-#elif defined(__APPLE__)
-#define HW_TAG "Apple_Silicon"
-#elif defined(__x86_64__) || defined(_M_X64)
-#define HW_TAG "Linux_x64"
+    #define HW_TAG "CUDA_Enabled"
 #else
-#define HW_TAG "Linux_ARM64"
+    // Determine OS String
+    #if defined(TG_OS_WINDOWS)
+        #define PLAT_OS_STR "Windows"
+    #elif defined(TG_OS_MACOS)
+        #define PLAT_OS_STR "macOS"
+    #elif defined(TG_OS_LINUX)
+        #define PLAT_OS_STR "Linux"
+    #else
+        #define PLAT_OS_STR "UnknownOS"
+    #endif
+
+    // Determine Arch String
+    #if defined(TG_ARCH_ARM64)
+        #define PLAT_ARCH_STR "ARM64"
+    #elif defined(TG_ARCH_X64)
+        #define PLAT_ARCH_STR "x64"
+    #else
+        #define PLAT_ARCH_STR "UnknownArch"
+    #endif
+
+    #define HW_TAG PLAT_OS_STR "_" PLAT_ARCH_STR
 #endif
 
 // Uncomment the following line to enable logging calls to `benchmarks/calls.jsonl`

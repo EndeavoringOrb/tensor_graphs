@@ -16,6 +16,25 @@
 #include <json.hpp>
 using json = nlohmann::json;
 
+// --- OS Detection ---
+#if defined(_WIN32) || defined(_WIN64)
+    #define TG_OS_WINDOWS
+#elif defined(__APPLE__)
+    #define TG_OS_MACOS
+#elif defined(__linux__)
+    #define TG_OS_LINUX
+#endif
+
+// --- Architecture Detection ---
+#if defined(__aarch64__) || defined(_M_ARM64)
+    #define TG_ARCH_ARM64
+    #if defined(__ARM_NEON) || defined(TG_OS_WINDOWS) // Windows ARM64 always has NEON
+        #define TG_HAS_NEON
+    #endif
+#elif defined(__x86_64__) || defined(_M_X64)
+    #define TG_ARCH_X64
+#endif
+
 namespace Error
 {
     template <typename T = std::runtime_error, typename... Args>
