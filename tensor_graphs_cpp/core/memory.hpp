@@ -650,7 +650,8 @@ struct MemoryManager
         }
     }
 
-    uint32_t resolveAlias(uint32_t id) {
+    uint32_t resolveAlias(uint32_t id)
+    {
         while (aliasMap.find(id) != aliasMap.end())
         {
             id = aliasMap.at(id);
@@ -658,7 +659,7 @@ struct MemoryManager
         return id;
     }
 
-    TensorView getView(const TensorNode &node, const CompiledGraph &compiled = {}) const
+    TensorView getView(const TensorNode &node) const
     {
         auto it = buffers.find(node.backend);
         if (it == buffers.end())
@@ -667,9 +668,7 @@ struct MemoryManager
         }
 
         const DeviceBuffer &buf = it->second;
-        uint32_t logicalId = compiled.getLogicalId(node.id);
-
-        uint32_t targetId = logicalId;
+        uint32_t targetId = node.id;
         while (aliasMap.find(targetId) != aliasMap.end())
         {
             targetId = aliasMap.at(targetId);
@@ -709,7 +708,7 @@ struct MemoryManager
         return sizes;
     }
 
-    MemBlock& getBlock(Backend backend, uint32_t nodeId, const CompiledGraph &compiled = {})
+    MemBlock &getBlock(Backend backend, uint32_t nodeId)
     {
         auto it = buffers.find(backend);
         if (it == buffers.end())
@@ -717,9 +716,7 @@ struct MemoryManager
             Error::throw_err("[MemoryManager.getBlock] Backend buffer not initialized");
         }
 
-        uint32_t logicalId = compiled.getLogicalId(nodeId);
-
-        uint32_t targetId = logicalId;
+        uint32_t targetId = nodeId;
         while (aliasMap.find(targetId) != aliasMap.end())
         {
             targetId = aliasMap.at(targetId);
@@ -731,7 +728,7 @@ struct MemoryManager
         {
             Error::throw_err("[MemoryManager.getBlock] Buffer allocation map doesn't have targetId " + std::to_string(targetId));
         }
-        return *buf.allocationMap.at(targetId);
+        return *bufIt->second;
     }
 };
 

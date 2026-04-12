@@ -434,32 +434,19 @@ private:
         {
             for (const auto &nodePair : pair.second.nodesMap)
             {
-                if (graph.constantStaging.count(nodePair.first))
-                    neededConstants.insert(nodePair.first);
-                else if (pair.second.constantStaging.count(nodePair.first))
-                    neededConstants.insert(nodePair.first);
+                uint32_t logicalId = pair.second.getLogicalId(nodePair.first);
+                if (logicalId != UINT32_MAX && graph.constantStaging.count(logicalId))
+                {
+                    neededConstants.insert(logicalId);
+                }
             }
         }
 
         std::vector<uint32_t> orderedConstants(neededConstants.begin(), neededConstants.end());
         std::sort(orderedConstants.begin(), orderedConstants.end());
-        for (uint32_t nodeId : orderedConstants)
+        for (uint32_t logicalId : orderedConstants)
         {
-            if (graph.constantStaging.count(nodeId))
-            {
-                constantsObj[std::to_string(nodeId)] = graph.constantStaging.at(nodeId);
-            }
-            else
-            {
-                for (const auto &pair : cachedGraphs)
-                {
-                    if (pair.second.constantStaging.count(nodeId))
-                    {
-                        constantsObj[std::to_string(nodeId)] = pair.second.constantStaging.at(nodeId);
-                        break;
-                    }
-                }
-            }
+            constantsObj[std::to_string(logicalId)] = graph.constantStaging.at(logicalId);
         }
 
         entry["constants"] = constantsObj;
@@ -514,9 +501,13 @@ public:
             for (const auto &nodePair : pair.second.nodesMap)
             {
                 const TensorNode &node = nodePair.second;
+
+                uint32_t logicalId = pair.second.getLogicalId(node.id);
+
                 if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
                 {
-                    countSet.insert(node.id);
+                    uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : node.id;
+                    countSet.insert(memId);
                 }
             }
         }
@@ -529,29 +520,31 @@ public:
             for (const auto &nodePair : pair.second.nodesMap)
             {
                 const TensorNode &node = nodePair.second;
-                uint32_t nodeId = node.id;
-                uint32_t logicalId = pair.second.getLogicalId(node.id);
+                uint32_t eclassId = node.id;
+                uint32_t logicalId = pair.second.getLogicalId(eclassId);
 
                 if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
                 {
-                    if (materialized.insert(nodeId).second)
+                    uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : eclassId;
+
+                    if (materialized.insert(memId).second)
                     {
                         timer.tick();
                         uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
 
-                        uint64_t offset = memManager.allocate(node.backend, logicalId, sizeBytes, StorageType::PERSISTENT);
+                        uint64_t offset = memManager.allocate(node.backend, memId, sizeBytes, StorageType::PERSISTENT);
 
-                        if (graph.constantStaging.count(nodeId))
+                        if (logicalId != UINT32_MAX && graph.constantStaging.count(logicalId))
                         {
-                            memManager.write(node.backend, logicalId, graph.constantStaging[nodeId].data(), sizeBytes);
+                            memManager.write(node.backend, memId, graph.constantStaging.at(logicalId).data(), sizeBytes);
                         }
-                        else if (pair.second.constantStaging.count(nodeId))
+                        else if (pair.second.constantStaging.count(eclassId))
                         {
-                            memManager.write(node.backend, logicalId, pair.second.constantStaging.at(nodeId).data(), sizeBytes);
+                            memManager.write(node.backend, memId, pair.second.constantStaging.at(eclassId).data(), sizeBytes);
                         }
-                        else if (graph.weightSources.count(nodeId))
+                        else if (logicalId != UINT32_MAX && graph.weightSources.count(logicalId))
                         {
-                            const auto &source = graph.weightSources.at(nodeId);
+                            const auto &source = graph.weightSources.at(logicalId);
                             auto &loader = graph.loaders.at(source.first);
                             uint8_t *destPtr = memManager.buffers.at(node.backend).arena_ptr + offset;
                             loader->loadTensor(source.second, destPtr, sizeBytes);
@@ -708,11 +701,14 @@ public:
         // get output
         const OpInstruction &lastInst = compiled->instructions[compiled->instructions.size() - 1];
         Backend backend = lastInst.backend;
-        if (!memManager.has(backend, compiled->getLogicalId(lastInst.nodeId)))
+        uint32_t outLogicalId = compiled->getLogicalId(lastInst.nodeId);
+        if (!memManager.has(backend, outLogicalId))
         {
-            Error::throw_err("[Session.run] execution output nodeId " + std::to_string(lastInst.logicalNodeId) + " not found in memory");
+            Error::throw_err("[Session.run] execution output nodeId " + std::to_string(outLogicalId) + " not found in memory");
         }
-        TensorView view = memManager.getView(compiled->nodesMap.at(lastInst.nodeId), *compiled);
+        TensorNode outNode = compiled->nodesMap.at(lastInst.nodeId);
+        outNode.id = outLogicalId;
+        TensorView view = memManager.getView(outNode);
         std::cout << "final output view: " << toString(view) << "\n"
                   << std::flush;
         return memManager.buffers.at(backend).arena_ptr + view.baseOffset;

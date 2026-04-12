@@ -69,12 +69,18 @@ public:
             for (uint32_t inId : inst.inputNodeIds)
             {
                 const TensorNode &inNode = compiled.nodesMap.at(inId);
-                TensorView view = memManager.getView(inNode, compiled);
-                if (memManager.has(inNode.backend, inId))
+
+                uint32_t activeInId = inId;
+                uint32_t inLogicalId = compiled.getLogicalId(inId);
+                if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
                 {
-                    view = memManager.getView(inNode);
+                    activeInId = inLogicalId;
                 }
 
+                TensorNode activeNode = inNode;
+                activeNode.id = activeInId;
+
+                TensorView view = memManager.getView(activeNode);
                 kernelInViews.push_back(view);
                 kernelInputs.push_back(memManager.buffers.at(inNode.backend).arena_ptr + view.baseOffset);
             }
@@ -82,19 +88,37 @@ public:
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {
                 const uint32_t inId = inst.inputNodeIds[i];
+                uint32_t activeInId = inId;
+                uint32_t inLogicalId = compiled.getLogicalId(inId);
+                if (!memManager.has(compiled.nodesMap.at(inId).backend, inId) && memManager.has(compiled.nodesMap.at(inId).backend, inLogicalId))
+                {
+                    activeInId = inLogicalId;
+                }
                 TensorNode debugInput = compiled.nodesMap.at(inId);
-                debugInput.id = compiled.getLogicalId(inId);
-                Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId), compiled);
+                debugInput.id = activeInId;
+                Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId));
             }
 
             if (inst.inplaceInputIndex >= 0)
             {
-                uint32_t srcId = compiled.getLogicalId(inst.inputNodeIds[inst.inplaceInputIndex]);
+                uint32_t inId = inst.inputNodeIds[inst.inplaceInputIndex];
+                uint32_t srcId = inId;
+                uint32_t inLogicalId = compiled.getLogicalId(inId);
+                if (!memManager.has(inst.backend, inId) && memManager.has(inst.backend, inLogicalId))
+                {
+                    srcId = inLogicalId;
+                }
                 memManager.transferOwnership(inst.backend, srcId, outputMemId);
             }
             else if (inst.viewInputIndex >= 0)
             {
-                uint32_t srcId = compiled.getLogicalId(inst.inputNodeIds[inst.viewInputIndex]);
+                uint32_t inId = inst.inputNodeIds[inst.viewInputIndex];
+                uint32_t srcId = inId;
+                uint32_t inLogicalId = compiled.getLogicalId(inId);
+                if (!memManager.has(inst.backend, inId) && memManager.has(inst.backend, inLogicalId))
+                {
+                    srcId = inLogicalId;
+                }
                 memManager.addAlias(inst.backend, srcId, outputMemId, compiled.refCounts.at(inst.nodeId), inst.outputStorageType);
             }
 
@@ -111,7 +135,7 @@ public:
 
             if (inst.viewInputIndex < 0)
             {
-                MemBlock &outBlock = memManager.getBlock(node.backend, outputMemId, compiled);
+                MemBlock &outBlock = memManager.getBlock(node.backend, outputMemId);
                 outBlock.refCount = compiled.refCounts.at(inst.nodeId);
                 outBlock.storageType = inst.outputStorageType;
                 outBlock.isLocked = true;
@@ -126,7 +150,7 @@ public:
 
             TensorNode debugOutput = compiled.nodesMap.at(inst.nodeId);
             debugOutput.id = outputMemId;
-            Debug::checkNan(debugOutput, memManager, "Kernel Output: " + std::to_string(inst.nodeId), compiled);
+            Debug::checkNan(debugOutput, memManager, "Kernel Output: " + std::to_string(inst.nodeId));
 
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {

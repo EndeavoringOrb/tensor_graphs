@@ -911,6 +911,24 @@ private:
             enodeInfos[i] = info;
         }
 
+        // Sort enodes in each eclass by cost for greedy exploration.
+        // By sorting upfront, iterating sel = 0, 1, 2... automatically selects
+        // the next lowest cost enode at each step of the search.
+        for (size_t i = 0; i < egraph.getClasses().size(); ++i)
+        {
+            if (egraph.find(static_cast<uint32_t>(i)) == i)
+            {
+                EClass &cls = egraph.getEClass(static_cast<uint32_t>(i));
+                std::sort(cls.enodes.begin(), cls.enodes.end(),
+                          [&enodeInfos](uint32_t a, uint32_t b)
+                          {
+                              if (enodeInfos[a].cost != enodeInfos[b].cost)
+                                  return enodeInfos[a].cost < enodeInfos[b].cost;
+                              return a < b; // stable tie-break
+                          });
+            }
+        }
+
         auto rootIt = nodeToEClass.find(rootId);
         if (rootIt == nodeToEClass.end())
         {
@@ -928,7 +946,7 @@ private:
         float best_cost = std::numeric_limits<float>::infinity();
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
 
-        int max_iters = 1000;
+        int max_iters = 10;
         ProgressTimer timer(max_iters, "extracting graphs ");
         while (max_iters-- > 0)
         {
@@ -1035,7 +1053,7 @@ private:
                 {
                     best_cost = current_cost;
                     best_selection_map = selection_map;
-                    std::cout << "new best cost: " << best_cost << std::endl;
+                    std::cout << "new best cost: " << std::to_string(best_cost) << std::endl;
                 }
             }
             else
@@ -1186,8 +1204,11 @@ private:
 
             uint32_t logicalId = eclassToLogical.count(eclassId) ? eclassToLogical.at(eclassId) : UINT32_MAX;
 
+            // Offset physical IDs so they never collide with logical IDs from the original Graph
+            uint32_t physId = eclassId | 0x80000000;
+
             TensorNode tNode;
-            tNode.id = eclassId;
+            tNode.id = physId;
             tNode.opType = enode.opType;
             tNode.opName = enode.opName;
             tNode.dtype = enode.dtype;
@@ -1196,7 +1217,7 @@ private:
             tNode.backend = enode.backend;
             tNode.parentIds.reserve(enode.children.size());
             for (uint32_t c : enode.children)
-                tNode.parentIds.push_back(egraph.find(c));
+                tNode.parentIds.push_back(egraph.find(c) | 0x80000000);
 
             tNode.storageType = StorageType::TRANSIENT;
             if (logicalId != UINT32_MAX && graph.hasNode(logicalId))
@@ -1204,14 +1225,14 @@ private:
                 tNode.storageType = graph.getNode(logicalId).storageType;
             }
 
-            compiled.nodesMap[eclassId] = tNode;
+            compiled.nodesMap[physId] = tNode;
             if (egraph.constantStaging.count(eclassId))
             {
-                compiled.constantStaging[eclassId] = egraph.constantStaging.at(eclassId);
+                compiled.constantStaging[physId] = egraph.constantStaging.at(eclassId);
             }
 
             OpInstruction inst;
-            inst.nodeId = eclassId;
+            inst.nodeId = physId;
             inst.logicalNodeId = logicalId;
             inst.inputNodeIds = tNode.parentIds;
             inst.backend = enode.backend;
@@ -1233,9 +1254,13 @@ private:
             const bool nodeIsFinalLogicalOutput = logicalToPhysicalNodeMap.count(logicalId) && logicalToPhysicalNodeMap.at(logicalId) == rootId;
             inst.outputStorageType = (cachedNodes.count(logicalId) && (logicalId != UINT32_MAX) && nodeIsFinalLogicalOutput) ? StorageType::PINNED : tNode.storageType;
 
-            compiled.instructions.push_back(inst);
-            compiled.nodeCosts[eclassId] = choice.cost;
-            compiled.physicalToLogicalNodeMap[eclassId] = logicalId;
+            if (enode.opType != OpType::INPUT)
+            {
+                compiled.instructions.push_back(inst);
+            }
+
+            compiled.nodeCosts[physId] = choice.cost;
+            compiled.physicalToLogicalNodeMap[physId] = logicalId;
         }
 
         std::unordered_map<uint32_t, uint32_t> compiledRefCounts;
@@ -1246,7 +1271,7 @@ private:
                 compiledRefCounts[pid]++;
             }
         }
-        compiledRefCounts[rootEClassId] = std::max<uint32_t>(1, compiledRefCounts[rootEClassId]);
+        compiledRefCounts[rootEClassId | 0x80000000] = std::max<uint32_t>(1, compiledRefCounts[rootEClassId | 0x80000000]);
         compiled.refCounts = compiledRefCounts;
 
         return compiled;

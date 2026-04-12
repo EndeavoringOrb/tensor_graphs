@@ -8,7 +8,7 @@
 
 namespace Debug
 {
-    inline void checkNan(const TensorNode &node, const MemoryManager &mem, const std::string &context, const CompiledGraph &compiled = {})
+    inline void checkNan(const TensorNode &node, const MemoryManager &mem, const std::string &context)
     {
 #ifndef DEBUG
         return;
@@ -19,7 +19,7 @@ namespace Debug
             return;
         }
 
-        TensorView view = mem.getView(node, compiled);
+        TensorView view = mem.getView(node);
 
         auto it = mem.buffers.find(node.backend);
         if (it == mem.buffers.end())
