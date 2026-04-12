@@ -923,6 +923,15 @@ private:
                     enode.strides,
                     enode.dtype,
                     inShapes, inStrides, inDTypes, inConstants);
+
+                if (info.inplace && info.inplace_idx >= 0)
+                {
+                    uint32_t mutated_eclass = egraph.find(enode.children[info.inplace_idx]);
+                    if (immutable_eclasses.count(mutated_eclass))
+                    {
+                        info.cost = std::numeric_limits<float>::infinity();
+                    }
+                }
             }
             else
             {
@@ -961,12 +970,12 @@ private:
         std::vector<uint32_t> to_process = {rootEClassId};
         std::vector<uint32_t> to_process_enode;
         std::unordered_map<uint32_t, uint32_t> local_ref_counts;
-        std::unordered_set<uint32_t> need_single_ref;
+        std::unordered_map<uint32_t, uint32_t> need_single_ref;
 
         float best_cost = std::numeric_limits<float>::infinity();
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
 
-        int max_iters = 10;
+        int max_iters = 10000;
         ProgressTimer timer(max_iters, "extracting graphs ");
         while (max_iters-- > 0)
         {
@@ -1001,25 +1010,6 @@ private:
                 const ENode &node = egraph.getENodes()[enode_id];
                 const ENodeInfo &info = enodeInfos[enode_id];
 
-                if (info.inplace)
-                {
-                    uint32_t inplace_child = node.children[info.inplace_idx];
-                    if (need_single_ref.count(inplace_child) || immutable_eclasses.count(inplace_child))
-                    {
-                        valid = false;
-                        reason = "inplace";
-                        break;
-                    }
-                    need_single_ref.insert(inplace_child);
-                }
-
-                if (best_cost != std::numeric_limits<float>::infinity() && (current_cost + info.cost) >= best_cost)
-                {
-                    valid = false;
-                    reason = "cost=" + std::to_string(current_cost + info.cost);
-                    break;
-                }
-
                 selection_map[current] = sel;
                 current_cost += info.cost;
 
@@ -1031,15 +1021,47 @@ private:
                     }
                 }
 
+                if (info.inplace)
+                    need_single_ref[node.children[info.inplace_idx]]++;
+
+                for (uint32_t child : node.children)
+                    local_ref_counts[child]++;
+
+                if (info.cost == std::numeric_limits<float>::infinity())
+                {
+                    valid = false;
+                    reason = "cost=inf";
+                    break;
+                }
+
+                if (info.inplace)
+                {
+                    uint32_t inplace_child = node.children[info.inplace_idx];
+                    if (local_ref_counts[inplace_child] > 1 || immutable_eclasses.count(inplace_child))
+                    {
+                        valid = false;
+                        reason = "inplace";
+                        break;
+                    }
+                }
+
                 for (uint32_t child : node.children)
                 {
-                    local_ref_counts[child]++;
-                    if (need_single_ref.count(child) && local_ref_counts[child] > 1)
+                    if (need_single_ref.count(child) && need_single_ref[child] > 0 && local_ref_counts[child] > 1)
                     {
                         valid = false;
                         reason = "inplace_ref";
                         break;
                     }
+                }
+                if (!valid)
+                    break;
+
+                if (best_cost != std::numeric_limits<float>::infinity() && current_cost >= best_cost)
+                {
+                    valid = false;
+                    reason = "cost=" + std::to_string(current_cost);
+                    break;
                 }
 
                 std::vector<uint32_t> new_to_process;
@@ -1109,7 +1131,9 @@ private:
 
                 if (info.inplace)
                 {
-                    need_single_ref.erase(node.children[info.inplace_idx]);
+                    need_single_ref[node.children[info.inplace_idx]]--;
+                    if (need_single_ref[node.children[info.inplace_idx]] == 0)
+                        need_single_ref.erase(node.children[info.inplace_idx]);
                 }
 
                 if (sel + 1 < enodes.size())
