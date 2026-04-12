@@ -881,6 +881,26 @@ public:
             }
         }
 
+        std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
+        for (uint32_t inId : inputNodeIds)
+        {
+            fullInputRegions[inId] = makeFull(graph.getNode(inId).getShape());
+        }
+        std::string fullKey = encodeCacheKey(fullInputRegions);
+
+        if (baselinePlans.count(fullKey))
+        {
+            const CompiledGraph &fullPlan = baselinePlans.at(fullKey);
+            for (const auto &inst : fullPlan.instructions)
+            {
+                uint32_t logicalId = fullPlan.getLogicalId(inst.nodeId);
+                if (logicalId != UINT32_MAX && graph.hasNode(logicalId))
+                {
+                    graph.getNode(logicalId).backend = inst.backend;
+                }
+            }
+        }
+
         CacheOptimizationResult optResult = optimizeCacheCombination(
             rootId,
             graph,
@@ -896,13 +916,6 @@ public:
             cachedGraphs = std::move(optResult.bucketPlans);
             std::cout << "[Session.ensureCacheCoverage] Selected " << selectedCachedNodes.size()
                       << " cached nodes with runtime score " << optResult.runtimeScore << std::endl;
-            // Identify the "full" key to ensure the first run initializes the cache
-            std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
-            for (uint32_t inId : inputNodeIds)
-            {
-                fullInputRegions[inId] = makeFull(graph.getNode(inId).getShape());
-            }
-            std::string fullKey = encodeCacheKey(fullInputRegions);
             // Override the optimized plan for the full key with the baseline (recompute-all) plan
             if (baselinePlans.count(fullKey) == 0)
             {
