@@ -618,6 +618,7 @@ public:
         }
 
         std::unordered_map<uint32_t, uint32_t> eclassToLogical;
+        std::unordered_set<uint32_t> immutable_eclasses;
         for (const auto &kv : nodeToEClass)
         {
             uint32_t physId = kv.first;
@@ -630,9 +631,24 @@ public:
             {
                 eclassToLogical[ecl] = physId;
             }
+
+            const TensorNode &node = planningGraph.graph.getNode(physId);
+            if (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED)
+            {
+                immutable_eclasses.insert(ecl);
+            }
+            auto logIt = planningGraph.physicalToLogicalNodeMap.find(physId);
+            if (logIt != planningGraph.physicalToLogicalNodeMap.end())
+            {
+                uint32_t logicalId = logIt->second;
+                if (cachedNodes.count(logicalId))
+                {
+                    immutable_eclasses.insert(ecl);
+                }
+            }
         }
 
-        auto extraction = extractBest(planningGraph.physicalRootId, egraph, nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical);
+        auto extraction = extractBest(planningGraph.physicalRootId, egraph, nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses);
 
         return buildCompiledGraph(
             planningGraph.physicalRootId,
@@ -846,7 +862,8 @@ private:
                                  const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
                                  const std::unordered_map<Backend, uint64_t> &maxMemoryByBackend,
                                  const std::unordered_set<uint32_t> &cachedNodes,
-                                 const std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
+                                 const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
+                                 const std::unordered_set<uint32_t> &immutable_eclasses)
     {
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
         for (size_t i = 0; i < egraph.getENodes().size(); ++i)
@@ -987,7 +1004,7 @@ private:
                 if (info.inplace)
                 {
                     uint32_t inplace_child = node.children[info.inplace_idx];
-                    if (need_single_ref.count(inplace_child))
+                    if (need_single_ref.count(inplace_child) || immutable_eclasses.count(inplace_child))
                     {
                         valid = false;
                         reason = "inplace";
