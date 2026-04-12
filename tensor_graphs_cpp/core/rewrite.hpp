@@ -246,6 +246,8 @@ struct FusionRule : public Rule
                     TensorNode outNode = inNode;
                     outNode.opType = OpType::COPY_TO;
                     outNode.backend = expectedBackend;
+                    outNode.strides = calcContiguousStrides(outNode.getShape());
+                    outNode.viewOffset = 0;
 
                     auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", outNode.backend, {inNode}, outNode, {}, true);
                     if (matches.empty())
@@ -320,10 +322,20 @@ struct FusionRule : public Rule
         for (uint32_t pid : adaptedParents)
             enode.children.push_back(pid);
         enode.shape = oldENode.shape;
-        enode.strides = oldENode.strides;
-        enode.viewOffset = oldENode.viewOffset;
+
+        if (kernel.isView)
+        {
+            enode.strides = oldENode.strides;
+            enode.viewOffset = oldENode.viewOffset;
+        }
+        else
+        {
+            enode.strides = calcContiguousStrides(oldENode.shape);
+            enode.viewOffset = 0;
+        }
+
         enode.dtype = oldENode.dtype;
-        enode.backend = oldENode.backend;
+        enode.backend = targetBackend;
         egraph.addENode(eclassId, enode);
     }
 
