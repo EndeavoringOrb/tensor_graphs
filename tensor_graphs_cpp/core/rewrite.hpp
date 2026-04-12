@@ -72,8 +72,8 @@ struct DistributiveProperty : public Rule
         uint32_t cClassId = addNode.children[1];
 
         // --- 1. Create (a*b) and (a*c) ---
-        uint32_t abClass = egraph.addEClass(mulNode.shape, mulNode.strides, mulNode.dtype, mulNode.backend);
-        uint32_t acClass = egraph.addEClass(mulNode.shape, mulNode.strides, mulNode.dtype, mulNode.backend);
+        uint32_t abClass = egraph.addEClass(mulNode.shape, mulNode.strides, mulNode.viewOffset, mulNode.dtype, mulNode.backend);
+        uint32_t acClass = egraph.addEClass(mulNode.shape, mulNode.strides, mulNode.viewOffset, mulNode.dtype, mulNode.backend);
 
         // Create (a*b)
         ENode abNode;
@@ -83,6 +83,7 @@ struct DistributiveProperty : public Rule
         abNode.children = leftIsAdd ? std::vector<uint32_t>{bClassId, aClassId} : std::vector<uint32_t>{aClassId, bClassId};
         abNode.shape = mulNode.shape;
         abNode.strides = mulNode.strides;
+        abNode.viewOffset = mulNode.viewOffset;
         abNode.dtype = mulNode.dtype;
         abNode.backend = mulNode.backend;
         abClass = egraph.addENode(abClass, abNode);
@@ -95,6 +96,7 @@ struct DistributiveProperty : public Rule
         acNode.children = leftIsAdd ? std::vector<uint32_t>{cClassId, aClassId} : std::vector<uint32_t>{aClassId, cClassId};
         acNode.shape = mulNode.shape;
         acNode.strides = mulNode.strides;
+        acNode.viewOffset = mulNode.viewOffset;
         acNode.dtype = mulNode.dtype;
         acNode.backend = mulNode.backend;
         acClass = egraph.addENode(acClass, acNode);
@@ -107,6 +109,7 @@ struct DistributiveProperty : public Rule
         newAddNode.children = {abClass, acClass};
         newAddNode.shape = mulNode.shape;
         newAddNode.strides = mulNode.strides;
+        newAddNode.viewOffset = mulNode.viewOffset;
         newAddNode.dtype = mulNode.dtype;
         newAddNode.backend = mulNode.backend;
 
@@ -237,6 +240,7 @@ struct FusionRule : public Rule
                     inNode.dtype = currentClass.dtype;
                     inNode.setShape(currentClass.shape);
                     inNode.strides = currentClass.strides;
+                    inNode.viewOffset = currentClass.viewOffset;
                     inNode.backend = currentClass.backend;
 
                     TensorNode outNode = inNode;
@@ -247,7 +251,7 @@ struct FusionRule : public Rule
                     if (matches.empty())
                         return; // cannot copy
 
-                    uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.dtype, outNode.backend);
+                    uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
                     for (uint64_t uid : matches)
                     {
                         ENode copyNode;
@@ -256,6 +260,7 @@ struct FusionRule : public Rule
                         copyNode.children = {currentPid};
                         copyNode.shape = outNode.getShape();
                         copyNode.strides = outNode.strides;
+                        copyNode.viewOffset = outNode.viewOffset;
                         copyNode.dtype = outNode.dtype;
                         copyNode.backend = outNode.backend;
                         egraph.addENode(newEClass, copyNode);
@@ -271,17 +276,19 @@ struct FusionRule : public Rule
                     inNode.dtype = currentClass.dtype;
                     inNode.setShape(currentClass.shape);
                     inNode.strides = currentClass.strides;
+                    inNode.viewOffset = currentClass.viewOffset;
                     inNode.backend = currentClass.backend;
 
                     TensorNode outNode = inNode;
                     outNode.opType = OpType::CONTIGUOUS;
                     outNode.strides = calcContiguousStrides(outNode.getShape());
+                    outNode.viewOffset = 0;
 
                     auto matches = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", outNode.backend, {inNode}, outNode, {}, true);
                     if (matches.empty())
                         return; // cannot make contiguous
 
-                    uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.dtype, outNode.backend);
+                    uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
                     for (uint64_t uid : matches)
                     {
                         ENode contigNode;
@@ -290,6 +297,7 @@ struct FusionRule : public Rule
                         contigNode.children = {currentPid};
                         contigNode.shape = outNode.getShape();
                         contigNode.strides = outNode.strides;
+                        contigNode.viewOffset = outNode.viewOffset;
                         contigNode.dtype = outNode.dtype;
                         contigNode.backend = outNode.backend;
                         egraph.addENode(newEClass, contigNode);
@@ -313,6 +321,7 @@ struct FusionRule : public Rule
             enode.children.push_back(pid);
         enode.shape = oldENode.shape;
         enode.strides = oldENode.strides;
+        enode.viewOffset = oldENode.viewOffset;
         enode.dtype = oldENode.dtype;
         enode.backend = oldENode.backend;
         egraph.addENode(eclassId, enode);

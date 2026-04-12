@@ -515,7 +515,7 @@ public:
                 Error::throw_err("Node " + std::to_string(nodeId) + " not found in refCounts");
             }
             refCount = rcIt->second;
-            uint32_t eclassId = egraph.addEClass(node.getShape(), node.strides, node.dtype, node.backend);
+            uint32_t eclassId = egraph.addEClass(node.getShape(), node.strides, node.viewOffset, node.dtype, node.backend);
             nodeToEClass[nodeId] = eclassId;
 
             // Map constants directly to EGraph EClass
@@ -560,6 +560,7 @@ public:
                             enode.children.push_back(nodeToEClass[pid]);
                         enode.shape = node.getShape();
                         enode.strides = node.strides;
+                        enode.viewOffset = node.viewOffset;
                         enode.dtype = node.dtype;
                         enode.backend = node.backend;
                         egraph.addENode(eclassId, enode);
@@ -575,6 +576,7 @@ public:
                         enode.children.push_back(nodeToEClass[pid]);
                     enode.shape = node.getShape();
                     enode.strides = node.strides;
+                    enode.viewOffset = node.viewOffset;
                     enode.dtype = node.dtype;
                     enode.backend = node.backend;
                     egraph.addENode(eclassId, enode);
@@ -603,6 +605,7 @@ public:
                     enode.children.push_back(nodeToEClass[pid]);
                 enode.shape = node.getShape();
                 enode.strides = node.strides;
+                enode.viewOffset = node.viewOffset;
                 enode.dtype = node.dtype;
                 enode.backend = node.backend;
                 egraph.addENode(eclassId, enode);
@@ -1214,6 +1217,7 @@ private:
             tNode.dtype = enode.dtype;
             tNode.setShape(enode.shape);
             tNode.strides = enode.strides;
+            tNode.viewOffset = enode.viewOffset;
             tNode.backend = enode.backend;
             tNode.parentIds.reserve(enode.children.size());
             for (uint32_t c : enode.children)

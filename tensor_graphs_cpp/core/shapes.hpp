@@ -575,6 +575,7 @@ struct ShapePropagator
                     out_shape[i] = target_dims[i];
             }
             graph.getNode(nodeId).setShape(out_shape);
+            graph.getNode(nodeId).viewOffset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
             break;
         }
         case OpType::PERMUTE:
@@ -587,6 +588,13 @@ struct ShapePropagator
                 out_shape[i] = s0[dims[i]];
             }
             graph.getNode(nodeId).setShape(out_shape);
+
+            auto parentStrides = graph.getNode(graph.getNode(nodeId).parentIds[0]).strides;
+            for (size_t i = 0; i < dims.size(); ++i)
+            {
+                graph.getNode(nodeId).strides[i] = parentStrides[dims[i]];
+            }
+            graph.getNode(nodeId).viewOffset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
             break;
         }
         case OpType::GATHER:
@@ -631,6 +639,17 @@ struct ShapePropagator
             std::vector<uint32_t> out_shape = s0;
             out_shape[axis] *= repeats;
             graph.getNode(nodeId).setShape(out_shape);
+
+            auto parentStrides = graph.getNode(graph.getNode(nodeId).parentIds[0]).strides;
+            graph.getNode(nodeId).strides = parentStrides;
+            for (size_t d = 0; d < out_shape.size(); ++d)
+            {
+                if (s0[d] != out_shape[d])
+                {
+                    graph.getNode(nodeId).strides[d] = 0;
+                }
+            }
+            graph.getNode(nodeId).viewOffset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
             break;
         }
         case OpType::FILL:
@@ -680,6 +699,19 @@ struct ShapePropagator
                 }
             }
             graph.getNode(nodeId).setShape(out_shape);
+
+            auto parentStrides = graph.getNode(graph.getNode(nodeId).parentIds[0]).strides;
+            uint64_t offset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
+            for (size_t i = 0; i < s0.size(); ++i)
+            {
+                int32_t start = i < starts.size() ? starts[i] : 0;
+                int32_t step = i < steps.size() ? steps[i] : 1;
+                if (start < 0)
+                    start += s0[i];
+                offset += start * parentStrides[i];
+                graph.getNode(nodeId).strides[i] = parentStrides[i] * step;
+            }
+            graph.getNode(nodeId).viewOffset = offset;
             break;
         }
         case OpType::ARANGE:
@@ -695,7 +727,7 @@ struct ShapePropagator
         default:
             break;
         }
-        graph.getNode(nodeId).strides = calcContiguousStrides(graph.getNode(nodeId).getShape());
+
         for (auto d : graph.getNode(nodeId).getShape())
         {
             if (d == 0)

@@ -17,6 +17,7 @@ struct ENode
     uint32_t leafId = UINT32_MAX;
     std::vector<uint32_t> shape;
     std::vector<uint64_t> strides;
+    uint64_t viewOffset = 0;
     DType dtype = DType::FLOAT32;
     Backend backend = Backend::CPU;
 };
@@ -30,6 +31,7 @@ struct ENodeKey
     uint32_t leafId = UINT32_MAX; // Used only for INPUT nodes to prevent bad merges
     std::vector<uint32_t> shape;
     std::vector<uint64_t> strides;
+    uint64_t viewOffset = 0;
     DType dtype = DType::FLOAT32;
     Backend backend = Backend::CPU;
 
@@ -41,6 +43,7 @@ struct ENodeKey
           leafId(enode.leafId),
           shape(enode.shape),
           strides(enode.strides),
+          viewOffset(enode.viewOffset),
           dtype(enode.dtype),
           backend(enode.backend)
     {
@@ -55,6 +58,7 @@ struct ENodeKey
                leafId == other.leafId &&
                shape == other.shape &&
                strides == other.strides &&
+               viewOffset == other.viewOffset &&
                dtype == other.dtype &&
                backend == other.backend;
     }
@@ -82,9 +86,10 @@ struct ENodeKeyHash
         for (uint32_t s : key.shape)
             hash_combine(h, std::hash<uint32_t>{}(s));
 
-        for (uint32_t s : key.strides)
+        for (uint64_t s : key.strides)
             hash_combine(h, std::hash<uint64_t>{}(s));
 
+        hash_combine(h, std::hash<uint64_t>{}(key.viewOffset));
         hash_combine(h, std::hash<uint32_t>{}(static_cast<uint32_t>(key.dtype)));
         hash_combine(h, std::hash<uint32_t>{}(static_cast<uint32_t>(key.backend)));
 
@@ -98,6 +103,7 @@ struct EClass
     std::vector<uint32_t> enodes;
     std::vector<uint32_t> shape;
     std::vector<uint64_t> strides;
+    uint64_t viewOffset = 0;
     DType dtype = DType::FLOAT32;
     Backend backend = Backend::CPU;
 };
@@ -108,13 +114,14 @@ public:
     uint32_t nextLeafId = 0;
     std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
 
-    uint32_t addEClass(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, DType dtype, Backend backend)
+    uint32_t addEClass(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, uint64_t viewOffset, DType dtype, Backend backend)
     {
         uint32_t id = static_cast<uint32_t>(classes.size());
         EClass c;
         c.id = id;
         c.shape = shape;
         c.strides = strides;
+        c.viewOffset = viewOffset;
         c.dtype = dtype;
         c.backend = backend;
         classes.push_back(std::move(c));
@@ -199,6 +206,10 @@ public:
         if (classes[ra].strides != classes[rb].strides)
         {
             Error::throw_err("EClass merge strides mismatch: " + toString(classes[ra].strides) + ", " + toString(classes[rb].strides));
+        }
+        if (classes[ra].viewOffset != classes[rb].viewOffset)
+        {
+            Error::throw_err("EClass merge viewOffset mismatch: " + std::to_string(classes[ra].viewOffset) + ", " + std::to_string(classes[rb].viewOffset));
         }
         if (classes[ra].dtype != classes[rb].dtype)
         {
