@@ -214,6 +214,17 @@ public:
             if (!inputBackendsMatch)
                 continue;
 
+            if (entry.inplace && entry.numInputs > 0)
+            {
+                if (inputs[0].backend != backend)
+                    continue;
+            }
+            if (entry.isView && entry.numInputs > 0)
+            {
+                if (inputs[0].backend != backend)
+                    continue;
+            }
+
             bool contigMatch = true;
             for (size_t i = 0; i < inputs.size(); ++i)
             {

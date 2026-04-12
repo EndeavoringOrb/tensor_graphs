@@ -336,7 +336,48 @@ struct FusionRule : public Rule
 
         enode.dtype = oldENode.dtype;
         enode.backend = targetBackend;
-        egraph.addENode(eclassId, enode);
+
+        Backend originalBackend = egraph.getEClass(eclassId).backend;
+
+        if (targetBackend == originalBackend)
+        {
+            egraph.addENode(eclassId, enode);
+        }
+        else
+        {
+            uint32_t newEClass = egraph.addEClass(enode.shape, enode.strides, enode.viewOffset, enode.dtype, targetBackend);
+            newEClass = egraph.addENode(newEClass, enode);
+
+            TensorNode dummyIn;
+            dummyIn.opType = OpType::INPUT;
+            dummyIn.setShape(enode.shape);
+            dummyIn.strides = enode.strides;
+            dummyIn.viewOffset = enode.viewOffset;
+            dummyIn.dtype = enode.dtype;
+            dummyIn.backend = targetBackend;
+
+            TensorNode dummyOut = dummyIn;
+            dummyOut.opType = OpType::COPY_TO;
+            dummyOut.backend = originalBackend;
+            dummyOut.strides = calcContiguousStrides(dummyOut.getShape());
+            dummyOut.viewOffset = 0;
+
+            auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", dummyOut.backend, {dummyIn}, dummyOut, {}, true);
+            for (uint64_t uid : matches)
+            {
+                ENode copyNode;
+                copyNode.kernelUid = uid;
+                copyNode.opType = OpType::COPY_TO;
+                copyNode.children = {newEClass};
+                copyNode.shape = dummyOut.getShape();
+                copyNode.strides = dummyOut.strides;
+                copyNode.viewOffset = dummyOut.viewOffset;
+                copyNode.dtype = dummyOut.dtype;
+                copyNode.backend = dummyOut.backend;
+
+                egraph.addENode(eclassId, copyNode);
+            }
+        }
     }
 
     static bool matchPattern(uint32_t eNodeIdx, const EGraph &egraph,

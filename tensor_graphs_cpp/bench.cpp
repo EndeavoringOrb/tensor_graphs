@@ -429,7 +429,7 @@ int main()
 #endif
             auto end = std::chrono::high_resolution_clock::now();
 
-            float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count() / iters;
+            float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count() / iters; // TODO: take median
 
             call["runTime"] = runtimeMs;
             outFile << call.dump() << "\n";
