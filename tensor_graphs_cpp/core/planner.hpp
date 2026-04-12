@@ -633,7 +633,7 @@ public:
             }
 
             const TensorNode &node = planningGraph.graph.getNode(physId);
-            if (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED)
+            if (node.storageType == StorageType::PERSISTENT)
             {
                 immutable_eclasses.insert(ecl);
             }
