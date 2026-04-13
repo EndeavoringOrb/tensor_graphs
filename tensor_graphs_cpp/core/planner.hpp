@@ -743,7 +743,6 @@ private:
         rules.emplace_back(std::make_unique<FusionRule>());
 
         size_t iterations = 0;
-        const size_t maxIterations = 3;
         bool changed = true;
         uint32_t nMatches = 0;
         while (changed)
@@ -764,7 +763,7 @@ private:
             }
             egraph.rebuild();
         }
-        std::cout << "Finished saturation with " + std::to_string(nMatches) + " matches\n"
+        std::cout << "Finished saturation in " << iterations << " iterations with " + std::to_string(nMatches) + " matches\n"
                   << std::flush;
     }
 
