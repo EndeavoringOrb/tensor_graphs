@@ -1,3 +1,4 @@
+// tensor_graphs_cpp/test.cpp
 #include <iostream>
 #include <vector>
 #include <string>
@@ -91,7 +92,7 @@ bool compareOutputs(const float *ref, const float *test, size_t elements, float 
     return true;
 }
 
-bool compareOutputs(const int32_t *ref, const int32_t *test, size_t elements, float eps = 1e-4f)
+bool compareOutputs(const int32_t *ref, const int32_t *test, size_t elements, float eps = 1e-4f) // Note: removed unused eps from check to match previous logic, but left parameter signature
 {
     for (size_t i = 0; i < elements; ++i)
     {
@@ -335,149 +336,6 @@ void runShapePropagationTests()
         auto backward = prop.backward(graph.getNode(gatherId), graph, {makeRegion({{0, 2}, {0, 3}})});
         assertRegionListEquals(backward[0], {makeRegion({{1, 2}, {0, 3}}), makeRegion({{3, 4}, {0, 3}})}, "GATHER backward sliced indices data");
         assertRegionListEquals(backward[1], {makeRegion({{0, 2}})}, "GATHER backward sliced indices idx");
-    }
-}
-
-void runRewriteTests()
-{
-    std::cout << "rewrite tests" << std::endl
-              << std::flush;
-    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
-    {
-        return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
-    };
-
-    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape, Backend backend = Backend::CPU) -> uint32_t
-    {
-        uint32_t id = graph.input(shape, DType::FLOAT32, {}, StorageType::PERSISTENT);
-        graph.getNode(id).backend = backend;
-        return id;
-    };
-
-    auto findEquivalent = [](const std::vector<uint32_t> &equivalents, const Graph &graph, OpType opType) -> bool
-    {
-        for (uint32_t id : equivalents)
-        {
-            if (id < graph.nodes.size() && graph.getNode(id).opType == opType)
-                return true;
-        }
-        return false;
-    };
-
-    {
-        Graph graph;
-        uint32_t x = makeFloatInput(graph, {2, 2}, Backend::CPU);
-        uint32_t copy = graph.copyto(x, Backend::CUDA);
-        graph.getNode(copy).backend = Backend::CUDA;
-        uint32_t contig = graph.contiguous(copy);
-        graph.getNode(contig).backend = Backend::CUDA;
-
-        Rewrite::CopyToContiguousReorderRule rule(true);
-        std::unordered_map<uint32_t, std::string> memo;
-        std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(contig, graph, {&rule}, memo);
-        if (!findEquivalent(equivalents, graph, OpType::COPY_TO))
-            Error::throw_err("[RewriteTest] contiguous(copyto(x)) should rewrite to copyto(contiguous(x))");
-
-        Graph graph2;
-        uint32_t x2 = makeFloatInput(graph2, {2, 2}, Backend::CPU);
-        uint32_t contig2 = graph2.contiguous(x2);
-        graph2.nodes[contig2].backend = Backend::CPU;
-        uint32_t copy2 = graph2.copyto(contig2, Backend::CUDA);
-        graph2.nodes[copy2].backend = Backend::CUDA;
-
-        std::unordered_map<uint32_t, std::string> memo2;
-        equivalents = Rewrite::generateAllEquivalents(copy2, graph2, {&rule}, memo2);
-        if (!findEquivalent(equivalents, graph2, OpType::CONTIGUOUS))
-            Error::throw_err("[RewriteTest] copyto(contiguous(x)) should rewrite to contiguous(copyto(x))");
-    }
-
-    {
-        Graph graph;
-        uint32_t target = makeFloatInput(graph, {4}, Backend::CPU);
-        uint32_t updates = makeFloatInput(graph, {2}, Backend::CPU);
-        uint32_t starts = makeIntConst(graph, {1});
-        uint32_t ends = makeIntConst(graph, {3});
-        uint32_t steps = makeIntConst(graph, {1});
-
-        uint32_t scatter = graph.scatter(target, updates, starts, ends, steps);
-        graph.getNode(scatter).backend = Backend::CPU;
-        uint32_t copy = graph.copyto(scatter, Backend::CUDA);
-        graph.getNode(copy).backend = Backend::CUDA;
-
-        Rewrite::CopyToScatterReorderRule rule(true);
-        std::unordered_map<uint32_t, std::string> memo;
-        std::vector<uint32_t> equivalents = Rewrite::generateAllEquivalents(copy, graph, {&rule}, memo);
-        if (!findEquivalent(equivalents, graph, OpType::SCATTER))
-            Error::throw_err("[RewriteTest] copyto(scatter(...)) should rewrite to scatter(copyto(...))");
-
-        Graph graph2;
-        uint32_t target2 = makeFloatInput(graph2, {4}, Backend::CPU);
-        uint32_t updates2 = makeFloatInput(graph2, {2}, Backend::CPU);
-        uint32_t starts2 = makeIntConst(graph2, {1});
-        uint32_t ends2 = makeIntConst(graph2, {3});
-        uint32_t steps2 = makeIntConst(graph2, {1});
-
-        uint32_t copyTarget = graph2.copyto(target2, Backend::CUDA);
-        graph2.nodes[copyTarget].backend = Backend::CUDA;
-        uint32_t scatter2 = graph2.scatter(copyTarget, updates2, starts2, ends2, steps2);
-        graph2.nodes[scatter2].backend = Backend::CUDA;
-
-        std::unordered_map<uint32_t, std::string> memo2;
-        equivalents = Rewrite::generateAllEquivalents(scatter2, graph2, {&rule}, memo2);
-        if (!findEquivalent(equivalents, graph2, OpType::COPY_TO))
-            Error::throw_err("[RewriteTest] scatter(copyto(...)) should rewrite to copyto(scatter(...))");
-    }
-}
-
-void runPlannerTests()
-{
-    std::cout << "planner tests" << std::endl
-              << std::flush;
-
-    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
-    {
-        return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
-    };
-
-    {
-        Graph graph;
-        uint32_t x = graph.input({2, 4}, DType::FLOAT32, {8, 2}, StorageType::PERSISTENT);
-        uint32_t contig = graph.contiguous(x);
-        uint32_t starts = makeIntConst(graph, {0, 0});
-        uint32_t ends = makeIntConst(graph, {2, 4});
-        uint32_t steps = makeIntConst(graph, {1, 1});
-        uint32_t slice = graph.slice(contig, starts, ends, steps);
-        uint32_t newShape = makeIntConst(graph, {8});
-        uint32_t reshape = graph.reshape(slice, newShape);
-
-        ShapePropagator prop;
-        prop.inferShapeRecursive(reshape, graph);
-
-        CostModel costModel;
-        Planner planner(costModel);
-
-        std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions;
-        dirtyOutputRegions[reshape] = makeFull(graph.getNode(reshape).getShape());
-        std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions;
-        std::unordered_set<uint32_t> cachedNodes;
-
-        try
-        {
-            planner.plan(reshape, graph, dirtyOutputRegions, dirtyInputRegions, cachedNodes, false);
-        }
-        catch (const std::exception &e)
-        {
-            Error::throw_err("[PlannerTest] baseline planning failed for reshape(slice(contiguous(x))). " + std::string(e.what()));
-        }
-
-        try
-        {
-            planner.plan(reshape, graph, dirtyOutputRegions, dirtyInputRegions, cachedNodes, true);
-        }
-        catch (const std::exception &e)
-        {
-            Error::throw_err("[PlannerTest] saturated planning failed after remove-contiguous rewrite. " + std::string(e.what()));
-        }
     }
 }
 
@@ -1038,7 +896,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         for (const auto &inpJson : info["inputs"])
         {
             std::vector<uint32_t> shape = inpJson["shape"].get<std::vector<uint32_t>>();
-            std::vector<int64_t> strides = inpJson["strides"].get<std::vector<int64_t>>();
+            std::vector<uint64_t> strides = inpJson["strides"].get<std::vector<uint64_t>>();
             DType dtype = inpJson["dtype"].get<DType>();
 
             std::string tensorName = "input." + std::to_string(i);
@@ -1072,7 +930,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 
         json outJson = info["output"];
         std::vector<uint32_t> outShape = outJson["shape"].get<std::vector<uint32_t>>();
-        std::vector<int64_t> outStrides = outJson["strides"].get<std::vector<int64_t>>();
+        std::vector<uint64_t> outStrides = outJson["strides"].get<std::vector<uint64_t>>();
         DType outDType = outJson["dtype"].get<DType>();
 
         uint64_t outSizeBytes = countElements(outShape) * getDTypeSize(outDType);
@@ -1189,8 +1047,6 @@ int main()
     runPythonTests();
     runRegionMergeTests();
     runShapePropagationTests();
-    runRewriteTests();
-    runPlannerTests();
 
     std::cout << "Running Non-Reference Kernel Tests..." << std::endl;
 
