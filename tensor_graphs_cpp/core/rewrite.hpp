@@ -157,7 +157,7 @@ struct FusionRule : public Rule
         for (const auto &pattern : patterns)
         {
             std::unordered_map<uint32_t, uint32_t> binding;
-            if (matchPattern(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes))
+            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes))
             {
                 return true;
             }
@@ -170,7 +170,7 @@ struct FusionRule : public Rule
         for (const auto &pattern : patterns)
         {
             std::unordered_map<uint32_t, uint32_t> binding;
-            if (matchPattern(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes))
+            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes))
             {
                 std::vector<uint32_t> inputs;
                 inputs.reserve(pattern.variables.size());
@@ -380,28 +380,51 @@ struct FusionRule : public Rule
         }
     }
 
-    static bool matchPattern(uint32_t eNodeIdx, const EGraph &egraph,
-                             uint32_t patternId, const Graph &patternGraph,
-                             const std::vector<uint32_t> &patternVariables,
-                             std::unordered_map<uint32_t, uint32_t> &binding,
-                             const std::vector<DType> &patternDtypes)
+    static bool matchPatternClass(uint32_t eClassIdx, const EGraph &egraph,
+                                  uint32_t patternId, const Graph &patternGraph,
+                                  const std::vector<uint32_t> &patternVariables,
+                                  std::unordered_map<uint32_t, uint32_t> &binding,
+                                  const std::vector<DType> &patternDtypes)
     {
+        uint32_t canonicalClassIdx = egraph.findConst(eClassIdx);
+
         auto itVar = std::find(patternVariables.begin(), patternVariables.end(), patternId);
         if (itVar != patternVariables.end())
         {
             size_t varIdx = static_cast<size_t>(std::distance(patternVariables.begin(), itVar));
-            const ENode &eNode = egraph.getENodes()[eNodeIdx];
-            if (varIdx < patternDtypes.size() && eNode.dtype != patternDtypes[varIdx])
+            const EClass &eclass = egraph.getEClass(canonicalClassIdx);
+
+            if (varIdx < patternDtypes.size() && eclass.dtype != patternDtypes[varIdx])
                 return false;
 
             if (binding.count(patternId))
             {
-                return binding[patternId] == eNodeIdx;
+                return binding[patternId] == canonicalClassIdx;
             }
-            binding[patternId] = eNodeIdx;
+            binding[patternId] = canonicalClassIdx;
             return true;
         }
 
+        const EClass &eclass = egraph.getEClass(canonicalClassIdx);
+        for (uint32_t enodeId : eclass.enodes)
+        {
+            std::unordered_map<uint32_t, uint32_t> localBinding = binding;
+            if (matchPatternNode(enodeId, egraph, patternId, patternGraph, patternVariables, localBinding, patternDtypes))
+            {
+                binding = std::move(localBinding);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    static bool matchPatternNode(uint32_t eNodeIdx, const EGraph &egraph,
+                                 uint32_t patternId, const Graph &patternGraph,
+                                 const std::vector<uint32_t> &patternVariables,
+                                 std::unordered_map<uint32_t, uint32_t> &binding,
+                                 const std::vector<DType> &patternDtypes)
+    {
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
         const auto &pNode = patternGraph.getNode(patternId);
 
@@ -414,7 +437,7 @@ struct FusionRule : public Rule
 
         for (size_t i = 0; i < eNode.children.size(); ++i)
         {
-            if (!matchPattern(eNode.children[i], egraph, pNode.parentIds[i], patternGraph, patternVariables, binding, patternDtypes))
+            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], patternGraph, patternVariables, binding, patternDtypes))
             {
                 return false;
             }
