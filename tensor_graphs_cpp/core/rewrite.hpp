@@ -13,14 +13,14 @@
 struct Rule
 {
     virtual ~Rule() = default;
-    virtual bool match(const EGraph &egraph, uint32_t eNodeIdx) const = 0;
-    virtual void apply(EGraph &egraph, uint32_t eNodeIdx) const = 0;
+    virtual bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const = 0;
+    virtual void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const = 0;
 };
 
 // a*(b+c) -> (a*b)+(a*c)
 struct DistributiveProperty : public Rule
 {
-    bool match(const EGraph &egraph, uint32_t eNodeIdx) const override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const override
     {
         const ENode enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::MUL || enode.children.size() != 2)
@@ -50,7 +50,7 @@ struct DistributiveProperty : public Rule
         return UINT32_MAX;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx) const override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const override
     {
         const ENode mulNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
@@ -152,12 +152,12 @@ struct FusionRule : public Rule
         }
     }
 
-    bool match(const EGraph &egraph, uint32_t eNodeIdx) const override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const override
     {
         for (const auto &pattern : patterns)
         {
             std::unordered_map<uint32_t, uint32_t> binding;
-            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes))
+            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes, pattern.rootId, protectedEClasses))
             {
                 return true;
             }
@@ -165,12 +165,12 @@ struct FusionRule : public Rule
         return false;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx) const override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const override
     {
         for (const auto &pattern : patterns)
         {
             std::unordered_map<uint32_t, uint32_t> binding;
-            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes))
+            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes, pattern.rootId, protectedEClasses))
             {
                 std::vector<uint32_t> inputs;
                 inputs.reserve(pattern.variables.size());
@@ -384,7 +384,9 @@ struct FusionRule : public Rule
                                   uint32_t patternId, const Graph &patternGraph,
                                   const std::vector<uint32_t> &patternVariables,
                                   std::unordered_map<uint32_t, uint32_t> &binding,
-                                  const std::vector<DType> &patternDtypes)
+                                  const std::vector<DType> &patternDtypes,
+                                  uint32_t patternRootId,
+                                  const std::unordered_set<uint32_t> &protectedEClasses)
     {
         uint32_t canonicalClassIdx = egraph.findConst(eClassIdx);
 
@@ -405,11 +407,22 @@ struct FusionRule : public Rule
             return true;
         }
 
+        if (patternId != patternRootId)
+        {
+            for (uint32_t p : protectedEClasses)
+            {
+                if (egraph.findConst(p) == canonicalClassIdx)
+                {
+                    return false;
+                }
+            }
+        }
+
         const EClass &eclass = egraph.getEClass(canonicalClassIdx);
         for (uint32_t enodeId : eclass.enodes)
         {
             std::unordered_map<uint32_t, uint32_t> localBinding = binding;
-            if (matchPatternNode(enodeId, egraph, patternId, patternGraph, patternVariables, localBinding, patternDtypes))
+            if (matchPatternNode(enodeId, egraph, patternId, patternGraph, patternVariables, localBinding, patternDtypes, patternRootId, protectedEClasses))
             {
                 binding = std::move(localBinding);
                 return true;
@@ -423,7 +436,9 @@ struct FusionRule : public Rule
                                  uint32_t patternId, const Graph &patternGraph,
                                  const std::vector<uint32_t> &patternVariables,
                                  std::unordered_map<uint32_t, uint32_t> &binding,
-                                 const std::vector<DType> &patternDtypes)
+                                 const std::vector<DType> &patternDtypes,
+                                 uint32_t patternRootId,
+                                 const std::unordered_set<uint32_t> &protectedEClasses)
     {
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
         const auto &pNode = patternGraph.getNode(patternId);
@@ -437,7 +452,7 @@ struct FusionRule : public Rule
 
         for (size_t i = 0; i < eNode.children.size(); ++i)
         {
-            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], patternGraph, patternVariables, binding, patternDtypes))
+            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], patternGraph, patternVariables, binding, patternDtypes, patternRootId, protectedEClasses))
             {
                 return false;
             }

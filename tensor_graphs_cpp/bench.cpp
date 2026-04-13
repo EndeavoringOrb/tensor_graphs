@@ -110,7 +110,7 @@ int main()
             std::string valA = j["hwTag"].get<std::string>();
             std::string valB = j["buildContextId"].get<std::string>();
             bool checkA = valA == HW_TAG;
-            bool checkB = valB == BUILD_CONTEXT_ID_STRING;
+            bool checkB = valB == BUILD_CONTEXT_ID_STRING; // TODO: remove this check
             bool hasKernel = KernelRegistry::get().hasKernel(r.kernelUid);
             if (checkA && checkB && hasKernel)
             {

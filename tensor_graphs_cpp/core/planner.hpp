@@ -612,9 +612,24 @@ public:
             }
         }
 
+        std::unordered_set<uint32_t> protectedEClasses;
+        for (uint32_t logicalId : cachedNodes)
+        {
+            auto it = planningGraph.logicalToPhysicalNodeMap.find(logicalId);
+            if (it != planningGraph.logicalToPhysicalNodeMap.end())
+            {
+                uint32_t physId = it->second;
+                auto it2 = nodeToEClass.find(physId);
+                if (it2 != nodeToEClass.end())
+                {
+                    protectedEClasses.insert(egraph.find(it2->second));
+                }
+            }
+        }
+
         if (doSaturate)
         {
-            saturate(egraph);
+            saturate(egraph, protectedEClasses);
         }
 
         std::unordered_map<uint32_t, uint32_t> eclassToLogical;
@@ -736,7 +751,7 @@ private:
         return order;
     }
 
-    void saturate(EGraph &egraph)
+    void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses)
     {
         std::vector<std::unique_ptr<Rule>> rules;
         // rules.emplace_back(std::make_unique<DistributiveProperty>());
@@ -754,10 +769,10 @@ private:
             {
                 for (const auto &rule : rules)
                 {
-                    if (!rule->match(egraph, eNodeIdx))
+                    if (!rule->match(egraph, eNodeIdx, protectedEClasses))
                         continue;
 
-                    rule->apply(egraph, eNodeIdx);
+                    rule->apply(egraph, eNodeIdx, protectedEClasses);
                     changed = true;
                     nMatches++;
                 }
