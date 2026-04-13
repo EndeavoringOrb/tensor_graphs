@@ -92,7 +92,7 @@ bool compareOutputs(const float *ref, const float *test, size_t elements, float 
     return true;
 }
 
-bool compareOutputs(const int32_t *ref, const int32_t *test, size_t elements, float eps = 1e-4f) // Note: removed unused eps from check to match previous logic, but left parameter signature
+bool compareOutputs(const int32_t *ref, const int32_t *test, size_t elements, float eps = 1e-4f)
 {
     for (size_t i = 0; i < elements; ++i)
     {
@@ -687,11 +687,24 @@ std::vector<float> executeFusedKernel(
         // Allocate and copy inputs to device if needed
         for (size_t i = 0; i < inputData.size(); ++i)
         {
-            Backend expectedBack = Backend::CUDA;
+            bool inputNeedsCuda = false;
             if (i < kernel.inputBackends.size())
-                expectedBack = kernel.inputBackends[i];
+            {
+                for (Backend b : kernel.inputBackends[i])
+                {
+                    if (b == Backend::CUDA)
+                    {
+                        inputNeedsCuda = true;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                inputNeedsCuda = true; // Fallback default
+            }
 
-            if (expectedBack == Backend::CUDA)
+            if (inputNeedsCuda)
             {
                 void *d_ptr = nullptr;
                 cudaMalloc(&d_ptr, inputData[i].size());
