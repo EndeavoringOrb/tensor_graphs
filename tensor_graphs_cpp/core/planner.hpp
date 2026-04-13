@@ -745,9 +745,9 @@ private:
         size_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
+        ProgressTimer timer(0, "saturating ");
         while (changed)
         {
-            changed = false;
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
             for (uint32_t eNodeIdx = 0; eNodeIdx < numENodes; eNodeIdx++)
@@ -758,10 +758,14 @@ private:
                         continue;
 
                     rule->apply(egraph, eNodeIdx);
+                    changed = true;
                     nMatches++;
                 }
             }
             egraph.rebuild();
+            timer.tick();
+            changed = egraph.getENodes().size() != numENodes;
+            std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << std::endl;
         }
         std::cout << "Finished saturation in " << iterations << " iterations with " + std::to_string(nMatches) + " matches\n"
                   << std::flush;
@@ -939,22 +943,152 @@ private:
             enodeInfos[i] = info;
         }
 
-        // Sort enodes in each eclass by cost for greedy exploration.
-        // By sorting upfront, iterating sel = 0, 1, 2... automatically selects
-        // the next lowest cost enode at each step of the search.
+        // 1. Filter out infinite cost nodes early
+        bool droppedInf = false;
         for (size_t i = 0; i < egraph.getClasses().size(); ++i)
         {
-            if (egraph.find(static_cast<uint32_t>(i)) == i)
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId != i)
+                continue;
+
+            EClass &cls = egraph.getEClass(eclassId);
+            std::vector<uint32_t> validEnodes;
+            for (uint32_t enodeId : cls.enodes)
             {
-                EClass &cls = egraph.getEClass(static_cast<uint32_t>(i));
-                std::sort(cls.enodes.begin(), cls.enodes.end(),
-                          [&enodeInfos](uint32_t a, uint32_t b)
-                          {
-                              if (enodeInfos[a].cost != enodeInfos[b].cost)
-                                  return enodeInfos[a].cost < enodeInfos[b].cost;
-                              return a < b; // stable tie-break
-                          });
+                if (enodeInfos[enodeId].cost == std::numeric_limits<float>::infinity())
+                {
+                    droppedInf = true;
+                }
+                else
+                {
+                    validEnodes.push_back(enodeId);
+                }
             }
+            cls.enodes = validEnodes;
+        }
+
+        if (droppedInf)
+        {
+            std::cout << "[Planner.extractBest] Warning: Filtered out nodes with infinite cost. "
+                      << "You may need to run 'bench' to gather missing kernel performance data." << std::endl;
+        }
+
+        // 2. Compute Optimistic Subtree Costs via Dynamic Programming (Worklist Algorithm)
+        // This calculates the absolute minimum cost to compute each EClass (ignoring inplace/ref-counts).
+        size_t numClasses = egraph.getClasses().size();
+        std::vector<float> eclassMinCost(numClasses, std::numeric_limits<float>::infinity());
+
+        // Build dependency graph: eclass -> eclasses that depend on it
+        std::vector<std::vector<uint32_t>> dependent_classes(numClasses);
+        for (size_t i = 0; i < numClasses; ++i)
+        {
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId != i)
+                continue;
+
+            for (uint32_t enodeId : egraph.getEClass(eclassId).enodes)
+            {
+                const ENode &enode = egraph.getENodes()[enodeId];
+                for (uint32_t child : enode.children)
+                {
+                    uint32_t childEClass = egraph.find(child);
+                    dependent_classes[childEClass].push_back(eclassId);
+                }
+            }
+        }
+
+        // Deduplicate dependents
+        for (auto &deps : dependent_classes)
+        {
+            std::sort(deps.begin(), deps.end());
+            deps.erase(std::unique(deps.begin(), deps.end()), deps.end());
+        }
+
+        // Initialize worklist with all active eclasses
+        std::vector<uint32_t> worklist;
+        std::vector<bool> in_worklist(numClasses, false);
+        for (size_t i = 0; i < numClasses; ++i)
+        {
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId == i)
+            {
+                worklist.push_back(eclassId);
+                in_worklist[eclassId] = true;
+            }
+        }
+
+        // Process worklist (Knuth's Algorithm for Shortest Path on a Hypergraph)
+        while (!worklist.empty())
+        {
+            uint32_t c = worklist.back();
+            worklist.pop_back();
+            in_worklist[c] = false;
+
+            float old_cost = eclassMinCost[c];
+            float new_cost = old_cost;
+
+            const EClass &cls = egraph.getEClass(c);
+            for (uint32_t enodeId : cls.enodes)
+            {
+                float cost = enodeInfos[enodeId].cost;
+                if (cost == std::numeric_limits<float>::infinity())
+                    continue;
+
+                const ENode &enode = egraph.getENodes()[enodeId];
+                for (uint32_t child : enode.children)
+                {
+                    cost += eclassMinCost[egraph.find(child)];
+                }
+
+                if (cost < new_cost)
+                {
+                    new_cost = cost;
+                }
+            }
+
+            // Update and push dependents if cost improved significantly
+            // (Using 1e-6f to avoid infinite loops on tiny floating point inaccuracies in cyclic graphs)
+            if (new_cost < old_cost && (old_cost == std::numeric_limits<float>::infinity() || (old_cost - new_cost) > 1e-6f))
+            {
+                eclassMinCost[c] = new_cost;
+                for (uint32_t dep : dependent_classes[c])
+                {
+                    if (!in_worklist[dep])
+                    {
+                        worklist.push_back(dep);
+                        in_worklist[dep] = true;
+                    }
+                }
+            }
+        }
+
+        // 3. Sort enodes in each eclass by optimistic subtree cost for greedy DFS exploration.
+        // By sorting upfront, iterating sel = 0, 1, 2... automatically selects
+        // the next globally optimal enode choice at each step of the search.
+        for (size_t i = 0; i < numClasses; ++i)
+        {
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId != i)
+                continue;
+
+            EClass &cls = egraph.getEClass(eclassId);
+            std::sort(cls.enodes.begin(), cls.enodes.end(),
+                      [&](uint32_t a, uint32_t b)
+                      {
+                          const ENode &enodeA = egraph.getENodes()[a];
+                          float costA = enodeInfos[a].cost;
+                          for (uint32_t c : enodeA.children)
+                              costA += eclassMinCost[egraph.find(c)];
+
+                          const ENode &enodeB = egraph.getENodes()[b];
+                          float costB = enodeInfos[b].cost;
+                          for (uint32_t c : enodeB.children)
+                              costB += eclassMinCost[egraph.find(c)];
+
+                          if (costA != costB)
+                              return costA < costB;
+                          return a < b; // stable tie-break
+                      });
         }
 
         auto rootIt = nodeToEClass.find(rootId);
@@ -974,7 +1108,7 @@ private:
         float best_cost = std::numeric_limits<float>::infinity();
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
 
-        int max_iters = 300;
+        int max_iters = 100000;
         ProgressTimer timer(max_iters, "extracting graphs ");
         while (max_iters-- > 0)
         {

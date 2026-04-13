@@ -389,47 +389,76 @@ int main()
                     std::cout << ",";
                 std::cout << toString(kernel.backends[bidx]);
             }
-            std::cout << "] "
-                      << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                      << " (0x" << std::hex << kernelUid << std::dec << ")"
-                      << ", Out DType: " << toString(outViews[0].dtype) // Added DType
-                      << ", Out Shape: " << toString(outViews[0].getShape())
-                      << ", Out Strides: " << toString(outViews[0].strides) // Added Strides
-                      << std::flush;
+            std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
+                      << " (0x" << std::hex << kernelUid << std::dec << ")\n";
+
+            // Print All Inputs
+            for (size_t idx = 0; idx < inViews.size(); ++idx)
+            {
+                std::cout << "  In  #" << idx << ": dtype=" << toString(inViews[idx].dtype)
+                          << ", shape=" << toString(inViews[idx].getShape())
+                          << ", strides=" << toString(inViews[idx].strides) << "\n";
+            }
+
+            // Print All Outputs
+            for (size_t idx = 0; idx < outViews.size(); ++idx)
+            {
+                std::cout << "  Out #" << idx << ": dtype=" << toString(outViews[idx].dtype)
+                          << ", shape=" << toString(outViews[idx].getShape())
+                          << ", strides=" << toString(outViews[idx].strides) << "\n";
+            }
+            std::cout << "  Benchmarking..." << std::flush;
 
             // Warmup
             if (!kernel.isView)
             {
                 kernel.run(inPtrs, outPtrs, inViews, outViews);
+#ifdef USE_CUDA
+                cudaDeviceSynchronize();
+#endif
             }
 
-            int iters = 1; // TODO: make this an arg, default to 15
-            auto start = std::chrono::high_resolution_clock::now();
+            int iters = 8;
+            std::vector<float> latencies;
+            latencies.reserve(iters);
             for (int it = 0; it < iters; ++it)
             {
+                auto iterStart = std::chrono::high_resolution_clock::now();
                 if (!kernel.isView)
                 {
                     kernel.run(inPtrs, outPtrs, inViews, outViews);
                 }
-            }
 #ifdef USE_CUDA
-            bool anyInputCuda = std::any_of(inIsCuda.begin(), inIsCuda.end(), [](bool b)
-                                            { return b; });
-            if (anyInputCuda || isOutputCuda)
-            {
-                cudaError_t err = cudaDeviceSynchronize();
-                if (err != cudaSuccess)
+                bool anyInputCuda = std::any_of(inIsCuda.begin(), inIsCuda.end(), [](bool b)
+                                                { return b; });
+                if (anyInputCuda || isOutputCuda)
                 {
-                    // Critical: if a kernel crashed, we must reset the error state
-                    // or subsequent cudaMalloc/cudaMemcpy calls will fail.
-                    // However, illegal memory access is often unrecoverable without context reset.
-                    throw std::runtime_error("CUDA Synchronization failed: " + std::string(cudaGetErrorString(err)));
+                    cudaError_t err = cudaDeviceSynchronize();
+                    if (err != cudaSuccess)
+                    {
+                        throw std::runtime_error("CUDA Synchronization failed: " + std::string(cudaGetErrorString(err)));
+                    }
+                }
+#endif
+                auto iterEnd = std::chrono::high_resolution_clock::now();
+                float iterMs = std::chrono::duration<float, std::milli>(iterEnd - iterStart).count();
+                latencies.push_back(iterMs);
+            }
+            // Calculate Median
+            std::sort(latencies.begin(), latencies.end());
+
+            float runtimeMs = 0.0f;
+            if (iters > 0)
+            {
+                if (iters % 2 == 0)
+                {
+                    runtimeMs = (latencies[iters / 2 - 1] + latencies[iters / 2]) / 2.0f;
+                }
+                else
+                {
+                    runtimeMs = latencies[iters / 2];
                 }
             }
-#endif
-            auto end = std::chrono::high_resolution_clock::now();
-
-            float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count() / iters; // TODO: take median
 
             call["runTime"] = runtimeMs;
             outFile << call.dump() << "\n";

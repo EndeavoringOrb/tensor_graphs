@@ -317,8 +317,8 @@ struct FusionRule : public Rule
 
         ENode enode;
         enode.kernelUid = kernel.uid;
-        enode.opType = oldENode.opType;
-        enode.opName = oldENode.opName;
+        enode.opType = kernel.opType;
+        enode.opName = kernel.opName;
         for (uint32_t pid : adaptedParents)
             enode.children.push_back(pid);
         enode.shape = oldENode.shape;
