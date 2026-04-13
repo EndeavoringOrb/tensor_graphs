@@ -28,86 +28,6 @@ struct CacheOptimizationResult
     CacheOptimizationResult() : runtimeScore(std::numeric_limits<float>::infinity()), foundValidCombination(false) {}
 };
 
-struct BucketPlanMemoEntry
-{
-    bool attempted = false;
-    bool valid = false;
-    bool memoryFailed = false;
-    CompiledGraph plan;
-    float runtime = std::numeric_limits<float>::infinity();
-};
-
-static uint32_t getCompiledLogicalNodeId(const CompiledGraph &plan, const OpInstruction &inst)
-{
-    if (inst.logicalNodeId != UINT32_MAX)
-        return inst.logicalNodeId;
-
-    auto physIt = plan.physicalToLogicalNodeMap.find(inst.nodeId);
-    if (physIt != plan.physicalToLogicalNodeMap.end())
-        return physIt->second;
-
-    return inst.nodeId;
-}
-
-static uint32_t getCompiledLogicalNodeId(const CompiledGraph &plan, uint32_t physicalNodeId)
-{
-    auto nodeIt = plan.nodesMap.find(physicalNodeId);
-    if (nodeIt == plan.nodesMap.end())
-        return physicalNodeId;
-
-    auto physIt = plan.physicalToLogicalNodeMap.find(physicalNodeId);
-    if (physIt != plan.physicalToLogicalNodeMap.end())
-        return physIt->second;
-
-    return physicalNodeId;
-}
-
-static std::unordered_map<Backend, uint64_t> calculatePlanPeakMemoryByBackend(
-    const CompiledGraph &plan,
-    const std::unordered_set<uint32_t> &cachedNodes)
-{
-    std::unordered_map<Backend, uint64_t> currentMemByBackend;
-    std::unordered_map<Backend, uint64_t> peakMemByBackend;
-    std::unordered_map<uint32_t, uint32_t> uses = plan.refCounts;
-
-    for (const OpInstruction &inst : plan.instructions)
-    {
-        const TensorNode &node = plan.nodesMap.at(inst.nodeId);
-        const uint32_t logicalNodeId = getCompiledLogicalNodeId(plan, inst);
-        const Backend backend = node.backend;
-
-        if (cachedNodes.count(logicalNodeId) == 0)
-        {
-            currentMemByBackend[backend] += getSizeBytes(node.getShape(), node.dtype);
-            peakMemByBackend[backend] = std::max(peakMemByBackend[backend], currentMemByBackend[backend]);
-        }
-
-        for (uint32_t parentId : node.parentIds)
-        {
-            auto useIt = uses.find(parentId);
-            if (useIt == uses.end() || useIt->second == 0)
-                continue;
-
-            useIt->second--;
-            if (useIt->second != 0)
-                continue;
-
-            const TensorNode &parentNode = plan.nodesMap.at(parentId);
-            const uint32_t logicalParentId = getCompiledLogicalNodeId(plan, parentId);
-            if (cachedNodes.count(logicalParentId) != 0)
-                continue;
-
-            uint64_t sizeBytes = getSizeBytes(parentNode.getShape(), parentNode.dtype);
-            if (currentMemByBackend[parentNode.backend] >= sizeBytes)
-                currentMemByBackend[parentNode.backend] -= sizeBytes;
-            else
-                currentMemByBackend[parentNode.backend] = 0;
-        }
-    }
-
-    return peakMemByBackend;
-}
-
 static std::vector<uint32_t> collectCacheableNodes(const Graph &graph)
 {
     std::vector<uint32_t> cacheableNodes;
@@ -142,21 +62,6 @@ static std::unordered_map<uint32_t, uint64_t> buildLogicalNodeMemorySizes(
     return nodeMemorySizes;
 }
 
-static std::string encodeCachedNodeSet(const std::unordered_set<uint32_t> &cachedNodes)
-{
-    std::vector<uint32_t> ids(cachedNodes.begin(), cachedNodes.end());
-    std::sort(ids.begin(), ids.end());
-
-    std::stringstream ss;
-    for (size_t i = 0; i < ids.size(); ++i)
-    {
-        if (i > 0)
-            ss << ",";
-        ss << ids[i];
-    }
-    return ss.str();
-}
-
 static float getPlanRuntime(const CompiledGraph &plan)
 {
     float totalCost = 0.0f;
@@ -167,201 +72,13 @@ static float getPlanRuntime(const CompiledGraph &plan)
     return totalCost;
 }
 
-static float calculateWeightedRuntimeScore(
-    const std::unordered_map<std::string, CompiledGraph> &plans,
-    const std::unordered_map<std::string, uint64_t> &bucketCallCounts,
-    CostModel &costModel)
-{
-    if (plans.empty())
-        return std::numeric_limits<float>::infinity();
-
-    double totalScore = 0.0;
-    for (const auto &kv : plans)
-    {
-        auto countIt = bucketCallCounts.find(kv.first);
-        uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
-        totalScore += static_cast<double>(getPlanRuntime(kv.second)) * static_cast<double>(callCount);
-    }
-    return static_cast<float>(totalScore);
-}
-
-static size_t findUpperBound(
-    const std::vector<uint32_t> &cacheableNodes,
-    const std::unordered_map<uint32_t, uint64_t> &nodeMemorySizes,
-    const Graph &graph,
-    const std::unordered_map<Backend, uint64_t> &memoryLimits)
-{
-    if (cacheableNodes.empty())
-        return 0;
-
-    // Calculate total aggregate memory limit across all backends
-    uint64_t totalMemoryLimit = 0;
-    for (const auto &limitPair : memoryLimits)
-    {
-        totalMemoryLimit += limitPair.second;
-    }
-
-    // Collect all cacheable node sizes into a single list
-    std::vector<uint64_t> allSizes;
-    allSizes.reserve(cacheableNodes.size());
-    for (uint32_t nodeId : cacheableNodes)
-    {
-        auto sizeIt = nodeMemorySizes.find(nodeId);
-        if (sizeIt != nodeMemorySizes.end())
-            allSizes.push_back(sizeIt->second);
-    }
-
-    // Sort nodes by size (smallest first) to find the maximum possible count
-    std::sort(allSizes.begin(), allSizes.end());
-
-    size_t count = 0;
-    uint64_t used = 0;
-    for (uint64_t sizeBytes : allSizes)
-    {
-        if (used + sizeBytes > totalMemoryLimit)
-            break;
-        used += sizeBytes;
-        count++;
-    }
-
-    return count;
-}
-
-static size_t findLowerBound(
-    const std::vector<BucketPlanRequest> &buckets,
-    const std::unordered_map<std::string, CompiledGraph> &baselinePlans,
-    const std::vector<uint32_t> &cacheableNodes,
-    const std::unordered_map<uint32_t, uint64_t> &nodeMemorySizes,
-    const Graph &graph,
-    const std::unordered_map<Backend, uint64_t> &memoryLimits)
-{
-    if (cacheableNodes.empty())
-        return 0;
-
-    // Calculate total aggregate memory limit
-    uint64_t totalMemoryLimit = 0;
-    for (const auto &limitPair : memoryLimits)
-    {
-        totalMemoryLimit += limitPair.second;
-    }
-
-    // Find the maximum aggregate peak memory usage among all baseline plans
-    uint64_t maxTotalPeak = 0;
-    for (const BucketPlanRequest &bucket : buckets)
-    {
-        auto planIt = baselinePlans.find(bucket.key);
-        if (planIt == baselinePlans.end())
-            continue;
-
-        std::unordered_map<Backend, uint64_t> peaks = calculatePlanPeakMemoryByBackend(planIt->second, {});
-        uint64_t bucketTotalPeak = 0;
-        for (const auto &pair : peaks)
-        {
-            bucketTotalPeak += pair.second;
-        }
-
-        if (bucketTotalPeak > maxTotalPeak)
-        {
-            maxTotalPeak = bucketTotalPeak;
-        }
-    }
-
-    // Headroom represents memory that is never touched by transient execution peaks
-    if (maxTotalPeak >= totalMemoryLimit)
-        return 0;
-
-    uint64_t headroom = totalMemoryLimit - maxTotalPeak;
-
-    // Use aggregate count logic against the calculated headroom
-    std::vector<uint64_t> allSizes;
-    allSizes.reserve(cacheableNodes.size());
-    for (uint32_t nodeId : cacheableNodes)
-    {
-        auto sizeIt = nodeMemorySizes.find(nodeId);
-        if (sizeIt != nodeMemorySizes.end())
-            allSizes.push_back(sizeIt->second);
-    }
-    std::sort(allSizes.begin(), allSizes.end());
-
-    size_t count = 0;
-    uint64_t used = 0;
-    for (uint64_t sizeBytes : allSizes)
-    {
-        if (used + sizeBytes > headroom)
-            break;
-        used += sizeBytes;
-        count++;
-    }
-
-    return count;
-}
-
-static const BucketPlanMemoEntry &getOrPlanBucket(
-    uint32_t rootId,
-    const Graph &graph,
-    const BucketPlanRequest &bucket,
-    const std::unordered_set<uint32_t> &cachedNodes,
-    const std::unordered_map<Backend, uint64_t> &memoryLimits,
-    CostModel &costModel,
-    std::unordered_map<std::string, BucketPlanMemoEntry> &memo)
-{
-    const std::string cacheSetKey = encodeCachedNodeSet(cachedNodes);
-    const std::string memoKey = cacheSetKey + "|" + bucket.key;
-
-    auto memoIt = memo.find(memoKey);
-    if (memoIt != memo.end())
-        return memoIt->second;
-
-    BucketPlanMemoEntry entry;
-    entry.attempted = true;
-
-    try
-    {
-        Graph planningGraph = graph;
-        Planner planner(costModel, memoryLimits);
-        entry.plan = planner.plan(rootId, planningGraph, bucket.bucket.regions, bucket.bucket.inputSlices, cachedNodes);
-        entry.runtime = getPlanRuntime(entry.plan);
-        entry.valid = true;
-    }
-    catch (const MemoryExhaustedError &)
-    {
-        entry.memoryFailed = true;
-    }
-
-    return memo.emplace(memoKey, std::move(entry)).first->second;
-}
-
-template <typename Fn>
-static void enumerateCombinations(
-    const std::vector<uint32_t> &nodes,
-    size_t choose,
-    size_t start,
-    std::vector<uint32_t> &current,
-    Fn &&fn)
-{
-    if (current.size() == choose)
-    {
-        fn(current);
-        return;
-    }
-
-    const size_t remaining = choose - current.size();
-    for (size_t i = start; i + remaining <= nodes.size(); ++i)
-    {
-        current.push_back(nodes[i]);
-        enumerateCombinations(nodes, choose, i + 1, current, fn);
-        current.pop_back();
-    }
-}
-
 CacheOptimizationResult optimizeCacheCombination(
     uint32_t rootId,
     Graph &graph,
     const std::vector<BucketPlanRequest> &buckets,
     const std::unordered_map<std::string, uint64_t> &bucketCallCounts,
-    const std::unordered_map<std::string, CompiledGraph> &baselinePlans,
-    const std::unordered_map<Backend, uint64_t> &memoryLimits,
-    CostModel &costModel)
+    uint64_t maxCacheMemory,
+    Planner &planner)
 {
     CacheOptimizationResult result;
     if (buckets.empty())
@@ -370,93 +87,88 @@ CacheOptimizationResult optimizeCacheCombination(
     const std::vector<uint32_t> cacheableNodes = collectCacheableNodes(graph);
     const std::unordered_map<uint32_t, uint64_t> nodeMemorySizes = buildLogicalNodeMemorySizes(graph, cacheableNodes);
 
-    std::unordered_map<std::string, BucketPlanMemoEntry> memo;
-    const std::string emptyCacheKey = encodeCachedNodeSet({});
+    std::cout << "[CacheOptimizer] Evaluating baseline cost..." << std::endl;
+    float baselineScore = 0.0f;
     for (const BucketPlanRequest &bucket : buckets)
     {
-        BucketPlanMemoEntry entry;
-        entry.attempted = true;
-
-        auto baselineIt = baselinePlans.find(bucket.key);
-        if (baselineIt != baselinePlans.end())
-        {
-            entry.valid = true;
-            entry.plan = baselineIt->second;
-            entry.runtime = getPlanRuntime(entry.plan);
-        }
-        else
-        {
-            entry.memoryFailed = true;
-        }
-
-        memo[emptyCacheKey + "|" + bucket.key] = std::move(entry);
+        float cost = planner.estimateCostForCacheSet(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {});
+        auto countIt = bucketCallCounts.find(bucket.key);
+        uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
+        baselineScore += cost * callCount;
     }
 
-    if (cacheableNodes.empty())
+    std::cout << "[CacheOptimizer] Baseline Score: " << baselineScore << std::endl;
+
+    struct NodeROI
     {
-        if (baselinePlans.size() != buckets.size())
-            return result;
+        uint32_t nodeId;
+        float costSaved;
+        uint64_t sizeBytes;
+        float roi;
+    };
 
-        result.bestCachedNodes = {};
-        result.bucketPlans = baselinePlans;
-        result.runtimeScore = calculateWeightedRuntimeScore(baselinePlans, bucketCallCounts, costModel);
-        result.foundValidCombination = true;
-        return result;
-    }
+    std::vector<NodeROI> nodeROIs;
+    ProgressTimer timer(cacheableNodes.size(), "Evaluating nodes for caching: ");
 
-    const size_t lowerBound = findLowerBound(buckets, baselinePlans, cacheableNodes, nodeMemorySizes, graph, memoryLimits);
-    const size_t upperBound = findUpperBound(cacheableNodes, nodeMemorySizes, graph, memoryLimits);
-
-    if (lowerBound > upperBound)
-        return result;
-
-    std::cout << "[CacheOptimizer] Searching cache combinations: [" << lowerBound << ", " << upperBound << "] nodes" << std::endl;
-
-    for (size_t k = lowerBound; k <= upperBound; ++k)
+    for (uint32_t nodeId : cacheableNodes)
     {
-        std::cout << "[CacheOptimizer] Trying combinations of size " << k << std::endl;
-        std::vector<uint32_t> current;
-        uint64_t total = binom(cacheableNodes.size(), k);
-        ProgressTimer timer(total, "trying combinations ");
-        enumerateCombinations(cacheableNodes, k, 0, current, [&](const std::vector<uint32_t> &combination)
-                              {
-            std::unordered_set<uint32_t> cachedNodes(combination.begin(), combination.end());
+        timer.tick();
+        float testScore = 0.0f;
+        for (const BucketPlanRequest &bucket : buckets)
+        {
+            float cost = planner.estimateCostForCacheSet(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {nodeId});
+            auto countIt = bucketCallCounts.find(bucket.key);
+            uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
+            testScore += cost * callCount;
+        }
 
-            double totalScore = 0.0;
-            std::unordered_map<std::string, CompiledGraph> plans;
+        float costSaved = baselineScore - testScore;
+        uint64_t sizeBytes = nodeMemorySizes.count(nodeId) ? nodeMemorySizes.at(nodeId) : 0;
+        float roi = sizeBytes > 0 ? (costSaved / static_cast<float>(sizeBytes)) : 0.0f;
 
-            for (const BucketPlanRequest &bucket : buckets)
-            {
-                const BucketPlanMemoEntry &entry = getOrPlanBucket(
-                    rootId,
-                    graph,
-                    bucket,
-                    cachedNodes,
-                    memoryLimits,
-                    costModel,
-                    memo);
-
-                if (!entry.valid) {
-                    timer.tick();
-                    return;
-                }
-
-                plans[bucket.key] = entry.plan;
-                auto countIt = bucketCallCounts.find(bucket.key);
-                uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
-                totalScore += static_cast<double>(entry.runtime) * static_cast<double>(callCount);
-            }
-
-            if (!result.foundValidCombination || totalScore < result.runtimeScore)
-            {
-                std::cout << "[CacheOptimizer] Found better combination with score " << totalScore << std::endl;
-                result.runtimeScore = static_cast<float>(totalScore);
-                result.bestCachedNodes = std::move(cachedNodes);
-                result.bucketPlans = std::move(plans);
-                result.foundValidCombination = true;
-            } 
-            timer.tick(); });
+        nodeROIs.push_back({nodeId, costSaved, sizeBytes, roi});
     }
+
+    std::sort(nodeROIs.begin(), nodeROIs.end(), [](const NodeROI &a, const NodeROI &b)
+              { return a.roi > b.roi; });
+
+    std::unordered_set<uint32_t> selectedCachedNodes;
+    uint64_t currentCacheMem = 0;
+
+    for (const auto &nr : nodeROIs)
+    {
+        if (nr.roi > 0.0f && currentCacheMem + nr.sizeBytes <= maxCacheMemory)
+        {
+            selectedCachedNodes.insert(nr.nodeId);
+            currentCacheMem += nr.sizeBytes;
+            std::cout << "[CacheOptimizer] Selected Node " << nr.nodeId
+                      << " | ROI: " << nr.roi
+                      << " | Saved: " << nr.costSaved
+                      << " | Mem: " << nr.sizeBytes << " bytes" << std::endl;
+        }
+    }
+
+    std::cout << "[CacheOptimizer] Final selected cache set size: " << selectedCachedNodes.size()
+              << " nodes, using " << currentCacheMem << " bytes." << std::endl;
+
+    std::unordered_map<std::string, CompiledGraph> plans;
+    float finalScore = 0.0f;
+
+    std::cout << "[CacheOptimizer] Generating final plans..." << std::endl;
+    for (const BucketPlanRequest &bucket : buckets)
+    {
+        CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, selectedCachedNodes);
+        float cost = getPlanRuntime(plan);
+        auto countIt = bucketCallCounts.find(bucket.key);
+        uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
+        finalScore += cost * callCount;
+        plans[bucket.key] = std::move(plan);
+    }
+
+    result.bestCachedNodes = std::move(selectedCachedNodes);
+    result.bucketPlans = std::move(plans);
+    result.runtimeScore = finalScore;
+    result.foundValidCombination = true;
 
     return result;
 }

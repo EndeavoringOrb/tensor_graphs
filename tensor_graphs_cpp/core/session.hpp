@@ -133,6 +133,7 @@ private:
     bool isPlanned;
     bool isCompiled;
     uint32_t nBucketSizes = 0;
+    uint64_t maxCacheMemory;
 
     std::string cachePath;
     std::unordered_map<std::string, CompiledGraph> cachedGraphs;
@@ -454,8 +455,8 @@ private:
     }
 
 public:
-    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0)
-        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes)
+    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0, uint64_t _maxCacheMemory = std::numeric_limits<uint64_t>::max())
+        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes), maxCacheMemory(_maxCacheMemory)
     {
         ensureOutputDirectories();
         loadCache();
@@ -865,22 +866,6 @@ public:
             cachedBuckets[bucket.key] = bucket.bucket;
         }
 
-        std::unordered_map<std::string, CompiledGraph> baselinePlans;
-        ProgressTimer baselineTimer(buckets.size(), "Planning baseline buckets: ");
-        for (const BucketPlanRequest &bucket : buckets)
-        {
-            baselineTimer.tick();
-            try
-            {
-                baselinePlans[bucket.key] = compileBucketPlan(bucket, {}, true);
-            }
-            catch (const MemoryExhaustedError &e)
-            {
-                std::cout << "[Session.ensureCacheCoverage] Uncached baseline failed for bucket "
-                          << bucket.key << ": " << e.what() << std::endl;
-            }
-        }
-
         std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
         for (uint32_t inId : inputNodeIds)
         {
@@ -888,9 +873,30 @@ public:
         }
         std::string fullKey = encodeCacheKey(fullInputRegions);
 
-        if (baselinePlans.count(fullKey))
+        std::cout << "[Session.ensureCacheCoverage] Starting greedy cache optimization..." << std::endl;
+        Planner planner(costModel, memManager.getBufferSizes());
+        CacheOptimizationResult optResult = optimizeCacheCombination(
+            rootId,
+            graph,
+            buckets,
+            bucketCallCounts,
+            maxCacheMemory,
+            planner);
+
+        if (optResult.foundValidCombination)
         {
-            const CompiledGraph &fullPlan = baselinePlans.at(fullKey);
+            selectedCachedNodes = std::move(optResult.bestCachedNodes);
+            cachedGraphs = std::move(optResult.bucketPlans);
+            std::cout << "[Session.ensureCacheCoverage] Selected " << selectedCachedNodes.size()
+                      << " cached nodes with runtime score " << optResult.runtimeScore << std::endl;
+
+            if (cachedGraphs.count(fullKey) == 0)
+            {
+                Error::throw_err("[Session::ensureCacheCoverage] full key not in generated plans");
+            }
+
+            // Propagate logical backend choice to Graph
+            const CompiledGraph &fullPlan = cachedGraphs.at(fullKey);
             for (const auto &inst : fullPlan.instructions)
             {
                 uint32_t logicalId = fullPlan.getLogicalId(inst.nodeId);
@@ -899,43 +905,16 @@ public:
                     graph.getNode(logicalId).backend = inst.backend;
                 }
             }
-        }
 
-        // CacheOptimizationResult optResult = optimizeCacheCombination(
-        //     rootId,
-        //     graph,
-        //     buckets,
-        //     bucketCallCounts,
-        //     baselinePlans,
-        //     memManager.getBufferSizes(),
-        //     costModel);
-
-        // if (optResult.foundValidCombination)
-        // {
-        //     selectedCachedNodes = std::move(optResult.bestCachedNodes);
-        //     cachedGraphs = std::move(optResult.bucketPlans);
-        //     std::cout << "[Session.ensureCacheCoverage] Selected " << selectedCachedNodes.size()
-        //               << " cached nodes with runtime score " << optResult.runtimeScore << std::endl;
-        //     // Override the optimized plan for the full key with the baseline (recompute-all) plan
-        //     if (baselinePlans.count(fullKey) == 0)
-        //     {
-        //         Error::throw_err("[Session::ensureCacheCoverage] full key not in baseline plans");
-        //     }
-        //     cachedGraphs[fullKey] = baselinePlans.at(fullKey);
-        //     for (auto &inst : cachedGraphs[fullKey].instructions)
-        //     {
-        //         uint32_t logicalId = cachedGraphs[fullKey].getLogicalId(inst.nodeId);
-        //         if (selectedCachedNodes.count(logicalId) != 0)
-        //         {
-        //             inst.outputStorageType = StorageType::PINNED;
-        //         }
-        //     }
-        //     std::cout << "[Session.ensureCacheCoverage] Forced baseline plan for full key: " << fullKey << " to ensure cache initialization." << std::endl;
-        // }
-        if (baselinePlans.size() == buckets.size())
-        {
-            cachedGraphs = std::move(baselinePlans);
-            std::cout << "[Session.ensureCacheCoverage] Falling back to uncached baseline plans." << std::endl;
+            for (auto &inst : cachedGraphs[fullKey].instructions)
+            {
+                uint32_t logicalId = cachedGraphs[fullKey].getLogicalId(inst.nodeId);
+                if (selectedCachedNodes.count(logicalId) != 0)
+                {
+                    inst.outputStorageType = StorageType::PINNED;
+                }
+            }
+            std::cout << "[Session.ensureCacheCoverage] Marked cached nodes as PINNED in full key plan." << std::endl;
         }
         else
         {
