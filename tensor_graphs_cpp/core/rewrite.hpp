@@ -122,6 +122,7 @@ struct FusionRule : public Rule
     struct Pattern
     {
         std::string opName;
+        OpType rootOpType;
         uint32_t rootId;
         std::vector<uint32_t> variables;
         std::vector<DType> dtypes;
@@ -129,9 +130,14 @@ struct FusionRule : public Rule
         Graph graph;
     };
 
-    std::vector<Pattern> patterns;
-    std::vector<std::unordered_map<uint32_t, uint32_t>> bindings;
-    std::vector<uint32_t> activeMatches;
+    struct MatchResult
+    {
+        const Pattern *pattern;
+        std::unordered_map<uint32_t, uint32_t> binding;
+    };
+
+    std::unordered_map<OpType, std::vector<Pattern>> patternsByOp;
+    std::vector<MatchResult> activeMatches;
 
     FusionRule()
     {
@@ -148,25 +154,36 @@ struct FusionRule : public Rule
                 pattern.variables.push_back(inId);
             }
             pattern.rootId = entry.factory(pattern.variables, pattern.graph);
+            pattern.rootOpType = pattern.graph.getNode(pattern.rootId).opType;
             pattern.dtypes = entry.dtypes;
             pattern.dummyShapes = entry.dummyShapes;
-            patterns.push_back(std::move(pattern));
-        }
 
-        // Initialize pre-allocated memory structures
-        bindings.resize(patterns.size());
-        activeMatches.reserve(patterns.size());
+            patternsByOp[pattern.rootOpType].push_back(std::move(pattern));
+        }
     }
 
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
         activeMatches.clear();
-        for (size_t i = 0; i < patterns.size(); ++i)
+        const ENode &eNode = egraph.getENodes()[eNodeIdx];
+
+        auto it = patternsByOp.find(eNode.opType);
+        if (it == patternsByOp.end())
+            return false;
+
+        // Optimization: Canonicalize protected classes once per match call
+        std::unordered_set<uint32_t> canonicalProtected;
+        for (uint32_t id : protectedEClasses)
         {
-            bindings[i].clear();
-            if (matchPatternNode(eNodeIdx, egraph, patterns[i].rootId, patterns[i].graph, patterns[i].variables, bindings[i], patterns[i].dtypes, patterns[i].rootId, protectedEClasses))
+            canonicalProtected.insert(egraph.findConst(id));
+        }
+
+        for (const auto &pattern : it->second)
+        {
+            std::unordered_map<uint32_t, uint32_t> binding;
+            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern, binding, canonicalProtected))
             {
-                activeMatches.push_back(static_cast<uint32_t>(i));
+                activeMatches.push_back({&pattern, std::move(binding)});
             }
         }
         return !activeMatches.empty();
@@ -174,10 +191,10 @@ struct FusionRule : public Rule
 
     void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
-        for (uint32_t patternIdx : activeMatches)
+        for (const auto &match : activeMatches)
         {
-            const auto &pattern = patterns[patternIdx];
-            const auto &binding = bindings[patternIdx];
+            const Pattern &pattern = *match.pattern;
+            const auto &binding = match.binding;
 
             std::vector<uint32_t> inputs;
             std::vector<TensorNode> inputNodes;
@@ -211,10 +228,10 @@ struct FusionRule : public Rule
             outputNode.viewOffset = matchedClass.viewOffset;
             outputNode.backend = matchedClass.backend;
 
-            std::vector<uint64_t> matches = KernelRegistry::get().findMatchingKernels(
+            std::vector<uint64_t> kernelMatches = KernelRegistry::get().findMatchingKernels(
                 OpType::FUSED, pattern.opName, outputNode.backend, inputNodes, outputNode, {}, false);
 
-            for (uint64_t uid : matches)
+            for (uint64_t uid : kernelMatches)
             {
                 const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
                 addFusedNode(egraph, kernel, outputNode.backend, inputs, eNodeIdx);
@@ -231,6 +248,7 @@ struct FusionRule : public Rule
                              "  Parent IDs: " + std::to_string(parentIds.size()) + "\n" +
                              "  Kernel Num Inputs: " + std::to_string(kernel.numInputs) + "\n");
         }
+
         for (size_t i = 0; i < parentIds.size(); ++i)
         {
             uint32_t pid = parentIds[i];
@@ -256,88 +274,85 @@ struct FusionRule : public Rule
                 adaptedParents.push_back(pid);
                 continue;
             }
-            else
+
+            uint32_t currentPid = pid;
+            EClass currentClass = parent;
+
+            if (needCopy)
             {
-                uint32_t currentPid = pid;
-                EClass currentClass = parent;
+                TensorNode inNode;
+                inNode.opType = OpType::INPUT;
+                inNode.dtype = currentClass.dtype;
+                inNode.setShape(currentClass.shape);
+                inNode.strides = currentClass.strides;
+                inNode.viewOffset = currentClass.viewOffset;
+                inNode.backend = currentClass.backend;
 
-                if (needCopy)
+                TensorNode outNode = inNode;
+                outNode.opType = OpType::COPY_TO;
+                outNode.backend = expectedBackend;
+                outNode.strides = calcContiguousStrides(outNode.getShape());
+                outNode.viewOffset = 0;
+
+                auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", outNode.backend, {inNode}, outNode, {}, true);
+                if (matches.empty())
+                    return;
+
+                uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
+                for (uint64_t uid : matches)
                 {
-                    TensorNode inNode;
-                    inNode.opType = OpType::INPUT;
-                    inNode.dtype = currentClass.dtype;
-                    inNode.setShape(currentClass.shape);
-                    inNode.strides = currentClass.strides;
-                    inNode.viewOffset = currentClass.viewOffset;
-                    inNode.backend = currentClass.backend;
-
-                    TensorNode outNode = inNode;
-                    outNode.opType = OpType::COPY_TO;
-                    outNode.backend = expectedBackend;
-                    outNode.strides = calcContiguousStrides(outNode.getShape());
-                    outNode.viewOffset = 0;
-
-                    auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", outNode.backend, {inNode}, outNode, {}, true);
-                    if (matches.empty())
-                        return;
-
-                    uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
-                    for (uint64_t uid : matches)
-                    {
-                        ENode copyNode;
-                        copyNode.kernelUid = uid;
-                        copyNode.opType = OpType::COPY_TO;
-                        copyNode.children = {currentPid};
-                        copyNode.shape = outNode.getShape();
-                        copyNode.strides = outNode.strides;
-                        copyNode.viewOffset = outNode.viewOffset;
-                        copyNode.dtype = outNode.dtype;
-                        copyNode.backend = outNode.backend;
-                        egraph.addENode(newEClass, copyNode);
-                    }
-                    currentPid = newEClass;
-                    currentClass = egraph.getEClass(newEClass);
+                    ENode copyNode;
+                    copyNode.kernelUid = uid;
+                    copyNode.opType = OpType::COPY_TO;
+                    copyNode.children = {currentPid};
+                    copyNode.shape = outNode.getShape();
+                    copyNode.strides = outNode.strides;
+                    copyNode.viewOffset = outNode.viewOffset;
+                    copyNode.dtype = outNode.dtype;
+                    copyNode.backend = outNode.backend;
+                    egraph.addENode(newEClass, copyNode);
                 }
-
-                if (needContig)
-                {
-                    TensorNode inNode;
-                    inNode.opType = OpType::INPUT;
-                    inNode.dtype = currentClass.dtype;
-                    inNode.setShape(currentClass.shape);
-                    inNode.strides = currentClass.strides;
-                    inNode.viewOffset = currentClass.viewOffset;
-                    inNode.backend = currentClass.backend;
-
-                    TensorNode outNode = inNode;
-                    outNode.opType = OpType::CONTIGUOUS;
-                    outNode.strides = calcContiguousStrides(outNode.getShape());
-                    outNode.viewOffset = 0;
-
-                    auto matches = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", outNode.backend, {inNode}, outNode, {}, true);
-                    if (matches.empty())
-                        return;
-
-                    uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
-                    for (uint64_t uid : matches)
-                    {
-                        ENode contigNode;
-                        contigNode.kernelUid = uid;
-                        contigNode.opType = OpType::CONTIGUOUS;
-                        contigNode.children = {currentPid};
-                        contigNode.shape = outNode.getShape();
-                        contigNode.strides = outNode.strides;
-                        contigNode.viewOffset = outNode.viewOffset;
-                        contigNode.dtype = outNode.dtype;
-                        contigNode.backend = outNode.backend;
-                        egraph.addENode(newEClass, contigNode);
-                    }
-                    currentPid = newEClass;
-                    currentClass = egraph.getEClass(newEClass);
-                }
-
-                adaptedParents.push_back(currentPid);
+                currentPid = newEClass;
+                currentClass = egraph.getEClass(newEClass);
             }
+
+            if (needContig)
+            {
+                TensorNode inNode;
+                inNode.opType = OpType::INPUT;
+                inNode.dtype = currentClass.dtype;
+                inNode.setShape(currentClass.shape);
+                inNode.strides = currentClass.strides;
+                inNode.viewOffset = currentClass.viewOffset;
+                inNode.backend = currentClass.backend;
+
+                TensorNode outNode = inNode;
+                outNode.opType = OpType::CONTIGUOUS;
+                outNode.strides = calcContiguousStrides(outNode.getShape());
+                outNode.viewOffset = 0;
+
+                auto matches = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", outNode.backend, {inNode}, outNode, {}, true);
+                if (matches.empty())
+                    return;
+
+                uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
+                for (uint64_t uid : matches)
+                {
+                    ENode contigNode;
+                    contigNode.kernelUid = uid;
+                    contigNode.opType = OpType::CONTIGUOUS;
+                    contigNode.children = {currentPid};
+                    contigNode.shape = outNode.getShape();
+                    contigNode.strides = outNode.strides;
+                    contigNode.viewOffset = outNode.viewOffset;
+                    contigNode.dtype = outNode.dtype;
+                    contigNode.backend = outNode.backend;
+                    egraph.addENode(newEClass, contigNode);
+                }
+                currentPid = newEClass;
+                currentClass = egraph.getEClass(newEClass);
+            }
+            adaptedParents.push_back(currentPid);
         }
 
         const ENode &oldENode = egraph.getENodes()[eNodeIdx];
@@ -347,8 +362,7 @@ struct FusionRule : public Rule
         enode.kernelUid = kernel.uid;
         enode.opType = kernel.opType;
         enode.opName = kernel.opName;
-        for (uint32_t pid : adaptedParents)
-            enode.children.push_back(pid);
+        enode.children = adaptedParents;
         enode.shape = oldENode.shape;
 
         if (kernel.isView)
@@ -366,7 +380,6 @@ struct FusionRule : public Rule
         enode.backend = targetBackend;
 
         Backend originalBackend = egraph.getEClass(eclassId).backend;
-
         if (targetBackend == originalBackend)
         {
             egraph.addENode(eclassId, enode);
@@ -402,74 +415,63 @@ struct FusionRule : public Rule
                 copyNode.viewOffset = dummyOut.viewOffset;
                 copyNode.dtype = dummyOut.dtype;
                 copyNode.backend = dummyOut.backend;
-
                 egraph.addENode(eclassId, copyNode);
             }
         }
     }
 
     static bool matchPatternClass(uint32_t eClassIdx, const EGraph &egraph,
-                                  uint32_t patternId, const Graph &patternGraph,
-                                  const std::vector<uint32_t> &patternVariables,
+                                  uint32_t patternId, const Pattern &pattern,
                                   std::unordered_map<uint32_t, uint32_t> &binding,
-                                  const std::vector<DType> &patternDtypes,
-                                  uint32_t patternRootId,
-                                  const std::unordered_set<uint32_t> &protectedEClasses)
+                                  const std::unordered_set<uint32_t> &canonicalProtected)
     {
         uint32_t canonicalClassIdx = egraph.findConst(eClassIdx);
 
-        auto itVar = std::find(patternVariables.begin(), patternVariables.end(), patternId);
-        if (itVar != patternVariables.end())
+        auto itVar = std::find(pattern.variables.begin(), pattern.variables.end(), patternId);
+        if (itVar != pattern.variables.end())
         {
-            size_t varIdx = static_cast<size_t>(std::distance(patternVariables.begin(), itVar));
+            size_t varIdx = static_cast<size_t>(std::distance(pattern.variables.begin(), itVar));
             const EClass &eclass = egraph.getEClass(canonicalClassIdx);
 
-            if (varIdx < patternDtypes.size() && eclass.dtype != patternDtypes[varIdx])
+            if (varIdx < pattern.dtypes.size() && eclass.dtype != pattern.dtypes[varIdx])
                 return false;
 
-            if (binding.count(patternId))
+            auto bIt = binding.find(patternId);
+            if (bIt != binding.end())
             {
-                return binding[patternId] == canonicalClassIdx;
+                return bIt->second == canonicalClassIdx;
             }
             binding[patternId] = canonicalClassIdx;
             return true;
         }
 
-        if (patternId != patternRootId)
+        // Optimization: O(1) check for protected eclasses
+        if (patternId != pattern.rootId)
         {
-            for (uint32_t p : protectedEClasses)
-            {
-                if (egraph.findConst(p) == canonicalClassIdx)
-                {
-                    return false;
-                }
-            }
+            if (canonicalProtected.count(canonicalClassIdx))
+                return false;
         }
 
         const EClass &eclass = egraph.getEClass(canonicalClassIdx);
         for (uint32_t enodeId : eclass.enodes)
         {
             std::unordered_map<uint32_t, uint32_t> localBinding = binding;
-            if (matchPatternNode(enodeId, egraph, patternId, patternGraph, patternVariables, localBinding, patternDtypes, patternRootId, protectedEClasses))
+            if (matchPatternNode(enodeId, egraph, patternId, pattern, localBinding, canonicalProtected))
             {
                 binding = std::move(localBinding);
                 return true;
             }
         }
-
         return false;
     }
 
     static bool matchPatternNode(uint32_t eNodeIdx, const EGraph &egraph,
-                                 uint32_t patternId, const Graph &patternGraph,
-                                 const std::vector<uint32_t> &patternVariables,
+                                 uint32_t patternId, const Pattern &pattern,
                                  std::unordered_map<uint32_t, uint32_t> &binding,
-                                 const std::vector<DType> &patternDtypes,
-                                 uint32_t patternRootId,
-                                 const std::unordered_set<uint32_t> &protectedEClasses)
+                                 const std::unordered_set<uint32_t> &canonicalProtected)
     {
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
-        const auto &pNode = patternGraph.getNode(patternId);
+        const auto &pNode = pattern.graph.getNode(patternId);
 
         if (eNode.opType != pNode.opType)
             return false;
@@ -480,12 +482,11 @@ struct FusionRule : public Rule
 
         for (size_t i = 0; i < eNode.children.size(); ++i)
         {
-            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], patternGraph, patternVariables, binding, patternDtypes, patternRootId, protectedEClasses))
+            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], pattern, binding, canonicalProtected))
             {
                 return false;
             }
         }
-
         return true;
     }
 };
