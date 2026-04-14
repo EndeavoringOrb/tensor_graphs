@@ -134,7 +134,7 @@ private:
     bool isCompiled;
     uint32_t nBucketSizes = 0;
     uint64_t maxCacheMemory;
-    bool useRoiHeuristic = true;
+    bool useRoiHeuristic = false;
 
     std::string cachePath;
     std::unordered_map<std::string, CompiledGraph> cachedGraphs;
