@@ -107,12 +107,7 @@ int main()
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
         {
             seenCalls.insert(key);
-            std::string valA = j["hwTag"].get<std::string>();
-            std::string valB = j["buildContextId"].get<std::string>();
-            bool checkA = valA == HW_TAG;
-            bool checkB = valB == BUILD_CONTEXT_ID_STRING; // TODO: remove this check
-            bool hasKernel = KernelRegistry::get().hasKernel(r.kernelUid);
-            if (checkA && checkB && hasKernel)
+            if (j["hwTag"].get<std::string>() == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
             {
                 toBenchmark.push_back(j);
             }
@@ -461,6 +456,7 @@ int main()
             }
 
             call["runTime"] = runtimeMs;
+            call["buildContextId"] = BUILD_CONTEXT_ID_STRING;
             outFile << call.dump() << "\n";
             outFile.flush();
 
