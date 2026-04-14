@@ -205,9 +205,9 @@ static PlanningRegionState derivePlanningRegions(
                           node.opType == OpType::FILL);
 
         auto dirtyIt = dirtyOutputRegions.find(nodeId);
-        state.recompute[nodeId] = mergeRegions(neededRegions);
+        state.recompute[nodeId] = normalizeRegions(mergeRegions(neededRegions));
         if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty() && !forceFull)
-            state.recomputeCached[nodeId] = intersectRegionLists(dirtyIt->second, neededRegions);
+            state.recomputeCached[nodeId] = normalizeRegions(intersectRegionLists(dirtyIt->second, neededRegions));
     }
 
     state.initialized = true;
@@ -413,8 +413,8 @@ private:
             return logicalId;
         }
 
-        const std::vector<Region> recomputeRegionsRaw = regionState.getRecompute(cachedNodes, logicalId);
-        if (recomputeRegionsRaw.empty())
+        const std::vector<Region> &recomputeRegions = regionState.getRecompute(cachedNodes, logicalId);
+        if (recomputeRegions.empty())
         {
             convertLogicalNodeToPlaceholder(logicalId);
             result.logicalToPhysicalNodeMap[logicalId] = logicalId;
@@ -422,8 +422,6 @@ private:
             memoizedPhysicalIds[logicalId] = logicalId;
             return logicalId;
         }
-
-        const std::vector<Region> recomputeRegions = normalizeRegions(recomputeRegionsRaw);
 
         if (cachedNodes.count(logicalId))
         {
