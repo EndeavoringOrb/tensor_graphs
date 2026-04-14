@@ -16,29 +16,29 @@
 
 // TODO: make hardware detection better
 #if defined(USE_CUDA)
-    #define HW_TAG "CUDA_Enabled"
+#define HW_TAG "CUDA_Enabled"
 #else
-    // Determine OS String
-    #if defined(TG_OS_WINDOWS)
-        #define PLAT_OS_STR "Windows"
-    #elif defined(TG_OS_MACOS)
-        #define PLAT_OS_STR "macOS"
-    #elif defined(TG_OS_LINUX)
-        #define PLAT_OS_STR "Linux"
-    #else
-        #define PLAT_OS_STR "UnknownOS"
-    #endif
+// Determine OS String
+#if defined(TG_OS_WINDOWS)
+#define PLAT_OS_STR "Windows"
+#elif defined(TG_OS_MACOS)
+#define PLAT_OS_STR "macOS"
+#elif defined(TG_OS_LINUX)
+#define PLAT_OS_STR "Linux"
+#else
+#define PLAT_OS_STR "UnknownOS"
+#endif
 
-    // Determine Arch String
-    #if defined(TG_ARCH_ARM64)
-        #define PLAT_ARCH_STR "ARM64"
-    #elif defined(TG_ARCH_X64)
-        #define PLAT_ARCH_STR "x64"
-    #else
-        #define PLAT_ARCH_STR "UnknownArch"
-    #endif
+// Determine Arch String
+#if defined(TG_ARCH_ARM64)
+#define PLAT_ARCH_STR "ARM64"
+#elif defined(TG_ARCH_X64)
+#define PLAT_ARCH_STR "x64"
+#else
+#define PLAT_ARCH_STR "UnknownArch"
+#endif
 
-    #define HW_TAG PLAT_OS_STR "_" PLAT_ARCH_STR
+#define HW_TAG PLAT_OS_STR "_" PLAT_ARCH_STR
 #endif
 
 // Uncomment the following line to enable logging calls to `benchmarks/calls.jsonl`
@@ -199,6 +199,56 @@ struct CostModel
         std::vector<DType> outDTypes = {outDType};
         const std::vector<std::vector<uint64_t>> outStrides = {_outStrides};
 
+        auto it = records.find(kernelUid);
+        if (it == records.end() || it->second.empty())
+        {
+#ifdef TENSOR_GRAPHS_LOG_COST_CALLS
+            {
+                Record r;
+                r.kernelUid = kernelUid;
+                r.buildContextId = BUILD_CONTEXT_ID;
+                r.hwTag = HW_TAG;
+                r.inputShapes = inShapes;
+                r.outputShapes = outShapes;
+                r.inputStrides = inStrides;
+                r.outputStrides = outStrides;
+                r.inputDTypes = inDTypes;
+                r.outputDTypes = outDTypes;
+                r.inputConstants = inConstants;
+                const auto &entry = KernelRegistry::get().getKernel(kernelUid);
+                r.backends = entry.backends;
+                r.inputBackends = entry.inputBackends;
+                r.runTime = 0.0f;
+
+                json callObj = r;
+                std::string callStr = callObj.dump();
+
+                if (loggedCalls.find(callStr) == loggedCalls.end())
+                {
+                    loggedCalls.insert(callStr);
+                    if (callFile.is_open())
+                    {
+                        callFile << callStr << "\n";
+                        callFile.flush();
+                    }
+                }
+            }
+#endif
+            std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n"
+                      << std::flush;
+            return std::numeric_limits<float>::infinity();
+        }
+
+        for (const auto &r : it->second)
+        {
+            if (r.inputShapes == inShapes && r.outputShapes == outShapes &&
+                r.inputStrides == inStrides && r.outputStrides == outStrides &&
+                r.inputDTypes == inDTypes && r.outputDTypes == outDTypes)
+            {
+                return r.runTime;
+            }
+        }
+
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS
         {
             Record r;
@@ -231,24 +281,6 @@ struct CostModel
             }
         }
 #endif
-
-        auto it = records.find(kernelUid);
-        if (it == records.end() || it->second.empty())
-        {
-            std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n" << std::flush;
-            return std::numeric_limits<float>::infinity();
-        }
-
-        for (const auto &r : it->second)
-        {
-            if (r.inputShapes == inShapes && r.outputShapes == outShapes &&
-                r.inputStrides == inStrides && r.outputStrides == outStrides &&
-                r.inputDTypes == inDTypes && r.outputDTypes == outDTypes)
-            {
-                return r.runTime;
-            }
-        }
-
         uint64_t targetElements = countElements(outShape);
         return interpolate(it->second, targetElements);
     }
