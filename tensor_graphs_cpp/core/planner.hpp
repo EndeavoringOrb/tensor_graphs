@@ -4,7 +4,6 @@
 #include "core/cost_model.hpp"
 #include "core/kernels.hpp"
 #include "core/rewrite.hpp"
-#include "core/hashing.hpp"
 #include "core/shapes.hpp"
 #include "core/misc.hpp"
 #include "core/egraph.hpp"

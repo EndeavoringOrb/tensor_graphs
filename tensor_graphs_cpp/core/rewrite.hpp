@@ -1,6 +1,5 @@
 #pragma once
 #include "core/graph.hpp"
-#include "core/hashing.hpp"
 #include "core/kernels.hpp"
 #include "core/shapes.hpp"
 #include "core/egraph.hpp"
