@@ -20,17 +20,21 @@ struct ProgressTimer
     const char *label;
 
     bool has_total;
+    bool disable;
 
-    ProgressTimer(size_t total_, const char *label_ = "", double minInterval_ = 2)
+    ProgressTimer(size_t total_, const char *label_ = "", bool disable_ = false, double minInterval_ = 2)
         : start(clock::now()),
           last_print(start),
           total(total_),
           minInterval(minInterval_),
           label(label_),
-          has_total(total_ > 0) {}
+          has_total(total_ > 0),
+          disable(disable_) {}
 
     inline void tick(size_t increment = 1)
     {
+        if (disable)
+            return;
         current += increment;
 
         auto now = clock::now();
@@ -74,6 +78,8 @@ struct ProgressTimer
 
     ~ProgressTimer()
     {
+        if (disable)
+            return;
         auto end = clock::now();
         double elapsed = std::chrono::duration<double>(end - start).count();
 

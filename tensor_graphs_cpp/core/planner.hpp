@@ -1106,7 +1106,7 @@ private:
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
 
         int max_iters = 100;
-        ProgressTimer timer(max_iters, "extracting graphs ");
+        ProgressTimer timer(max_iters, "extracting graphs ", stopOnFirstValid);
         while (max_iters-- > 0)
         {
             timer.tick();
