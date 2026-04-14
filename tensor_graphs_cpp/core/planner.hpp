@@ -89,25 +89,26 @@ struct PlanningRegionState
     std::unordered_map<uint32_t, std::vector<Region>> recomputeCached;
     std::unordered_map<uint32_t, std::vector<Region>> needed;
 
-    const std::vector<Region> &getRecompute(const std::unordered_set<uint32_t> &cachedNodes, uint32_t nodeId) const
+    const std::vector<Region> *getRecompute(
+        const std::unordered_set<uint32_t> &cachedNodes,
+        uint32_t nodeId) const
     {
-        static const std::vector<Region> empty;
-
         if (cachedNodes.count(nodeId) != 0)
         {
             auto it = recomputeCached.find(nodeId);
             if (it != recomputeCached.end())
             {
-                return it->second;
+                return &it->second;
             }
         }
+
         auto it = recompute.find(nodeId);
         if (it != recompute.end())
         {
-            return it->second;
+            return &it->second;
         }
 
-        return empty;
+        return nullptr;
     }
 };
 
@@ -421,8 +422,8 @@ private:
             return logicalId;
         }
 
-        const std::vector<Region> &recomputeRegions = regionState.getRecompute(cachedNodes, logicalId);
-        if (recomputeRegions.empty())
+        const std::vector<Region> *recomputePtr = regionState.getRecompute(cachedNodes, logicalId);
+        if (!recomputePtr || recomputePtr->empty())
         {
             convertLogicalNodeToPlaceholder(logicalId);
             result.logicalToPhysicalNodeMap[logicalId] = logicalId;
@@ -430,6 +431,7 @@ private:
             memoizedPhysicalIds[logicalId] = logicalId;
             return logicalId;
         }
+        const std::vector<Region> &recomputeRegions = *recomputePtr;
 
         if (cachedNodes.count(logicalId))
         {
