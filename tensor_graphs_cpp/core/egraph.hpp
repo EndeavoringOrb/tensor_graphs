@@ -20,36 +20,8 @@ struct ENode
     uint64_t viewOffset = 0;
     DType dtype = DType::FLOAT32;
     Backend backend = Backend::CPU;
-};
 
-struct ENodeKey
-{
-    uint64_t kernelUid = 0;
-    OpType opType;
-    std::string opName;
-    std::vector<uint32_t> children;
-    uint32_t leafId = UINT32_MAX; // Used only for INPUT nodes to prevent bad merges
-    std::vector<uint32_t> shape;
-    std::vector<uint64_t> strides;
-    uint64_t viewOffset = 0;
-    DType dtype = DType::FLOAT32;
-    Backend backend = Backend::CPU;
-
-    ENodeKey(const ENode enode)
-        : kernelUid(enode.kernelUid),
-          opType(enode.opType),
-          opName(enode.opName),
-          children(enode.children),
-          leafId(enode.leafId),
-          shape(enode.shape),
-          strides(enode.strides),
-          viewOffset(enode.viewOffset),
-          dtype(enode.dtype),
-          backend(enode.backend)
-    {
-    }
-
-    bool operator==(const ENodeKey &other) const
+    bool operator==(const ENode &other) const
     {
         return kernelUid == other.kernelUid &&
                opType == other.opType &&
@@ -64,10 +36,9 @@ struct ENodeKey
     }
 };
 
-// TODO: make generic hashing thing and use it instead of this custom hash
-struct ENodeKeyHash
+struct ENodeHash
 {
-    size_t operator()(const ENodeKey &key) const noexcept
+    size_t operator()(const ENode &key) const noexcept
     {
         size_t h = std::hash<uint64_t>{}(key.kernelUid);
 
@@ -76,22 +47,23 @@ struct ENodeKeyHash
             h ^= v + 0x9e3779b9 + (h << 6) + (h >> 2);
         };
 
-        hash_combine(h, std::hash<uint32_t>{}(static_cast<uint32_t>(key.opType)));
-        hash_combine(h, std::hash<std::string>{}(key.opName));
-        hash_combine(h, std::hash<uint32_t>{}(key.leafId));
+        hash_combine(h, static_cast<size_t>(key.opType));
+        if (!key.opName.empty())
+            hash_combine(h, std::hash<std::string>{}(key.opName));
+        hash_combine(h, key.leafId);
 
         for (uint32_t c : key.children)
-            hash_combine(h, std::hash<uint32_t>{}(c));
+            hash_combine(h, c);
 
         for (uint32_t s : key.shape)
-            hash_combine(h, std::hash<uint32_t>{}(s));
+            hash_combine(h, s);
 
         for (uint64_t s : key.strides)
-            hash_combine(h, std::hash<uint64_t>{}(s));
+            hash_combine(h, static_cast<size_t>(s));
 
-        hash_combine(h, std::hash<uint64_t>{}(key.viewOffset));
-        hash_combine(h, std::hash<uint32_t>{}(static_cast<uint32_t>(key.dtype)));
-        hash_combine(h, std::hash<uint32_t>{}(static_cast<uint32_t>(key.backend)));
+        hash_combine(h, static_cast<size_t>(key.viewOffset));
+        hash_combine(h, static_cast<size_t>(key.dtype));
+        hash_combine(h, static_cast<size_t>(key.backend));
 
         return h;
     }
@@ -146,9 +118,7 @@ public:
         }
         node.leafId = leafId;
 
-        ENodeKey key = ENodeKey(node);
-
-        auto it = hashcons.find(key);
+        auto it = hashcons.find(node);
         if (it != hashcons.end())
         {
             merge(canonical, it->second);
@@ -156,10 +126,10 @@ public:
         }
 
         uint32_t enodeId = static_cast<uint32_t>(enodes.size());
-        enodes.push_back(std::move(node));
+        enodes.push_back(node);
         classes[canonical].enodes.push_back(enodeId);
         nodeToEClass[enodeId] = canonical;
-        hashcons[key] = canonical;
+        hashcons[node] = canonical;
         return canonical;
     }
 
@@ -223,7 +193,8 @@ public:
 
     void rebuild()
     {
-        std::unordered_map<ENodeKey, uint32_t, ENodeKeyHash> newHash;
+        std::unordered_map<ENode, uint32_t, ENodeHash> newHash;
+        newHash.reserve(enodes.size());
         for (uint32_t i = 0; i < enodes.size(); ++i)
         {
             ENode &node = enodes[i];
@@ -232,9 +203,7 @@ public:
                 child = find(child);
             }
 
-            ENodeKey key = ENodeKey(node);
-
-            auto it = newHash.find(key);
+            auto it = newHash.find(node);
             if (it != newHash.end())
             {
                 merge(it->second, nodeToEClass.at(i));
@@ -242,7 +211,7 @@ public:
             }
             else
             {
-                newHash[key] = find(nodeToEClass.at(i));
+                newHash[node] = find(nodeToEClass.at(i));
             }
         }
         hashcons = std::move(newHash);
@@ -270,7 +239,7 @@ private:
     std::vector<EClass> classes;
     std::vector<ENode> enodes;
     std::vector<uint32_t> parent;
-    std::unordered_map<ENodeKey, uint32_t, ENodeKeyHash> hashcons;
+    std::unordered_map<ENode, uint32_t, ENodeHash> hashcons;
     std::unordered_map<uint32_t, uint32_t> nodeToEClass;
 };
 
