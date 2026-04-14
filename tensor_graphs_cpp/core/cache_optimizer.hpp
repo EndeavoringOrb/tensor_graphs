@@ -164,7 +164,7 @@ CacheOptimizationResult optimizeCacheCombination(
     std::cout << "[CacheOptimizer] Generating final plans..." << std::endl;
     for (const BucketPlanRequest &bucket : buckets)
     {
-        CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, selectedCachedNodes);
+        CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, selectedCachedNodes, regionStates[bucket.key]);
         float cost = getPlanRuntime(plan);
         auto countIt = bucketCallCounts.find(bucket.key);
         uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;

@@ -705,7 +705,7 @@ private:
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_set<uint32_t> &cachedNodes,
         bool doSaturate,
-        PlanningRegionState &regionState = {})
+        PlanningRegionState &regionState)
     {
         if (InterruptManager::isInterrupted())
         {
@@ -1476,7 +1476,7 @@ public:
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
         const std::unordered_set<uint32_t> &cachedNodes,
-        PlanningRegionState &regionState = {})
+        PlanningRegionState &regionState)
     {
         auto setup = setupEGraph(rootId, graph, dirtyOutputRegions, cachedNodes, true, regionState);
         return extractFirstValidCost(setup.planningGraph.physicalRootId, setup.egraph, setup.nodeToEClass, maxMemoryByBackend, cachedNodes, setup.eclassToLogical, setup.immutable_eclasses);
@@ -1487,7 +1487,7 @@ public:
         Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
-        const std::unordered_set<uint32_t> &cachedNodes, bool doSaturate = true, PlanningRegionState &regionState = {})
+        const std::unordered_set<uint32_t> &cachedNodes, PlanningRegionState &regionState, bool doSaturate = true)
     {
         auto setup = setupEGraph(rootId, graph, dirtyOutputRegions, cachedNodes, doSaturate, regionState);
         auto extraction = extractBest(setup.planningGraph.physicalRootId, setup.egraph, setup.nodeToEClass, maxMemoryByBackend, cachedNodes, setup.eclassToLogical, setup.immutable_eclasses);

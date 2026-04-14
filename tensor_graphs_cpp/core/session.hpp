@@ -217,7 +217,8 @@ private:
     {
         Graph planningGraph = graph;
         Planner planner(costModel, memManager.getBufferSizes());
-        return planner.plan(rootId, planningGraph, request.bucket.regions, request.bucket.inputSlices, cachedNodes, doSaturate);
+        PlanningRegionState regionState;
+        return planner.plan(rootId, planningGraph, request.bucket.regions, request.bucket.inputSlices, cachedNodes, regionState, doSaturate);
     }
 
     void materializePersistentInputsForPlan(const CompiledGraph &compiled)
