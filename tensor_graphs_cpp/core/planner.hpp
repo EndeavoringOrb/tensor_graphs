@@ -708,7 +708,7 @@ private:
 
     EGraphSetupResult setupEGraph(
         uint32_t rootId,
-        Graph &graph,
+        const Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_set<uint32_t> &cachedNodes,
         bool doSaturate,
@@ -1479,7 +1479,7 @@ public:
 
     float estimateCostForCacheSet(
         uint32_t rootId,
-        Graph &graph,
+        const Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
         const std::unordered_set<uint32_t> &cachedNodes,

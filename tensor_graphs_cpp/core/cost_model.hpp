@@ -13,6 +13,7 @@
 #include <cmath>
 #include <limits>
 #include <filesystem>
+#include <mutex>
 
 // TODO: make hardware detection better
 #if defined(USE_CUDA)
@@ -109,6 +110,7 @@ struct CostModel
     std::unordered_map<uint64_t, std::vector<Record>> records;
     std::unordered_set<std::string> loggedCalls;
     std::ofstream callFile;
+    std::mutex logMtx;
 
     CostModel()
     {
@@ -223,6 +225,7 @@ struct CostModel
                 json callObj = r;
                 std::string callStr = callObj.dump();
 
+                std::lock_guard<std::mutex> lock(logMtx);
                 if (loggedCalls.find(callStr) == loggedCalls.end())
                 {
                     loggedCalls.insert(callStr);
@@ -270,6 +273,7 @@ struct CostModel
             json callObj = r;
             std::string callStr = callObj.dump();
 
+            std::lock_guard<std::mutex> lock(logMtx);
             if (loggedCalls.find(callStr) == loggedCalls.end())
             {
                 loggedCalls.insert(callStr);

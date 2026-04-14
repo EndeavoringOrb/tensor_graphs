@@ -11,6 +11,9 @@
 #include <limits>
 #include <functional>
 #include <sstream>
+#include <future>
+#include <thread>
+#include <mutex>
 
 struct BucketPlanRequest
 {
@@ -116,26 +119,67 @@ CacheOptimizationResult optimizeCacheCombination(
     };
 
     std::vector<NodeROI> nodeROIs;
-    ProgressTimer timer(cacheableNodes.size(), "Evaluating nodes for caching: ");
+    nodeROIs.resize(cacheableNodes.size());
 
-    for (uint32_t nodeId : cacheableNodes)
+    ProgressTimer timer(cacheableNodes.size(), "Evaluating nodes for caching (Parallel): ");
+    std::mutex timerMtx;
+
+    // Determine number of threads
+    unsigned int numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0)
+        numThreads = 4;
+
+    auto worker = [&](size_t startIdx, size_t endIdx)
     {
-        timer.tick();
-        float testScore = 0.0f;
-        for (const BucketPlanRequest &bucket : buckets)
+        for (size_t i = startIdx; i < endIdx; ++i)
         {
-            float cost = planner.estimateCostForCacheSet(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {nodeId}, regionStates[bucket.key], doSaturate);
-            auto countIt = bucketCallCounts.find(bucket.key);
-            uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
-            testScore += cost * callCount;
+            uint32_t nodeId = cacheableNodes[i];
+            float testScore = 0.0f;
+
+            for (const BucketPlanRequest &bucket : buckets)
+            {
+                // The planner and graph are read-only here
+                float cost = planner.estimateCostForCacheSet(
+                    rootId, graph, bucket.bucket.regions,
+                    bucket.bucket.inputSlices, {nodeId},
+                    regionStates.at(bucket.key), doSaturate);
+
+                auto countIt = bucketCallCounts.find(bucket.key);
+                uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
+                testScore += cost * callCount;
+            }
+
+            float costSaved = baselineScore - testScore;
+            uint64_t sizeBytes = nodeMemorySizes.at(nodeId);
+            float roi = sizeBytes > 0 ? (costSaved / static_cast<float>(sizeBytes)) : 0.0f;
+
+            nodeROIs[i] = {nodeId, costSaved, sizeBytes, roi};
+
+            // Update progress timer safely
+            {
+                std::lock_guard<std::mutex> lock(timerMtx);
+                timer.tick();
+            }
         }
+    };
 
-        float costSaved = baselineScore - testScore;
-        uint64_t sizeBytes = nodeMemorySizes.count(nodeId) ? nodeMemorySizes.at(nodeId) : 0;
-        float roi = sizeBytes > 0 ? (costSaved / static_cast<float>(sizeBytes)) : 0.0f;
+    // Dispatch chunks
+    std::vector<std::future<void>> futures;
+    size_t chunkSize = (cacheableNodes.size() + numThreads - 1) / numThreads;
 
-        nodeROIs.push_back({nodeId, costSaved, sizeBytes, roi});
+    for (unsigned int t = 0; t < numThreads; ++t)
+    {
+        size_t start = t * chunkSize;
+        size_t end = std::min(start + chunkSize, cacheableNodes.size());
+        if (start < end)
+        {
+            futures.push_back(std::async(std::launch::async, worker, start, end));
+        }
     }
+
+    // Wait for all workers to finish
+    for (auto &f : futures)
+        f.get();
 
     std::sort(nodeROIs.begin(), nodeROIs.end(), [](const NodeROI &a, const NodeROI &b)
               { return a.roi > b.roi; });
