@@ -1,0 +1,268 @@
+```text
+eclasses
+0: A
+1: B(0), C(0)
+2: D(1)
+
+A cost 0
+B cost 1
+C cost 5
+D cost 2
+
+eClassToENode = {}
+path = []
+eclassid = 2 # start at root
+cost = 0
+best = (inf, {})
+worklist = []
+
+eclassid = 2
+eClassToENode = {2: 0}
+path = [2]
+cost = 2
+best = (inf, {})
+worklist = [1]
+
+eclassid = 1
+eClassToENode = {2: 0, 1: 0}
+path = [2, 1]
+cost = 3
+best = (inf, {})
+worklist = [0]
+
+eclassid = 0
+eClassToENode = {2: 0, 1: 0, 0: 0}
+path = [2, 1, 0]
+cost = 3
+best = (3, {2: 0, 1: 0, 0: 0}) # worklist is empty, so done extracting a graph, so update best
+worklist = []
+
+
+# go back up
+eclassid = 1
+eClassToENode = {2: 0, 1: 1}
+path = [2, 1]
+cost = 7
+best = (3, {2: 0, 1: 0, 0: 0})
+worklist = [0]
+
+eclassid = 0
+eClassToENode = {2: 0, 1: 1, 0: 0}
+path = [2, 1, 0]
+cost = 7
+best = (3, {2: 0, 1: 0, 0: 0})
+worklist = []
+# worklist is empty, so done extracting a graph, so update best, but 7 > 3 so no update
+
+# go back up
+eclassid = 1
+eClassToENode = {2: 0, 1: 1}
+eClassToENode[eclassid] + 1 >= enodes.size() so we already tried all branches here, so go back up
+
+eclassid = 2
+eClassToENode = {2: 0}
+eClassToENode[eclassid] + 1 >= enodes.size() so we already tried all branches here, and (eClassToENode.size() == 1 && eClassToENode.count(rootId) == 1) so we are done
+```
+
+for a graph with multiple leaf nodes
+```text
+eclasses
+0: A
+1: B
+2: C(0, 1), D(0, 1)
+3: E(2)
+
+A cost 0
+B cost 0
+C cost 5
+D cost 2
+E cost 1
+
+eClassToENode = {}
+path = []
+eclassid = 3 # start at root
+cost = 0
+best = (inf, {})
+worklist = []
+
+eclassid = 3
+eClassToENode = {3: 0}
+path = [3]
+cost = 1
+best = (inf, {})
+worklist = [1]
+
+eclassid = 2
+eClassToENode = {3: 0, 2: 0}
+path = [3, 2]
+cost = 1+5=6
+best = (inf, {})
+worklist = [0, 1]
+
+eclassid = 0
+eClassToENode = {3: 0, 2: 0, 0: 0}
+path = [3, 2, 0]
+cost = 1+5+0=6
+best = (inf, {})
+worklist = [1]
+
+eclassid = 1
+eClassToENode = {3: 0, 2: 0, 0: 0, 1: 0}
+path = [3, 2, 0, 1]
+cost = 1+5+0+0=6
+best = (6, {3: 0, 2: 0, 0: 0, 1: 0})
+worklist = []
+# worklist is empty, so done extracting a graph, so update best
+# eClassToENode[eclassid] + 1 >= enodes.size() so we already tried all branches here, so go back up
+
+eclassid = 0
+eClassToENode = {3: 0, 2: 0, 0: 0}
+path = [3, 2, 0]
+cost = 1+5+0=6
+best = (6, {3: 0, 2: 0, 0: 0, 1: 0})
+worklist = []
+# eClassToENode[eclassid] + 1 >= enodes.size() so we already tried all branches here, so go back up
+
+eclassid = 2
+eClassToENode = {3: 0, 2: 1}
+path = [3, 2]
+cost = 1+2=3
+best = (6, {3: 0, 2: 0, 0: 0, 1: 0})
+worklist = [0, 1]
+
+eclassid = 0
+eClassToENode = {3: 0, 2: 1, 0: 0}
+path = [3, 2, 0]
+cost = 1+2+0=3
+best = (6, {3: 0, 2: 0, 0: 0, 1: 0})
+worklist = [1]
+
+eclassid = 1
+eClassToENode = {3: 0, 2: 1, 0: 0, 1: 0}
+path = [3, 2, 0, 1]
+cost = 1+2+0+0=3
+best = (3, {3: 0, 2: 1, 0: 0, 1: 0})
+worklist = []
+# worklist is empty, so done extracting a graph, so update best
+# eClassToENode[eclassid] + 1 >= enodes.size() so we already tried all branches here, so go back up
+
+eclassid = 0
+eClassToENode = {3: 0, 2: 1, 0: 0}
+path = [3, 2, 0]
+cost = 1+2+0=3
+best = (3, {3: 0, 2: 1, 0: 0, 1: 0})
+worklist = []
+# eClassToENode[eclassid] + 1 >= enodes.size() so we already tried all branches here, so go back up
+
+eclassid = 2
+eClassToENode = {3: 0, 2: 1}
+path = [3, 2]
+cost = 1+2=3
+best = (3, {3: 0, 2: 1, 0: 0, 1: 0})
+worklist = []
+# eClassToENode[eclassid] + 1 >= enodes.size() so we already tried all branches here, so go back up
+
+eclassid = 3
+eClassToENode = {3: 0}
+path = [3]
+cost = 1
+best = (3, {3: 0, 2: 1, 0: 0, 1: 0})
+worklist = []
+# eClassToENode[eclassid] + 1 >= enodes.size() so we already tried all branches here, and (eClassToENode.size() == 1 && eClassToENode.count(rootId) == 1) so we are done
+```
+
+```text
+graph for a*(b+c)
+e_class_id: (op_type, (input0, input1, ...))
+0: (input, (a,))
+1: (input, (b,))
+2: (input, (c,))
+3: (+, (1,2,))
+4: (*, (0,3,))
+
+suppose we have a rewrite rule a*(b+c) -> a*b+a*c
+
+graph for a*(b+c) and a*b+a*c
+0: (input, (a,))
+1: (input, (b,))
+2: (input, (c,))
+3: (+, (1,2,))
+4: (*, (0,3,)), (+, (5,6,))
+5: (*, (0,1,))
+6: (*, (0,2,))
+
+DFS
+(4, 0), (0, 0), (3, 0), (1, 0), (2, 0)
+(4, 1), (5, 0), (0, 0), (1, 0), (6, 0), (0, 0), (2, 0)
+
+---
+extract selection map for a*(b+c) -> {4: 0, 0: 0, 3: 0, 1: 0, 2: 0}
+root_id = 4
+path = []
+to_process = [4]
+to_process_enode = []
+
+go to eclass at to_process[0] -> 4
+path = [4]
+choose 4th eclass 0th enode -> {4: 0}
+to_process_enode = [4] # add because enodes.size() > selection_map[current_eclass]+1
+to_process = [4] + [0, 3] # enode has child eclasses 0, 3
+to_process = [0, 3] # remove current eclass from to_process
+
+go to eclass at to_process[0] -> 0
+path = [4, 0]
+choose 0th eclass 0th enode -> {4: 0, 0: 0}
+to_process_enode = [4] # no change
+to_process = [0, 3] + [] # enode has no child eclasses
+to_process = [3] # remove current eclass
+
+go to eclass at to_process[0] -> 3
+path = [4, 0, 3]
+choose 3rd eclass 0th enode -> {4: 0, 0: 0, 3: 0}
+to_process_enode = [4] # no change
+to_process = [3] + [1, 2] # enode has child eclasses 1, 2
+to_process = [1, 2] # remove current eclass
+
+go to eclass at to_process[0] -> 1
+path = [4, 0, 3, 1]
+choose 1st eclass 0th enode -> {4: 0, 0: 0, 3: 0, 1: 0}
+to_process_enode = [4] # no change
+to_process = [1, 2] # enode has no child eclasses
+to_process = [2] # remove current eclass
+
+go to eclass at to_process[0] -> 2
+path = [4, 0, 3, 1, 2]
+choose 2nd eclass 0th enode -> {4: 0, 0: 0, 3: 0, 1: 0, 2: 0}
+to_process_enode = [4] # no change
+to_process = [2] # enode has no child eclasses
+to_process = [] # remove current eclass
+
+to_process is empty, graph selection map: {4: 0, 0: 0, 3: 0, 1: 0, 2: 0}
+yay
+
+go back up path until to_process_enode
+path = [4, 0, 3, 1]
+{4: 0, 0: 0, 3: 0, 1: 0}
+
+path = [4, 0, 3]
+{4: 0, 0: 0, 3: 0}
+
+path = [4, 0]
+{4: 0, 0: 0}
+
+path = [4]
+choose 4th eclass 1st enode -> {4: 1}
+if to_process_enode[-1] == current_eclass:
+  to_process_enode = to_process_enode[:-1]
+if enodes.size() > selection_map[current_eclass]+1:
+  to_process_enode.append(current_eclass)
+to_process_enode = []
+to_process = [] + [5, 6] # enode has child eclasses 5, 6
+to_process = [5, 6] # remove current eclass from to_process
+
+
+restraints:
+-inplace/outplace
+-do strides match
+-memory limits per backend
+```

@@ -26,11 +26,11 @@ inline bool matchCastBF16_F32_ND(const std::vector<TensorNode> &inputs, const Te
         return false;
 
     // Check Shape Identity
-    if (inputs[0].shape != output.shape)
+    if (inputs[0].getShape() != output.getShape())
         return false;
 
     // Reference implementation requires contiguity for flat iteration
-    if (!inputs[0].view.isContiguous() || !output.view.isContiguous())
+    if (!isContiguous(inputs[0]) || !isContiguous(output))
         return false;
 
     return true;
@@ -47,7 +47,7 @@ inline void runCastBF16_F32_ND(const std::vector<const void *> &inputs, const st
     const uint16_t *src = static_cast<const uint16_t *>(inputs[0]);
     float *dst = static_cast<float *>(outputs[0]);
 
-    uint64_t numElements = countElements(inViews[0].shape);
+    uint64_t numElements = countElements(inViews[0].getShape());
 
     for (uint64_t i = 0; i < numElements; ++i)
     {
@@ -63,4 +63,4 @@ inline void runCastBF16_F32_ND(const std::vector<const void *> &inputs, const st
 }
 
 // Register as a CPU kernel for the CAST operation
-REGISTER_REF_KERNEL(OpType::CAST, Backend::CPU, matchCastBF16_F32_ND, runCastBF16_F32_ND);
+REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastBF16_F32_ND, runCastBF16_F32_ND, {Backend::CPU}, {DType::BF16}, {{8, 32}}, {false}, {{Backend::CPU}});

@@ -259,6 +259,7 @@ public:
                               g.constant({3}, starts1, DType::INT32),
                               g.constant({3}, ends1, DType::INT32),
                               g.constant({3}, steps1, DType::INT32));
+        x1 = g.contiguous(x1);
 
         int32_t starts2[] = {0, 0, (int32_t)cfg.head_dim / 2};
         int32_t ends2[] = {(int32_t)n_groups, (int32_t)seq_len, (int32_t)cfg.head_dim};
@@ -318,6 +319,7 @@ public:
         {
             uint32_t w = weight(w_path, prefix + suffix);
             uint32_t w_t = g.permute(w, dims_node);
+            w_t = g.contiguous(w_t);
             int32_t s3[] = {1, (int32_t)in_d, (int32_t)out_d};
             return g.dot(x, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
         };
@@ -333,6 +335,7 @@ public:
         int32_t q_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.n_heads, (int32_t)cfg.head_dim};
         uint32_t q_4d = g.reshape(q, g.constant({4}, q_shape4, DType::INT32));
         uint32_t q_perm = g.permute(q_4d, perm4_node);
+        q_perm = g.contiguous(q_perm);
         int32_t shape3_q[] = {(int32_t)cfg.n_heads, (int32_t)seq_len, (int32_t)cfg.head_dim};
         q = g.reshape(q_perm, g.constant({3}, shape3_q, DType::INT32));
 
@@ -340,12 +343,14 @@ public:
         int32_t k_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.n_kv_groups, (int32_t)cfg.head_dim};
         uint32_t k_4d = g.reshape(k, g.constant({4}, k_shape4, DType::INT32));
         uint32_t k_perm = g.permute(k_4d, perm4_node);
+        k_perm = g.contiguous(k_perm);
         int32_t shape3_k[] = {(int32_t)cfg.n_kv_groups, (int32_t)seq_len, (int32_t)cfg.head_dim};
         k = g.reshape(k_perm, g.constant({3}, shape3_k, DType::INT32));
 
         // V reshaping -> [n_kv_groups, seq_len, head_dim]
         uint32_t v_4d = g.reshape(v, g.constant({4}, k_shape4, DType::INT32));
         uint32_t v_perm = g.permute(v_4d, perm4_node);
+        v_perm = g.contiguous(v_perm);
         v = g.reshape(v_perm, g.constant({3}, shape3_k, DType::INT32));
 
         // RMSNorm pre-attention
@@ -385,6 +390,7 @@ public:
 
         int32_t perm_k[] = {0, 2, 1};
         uint32_t k_t = g.permute(k, g.constant({3}, perm_k, DType::INT32));
+        k_t = g.contiguous(k_t);
 
         uint32_t scores = g.dot(scaled_q, k_t); // [n_heads, seq_len, seq_len]
 
@@ -413,6 +419,7 @@ public:
 
         int32_t perm_ctx[] = {0, 2, 1, 3};
         uint32_t ctx_perm = g.permute(ctx_4d, g.constant({4}, perm_ctx, DType::INT32));
+        ctx_perm = g.contiguous(ctx_perm);
 
         int32_t ctx_shape3[] = {1, (int32_t)seq_len, (int32_t)(cfg.n_heads * cfg.head_dim)};
         uint32_t ctx_flat = g.reshape(ctx_perm, g.constant({3}, ctx_shape3, DType::INT32));
@@ -420,6 +427,7 @@ public:
         uint32_t w_o = weight(w_path, prefix + ".self_attn.o_proj.weight");
         int32_t perm_dims[] = {1, 0};
         uint32_t w_o_t = g.permute(w_o, g.constant({2}, perm_dims, DType::INT32));
+        w_o_t = g.contiguous(w_o_t);
 
         int32_t s3[] = {1, (int32_t)(cfg.n_heads * cfg.head_dim), (int32_t)cfg.emb_dim};
         uint32_t w_o_3d = g.reshape(w_o_t, g.constant({3}, s3, DType::INT32));
@@ -436,6 +444,7 @@ public:
         {
             uint32_t w = weight(w_path, prefix + suffix);
             uint32_t w_t = g.permute(w, p_node);
+            w_t = g.contiguous(w_t);
             int32_t s3[] = {1, (int32_t)in_d, (int32_t)out_d};
             return g.dot(x, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
         };
@@ -448,6 +457,7 @@ public:
 
         uint32_t w_down = weight(w_path, prefix + ".mlp.down_proj.weight");
         uint32_t w_down_t = g.permute(w_down, p_node);
+        w_down_t = g.contiguous(w_down_t);
         int32_t s3[] = {1, (int32_t)cfg.hidden_dim, (int32_t)cfg.emb_dim};
 
         return g.dot(gate_up, g.reshape(w_down_t, g.constant({3}, s3, DType::INT32)));
@@ -502,6 +512,7 @@ public:
         int32_t perm_dims[] = {1, 0};
         uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
         uint32_t w_emb_t = g.permute(w_emb, dims_node);
+        w_emb_t = g.contiguous(w_emb_t);
 
         int32_t s3[] = {1, (int32_t)cfg.emb_dim, (int32_t)cfg.vocab_size};
         uint32_t w_emb_3d = g.reshape(w_emb_t, g.constant({3}, s3, DType::INT32));
@@ -528,23 +539,17 @@ int main()
 
     ModelConfig cfg;
 #if USE_CUDA
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 2ULL * 1024 * 1024 * 1024}, {Backend::CUDA, 2ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 16ULL * 1024 * 1024 * 1024}, {Backend::CUDA, 6ULL * 1024 * 1024 * 1024}};
 #else
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 8ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 16ULL * 1024 * 1024 * 1024}};
 #endif
     MemoryManager mem = MemoryManager(bufferSizes);
     Graph g;
 
     // Setup input node
-    uint32_t inputIdsId = g.allocateId();
+    uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32, {}, StorageType::PERSISTENT);
     uint64_t sizeBytes = maxSeqLen * getDTypeSize(DType::INT32);
     mem.allocate(Backend::CPU, inputIdsId, sizeBytes, StorageType::PERSISTENT);
-
-    TensorView inputView;
-    inputView.shape = {1, maxSeqLen};
-    inputView.strides = TensorView::calcContiguousStrides(inputView.shape);
-    inputView.dtype = DType::INT32;
-    g.inputWithId(inputIdsId, {1, maxSeqLen}, DType::INT32, inputView, StorageType::PERSISTENT);
 
     std::cout << "Building Graph..." << std::endl;
     Gemma3Model model(cfg, maxSeqLen, g, mem, modelPath);
@@ -576,16 +581,14 @@ int main()
 
         // 2. Run inference
         auto start = std::chrono::high_resolution_clock::now();
-        session.run(inputs);
+        const float *device_output_ptr = static_cast<const float *>(session.run(inputs));
         auto end = std::chrono::high_resolution_clock::now();
         float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
 
-        // 3. Extract output and perform Argmax sampling
-        const float *device_output_ptr = static_cast<const float *>(session.getOutput(logits_id));
+        // 3. Perform Argmax sampling
         if (!device_output_ptr)
         {
-            std::cerr << "Failed to retrieve output." << std::endl;
-            break;
+            Error::throw_err("Failed to retrieve output.");
         }
 
         const float *output_ptr = device_output_ptr;
@@ -608,8 +611,15 @@ int main()
 
         float max_val = -FLT_MAX;
         int32_t argmax_idx = 0;
+        uint32_t firstNLogits = 20;
+        std::cout << "Step " << step + 1 << "\nFirst " << firstNLogits << " logits:\n";
         for (uint32_t i = 0; i < cfg.vocab_size; ++i)
         {
+            if (i < firstNLogits)
+            {
+                std::cout << i << ": " << logits_vec[i] << "\n";
+            }
+
             if (logits_vec[i] > max_val)
             {
                 max_val = logits_vec[i];
@@ -621,8 +631,9 @@ int main()
         tokens.push_back((uint32_t)argmax_idx);
 
         // Print progress
-        std::cout << "Step " << step + 1 << " | Token: " << argmax_idx
-                  << " | Latency: " << runtimeMs << "ms" << std::endl;
+        std::cout << "Argmax Token: " << argmax_idx
+                  << " | Latency: " << runtimeMs << "ms" << std::endl
+                  << std::flush;
     }
 
     std::cout << "\nFinal sequence length: " << tokens.size() << std::endl;

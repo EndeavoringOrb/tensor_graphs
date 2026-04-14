@@ -1,3 +1,4 @@
+// tensor_graphs_cpp/core/memory.hpp
 #pragma once
 #include "core/types.hpp"
 #include <vector>
@@ -27,6 +28,7 @@ struct InterruptManager
 {
     static inline std::vector<DeviceBuffer *> buffers;
     static inline std::mutex mtx;
+    static inline volatile sig_atomic_t g_interrupted = 0;
 
     static void registerBuffer(DeviceBuffer *buf)
     {
@@ -47,6 +49,16 @@ struct InterruptManager
     static void cleanup(); // Implemented at the bottom of the file
 
     static void handleSigInt(int signum); // Implemented at the bottom of the file
+
+    static bool isInterrupted()
+    {
+        return g_interrupted != 0;
+    }
+
+    static void resetInterruptFlag()
+    {
+        g_interrupted = 0;
+    }
 
     static void hook()
     {
@@ -130,9 +142,6 @@ struct DeviceBuffer
     uint64_t sizeBytes;
     bool initialized = false;
 
-    // Sparse representation
-    std::unordered_map<uint32_t, std::vector<uint8_t>> sparseData;
-
     std::list<MemBlock> blocks;
     std::unordered_map<uint32_t, std::list<MemBlock>::iterator> allocationMap;
 
@@ -167,7 +176,7 @@ struct DeviceBuffer
     DeviceBuffer(DeviceBuffer &&other) noexcept
         : backend(other.backend), cpu_arena(std::move(other.cpu_arena)),
           arena_ptr(other.arena_ptr), sizeBytes(other.sizeBytes),
-          initialized(other.initialized), sparseData(std::move(other.sparseData)),
+          initialized(other.initialized),
           blocks(std::move(other.blocks)), allocationMap(std::move(other.allocationMap))
     {
         other.arena_ptr = nullptr;
@@ -186,7 +195,6 @@ struct DeviceBuffer
             arena_ptr = other.arena_ptr;
             sizeBytes = other.sizeBytes;
             initialized = other.initialized;
-            sparseData = std::move(other.sparseData);
             blocks = std::move(other.blocks);
             allocationMap = std::move(other.allocationMap);
 
@@ -219,6 +227,28 @@ struct DeviceBuffer
                 ++it;
             }
         }
+    }
+
+    void freeAllocation(std::list<MemBlock>::iterator it)
+    {
+        if (it == blocks.end() || it->isFree())
+            return;
+
+        for (auto mapIt = allocationMap.begin(); mapIt != allocationMap.end();)
+        {
+            if (mapIt->second == it)
+            {
+                mapIt = allocationMap.erase(mapIt);
+            }
+            else
+            {
+                ++mapIt;
+            }
+        }
+
+        it->nodeId = UINT32_MAX;
+        it->isLocked = false;
+        mergeFreeBlocks();
     }
 
     void init()
@@ -260,100 +290,96 @@ struct DeviceBuffer
         }
 #endif
         initialized = true;
-
-        for (const auto &pair : sparseData)
-        {
-            uint32_t nodeId = pair.first;
-            auto it = allocationMap.find(nodeId);
-            if (it != allocationMap.end())
-            {
-#ifdef USE_CUDA
-                if (backend == Backend::CUDA)
-                {
-                    cudaMemcpy(arena_ptr + it->second->offset, pair.second.data(), pair.second.size(), cudaMemcpyHostToDevice);
-                }
-                else
-                {
-                    std::memcpy(arena_ptr + it->second->offset, pair.second.data(), pair.second.size());
-                }
-#else
-                std::memcpy(arena_ptr + it->second->offset, pair.second.data(), pair.second.size());
-#endif
-            }
-        }
-        sparseData.clear();
     }
 
     void write(uint32_t nodeId, const void *data, uint64_t size)
     {
-        if (!initialized)
+        auto it = allocationMap.find(nodeId);
+        if (it != allocationMap.end())
         {
-            std::vector<uint8_t> buf(size);
-            std::memcpy(buf.data(), data, size);
-            sparseData[nodeId] = std::move(buf);
-        }
-        else
-        {
-            auto it = allocationMap.find(nodeId);
-            if (it != allocationMap.end())
-            {
 #ifdef USE_CUDA
-                if (backend == Backend::CUDA)
-                {
-                    cudaMemcpy(arena_ptr + it->second->offset, data, size, cudaMemcpyHostToDevice);
-                }
-                else
-                {
-                    std::memcpy(arena_ptr + it->second->offset, data, size);
-                }
-#else
-                std::memcpy(arena_ptr + it->second->offset, data, size);
-#endif
+            if (backend == Backend::CUDA)
+            {
+                cudaMemcpy(arena_ptr + it->second->offset, data, size, cudaMemcpyHostToDevice);
             }
             else
             {
-                Error::throw_err("Cannot write to unallocated node");
+                std::memcpy(arena_ptr + it->second->offset, data, size);
             }
+#else
+            std::memcpy(arena_ptr + it->second->offset, data, size);
+#endif
+        }
+        else
+        {
+            Error::throw_err("Cannot write to unallocated node");
         }
     }
 
     const uint8_t *read(uint32_t nodeId) const
     {
-        if (!initialized)
+        auto it = allocationMap.find(nodeId);
+        if (it != allocationMap.end())
         {
-            auto it = sparseData.find(nodeId);
-            if (it != sparseData.end())
-            {
-                return it->second.data();
-            }
-            return nullptr;
-        }
-        else
-        {
-            auto it = allocationMap.find(nodeId);
-            if (it != allocationMap.end())
-            {
 #ifdef USE_CUDA
-                if (backend == Backend::CUDA)
-                {
-                    cudaDeviceSynchronize();
-                }
-#endif
-                return arena_ptr + it->second->offset;
+            if (backend == Backend::CUDA)
+            {
+                cudaDeviceSynchronize();
             }
-            return nullptr;
+#endif
+            return arena_ptr + it->second->offset;
         }
+        return nullptr;
     }
 
-    void unload(uint32_t nodeId)
+    void defrag()
     {
-        if (!initialized)
+        uint64_t offset = 0;
+        auto it = blocks.begin();
+        while (it != blocks.end())
         {
-            sparseData.erase(nodeId);
+            if (it->isFree())
+            {
+                it = blocks.erase(it);
+            }
+            else
+            {
+                if (it->offset > offset)
+                {
+#ifdef USE_CUDA
+                    if (backend == Backend::CUDA)
+                    {
+                        cudaMemcpy(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes, cudaMemcpyDeviceToDevice);
+                    }
+                    else
+                    {
+                        std::memmove(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes);
+                    }
+#else
+                    std::memmove(arena_ptr + offset, arena_ptr + it->offset, it->sizeBytes);
+#endif
+                    it->offset = offset;
+                }
+                offset += it->sizeBytes;
+                ++it;
+            }
+        }
+
+        if (offset < sizeBytes)
+        {
+            MemBlock freeBlock;
+            freeBlock.offset = offset;
+            freeBlock.sizeBytes = sizeBytes - offset;
+            freeBlock.nodeId = UINT32_MAX;
+            freeBlock.storageType = StorageType::TRANSIENT;
+            freeBlock.refCount = 0;
+            freeBlock.isLocked = false;
+            freeBlock.cost = 0.0f;
+            blocks.push_back(freeBlock);
         }
     }
 
-    std::list<MemBlock>::iterator findFreeSlot(uint64_t _sizeBytes)
+    std::list<MemBlock>::iterator findFreeSlot(uint64_t _sizeBytes, bool tryDefrag = true)
     {
         for (auto it = blocks.begin(); it != blocks.end(); ++it)
         {
@@ -362,135 +388,18 @@ struct DeviceBuffer
                 return it;
             }
         }
+        if (tryDefrag) // TODO: store a boolean on DeviceBuffer that tracks if memory has been changed since last defrag, if not then we don't need to defrag again
+        {
+            mergeFreeBlocks();
+            defrag();
+            return findFreeSlot(_sizeBytes, false);
+        }
         return blocks.end();
-    }
-
-    bool tryEvict(uint64_t needed,
-                  const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr,
-                  const std::unordered_map<uint32_t, float> *nodeCosts = nullptr,
-                  const std::unordered_set<uint32_t> &globalCacheState = {})
-    {
-        auto left = blocks.begin();
-        auto right = blocks.begin();
-        uint64_t currentSize = 0;
-
-        auto bestLeft = blocks.end();
-        auto bestRight = blocks.end();
-        float bestCostLost = -1.0f;
-        uint64_t bestSize = std::numeric_limits<uint64_t>::max();
-
-        float currentTotalSaved = 0.0f;
-        if (parentMap && nodeCosts)
-        {
-            currentTotalSaved = calculateSavedCost(globalCacheState, *parentMap, *nodeCosts);
-        }
-
-        while (right != blocks.end())
-        {
-            // Locked blocks act as an impenetrable wall. Reset the window.
-            if (right->isLocked)
-            {
-                right++;
-                left = right;
-                currentSize = 0;
-                continue;
-            }
-
-            currentSize += right->sizeBytes;
-
-            // Once the window meets our size requirement, evaluate and shrink
-            while (currentSize >= needed)
-            {
-                float costLost = 0.0f;
-                if (parentMap && nodeCosts)
-                {
-                    std::unordered_set<uint32_t> windowNodes;
-                    auto tempIt = left;
-                    while (tempIt != std::next(right))
-                    {
-                        if (!tempIt->isFree())
-                        {
-                            windowNodes.insert(tempIt->nodeId);
-                        }
-                        tempIt++;
-                    }
-
-                    // Create hypothetical state simulating what remains if window is evicted
-                    std::unordered_set<uint32_t> cacheStateWithoutWindow = globalCacheState;
-                    for (uint32_t wn : windowNodes)
-                    {
-                        cacheStateWithoutWindow.erase(wn);
-                    }
-
-                    float newSaved = calculateSavedCost(cacheStateWithoutWindow, *parentMap, *nodeCosts);
-                    costLost = currentTotalSaved - newSaved;
-                }
-                else
-                {
-                    auto tempIt = left;
-                    while (tempIt != std::next(right))
-                    {
-                        if (!tempIt->isFree())
-                            costLost += tempIt->cost;
-                        tempIt++;
-                    }
-                }
-
-                // Save it if it is strictly cheaper (we lose less cached compute), OR same cost but wastes less physical space
-                if (bestCostLost < 0 || costLost < bestCostLost || (costLost == bestCostLost && currentSize < bestSize))
-                {
-                    bestCostLost = costLost;
-                    bestSize = currentSize;
-                    bestLeft = left;
-                    bestRight = right;
-                }
-
-                // Break early if we've shrunk it to a single block
-                if (left == right)
-                    break;
-
-                // Shrink from the left
-                currentSize -= left->sizeBytes;
-                left++;
-            }
-            right++;
-        }
-
-        if (bestLeft != blocks.end())
-        {
-            auto it = bestLeft;
-            uint64_t mergeOffset = bestLeft->offset;
-            auto end_evict = std::next(bestRight);
-
-            while (it != end_evict)
-            {
-                if (!it->isFree())
-                {
-                    allocationMap.erase(it->nodeId);
-                }
-                it++;
-            }
-
-            MemBlock mergedFree;
-            mergedFree.offset = mergeOffset;
-            mergedFree.sizeBytes = bestSize;
-            mergedFree.nodeId = UINT32_MAX;
-            mergedFree.cost = 0.0f;
-            mergedFree.isLocked = false;
-
-            blocks.insert(bestLeft, mergedFree);
-            blocks.erase(bestLeft, end_evict);
-
-            return true;
-        }
-
-        return false;
     }
 
     uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost,
                       const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr,
-                      const std::unordered_map<uint32_t, float> *nodeCosts = nullptr,
-                      const std::unordered_set<uint32_t> &globalCacheState = {})
+                      const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
     {
         // 1. If it's already cached, lock it and update
         auto mapIt = allocationMap.find(nodeId);
@@ -506,22 +415,13 @@ struct DeviceBuffer
         // 2. See if there is space already available
         auto slotIt = findFreeSlot(_sizeBytes);
 
-        // 3. If no space, try evict
+        // 3. If no space, allocation failed.
         if (slotIt == blocks.end())
         {
-            if (tryEvict(_sizeBytes, parentMap, nodeCosts, globalCacheState))
-            {
-                slotIt = findFreeSlot(_sizeBytes);
-            }
+            Error::throw_err<MemoryAllocationError>("Cannot allocate: Not enough space.", _sizeBytes);
         }
 
-        // 4. If still no space, eviction failed.
-        if (slotIt == blocks.end())
-        {
-            Error::throw_err<MemoryAllocationError>("Cannot allocate: Not enough contiguous space.", _sizeBytes);
-        }
-
-        // 5. Claim the free slot
+        // 4. Claim the free slot
         if (slotIt->sizeBytes > _sizeBytes)
         {
             // Split the block (leaves leftovers as free space naturally)
@@ -569,6 +469,9 @@ struct DeviceBuffer
 struct MemoryManager
 {
     std::unordered_map<Backend, DeviceBuffer> buffers;
+    std::unordered_map<uint32_t, uint32_t> aliasMap;
+    std::unordered_map<uint32_t, uint32_t> aliasRefCounts;
+    std::unordered_map<uint32_t, StorageType> aliasStorageTypes;
 
     MemoryManager(std::unordered_map<Backend, uint64_t> bufferSizes)
     {
@@ -587,51 +490,86 @@ struct MemoryManager
         }
     }
 
-    std::unordered_set<uint32_t> getGlobalCacheState() const
+    void addAlias(Backend backend, uint32_t srcId, uint32_t dstId, uint32_t additionalRefs, StorageType storageType = StorageType::TRANSIENT)
     {
-        std::unordered_set<uint32_t> state;
-        for (const auto &pair : buffers)
-        {
-            for (const auto &alloc : pair.second.allocationMap)
-            {
-                state.insert(alloc.first);
-            }
-        }
-        return state;
+        if (srcId == dstId)
+            return;
+        aliasMap[dstId] = srcId;
+        aliasRefCounts[dstId] = additionalRefs;
+        aliasStorageTypes[dstId] = storageType;
     }
 
     uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f, const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr, const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
     {
         auto it = buffers.find(backend);
         if (it == buffers.end())
-            Error::throw_err("Backend buffer not initialized in MemoryManager");
+            Error::throw_err("[MemoryManager.allocate] DeviceBuffer not initialized for backend " + toString(backend));
 
-        std::unordered_set<uint32_t> globalCacheState;
-        if (parentMap && nodeCosts)
-        {
-            globalCacheState = getGlobalCacheState();
-        }
-
-        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost, parentMap, nodeCosts, globalCacheState);
+        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost, parentMap, nodeCosts);
     }
 
     void write(Backend backend, uint32_t nodeId, const void *data, uint64_t size)
     {
-        buffers.at(backend).write(nodeId, data, size);
+        auto it = buffers.find(backend);
+        if (it == buffers.end())
+            Error::throw_err("[MemoryManager.write] DeviceBuffer not initialized for backend " + toString(backend));
+
+        uint32_t targetId = nodeId;
+        while (aliasMap.find(targetId) != aliasMap.end())
+        {
+            targetId = aliasMap.at(targetId);
+        }
+
+        buffers.at(backend).write(targetId, data, size);
     }
 
     const uint8_t *read(Backend backend, uint32_t nodeId) const
     {
-        return buffers.at(backend).read(nodeId);
-    }
+        auto it = buffers.find(backend);
+        if (it == buffers.end())
+            Error::throw_err("[MemoryManager.read] DeviceBuffer not initialized for backend " + toString(backend));
 
-    void unload(Backend backend, uint32_t nodeId)
-    {
-        buffers.at(backend).unload(nodeId);
+        uint32_t targetId = nodeId;
+        while (aliasMap.find(targetId) != aliasMap.end())
+        {
+            targetId = aliasMap.at(targetId);
+        }
+
+        return buffers.at(backend).read(targetId);
     }
 
     void release(Backend backend, uint32_t nodeId)
     {
+        auto aliasIt = aliasMap.find(nodeId);
+        if (aliasIt != aliasMap.end())
+        {
+            auto refIt = aliasRefCounts.find(nodeId);
+            if (refIt != aliasRefCounts.end() && refIt->second > 0)
+            {
+                refIt->second--;
+                if (refIt->second == 0)
+                {
+                    auto storageIt = aliasStorageTypes.find(nodeId);
+                    if (storageIt == aliasStorageTypes.end() || storageIt->second == StorageType::TRANSIENT)
+                    {
+                        uint32_t targetId = aliasIt->second;
+                        aliasMap.erase(aliasIt);
+                        aliasRefCounts.erase(refIt);
+                        if (storageIt != aliasStorageTypes.end())
+                        {
+                            aliasStorageTypes.erase(storageIt);
+                        }
+                        release(backend, targetId);
+                    }
+                }
+            }
+            return;
+        }
+
+        auto bufIt = buffers.find(backend);
+        if (bufIt == buffers.end())
+            Error::throw_err("[MemoryManager.release] DeviceBuffer not initialized for backend " + toString(backend));
+
         auto &buf = buffers.at(backend);
         auto it = buf.allocationMap.find(nodeId);
         if (it != buf.allocationMap.end())
@@ -641,10 +579,10 @@ struct MemoryManager
                 if (it->second->refCount > 0)
                 {
                     it->second->refCount--;
-                    // If no one else needs this node, unlock it for eviction
+                    // Transients are reclaimed as soon as the last consumer releases them.
                     if (it->second->refCount == 0)
                     {
-                        it->second->isLocked = false;
+                        buf.freeAllocation(it->second);
                     }
                 }
             }
@@ -653,7 +591,40 @@ struct MemoryManager
 
     void transferOwnership(Backend backend, uint32_t srcId, uint32_t dstId)
     {
+        if (srcId == dstId)
+            return;
+
+        auto dstAliasIt = aliasMap.find(dstId);
+        if (dstAliasIt != aliasMap.end())
+        {
+            aliasMap.erase(dstAliasIt);
+            aliasRefCounts.erase(dstId);
+            aliasStorageTypes.erase(dstId);
+        }
+
         auto &buf = buffers.at(backend);
+
+        auto aliasIt = aliasMap.find(srcId);
+        if (aliasIt != aliasMap.end())
+        {
+            aliasMap[dstId] = aliasIt->second;
+            aliasRefCounts[dstId] = aliasRefCounts[srcId];
+            aliasStorageTypes[dstId] = aliasStorageTypes[srcId];
+            aliasMap.erase(aliasIt);
+            aliasRefCounts.erase(srcId);
+            aliasStorageTypes.erase(srcId);
+
+            auto dstIt = buf.allocationMap.find(dstId);
+            if (dstIt != buf.allocationMap.end())
+            {
+                dstIt->second->nodeId = UINT32_MAX;
+                dstIt->second->isLocked = false;
+                buf.allocationMap.erase(dstIt);
+                buf.mergeFreeBlocks();
+            }
+            return;
+        }
+
         auto srcIt = buf.allocationMap.find(srcId);
         if (srcIt != buf.allocationMap.end())
         {
@@ -679,6 +650,15 @@ struct MemoryManager
         }
     }
 
+    uint32_t resolveAlias(uint32_t id)
+    {
+        while (aliasMap.find(id) != aliasMap.end())
+        {
+            id = aliasMap.at(id);
+        }
+        return id;
+    }
+
     TensorView getView(const TensorNode &node) const
     {
         auto it = buffers.find(node.backend);
@@ -688,77 +668,67 @@ struct MemoryManager
         }
 
         const DeviceBuffer &buf = it->second;
-        uint64_t arenaOffset = buf.getOffset(node.id);
-
-        // If the node already has view metadata (shape/strides), we use it.
-        // Otherwise, we create a default contiguous view based on the node's shape.
-        TensorView view;
-        if (node.view.shape.empty())
+        uint32_t targetId = node.id;
+        while (aliasMap.find(targetId) != aliasMap.end())
         {
-            view.baseOffset = arenaOffset;
-            view.shape = node.shape;
-            view.strides = TensorView::calcContiguousStrides(node.shape);
-            view.dtype = node.dtype;
-        }
-        else
-        {
-            view = node.view;
-            // The view's baseOffset stored in the node is usually relative to the
-            // start of the allocation. We add the arena-relative offset here.
-            view.baseOffset += arenaOffset;
+            targetId = aliasMap.at(targetId);
         }
 
-        return view;
-    }
+        uint64_t arenaOffset = buf.getOffset(targetId);
 
-    /**
-     * Creates a TensorView for a specific node and backend with a custom shape.
-     * This is typically used when a node needs to be interpreted as a different shape
-     * (like a reshape operation) or to initialize the view for a newly allocated input.
-     *
-     * @param backend The backend (device) where the tensor resides.
-     * @param nodeId The unique identifier for the tensor node.
-     * @param shape The desired shape for the view.
-     * @return A TensorView containing the physical arena offset, shape, and contiguous strides.
-     */
-    TensorView getView(Backend backend, const uint32_t nodeId, std::vector<uint32_t> shape, DType dtype) const
-    {
-        // 1. Find the device-specific buffer
-        auto it = buffers.find(backend);
-        if (it == buffers.end())
-        {
-            std::stringstream ss;
-            ss << "[MemoryManager.getView] Backend " << backend << " not initialized.";
-            Error::throw_err(ss.str());
-        }
-
-        const DeviceBuffer &buf = it->second;
-
-        // 2. Find the physical allocation block for this node
-        auto allocIt = buf.allocationMap.find(nodeId);
-        if (allocIt == buf.allocationMap.end())
-        {
-            std::stringstream ss;
-            ss << "[MemoryManager.getView] Node ID " << nodeId << " is not currently allocated on " << backend;
-            Error::throw_err(ss.str());
-        }
-
-        // 3. Construct the view
-        TensorView view;
-        // The baseOffset is the start of the block within the physical DeviceBuffer arena
-        view.baseOffset = allocIt->second->offset;
-        view.shape = std::move(shape);
-        // Standard contiguous layout calculation (row-major)
-        view.strides = TensorView::calcContiguousStrides(view.shape);
-        view.dtype = dtype;
+        TensorView view = TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype));
 
         return view;
     }
 
     bool has(Backend backend, uint32_t nodeId) const
     {
+        auto aliasIt = aliasMap.find(nodeId);
+        if (aliasIt != aliasMap.end())
+        {
+            return has(backend, aliasIt->second);
+        }
+
         const DeviceBuffer &buf = buffers.at(backend);
         return (buf.allocationMap.find(nodeId) != buf.allocationMap.end());
+    }
+
+    uint64_t getCapacity(Backend backend) const
+    {
+        return buffers.at(backend).sizeBytes;
+    }
+
+    std::unordered_map<Backend, uint64_t> getBufferSizes() const
+    {
+        std::unordered_map<Backend, uint64_t> sizes;
+        for (const auto &pair : buffers)
+        {
+            sizes[pair.first] = pair.second.sizeBytes;
+        }
+        return sizes;
+    }
+
+    MemBlock &getBlock(Backend backend, uint32_t nodeId)
+    {
+        auto it = buffers.find(backend);
+        if (it == buffers.end())
+        {
+            Error::throw_err("[MemoryManager.getBlock] Backend buffer not initialized");
+        }
+
+        uint32_t targetId = nodeId;
+        while (aliasMap.find(targetId) != aliasMap.end())
+        {
+            targetId = aliasMap.at(targetId);
+        }
+
+        const DeviceBuffer &buf = it->second;
+        auto bufIt = buf.allocationMap.find(targetId);
+        if (bufIt == buf.allocationMap.end())
+        {
+            Error::throw_err("[MemoryManager.getBlock] Buffer allocation map doesn't have targetId " + std::to_string(targetId));
+        }
+        return *bufIt->second;
     }
 };
 
@@ -776,6 +746,5 @@ inline void InterruptManager::cleanup()
 inline void InterruptManager::handleSigInt(int signum)
 {
     std::cerr << "\n[TensorGraph] Caught interrupt signal (" << signum << "). Cleaning up..." << std::endl;
-    cleanup();
-    std::exit(signum);
+    g_interrupted = 1; // Just set the flag - cleanup happens in main thread
 }

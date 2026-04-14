@@ -19,12 +19,12 @@ inline bool matchContiguous_ND(const std::vector<TensorNode> &inputs, const Tens
     // Check Dtypes and Shapes
     if (in.dtype != output.dtype)
         return false;
-    if (in.shape != output.shape)
+    if (in.getShape() != output.getShape())
         return false;
 
     // Input must not be contiguous (otherwise this kernel is redundant, though technically valid)
     // Output must be contiguous
-    if (!output.view.isContiguous())
+    if (!isContiguous(output))
         return false;
 
     return true;
@@ -37,7 +37,7 @@ inline void runContiguous_ND(const std::vector<const void *> &inputs, const std:
     uint8_t *dst = static_cast<uint8_t *>(outputs[0]);
 
     const auto &view = inViews[0];
-    const auto &shape = view.shape;
+    const auto &shape = view.getShape();
     const auto &strides = view.strides;
     uint64_t elementSize = getDTypeSize(view.dtype);
 
@@ -46,7 +46,7 @@ inline void runContiguous_ND(const std::vector<const void *> &inputs, const std:
         // Scalar or empty
         if (countElements(shape) == 1)
         {
-            std::memcpy(dst, src_base + view.baseOffset, elementSize);
+            std::memcpy(dst, src_base, elementSize);
         }
         return;
     }
@@ -57,8 +57,7 @@ inline void runContiguous_ND(const std::vector<const void *> &inputs, const std:
 
     for (uint64_t i = 0; i < totalElements; ++i)
     {
-        // Calculate source pointer for current coordinate
-        uint64_t offset = view.baseOffset;
+        uint64_t offset = 0;
         for (size_t d = 0; d < coords.size(); ++d)
         {
             offset += static_cast<uint64_t>(coords[d]) * strides[d];
@@ -81,4 +80,4 @@ inline void runContiguous_ND(const std::vector<const void *> &inputs, const std:
     }
 }
 
-REGISTER_REF_KERNEL(OpType::CONTIGUOUS, Backend::CPU, matchContiguous_ND, runContiguous_ND);
+REGISTER_REF_KERNEL(OpType::CONTIGUOUS, 1, matchContiguous_ND, runContiguous_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {false}, {{Backend::CPU}});

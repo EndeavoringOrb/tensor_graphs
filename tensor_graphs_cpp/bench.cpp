@@ -6,6 +6,7 @@
 #include <chrono>
 #include <filesystem>
 #include <cstring>
+#include <algorithm>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -57,6 +58,8 @@ int main()
             keyObj["outputShapes"] = r.outputShapes;
             keyObj["inputStrides"] = r.inputStrides;
             keyObj["outputStrides"] = r.outputStrides;
+            keyObj["backends"] = r.backends;
+            keyObj["inputBackends"] = r.inputBackends;
             std::string key = keyObj.dump();
             recordedKeys.insert(key);
         }
@@ -84,10 +87,9 @@ int main()
         auto j = json::parse(line);
         Record r = j.get<Record>();
         json keyObj;
-        std::stringstream uid_ss, build_ss;
+        std::stringstream uid_ss;
         uid_ss << "0x" << std::hex << r.kernelUid;
-        build_ss << "0x" << std::hex << r.buildContextId;
-        keyObj["buildContextId"] = build_ss.str();
+        keyObj["buildContextId"] = BUILD_CONTEXT_ID_STRING;
         keyObj["hwTag"] = r.hwTag;
         keyObj["inputConstants"] = r.inputConstants;
         keyObj["inputDTypes"] = r.inputDTypes;
@@ -97,16 +99,14 @@ int main()
         keyObj["outputShapes"] = r.outputShapes;
         keyObj["inputStrides"] = r.inputStrides;
         keyObj["outputStrides"] = r.outputStrides;
+        keyObj["backends"] = r.backends;
+        keyObj["inputBackends"] = r.inputBackends;
         std::string key = keyObj.dump();
 
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
         {
             seenCalls.insert(key);
-            std::string valA = j["hwTag"].get<std::string>();
-            std::string valB = j["buildContextId"].get<std::string>();
-            bool checkA = valA == HW_TAG;
-            bool checkB = valB == BUILD_CONTEXT_ID_STRING;
-            if (checkA && checkB)
+            if (j["hwTag"].get<std::string>() == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
             {
                 toBenchmark.push_back(j);
             }
@@ -149,24 +149,54 @@ int main()
             std::vector<TensorView> outViews(r.outputShapes.size());
 
 #ifdef USE_CUDA
-            bool isInputCuda = kernel.backend == Backend::CUDA;
-            bool isOutputCuda = kernel.backend == Backend::CUDA;
+            std::vector<bool> inIsCuda(r.inputShapes.size(), false);
+            bool runCuda = false;
+            for (Backend b : kernel.backends)
+            {
+                if (b == Backend::CUDA)
+                    runCuda = true;
+            }
+
+            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+            {
+                size_t ruleIdx = idx;
+                if (kernel.isVariadic)
+                {
+                    ruleIdx = (idx == r.inputShapes.size() - 1) ? kernel.inputBackends.size() - 1 : 0;
+                }
+
+                if (ruleIdx < kernel.inputBackends.size())
+                {
+                    bool hasCuda = false;
+                    for (Backend b : kernel.inputBackends[ruleIdx])
+                    {
+                        if (b == Backend::CUDA)
+                            hasCuda = true;
+                    }
+                    inIsCuda[idx] = hasCuda;
+                }
+                else
+                {
+                    inIsCuda[idx] = runCuda;
+                }
+            }
+            bool isOutputCuda = runCuda;
 
             if (kernel.opType == OpType::COPY_TO)
             {
-                if (kernel.backend == Backend::CUDA)
+                if (runCuda)
                 {
-                    isInputCuda = false;
+                    inIsCuda.assign(inIsCuda.size(), false);
                     isOutputCuda = true;
                 }
                 else
                 {
-                    isInputCuda = true;
+                    inIsCuda.assign(inIsCuda.size(), true);
                     isOutputCuda = false;
                 }
             }
 #else
-            bool isInputCuda = false;
+            std::vector<bool> inIsCuda(r.inputShapes.size(), false);
             bool isOutputCuda = false;
 #endif
 
@@ -175,14 +205,14 @@ int main()
             {
                 std::vector<const void *> &inPtrs;
                 std::vector<void *> &outPtrs;
-                bool isInputCuda;
+                const std::vector<bool> &inIsCuda;
                 bool isOutputCuda;
                 ~CudaCleanup()
                 {
 #ifdef USE_CUDA
                     for (size_t idx = 0; idx < inPtrs.size(); ++idx)
                     {
-                        if (isInputCuda && inPtrs[idx])
+                        if (idx < inIsCuda.size() && inIsCuda[idx] && inPtrs[idx])
                             cudaFree(const_cast<void *>(inPtrs[idx]));
                     }
                     for (size_t idx = 0; idx < outPtrs.size(); ++idx)
@@ -192,7 +222,7 @@ int main()
                     }
 #endif
                 }
-            } cleanup{inPtrs, outPtrs, isInputCuda, isOutputCuda};
+            } cleanup{inPtrs, outPtrs, inIsCuda, isOutputCuda};
 
             for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
@@ -229,8 +259,38 @@ int main()
                     else if (r.inputDTypes[idx] == DType::INT32)
                     {
                         int32_t *iptr = reinterpret_cast<int32_t *>(inData[idx].data());
-                        for (size_t k = 0; k < elements; ++k)
-                            iptr[k] = 1;
+                        if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos) // TODO: make the check based on reference graph instead of name
+                        {
+                            if (idx == 1 && r.inputShapes.size() > 0 && r.outputShapes.size() > 0 &&
+                                r.inputShapes[0].size() == r.outputShapes[0].size() && elements == r.inputShapes[0].size())
+                            {
+                                std::vector<bool> used(elements, false);
+                                for (size_t k = 0; k < elements; ++k)
+                                {
+                                    size_t found_d = k; // default fallback
+                                    for (size_t d = 0; d < elements; ++d)
+                                    {
+                                        if (!used[d] && r.inputShapes[0][d] == r.outputShapes[0][k])
+                                        {
+                                            found_d = d;
+                                            break;
+                                        }
+                                    }
+                                    used[found_d] = true;
+                                    iptr[k] = found_d;
+                                }
+                            }
+                            else
+                            {
+                                for (size_t k = 0; k < elements; ++k)
+                                    iptr[k] = k;
+                            }
+                        }
+                        else
+                        {
+                            for (size_t k = 0; k < elements; ++k)
+                                iptr[k] = 1;
+                        }
                     }
                     else if (r.inputDTypes[idx] == DType::BF16)
                     {
@@ -244,7 +304,7 @@ int main()
                     }
                 }
 
-                if (isInputCuda)
+                if (inIsCuda[idx])
                 {
 #ifdef USE_CUDA
                     void *d_ptr = nullptr;
@@ -270,7 +330,7 @@ int main()
                     inPtrs[idx] = inData[idx].data();
                 }
 
-                inViews[idx].shape = r.inputShapes[idx];
+                inViews[idx].setShape(r.inputShapes[idx]);
                 inViews[idx].strides = r.inputStrides[idx];
                 inViews[idx].baseOffset = 0;
                 inViews[idx].dtype = r.inputDTypes[idx];
@@ -310,41 +370,92 @@ int main()
                     outPtrs[idx] = outData[idx].data();
                 }
 
-                outViews[idx].shape = r.outputShapes[idx];
+                outViews[idx].setShape(r.outputShapes[idx]);
                 outViews[idx].strides = r.outputStrides[idx];
                 outViews[idx].baseOffset = 0;
                 outViews[idx].dtype = r.outputDTypes[idx];
             }
 
-            std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "] "
-                      << "[" << toString(kernel.backend) << "] " // Added Backend
-                      << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                      << " (0x" << std::hex << kernelUid << std::dec << ")"
-                      << ", Out DType: " << toString(outViews[0].dtype) // Added DType
-                      << ", Out Shape: " << toString(outViews[0].shape)
-                      << ", Out Strides: " << toString(outViews[0].strides) // Added Strides
-                      << std::flush;
+            std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "][";
+            for (size_t bidx = 0; bidx < kernel.backends.size(); ++bidx)
+            {
+                if (bidx > 0)
+                    std::cout << ",";
+                std::cout << toString(kernel.backends[bidx]);
+            }
+            std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
+                      << " (0x" << std::hex << kernelUid << std::dec << ")\n";
+
+            // Print All Inputs
+            for (size_t idx = 0; idx < inViews.size(); ++idx)
+            {
+                std::cout << "  In  #" << idx << ": dtype=" << toString(inViews[idx].dtype)
+                          << ", shape=" << toString(inViews[idx].getShape())
+                          << ", strides=" << toString(inViews[idx].strides) << "\n";
+            }
+
+            // Print All Outputs
+            for (size_t idx = 0; idx < outViews.size(); ++idx)
+            {
+                std::cout << "  Out #" << idx << ": dtype=" << toString(outViews[idx].dtype)
+                          << ", shape=" << toString(outViews[idx].getShape())
+                          << ", strides=" << toString(outViews[idx].strides) << "\n";
+            }
+            std::cout << "  Benchmarking..." << std::flush;
 
             // Warmup
-            kernel.run(inPtrs, outPtrs, inViews, outViews);
-
-            int iters = 1; // TODO: make this an arg, default to 15
-            auto start = std::chrono::high_resolution_clock::now();
-            for (int it = 0; it < iters; ++it)
+            if (!kernel.isView)
             {
                 kernel.run(inPtrs, outPtrs, inViews, outViews);
-            }
 #ifdef USE_CUDA
-            if (isInputCuda || isOutputCuda)
-            {
                 cudaDeviceSynchronize();
-            }
 #endif
-            auto end = std::chrono::high_resolution_clock::now();
+            }
 
-            float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count() / iters;
+            int iters = 8;
+            std::vector<float> latencies;
+            latencies.reserve(iters);
+            for (int it = 0; it < iters; ++it)
+            {
+                auto iterStart = std::chrono::high_resolution_clock::now();
+                if (!kernel.isView)
+                {
+                    kernel.run(inPtrs, outPtrs, inViews, outViews);
+                }
+#ifdef USE_CUDA
+                bool anyInputCuda = std::any_of(inIsCuda.begin(), inIsCuda.end(), [](bool b)
+                                                { return b; });
+                if (anyInputCuda || isOutputCuda)
+                {
+                    cudaError_t err = cudaDeviceSynchronize();
+                    if (err != cudaSuccess)
+                    {
+                        throw std::runtime_error("CUDA Synchronization failed: " + std::string(cudaGetErrorString(err)));
+                    }
+                }
+#endif
+                auto iterEnd = std::chrono::high_resolution_clock::now();
+                float iterMs = std::chrono::duration<float, std::milli>(iterEnd - iterStart).count();
+                latencies.push_back(iterMs);
+            }
+            // Calculate Median
+            std::sort(latencies.begin(), latencies.end());
+
+            float runtimeMs = 0.0f;
+            if (iters > 0)
+            {
+                if (iters % 2 == 0)
+                {
+                    runtimeMs = (latencies[iters / 2 - 1] + latencies[iters / 2]) / 2.0f;
+                }
+                else
+                {
+                    runtimeMs = latencies[iters / 2];
+                }
+            }
 
             call["runTime"] = runtimeMs;
+            call["buildContextId"] = BUILD_CONTEXT_ID_STRING;
             outFile << call.dump() << "\n";
             outFile.flush();
 

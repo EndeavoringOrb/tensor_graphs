@@ -13,11 +13,11 @@ bool matchTanhF32_1D(const std::vector<TensorNode> &inputs, const TensorNode &ou
         return false;
     if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
-    if (inputs[0].shape.size() != 1 || output.shape.size() != 1)
+    if (inputs[0].getShape().size() != 1 || output.getShape().size() != 1)
         return false;
-    if (inputs[0].shape[0] != output.shape[0])
+    if (inputs[0].getShape()[0] != output.getShape()[0])
         return false;
-    if (!inputs[0].view.isContiguous() || !output.view.isContiguous())
+    if (!isContiguous(inputs[0]) || !isContiguous(output))
         return false;
     return true;
 }
@@ -28,7 +28,7 @@ void runTanhF32_1D(const std::vector<const void *> &inputs, const std::vector<vo
     const float *x = static_cast<const float *>(inputs[0]);
     float *out = static_cast<float *>(outputs[0]);
 
-    uint32_t size = inViews[0].shape[0];
+    uint32_t size = inViews[0].getShape()[0];
 
     for (uint32_t i = 0; i < size; ++i)
     {
@@ -43,7 +43,7 @@ uint32_t refFactoryTanh(const std::vector<uint32_t> &inputs, Graph &graph)
     if (inputs.size() != 1)
         Error::throw_err("Tanh requires 1 input");
     uint32_t x = inputs[0];
-    uint32_t n_elements = graph.nodes[x].shape[0];
+    uint32_t n_elements = graph.getNode(x).getShape()[0];
 
     // Create Constant 'e' as a scalar
     float e_val = 2.718281828459f;
@@ -70,4 +70,4 @@ uint32_t refFactoryTanh(const std::vector<uint32_t> &inputs, Graph &graph)
     return graph.div(num, den);
 }
 
-REGISTER_KERNEL("Tanh", 1, Backend::CPU, matchTanhF32_1D, runTanhF32_1D, refFactoryTanh, {DType::FLOAT32}, {{1}}, {true});
+REGISTER_KERNEL("Tanh", 1, matchTanhF32_1D, runTanhF32_1D, refFactoryTanh, {Backend::CPU}, {DType::FLOAT32}, {{1}}, {true}, {{Backend::CPU}});

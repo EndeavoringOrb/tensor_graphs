@@ -10,16 +10,16 @@
  * CUDA KERNEL: F32 3D Dot Product (Batched MatMul)
  */
 __global__ void dot_f32_3d_kernel(const float *A, const float *B, float *Out,
-                                  uint32_t B_count, uint32_t M, uint32_t K, uint32_t N)
+                                  uint64_t B_count, uint64_t M, uint64_t K, uint64_t N)
 {
-    uint32_t b = blockIdx.z;
-    uint32_t m = blockIdx.y * blockDim.y + threadIdx.y;
-    uint32_t n = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t b = blockIdx.z;
+    uint64_t m = (uint64_t)blockIdx.y * blockDim.y + threadIdx.y;
+    uint64_t n = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
 
     if (b < B_count && m < M && n < N)
     {
         float sum = 0.0f;
-        for (uint32_t k = 0; k < K; ++k)
+        for (uint64_t k = 0; k < K; ++k)
         {
             sum += A[b * M * K + m * K + k] * B[b * K * N + k * N + n];
         }
@@ -39,9 +39,9 @@ inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const Ten
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
 
-    const auto &s0 = inputs[0].shape;
-    const auto &s1 = inputs[1].shape;
-    const auto &so = output.shape;
+    const auto &s0 = inputs[0].getShape();
+    const auto &s1 = inputs[1].getShape();
+    const auto &so = output.getShape();
 
     // Rank Check (Must be 3D)
     if (s0.size() != 3 || s1.size() != 3 || so.size() != 3)
@@ -54,7 +54,7 @@ inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const Ten
         return false;
 
     // Memory layout check
-    if (!inputs[0].view.isContiguous() || !inputs[1].view.isContiguous() || !output.view.isContiguous())
+    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output))
         return false;
 
     return true;
@@ -70,15 +70,15 @@ void runDotF32_3D_CUDA(const std::vector<const void *> &inputs, const std::vecto
     const float *B = static_cast<const float *>(inputs[1]);
     float *Out = static_cast<float *>(outputs[0]);
 
-    uint32_t B_count = inViews[0].shape[0];
-    uint32_t M = inViews[0].shape[1];
-    uint32_t K = inViews[0].shape[2];
-    uint32_t N = inViews[1].shape[2];
+    uint64_t B_count = inViews[0].getShape()[0];
+    uint64_t M = inViews[0].getShape()[1];
+    uint64_t K = inViews[0].getShape()[2];
+    uint64_t N = inViews[1].getShape()[2];
 
     dim3 threads(16, 16);
-    dim3 blocks((N + threads.x - 1) / threads.x,
-                (M + threads.y - 1) / threads.y,
-                B_count);
+    dim3 blocks((uint32_t)((N + threads.x - 1) / threads.x),
+                (uint32_t)((M + threads.y - 1) / threads.y),
+                (uint32_t)B_count);
 
     dot_f32_3d_kernel<<<blocks, threads>>>(A, B, Out, B_count, M, K, N);
 
@@ -86,8 +86,7 @@ void runDotF32_3D_CUDA(const std::vector<const void *> &inputs, const std::vecto
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
     {
-        std::cerr << "CUDA Launch Error in runDotF32_3D_CUDA: " << cudaGetErrorString(err) << std::endl;
-        Error::throw_err("CUDA kernel launch failed");
+        Error::throw_err("CUDA kernel launch failed in runDotF32_3D_CUDA: " + std::string(cudaGetErrorString(err)));
     }
 }
 
@@ -109,14 +108,8 @@ inline uint32_t refFactoryDotF32_3D_CUDA(const std::vector<uint32_t> &inputs, Gr
  * Inputs: 2
  * Backend: CUDA
  */
-REGISTER_KERNEL(
-    "Dot_F32_3D_CUDA",
-    2,
-    Backend::CUDA,
-    matchDotF32_3D_CUDA,
-    runDotF32_3D_CUDA,
-    refFactoryDotF32_3D_CUDA,
+REGISTER_KERNEL("Dot_F32_3D_CUDA", 2, matchDotF32_3D_CUDA, runDotF32_3D_CUDA, refFactoryDotF32_3D_CUDA, {Backend::CUDA},
     {DType::FLOAT32, DType::FLOAT32},
-    {{2, 8, 16}, {2, 16, 8}}, {true, true});
+    {{2, 8, 16}, {2, 16, 8}}, {true, true}, {{Backend::CUDA}, {Backend::CUDA}});
 
 #endif

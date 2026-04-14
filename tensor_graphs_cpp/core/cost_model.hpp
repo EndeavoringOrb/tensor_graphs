@@ -2,6 +2,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
+#include "core/kernels.hpp"
 #include "core/misc.hpp"
 #include "generated/build_context.gen.hpp"
 #include <vector>
@@ -11,18 +12,33 @@
 #include <iostream>
 #include <cmath>
 #include <limits>
+#include <filesystem>
 
 // TODO: make hardware detection better
 #if defined(USE_CUDA)
 #define HW_TAG "CUDA_Enabled"
-#elif defined(_WIN32) || defined(_WIN64)
-#define HW_TAG "Windows_x64"
-#elif defined(__APPLE__)
-#define HW_TAG "Apple_Silicon"
-#elif defined(__x86_64__) || defined(_M_X64)
-#define HW_TAG "Linux_x64"
 #else
-#define HW_TAG "Linux_ARM64"
+// Determine OS String
+#if defined(TG_OS_WINDOWS)
+#define PLAT_OS_STR "Windows"
+#elif defined(TG_OS_MACOS)
+#define PLAT_OS_STR "macOS"
+#elif defined(TG_OS_LINUX)
+#define PLAT_OS_STR "Linux"
+#else
+#define PLAT_OS_STR "UnknownOS"
+#endif
+
+// Determine Arch String
+#if defined(TG_ARCH_ARM64)
+#define PLAT_ARCH_STR "ARM64"
+#elif defined(TG_ARCH_X64)
+#define PLAT_ARCH_STR "x64"
+#else
+#define PLAT_ARCH_STR "UnknownArch"
+#endif
+
+#define HW_TAG PLAT_OS_STR "_" PLAT_ARCH_STR
 #endif
 
 // Uncomment the following line to enable logging calls to `benchmarks/calls.jsonl`
@@ -36,11 +52,13 @@ struct Record
 
     std::vector<std::vector<uint32_t>> inputShapes;
     std::vector<std::vector<uint32_t>> outputShapes;
-    std::vector<std::vector<int64_t>> inputStrides;
-    std::vector<std::vector<int64_t>> outputStrides;
+    std::vector<std::vector<uint64_t>> inputStrides;
+    std::vector<std::vector<uint64_t>> outputStrides;
     std::vector<DType> inputDTypes;
     std::vector<DType> outputDTypes;
     std::vector<std::vector<uint8_t>> inputConstants;
+    std::vector<Backend> backends;
+    std::vector<std::vector<Backend>> inputBackends;
     float runTime;
 };
 
@@ -61,6 +79,8 @@ inline void to_json(json &j, const Record &r)
         {"inputDTypes", r.inputDTypes},
         {"outputDTypes", r.outputDTypes},
         {"inputConstants", r.inputConstants},
+        {"backends", r.backends},
+        {"inputBackends", r.inputBackends},
         {"runTime", r.runTime}};
 }
 
@@ -72,12 +92,15 @@ inline void from_json(const json &j, Record &r)
 
     r.inputShapes = j.at("inputShapes").get<std::vector<std::vector<uint32_t>>>();
     r.outputShapes = j.at("outputShapes").get<std::vector<std::vector<uint32_t>>>();
-    r.inputStrides = j.at("inputStrides").get<std::vector<std::vector<int64_t>>>();
-    r.outputStrides = j.at("outputStrides").get<std::vector<std::vector<int64_t>>>();
+    r.inputStrides = j.at("inputStrides").get<std::vector<std::vector<uint64_t>>>();
+    r.outputStrides = j.at("outputStrides").get<std::vector<std::vector<uint64_t>>>();
 
     r.inputDTypes = j.at("inputDTypes").get<std::vector<DType>>();
     r.outputDTypes = j.at("outputDTypes").get<std::vector<DType>>();
     r.inputConstants = j.at("inputConstants").get<std::vector<std::vector<uint8_t>>>();
+    r.backends = j.at("backends").get<std::vector<Backend>>();
+    r.inputBackends = j.at("inputBackends").get<std::vector<std::vector<Backend>>>();
+
     r.runTime = j.at("runTime").get<float>();
 }
 
@@ -91,6 +114,7 @@ struct CostModel
     {
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS
         const std::string path = "benchmarks/calls.jsonl";
+        std::filesystem::create_directories(std::filesystem::path(path).parent_path());
         {
             std::ifstream inFile(path);
             if (inFile.is_open())
@@ -126,7 +150,8 @@ struct CostModel
             total++;
             auto j = json::parse(line);
             Record r = j.get<Record>();
-            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID)
+            bool hasKernel = KernelRegistry::get().hasKernel(r.kernelUid);
+            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID || !hasKernel)
                 continue;
             valid++;
             records[r.kernelUid].push_back(r);
@@ -134,9 +159,8 @@ struct CostModel
         std::cout << "Loaded " << valid << " valid records out of " << total << " total records from " << benchmarkPath << std::endl;
     }
 
-    float interpolate(const std::vector<Record> &kernelRecords, const TensorNode &node, const Graph &graph)
+    float interpolate(const std::vector<Record> &kernelRecords, uint64_t targetElements)
     {
-        uint64_t targetElements = countElements(node.shape);
         if (targetElements == 0)
             return 0.0f;
 
@@ -158,41 +182,72 @@ struct CostModel
                 estimatedTime = r.runTime * (static_cast<float>(targetElements) / static_cast<float>(recElements));
             }
         }
-#ifdef DEBUG
-        if (bestDist == std::numeric_limits<float>::infinity() || estimatedTime == std::numeric_limits<float>::infinity())
-        {
-            std::cout << "[CostModel.interpolate] WARNING: inf cost" << std::endl;
-            std::cout << toString(node, graph, "[Planner Error] ") << std::endl;
-        }
-#endif
         return (bestDist == std::numeric_limits<float>::infinity()) ? bestDist : estimatedTime;
     }
 
-    float estimateCost(const TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph, uint64_t kernelUid)
+    float estimateCost(
+        uint64_t kernelUid,
+        const std::vector<uint32_t> &outShape,
+        const std::vector<uint64_t> &_outStrides,
+        DType outDType,
+        const std::vector<std::vector<uint32_t>> &inShapes,
+        const std::vector<std::vector<uint64_t>> &inStrides,
+        const std::vector<DType> &inDTypes,
+        const std::vector<std::vector<uint8_t>> &inConstants)
     {
-        std::vector<std::vector<uint32_t>> inShapes(inputs.size());
-        std::vector<std::vector<int64_t>> inStrides(inputs.size());
-        std::vector<std::vector<uint8_t>> inConstants(inputs.size());
-        std::vector<DType> inDTypes(inputs.size());
+        std::vector<std::vector<uint32_t>> outShapes = {outShape};
+        std::vector<DType> outDTypes = {outDType};
+        const std::vector<std::vector<uint64_t>> outStrides = {_outStrides};
 
-        for (size_t i = 0; i < inputs.size(); ++i)
+        auto it = records.find(kernelUid);
+        if (it == records.end() || it->second.empty())
         {
-            const auto &inNode = inputs[i];
-            inShapes[i] = inNode.shape;
-            inStrides[i] = inNode.view.shape.empty() ? TensorView::calcContiguousStrides(inNode.shape) : inNode.view.strides;
-            inDTypes[i] = inNode.dtype;
-
-            // Check if this input corresponds to a persistent constant in the global graph
-            if (inNode.opType == OpType::INPUT && inNode.storageType == StorageType::PERSISTENT)
+#ifdef TENSOR_GRAPHS_LOG_COST_CALLS
             {
-                auto stagingIt = graph.constantStaging.find(inNode.id);
-                if (stagingIt != graph.constantStaging.end())
-                    inConstants[i] = stagingIt->second;
+                Record r;
+                r.kernelUid = kernelUid;
+                r.buildContextId = BUILD_CONTEXT_ID;
+                r.hwTag = HW_TAG;
+                r.inputShapes = inShapes;
+                r.outputShapes = outShapes;
+                r.inputStrides = inStrides;
+                r.outputStrides = outStrides;
+                r.inputDTypes = inDTypes;
+                r.outputDTypes = outDTypes;
+                r.inputConstants = inConstants;
+                const auto &entry = KernelRegistry::get().getKernel(kernelUid);
+                r.backends = entry.backends;
+                r.inputBackends = entry.inputBackends;
+                r.runTime = 0.0f;
+
+                json callObj = r;
+                std::string callStr = callObj.dump();
+
+                if (loggedCalls.find(callStr) == loggedCalls.end())
+                {
+                    loggedCalls.insert(callStr);
+                    if (callFile.is_open())
+                    {
+                        callFile << callStr << "\n";
+                        callFile.flush();
+                    }
+                }
+            }
+#endif
+            std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n"
+                      << std::flush;
+            return std::numeric_limits<float>::infinity();
+        }
+
+        for (const auto &r : it->second)
+        {
+            if (r.inputShapes == inShapes && r.outputShapes == outShapes &&
+                r.inputStrides == inStrides && r.outputStrides == outStrides &&
+                r.inputDTypes == inDTypes && r.outputDTypes == outDTypes)
+            {
+                return r.runTime;
             }
         }
-        std::vector<std::vector<uint32_t>> outShapes = {node.shape};
-        std::vector<std::vector<int64_t>> outStrides = {node.view.shape.empty() ? TensorView::calcContiguousStrides(node.shape) : node.view.strides};
-        std::vector<DType> outDTypes = {node.dtype};
 
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS
         {
@@ -207,6 +262,9 @@ struct CostModel
             r.inputDTypes = inDTypes;
             r.outputDTypes = outDTypes;
             r.inputConstants = inConstants;
+            const auto &entry = KernelRegistry::get().getKernel(kernelUid);
+            r.backends = entry.backends;
+            r.inputBackends = entry.inputBackends;
             r.runTime = 0.0f;
 
             json callObj = r;
@@ -223,30 +281,7 @@ struct CostModel
             }
         }
 #endif
-
-        auto it = records.find(kernelUid);
-        if (it == records.end() || it->second.empty())
-        {
-#ifdef DEBUG
-            std::cout << "[CostModel.estimateCost] WARNING: No records found for kernelUid: 0x"
-                      << std::hex << kernelUid << std::dec << std::endl;
-
-            // Use the helper here
-            std::cout << toString(node, graph, "[Planner Error] ") << std::endl;
-#endif
-            return std::numeric_limits<float>::infinity();
-        }
-
-        for (const auto &r : it->second)
-        {
-            if (r.inputShapes == inShapes && r.outputShapes == outShapes &&
-                r.inputStrides == inStrides && r.outputStrides == outStrides &&
-                r.inputDTypes == inDTypes && r.outputDTypes == outDTypes)
-            {
-                return r.runTime;
-            }
-        }
-
-        return interpolate(it->second, node, graph);
+        uint64_t targetElements = countElements(outShape);
+        return interpolate(it->second, targetElements);
     }
 };

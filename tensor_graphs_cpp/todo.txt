@@ -1,17 +1,8 @@
-add compile time DEBUG ifdef flag
--check nan
-
-more fused ops
-
-test.cpp
-
 examples/gemma-3-270m-cpp.py
 
 graph parallel
 
 constant folding
-
-remove sparseData? functionality might be covered by graph.constantStaging
 
 improve hash stability. right now if you change a single character in a commented line in core/types.hpp, system benchmarks all kernels again
 
@@ -19,16 +10,14 @@ allow finer user control over dirty bucket caching. Maybe they know a certain in
 
 main.exe should create benchmarks/ folder
 
-automatically reject dirty region cache .jsonl if invalid kernel ids
+rewrite rules:
+-swap order of copyto & contiguous if kernels exist
+-swap order of copyto & scatter if kernels exist
 
-make ctrl-c safe (cudafree or whatever)
+PERFORMANCE:
+-rewrite rules
+-specialized kernels
+-parallel graph execution
+-constant folding?
 
-replace throw error with wrapper that first prints message (windows doesn't print the error message for some reason)
-
-
-bench crashing after gather
-```text
-[41/81] [CPU] GATHER (0x2f916246689c6344), Out DType: F32, Out Shape: [1, 4, 640], Out Strides: [5120, 640, 1] -> 0.000411 ms
-double free or corruption (!prev)
-Aborted (core dumped)
-```
+is it properly slicing backward gather for the first gather with gather(embeddings, input_seq)?

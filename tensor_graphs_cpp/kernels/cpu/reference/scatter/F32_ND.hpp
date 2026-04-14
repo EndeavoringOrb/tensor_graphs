@@ -21,42 +21,49 @@ inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std:
     const int32_t *steps = static_cast<const int32_t *>(inputs[4]);
     float *out = static_cast<float *>(outputs[0]);
 
-    const auto &out_shape = outViews[0].shape;
-    const auto &upd_shape = inViews[1].shape;
+    const auto &out_shape = outViews[0].getShape();
+    const auto &upd_shape = inViews[1].getShape();
     uint64_t n_target = countElements(out_shape);
 
+    // If target and out are different buffers, copy target to out first.
+    // Use getStridedIndex to handle potentially strided target/out.
     if (target != out)
     {
-        std::memcpy(out, target, n_target * sizeof(float));
+        for (uint64_t i = 0; i < n_target; ++i)
+        {
+            out[getStridedIndex(i, out_shape, outViews[0].strides)] =
+                target[getStridedIndex(i, out_shape, inViews[0].strides)];
+        }
     }
 
     uint64_t n_updates = countElements(upd_shape);
+    int ndim = static_cast<int>(upd_shape.size());
 
-    std::vector<uint64_t> out_strides(out_shape.size(), 1);
-    std::vector<uint64_t> upd_strides(upd_shape.size(), 1);
-    for (int d = static_cast<int>(out_shape.size()) - 2; d >= 0; --d)
-        out_strides[d] = out_strides[d + 1] * out_shape[d + 1];
-    for (int d = static_cast<int>(upd_shape.size()) - 2; d >= 0; --d)
-        upd_strides[d] = upd_strides[d + 1] * upd_shape[d + 1];
-
-    for (uint64_t idx = 0; idx < n_updates; ++idx)
+    for (uint64_t i = 0; i < n_updates; ++i)
     {
-        uint64_t temp = idx;
-        uint64_t out_idx = 0;
-        for (size_t d = 0; d < out_shape.size(); ++d)
-        {
-            uint64_t coord = temp / upd_strides[d];
-            temp %= upd_strides[d];
+        // 1. Get update value safely
+        float val = updates[getStridedIndex(i, upd_shape, inViews[1].strides)];
 
-            int32_t s = (d < inViews[2].shape[0]) ? starts[d] : 0;
+        // 2. Unravel flat index 'i' into update coordinates, map to target, and calculate output offset
+        uint64_t temp = i;
+        uint64_t out_phys_idx = 0;
+
+        // We iterate backwards to unravel the coordinates correctly
+        for (int d = ndim - 1; d >= 0; --d)
+        {
+            uint32_t coord = temp % upd_shape[d];
+            temp /= upd_shape[d];
+
+            int32_t s = (d < (int)inViews[2].getShape()[0]) ? starts[d] : 0;
             if (s < 0)
                 s += out_shape[d];
-            int32_t st = (d < inViews[4].shape[0]) ? steps[d] : 1;
+            int32_t st = (d < (int)inViews[4].getShape()[0]) ? steps[d] : 1;
 
-            out_idx += (s + coord * st) * out_strides[d];
+            uint32_t target_coord = s + coord * st;
+            out_phys_idx += (uint64_t)target_coord * outViews[0].strides[d];
         }
-        out[out_idx] = updates[idx];
+        out[out_phys_idx] = val;
     }
 }
 
-REGISTER_REF_KERNEL(OpType::SCATTER, Backend::CPU, matchScatterF32_ND, runScatterF32_ND);
+REGISTER_REF_KERNEL(OpType::SCATTER, 5, matchScatterF32_ND, runScatterF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {8}, {8}, {8}}, {false, false, false, false, false}, {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});

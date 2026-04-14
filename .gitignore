@@ -21,8 +21,9 @@ profile_output*
 
 # Cache and Benchmarks
 benchmarks*
-dirty_region_caches/
+dirty_region_caches
 kernel_launches
+tensor_graphs_cpp/tests
 
 # Compiled binaries
 *.exe

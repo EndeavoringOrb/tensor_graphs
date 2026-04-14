@@ -10,20 +10,43 @@
 #include <cctype>
 #include <memory>
 #include <list>
+#include <algorithm>
+#include <map>
+#include <iomanip>
 #include <json.hpp>
 using json = nlohmann::json;
+
+// --- OS Detection ---
+#if defined(_WIN32) || defined(_WIN64)
+    #define TG_OS_WINDOWS
+#elif defined(__APPLE__)
+    #define TG_OS_MACOS
+#elif defined(__linux__)
+    #define TG_OS_LINUX
+#endif
+
+// --- Architecture Detection ---
+#if defined(__aarch64__) || defined(_M_ARM64)
+    #define TG_ARCH_ARM64
+    #if defined(__ARM_NEON) || defined(TG_OS_WINDOWS) // Windows ARM64 always has NEON
+        #define TG_HAS_NEON
+    #endif
+#elif defined(__x86_64__) || defined(_M_X64)
+    #define TG_ARCH_X64
+#endif
 
 namespace Error
 {
     template <typename T = std::runtime_error, typename... Args>
     [[noreturn]] inline void throw_err(const std::string &msg, Args &&...args)
     {
-        std::cerr << "\n[TensorGraph Error] " << msg << std::endl;
+        std::cerr << "\n[TensorGraph Error] " << msg << std::endl
+                  << std::flush;
         throw T(msg, std::forward<Args>(args)...);
     }
 }
 
-inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape, const std::vector<int64_t> &strides)
+inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
 {
     uint64_t stridedIndex = 0;
     uint64_t temp = flatIndex;
@@ -122,7 +145,8 @@ enum class Backend : uint32_t
 enum class StorageType : uint32_t
 {
     TRANSIENT,
-    PERSISTENT
+    PERSISTENT,
+    PINNED
 };
 
 struct TensorGraphError : public std::runtime_error
@@ -163,6 +187,17 @@ struct MemoryAllocationError : public TensorGraphError
         : TensorGraphError(msg), requestedSize(size) {}
 };
 
+struct MemoryExhaustedError : public std::runtime_error
+{
+    uint64_t requestedMemory;
+    uint64_t availableMemory;
+
+    MemoryExhaustedError(uint64_t requested, uint64_t available)
+        : std::runtime_error("Memory exhausted: requested " + std::to_string(requested) +
+                             " bytes, available " + std::to_string(available) + " bytes"),
+          requestedMemory(requested), availableMemory(available) {}
+};
+
 struct Dim
 {
     uint32_t start;
@@ -179,75 +214,206 @@ struct Region
     }
 };
 
-inline bool regionsMatch(const Region &r1, const Region &r2)
+inline bool regionsMatch(const Region &r1, const Region &r2);
+
+inline void to_json(json &j, const Region &r)
 {
-    if (r1.region.size() != r2.region.size())
-        return false;
-    for (size_t i = 0; i < r1.region.size(); ++i)
+    j = json::array();
+    for (const auto &dim : r.region)
+        j.push_back(json::array({dim.start, dim.stop}));
+}
+
+inline void from_json(const json &j, Region &r)
+{
+    r.region.clear();
+    for (const auto &dimJson : j)
     {
-        if (r1.region[i].start != r2.region[i].start ||
-            r1.region[i].stop != r2.region[i].stop)
-        {
+        r.region.push_back({dimJson[0].get<uint32_t>(), dimJson[1].get<uint32_t>()});
+    }
+}
+
+inline std::string encodeRegion(const Region &r)
+{
+    std::stringstream ss;
+    ss << "(";
+    for (size_t i = 0; i < r.region.size(); ++i)
+    {
+        if (i > 0)
+            ss << ",";
+        ss << r.region[i].start << "-" << r.region[i].stop;
+    }
+    ss << ")";
+    return ss.str();
+}
+
+inline bool isFullRegion(const Region &r, const std::vector<uint32_t> &shape)
+{
+    if (r.region.size() != shape.size())
+        return false;
+    for (size_t i = 0; i < shape.size(); ++i)
+    {
+        if (r.region[i].start != 0 || r.region[i].stop != shape[i])
             return false;
-        }
     }
     return true;
 }
 
-struct TensorView
+inline std::vector<Region> normalizeRegions(std::vector<Region> regions)
 {
-    uint64_t baseOffset = 0; // Offset into the MemoryManager's DeviceBuffer
-    std::vector<uint32_t> shape;
-    std::vector<int64_t> strides; // Strides in terms of elements, not bytes
-    DType dtype;
+    std::sort(regions.begin(), regions.end(), [](const Region &a, const Region &b)
+              {
+                  if (a.region.size() != b.region.size())
+                      return a.region.size() < b.region.size();
+                  for (size_t i = 0; i < a.region.size(); ++i)
+                  {
+                      if (a.region[i].start != b.region[i].start)
+                          return a.region[i].start < b.region[i].start;
+                      if (a.region[i].stop != b.region[i].stop)
+                          return a.region[i].stop < b.region[i].stop;
+                  }
+                  return false; });
 
-    bool isContiguous() const
-    {
-        int64_t expectedStride = 1;
-        for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
-        {
-            if (shape[i] == 1)
-                continue;
-            if (strides[i] != expectedStride)
-                return false;
-            expectedStride *= shape[i];
-        }
-        return true;
-    }
+    regions.erase(std::unique(regions.begin(), regions.end(), [](const Region &a, const Region &b)
+                              { return regionsMatch(a, b); }),
+                  regions.end());
+    return regions;
+}
 
-    static std::vector<int64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
+inline std::string encodeRegionList(const std::vector<Region> &regions)
+{
+    std::stringstream ss;
+    const std::vector<Region> canonical = normalizeRegions(regions);
+    for (const auto &r : canonical)
+        ss << encodeRegion(r);
+    return ss.str();
+}
+
+bool isContiguous(const std::vector<uint64_t> &strides, const std::vector<uint32_t> &shape)
+{
+    int64_t expectedStride = 1;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
     {
-        std::vector<int64_t> newStrides(targetShape.size());
-        int64_t stride = 1;
-        for (int i = static_cast<int>(targetShape.size()) - 1; i >= 0; --i)
-        {
-            newStrides[i] = stride;
-            stride *= targetShape[i];
-        }
-        return newStrides;
+        if (strides[i] != expectedStride)
+            return false;
+        expectedStride *= shape[i];
     }
-};
+    return true;
+}
+
+static std::vector<uint64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
+{
+    std::vector<uint64_t> newStrides(targetShape.size());
+    uint64_t stride = 1;
+    for (int i = static_cast<int>(targetShape.size()) - 1; i >= 0; --i)
+    {
+        newStrides[i] = stride;
+        stride *= targetShape[i];
+    }
+    return newStrides;
+}
 
 struct TensorNode
 {
+private:
+    std::vector<uint32_t> shape;
+
+public:
     uint32_t id;
     OpType opType;
     std::string opName; // Used if opType == OpType::FUSED
     DType dtype;
     std::vector<uint32_t> parentIds;
-    std::vector<uint32_t> shape;
+    std::vector<uint64_t> strides;
+    uint64_t viewOffset = 0;
     Backend backend = Backend::CPU;
-    TensorView view;
     StorageType storageType = StorageType::TRANSIENT;
     std::string contentHash;
+
+    TensorNode() {}
+
+    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "")
+        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), backend(_backend), storageType(_storageType), contentHash(_contentHash)
+    {
+        if (strides.empty())
+        {
+            strides = calcContiguousStrides(shape);
+        }
+    }
+
+    Region fullRegion() const
+    {
+        Region region = Region();
+        for (const uint32_t dimSize : shape)
+        {
+            region.region.push_back({0, dimSize});
+        }
+        return region;
+    }
+
+    const std::vector<uint32_t> &getShape() const
+    {
+        return shape;
+    }
+
+    void setShape(const std::vector<uint32_t> &_shape)
+    {
+        shape = _shape;
+        strides = calcContiguousStrides(_shape);
+    }
 };
+
+bool isContiguous(const TensorNode &node)
+{
+    return isContiguous(node.strides, node.getShape());
+}
+
+uint64_t countElements(const TensorNode &node)
+{
+    return countElements(node.getShape());
+}
+
+struct TensorView
+{
+private:
+    std::vector<uint32_t> shape;
+
+public:
+    uint64_t baseOffset = 0;      // Offset into the MemoryManager's DeviceBuffer
+    std::vector<uint64_t> strides; // Strides in terms of elements, not bytes
+    DType dtype;
+
+    TensorView() {}
+    TensorView(const TensorNode &node, uint64_t _baseOffset) : baseOffset(_baseOffset), shape(node.getShape()), strides(node.strides), dtype(node.dtype) {}
+
+    const std::vector<uint32_t> &getShape() const
+    {
+        return shape;
+    }
+
+    void setShape(const std::vector<uint32_t> &_shape)
+    {
+        shape = _shape;
+        if (strides.empty() || shape.size() != strides.size())
+            strides = calcContiguousStrides(_shape);
+    }
+};
+
+bool isContiguous(const TensorView &view)
+{
+    return isContiguous(view.strides, view.getShape());
+}
+
+uint64_t countElements(const TensorView &view)
+{
+    return countElements(view.getShape());
+}
 
 inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape, DType dtype)
 {
     return countElements(shape) * getDTypeSize(dtype);
 }
 
-inline const char *toString(DType dtype)
+inline std::string toString(DType dtype)
 {
     switch (dtype)
     {
@@ -275,7 +441,7 @@ inline DType fromString(const std::string &str)
     Error::throw_err("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for that instead of generic runtime_error
 }
 
-inline const char *toString(OpType op)
+inline std::string toString(OpType op)
 {
     switch (op)
     {
@@ -336,7 +502,7 @@ inline const char *toString(OpType op)
     }
 }
 
-inline const char *toString(Backend backend)
+inline std::string toString(Backend backend)
 {
     switch (backend)
     {
@@ -349,7 +515,7 @@ inline const char *toString(Backend backend)
     }
 }
 
-inline const char *toString(StorageType storage)
+inline std::string toString(StorageType storage)
 {
     switch (storage)
     {
@@ -357,6 +523,8 @@ inline const char *toString(StorageType storage)
         return "TRANSIENT";
     case StorageType::PERSISTENT:
         return "PERSISTENT";
+    case StorageType::PINNED:
+        return "PINNED";
     default:
         return "UNKNOWN_STORAGE";
     }
@@ -369,6 +537,10 @@ inline std::ostream &operator<<(std::ostream &os, StorageType storage) { return 
 
 struct DirtyBucket
 {
+    // Canonical meaning:
+    // - regions[nodeId] is the logical output region list for nodeId.
+    // - inputSlices[nodeId][parentIndex][regionIndex] is the corresponding
+    //   parent slice needed to compute regions[nodeId][regionIndex].
     std::unordered_map<uint32_t, std::vector<Region>> regions;
     std::unordered_map<uint32_t, std::vector<std::vector<Region>>> inputSlices;
 };
@@ -550,15 +722,20 @@ NLOHMANN_JSON_SERIALIZE_ENUM(Backend, {
 NLOHMANN_JSON_SERIALIZE_ENUM(StorageType, {
                                               {StorageType::TRANSIENT, "TRANSIENT"},
                                               {StorageType::PERSISTENT, "PERSISTENT"},
+                                              {StorageType::PINNED, "PINNED"},
                                           })
 
 struct OpInstruction
 {
     uint32_t nodeId;
-    std::vector<uint64_t> kernelIds;
+    uint32_t logicalNodeId = UINT32_MAX;
+    uint64_t fullKernelId = 0;
+    std::vector<uint64_t> cachedKernelIds;
     std::vector<uint32_t> inputNodeIds;
-    int32_t inplaceInputIndex; // -1 if not inplace
+    int32_t inplaceInputIndex = -1; // -1 if not inplace
+    int32_t viewInputIndex = -1;    // -1 if not view
     Backend backend;
+    StorageType outputStorageType = StorageType::TRANSIENT;
 };
 
 struct CompiledGraph
@@ -567,42 +744,15 @@ struct CompiledGraph
     std::unordered_map<uint32_t, uint32_t> refCounts;
     std::unordered_map<uint32_t, TensorNode> nodesMap;
     std::unordered_map<uint32_t, float> nodeCosts;
-    std::unordered_map<uint32_t, uint32_t> logicalNodeMap;
-};
+    // Canonical direction:
+    // compiled physical node id -> original logical node id.
+    std::unordered_map<uint32_t, uint32_t> physicalToLogicalNodeMap;
+    std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
 
-struct AdapterOp
-{
-    OpType opType;
-    uint64_t kernelId;
-    Backend backend;
-
-    bool isSliceOrScatter = false;
-    std::vector<uint32_t> sliceStarts;
-    std::vector<uint32_t> sliceEnds;
-    std::vector<uint32_t> sliceSteps;
-    std::vector<uint32_t> outShape;
-    uint32_t scatterTargetId = 0;
-};
-
-struct BeamStrategy
-{
-    float cost;                      // Total cumulative cost (deduplicated)
-    float nodeCost = 0.0f;           // The cost of THIS specific node's kernel
-    float edgeCost = 0.0f;           // The cost of all adapter chains linking to parents
-    mutable uint32_t visitedGen = 0; // Ensures deduplication during DFS cost accumulation
-
-    uint32_t nodeId;         // The original node ID this strategy resolves
-    uint32_t selectedNodeId; // The actual fused/replaced node ID chosen
-    Backend backend;         // Backend chosen for this node
-    std::vector<uint64_t> kernelIds;
-
-    // Pointers tracking the selected parent paths
-    std::vector<std::shared_ptr<BeamStrategy>> parentStrategies;
-    std::vector<std::vector<AdapterOp>> parentAdapters;
-
-    bool operator<(const BeamStrategy &other) const
+    const uint32_t getLogicalId(uint32_t id) const
     {
-        return cost < other.cost;
+        auto it = physicalToLogicalNodeMap.find(id);
+        return it != physicalToLogicalNodeMap.end() ? it->second : id;
     }
 };
 
@@ -617,15 +767,15 @@ inline void to_json(json &j, const TensorView &v)
 {
     j = json{
         {"baseOffset", v.baseOffset},
-        {"shape", v.shape},
+        {"shape", v.getShape()},
         {"strides", v.strides},
         {"dtype", v.dtype}};
 }
 inline void from_json(const json &j, TensorView &v)
 {
     v.baseOffset = j.at("baseOffset").get<uint64_t>();
-    v.shape = j.at("shape").get<std::vector<uint32_t>>();
-    v.strides = j.at("strides").get<std::vector<int64_t>>();
+    v.setShape(j.at("shape").get<std::vector<uint32_t>>());
+    v.strides = j.at("strides").get<std::vector<uint64_t>>();
     v.dtype = j.at("dtype").get<DType>();
 }
 
@@ -637,9 +787,10 @@ inline void to_json(json &j, const TensorNode &n)
         {"opName", n.opName},
         {"dtype", n.dtype},
         {"parentIds", n.parentIds},
-        {"shape", n.shape},
+        {"shape", n.getShape()},
+        {"strides", n.strides},
+        {"viewOffset", n.viewOffset},
         {"backend", n.backend},
-        {"view", n.view},
         {"storageType", n.storageType},
         {"contentHash", n.contentHash}};
 }
@@ -650,43 +801,58 @@ inline void from_json(const json &j, TensorNode &n)
     n.opName = j.at("opName").get<std::string>();
     n.dtype = j.at("dtype").get<DType>();
     n.parentIds = j.at("parentIds").get<std::vector<uint32_t>>();
-    n.shape = j.at("shape").get<std::vector<uint32_t>>();
+    n.setShape(j.at("shape").get<std::vector<uint32_t>>());
+    n.strides = j.at("strides").get<std::vector<uint64_t>>();
+    n.viewOffset = j.contains("viewOffset") ? j.at("viewOffset").get<uint64_t>() : 0;
     n.backend = j.at("backend").get<Backend>();
-    n.view = j.at("view").get<TensorView>();
     n.storageType = j.at("storageType").get<StorageType>();
     n.contentHash = j.at("contentHash").get<std::string>();
 }
 
 inline void to_json(json &j, const OpInstruction &i)
 {
-    json kIds = json::array();
-    for (uint64_t k : i.kernelIds)
+    json fullId;
+    {
+        std::stringstream pss;
+        pss << "0x" << std::hex << i.fullKernelId;
+        fullId = pss.str();
+    }
+
+    json cachedIds = json::array();
+    for (uint64_t k : i.cachedKernelIds)
     {
         std::stringstream pss;
         pss << "0x" << std::hex << k;
-        kIds.push_back(pss.str());
+        cachedIds.push_back(pss.str());
     }
 
     j = json{
         {"nodeId", i.nodeId},
-        {"kernelIds", kIds},
+        {"logicalNodeId", i.logicalNodeId},
+        {"fullKernelId", fullId},
+        {"cachedKernelIds", cachedIds},
         {"inputNodeIds", i.inputNodeIds},
         {"inplaceInputIndex", i.inplaceInputIndex},
-        {"backend", i.backend}};
+        {"viewInputIndex", i.viewInputIndex},
+        {"backend", i.backend},
+        {"outputStorageType", i.outputStorageType}};
 }
 inline void from_json(const json &j, OpInstruction &i)
 {
     i.nodeId = j.at("nodeId").get<uint32_t>();
-
-    i.kernelIds.clear();
-    for (const auto &pkStr : j.at("kernelIds"))
+    i.logicalNodeId = j.contains("logicalNodeId") ? j.at("logicalNodeId").get<uint32_t>() : UINT32_MAX;
+    i.fullKernelId = std::stoull(j.at("fullKernelId").get<std::string>(), nullptr, 16);
+    i.cachedKernelIds.clear();
+    for (const auto &pkStr : j.at("cachedKernelIds"))
     {
-        i.kernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
+        i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
     }
 
     i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();
     i.inplaceInputIndex = j.at("inplaceInputIndex").get<int32_t>();
+    i.viewInputIndex = j.at("viewInputIndex").get<int32_t>();
     i.backend = j.at("backend").get<Backend>();
+    i.outputStorageType = j.contains("outputStorageType") ? j.at("outputStorageType").get<StorageType>() : StorageType::TRANSIENT;
 }
 inline void to_json(json &j, const CompiledGraph &cg)
 {
@@ -703,15 +869,20 @@ inline void to_json(json &j, const CompiledGraph &cg)
         nodeCosts[std::to_string(kv.first)] = kv.second;
 
     json logicalMap = json::object();
-    for (const auto &kv : cg.logicalNodeMap)
+    for (const auto &kv : cg.physicalToLogicalNodeMap)
         logicalMap[std::to_string(kv.first)] = kv.second;
+
+    json constStaging = json::object();
+    for (const auto &kv : cg.constantStaging)
+        constStaging[std::to_string(kv.first)] = kv.second;
 
     j = json{
         {"instructions", cg.instructions},
         {"refCounts", refCounts},
         {"nodesMap", nodesMap},
         {"nodeCosts", nodeCosts},
-        {"logicalNodeMap", logicalMap}};
+        {"physicalToLogicalNodeMap", logicalMap},
+        {"constantStaging", constStaging}};
 }
 
 inline void from_json(const json &j, CompiledGraph &cg)
@@ -720,11 +891,11 @@ inline void from_json(const json &j, CompiledGraph &cg)
 
     cg.refCounts.clear();
     for (const auto &item : j.at("refCounts").items())
-            cg.refCounts[std::stoul(item.key())] = item.value().get<uint32_t>();
+        cg.refCounts[std::stoul(item.key())] = item.value().get<uint32_t>();
 
     cg.nodesMap.clear();
     for (const auto &item : j.at("nodesMap").items())
-            cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
+        cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
 
     cg.nodeCosts.clear();
     for (const auto &item : j.at("nodeCosts").items())
@@ -739,7 +910,11 @@ inline void from_json(const json &j, CompiledGraph &cg)
         }
     }
 
-    cg.logicalNodeMap.clear();
-    for (const auto &item : j.at("logicalNodeMap").items())
-        cg.logicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
+    cg.physicalToLogicalNodeMap.clear();
+    for (const auto &item : j.at("physicalToLogicalNodeMap").items())
+        cg.physicalToLogicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
+
+    cg.constantStaging.clear();
+    for (const auto &item : j.at("constantStaging").items())
+        cg.constantStaging[std::stoul(item.key())] = item.value().get<std::vector<uint8_t>>();
 }

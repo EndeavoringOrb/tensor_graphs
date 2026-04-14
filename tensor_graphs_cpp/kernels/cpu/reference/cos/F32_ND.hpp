@@ -7,7 +7,7 @@ inline bool matchCosF32_ND(const std::vector<TensorNode> &inputs, const TensorNo
 {
     if (inputs.size() != 1)
         return false;
-    return inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && inputs[0].view.isContiguous() && output.view.isContiguous();
+    return inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && isContiguous(inputs[0]) && isContiguous(output);
 }
 
 inline void runCosF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
@@ -15,9 +15,9 @@ inline void runCosF32_ND(const std::vector<const void *> &inputs, const std::vec
 {
     const float *in = static_cast<const float *>(inputs[0]);
     float *out = static_cast<float *>(outputs[0]);
-    uint64_t n = countElements(outViews[0].shape);
+    uint64_t n = countElements(outViews[0].getShape());
     for (uint64_t i = 0; i < n; ++i)
         out[i] = std::cos(in[i]);
 }
 
-REGISTER_REF_KERNEL(OpType::COS, Backend::CPU, matchCosF32_ND, runCosF32_ND);
+REGISTER_REF_KERNEL(OpType::COS, 1, matchCosF32_ND, runCosF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {false}, {{Backend::CPU}});

@@ -3,32 +3,18 @@
 #include "core/kernels.hpp"
 #include <vector>
 
-/**
- * FUSED KERNEL: ADD FP32 3D + Scalar (Broadcasting)
- * Pattern: Output[b, s, d] = Input3D[b, s, d] + InputScalar[]
- */
-
 inline bool matchAddFP32_3D_Scalar(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
     if (inputs.size() != 2)
         return false;
-
-    const auto &in3D = inputs[0];
-    const auto &inScalar = inputs[1];
-
-    if (in3D.dtype != DType::FLOAT32 || inScalar.dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
+    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
-
-    // Rank Check: 3D + Scalar
-    if (in3D.shape.size() != 3 || inScalar.shape.size() != 1 || inScalar.shape[0] != 1)
+    if (inputs[0].getShape().size() != 3 || inputs[1].getShape().size() != 1 || inputs[1].getShape()[0] != 1)
         return false;
-
-    if (in3D.shape != output.shape)
+    if (inputs[0].getShape() != output.getShape())
         return false;
-
-    if (!in3D.view.isContiguous() || !output.view.isContiguous())
+    if (!isContiguous(inputs[0]) || !isContiguous(output))
         return false;
-
     return true;
 }
 
@@ -39,17 +25,11 @@ inline void runAddFP32_3D_Scalar(const std::vector<const void *> &inputs, const 
     float scalarValue = *static_cast<const float *>(inputs[1]);
     float *out = static_cast<float *>(outputs[0]);
 
-    uint64_t totalElements = countElements(inViews[0].shape);
-
+    uint64_t totalElements = countElements(inViews[0].getShape());
     for (uint64_t i = 0; i < totalElements; ++i)
-    {
         out[i] = data3D[i] + scalarValue;
-    }
 }
 
-/**
- * Reference Factory: Pattern: add(x_3d, repeat(repeat(repeat(reshape(scalar, [1,1,1]), B, 0), S, 1), D, 2))
- */
 inline uint32_t refFactoryAdd3D_Scalar(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
@@ -58,7 +38,7 @@ inline uint32_t refFactoryAdd3D_Scalar(const std::vector<uint32_t> &inputs, Grap
     uint32_t id3D = inputs[0];
     uint32_t idScalar = inputs[1];
 
-    auto shape3D = graph.nodes[id3D].shape;
+    auto shape3D = graph.getNode(id3D).getShape();
 
     // 1. Reshape Scalar -> [1, 1, 1]
     int32_t reshape_dims[] = {1, 1, 1};
@@ -66,27 +46,27 @@ inline uint32_t refFactoryAdd3D_Scalar(const std::vector<uint32_t> &inputs, Grap
     uint32_t reshaped = graph.reshape(idScalar, shape_node);
 
     // 2. Repeat axis 0 (Batch)
-        int32_t b_repeats[] = {(int32_t)shape3D[0]};
-        int32_t b_axis[] = {0};
-        uint32_t rep_b = graph.constant({1}, b_repeats, DType::INT32);
-        uint32_t ax_b = graph.constant({1}, b_axis, DType::INT32);
+    int32_t b_repeats[] = {(int32_t)shape3D[0]};
+    int32_t b_axis[] = {0};
+    uint32_t rep_b = graph.constant({1}, b_repeats, DType::INT32);
+    uint32_t ax_b = graph.constant({1}, b_axis, DType::INT32);
     uint32_t repeated_b = graph.repeat(reshaped, rep_b, ax_b);
 
     // 3. Repeat axis 1 (Sequence)
-        int32_t s_repeats[] = {(int32_t)shape3D[1]};
-        int32_t s_axis[] = {1};
-        uint32_t rep_s = graph.constant({1}, s_repeats, DType::INT32);
-        uint32_t ax_s = graph.constant({1}, s_axis, DType::INT32);
+    int32_t s_repeats[] = {(int32_t)shape3D[1]};
+    int32_t s_axis[] = {1};
+    uint32_t rep_s = graph.constant({1}, s_repeats, DType::INT32);
+    uint32_t ax_s = graph.constant({1}, s_axis, DType::INT32);
     uint32_t repeated_s = graph.repeat(repeated_b, rep_s, ax_s);
 
     // 4. Repeat axis 2 (Hidden)
-        int32_t d_repeats[] = {(int32_t)shape3D[2]};
-        int32_t d_axis[] = {2};
-        uint32_t rep_d = graph.constant({1}, d_repeats, DType::INT32);
-        uint32_t ax_d = graph.constant({1}, d_axis, DType::INT32);
+    int32_t d_repeats[] = {(int32_t)shape3D[2]};
+    int32_t d_axis[] = {2};
+    uint32_t rep_d = graph.constant({1}, d_repeats, DType::INT32);
+    uint32_t ax_d = graph.constant({1}, d_axis, DType::INT32);
     uint32_t expanded = graph.repeat(repeated_s, rep_d, ax_d);
 
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL("Add_3D_Scalar", 2, Backend::CPU, matchAddFP32_3D_Scalar, runAddFP32_3D_Scalar, refFactoryAdd3D_Scalar, {DType::FLOAT32, DType::FLOAT32}, {{1, 128, 640}, {1}}, {true, true});
+REGISTER_KERNEL("Add_3D_Scalar", 2, matchAddFP32_3D_Scalar, runAddFP32_3D_Scalar, refFactoryAdd3D_Scalar, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
