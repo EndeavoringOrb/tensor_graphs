@@ -88,10 +88,12 @@ CacheOptimizationResult optimizeCacheCombination(
     const std::unordered_map<uint32_t, uint64_t> nodeMemorySizes = buildLogicalNodeMemorySizes(graph, cacheableNodes);
 
     std::cout << "[CacheOptimizer] Evaluating baseline cost..." << std::endl;
+    std::unordered_map<std::string, PlanningRegionState> regionStates;
     float baselineScore = 0.0f;
     for (const BucketPlanRequest &bucket : buckets)
     {
-        float cost = planner.estimateCostForCacheSet(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {});
+        regionStates[bucket.key] = derivePlanningRegions(rootId, graph, bucket.bucket.regions);
+        float cost = planner.estimateCostForCacheSet(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {}, regionStates[bucket.key]);
         auto countIt = bucketCallCounts.find(bucket.key);
         uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
         baselineScore += cost * callCount;
@@ -121,7 +123,7 @@ CacheOptimizationResult optimizeCacheCombination(
         float testScore = 0.0f;
         for (const BucketPlanRequest &bucket : buckets)
         {
-            float cost = planner.estimateCostForCacheSet(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {nodeId});
+            float cost = planner.estimateCostForCacheSet(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {nodeId}, regionStates[bucket.key]);
             auto countIt = bucketCallCounts.find(bucket.key);
             uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
             testScore += cost * callCount;

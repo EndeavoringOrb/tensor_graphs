@@ -84,8 +84,23 @@ inline bool updateRegionListIfChanged(std::vector<Region> &dst, const std::vecto
 
 struct PlanningRegionState
 {
-    std::unordered_map<uint32_t, std::vector<Region>> needed;
+    bool initialized = false;
     std::unordered_map<uint32_t, std::vector<Region>> recompute;
+    std::unordered_map<uint32_t, std::vector<Region>> recomputeCached;
+    std::unordered_map<uint32_t, std::vector<Region>> needed;
+
+    const std::vector<Region> &getRecompute(const std::unordered_set<uint32_t> &cachedNodes, uint32_t nodeId) const
+    {
+        if (cachedNodes.count(nodeId) != 0 && recomputeCached.count(nodeId) != 0)
+        {
+            return recomputeCached.at(nodeId);
+        }
+        if (recompute.count(nodeId))
+        {
+            return recompute.at(nodeId);
+        }
+        return {};
+    }
 };
 
 // Worklist backward pass to compute needed regions from the root.
@@ -160,8 +175,7 @@ static void updateNeeded(
 static PlanningRegionState derivePlanningRegions(
     uint32_t rootId,
     const Graph &graph,
-    const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
-    const std::unordered_set<uint32_t> &cachedNodes)
+    const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions)
 {
     PlanningRegionState state;
     ShapePropagator prop;
@@ -191,17 +205,12 @@ static PlanningRegionState derivePlanningRegions(
                           node.opType == OpType::FILL);
 
         auto dirtyIt = dirtyOutputRegions.find(nodeId);
-        if (cachedNodes.count(nodeId) && !forceFull)
-        {
-            if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty())
-                state.recompute[nodeId] = intersectRegionLists(dirtyIt->second, neededRegions);
-        }
-        else
-        {
-            state.recompute[nodeId] = mergeRegions(neededRegions);
-        }
+        state.recompute[nodeId] = mergeRegions(neededRegions);
+        if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty() && !forceFull)
+            state.recomputeCached[nodeId] = intersectRegionLists(dirtyIt->second, neededRegions);
     }
 
+    state.initialized = true;
     return state;
 }
 
@@ -404,8 +413,8 @@ private:
             return logicalId;
         }
 
-        auto recomputeIt = regionState.recompute.find(logicalId);
-        if (recomputeIt == regionState.recompute.end() || recomputeIt->second.empty())
+        const std::vector<Region> recomputeRegionsRaw = regionState.getRecompute(cachedNodes, logicalId);
+        if (recomputeRegionsRaw.empty())
         {
             convertLogicalNodeToPlaceholder(logicalId);
             result.logicalToPhysicalNodeMap[logicalId] = logicalId;
@@ -414,7 +423,7 @@ private:
             return logicalId;
         }
 
-        const std::vector<Region> recomputeRegions = normalizeRegions(recomputeIt->second);
+        const std::vector<Region> recomputeRegions = normalizeRegions(recomputeRegionsRaw);
 
         if (cachedNodes.count(logicalId))
         {
@@ -695,7 +704,8 @@ private:
         Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_set<uint32_t> &cachedNodes,
-        bool doSaturate)
+        bool doSaturate,
+        PlanningRegionState &regionState = {})
     {
         if (InterruptManager::isInterrupted())
         {
@@ -703,7 +713,10 @@ private:
             InterruptManager::cleanup();
             std::exit(SIGINT);
         }
-        PlanningRegionState regionState = derivePlanningRegions(rootId, graph, dirtyOutputRegions, cachedNodes);
+        if (!regionState.initialized)
+        {
+            regionState = derivePlanningRegions(rootId, graph, dirtyOutputRegions);
+        }
         EGraphSetupResult result;
         result.planningGraph = buildCacheAwarePlanningGraph(rootId, graph, regionState, cachedNodes);
 
@@ -1311,7 +1324,8 @@ private:
 
         ExtractionResult result;
         result.totalCost = best_cost;
-        if (stopOnFirstValid) {
+        if (stopOnFirstValid)
+        {
             return result; // return early to speed up
         }
         for (auto const &kv : best_selection_map)
@@ -1461,9 +1475,10 @@ public:
         Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
-        const std::unordered_set<uint32_t> &cachedNodes)
+        const std::unordered_set<uint32_t> &cachedNodes,
+        PlanningRegionState &regionState = {})
     {
-        auto setup = setupEGraph(rootId, graph, dirtyOutputRegions, cachedNodes, true);
+        auto setup = setupEGraph(rootId, graph, dirtyOutputRegions, cachedNodes, true, regionState);
         return extractFirstValidCost(setup.planningGraph.physicalRootId, setup.egraph, setup.nodeToEClass, maxMemoryByBackend, cachedNodes, setup.eclassToLogical, setup.immutable_eclasses);
     }
 
@@ -1472,9 +1487,9 @@ public:
         Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
-        const std::unordered_set<uint32_t> &cachedNodes, bool doSaturate = true)
+        const std::unordered_set<uint32_t> &cachedNodes, bool doSaturate = true, PlanningRegionState &regionState = {})
     {
-        auto setup = setupEGraph(rootId, graph, dirtyOutputRegions, cachedNodes, doSaturate);
+        auto setup = setupEGraph(rootId, graph, dirtyOutputRegions, cachedNodes, doSaturate, regionState);
         auto extraction = extractBest(setup.planningGraph.physicalRootId, setup.egraph, setup.nodeToEClass, maxMemoryByBackend, cachedNodes, setup.eclassToLogical, setup.immutable_eclasses);
 
         return buildCompiledGraph(
