@@ -96,6 +96,11 @@ CacheOptimizationResult optimizeCacheCombination(
         uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
         baselineScore += cost * callCount;
     }
+    if (baselineScore == std::numeric_limits<float>::infinity())
+    {
+        std::cout << "[CacheOptimizer] WARNING: Baseline Score is inf, terminating cache optimization" << std::endl;
+        return result;
+    }
 
     std::cout << "[CacheOptimizer] Baseline Score: " << baselineScore << std::endl;
 

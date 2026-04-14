@@ -87,10 +87,9 @@ int main()
         auto j = json::parse(line);
         Record r = j.get<Record>();
         json keyObj;
-        std::stringstream uid_ss, build_ss;
+        std::stringstream uid_ss;
         uid_ss << "0x" << std::hex << r.kernelUid;
-        build_ss << "0x" << std::hex << r.buildContextId;
-        keyObj["buildContextId"] = build_ss.str();
+        keyObj["buildContextId"] = BUILD_CONTEXT_ID_STRING;
         keyObj["hwTag"] = r.hwTag;
         keyObj["inputConstants"] = r.inputConstants;
         keyObj["inputDTypes"] = r.inputDTypes;
