@@ -91,15 +91,23 @@ struct PlanningRegionState
 
     const std::vector<Region> &getRecompute(const std::unordered_set<uint32_t> &cachedNodes, uint32_t nodeId) const
     {
-        if (cachedNodes.count(nodeId) != 0 && recomputeCached.count(nodeId) != 0)
+        static const std::vector<Region> empty;
+
+        if (cachedNodes.count(nodeId) != 0)
         {
-            return recomputeCached.at(nodeId);
+            auto it = recomputeCached.find(nodeId);
+            if (it != recomputeCached.end())
+            {
+                return it->second;
+            }
         }
-        if (recompute.count(nodeId))
+        auto it = recompute.find(nodeId);
+        if (it != recompute.end())
         {
-            return recompute.at(nodeId);
+            return it->second;
         }
-        return {};
+
+        return empty;
     }
 };
 
