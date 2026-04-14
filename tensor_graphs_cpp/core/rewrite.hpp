@@ -173,19 +173,43 @@ struct FusionRule : public Rule
             if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes, pattern.rootId, protectedEClasses))
             {
                 std::vector<uint32_t> inputs;
+                std::vector<TensorNode> inputNodes;
                 inputs.reserve(pattern.variables.size());
+                inputNodes.reserve(pattern.variables.size());
                 for (uint32_t var : pattern.variables)
-                    inputs.push_back(binding[var]);
-
-                for (const auto &kernel : KernelRegistry::get().getAllKernels())
                 {
-                    if (kernel.opType == OpType::FUSED && kernel.opName == pattern.opName)
-                    {
-                        for (Backend targetBackend : kernel.backends)
-                        {
-                            addFusedNode(egraph, kernel, targetBackend, inputs, eNodeIdx);
-                        }
-                    }
+                    uint32_t parentEClassId = binding.at(var);
+                    const EClass &parent = egraph.getEClass(parentEClassId);
+                    inputs.push_back(parentEClassId);
+
+                    TensorNode inputNode;
+                    inputNode.opType = OpType::INPUT;
+                    inputNode.dtype = parent.dtype;
+                    inputNode.setShape(parent.shape);
+                    inputNode.strides = parent.strides;
+                    inputNode.viewOffset = parent.viewOffset;
+                    inputNode.backend = parent.backend;
+                    inputNodes.push_back(std::move(inputNode));
+                }
+
+                const EClass &matchedClass = egraph.getEClass(egraph.getENodeEClass(eNodeIdx));
+
+                TensorNode outputNode;
+                outputNode.opType = OpType::FUSED;
+                outputNode.opName = pattern.opName;
+                outputNode.dtype = matchedClass.dtype;
+                outputNode.setShape(matchedClass.shape);
+                outputNode.strides = matchedClass.strides;
+                outputNode.viewOffset = matchedClass.viewOffset;
+                outputNode.backend = matchedClass.backend;
+
+                std::vector<uint64_t> matches = KernelRegistry::get().findMatchingKernels(
+                    OpType::FUSED, pattern.opName, outputNode.backend, inputNodes, outputNode, {}, false);
+
+                for (uint64_t uid : matches)
+                {
+                    const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
+                    addFusedNode(egraph, kernel, outputNode.backend, inputs, eNodeIdx);
                 }
             }
         }
