@@ -157,7 +157,8 @@ public:
         const std::vector<TensorNode> &inputs,
         const TensorNode &output,
         const std::unordered_map<uint32_t, uint32_t> &refCounts = {},
-        bool referenceOnly = false) const
+        bool referenceOnly = false,
+        bool ignoreInputBackends = false) const
     {
         std::vector<uint64_t> matches;
         for (const auto &entry : entries)
@@ -192,27 +193,28 @@ public:
             {
                 Error::throw_err("[KernelRegistry.findMatchingKernels] expected # inputs to equal # input backends but got " + std::to_string(inputs.size()) + " inputs and " + std::to_string(entry.inputBackends.size()) + " input backends");
             }
-            bool inputBackendsMatch = true;
-            for (uint32_t i = 0; i < inputs.size(); ++i)
+            if (!ignoreInputBackends)
             {
-                // Map to the correct rule index for variadic inputs
-                size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
-
-                bool currentInputMatch = false;
-                for (uint32_t j = 0; j < entry.inputBackends[ruleIdx].size(); j++)
+                bool inputBackendsMatch = true;
+                for (uint32_t i = 0; i < inputs.size(); ++i)
                 {
-                    if (inputs[i].backend == entry.inputBackends[ruleIdx][j])
+                    size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                    bool currentInputMatch = false;
+                    for (uint32_t j = 0; j < entry.inputBackends[ruleIdx].size(); j++)
                     {
-                        currentInputMatch = true;
-                        break;
+                        if (inputs[i].backend == entry.inputBackends[ruleIdx][j])
+                        {
+                            currentInputMatch = true;
+                            break;
+                        }
                     }
+                    inputBackendsMatch = inputBackendsMatch && currentInputMatch;
+                    if (!inputBackendsMatch)
+                        break;
                 }
-                inputBackendsMatch = inputBackendsMatch && currentInputMatch;
                 if (!inputBackendsMatch)
-                    break;
+                    continue;
             }
-            if (!inputBackendsMatch)
-                continue;
 
             if (entry.inplace && entry.numInputs > 0)
             {

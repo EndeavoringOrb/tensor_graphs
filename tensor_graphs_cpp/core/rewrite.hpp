@@ -219,22 +219,32 @@ struct FusionRule : public Rule
 
             const EClass &matchedClass = egraph.getEClass(egraph.getENodeEClass(eNodeIdx));
 
-            TensorNode outputNode;
-            outputNode.opType = OpType::FUSED;
-            outputNode.opName = pattern.opName;
-            outputNode.dtype = matchedClass.dtype;
-            outputNode.setShape(matchedClass.shape);
-            outputNode.strides = matchedClass.strides;
-            outputNode.viewOffset = matchedClass.viewOffset;
-            outputNode.backend = matchedClass.backend;
+            // Setup the backends we want the EGraph to explore
+            std::vector<Backend> targetBackends = {Backend::CPU};
+#ifdef USE_CUDA
+            targetBackends.push_back(Backend::CUDA);
+#endif
 
-            std::vector<uint64_t> kernelMatches = KernelRegistry::get().findMatchingKernels(
-                OpType::FUSED, pattern.opName, outputNode.backend, inputNodes, outputNode, {}, false);
-
-            for (uint64_t uid : kernelMatches)
+            // Explore Fused kernels on ALL available backends
+            for (Backend targetBackend : targetBackends)
             {
-                const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
-                addFusedNode(egraph, kernel, outputNode.backend, inputs, eNodeIdx);
+                TensorNode outputNode;
+                outputNode.opType = OpType::FUSED;
+                outputNode.opName = pattern.opName;
+                outputNode.dtype = matchedClass.dtype;
+                outputNode.setShape(matchedClass.shape);
+                outputNode.strides = matchedClass.strides;
+                outputNode.viewOffset = matchedClass.viewOffset;
+                outputNode.backend = targetBackend;
+
+                std::vector<uint64_t> kernelMatches = KernelRegistry::get().findMatchingKernels(
+                    OpType::FUSED, pattern.opName, targetBackend, inputNodes, outputNode, {}, false, true);
+
+                for (uint64_t uid : kernelMatches)
+                {
+                    const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
+                    addFusedNode(egraph, kernel, targetBackend, inputs, eNodeIdx);
+                }
             }
         }
     }
