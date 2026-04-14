@@ -9,18 +9,19 @@
 #include <unordered_map>
 #include <queue>
 #include <string>
+#include <algorithm>
 
 struct Rule
 {
     virtual ~Rule() = default;
-    virtual bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const = 0;
-    virtual void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const = 0;
+    virtual bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) = 0;
+    virtual void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) = 0;
 };
 
 // a*(b+c) -> (a*b)+(a*c)
 struct DistributiveProperty : public Rule
 {
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
         const ENode enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::MUL || enode.children.size() != 2)
@@ -50,7 +51,7 @@ struct DistributiveProperty : public Rule
         return UINT32_MAX;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
         const ENode mulNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
@@ -130,6 +131,8 @@ struct FusionRule : public Rule
     };
 
     std::vector<Pattern> patterns;
+    std::vector<std::unordered_map<uint32_t, uint32_t>> bindings;
+    std::vector<uint32_t> activeMatches;
 
     FusionRule()
     {
@@ -150,67 +153,72 @@ struct FusionRule : public Rule
             pattern.dummyShapes = entry.dummyShapes;
             patterns.push_back(std::move(pattern));
         }
+
+        // Initialize pre-allocated memory structures
+        bindings.resize(patterns.size());
+        activeMatches.reserve(patterns.size());
     }
 
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
-        for (const auto &pattern : patterns)
+        activeMatches.clear();
+        for (size_t i = 0; i < patterns.size(); ++i)
         {
-            std::unordered_map<uint32_t, uint32_t> binding;
-            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes, pattern.rootId, protectedEClasses))
+            bindings[i].clear();
+            if (matchPatternNode(eNodeIdx, egraph, patterns[i].rootId, patterns[i].graph, patterns[i].variables, bindings[i], patterns[i].dtypes, patterns[i].rootId, protectedEClasses))
             {
-                return true;
+                activeMatches.push_back(static_cast<uint32_t>(i));
             }
         }
-        return false;
+        return !activeMatches.empty();
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) const override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
-        for (const auto &pattern : patterns)
+        for (uint32_t patternIdx : activeMatches)
         {
-            std::unordered_map<uint32_t, uint32_t> binding;
-            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern.graph, pattern.variables, binding, pattern.dtypes, pattern.rootId, protectedEClasses))
+            const auto &pattern = patterns[patternIdx];
+            const auto &binding = bindings[patternIdx];
+
+            std::vector<uint32_t> inputs;
+            std::vector<TensorNode> inputNodes;
+            inputs.reserve(pattern.variables.size());
+            inputNodes.reserve(pattern.variables.size());
+
+            for (uint32_t var : pattern.variables)
             {
-                std::vector<uint32_t> inputs;
-                std::vector<TensorNode> inputNodes;
-                inputs.reserve(pattern.variables.size());
-                inputNodes.reserve(pattern.variables.size());
-                for (uint32_t var : pattern.variables)
-                {
-                    uint32_t parentEClassId = binding.at(var);
-                    const EClass &parent = egraph.getEClass(parentEClassId);
-                    inputs.push_back(parentEClassId);
+                uint32_t parentEClassId = binding.at(var);
+                const EClass &parent = egraph.getEClass(parentEClassId);
+                inputs.push_back(parentEClassId);
 
-                    TensorNode inputNode;
-                    inputNode.opType = OpType::INPUT;
-                    inputNode.dtype = parent.dtype;
-                    inputNode.setShape(parent.shape);
-                    inputNode.strides = parent.strides;
-                    inputNode.viewOffset = parent.viewOffset;
-                    inputNode.backend = parent.backend;
-                    inputNodes.push_back(std::move(inputNode));
-                }
+                TensorNode inputNode;
+                inputNode.opType = OpType::INPUT;
+                inputNode.dtype = parent.dtype;
+                inputNode.setShape(parent.shape);
+                inputNode.strides = parent.strides;
+                inputNode.viewOffset = parent.viewOffset;
+                inputNode.backend = parent.backend;
+                inputNodes.push_back(std::move(inputNode));
+            }
 
-                const EClass &matchedClass = egraph.getEClass(egraph.getENodeEClass(eNodeIdx));
+            const EClass &matchedClass = egraph.getEClass(egraph.getENodeEClass(eNodeIdx));
 
-                TensorNode outputNode;
-                outputNode.opType = OpType::FUSED;
-                outputNode.opName = pattern.opName;
-                outputNode.dtype = matchedClass.dtype;
-                outputNode.setShape(matchedClass.shape);
-                outputNode.strides = matchedClass.strides;
-                outputNode.viewOffset = matchedClass.viewOffset;
-                outputNode.backend = matchedClass.backend;
+            TensorNode outputNode;
+            outputNode.opType = OpType::FUSED;
+            outputNode.opName = pattern.opName;
+            outputNode.dtype = matchedClass.dtype;
+            outputNode.setShape(matchedClass.shape);
+            outputNode.strides = matchedClass.strides;
+            outputNode.viewOffset = matchedClass.viewOffset;
+            outputNode.backend = matchedClass.backend;
 
-                std::vector<uint64_t> matches = KernelRegistry::get().findMatchingKernels(
-                    OpType::FUSED, pattern.opName, outputNode.backend, inputNodes, outputNode, {}, false);
+            std::vector<uint64_t> matches = KernelRegistry::get().findMatchingKernels(
+                OpType::FUSED, pattern.opName, outputNode.backend, inputNodes, outputNode, {}, false);
 
-                for (uint64_t uid : matches)
-                {
-                    const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
-                    addFusedNode(egraph, kernel, outputNode.backend, inputs, eNodeIdx);
-                }
+            for (uint64_t uid : matches)
+            {
+                const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
+                addFusedNode(egraph, kernel, outputNode.backend, inputs, eNodeIdx);
             }
         }
     }
@@ -246,9 +254,6 @@ struct FusionRule : public Rule
 
             if (!needCopy && !needContig)
             {
-                // The planner's extraction phase evaluates inplace safety incrementally
-                // using local_ref_counts during path traversal. We do not need to modify
-                // static ENode refCounts here to ensure correct inplace checks.
                 adaptedParents.push_back(pid);
                 continue;
             }
@@ -260,7 +265,7 @@ struct FusionRule : public Rule
                 if (needCopy)
                 {
                     TensorNode inNode;
-                    inNode.opType = OpType::INPUT; // dummy
+                    inNode.opType = OpType::INPUT;
                     inNode.dtype = currentClass.dtype;
                     inNode.setShape(currentClass.shape);
                     inNode.strides = currentClass.strides;
@@ -275,7 +280,7 @@ struct FusionRule : public Rule
 
                     auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", outNode.backend, {inNode}, outNode, {}, true);
                     if (matches.empty())
-                        return; // cannot copy
+                        return;
 
                     uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
                     for (uint64_t uid : matches)
@@ -298,7 +303,7 @@ struct FusionRule : public Rule
                 if (needContig)
                 {
                     TensorNode inNode;
-                    inNode.opType = OpType::INPUT; // dummy
+                    inNode.opType = OpType::INPUT;
                     inNode.dtype = currentClass.dtype;
                     inNode.setShape(currentClass.shape);
                     inNode.strides = currentClass.strides;
@@ -312,7 +317,7 @@ struct FusionRule : public Rule
 
                     auto matches = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", outNode.backend, {inNode}, outNode, {}, true);
                     if (matches.empty())
-                        return; // cannot make contiguous
+                        return;
 
                     uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
                     for (uint64_t uid : matches)
