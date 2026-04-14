@@ -134,6 +134,7 @@ private:
     bool isCompiled;
     uint32_t nBucketSizes = 0;
     uint64_t maxCacheMemory;
+    bool useRoiHeuristic = true;
 
     std::string cachePath;
     std::unordered_map<std::string, CompiledGraph> cachedGraphs;
@@ -876,13 +877,16 @@ public:
 
         std::cout << "[Session.ensureCacheCoverage] Starting greedy cache optimization..." << std::endl;
         Planner planner(costModel, memManager.getBufferSizes());
-        CacheOptimizationResult optResult = optimizeCacheCombination(
-            rootId,
-            graph,
-            buckets,
-            bucketCallCounts,
-            maxCacheMemory,
-            planner);
+        CacheOptimizationResult optResult;
+        if (useRoiHeuristic) {
+            std::cout << "[Session.ensureCacheCoverage] Starting greedy ROI cache optimization..." << std::endl;
+            optResult = optimizeCacheCombination(
+                rootId, graph, buckets, bucketCallCounts, maxCacheMemory, planner);
+        } else {
+            std::cout << "[Session.ensureCacheCoverage] Starting size-based cache optimization..." << std::endl;
+            optResult = optimizeCacheBySize(
+                rootId, graph, buckets, bucketCallCounts, maxCacheMemory, planner);
+        }
 
         if (optResult.foundValidCombination)
         {
