@@ -797,7 +797,8 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         // so they're available in constantStaging for shape inference
         bool isConstantParam = (kernel.opName == "Repeat_Inplace" && i > 0) ||
                                (kernel.opName == "Reshape_Inplace" && i == 1) ||
-                               (kernel.opName == "Permute_CUDA_Contiguous" && i == 1);
+                               (kernel.opName == "Permute_CUDA_Contiguous" && i == 1) ||
+                               (kernel.opName.find("SCATTER") != std::string::npos && i >= 2);
 
         if (isConstantParam)
         {
@@ -826,6 +827,29 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                         constData[j] = (j == 0 ? 1 : 0);
                     else
                         constData[j] = (int32_t)j;
+                }
+            }
+            else if (kernel.opName.find("SCATTER") != std::string::npos)
+            {
+                if (i == 2) // starts
+                {
+                    for (size_t j = 0; j < elements; ++j)
+                        constData[j] = 0;
+                }
+                else if (i == 3) // ends
+                {
+                    for (size_t j = 0; j < elements; ++j)
+                    {
+                        if (j < kernel.dummyShapes[0].size())
+                            constData[j] = kernel.dummyShapes[0][j];
+                        else
+                            constData[j] = 1;
+                    }
+                }
+                else if (i == 4) // steps
+                {
+                    for (size_t j = 0; j < elements; ++j)
+                        constData[j] = 1;
                 }
             }
 

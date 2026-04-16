@@ -6,15 +6,13 @@
 
 inline bool matchMulFP32_3D_Scalar_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
-    if (inputs.size() != 2)
-        return false;
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
     if (inputs[0].getShape().size() != 3 || inputs[1].getShape().size() != 1 || inputs[1].getShape()[0] != 1)
         return false;
     if (inputs[0].getShape() != output.getShape())
         return false;
-    if (!isContiguous(inputs[0]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
     if (inputs[0].storageType == StorageType::PERSISTENT)
         return false;

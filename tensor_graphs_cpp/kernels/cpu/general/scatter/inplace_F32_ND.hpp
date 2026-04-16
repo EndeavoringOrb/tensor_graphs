@@ -1,4 +1,3 @@
-// tensor_graphs_cpp/kernels/cpu/reference/scatter/F32_ND.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -6,7 +5,6 @@
 
 inline bool matchScatterF32_ND_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
-    if (inputs.size() != 5) return false;
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32) return false;
     if (inputs[0].storageType == StorageType::PERSISTENT) return false;
     auto it = refCounts.find(inputs[0].id);
@@ -68,4 +66,9 @@ inline void runInplaceScatterF32_ND(const std::vector<const void *> &inputs, con
     }
 }
 
-REGISTER_REF_KERNEL_INPLACE(OpType::SCATTER, 5, matchScatterF32_ND_Inplace, runInplaceScatterF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {8}, {8}, {8}}, {false, false, false, false, false}, {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+uint32_t refFactoryScatterF32_ND_Inplace(const std::vector<uint32_t> &inputs, Graph &graph)
+{
+    return graph.scatter(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
+}
+
+REGISTER_KERNEL_INPLACE("SCATTER_inplace", 5, matchScatterF32_ND_Inplace, runInplaceScatterF32_ND, refFactoryScatterF32_ND_Inplace, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {8}, {8}, {8}}, {false, false, false, false, false}, {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
