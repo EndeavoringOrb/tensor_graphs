@@ -57,8 +57,6 @@ inline bool matchContiguous_CUDA_ND(const std::vector<TensorNode> &inputs, const
 {
     const auto &in = inputs[0];
 
-    if (in.backend != Backend::CUDA || output.backend != Backend::CUDA)
-        return false;
     if (in.dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
 

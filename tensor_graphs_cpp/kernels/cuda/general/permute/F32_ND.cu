@@ -57,8 +57,6 @@ inline bool matchPermute_CUDA_ND(const std::vector<TensorNode> &inputs, const Te
     const auto &data = inputs[0];
     const auto &perm = inputs[1];
 
-    if (data.backend != Backend::CUDA || output.backend != Backend::CUDA)
-        return false;
     if (data.dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
     if (perm.dtype != DType::INT32)

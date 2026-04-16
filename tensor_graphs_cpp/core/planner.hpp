@@ -589,6 +589,9 @@ private:
     {
         std::vector<std::unique_ptr<Rule>> rules;
         rules.emplace_back(std::make_unique<FusionRule>());
+        rules.emplace_back(std::make_unique<CopyToOfContiguous>());
+        rules.emplace_back(std::make_unique<ContiguousOfCopyTo>());
+        // rules.emplace_back(std::make_unique<DistributiveProperty>());
 
         size_t iterations = 0;
         bool changed = true;
