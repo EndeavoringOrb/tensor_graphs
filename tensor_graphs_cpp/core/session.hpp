@@ -134,7 +134,7 @@ private:
     bool isCompiled;
     uint32_t nBucketSizes = 0;
     uint64_t maxCacheMemory;
-    bool useRoiHeuristic = false;
+    CacheHeuristic cacheHeuristic = CacheHeuristic::FUSION;
 
     std::string cachePath;
     std::unordered_map<std::string, CompiledGraph> cachedGraphs;
@@ -875,14 +875,24 @@ public:
         }
         std::string fullKey = encodeCacheKey(fullInputRegions);
 
-        std::cout << "[Session.ensureCacheCoverage] Starting greedy cache optimization..." << std::endl;
+        std::cout << "[Session.ensureCacheCoverage] Starting cache optimization..." << std::endl;
         Planner planner(costModel, memManager.getBufferSizes());
         CacheOptimizationResult optResult;
-        if (useRoiHeuristic) {
+
+        if (cacheHeuristic == CacheHeuristic::ROI)
+        {
             std::cout << "[Session.ensureCacheCoverage] Starting greedy ROI cache optimization..." << std::endl;
             optResult = optimizeCacheCombination(
                 rootId, graph, buckets, bucketCallCounts, maxCacheMemory, planner);
-        } else {
+        }
+        else if (cacheHeuristic == CacheHeuristic::FUSION)
+        {
+            std::cout << "[Session.ensureCacheCoverage] Starting fusion-based cache optimization..." << std::endl;
+            optResult = optimizeCacheByFusion(
+                rootId, graph, buckets, fullKey, bucketCallCounts, maxCacheMemory, planner);
+        }
+        else
+        {
             std::cout << "[Session.ensureCacheCoverage] Starting size-based cache optimization..." << std::endl;
             optResult = optimizeCacheBySize(
                 rootId, graph, buckets, bucketCallCounts, maxCacheMemory, planner);

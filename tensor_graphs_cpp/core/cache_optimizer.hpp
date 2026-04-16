@@ -15,6 +15,13 @@
 #include <thread>
 #include <mutex>
 
+enum class CacheHeuristic
+{
+    SIZE,
+    ROI,
+    FUSION
+};
+
 struct BucketPlanRequest
 {
     std::string key;
@@ -211,6 +218,106 @@ CacheOptimizationResult optimizeCacheCombination(
     for (const BucketPlanRequest &bucket : buckets)
     {
         CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, selectedCachedNodes, regionStates[bucket.key]);
+        float cost = getPlanRuntime(plan);
+        auto countIt = bucketCallCounts.find(bucket.key);
+        uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
+        finalScore += cost * callCount;
+        plans[bucket.key] = std::move(plan);
+    }
+
+    result.bestCachedNodes = std::move(selectedCachedNodes);
+    result.bucketPlans = std::move(plans);
+    result.runtimeScore = finalScore;
+    result.foundValidCombination = true;
+
+    return result;
+}
+
+CacheOptimizationResult optimizeCacheByFusion(
+    uint32_t rootId,
+    Graph &graph,
+    const std::vector<BucketPlanRequest> &buckets,
+    const std::string &fullKey,
+    const std::unordered_map<std::string, uint64_t> &bucketCallCounts,
+    uint64_t maxCacheMemory,
+    Planner &planner,
+    bool doSaturate = true)
+{
+    CacheOptimizationResult result;
+    if (buckets.empty())
+        return result;
+
+    const std::vector<uint32_t> cacheableNodes = collectCacheableNodes(graph);
+    const std::unordered_map<uint32_t, uint64_t> nodeMemorySizes = buildLogicalNodeMemorySizes(graph, cacheableNodes);
+
+    std::cout << "[CacheOptimizer] Planning full bucket to find unfused nodes..." << std::endl;
+
+    std::unordered_map<std::string, PlanningRegionState> regionStates;
+    std::unordered_set<uint32_t> survivingLogicalNodes;
+
+    // First, plan all buckets to get regionStates, but explicitly extract survivors from the full bucket
+    for (const BucketPlanRequest &bucket : buckets)
+    {
+        regionStates[bucket.key] = derivePlanningRegions(rootId, graph, bucket.bucket.regions);
+
+        if (bucket.key == fullKey)
+        {
+            CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {}, regionStates[bucket.key], doSaturate);
+            for (const auto &kv : plan.physicalToLogicalNodeMap)
+            {
+                if (kv.second != UINT32_MAX)
+                {
+                    survivingLogicalNodes.insert(kv.second);
+                }
+            }
+        }
+    }
+
+    std::cout << "[CacheOptimizer] Sorting surviving nodes by size..." << std::endl;
+    std::vector<uint32_t> candidateNodes;
+    for (uint32_t id : cacheableNodes)
+    {
+        if (survivingLogicalNodes.count(id))
+        {
+            candidateNodes.push_back(id);
+        }
+    }
+
+    std::sort(candidateNodes.begin(), candidateNodes.end(), [&](uint32_t a, uint32_t b)
+              {
+                  uint64_t sizeA = nodeMemorySizes.at(a);
+                  uint64_t sizeB = nodeMemorySizes.at(b);
+                  if (sizeA != sizeB)
+                      return sizeA > sizeB;
+                  return a < b; // stable tie-break
+              });
+
+    std::unordered_set<uint32_t> selectedCachedNodes;
+    uint64_t currentCacheMem = 0;
+
+    for (uint32_t nodeId : candidateNodes)
+    {
+        uint64_t nodeSize = nodeMemorySizes.at(nodeId);
+        if (currentCacheMem + nodeSize <= maxCacheMemory)
+        {
+            selectedCachedNodes.insert(nodeId);
+            currentCacheMem += nodeSize;
+            std::cout << "[CacheOptimizer] Selected Node " << nodeId
+                      << " | Size: " << nodeSize << " bytes" << std::endl;
+        }
+    }
+
+    std::cout << "[CacheOptimizer] Final fusion-based cache set: " << selectedCachedNodes.size()
+              << " nodes, using " << currentCacheMem << " bytes." << std::endl;
+
+    std::unordered_map<std::string, CompiledGraph> plans;
+    float finalScore = 0.0f;
+
+    std::cout << "[CacheOptimizer] Generating plans for " << buckets.size() << " buckets..." << std::endl;
+    for (const BucketPlanRequest &bucket : buckets)
+    {
+        CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, selectedCachedNodes, regionStates[bucket.key], doSaturate);
+
         float cost = getPlanRuntime(plan);
         auto countIt = bucketCallCounts.find(bucket.key);
         uint64_t callCount = (countIt != bucketCallCounts.end()) ? countIt->second : 1;
