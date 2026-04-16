@@ -44,8 +44,7 @@ __global__ void gatherKernelBytes(const uint8_t *__restrict__ src,
 // Matcher
 // ------------------------------------------------------------
 inline bool matchCopyTo_CUDA_CPU(const std::vector<TensorNode> &inputs,
-                                 const TensorNode &output,
-                                 const std::unordered_map<uint32_t, uint32_t> &)
+                                 const TensorNode &output)
 {
     if (inputs.size() != 1)
         return false;

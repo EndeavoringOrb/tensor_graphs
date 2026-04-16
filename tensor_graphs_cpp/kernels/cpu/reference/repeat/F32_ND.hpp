@@ -3,7 +3,7 @@
 #include "core/kernels.hpp"
 #include "core/graph.hpp"
 
-inline bool matchRepeatView(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchRepeatView(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // Inputs: Data (0), Repeats (1), Axis (2)
     if (inputs.size() != 3)

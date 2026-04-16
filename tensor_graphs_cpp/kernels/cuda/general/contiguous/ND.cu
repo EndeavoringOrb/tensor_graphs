@@ -53,7 +53,7 @@ namespace ContiguousCUDA
  * Match Function:
  * Requires Rank <= 8, Input backend CUDA, Output backend CUDA, and Output must be contiguous.
  */
-inline bool matchContiguous_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchContiguous_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     const auto &in = inputs[0];
 

@@ -238,7 +238,7 @@ struct FusionRule : public Rule
                 outputNode.backend = targetBackend;
 
                 std::vector<uint64_t> kernelMatches = KernelRegistry::get().findMatchingKernels(
-                    OpType::FUSED, pattern.opName, targetBackend, inputNodes, outputNode, {}, false, true, true);
+                    OpType::FUSED, pattern.opName, targetBackend, inputNodes, outputNode, false, true, true);
 
                 for (uint64_t uid : kernelMatches)
                 {
@@ -304,7 +304,7 @@ struct FusionRule : public Rule
                 outNode.strides = calcContiguousStrides(outNode.getShape());
                 outNode.viewOffset = 0;
 
-                auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", outNode.backend, {inNode}, outNode, {}, true);
+                auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", outNode.backend, {inNode}, outNode, true);
                 if (matches.empty())
                     return;
 
@@ -341,7 +341,7 @@ struct FusionRule : public Rule
                 outNode.strides = calcContiguousStrides(outNode.getShape());
                 outNode.viewOffset = 0;
 
-                auto matches = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", outNode.backend, {inNode}, outNode, {}, true);
+                auto matches = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", outNode.backend, {inNode}, outNode, true);
                 if (matches.empty())
                     return;
 
@@ -413,7 +413,7 @@ struct FusionRule : public Rule
             dummyOut.strides = calcContiguousStrides(dummyOut.getShape());
             dummyOut.viewOffset = 0;
 
-            auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", dummyOut.backend, {dummyIn}, dummyOut, {}, true);
+            auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", dummyOut.backend, {dummyIn}, dummyOut, true);
             for (uint64_t uid : matches)
             {
                 ENode copyNode;
@@ -561,7 +561,7 @@ struct CopyToOfContiguous : public Rule
         copyOutNode.viewOffset = 0;
 
         auto copyMatches = KernelRegistry::get().findMatchingKernels(
-            OpType::COPY_TO, "", copyOutNode.backend, {copyInNode}, copyOutNode, {}, true);
+            OpType::COPY_TO, "", copyOutNode.backend, {copyInNode}, copyOutNode, true);
         if (copyMatches.empty())
             return;
 
@@ -580,7 +580,7 @@ struct CopyToOfContiguous : public Rule
         contigOutNode.viewOffset = 0;
 
         auto contigMatches = KernelRegistry::get().findMatchingKernels(
-            OpType::CONTIGUOUS, "", contigOutNode.backend, {contigInNode}, contigOutNode, {}, true);
+            OpType::CONTIGUOUS, "", contigOutNode.backend, {contigInNode}, contigOutNode, true);
         if (contigMatches.empty())
             return;
 
@@ -678,7 +678,7 @@ struct ContiguousOfCopyTo : public Rule
         contigOutNode.viewOffset = 0;
 
         auto contigMatches = KernelRegistry::get().findMatchingKernels(
-            OpType::CONTIGUOUS, "", contigOutNode.backend, {contigInNode}, contigOutNode, {}, true);
+            OpType::CONTIGUOUS, "", contigOutNode.backend, {contigInNode}, contigOutNode, true);
         if (contigMatches.empty())
             return;
 
@@ -698,7 +698,7 @@ struct ContiguousOfCopyTo : public Rule
         copyOutNode.viewOffset = 0;
 
         auto copyMatches = KernelRegistry::get().findMatchingKernels(
-            OpType::COPY_TO, "", copyOutNode.backend, {copyInNode}, copyOutNode, {}, true);
+            OpType::COPY_TO, "", copyOutNode.backend, {copyInNode}, copyOutNode, true);
         if (copyMatches.empty())
             return;
 

@@ -12,7 +12,7 @@
  * Implementation: IKJ loop order to maximize cache hits and SIMD throughput.
  * Parallelization: Distributed across Batch (B) and Row (M) dimensions.
  */
-inline bool matchDotF32_3D_Optimized(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchDotF32_3D_Optimized(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;

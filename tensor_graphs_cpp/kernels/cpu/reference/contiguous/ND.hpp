@@ -9,7 +9,7 @@
  * Operation: Copies data from a potentially strided source to a contiguous destination.
  */
 
-inline bool matchContiguous_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchContiguous_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs.size() != 1)
         return false;

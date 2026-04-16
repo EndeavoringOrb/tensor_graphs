@@ -3,7 +3,7 @@
 #include "core/kernels.hpp"
 #include <cstring>
 
-inline bool matchReshapeView(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchReshapeView(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs.size() != 2)
         return false;

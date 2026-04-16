@@ -9,7 +9,7 @@
  * integers to 32-bit floating point numbers.
  */
 
-inline bool matchCastI32_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchCastI32_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs.size() != 1)
         return false;

@@ -2,7 +2,7 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
-inline bool matchAddF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchAddF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs.size() != 2) return false;
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32) return false;
@@ -27,3 +27,4 @@ inline void runAddF32_ND(const std::vector<const void *> &inputs, const std::vec
 }
 
 REGISTER_REF_KERNEL(OpType::ADD, 2, matchAddF32_ND, runAddF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{8, 32}, {8, 32}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
+

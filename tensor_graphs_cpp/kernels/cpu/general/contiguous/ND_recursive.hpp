@@ -66,7 +66,7 @@ namespace detail
     }
 }
 
-inline bool matchRecursiveContiguous_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchRecursiveContiguous_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     const auto &in = inputs[0];
 
@@ -190,3 +190,4 @@ REGISTER_KERNEL(
     {{8, 32}},
     {false},
     {{Backend::CPU}});
+

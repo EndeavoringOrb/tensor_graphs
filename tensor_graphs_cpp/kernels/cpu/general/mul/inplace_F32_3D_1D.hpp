@@ -4,7 +4,7 @@
 #include "core/kernels.hpp"
 #include <vector>
 
-inline bool matchMulFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchMulFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
@@ -17,9 +17,6 @@ inline bool matchMulFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, co
     if (!isContiguous(output))
         return false;
     if (inputs[0].storageType == StorageType::PERSISTENT)
-        return false;
-    auto it = refCounts.find(inputs[0].id);
-    if (it == refCounts.end() || it->second != 1)
         return false;
     return true;
 }

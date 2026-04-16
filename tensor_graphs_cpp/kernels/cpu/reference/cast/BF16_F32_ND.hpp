@@ -16,7 +16,7 @@
  * Match Function:
  * Validates that input is BF16, output is F32, shapes match, and both are contiguous.
  */
-inline bool matchCastBF16_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchCastBF16_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs.size() != 1)
         return false;

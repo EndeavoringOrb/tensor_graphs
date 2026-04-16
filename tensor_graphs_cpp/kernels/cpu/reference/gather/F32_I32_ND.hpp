@@ -9,7 +9,7 @@
  * Logic: For each index in the indices tensor, copy a 'row' from the data tensor.
  */
 
-inline bool matchGatherF32_I32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchGatherF32_I32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs.size() != 2)
         return false;

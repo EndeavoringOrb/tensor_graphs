@@ -4,7 +4,7 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
-inline bool matchSliceView(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchSliceView(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     return inputs.size() == 4;
 }
@@ -33,3 +33,4 @@ inline void inferViewSlice(TensorNode &node, const std::vector<TensorNode> &inpu
 }
 
 REGISTER_REF_KERNEL_VIEW(OpType::SLICE, 4, matchSliceView, inferViewSlice, {Backend::CPU, Backend::CUDA}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}, {1}}, {false, false, false, false}, {{Backend::CPU, Backend::CUDA}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+

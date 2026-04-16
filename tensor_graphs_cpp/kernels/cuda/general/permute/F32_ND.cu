@@ -52,7 +52,7 @@ namespace PermuteCUDA
  * Match Function:
  * Requires Rank <= 8, both tensors contiguous, and CUDA backend.
  */
-inline bool matchPermute_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchPermute_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     const auto &data = inputs[0];
     const auto &perm = inputs[1];

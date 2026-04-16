@@ -10,7 +10,7 @@
 
 // A matching function checks the context of the requested operation to determine
 // if the kernel supports the specific layout, rank, dimensions, or dtypes.
-using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts);
+using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
 
 // The execution function receives raw pointers dynamically mapped to the device buffer,
 // alongside the TensorViews to access strides and shapes during execution.
@@ -156,7 +156,6 @@ public:
         Backend backend,
         const std::vector<TensorNode> &inputs,
         const TensorNode &output,
-        const std::unordered_map<uint32_t, uint32_t> &refCounts = {},
         bool referenceOnly = false,
         bool ignoreInputBackends = false,
         bool ignoreInputContig = false) const
@@ -244,7 +243,7 @@ public:
                     continue;
             }
 
-            if (entry.match(inputs, output, refCounts))
+            if (entry.match(inputs, output))
             {
                 matches.push_back(entry.uid);
             }

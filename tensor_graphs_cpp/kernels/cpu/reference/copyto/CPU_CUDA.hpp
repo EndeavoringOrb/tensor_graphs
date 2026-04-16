@@ -31,7 +31,7 @@ __global__ void unpackKernelBytes(const uint8_t *__restrict__ src,
         dstPtr[b] = srcPtr[b];
 }
 
-inline bool matchCopyTo_CPU_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &)
+inline bool matchCopyTo_CPU_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     return (inputs.size() == 1 && inputs[0].backend == Backend::CPU && output.backend == Backend::CUDA && inputs[0].dtype == output.dtype && inputs[0].getShape() == output.getShape());
 }

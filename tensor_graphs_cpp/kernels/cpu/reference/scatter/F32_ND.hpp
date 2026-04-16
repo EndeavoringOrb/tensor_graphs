@@ -4,7 +4,7 @@
 #include "core/kernels.hpp"
 #include <cstring>
 
-inline bool matchScatterF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchScatterF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     return inputs.size() == 5 &&
            inputs[0].dtype == DType::FLOAT32 &&

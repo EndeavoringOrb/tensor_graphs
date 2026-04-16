@@ -799,7 +799,7 @@ private:
                 inputs.push_back(result.planningGraph.graph.getNode(pid));
 
             std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, node.backend, inputs, node, refCounts, true);
+                node.opType, node.opName, node.backend, inputs, node, true);
             if (refs.empty())
             {
                 Error::throw_err("No reference kernel found for node " + toString(node, result.planningGraph.graph, ""));
