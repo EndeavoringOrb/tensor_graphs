@@ -170,11 +170,6 @@ public:
             if (entry.opType != op)
                 continue;
 
-            if (inputs.size() != entry.numInputs)
-            {
-                Error::throw_err("[KernelRegistry.findMatchingKernels] expected " + std::to_string(entry.numInputs) + " inputs but got " + std::to_string(inputs.size()));
-            }
-
             bool backendFound = false;
             for (auto b : entry.backends)
             {
@@ -195,9 +190,9 @@ public:
                 if (inputs.size() < 2)
                     continue; // Must have at least 1 tensor + 1 axis
             }
-            else if (inputs.size() != entry.inputBackends.size())
+            else if (inputs.size() != entry.numInputs)
             {
-                Error::throw_err("[KernelRegistry.findMatchingKernels] expected # inputs to equal # input backends but got " + std::to_string(inputs.size()) + " inputs and " + std::to_string(entry.inputBackends.size()) + " input backends");
+                Error::throw_err("[KernelRegistry.findMatchingKernels] expected " + std::to_string(entry.numInputs) + " inputs but got " + std::to_string(inputs.size()));
             }
             if (!ignoreInputBackends)
             {
