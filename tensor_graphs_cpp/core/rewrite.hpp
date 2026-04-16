@@ -238,7 +238,7 @@ struct FusionRule : public Rule
                 outputNode.backend = targetBackend;
 
                 std::vector<uint64_t> kernelMatches = KernelRegistry::get().findMatchingKernels(
-                    OpType::FUSED, pattern.opName, targetBackend, inputNodes, outputNode, {}, false, true);
+                    OpType::FUSED, pattern.opName, targetBackend, inputNodes, outputNode, {}, false, true, true);
 
                 for (uint64_t uid : kernelMatches)
                 {

@@ -21,3 +21,5 @@ PERFORMANCE:
 -constant folding?
 
 is it properly slicing backward gather for the first gather with gather(embeddings, input_seq)?
+
+remove duplicate logic from kernel match functions and findMatchingKernels
