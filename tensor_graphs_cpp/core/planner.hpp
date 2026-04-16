@@ -89,7 +89,7 @@ struct PlanningRegionState
     std::unordered_map<uint32_t, std::vector<Region>> needed;
 
     const std::vector<Region> *getRecompute(
-        const std::unordered_set<uint32_t> &cachedNodes,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
         uint32_t nodeId) const
     {
         if (cachedNodes.count(nodeId) != 0)
@@ -246,7 +246,7 @@ public:
     CacheAwarePlanningGraphBuilder(
         const Graph &sourceGraph,
         const PlanningRegionState &regionState,
-        const std::unordered_set<uint32_t> &cachedNodes)
+        const std::unordered_map<uint32_t, Backend> &cachedNodes)
         : sourceGraph(sourceGraph), regionState(regionState), cachedNodes(cachedNodes)
     {
         result.graph = sourceGraph;
@@ -267,7 +267,7 @@ private:
 
     const Graph &sourceGraph;
     const PlanningRegionState &regionState;
-    const std::unordered_set<uint32_t> &cachedNodes;
+    const std::unordered_map<uint32_t, Backend> &cachedNodes;
     ShapePropagator prop;
     CacheAwarePlanningGraph result;
     std::unordered_map<uint32_t, uint32_t> memoizedPhysicalIds;
@@ -341,6 +341,10 @@ private:
         TensorNode &placeholder = result.graph.getNode(logicalId);
         placeholder.opType = OpType::INPUT;
         placeholder.storageType = StorageType::PINNED;
+        if (cachedNodes.count(logicalId))
+        {
+            placeholder.backend = cachedNodes.at(logicalId);
+        }
         placeholder.parentIds.clear();
         result.physicalToLogicalNodeMap[logicalId] = logicalId;
     }
@@ -415,6 +419,11 @@ private:
         const TensorNode &sourceNode = sourceGraph.getNode(logicalId);
         if (sourceNode.opType == OpType::INPUT)
         {
+            TensorNode &placeholder = result.graph.getNode(logicalId);
+            if (cachedNodes.count(logicalId))
+            {
+                placeholder.backend = cachedNodes.at(logicalId);
+            }
             result.logicalToPhysicalNodeMap[logicalId] = logicalId;
             result.physicalToLogicalNodeMap[logicalId] = logicalId;
             memoizedPhysicalIds[logicalId] = logicalId;
@@ -484,7 +493,7 @@ static CacheAwarePlanningGraph buildCacheAwarePlanningGraph(
     uint32_t rootId,
     const Graph &graph,
     const PlanningRegionState &regionState,
-    const std::unordered_set<uint32_t> &cachedNodes)
+    const std::unordered_map<uint32_t, Backend> &cachedNodes)
 {
     CacheAwarePlanningGraphBuilder builder(graph, regionState, cachedNodes);
     return builder.build(rootId);
@@ -638,7 +647,7 @@ private:
         const std::unordered_map<uint32_t, uint32_t> &selection_map,
         const std::vector<ENodeInfo> &enodeInfos,
         uint32_t root,
-        const std::unordered_set<uint32_t> &cachedNodes,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
         const std::unordered_map<uint32_t, uint32_t> &eclassToLogical) const
     {
         auto ref = build_ref_counts(egraph, selection_map, root);
@@ -710,7 +719,7 @@ private:
         uint32_t rootId,
         const Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
-        const std::unordered_set<uint32_t> &cachedNodes,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
         bool doSaturate,
         PlanningRegionState &regionState)
     {
@@ -814,8 +823,9 @@ private:
         }
 
         std::unordered_set<uint32_t> protectedEClasses;
-        for (uint32_t logicalId : cachedNodes)
+        for (const auto& kv : cachedNodes)
         {
+            uint32_t logicalId = kv.first;
             auto it = result.planningGraph.logicalToPhysicalNodeMap.find(logicalId);
             if (it != result.planningGraph.logicalToPhysicalNodeMap.end())
             {
@@ -865,13 +875,14 @@ private:
         return result;
     }
 
-    ExtractionResult extractBest(const uint32_t rootId, EGraph &egraph,
+    ExtractionResult extractBest(const uint32_t rootId, const Graph &graph, EGraph &egraph,
                                  const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
                                  const std::unordered_map<Backend, uint64_t> &maxMemoryByBackend,
-                                 const std::unordered_set<uint32_t> &cachedNodes,
+                                 const std::unordered_map<uint32_t, Backend> &cachedNodes,
                                  const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
                                  const std::unordered_set<uint32_t> &immutable_eclasses,
-                                 bool stopOnFirstValid = false)
+                                 bool stopOnFirstValid = false,
+                                 bool cheapInputCopy = false)
     {
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
         for (size_t i = 0; i < egraph.getENodes().size(); ++i)
@@ -898,39 +909,61 @@ private:
             }
             else if (enode.kernelUid != 0)
             {
-                std::vector<std::vector<uint32_t>> inShapes;
-                std::vector<std::vector<uint64_t>> inStrides;
-                std::vector<DType> inDTypes;
-                std::vector<std::vector<uint8_t>> inConstants;
-
-                for (uint32_t childEClassId : enode.children)
+                bool isCheapCopy = false;
+                if (cheapInputCopy && enode.opType == OpType::COPY_TO && enode.children.size() == 1)
                 {
-                    const EClass &childCls = egraph.getEClass(childEClassId);
-                    inShapes.push_back(childCls.shape);
-
-                    std::vector<uint64_t> strides_cast;
-                    for (uint64_t s : childCls.strides)
-                        strides_cast.push_back(s);
-                    inStrides.push_back(strides_cast);
-
-                    inDTypes.push_back(childCls.dtype);
-
-                    if (egraph.constantStaging.count(childEClassId))
+                    uint32_t childEClassId = egraph.find(enode.children[0]);
+                    uint32_t logicalId = eclassToLogical.count(childEClassId) ? eclassToLogical.at(childEClassId) : UINT32_MAX;
+                    if (logicalId != UINT32_MAX && graph.hasNode(logicalId))
                     {
-                        inConstants.push_back(egraph.constantStaging.at(childEClassId));
-                    }
-                    else
-                    {
-                        inConstants.push_back({});
+                        const TensorNode &childLogicalNode = graph.getNode(logicalId);
+                        if (childLogicalNode.opType == OpType::INPUT && childLogicalNode.storageType == StorageType::PERSISTENT)
+                        {
+                            isCheapCopy = true;
+                        }
                     }
                 }
 
-                info.cost = costModel.estimateCost(
-                    enode.kernelUid,
-                    enode.shape,
-                    enode.strides,
-                    enode.dtype,
-                    inShapes, inStrides, inDTypes, inConstants);
+                if (isCheapCopy)
+                {
+                    info.cost = 0.0f;
+                }
+                else
+                {
+                    std::vector<std::vector<uint32_t>> inShapes;
+                    std::vector<std::vector<uint64_t>> inStrides;
+                    std::vector<DType> inDTypes;
+                    std::vector<std::vector<uint8_t>> inConstants;
+
+                    for (uint32_t childEClassId : enode.children)
+                    {
+                        const EClass &childCls = egraph.getEClass(childEClassId);
+                        inShapes.push_back(childCls.shape);
+
+                        std::vector<uint64_t> strides_cast;
+                        for (uint64_t s : childCls.strides)
+                            strides_cast.push_back(s);
+                        inStrides.push_back(strides_cast);
+
+                        inDTypes.push_back(childCls.dtype);
+
+                        if (egraph.constantStaging.count(childEClassId))
+                        {
+                            inConstants.push_back(egraph.constantStaging.at(childEClassId));
+                        }
+                        else
+                        {
+                            inConstants.push_back({});
+                        }
+                    }
+
+                    info.cost = costModel.estimateCost(
+                        enode.kernelUid,
+                        enode.shape,
+                        enode.strides,
+                        enode.dtype,
+                        inShapes, inStrides, inDTypes, inConstants);
+                }
 
                 if (info.inplace && info.inplace_idx >= 0)
                 {
@@ -1355,7 +1388,7 @@ private:
         const ExtractionResult &extraction,
         const std::unordered_map<uint32_t, uint32_t> &logicalToPhysicalNodeMap,
         const std::unordered_map<uint32_t, uint32_t> &physicalToLogicalNodeMap,
-        const std::unordered_set<uint32_t> &cachedNodes,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
         const std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
     {
         CompiledGraph compiled;
@@ -1467,14 +1500,15 @@ public:
     Planner(CostModel &costModel, std::unordered_map<Backend, uint64_t> maxMemoryByBackend = {})
         : costModel(costModel), maxMemoryByBackend(std::move(maxMemoryByBackend)) {}
 
-    float extractFirstValidCost(const uint32_t rootId, EGraph &egraph,
+    float extractFirstValidCost(const uint32_t rootId, const Graph &graph, EGraph &egraph,
                                 const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
                                 const std::unordered_map<Backend, uint64_t> &maxMemoryByBackend,
-                                const std::unordered_set<uint32_t> &cachedNodes,
+                                const std::unordered_map<uint32_t, Backend> &cachedNodes,
                                 const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
-                                const std::unordered_set<uint32_t> &immutable_eclasses)
+                                const std::unordered_set<uint32_t> &immutable_eclasses,
+                                bool cheapInputCopy = false)
     {
-        return extractBest(rootId, egraph, nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, true).totalCost;
+        return extractBest(rootId, graph, egraph, nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, true, cheapInputCopy).totalCost;
     }
 
     float estimateCostForCacheSet(
@@ -1482,12 +1516,13 @@ public:
         const Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
-        const std::unordered_set<uint32_t> &cachedNodes,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
         PlanningRegionState &regionState,
-        bool doSaturate = true)
+        bool doSaturate = true,
+        bool cheapInputCopy = false)
     {
         auto setup = setupEGraph(rootId, graph, dirtyOutputRegions, cachedNodes, doSaturate, regionState);
-        return extractFirstValidCost(setup.planningGraph.physicalRootId, setup.egraph, setup.nodeToEClass, maxMemoryByBackend, cachedNodes, setup.eclassToLogical, setup.immutable_eclasses);
+        return extractFirstValidCost(setup.planningGraph.physicalRootId, graph, setup.egraph, setup.nodeToEClass, maxMemoryByBackend, cachedNodes, setup.eclassToLogical, setup.immutable_eclasses, cheapInputCopy);
     }
 
     CompiledGraph plan(
@@ -1495,10 +1530,10 @@ public:
         Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
-        const std::unordered_set<uint32_t> &cachedNodes, PlanningRegionState &regionState, bool doSaturate = true)
+        const std::unordered_map<uint32_t, Backend> &cachedNodes, PlanningRegionState &regionState, bool doSaturate = true, bool cheapInputCopy = false)
     {
         auto setup = setupEGraph(rootId, graph, dirtyOutputRegions, cachedNodes, doSaturate, regionState);
-        auto extraction = extractBest(setup.planningGraph.physicalRootId, setup.egraph, setup.nodeToEClass, maxMemoryByBackend, cachedNodes, setup.eclassToLogical, setup.immutable_eclasses);
+        auto extraction = extractBest(setup.planningGraph.physicalRootId, graph, setup.egraph, setup.nodeToEClass, maxMemoryByBackend, cachedNodes, setup.eclassToLogical, setup.immutable_eclasses, false, cheapInputCopy);
 
         return buildCompiledGraph(
             setup.planningGraph.physicalRootId,

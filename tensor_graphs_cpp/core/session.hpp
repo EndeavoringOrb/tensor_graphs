@@ -134,12 +134,11 @@ private:
     bool isCompiled;
     uint32_t nBucketSizes = 0;
     uint64_t maxCacheMemory;
-    CacheHeuristic cacheHeuristic = CacheHeuristic::FUSION;
 
     std::string cachePath;
     std::unordered_map<std::string, CompiledGraph> cachedGraphs;
     std::unordered_map<std::string, DirtyBucket> cachedBuckets;
-    std::unordered_set<uint32_t> selectedCachedNodes;
+    std::unordered_map<uint32_t, Backend> selectedCachedNodes;
 
     // Bucket call tracking for cache optimization
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
@@ -214,7 +213,7 @@ private:
         return atomicTopo;
     }
 
-    CompiledGraph compileBucketPlan(const BucketPlanRequest &request, const std::unordered_set<uint32_t> &cachedNodes, bool doSaturate = true)
+    CompiledGraph compileBucketPlan(const BucketPlanRequest &request, const std::unordered_map<uint32_t, Backend> &cachedNodes, bool doSaturate = true)
     {
         Graph planningGraph = graph;
         Planner planner(costModel, memManager.getBufferSizes());
@@ -234,7 +233,7 @@ private:
                 continue;
 
             uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
-            uint64_t offset = memManager.allocate(node.backend, logicalId, sizeBytes, StorageType::PERSISTENT);
+            memManager.allocate(node.backend, logicalId, sizeBytes, StorageType::PERSISTENT);
 
             if (graph.constantStaging.count(node.id))
             {
@@ -244,8 +243,9 @@ private:
             {
                 const auto &source = graph.weightSources.at(node.id);
                 auto &loader = graph.loaders.at(source.first);
-                uint8_t *destPtr = memManager.buffers.at(node.backend).arena_ptr + offset;
-                loader->loadTensor(source.second, destPtr, sizeBytes);
+                std::vector<uint8_t> temp(sizeBytes);
+                loader->loadTensor(source.second, temp.data(), sizeBytes);
+                memManager.write(node.backend, logicalId, temp.data(), sizeBytes);
             }
         }
     }
@@ -399,14 +399,17 @@ private:
         if (!file.is_open())
             return;
 
-        std::vector<uint32_t> cachedNodeIds(selectedCachedNodes.begin(), selectedCachedNodes.end());
-        std::sort(cachedNodeIds.begin(), cachedNodeIds.end());
+        json cachedNodesJson = json::object();
+        for (const auto &kv : selectedCachedNodes)
+        {
+            cachedNodesJson[std::to_string(kv.first)] = kv.second;
+        }
 
         json metadata;
         metadata["type"] = "metadata";
         metadata["cacheVersion"] = kCacheFileVersion;
         metadata["rootId"] = rootId;
-        metadata["selectedCachedNodes"] = cachedNodeIds;
+        metadata["selectedCachedNodes"] = cachedNodesJson;
         file << metadata.dump() << "\n";
 
         std::vector<std::string> keys;
@@ -549,8 +552,9 @@ public:
                         {
                             const auto &source = graph.weightSources.at(logicalId);
                             auto &loader = graph.loaders.at(source.first);
-                            uint8_t *destPtr = memManager.buffers.at(node.backend).arena_ptr + offset;
-                            loader->loadTensor(source.second, destPtr, sizeBytes);
+                            std::vector<uint8_t> temp(sizeBytes);
+                            loader->loadTensor(source.second, temp.data(), sizeBytes);
+                            memManager.write(node.backend, memId, temp.data(), sizeBytes);
                         }
                     }
                 }
@@ -877,26 +881,8 @@ public:
 
         std::cout << "[Session.ensureCacheCoverage] Starting cache optimization..." << std::endl;
         Planner planner(costModel, memManager.getBufferSizes());
-        CacheOptimizationResult optResult;
-
-        if (cacheHeuristic == CacheHeuristic::ROI)
-        {
-            std::cout << "[Session.ensureCacheCoverage] Starting greedy ROI cache optimization..." << std::endl;
-            optResult = optimizeCacheCombination(
-                rootId, graph, buckets, bucketCallCounts, maxCacheMemory, planner);
-        }
-        else if (cacheHeuristic == CacheHeuristic::FUSION)
-        {
-            std::cout << "[Session.ensureCacheCoverage] Starting fusion-based cache optimization..." << std::endl;
-            optResult = optimizeCacheByFusion(
-                rootId, graph, buckets, fullKey, bucketCallCounts, maxCacheMemory, planner);
-        }
-        else
-        {
-            std::cout << "[Session.ensureCacheCoverage] Starting size-based cache optimization..." << std::endl;
-            optResult = optimizeCacheBySize(
-                rootId, graph, buckets, bucketCallCounts, maxCacheMemory, planner);
-        }
+        CacheOptimizationResult optResult = optimizeCacheByFusion(
+            rootId, graph, buckets, fullKey, bucketCallCounts, maxCacheMemory, planner);
 
         if (optResult.foundValidCombination)
         {
@@ -908,17 +894,6 @@ public:
             if (cachedGraphs.count(fullKey) == 0)
             {
                 Error::throw_err("[Session::ensureCacheCoverage] full key not in generated plans");
-            }
-
-            // Propagate logical backend choice to Graph
-            const CompiledGraph &fullPlan = cachedGraphs.at(fullKey);
-            for (const auto &inst : fullPlan.instructions)
-            {
-                uint32_t logicalId = fullPlan.getLogicalId(inst.nodeId);
-                if (logicalId != UINT32_MAX && graph.hasNode(logicalId))
-                {
-                    graph.getNode(logicalId).backend = inst.backend;
-                }
             }
 
             for (auto &inst : cachedGraphs[fullKey].instructions)
@@ -977,7 +952,7 @@ public:
         std::unordered_map<std::string, CompiledGraph> tempGraphs;
         std::unordered_map<std::string, DirtyBucket> tempBuckets;
         std::unordered_map<uint32_t, std::vector<uint8_t>> tempStaging;
-        std::unordered_set<uint32_t> tempSelectedCachedNodes;
+        std::unordered_map<uint32_t, Backend> tempSelectedCachedNodes;
 
         while (std::getline(file, line))
         {
@@ -1024,9 +999,18 @@ public:
                 }
 
                 tempSelectedCachedNodes.clear();
-                for (uint32_t nodeId : entry["selectedCachedNodes"].get<std::vector<uint32_t>>())
+                if (entry["selectedCachedNodes"].is_object())
                 {
-                    tempSelectedCachedNodes.insert(nodeId);
+                    for (auto it = entry["selectedCachedNodes"].begin(); it != entry["selectedCachedNodes"].end(); ++it)
+                    {
+                        tempSelectedCachedNodes[std::stoul(it.key())] = it.value().get<Backend>();
+                    }
+                }
+                else
+                {
+                    hasInvalidCache = true;
+                    invalidCacheReason = "Cache metadata selectedCachedNodes format changed.";
+                    break;
                 }
                 sawMetadata = true;
             }
