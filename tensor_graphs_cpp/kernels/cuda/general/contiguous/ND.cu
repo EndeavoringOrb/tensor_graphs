@@ -55,9 +55,6 @@ namespace ContiguousCUDA
  */
 inline bool matchContiguous_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
-    if (inputs.size() != 1)
-        return false;
-
     const auto &in = inputs[0];
 
     if (in.backend != Backend::CUDA || output.backend != Backend::CUDA)

@@ -158,7 +158,8 @@ public:
         const TensorNode &output,
         const std::unordered_map<uint32_t, uint32_t> &refCounts = {},
         bool referenceOnly = false,
-        bool ignoreInputBackends = false) const
+        bool ignoreInputBackends = false,
+        bool ignoreInputContig = false) const
     {
         std::vector<uint64_t> matches;
         for (const auto &entry : entries)
@@ -168,6 +169,11 @@ public:
 
             if (entry.opType != op)
                 continue;
+
+            if (inputs.size() != entry.numInputs)
+            {
+                Error::throw_err("[KernelRegistry.findMatchingKernels] expected " + std::to_string(entry.numInputs) + " inputs but got " + std::to_string(inputs.size()));
+            }
 
             bool backendFound = false;
             for (auto b : entry.backends)
@@ -227,18 +233,21 @@ public:
                     continue;
             }
 
-            bool contigMatch = true;
-            for (size_t i = 0; i < inputs.size(); ++i)
+            if (!ignoreInputContig)
             {
-                size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
-                if (entry.requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
+                bool contigMatch = true;
+                for (size_t i = 0; i < inputs.size(); ++i)
                 {
-                    contigMatch = false;
-                    break;
+                    size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                    if (entry.requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
+                    {
+                        contigMatch = false;
+                        break;
+                    }
                 }
+                if (!contigMatch)
+                    continue;
             }
-            if (!contigMatch)
-                continue;
 
             if (entry.match(inputs, output, refCounts))
             {

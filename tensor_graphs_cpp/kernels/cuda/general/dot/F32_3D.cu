@@ -32,9 +32,6 @@ __global__ void dot_f32_3d_kernel(const float *A, const float *B, float *Out,
  */
 inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
-    if (inputs.size() != 2)
-        return false;
-
     // Check Dtypes
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
@@ -54,7 +51,7 @@ inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const Ten
         return false;
 
     // Memory layout check
-    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
 
     return true;

@@ -54,9 +54,6 @@ namespace PermuteCUDA
  */
 inline bool matchPermute_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
 {
-    if (inputs.size() != 2)
-        return false;
-
     const auto &data = inputs[0];
     const auto &perm = inputs[1];
 
@@ -75,8 +72,7 @@ inline bool matchPermute_CUDA_ND(const std::vector<TensorNode> &inputs, const Te
     if (perm.getShape().size() != 1 || perm.getShape()[0] != data.getShape().size())
         return false;
 
-    // Strict requirement: input and output must be contiguous for this specific kernel
-    if (!isContiguous(data) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
 
     return true;
