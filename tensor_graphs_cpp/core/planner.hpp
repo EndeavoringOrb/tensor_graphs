@@ -99,6 +99,10 @@ struct PlanningRegionState
             {
                 return &it->second;
             }
+            // If the node is cached but has no entry in recomputeCached, it means it is fully clean.
+            // Return an empty region to avoid a full recompute & scatter!
+            static const std::vector<Region> emptyRegions;
+            return &emptyRegions;
         }
 
         auto it = recompute.find(nodeId);
@@ -826,7 +830,7 @@ private:
         }
 
         std::unordered_set<uint32_t> protectedEClasses;
-        for (const auto& kv : cachedNodes)
+        for (const auto &kv : cachedNodes)
         {
             uint32_t logicalId = kv.first;
             auto it = result.planningGraph.logicalToPhysicalNodeMap.find(logicalId);

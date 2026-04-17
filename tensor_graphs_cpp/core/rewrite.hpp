@@ -304,7 +304,11 @@ struct FusionRule : public Rule
                 outNode.strides = calcContiguousStrides(outNode.getShape());
                 outNode.viewOffset = 0;
 
-                auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", outNode.backend, {inNode}, outNode, true);
+                Graph pGraph;
+                uint32_t pIn = pGraph.input(inNode.getShape(), inNode.dtype);
+                uint32_t pRoot = pGraph.copyto(pIn, outNode.backend);
+
+                auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, outNode.backend, {inNode}, outNode, false, false, false);
                 if (matches.empty())
                     return;
 
@@ -341,7 +345,11 @@ struct FusionRule : public Rule
                 outNode.strides = calcContiguousStrides(outNode.getShape());
                 outNode.viewOffset = 0;
 
-                auto matches = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", outNode.backend, {inNode}, outNode, true);
+                Graph pGraph;
+                uint32_t pIn = pGraph.input(inNode.getShape(), inNode.dtype);
+                uint32_t pRoot = pGraph.contiguous(pIn);
+
+                auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, outNode.backend, {inNode}, outNode, false, false, false);
                 if (matches.empty())
                     return;
 
@@ -413,7 +421,11 @@ struct FusionRule : public Rule
             dummyOut.strides = calcContiguousStrides(dummyOut.getShape());
             dummyOut.viewOffset = 0;
 
-            auto matches = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", dummyOut.backend, {dummyIn}, dummyOut, true);
+            Graph pGraph;
+            uint32_t pIn = pGraph.input(dummyIn.getShape(), dummyIn.dtype);
+            uint32_t pRoot = pGraph.copyto(pIn, dummyOut.backend);
+
+            auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, dummyOut.backend, {dummyIn}, dummyOut, false, false, false);
             for (uint64_t uid : matches)
             {
                 ENode copyNode;
@@ -560,8 +572,11 @@ struct CopyToOfContiguous : public Rule
         copyOutNode.strides = calcContiguousStrides(copyOutNode.getShape());
         copyOutNode.viewOffset = 0;
 
-        auto copyMatches = KernelRegistry::get().findMatchingKernels(
-            OpType::COPY_TO, "", copyOutNode.backend, {copyInNode}, copyOutNode, true);
+        Graph copyGraph;
+        uint32_t copyIn = copyGraph.input(copyInNode.getShape(), copyInNode.dtype);
+        uint32_t copyRoot = copyGraph.copyto(copyIn, copyOutNode.backend);
+        auto copyMatches = KernelRegistry::get().findMatchingKernelsByPattern(
+            copyGraph, copyRoot, copyOutNode.backend, {copyInNode}, copyOutNode, false, false, false);
         if (copyMatches.empty())
             return;
 
@@ -579,8 +594,11 @@ struct CopyToOfContiguous : public Rule
         contigOutNode.strides = calcContiguousStrides(contigOutNode.getShape());
         contigOutNode.viewOffset = 0;
 
-        auto contigMatches = KernelRegistry::get().findMatchingKernels(
-            OpType::CONTIGUOUS, "", contigOutNode.backend, {contigInNode}, contigOutNode, true);
+        Graph contigGraph;
+        uint32_t contigIn = contigGraph.input(contigInNode.getShape(), contigInNode.dtype);
+        uint32_t contigRoot = contigGraph.contiguous(contigIn);
+        auto contigMatches = KernelRegistry::get().findMatchingKernelsByPattern(
+            contigGraph, contigRoot, contigOutNode.backend, {contigInNode}, contigOutNode, false, false, false);
         if (contigMatches.empty())
             return;
 
@@ -677,8 +695,11 @@ struct ContiguousOfCopyTo : public Rule
         contigOutNode.strides = calcContiguousStrides(contigOutNode.getShape());
         contigOutNode.viewOffset = 0;
 
-        auto contigMatches = KernelRegistry::get().findMatchingKernels(
-            OpType::CONTIGUOUS, "", contigOutNode.backend, {contigInNode}, contigOutNode, true);
+        Graph contigGraph;
+        uint32_t contigIn = contigGraph.input(contigInNode.getShape(), contigInNode.dtype);
+        uint32_t contigRoot = contigGraph.contiguous(contigIn);
+        auto contigMatches = KernelRegistry::get().findMatchingKernelsByPattern(
+            contigGraph, contigRoot, contigOutNode.backend, {contigInNode}, contigOutNode, false, false, false);
         if (contigMatches.empty())
             return;
 
@@ -697,8 +718,11 @@ struct ContiguousOfCopyTo : public Rule
         copyOutNode.strides = calcContiguousStrides(copyOutNode.getShape());
         copyOutNode.viewOffset = 0;
 
-        auto copyMatches = KernelRegistry::get().findMatchingKernels(
-            OpType::COPY_TO, "", copyOutNode.backend, {copyInNode}, copyOutNode, true);
+        Graph copyGraph;
+        uint32_t copyIn = copyGraph.input(copyInNode.getShape(), copyInNode.dtype);
+        uint32_t copyRoot = copyGraph.copyto(copyIn, copyOutNode.backend);
+        auto copyMatches = KernelRegistry::get().findMatchingKernelsByPattern(
+            copyGraph, copyRoot, copyOutNode.backend, {copyInNode}, copyOutNode, false, false, false);
         if (copyMatches.empty())
             return;
 

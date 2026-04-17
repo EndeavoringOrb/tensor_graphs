@@ -102,6 +102,140 @@ public:
 
     const std::vector<KernelEntry> &getAllKernels() const { return entries; }
 
+    std::vector<uint64_t> findMatchingKernelsByPattern(
+        const Graph &patternGraph,
+        uint32_t patternRootId,
+        Backend backend,
+        const std::vector<TensorNode> &inputs,
+        const TensorNode &output,
+        bool referenceOnly = false,
+        bool ignoreInputBackends = false,
+        bool ignoreInputContig = false) const
+    {
+        std::vector<uint64_t> matches;
+        for (const auto &entry : entries)
+        {
+            if ((referenceOnlyMode || referenceOnly) && !entry.isReference)
+                continue;
+
+            bool patternMatches = false;
+
+            if (entry.opType == OpType::FUSED)
+            {
+                if (entry.refFactory)
+                {
+                    Graph kGraph;
+                    std::vector<uint32_t> kInputs;
+                    for (size_t i = 0; i < entry.numInputs; ++i)
+                    {
+                        kInputs.push_back(kGraph.input(entry.dummyShapes[i], entry.dtypes[i]));
+                    }
+                    uint32_t kRootId = entry.refFactory(kInputs, kGraph);
+                    patternMatches = isIsomorphic(patternGraph, patternRootId, kGraph, kRootId);
+                }
+            }
+            else
+            {
+                const TensorNode &pNode = patternGraph.getNode(patternRootId);
+                if (pNode.opType == entry.opType)
+                {
+                    patternMatches = true;
+                    for (uint32_t pid : pNode.parentIds)
+                    {
+                        if (patternGraph.getNode(pid).opType != OpType::INPUT &&
+                            patternGraph.getNode(pid).opType != OpType::ARANGE &&
+                            patternGraph.getNode(pid).opType != OpType::FILL)
+                        {
+                            patternMatches = false;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!patternMatches)
+                continue;
+
+            bool backendFound = false;
+            for (auto b : entry.backends)
+            {
+                if (b == backend)
+                {
+                    backendFound = true;
+                    break;
+                }
+            }
+            if (!backendFound)
+                continue;
+
+            if (entry.isVariadic)
+            {
+                if (inputs.size() < 2)
+                    continue;
+            }
+            else if (inputs.size() != entry.numInputs)
+            {
+                continue;
+            }
+
+            if (!ignoreInputBackends)
+            {
+                bool inputBackendsMatch = true;
+                for (uint32_t i = 0; i < inputs.size(); ++i)
+                {
+                    size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                    bool currentInputMatch = false;
+                    for (uint32_t j = 0; j < entry.inputBackends[ruleIdx].size(); j++)
+                    {
+                        if (inputs[i].backend == entry.inputBackends[ruleIdx][j])
+                        {
+                            currentInputMatch = true;
+                            break;
+                        }
+                    }
+                    inputBackendsMatch = inputBackendsMatch && currentInputMatch;
+                    if (!inputBackendsMatch)
+                        break;
+                }
+                if (!inputBackendsMatch)
+                    continue;
+            }
+
+            if (entry.inplace && entry.numInputs > 0)
+            {
+                if (inputs[0].backend != backend)
+                    continue;
+            }
+            if (entry.isView && entry.numInputs > 0)
+            {
+                if (inputs[0].backend != backend)
+                    continue;
+            }
+
+            if (!ignoreInputContig)
+            {
+                bool contigMatch = true;
+                for (size_t i = 0; i < inputs.size(); ++i)
+                {
+                    size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                    if (entry.requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
+                    {
+                        contigMatch = false;
+                        break;
+                    }
+                }
+                if (!contigMatch)
+                    continue;
+            }
+
+            if (entry.match(inputs, output))
+            {
+                matches.push_back(entry.uid);
+            }
+        }
+        return matches;
+    }
+
     void registerKernel(uint64_t uid, OpType op, const std::string &opName, uint32_t numInputs,
                         const std::vector<Backend> &backends, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
                         bool inplace, bool isView, bool isReference, InferViewFunc inferView,

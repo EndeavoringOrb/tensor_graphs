@@ -469,3 +469,30 @@ inline std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)
     ss << "Expected constant for shape inference but not found in staging. Node ID: " << id;
     Error::throw_err(ss.str());
 }
+
+bool isIsomorphic(const Graph &g1, uint32_t root1, const Graph &g2, uint32_t root2)
+{
+    const TensorNode &n1 = g1.getNode(root1);
+    const TensorNode &n2 = g2.getNode(root2);
+
+    if (n1.opType != n2.opType)
+        return false;
+    if (n1.opType == OpType::FUSED && n1.opName != n2.opName)
+        return false;
+    if (n1.opType == OpType::COPY_TO && n1.backend != n2.backend)
+        return false;
+
+    if (n1.opType == OpType::INPUT)
+        return true;
+
+    if (n1.parentIds.size() != n2.parentIds.size())
+        return false;
+
+    for (size_t i = 0; i < n1.parentIds.size(); ++i)
+    {
+        if (!isIsomorphic(g1, n1.parentIds[i], g2, n2.parentIds[i]))
+            return false;
+    }
+
+    return true;
+}
