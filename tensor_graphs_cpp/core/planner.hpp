@@ -404,7 +404,6 @@ private:
         uint32_t partialId = cloneNode(sourceNode, partialParents);
         TensorNode &partialNode = result.graph.getNode(partialId);
         partialNode.setShape(getRegionShape(outRegion));
-        result.physicalToLogicalNodeMap[partialId] = logicalId;
         result.physicalInputSlices[partialId] = parentRegions;
         return {partialId, parentRegions};
     }
@@ -873,6 +872,40 @@ private:
                 if (cachedNodes.count(logicalId))
                 {
                     result.immutable_eclasses.insert(ecl);
+                }
+            }
+        }
+
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (size_t i = 0; i < result.egraph.getClasses().size(); ++i)
+            {
+                uint32_t ecl = result.egraph.find(static_cast<uint32_t>(i));
+                if (ecl != i)
+                    continue;
+                if (result.immutable_eclasses.count(ecl))
+                    continue;
+
+                const EClass &cls = result.egraph.getEClass(ecl);
+                for (uint32_t enodeId : cls.enodes)
+                {
+                    const ENode &enode = result.egraph.getENodes()[enodeId];
+                    if (enode.kernelUid != 0)
+                    {
+                        const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
+                        if (kernel.isView && enode.children.size() > 0)
+                        {
+                            uint32_t childEcl = result.egraph.find(enode.children[0]);
+                            if (result.immutable_eclasses.count(childEcl))
+                            {
+                                result.immutable_eclasses.insert(ecl);
+                                changed = true;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1475,8 +1508,7 @@ private:
                 inst.viewInputIndex = -1;
             }
 
-            const bool nodeIsFinalLogicalOutput = logicalToPhysicalNodeMap.count(logicalId) && logicalToPhysicalNodeMap.at(logicalId) == rootId;
-            inst.outputStorageType = (cachedNodes.count(logicalId) && (logicalId != UINT32_MAX) && nodeIsFinalLogicalOutput) ? StorageType::PINNED : tNode.storageType;
+            inst.outputStorageType = (cachedNodes.count(logicalId) && (logicalId != UINT32_MAX)) ? StorageType::PINNED : tNode.storageType;
 
             if (enode.opType != OpType::INPUT)
             {
