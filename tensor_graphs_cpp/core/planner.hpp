@@ -973,7 +973,7 @@ private:
                 if (info.inplace && info.inplace_idx >= 0)
                 {
                     uint32_t mutated_eclass = egraph.find(enode.children[info.inplace_idx]);
-                    if (immutable_eclasses.count(mutated_eclass))
+                    if (immutable_eclasses.count(mutated_eclass) && enode.opType != OpType::SCATTER)
                     {
                         info.cost = std::numeric_limits<float>::infinity();
                     }
@@ -1204,7 +1204,7 @@ private:
                 if (info.inplace)
                 {
                     uint32_t inplace_child = node.children[info.inplace_idx];
-                    if (local_ref_counts[inplace_child] > 1 || immutable_eclasses.count(inplace_child))
+                    if (local_ref_counts[inplace_child] > 1 || (immutable_eclasses.count(inplace_child) && node.opType != OpType::SCATTER))
                     {
                         valid = false;
                         reason = "inplace";

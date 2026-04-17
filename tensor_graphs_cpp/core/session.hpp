@@ -510,7 +510,7 @@ public:
 
                 uint32_t logicalId = pair.second.getLogicalId(node.id);
 
-                if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
+                if (node.opType == OpType::INPUT && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
                 {
                     uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : node.id;
                     countSet.insert(memId);
@@ -529,7 +529,7 @@ public:
                 uint32_t eclassId = node.id;
                 uint32_t logicalId = pair.second.getLogicalId(eclassId);
 
-                if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
+                if (node.opType == OpType::INPUT && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
                 {
                     uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : eclassId;
 
@@ -538,7 +538,7 @@ public:
                         timer.tick();
                         uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
 
-                        uint64_t offset = memManager.allocate(node.backend, memId, sizeBytes, StorageType::PERSISTENT);
+                        uint64_t offset = memManager.allocate(node.backend, memId, sizeBytes, node.storageType);
 
                         if (logicalId != UINT32_MAX && graph.constantStaging.count(logicalId))
                         {
