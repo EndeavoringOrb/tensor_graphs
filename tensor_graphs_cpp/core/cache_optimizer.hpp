@@ -152,8 +152,6 @@ CacheOptimizationResult optimizeCacheByFusion(
         {
             selectedCachedNodes[nodeId] = survivingLogicalNodes.at(nodeId);
             currentCacheMem += nodeSize;
-            std::cout << "[CacheOptimizer] Selected Node " << nodeId
-                      << " | Size: " << nodeSize << " bytes" << std::endl;
         }
     }
 

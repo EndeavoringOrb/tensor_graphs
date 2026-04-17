@@ -626,10 +626,8 @@ private:
             std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << std::endl;
 #endif
         }
-#ifdef DEBUG
-        std::cout << "Finished saturation in " << iterations << " iterations with " + std::to_string(nMatches) + " matches\n"
+        std::cout << "Finished saturation in " << iterations << " iterations with " << nMatches << " matches\n"
                   << std::flush;
-#endif
     }
 
     std::unordered_map<uint32_t, uint32_t> build_ref_counts(const EGraph &egraph, const std::unordered_map<uint32_t, uint32_t> &selection_map, uint32_t root) const
