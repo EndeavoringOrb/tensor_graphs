@@ -510,7 +510,7 @@ public:
 
                 uint32_t logicalId = pair.second.getLogicalId(node.id);
 
-                if (node.opType == OpType::INPUT && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
+                if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
                 {
                     uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : node.id;
                     countSet.insert(memId);
@@ -529,7 +529,7 @@ public:
                 uint32_t eclassId = node.id;
                 uint32_t logicalId = pair.second.getLogicalId(eclassId);
 
-                if (node.opType == OpType::INPUT && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
+                if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
                 {
                     uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : eclassId;
 

@@ -99,10 +99,6 @@ struct PlanningRegionState
             {
                 return &it->second;
             }
-            // If the node is cached but has no entry in recomputeCached, it means it is fully clean.
-            // Return an empty region to avoid a full recompute & scatter!
-            static const std::vector<Region> emptyRegions;
-            return &emptyRegions;
         }
 
         auto it = recompute.find(nodeId);
@@ -218,14 +214,8 @@ static PlanningRegionState derivePlanningRegions(
 
         auto dirtyIt = dirtyOutputRegions.find(nodeId);
         state.recompute[nodeId] = normalizeRegions(mergeRegions(neededRegions));
-        if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty())
-        {
-            if (forceFull) {
-                state.recomputeCached[nodeId] = neededRegions;
-            } else {
-                state.recomputeCached[nodeId] = normalizeRegions(intersectRegionLists(dirtyIt->second, neededRegions));
-            }
-        }
+        if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty() && !forceFull)
+            state.recomputeCached[nodeId] = normalizeRegions(intersectRegionLists(dirtyIt->second, neededRegions));
     }
 
     state.initialized = true;
@@ -410,6 +400,7 @@ private:
         uint32_t partialId = cloneNode(sourceNode, partialParents);
         TensorNode &partialNode = result.graph.getNode(partialId);
         partialNode.setShape(getRegionShape(outRegion));
+        result.physicalToLogicalNodeMap[partialId] = logicalId;
         result.physicalInputSlices[partialId] = parentRegions;
         return {partialId, parentRegions};
     }
