@@ -972,7 +972,7 @@ private:
 
                     for (uint32_t childEClassId : enode.children)
                     {
-                        const EClass &childCls = egraph.getEClass(childEClassId);
+                        const EClass &childCls = egraph.getEClass(egraph.find(childEClassId));
                         inShapes.push_back(childCls.shape);
 
                         std::vector<uint64_t> strides_cast;
@@ -982,9 +982,10 @@ private:
 
                         inDTypes.push_back(childCls.dtype);
 
-                        if (egraph.constantStaging.count(childEClassId))
+                        uint32_t canonChild = egraph.find(childEClassId);
+                        if (egraph.constantStaging.count(canonChild))
                         {
-                            inConstants.push_back(egraph.constantStaging.at(childEClassId));
+                            inConstants.push_back(egraph.constantStaging.at(canonChild));
                         }
                         else
                         {
@@ -1051,14 +1052,15 @@ private:
         }
 
         // 2. Compute optimistic DAG costs without double-counting shared eclasses.
+        //    Cyclic optimistic realizations are treated as invalid for this bound.
         size_t numClasses = egraph.getClasses().size();
 
         struct OptSummary
         {
-            float cost = std::numeric_limits<float>::infinity();      // total DAG-union optimistic cost
-            float intrinsic = std::numeric_limits<float>::infinity(); // intrinsic cost of chosen enode for this eclass
+            float cost = std::numeric_limits<float>::infinity();      // total optimistic DAG cost
+            float intrinsic = std::numeric_limits<float>::infinity(); // intrinsic cost of chosen enode
             uint32_t chosenEnode = UINT32_MAX;
-            std::unordered_set<uint32_t> covered; // eclasses in optimistic realization, including self
+            std::unordered_set<uint32_t> covered; // eclasses included in this optimistic realization, including self
             bool valid = false;
         };
 
@@ -1091,13 +1093,13 @@ private:
                     std::unordered_set<uint32_t> covered;
                     covered.insert(eclassId);
 
-                    float candidateCost = info.cost; // self intrinsic exactly once
+                    float candidateCost = info.cost; // count self intrinsic exactly once
 
                     for (uint32_t child : enode.children)
                     {
                         uint32_t childEClass = egraph.find(child);
 
-                        // Reject cyclic optimistic candidates.
+                        // Reject cyclic optimistic realizations
                         if (childEClass == eclassId)
                         {
                             candidateValid = false;
@@ -1117,6 +1119,7 @@ private:
                             break;
                         }
 
+                        // Add only newly covered eclasses to avoid double counting
                         for (uint32_t k : childOpt.covered)
                         {
                             if (covered.insert(k).second)
@@ -1215,7 +1218,7 @@ private:
 
                           if (costA != costB)
                               return costA < costB;
-                          return a < b;
+                          return a < b; // stable tie-break
                       });
         }
 
@@ -1232,8 +1235,9 @@ private:
         std::vector<uint32_t> path;
         std::vector<uint32_t> to_process = {rootEClassId};
         std::vector<uint32_t> to_process_enode;
-        std::unordered_map<uint32_t, uint32_t> local_ref_counts;
+        std::unordered_map<uint32_t, uint32_t> ref_counts;
         std::unordered_map<uint32_t, uint32_t> need_single_ref;
+        std::unordered_map<uint32_t, uint32_t> next_sel;
 
         float best_cost = std::numeric_limits<float>::infinity();
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
@@ -1247,21 +1251,32 @@ private:
             std::string reason = "";
             float current_cost = 0.0f;
 
-            for (auto const &kv : selection_map)
+            for (const auto &kv : selection_map)
             {
-                current_cost += enodeInfos[egraph.getEClass(kv.first).enodes[kv.second]].cost;
+                uint32_t eclass = kv.first;
+                uint32_t sel = kv.second;
+                current_cost += enodeInfos[egraph.getEClass(eclass).enodes[sel]].cost;
             }
 
             while (!to_process.empty())
             {
                 uint32_t current = to_process.front();
                 to_process.erase(to_process.begin());
+
+                if (selection_map.find(current) != selection_map.end())
+                {
+                    continue;
+                }
+
                 path.push_back(current);
 
                 uint32_t sel = 0;
-                auto it = selection_map.find(current);
-                if (it != selection_map.end())
-                    sel = it->second;
+                auto nextIt = next_sel.find(current);
+                if (nextIt != next_sel.end())
+                {
+                    sel = nextIt->second;
+                    next_sel.erase(nextIt);
+                }
 
                 const auto &enodes = egraph.getEClass(current).enodes;
                 if (sel >= enodes.size())
@@ -1276,6 +1291,48 @@ private:
                 selection_map[current] = sel;
                 current_cost += info.cost;
 
+                if (info.inplace && info.inplace_idx >= 0)
+                {
+                    uint32_t inplace_child = egraph.find(node.children[info.inplace_idx]);
+                    if (need_single_ref.find(inplace_child) != need_single_ref.end())
+                    {
+                        valid = false;
+                        reason = "inplace";
+                    }
+                    else if (immutable_eclasses.count(inplace_child) && node.opType != OpType::SCATTER)
+                    {
+                        valid = false;
+                        reason = "inplace_immutable";
+                    }
+                    else
+                    {
+                        need_single_ref[inplace_child] = current;
+                    }
+                }
+
+                for (uint32_t child : node.children)
+                {
+                    uint32_t canonChild = egraph.find(child);
+                    ref_counts[canonChild]++;
+                    if (need_single_ref.find(canonChild) != need_single_ref.end() && ref_counts[canonChild] > 1)
+                    {
+                        valid = false;
+                        reason = "inplace_ref";
+                    }
+                }
+
+                if (info.cost == std::numeric_limits<float>::infinity())
+                {
+                    valid = false;
+                    reason = "cost=inf";
+                }
+
+                if (best_cost != std::numeric_limits<float>::infinity() && current_cost >= best_cost)
+                {
+                    valid = false;
+                    reason = "cost=" + std::to_string(current_cost);
+                }
+
                 if (enodes.size() > sel + 1)
                 {
                     if (std::find(to_process_enode.begin(), to_process_enode.end(), current) == to_process_enode.end())
@@ -1284,55 +1341,16 @@ private:
                     }
                 }
 
-                if (info.inplace)
-                    need_single_ref[node.children[info.inplace_idx]]++;
-
-                for (uint32_t child : node.children)
-                    local_ref_counts[child]++;
-
-                if (info.cost == std::numeric_limits<float>::infinity())
-                {
-                    valid = false;
-                    reason = "cost=inf";
-                    break;
-                }
-
-                if (info.inplace)
-                {
-                    uint32_t inplace_child = node.children[info.inplace_idx];
-                    if (local_ref_counts[inplace_child] > 1 || (immutable_eclasses.count(inplace_child) && node.opType != OpType::SCATTER))
-                    {
-                        valid = false;
-                        reason = "inplace";
-                        break;
-                    }
-                }
-
-                for (uint32_t child : node.children)
-                {
-                    if (need_single_ref.count(child) && need_single_ref[child] > 0 && local_ref_counts[child] > 1)
-                    {
-                        valid = false;
-                        reason = "inplace_ref";
-                        break;
-                    }
-                }
                 if (!valid)
                     break;
-
-                if (best_cost != std::numeric_limits<float>::infinity() && current_cost >= best_cost)
-                {
-                    valid = false;
-                    reason = "cost=" + std::to_string(current_cost);
-                    break;
-                }
 
                 std::vector<uint32_t> new_to_process;
                 for (uint32_t child : node.children)
                 {
-                    if (selection_map.find(child) == selection_map.end())
+                    uint32_t childEClass = egraph.find(child);
+                    if (selection_map.find(childEClass) == selection_map.end())
                     {
-                        new_to_process.push_back(child);
+                        new_to_process.push_back(childEClass);
                     }
                 }
                 to_process.insert(to_process.begin(), new_to_process.begin(), new_to_process.end());
@@ -1356,6 +1374,17 @@ private:
             {
                 if (current_cost < best_cost)
                 {
+#ifdef DEBUG
+                    float selection_cost = 0.0f;
+                    for (auto const &kv : selection_map)
+                    {
+                        selection_cost += enodeInfos[egraph.getEClass(kv.first).enodes[kv.second]].cost;
+                    }
+                    if (std::abs(current_cost - selection_cost) > 1e-3f)
+                    {
+                        Error::throw_err("[Planner.extractBest] current_cost calculation went wrong somewhere. current_cost=" + std::to_string(current_cost) + ", selection_cost=" + std::to_string(selection_cost));
+                    }
+#endif
                     best_cost = current_cost;
                     best_selection_map = selection_map;
                     if (!stopOnFirstValid)
@@ -1371,7 +1400,7 @@ private:
             else
             {
 #ifdef DEBUG
-                std::cout << "invalid graph (" << reason << ")" << std::endl;
+                // std::cout << "invalid graph (" << reason << ")" << std::endl;
 #endif
             }
 
@@ -1386,6 +1415,7 @@ private:
 
                 if (selection_map.find(current) == selection_map.end())
                     continue;
+
                 uint32_t sel = selection_map[current];
                 const auto &enodes = egraph.getEClass(current).enodes;
                 uint32_t enode_id = enodes[sel];
@@ -1394,21 +1424,25 @@ private:
 
                 for (uint32_t child : node.children)
                 {
-                    local_ref_counts[child]--;
-                    if (local_ref_counts[child] == 0)
-                        local_ref_counts.erase(child);
+                    uint32_t canonChild = egraph.find(child);
+                    ref_counts[canonChild]--;
+                    if (ref_counts[canonChild] == 0)
+                        ref_counts.erase(canonChild);
                 }
 
-                if (info.inplace)
+                if (info.inplace && info.inplace_idx >= 0)
                 {
-                    need_single_ref[node.children[info.inplace_idx]]--;
-                    if (need_single_ref[node.children[info.inplace_idx]] == 0)
-                        need_single_ref.erase(node.children[info.inplace_idx]);
+                    uint32_t inplace_child = egraph.find(node.children[info.inplace_idx]);
+                    auto it = need_single_ref.find(inplace_child);
+                    if (it != need_single_ref.end() && it->second == current)
+                    {
+                        need_single_ref.erase(it);
+                    }
                 }
 
                 if (sel + 1 < enodes.size())
                 {
-                    selection_map[current] = sel + 1;
+                    next_sel[current] = sel + 1;
 
                     std::vector<uint32_t> keys_to_delete;
                     for (const auto &kv : selection_map)
@@ -1420,6 +1454,8 @@ private:
                     }
                     for (uint32_t k : keys_to_delete)
                         selection_map.erase(k);
+
+                    selection_map.erase(current);
 
                     auto it = std::remove(to_process_enode.begin(), to_process_enode.end(), current);
                     if (it != to_process_enode.end())
@@ -1438,9 +1474,10 @@ private:
                         std::vector<uint32_t> new_to_process;
                         for (uint32_t child : n.children)
                         {
-                            if (selection_map.find(child) == selection_map.end())
+                            uint32_t childEClass = egraph.find(child);
+                            if (selection_map.find(childEClass) == selection_map.end())
                             {
-                                new_to_process.push_back(child);
+                                new_to_process.push_back(childEClass);
                             }
                         }
                         to_process.insert(to_process.begin(), new_to_process.begin(), new_to_process.end());
