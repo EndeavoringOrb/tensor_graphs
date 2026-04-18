@@ -502,7 +502,7 @@ public:
 
                 uint32_t logicalId = pair.second.getLogicalId(node.id);
 
-                if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
+                if (node.opType == OpType::INPUT && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
                 {
                     uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : node.id;
                     countSet.insert(memId);
@@ -521,7 +521,7 @@ public:
                 uint32_t eclassId = node.id;
                 uint32_t logicalId = pair.second.getLogicalId(eclassId);
 
-                if (node.opType == OpType::INPUT && node.storageType == StorageType::PERSISTENT)
+                if (node.opType == OpType::INPUT && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
                 {
                     uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : eclassId;
 
@@ -888,6 +888,14 @@ public:
                 Error::throw_err("[Session::ensureCacheCoverage] full key not in generated plans");
             }
 
+            for (auto &inst : cachedGraphs[fullKey].instructions)
+            {
+                uint32_t logicalId = cachedGraphs[fullKey].getLogicalId(inst.nodeId);
+                if (selectedCachedNodes.count(logicalId) != 0)
+                {
+                    inst.outputStorageType = StorageType::PINNED;
+                }
+            }
             std::cout << "[Session.ensureCacheCoverage] Marked cached nodes as PINNED in full key plan." << std::endl;
         }
         else

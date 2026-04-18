@@ -15,6 +15,7 @@ images
 wsl_venv
 .claude
 CLAUDE.md
+diff.txt
 
 # Profiling artifacts
 profile_output*
