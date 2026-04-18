@@ -1037,6 +1037,10 @@ private:
                     validEnodes.push_back(enodeId);
                 }
             }
+            if (validEnodes.empty())
+            {
+                std::cout << "[Planner.extractBest] Warning: EClass " << eclassId << " has NO valid enodes\n";
+            }
             cls.enodes = validEnodes;
         }
 
@@ -1046,89 +1050,156 @@ private:
                       << "You may need to run 'bench' to gather missing kernel performance data." << std::endl;
         }
 
-        // 2. Compute Optimistic Subtree Costs via Dynamic Programming (Worklist Algorithm)
+        // 2. Compute optimistic DAG costs without double-counting shared eclasses.
         size_t numClasses = egraph.getClasses().size();
-        std::vector<float> eclassMinCost(numClasses, std::numeric_limits<float>::infinity());
 
-        std::vector<std::vector<uint32_t>> dependent_classes(numClasses);
-        for (size_t i = 0; i < numClasses; ++i)
+        struct OptSummary
         {
-            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-            if (eclassId != i)
-                continue;
+            float cost = std::numeric_limits<float>::infinity();      // total DAG-union optimistic cost
+            float intrinsic = std::numeric_limits<float>::infinity(); // intrinsic cost of chosen enode for this eclass
+            uint32_t chosenEnode = UINT32_MAX;
+            std::unordered_set<uint32_t> covered; // eclasses in optimistic realization, including self
+            bool valid = false;
+        };
 
-            for (uint32_t enodeId : egraph.getEClass(eclassId).enodes)
+        std::vector<OptSummary> opt(numClasses);
+
+        bool changed = true;
+
+        while (changed)
+        {
+            changed = false;
+
+            for (size_t i = 0; i < numClasses; ++i)
             {
-                const ENode &enode = egraph.getENodes()[enodeId];
-                for (uint32_t child : enode.children)
-                {
-                    uint32_t childEClass = egraph.find(child);
-                    dependent_classes[childEClass].push_back(eclassId);
-                }
-            }
-        }
-
-        for (auto &deps : dependent_classes)
-        {
-            std::sort(deps.begin(), deps.end());
-            deps.erase(std::unique(deps.begin(), deps.end()), deps.end());
-        }
-
-        std::vector<uint32_t> worklist;
-        std::vector<bool> in_worklist(numClasses, false);
-        for (size_t i = 0; i < numClasses; ++i)
-        {
-            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-            if (eclassId == i)
-            {
-                worklist.push_back(eclassId);
-                in_worklist[eclassId] = true;
-            }
-        }
-
-        while (!worklist.empty())
-        {
-            uint32_t c = worklist.back();
-            worklist.pop_back();
-            in_worklist[c] = false;
-
-            float old_cost = eclassMinCost[c];
-            float new_cost = old_cost;
-
-            const EClass &cls = egraph.getEClass(c);
-            for (uint32_t enodeId : cls.enodes)
-            {
-                float cost = enodeInfos[enodeId].cost;
-                if (cost == std::numeric_limits<float>::infinity())
+                uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+                if (eclassId != i)
                     continue;
 
-                const ENode &enode = egraph.getENodes()[enodeId];
-                for (uint32_t child : enode.children)
+                const EClass &cls = egraph.getEClass(eclassId);
+                OptSummary best;
+
+                for (uint32_t enodeId : cls.enodes)
                 {
-                    cost += eclassMinCost[egraph.find(child)];
+                    const ENodeInfo &info = enodeInfos[enodeId];
+                    if (info.cost == std::numeric_limits<float>::infinity())
+                        continue;
+
+                    const ENode &enode = egraph.getENodes()[enodeId];
+
+                    bool candidateValid = true;
+                    std::unordered_set<uint32_t> covered;
+                    covered.insert(eclassId);
+
+                    float candidateCost = info.cost; // self intrinsic exactly once
+
+                    for (uint32_t child : enode.children)
+                    {
+                        uint32_t childEClass = egraph.find(child);
+
+                        // Reject cyclic optimistic candidates.
+                        if (childEClass == eclassId)
+                        {
+                            candidateValid = false;
+                            break;
+                        }
+
+                        const OptSummary &childOpt = opt[childEClass];
+                        if (!childOpt.valid)
+                        {
+                            candidateValid = false;
+                            break;
+                        }
+
+                        if (childOpt.covered.count(eclassId))
+                        {
+                            candidateValid = false;
+                            break;
+                        }
+
+                        for (uint32_t k : childOpt.covered)
+                        {
+                            if (covered.insert(k).second)
+                            {
+                                candidateCost += opt[k].intrinsic;
+                            }
+                        }
+                    }
+
+                    if (!candidateValid)
+                        continue;
+
+                    if (!best.valid ||
+                        candidateCost < best.cost - 1e-6f ||
+                        (std::abs(candidateCost - best.cost) <= 1e-6f && enodeId < best.chosenEnode))
+                    {
+                        best.valid = true;
+                        best.cost = candidateCost;
+                        best.intrinsic = info.cost;
+                        best.chosenEnode = enodeId;
+                        best.covered = std::move(covered);
+                    }
                 }
 
-                if (cost < new_cost)
+                if (!best.valid)
+                    continue;
+
+                if (!opt[eclassId].valid ||
+                    best.cost < opt[eclassId].cost - 1e-6f ||
+                    (std::abs(best.cost - opt[eclassId].cost) <= 1e-6f && best.chosenEnode < opt[eclassId].chosenEnode))
                 {
-                    new_cost = cost;
+                    opt[eclassId] = std::move(best);
+                    changed = true;
                 }
             }
+        }
 
-            if (new_cost < old_cost && (old_cost == std::numeric_limits<float>::infinity() || (old_cost - new_cost) > 1e-6f))
+        std::vector<float> eclassMinCost(numClasses, std::numeric_limits<float>::infinity());
+        for (size_t i = 0; i < numClasses; ++i)
+        {
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId == i && opt[eclassId].valid)
             {
-                eclassMinCost[c] = new_cost;
-                for (uint32_t dep : dependent_classes[c])
+                eclassMinCost[eclassId] = opt[eclassId].cost;
+            }
+        }
+
+        // 3. Sort enodes in each eclass by optimistic DAG cost
+        auto optimisticEnodeCost = [&](uint32_t ownerEClassId, uint32_t enodeId) -> float
+        {
+            const ENodeInfo &info = enodeInfos[enodeId];
+            if (info.cost == std::numeric_limits<float>::infinity())
+                return info.cost;
+
+            const ENode &enode = egraph.getENodes()[enodeId];
+
+            std::unordered_set<uint32_t> covered;
+            covered.insert(ownerEClassId);
+            float total = info.cost;
+
+            for (uint32_t child : enode.children)
+            {
+                uint32_t childEClass = egraph.find(child);
+
+                if (childEClass == ownerEClassId)
+                    return std::numeric_limits<float>::infinity();
+                if (!opt[childEClass].valid)
+                    return std::numeric_limits<float>::infinity();
+                if (opt[childEClass].covered.count(ownerEClassId))
+                    return std::numeric_limits<float>::infinity();
+
+                for (uint32_t k : opt[childEClass].covered)
                 {
-                    if (!in_worklist[dep])
+                    if (covered.insert(k).second)
                     {
-                        worklist.push_back(dep);
-                        in_worklist[dep] = true;
+                        total += opt[k].intrinsic;
                     }
                 }
             }
-        }
 
-        // 3. Sort enodes in each eclass by optimistic subtree cost
+            return total;
+        };
+
         for (size_t i = 0; i < numClasses; ++i)
         {
             uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
@@ -1139,19 +1210,12 @@ private:
             std::sort(cls.enodes.begin(), cls.enodes.end(),
                       [&](uint32_t a, uint32_t b)
                       {
-                          const ENode &enodeA = egraph.getENodes()[a];
-                          float costA = enodeInfos[a].cost;
-                          for (uint32_t c : enodeA.children)
-                              costA += eclassMinCost[egraph.find(c)];
-
-                          const ENode &enodeB = egraph.getENodes()[b];
-                          float costB = enodeInfos[b].cost;
-                          for (uint32_t c : enodeB.children)
-                              costB += eclassMinCost[egraph.find(c)];
+                          float costA = optimisticEnodeCost(eclassId, a);
+                          float costB = optimisticEnodeCost(eclassId, b);
 
                           if (costA != costB)
                               return costA < costB;
-                          return a < b; // stable tie-break
+                          return a < b;
                       });
         }
 
@@ -1161,6 +1225,8 @@ private:
             Error::throw_err("[Planner.extractBest] Root node missing from nodeToEClass.");
         }
         uint32_t rootEClassId = egraph.find(rootIt->second);
+
+        std::cout << "[Planner.extractBest] Optimistic root cost: " << eclassMinCost[rootEClassId] << std::endl;
 
         std::unordered_map<uint32_t, uint32_t> selection_map;
         std::vector<uint32_t> path;
@@ -1172,7 +1238,7 @@ private:
         float best_cost = std::numeric_limits<float>::infinity();
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
 
-        int max_iters = 100000;
+        int max_iters = 100;
         ProgressTimer timer(max_iters, "extracting graphs ", stopOnFirstValid);
         while (max_iters-- > 0)
         {
