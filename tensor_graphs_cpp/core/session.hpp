@@ -888,14 +888,6 @@ public:
                 Error::throw_err("[Session::ensureCacheCoverage] full key not in generated plans");
             }
 
-            for (auto &inst : cachedGraphs[fullKey].instructions)
-            {
-                uint32_t logicalId = cachedGraphs[fullKey].getLogicalId(inst.nodeId);
-                if (selectedCachedNodes.count(logicalId) != 0)
-                {
-                    inst.outputStorageType = StorageType::PINNED;
-                }
-            }
             std::cout << "[Session.ensureCacheCoverage] Marked cached nodes as PINNED in full key plan." << std::endl;
         }
         else
