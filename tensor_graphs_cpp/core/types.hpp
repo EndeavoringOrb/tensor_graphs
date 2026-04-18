@@ -246,18 +246,6 @@ inline std::string encodeRegion(const Region &r)
     return ss.str();
 }
 
-inline bool isFullRegion(const Region &r, const std::vector<uint32_t> &shape)
-{
-    if (r.region.size() != shape.size())
-        return false;
-    for (size_t i = 0; i < shape.size(); ++i)
-    {
-        if (r.region[i].start != 0 || r.region[i].stop != shape[i])
-            return false;
-    }
-    return true;
-}
-
 inline std::vector<Region> normalizeRegions(std::vector<Region> regions)
 {
     std::sort(regions.begin(), regions.end(), [](const Region &a, const Region &b)

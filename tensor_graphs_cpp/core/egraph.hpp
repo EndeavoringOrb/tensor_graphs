@@ -266,11 +266,6 @@ public:
         hashcons = std::move(newHash);
     }
 
-    void setNodeEClass(uint32_t enodeId, uint32_t eclassId)
-    {
-        nodeToEClass[enodeId] = eclassId;
-    }
-
     const std::vector<EClass> &getClasses() const { return classes; }
     const std::vector<ENode> &getENodes() const { return enodes; }
 

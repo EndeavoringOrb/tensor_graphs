@@ -213,14 +213,6 @@ private:
         return atomicTopo;
     }
 
-    CompiledGraph compileBucketPlan(const BucketPlanRequest &request, const std::unordered_map<uint32_t, Backend> &cachedNodes, bool doSaturate = true)
-    {
-        Graph planningGraph = graph;
-        Planner planner(costModel, memManager.getBufferSizes());
-        PlanningRegionState regionState;
-        return planner.plan(rootId, planningGraph, request.bucket.regions, request.bucket.inputSlices, cachedNodes, regionState, doSaturate);
-    }
-
     void materializePersistentInputsForPlan(const CompiledGraph &compiled)
     {
         for (const auto &nodePair : compiled.nodesMap)

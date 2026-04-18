@@ -71,53 +71,6 @@ struct InterruptManager
     }
 };
 
-inline float calculateSavedCost(
-    const std::unordered_set<uint32_t> &cacheState,
-    const std::unordered_map<uint32_t, std::vector<uint32_t>> &parentMap,
-    const std::unordered_map<uint32_t, float> &nodeCosts)
-{
-    std::unordered_set<uint32_t> savedNodes;
-    std::vector<uint32_t> stack;
-
-    // A node in the cache saves itself AND all of its recursive ancestors.
-    for (uint32_t node : cacheState)
-    {
-        if (savedNodes.insert(node).second)
-        {
-            stack.push_back(node);
-        }
-    }
-
-    while (!stack.empty())
-    {
-        uint32_t curr = stack.back();
-        stack.pop_back();
-
-        auto it = parentMap.find(curr);
-        if (it != parentMap.end())
-        {
-            for (uint32_t p : it->second)
-            {
-                if (savedNodes.insert(p).second)
-                {
-                    stack.push_back(p);
-                }
-            }
-        }
-    }
-
-    float totalCost = 0.0f;
-    for (uint32_t node : savedNodes)
-    {
-        auto it = nodeCosts.find(node);
-        if (it != nodeCosts.end())
-        {
-            totalCost += it->second;
-        }
-    }
-    return totalCost;
-}
-
 struct MemBlock
 {
     uint64_t offset;

@@ -327,14 +327,6 @@ inline int32_t normalizeAxisIndex(int32_t axis, uint32_t rank)
     return axis;
 }
 
-inline Region makeEmptyRegion(size_t rank)
-{
-    Region region;
-    for (size_t i = 0; i < rank; ++i)
-        region.region.push_back({0, 0});
-    return region;
-}
-
 inline bool isValidRegion(const Region &region)
 {
     for (const auto &dim : region.region)
@@ -343,29 +335,6 @@ inline bool isValidRegion(const Region &region)
             return false;
     }
     return true;
-}
-
-inline Region clampRegionToShape(Region region, const std::vector<uint32_t> &shape)
-{
-    for (size_t i = 0; i < region.region.size() && i < shape.size(); ++i)
-    {
-        region.region[i].start = std::min(region.region[i].start, shape[i]);
-        region.region[i].stop = std::min(region.region[i].stop, shape[i]);
-    }
-    return region;
-}
-
-inline Region shiftRegionAxis(const Region &region, size_t axis, int64_t delta)
-{
-    Region out = region;
-    if (axis < out.region.size())
-    {
-        int64_t start = static_cast<int64_t>(out.region[axis].start) + delta;
-        int64_t stop = static_cast<int64_t>(out.region[axis].stop) + delta;
-        out.region[axis].start = static_cast<uint32_t>(std::max<int64_t>(0, start));
-        out.region[axis].stop = static_cast<uint32_t>(std::max<int64_t>(0, stop));
-    }
-    return out;
 }
 
 inline Region mapSliceRegionForward(const Region &region, const std::vector<uint32_t> &shape,
