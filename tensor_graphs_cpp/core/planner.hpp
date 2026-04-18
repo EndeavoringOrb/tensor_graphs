@@ -218,8 +218,14 @@ static PlanningRegionState derivePlanningRegions(
 
         auto dirtyIt = dirtyOutputRegions.find(nodeId);
         state.recompute[nodeId] = normalizeRegions(mergeRegions(neededRegions));
-        if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty() && !forceFull)
-            state.recomputeCached[nodeId] = normalizeRegions(intersectRegionLists(dirtyIt->second, neededRegions));
+        if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty())
+        {
+            if (forceFull) {
+                state.recomputeCached[nodeId] = neededRegions;
+            } else {
+                state.recomputeCached[nodeId] = normalizeRegions(intersectRegionLists(dirtyIt->second, neededRegions));
+            }
+        }
     }
 
     state.initialized = true;

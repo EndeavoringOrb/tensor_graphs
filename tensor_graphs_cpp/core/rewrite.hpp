@@ -317,7 +317,8 @@ struct FusionRule : public Rule
                 {
                     ENode copyNode;
                     copyNode.kernelUid = uid;
-                    copyNode.opType = OpType::COPY_TO;
+                    copyNode.opType = kernel.opType;
+                    copyNode.opName = kernel.opName;
                     copyNode.children = {currentPid};
                     copyNode.shape = outNode.getShape();
                     copyNode.strides = outNode.strides;
@@ -358,7 +359,8 @@ struct FusionRule : public Rule
                 {
                     ENode contigNode;
                     contigNode.kernelUid = uid;
-                    contigNode.opType = OpType::CONTIGUOUS;
+                    contigNode.opType = kernel.opType;
+                    contigNode.opName = kernel.opName;
                     contigNode.children = {currentPid};
                     contigNode.shape = outNode.getShape();
                     contigNode.strides = outNode.strides;
@@ -430,7 +432,8 @@ struct FusionRule : public Rule
             {
                 ENode copyNode;
                 copyNode.kernelUid = uid;
-                copyNode.opType = OpType::COPY_TO;
+                copyNode.opType = kernel.opType;
+                copyNode.opName = kernel.opName;
                 copyNode.children = {newEClass};
                 copyNode.shape = dummyOut.getShape();
                 copyNode.strides = dummyOut.strides;
@@ -608,9 +611,11 @@ struct CopyToOfContiguous : public Rule
             copyOutNode.dtype, copyOutNode.backend);
         for (uint64_t uid : copyMatches)
         {
+            const auto &kernel = KernelRegistry::get().getKernel(uid);
             ENode copyENode;
             copyENode.kernelUid = uid;
-            copyENode.opType = OpType::COPY_TO;
+            copyENode.opType = kernel.opType;
+            copyENode.opName = kernel.opName;
             copyENode.children = {xClassId};
             copyENode.shape = copyOutNode.getShape();
             copyENode.strides = copyOutNode.strides;
@@ -623,9 +628,11 @@ struct CopyToOfContiguous : public Rule
         // --- Create Contiguous(CopyTo(x)) and add to original eclass ---
         for (uint64_t uid : contigMatches)
         {
+            const auto &kernel = KernelRegistry::get().getKernel(uid);
             ENode contigENode;
             contigENode.kernelUid = uid;
-            contigENode.opType = OpType::CONTIGUOUS;
+            contigENode.opType = kernel.opType;
+            contigENode.opName = kernel.opName;
             contigENode.children = {copyEClass};
             contigENode.shape = contigOutNode.getShape();
             contigENode.strides = contigOutNode.strides;
@@ -732,9 +739,11 @@ struct ContiguousOfCopyTo : public Rule
             contigOutNode.dtype, contigOutNode.backend);
         for (uint64_t uid : contigMatches)
         {
+            const auto &kernel = KernelRegistry::get().getKernel(uid);
             ENode contigENode;
             contigENode.kernelUid = uid;
-            contigENode.opType = OpType::CONTIGUOUS;
+            contigENode.opType = kernel.opType;
+            contigENode.opName = kernel.opName;
             contigENode.children = {xClassId};
             contigENode.shape = contigOutNode.getShape();
             contigENode.strides = contigOutNode.strides;
@@ -747,9 +756,11 @@ struct ContiguousOfCopyTo : public Rule
         // --- Create CopyTo(Contiguous(x)) and add to original eclass ---
         for (uint64_t uid : copyMatches)
         {
+            const auto &kernel = KernelRegistry::get().getKernel(uid);
             ENode copyENode;
             copyENode.kernelUid = uid;
-            copyENode.opType = OpType::COPY_TO;
+            copyENode.opType = kernel.opType;
+            copyENode.opName = kernel.opName;
             copyENode.children = {contigEClass};
             copyENode.shape = copyOutNode.getShape();
             copyENode.strides = copyOutNode.strides;
