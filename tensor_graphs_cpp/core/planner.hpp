@@ -508,6 +508,7 @@ private:
         std::unordered_map<Backend, uint64_t> memSizes;
         bool inplace;
         int32_t inplace_idx;
+        bool isScatter;
     };
 
     struct ExtractChoice
@@ -927,6 +928,7 @@ private:
             info.memSizes[enode.backend] = getSizeBytes(enode.shape, enode.dtype);
             info.inplace = false;
             info.inplace_idx = -1;
+            info.isScatter = false;
 
             if (enode.kernelUid != 0)
             {
@@ -935,6 +937,43 @@ private:
                 if (info.inplace && kernel.numInputs > 0)
                 {
                     info.inplace_idx = 0;
+                }
+
+                if (enode.opType == OpType::SCATTER)
+                {
+                    info.isScatter = true;
+                }
+                else if (enode.opType == OpType::FUSED && kernel.numInputs == 5)
+                {
+                    Graph pGraph;
+                    std::vector<TensorNode> dummyInputs;
+                    for (size_t k = 0; k < 5; ++k)
+                    {
+                        pGraph.input(kernel.dummyShapes[k], kernel.dtypes[k]);
+                        TensorNode inNode;
+                        inNode.opType = OpType::INPUT;
+                        inNode.dtype = kernel.dtypes[k];
+                        inNode.setShape(kernel.dummyShapes[k]);
+                        inNode.backend = enode.backend;
+                        dummyInputs.push_back(inNode);
+                    }
+
+                    // Creates SCATTER pattern from IDs 0, 1, 2, 3, 4
+                    uint32_t pRoot = pGraph.scatter(0, 1, 2, 3, 4);
+
+                    TensorNode dummyOut;
+                    dummyOut.opType = enode.opType;
+                    dummyOut.dtype = enode.dtype;
+                    dummyOut.setShape(enode.shape);
+                    dummyOut.backend = enode.backend;
+
+                    auto matches = KernelRegistry::get().findMatchingKernelsByPattern(
+                        pGraph, pRoot, enode.backend, dummyInputs, dummyOut, false, true, true);
+
+                    if (std::find(matches.begin(), matches.end(), enode.kernelUid) != matches.end())
+                    {
+                        info.isScatter = true;
+                    }
                 }
             }
 
@@ -1004,7 +1043,7 @@ private:
                 if (info.inplace && info.inplace_idx >= 0)
                 {
                     uint32_t mutated_eclass = egraph.find(enode.children[info.inplace_idx]);
-                    if (immutable_eclasses.count(mutated_eclass) && enode.opType != OpType::SCATTER)
+                    if (immutable_eclasses.count(mutated_eclass) && !info.isScatter)
                     {
                         info.cost = std::numeric_limits<float>::infinity();
                     }
@@ -1366,7 +1405,7 @@ private:
                         valid = false;
                         reason = "inplace";
                     }
-                    else if (immutable_eclasses.count(inplace_child) && node.opType != OpType::SCATTER)
+                    else if (immutable_eclasses.count(inplace_child) && !info.isScatter)
                     {
                         valid = false;
                         reason = "inplace_immutable";
