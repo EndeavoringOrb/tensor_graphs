@@ -1011,7 +1011,7 @@ private:
             }
             else
             {
-                info.cost = std::numeric_limits<float>::infinity();
+                Error::throw_err("[Planner.extractBest] enode.kernelUid != 0, but isn't OpType::INPUT. this shouldn't happen");
             }
             enodeInfos[i] = info;
         }
@@ -1172,7 +1172,7 @@ private:
         float best_cost = std::numeric_limits<float>::infinity();
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
 
-        int max_iters = 100;
+        int max_iters = 100000;
         ProgressTimer timer(max_iters, "extracting graphs ", stopOnFirstValid);
         while (max_iters-- > 0)
         {

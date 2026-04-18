@@ -243,9 +243,6 @@ struct FusionRule : public Rule
                 for (uint64_t uid : kernelMatches)
                 {
                     const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
-                    if (kernel.opName == "Dot_F32_3D_CPU_Optimized") {
-                        int a = 5;
-                    }
                     addFusedNode(egraph, kernel, targetBackend, inputs, eNodeIdx);
                 }
             }
@@ -375,7 +372,6 @@ struct FusionRule : public Rule
                     egraph.addENode(newEClass, contigNode);
                 }
                 currentPid = newEClass;
-                currentClass = egraph.getEClass(newEClass);
             }
             adaptedParents.push_back(currentPid);
         }
