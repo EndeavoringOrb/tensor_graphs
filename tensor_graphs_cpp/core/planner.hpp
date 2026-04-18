@@ -1505,7 +1505,8 @@ private:
                 inst.viewInputIndex = -1;
             }
 
-            inst.outputStorageType = (cachedNodes.count(logicalId) && (logicalId != UINT32_MAX)) ? StorageType::PINNED : tNode.storageType;
+            const bool nodeIsFinalLogicalOutput = logicalToPhysicalNodeMap.count(logicalId) && logicalToPhysicalNodeMap.at(logicalId) == rootId;
+            inst.outputStorageType = (cachedNodes.count(logicalId) && (logicalId != UINT32_MAX) && nodeIsFinalLogicalOutput) ? StorageType::PINNED : tNode.storageType;
 
             if (enode.opType != OpType::INPUT)
             {
