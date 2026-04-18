@@ -1067,13 +1067,17 @@ private:
         std::vector<OptSummary> opt(numClasses);
 
         bool changed = true;
+        uint32_t optIdx = 0;
 
         while (changed)
         {
             changed = false;
+            std::string timerLabel = "optimistic iter " + std::to_string(optIdx) + " ";
+            ProgressTimer timer(numClasses, timerLabel.c_str());
 
             for (size_t i = 0; i < numClasses; ++i)
             {
+                timer.tick();
                 uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
                 if (eclassId != i)
                     continue;
@@ -1229,7 +1233,7 @@ private:
         }
         uint32_t rootEClassId = egraph.find(rootIt->second);
 
-        std::cout << "[Planner.extractBest] Optimistic root cost: " << eclassMinCost[rootEClassId] << std::endl;
+        std::cout << "[Planner.extractBest] Optimistic root cost: " << std::to_string(eclassMinCost[rootEClassId]) << std::endl;
 
         std::unordered_map<uint32_t, uint32_t> selection_map;
         std::vector<uint32_t> path;
