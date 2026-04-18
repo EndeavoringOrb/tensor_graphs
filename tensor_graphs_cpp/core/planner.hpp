@@ -1060,28 +1060,65 @@ private:
             float cost = std::numeric_limits<float>::infinity();      // total optimistic DAG cost
             float intrinsic = std::numeric_limits<float>::infinity(); // intrinsic cost of chosen enode
             uint32_t chosenEnode = UINT32_MAX;
-            std::unordered_set<uint32_t> covered; // eclasses included in this optimistic realization, including self
+            std::vector<uint32_t> covered; // Flat vector replaces std::unordered_set
             bool valid = false;
         };
 
         std::vector<OptSummary> opt(numClasses);
 
-        bool changed = true;
-        uint32_t optIdx = 0;
-
-        while (changed)
+        // Build parent map to only process dependencies that actually improve
+        std::vector<std::vector<uint32_t>> parentMap(numClasses);
+        for (size_t i = 0; i < numClasses; ++i)
         {
-            changed = false;
-            optIdx++;
-            std::string timerLabel = "optimistic iter " + std::to_string(optIdx) + " ";
-            ProgressTimer timer(numClasses, timerLabel.c_str());
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId != i)
+                continue;
 
-            for (size_t i = 0; i < numClasses; ++i)
+            const EClass &cls = egraph.getEClass(eclassId);
+            for (uint32_t enodeId : cls.enodes)
             {
-                timer.tick();
-                uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-                if (eclassId != i)
-                    continue;
+                const ENode &enode = egraph.getENodes()[enodeId];
+                for (uint32_t child : enode.children)
+                {
+                    uint32_t childEClass = egraph.find(child);
+                    parentMap[childEClass].push_back(eclassId);
+                }
+            }
+        }
+
+        // Deduplicate parent map
+        for (auto &parents : parentMap)
+        {
+            std::sort(parents.begin(), parents.end());
+            parents.erase(std::unique(parents.begin(), parents.end()), parents.end());
+        }
+
+        // Worklist Algorithm Structures
+        std::vector<uint32_t> worklist;
+        std::vector<uint32_t> next_worklist;
+        std::vector<bool> inQueue(numClasses, false);
+
+        for (size_t i = 0; i < numClasses; ++i)
+        {
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId == i)
+            {
+                worklist.push_back(eclassId);
+                inQueue[eclassId] = true;
+            }
+        }
+
+        // O(1) set membership array & pre-allocated candidate workspace
+        std::vector<uint32_t> seen(numClasses, 0);
+        uint32_t current_gen = 0;
+        std::vector<uint32_t> candidate_covered;
+        candidate_covered.reserve(128);
+
+        while (!worklist.empty())
+        {
+            for (uint32_t eclassId : worklist)
+            {
+                inQueue[eclassId] = false;
 
                 const EClass &cls = egraph.getEClass(eclassId);
                 OptSummary best;
@@ -1093,18 +1130,21 @@ private:
                         continue;
 
                     const ENode &enode = egraph.getENodes()[enodeId];
-
                     bool candidateValid = true;
-                    std::unordered_set<uint32_t> covered;
-                    covered.insert(eclassId);
 
-                    float candidateCost = info.cost; // count self intrinsic exactly once
+                    current_gen++;
+                    candidate_covered.clear();
+
+                    // Insert Self
+                    candidate_covered.push_back(eclassId);
+                    seen[eclassId] = current_gen;
+
+                    float candidateCost = info.cost;
 
                     for (uint32_t child : enode.children)
                     {
                         uint32_t childEClass = egraph.find(child);
 
-                        // Reject cyclic optimistic realizations
                         if (childEClass == eclassId)
                         {
                             candidateValid = false;
@@ -1118,20 +1158,25 @@ private:
                             break;
                         }
 
-                        if (childOpt.covered.count(eclassId))
-                        {
-                            candidateValid = false;
-                            break;
-                        }
-
-                        // Add only newly covered eclasses to avoid double counting
                         for (uint32_t k : childOpt.covered)
                         {
-                            if (covered.insert(k).second)
+                            if (k == eclassId)
                             {
+                                candidateValid = false;
+                                break;
+                            }
+
+                            // O(1) Add newly covered eclasses
+                            if (seen[k] != current_gen)
+                            {
+                                seen[k] = current_gen;
+                                candidate_covered.push_back(k);
                                 candidateCost += opt[k].intrinsic;
                             }
                         }
+
+                        if (!candidateValid)
+                            break;
                     }
 
                     if (!candidateValid)
@@ -1145,7 +1190,7 @@ private:
                         best.cost = candidateCost;
                         best.intrinsic = info.cost;
                         best.chosenEnode = enodeId;
-                        best.covered = std::move(covered);
+                        best.covered = candidate_covered;
                     }
                 }
 
@@ -1157,9 +1202,21 @@ private:
                     (std::abs(best.cost - opt[eclassId].cost) <= 1e-6f && best.chosenEnode < opt[eclassId].chosenEnode))
                 {
                     opt[eclassId] = std::move(best);
-                    changed = true;
+
+                    // Push dependencies onto the queue since this node improved
+                    for (uint32_t parentId : parentMap[eclassId])
+                    {
+                        if (!inQueue[parentId])
+                        {
+                            inQueue[parentId] = true;
+                            next_worklist.push_back(parentId);
+                        }
+                    }
                 }
             }
+
+            worklist.clear();
+            std::swap(worklist, next_worklist);
         }
 
         std::vector<float> eclassMinCost(numClasses, std::numeric_limits<float>::infinity());
@@ -1181,8 +1238,10 @@ private:
 
             const ENode &enode = egraph.getENodes()[enodeId];
 
-            std::unordered_set<uint32_t> covered;
-            covered.insert(ownerEClassId);
+            // Replace unordered_set with a vector so sort comparisons are blazing fast
+            std::vector<uint32_t> covered;
+            covered.reserve(64);
+            covered.push_back(ownerEClassId);
             float total = info.cost;
 
             for (uint32_t child : enode.children)
@@ -1193,13 +1252,16 @@ private:
                     return std::numeric_limits<float>::infinity();
                 if (!opt[childEClass].valid)
                     return std::numeric_limits<float>::infinity();
-                if (opt[childEClass].covered.count(ownerEClassId))
+
+                // Check cyclic utilizing std::find over flat vector
+                if (std::find(opt[childEClass].covered.begin(), opt[childEClass].covered.end(), ownerEClassId) != opt[childEClass].covered.end())
                     return std::numeric_limits<float>::infinity();
 
                 for (uint32_t k : opt[childEClass].covered)
                 {
-                    if (covered.insert(k).second)
+                    if (std::find(covered.begin(), covered.end(), k) == covered.end())
                     {
+                        covered.push_back(k);
                         total += opt[k].intrinsic;
                     }
                 }
