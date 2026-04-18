@@ -243,6 +243,9 @@ struct FusionRule : public Rule
                 for (uint64_t uid : kernelMatches)
                 {
                     const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
+                    if (kernel.opName == "Dot_F32_3D_CPU_Optimized") {
+                        int a = 5;
+                    }
                     addFusedNode(egraph, kernel, targetBackend, inputs, eNodeIdx);
                 }
             }
@@ -315,10 +318,11 @@ struct FusionRule : public Rule
                 uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
                 for (uint64_t uid : matches)
                 {
+                    const auto &copyKernel = KernelRegistry::get().getKernel(uid);
                     ENode copyNode;
                     copyNode.kernelUid = uid;
-                    copyNode.opType = kernel.opType;
-                    copyNode.opName = kernel.opName;
+                    copyNode.opType = copyKernel.opType;
+                    copyNode.opName = copyKernel.opName;
                     copyNode.children = {currentPid};
                     copyNode.shape = outNode.getShape();
                     copyNode.strides = outNode.strides;
@@ -357,10 +361,11 @@ struct FusionRule : public Rule
                 uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
                 for (uint64_t uid : matches)
                 {
+                    const auto &contigKernel = KernelRegistry::get().getKernel(uid);
                     ENode contigNode;
                     contigNode.kernelUid = uid;
-                    contigNode.opType = kernel.opType;
-                    contigNode.opName = kernel.opName;
+                    contigNode.opType = contigKernel.opType;
+                    contigNode.opName = contigKernel.opName;
                     contigNode.children = {currentPid};
                     contigNode.shape = outNode.getShape();
                     contigNode.strides = outNode.strides;
@@ -430,10 +435,11 @@ struct FusionRule : public Rule
             auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, dummyOut.backend, {dummyIn}, dummyOut, false, false, false);
             for (uint64_t uid : matches)
             {
+                const auto &copyKernel = KernelRegistry::get().getKernel(uid);
                 ENode copyNode;
                 copyNode.kernelUid = uid;
-                copyNode.opType = kernel.opType;
-                copyNode.opName = kernel.opName;
+                copyNode.opType = copyKernel.opType;
+                copyNode.opName = copyKernel.opName;
                 copyNode.children = {newEClass};
                 copyNode.shape = dummyOut.getShape();
                 copyNode.strides = dummyOut.strides;
@@ -503,7 +509,7 @@ struct FusionRule : public Rule
         if (eNode.opType == OpType::FUSED && eNode.opName != pNode.opName)
             return false;
         if (eNode.children.size() != pNode.parentIds.size())
-            return false;
+            return false; // TODO: maybe remove this, if optype and opname are equal, this should never be hit
 
         for (size_t i = 0; i < eNode.children.size(); ++i)
         {
