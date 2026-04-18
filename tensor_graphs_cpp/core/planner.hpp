@@ -1072,6 +1072,7 @@ private:
         while (changed)
         {
             changed = false;
+            optIdx++;
             std::string timerLabel = "optimistic iter " + std::to_string(optIdx) + " ";
             ProgressTimer timer(numClasses, timerLabel.c_str());
 
