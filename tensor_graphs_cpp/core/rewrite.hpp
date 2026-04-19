@@ -773,3 +773,77 @@ struct ContiguousOfCopyTo : public Rule
         }
     }
 };
+
+struct ContiguousElimination : public Rule
+{
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    {
+        const ENode &enode = egraph.getENodes()[eNodeIdx];
+
+        // Skip nodes that don't have children or are inputs
+        if (enode.opType == OpType::INPUT || enode.children.empty())
+            return false;
+
+        for (uint32_t childEClassId : enode.children)
+        {
+            const EClass &childCls = egraph.getEClass(childEClassId);
+
+            // Check if this child class contains a CONTIGUOUS node
+            for (uint32_t childENodeIdx : childCls.enodes)
+            {
+                const ENode &childENode = egraph.getENodes()[childENodeIdx];
+
+                if (childENode.opType == OpType::CONTIGUOUS && !childENode.children.empty())
+                {
+                    uint32_t sourceEClassId = childENode.children[0];
+
+                    // If the source of the contiguous node is already contiguous, we can eliminate the op
+                    if (isContiguous(egraph.getEClass(sourceEClassId)))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    {
+        const ENode consumerNode = egraph.getENodes()[eNodeIdx];
+        uint32_t consumerEClassId = egraph.getENodeEClass(eNodeIdx);
+
+        std::vector<uint32_t> optimizedChildren = consumerNode.children;
+        bool changed = false;
+
+        for (size_t i = 0; i < optimizedChildren.size(); ++i)
+        {
+            const EClass &childCls = egraph.getEClass(optimizedChildren[i]);
+
+            for (uint32_t childENodeIdx : childCls.enodes)
+            {
+                const ENode &childENode = egraph.getENodes()[childENodeIdx];
+
+                if (childENode.opType == OpType::CONTIGUOUS)
+                {
+                    uint32_t sourceEClassId = childENode.children[0];
+                    if (isContiguous(egraph.getEClass(sourceEClassId)))
+                    {
+                        // Use the grandchild (the original source) instead of the redundant contiguous node
+                        optimizedChildren[i] = sourceEClassId;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (changed)
+        {
+            ENode newNode = consumerNode;
+            newNode.children = optimizedChildren;
+            // Add the optimized ENode to the original consumer's EClass
+            egraph.addENode(consumerEClassId, newNode);
+        }
+    }
+};
