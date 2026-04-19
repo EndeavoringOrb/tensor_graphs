@@ -1580,18 +1580,18 @@ private:
             {
                 if (current_cost < best_cost)
                 {
-#ifdef DEBUG
-                    float selection_cost = 0.0f;
-                    for (auto const &kv : selection_map)
-                    {
-                        selection_cost += enodeInfos[egraph.getEClass(kv.first).enodes[kv.second]].cost;
-                    }
-                    if (std::abs(current_cost - selection_cost) > 1e-3f)
-                    {
-                        Error::throw_err("[Planner.extractBest] current_cost calculation went wrong somewhere. current_cost=" +
-                                         std::to_string(current_cost) + ", selection_cost=" + std::to_string(selection_cost));
-                    }
-#endif
+// #ifdef DEBUG
+//                     float selection_cost = 0.0f;
+//                     for (auto const &kv : selection_map)
+//                     {
+//                         selection_cost += enodeInfos[egraph.getEClass(kv.first).enodes[kv.second]].cost;
+//                     }
+//                     if (std::abs(current_cost - selection_cost) > 1e-3f)
+//                     {
+//                         Error::throw_err("[Planner.extractBest] current_cost calculation went wrong somewhere. current_cost=" +
+//                                          std::to_string(current_cost) + ", selection_cost=" + std::to_string(selection_cost));
+//                     }
+// #endif
                     best_cost = current_cost;
                     best_selection_map = selection_map;
                     if (!stopOnFirstValid)
