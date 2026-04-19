@@ -111,6 +111,7 @@ struct CostModel
     std::unordered_set<std::string> loggedCalls;
     std::ofstream callFile;
     std::mutex logMtx;
+    bool doneWarning = false;
 
     CostModel()
     {
@@ -237,8 +238,12 @@ struct CostModel
                 }
             }
 #endif
-            std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n"
-                      << std::flush;
+            if (!doneWarning)
+            {
+                std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n"
+                          << std::flush;
+                doneWarning = true;
+            }
             return std::numeric_limits<float>::infinity();
         }
 
