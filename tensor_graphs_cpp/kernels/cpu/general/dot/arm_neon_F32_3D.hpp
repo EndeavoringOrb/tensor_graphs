@@ -101,7 +101,7 @@ inline void runDotF32_3D_Optimized(const std::vector<const void *> &inputs, cons
                     uint32_t n = 0;
 
                     // SIMD loop: Process 4 columns of B at a time
-                    for (; n <= N - 4; n += 4) {
+                    for (; n + 4 <= N; n += 4) {
                         // Load 4 elements of B
                         // Note: Assuming strideB_N is 1 for maximum speed. 
                         // If B is not contiguous, this needs vld1q_f32 replacement.

@@ -47,7 +47,7 @@ inline void runBF16TransposedGEMM(const std::vector<const void *> &inputs, const
                         const float* x_row = X + (b * S * K) + (s * K);
                         float32x4_t acc = vdupq_n_f32(0.0f);
                         uint32_t k = 0;
-                        for (; k <= K - 4; k += 4) {
+                        for (; k + 4 <= K; k += 4) {
                             uint16x4_t vbf16 = vld1_u16(w_row + k);
                             float32x4_t vw = vreinterpretq_f32_u32(vshll_n_u16(vbf16, 16));
                             float32x4_t vx = vld1q_f32(x_row + k);
