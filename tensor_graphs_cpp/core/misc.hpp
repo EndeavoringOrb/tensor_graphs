@@ -201,6 +201,44 @@ inline bool regionsMatch(const Region &r1, const Region &r2)
     return true;
 }
 
+inline bool coversDim(const Dim &outer, const Dim &inner)
+{
+    return outer.start <= inner.start && outer.stop >= inner.stop;
+}
+
+inline bool coversRegion(const Region &outer, const Region &inner)
+{
+    if (outer.region.size() != inner.region.size())
+        return false;
+    for (size_t i = 0; i < outer.region.size(); i++)
+    {
+        if (!coversDim(outer.region[i], inner.region[i]))
+            return false;
+    }
+    return true;
+}
+
+inline bool coversRegionList(const std::vector<Region> &outer, const std::vector<Region> &inner)
+{
+    if (inner.empty())
+        return true;
+    for (const auto &innerReg : inner)
+    {
+        bool found = false;
+        for (const auto &outerReg : outer)
+        {
+            if (coversRegion(outerReg, innerReg))
+            {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            return false;
+    }
+    return true;
+}
+
 // Check if two intervals overlap or are adjacent
 inline bool intervalsOverlapOrAdjacent(const Dim &a, const Dim &b)
 {

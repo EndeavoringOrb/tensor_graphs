@@ -558,6 +558,19 @@ int main()
     std::cout << "Initializing Session..." << std::endl;
     Session session(g, mem, logits_id, "dirty_region_caches/gemma-3-270m-cpp.jsonl");
 
+    // Add manual buckets for decoding
+    for (uint32_t i = 0; i < maxSeqLen; ++i)
+    {
+        std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
+        Region inputRegion;
+        inputRegion.region = {{0, 1}, {i, i + 1}};
+        inputDirty[inputIdsId] = {inputRegion};
+
+        Region outputNeeded;
+        outputNeeded.region = {{0, 1}, {i, i + 1}, {0, cfg.vocab_size}};
+        session.addManualBucket(inputDirty, {outputNeeded});
+    }
+
     std::cout << "Starting Generation..." << std::endl;
     std::vector<int32_t> input_data(maxSeqLen, 0);
 

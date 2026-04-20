@@ -120,6 +120,12 @@ namespace dirty_cache_json
     }
 }
 
+struct ManualBucket
+{
+    std::unordered_map<uint32_t, std::vector<Region>> inputDirtyRegions;
+    std::vector<Region> outputNeededRegion;
+};
+
 class Session
 {
 private:
@@ -134,6 +140,7 @@ private:
     bool isCompiled;
     uint32_t nBucketSizes = 0;
     uint64_t maxCacheMemory;
+    std::vector<ManualBucket> manualBuckets;
 
     std::string cachePath;
     std::unordered_map<std::string, CompiledGraph> cachedGraphs;
@@ -246,123 +253,170 @@ private:
     {
         std::cout << "[Session.ensureCacheCoverage] Enumerating canonical dirty buckets..." << std::endl;
 
-        struct InputOption
-        {
-            uint32_t nodeId;
-            std::vector<std::vector<Dim>> dimSlices;
-        };
-
         std::vector<uint32_t> atomicTopo = buildAtomicTopoAndInferShapes();
-        std::vector<InputOption> inputOptions;
-
-        for (uint32_t nodeId : inputNodeIds)
-        {
-            if (graph.getNode(nodeId).opType != OpType::INPUT)
-                continue;
-
-            InputOption option;
-            option.nodeId = nodeId;
-            for (uint32_t dimLen : graph.getNode(nodeId).getShape())
-            {
-                option.dimSlices.push_back(generateSlicesForDim(dimLen, nBucketSizes));
-            }
-            inputOptions.push_back(std::move(option));
-        }
-
-        if (inputOptions.empty())
-        {
-            DirtyBucket bucket;
-            bucket.regions[rootId] = makeFull(graph.getNode(rootId).getShape());
-            return {{"", bucket}};
-        }
-
-        struct InputRegionSet
-        {
-            uint32_t nodeId;
-            std::vector<std::vector<Region>> options;
-        };
-
-        std::vector<InputRegionSet> perInput;
-        for (const InputOption &opt : inputOptions)
-        {
-            InputRegionSet regionSet;
-            regionSet.nodeId = opt.nodeId;
-
-            std::vector<Region> current = {Region{}};
-            for (const auto &dimSlices : opt.dimSlices)
-            {
-                std::vector<Region> next;
-                for (const Region &existing : current)
-                {
-                    for (const Dim &slice : dimSlices)
-                    {
-                        Region region = existing;
-                        region.region.push_back(slice);
-                        next.push_back(region);
-                    }
-                }
-                current = std::move(next);
-            }
-
-            regionSet.options.push_back({});
-            for (const Region &region : current)
-            {
-                regionSet.options.push_back({region});
-            }
-
-            std::cout << "[Session.ensureCacheCoverage] input node " << regionSet.nodeId
-                      << " has " << regionSet.options.size() << " buckets (including clean state)." << std::endl;
-            perInput.push_back(std::move(regionSet));
-        }
-
-        std::vector<size_t> indices(perInput.size(), 0);
-        std::vector<size_t> sizes;
-        size_t totalSize = 1;
-        for (const auto &regionSet : perInput)
-        {
-            sizes.push_back(regionSet.options.size());
-            totalSize *= regionSet.options.size();
-        }
-
         std::unordered_map<std::string, DirtyBucket> bucketByKey;
-        ProgressTimer timer(totalSize, "Caching dirty region propagation: ");
 
-        while (true)
+        // 1. Always include the "Full" bucket (all inputs dirty, full output needed)
         {
-            timer.tick();
-
-            std::unordered_map<uint32_t, std::vector<Region>> inputRegions;
-            for (size_t i = 0; i < perInput.size(); ++i)
+            std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
+            for (uint32_t nodeId : inputNodeIds)
             {
-                inputRegions[perInput[i].nodeId] = perInput[i].options[indices[i]];
+                fullInputRegions[nodeId] = {makeFull(graph.getNode(nodeId).getShape())};
             }
+            const std::string key = encodeCacheKey(fullInputRegions);
 
-            const std::string key = encodeCacheKey(inputRegions);
-            if (bucketByKey.find(key) == bucketByKey.end())
+            std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions = fullInputRegions;
+            dirtyOutputRegions[rootId] = {makeFull(graph.getNode(rootId).getShape())};
+            std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions;
+
+            Graph forwardGraph = graph;
+            propagateDirtyRegionsAtomic(atomicTopo, forwardGraph, dirtyOutputRegions, dirtyInputRegions);
+
+            DirtyBucket bucket;
+            bucket.regions = std::move(dirtyOutputRegions);
+            bucket.inputSlices = std::move(dirtyInputRegions);
+            bucketByKey[key] = std::move(bucket);
+        }
+
+        if (!manualBuckets.empty())
+        {
+            for (const auto &manual : manualBuckets)
             {
-                Graph forwardGraph = graph;
-                std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions = inputRegions;
+                const std::string key = encodeCacheKey(manual.inputDirtyRegions);
+                if (bucketByKey.find(key) != bucketByKey.end())
+                    continue;
+
+                std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions = manual.inputDirtyRegions;
+                dirtyOutputRegions[rootId] = manual.outputNeededRegion;
                 std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions;
+
+                Graph forwardGraph = graph;
                 propagateDirtyRegionsAtomic(atomicTopo, forwardGraph, dirtyOutputRegions, dirtyInputRegions);
 
                 DirtyBucket bucket;
                 bucket.regions = std::move(dirtyOutputRegions);
                 bucket.inputSlices = std::move(dirtyInputRegions);
-                bucketByKey.emplace(key, std::move(bucket));
+                bucketByKey[key] = std::move(bucket);
             }
-
-            int position = static_cast<int>(indices.size()) - 1;
-            while (position >= 0)
+        }
+        else
+        {
+            struct InputOption
             {
-                indices[position]++;
-                if (indices[position] < sizes[position])
-                    break;
-                indices[position] = 0;
-                position--;
+                uint32_t nodeId;
+                std::vector<std::vector<Dim>> dimSlices;
+            };
+
+            std::vector<InputOption> inputOptions;
+
+            for (uint32_t nodeId : inputNodeIds)
+            {
+                if (graph.getNode(nodeId).opType != OpType::INPUT)
+                    continue;
+
+                InputOption option;
+                option.nodeId = nodeId;
+                for (uint32_t dimLen : graph.getNode(nodeId).getShape())
+                {
+                    option.dimSlices.push_back(generateSlicesForDim(dimLen, nBucketSizes));
+                }
+                inputOptions.push_back(std::move(option));
             }
 
-            if (position < 0)
-                break;
+            if (inputOptions.empty())
+            {
+                DirtyBucket bucket;
+                bucket.regions[rootId] = makeFull(graph.getNode(rootId).getShape());
+                return {{"", bucket}};
+            }
+
+            struct InputRegionSet
+            {
+                uint32_t nodeId;
+                std::vector<std::vector<Region>> options;
+            };
+
+            std::vector<InputRegionSet> perInput;
+            for (const InputOption &opt : inputOptions)
+            {
+                InputRegionSet regionSet;
+                regionSet.nodeId = opt.nodeId;
+
+                std::vector<Region> current = {Region{}};
+                for (const auto &dimSlices : opt.dimSlices)
+                {
+                    std::vector<Region> next;
+                    for (const Region &existing : current)
+                    {
+                        for (const Dim &slice : dimSlices)
+                        {
+                            Region region = existing;
+                            region.region.push_back(slice);
+                            next.push_back(region);
+                        }
+                    }
+                    current = std::move(next);
+                }
+
+                regionSet.options.push_back({});
+                for (const Region &region : current)
+                {
+                    regionSet.options.push_back({region});
+                }
+
+                std::cout << "[Session.ensureCacheCoverage] input node " << regionSet.nodeId
+                          << " has " << regionSet.options.size() << " buckets (including clean state)." << std::endl;
+                perInput.push_back(std::move(regionSet));
+            }
+
+            std::vector<size_t> indices(perInput.size(), 0);
+            std::vector<size_t> sizes;
+            size_t totalSize = 1;
+            for (const auto &regionSet : perInput)
+            {
+                sizes.push_back(regionSet.options.size());
+                totalSize *= regionSet.options.size();
+            }
+
+            ProgressTimer timer(totalSize, "Caching dirty region propagation: ");
+
+            while (true)
+            {
+                timer.tick();
+
+                std::unordered_map<uint32_t, std::vector<Region>> inputRegions;
+                for (size_t i = 0; i < perInput.size(); ++i)
+                {
+                    inputRegions[perInput[i].nodeId] = perInput[i].options[indices[i]];
+                }
+
+                const std::string key = encodeCacheKey(inputRegions);
+                if (bucketByKey.find(key) == bucketByKey.end())
+                {
+                    Graph forwardGraph = graph;
+                    std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions = inputRegions;
+                    std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions;
+                    propagateDirtyRegionsAtomic(atomicTopo, forwardGraph, dirtyOutputRegions, dirtyInputRegions);
+
+                    DirtyBucket bucket;
+                    bucket.regions = std::move(dirtyOutputRegions);
+                    bucket.inputSlices = std::move(dirtyInputRegions);
+                    bucketByKey.emplace(key, std::move(bucket));
+                }
+
+                int position = static_cast<int>(indices.size()) - 1;
+                while (position >= 0)
+                {
+                    indices[position]++;
+                    if (indices[position] < sizes[position])
+                        break;
+                    indices[position] = 0;
+                    position--;
+                }
+
+                if (position < 0)
+                    break;
+            }
         }
 
         std::vector<std::string> orderedKeys;
@@ -452,6 +506,11 @@ private:
     }
 
 public:
+    void addManualBucket(const std::unordered_map<uint32_t, std::vector<Region>> &inputDirtyRegions, const std::vector<Region> &outputNeededRegion)
+    {
+        manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
+    }
+
     Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0, uint64_t _maxCacheMemory = std::numeric_limits<uint64_t>::max())
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes), maxCacheMemory(_maxCacheMemory)
     {
@@ -561,12 +620,49 @@ public:
     std::unordered_map<uint32_t, std::vector<Region>> canonicalizeInputDiffs(
         const std::unordered_map<uint32_t, std::vector<Region>> &inputDiffs) const
     {
-        std::unordered_map<uint32_t, std::vector<Region>> canonicalRegions;
         if (inputDiffs.empty())
         {
-            return canonicalRegions;
+            return {};
         }
 
+        if (!manualBuckets.empty())
+        {
+            // Try to find a manual bucket that covers inputDiffs
+            for (const auto &manual : manualBuckets)
+            {
+                bool covers = true;
+                for (const auto &diffPair : inputDiffs)
+                {
+                    uint32_t nodeId = diffPair.first;
+                    auto it = manual.inputDirtyRegions.find(nodeId);
+                    if (it == manual.inputDirtyRegions.end())
+                    {
+                        covers = false;
+                        break;
+                    }
+                    if (!coversRegionList(it->second, diffPair.second))
+                    {
+                        covers = false;
+                        break;
+                    }
+                }
+                if (covers)
+                {
+                    return manual.inputDirtyRegions;
+                }
+            }
+
+            // Fallback to full bucket
+            std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
+            std::vector<uint32_t> inputNodeIds = collectInputNodeIds();
+            for (uint32_t nodeId : inputNodeIds)
+            {
+                fullInputRegions[nodeId] = {makeFull(graph.getNode(nodeId).getShape())};
+            }
+            return fullInputRegions;
+        }
+
+        std::unordered_map<uint32_t, std::vector<Region>> canonicalRegions;
         for (const auto &pair : inputDiffs)
         {
             uint32_t nodeId = pair.first;
