@@ -16,8 +16,14 @@ wsl_venv
 .claude
 CLAUDE.md
 diff.txt
-wsl_venv
+wsl_env
 egraph_viewer/egraphs
+tensor_graphs_cpp/main
+tensor_graphs_cpp/bench
+tensor_graphs_cpp/test
+tensor_graphs_cpp/main.exe
+tensor_graphs_cpp/bench.exe
+tensor_graphs_cpp/test.exe
 
 # Profiling artifacts
 profile_output*

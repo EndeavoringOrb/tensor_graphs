@@ -107,11 +107,11 @@ CacheOptimizationResult optimizeCacheByFusion(
     // First, plan all buckets to get regionStates, but explicitly extract survivors from the full bucket
     for (const BucketPlanRequest &bucket : buckets)
     {
-        regionStates[bucket.key] = derivePlanningRegions(rootId, graph, bucket.bucket.regions);
+        regionStates[bucket.key] = derivePlanningRegions(rootId, graph, bucket.bucket.regions, bucket.bucket.outputNeeded);
 
         if (bucket.key == fullKey)
         {
-            CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {}, regionStates[bucket.key], doSaturate, true);
+            CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {}, regionStates[bucket.key], bucket.bucket.outputNeeded, doSaturate, true);
             for (const auto &inst : plan.instructions)
             {
                 uint32_t logicalId = plan.getLogicalId(inst.nodeId);
@@ -177,7 +177,7 @@ CacheOptimizationResult optimizeCacheByFusion(
     for (const BucketPlanRequest &bucket : buckets)
     {
         bool isFullKey = (bucket.key == fullKey);
-        CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, selectedCachedNodes, regionStates[bucket.key], doSaturate, isFullKey);
+        CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, selectedCachedNodes, regionStates[bucket.key], bucket.bucket.outputNeeded, doSaturate, isFullKey);
 
         float cost = getPlanRuntime(plan);
         auto countIt = bucketCallCounts.find(bucket.key);

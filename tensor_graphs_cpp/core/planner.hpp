@@ -185,17 +185,17 @@ static void updateNeeded(
 static PlanningRegionState derivePlanningRegions(
     uint32_t rootId,
     const Graph &graph,
-    const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions)
+    const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
+    const std::vector<Region> &outputNeeded)
 {
     PlanningRegionState state;
     ShapePropagator prop;
 
-    auto rootIt = dirtyOutputRegions.find(rootId);
-    if (rootIt == dirtyOutputRegions.end())
+    if (outputNeeded.empty())
     {
-        Error::throw_err("[derivePlanningRegions] Cannot find dirty region for output");
+        Error::throw_err("[derivePlanningRegions] outputNeeded is empty");
     }
-    state.needed[rootId] = mergeRegions(rootIt->second);
+    state.needed[rootId] = mergeRegions(outputNeeded);
 
     updateNeeded(rootId, graph, prop, state.needed);
 
@@ -1922,6 +1922,7 @@ public:
         const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
         const std::unordered_map<uint32_t, Backend> &cachedNodes,
         PlanningRegionState &regionState,
+        const std::vector<Region> &outputNeeded,
         bool doSaturate = true,
         bool cheapInputCopy = false)
     {
@@ -1929,7 +1930,7 @@ public:
 
         if (!regionState.initialized)
         {
-            regionState = derivePlanningRegions(rootId, graph, dirtyOutputRegions);
+            regionState = derivePlanningRegions(rootId, graph, dirtyOutputRegions, outputNeeded);
         }
 
         EGraph egraph = baseState.egraph;

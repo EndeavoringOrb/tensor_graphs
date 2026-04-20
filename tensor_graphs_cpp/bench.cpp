@@ -50,7 +50,6 @@ int main()
             build_ss << "0x" << std::hex << r.buildContextId;
             keyObj["buildContextId"] = build_ss.str();
             keyObj["hwTag"] = r.hwTag;
-            keyObj["inputConstants"] = r.inputConstants;
             keyObj["inputDTypes"] = r.inputDTypes;
             keyObj["outputDTypes"] = r.outputDTypes;
             keyObj["kernelUid"] = uid_ss.str();
@@ -91,7 +90,6 @@ int main()
         uid_ss << "0x" << std::hex << r.kernelUid;
         keyObj["buildContextId"] = BUILD_CONTEXT_ID_STRING;
         keyObj["hwTag"] = r.hwTag;
-        keyObj["inputConstants"] = r.inputConstants;
         keyObj["inputDTypes"] = r.inputDTypes;
         keyObj["outputDTypes"] = r.outputDTypes;
         keyObj["kernelUid"] = uid_ss.str();
@@ -118,6 +116,22 @@ int main()
         std::cout << "All calls already benchmarked or no new kernels to test." << std::endl;
         return 0;
     }
+
+    std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [](const json &a, const json &b)
+                     {
+                         uint64_t uidA = std::stoull(a["kernelUid"].get<std::string>(), nullptr, 16);
+                         uint64_t uidB = std::stoull(b["kernelUid"].get<std::string>(), nullptr, 16);
+
+                         bool isRefA = KernelRegistry::get().getKernel(uidA).isReference;
+                         bool isRefB = KernelRegistry::get().getKernel(uidB).isReference;
+
+                         // If a is optimized (not ref) and b is a reference, a comes first
+                         if (isRefA != isRefB)
+                         {
+                             return !isRefA;
+                         }
+                         return false; // Maintain relative order if they are the same type
+                     });
 
     std::ofstream outFile(recordsPath, std::ios::app);
     std::cout << "Benchmarking " << toBenchmark.size() << " configurations..." << std::endl;

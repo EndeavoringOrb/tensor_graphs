@@ -92,6 +92,8 @@ namespace dirty_cache_json
         }
         obj["input_slices"] = slicesObj;
 
+        obj["output_needed"] = regionsToJson(normalizeRegions(bucket.outputNeeded));
+
         return obj;
     }
 
@@ -116,6 +118,11 @@ namespace dirty_cache_json
             bucket.inputSlices[nodeId] = perNode;
         }
 
+        if (obj.contains("output_needed"))
+        {
+            bucket.outputNeeded = regionsFromJson(obj["output_needed"]);
+        }
+
         return bucket;
     }
 }
@@ -129,7 +136,7 @@ struct ManualBucket
 class Session
 {
 private:
-    static constexpr uint32_t kCacheFileVersion = 2;
+    static constexpr uint32_t kCacheFileVersion = 3;
 
     Graph &graph;
     MemoryManager &memManager;
@@ -266,7 +273,6 @@ private:
             const std::string key = encodeCacheKey(fullInputRegions);
 
             std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions = fullInputRegions;
-            dirtyOutputRegions[rootId] = {makeFull(graph.getNode(rootId).getShape())};
             std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions;
 
             Graph forwardGraph = graph;
@@ -275,6 +281,7 @@ private:
             DirtyBucket bucket;
             bucket.regions = std::move(dirtyOutputRegions);
             bucket.inputSlices = std::move(dirtyInputRegions);
+            bucket.outputNeeded = {makeFull(graph.getNode(rootId).getShape())};
             bucketByKey[key] = std::move(bucket);
         }
 
@@ -287,7 +294,6 @@ private:
                     continue;
 
                 std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions = manual.inputDirtyRegions;
-                dirtyOutputRegions[rootId] = manual.outputNeededRegion;
                 std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions;
 
                 Graph forwardGraph = graph;
@@ -296,6 +302,7 @@ private:
                 DirtyBucket bucket;
                 bucket.regions = std::move(dirtyOutputRegions);
                 bucket.inputSlices = std::move(dirtyInputRegions);
+                bucket.outputNeeded = manual.outputNeededRegion;
                 bucketByKey[key] = std::move(bucket);
             }
         }
@@ -327,6 +334,7 @@ private:
             {
                 DirtyBucket bucket;
                 bucket.regions[rootId] = makeFull(graph.getNode(rootId).getShape());
+                bucket.outputNeeded = makeFull(graph.getNode(rootId).getShape());
                 return {{"", bucket}};
             }
 
@@ -401,6 +409,7 @@ private:
                     DirtyBucket bucket;
                     bucket.regions = std::move(dirtyOutputRegions);
                     bucket.inputSlices = std::move(dirtyInputRegions);
+                    bucket.outputNeeded = {makeFull(graph.getNode(rootId).getShape())};
                     bucketByKey.emplace(key, std::move(bucket));
                 }
 
