@@ -16,6 +16,7 @@ wsl_venv
 .claude
 CLAUDE.md
 diff.txt
+egraph_viewer/egraphs
 
 # Profiling artifacts
 profile_output*

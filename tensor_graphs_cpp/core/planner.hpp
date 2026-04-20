@@ -18,6 +18,8 @@
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
+#include <fstream>
+#include <filesystem>
 
 void propagateDirtyRegionsAtomic(
     const std::vector<uint32_t> &topo,
@@ -225,7 +227,90 @@ static PlanningRegionState derivePlanningRegions(
 class Planner
 {
 private:
+    uint32_t egraph_dump_counter_ = 0;
     uint32_t nextPhysId = 0x80000000;
+
+    void dumpEGraphBinary(const EGraph &egraph, uint32_t idx, uint32_t rootEClassId)
+    {
+        std::filesystem::create_directories("egraph_viewer/egraphs");
+        std::string path = "egraphs_viewer/egraphs/" + std::to_string(idx) + ".bin";
+        std::ofstream out(path, std::ios::binary);
+        if (!out)
+        {
+            std::cerr << "[Planner] Failed to open " << path << " for writing." << std::endl;
+            return;
+        }
+
+        const auto &classes = egraph.getClasses();
+        const auto &enodes = egraph.getENodes();
+
+        uint32_t num_classes = static_cast<uint32_t>(classes.size());
+        uint32_t num_enodes = static_cast<uint32_t>(enodes.size());
+
+        out.write(reinterpret_cast<const char *>(&num_classes), 4);
+        out.write(reinterpret_cast<const char *>(&num_enodes), 4);
+        out.write(reinterpret_cast<const char *>(&rootEClassId), 4);
+
+        // Write EClasses
+        for (const auto &cls : classes)
+        {
+            out.write(reinterpret_cast<const char *>(&cls.id), 4);
+            uint32_t s_size = static_cast<uint32_t>(cls.shape.size());
+            out.write(reinterpret_cast<const char *>(&s_size), 4);
+            if (s_size > 0)
+                out.write(reinterpret_cast<const char *>(cls.shape.data()), s_size * 4);
+
+            uint32_t st_size = static_cast<uint32_t>(cls.strides.size());
+            out.write(reinterpret_cast<const char *>(&st_size), 4);
+            if (st_size > 0)
+                out.write(reinterpret_cast<const char *>(cls.strides.data()), st_size * 8);
+
+            out.write(reinterpret_cast<const char *>(&cls.viewOffset), 8);
+            out.write(reinterpret_cast<const char *>(&cls.dtype), 4);
+            out.write(reinterpret_cast<const char *>(&cls.backend), 4);
+
+            uint32_t e_size = static_cast<uint32_t>(cls.enodes.size());
+            out.write(reinterpret_cast<const char *>(&e_size), 4);
+            if (e_size > 0)
+                out.write(reinterpret_cast<const char *>(cls.enodes.data()), e_size * 4);
+        }
+
+        // Write ENodes
+        for (const auto &enode : enodes)
+        {
+            out.write(reinterpret_cast<const char *>(&enode.kernelUid), 8);
+            uint32_t op_type = static_cast<uint32_t>(enode.opType);
+            out.write(reinterpret_cast<const char *>(&op_type), 4);
+            uint32_t n_len = static_cast<uint32_t>(enode.opName.length());
+            out.write(reinterpret_cast<const char *>(&n_len), 4);
+            if (n_len > 0)
+                out.write(enode.opName.c_str(), n_len);
+
+            uint32_t c_size = static_cast<uint32_t>(enode.children.size());
+            out.write(reinterpret_cast<const char *>(&c_size), 4);
+            if (c_size > 0)
+                out.write(reinterpret_cast<const char *>(enode.children.data()), c_size * 4);
+
+            out.write(reinterpret_cast<const char *>(&enode.leafId), 4);
+
+            uint32_t s_size = static_cast<uint32_t>(enode.shape.size());
+            out.write(reinterpret_cast<const char *>(&s_size), 4);
+            if (s_size > 0)
+                out.write(reinterpret_cast<const char *>(enode.shape.data()), s_size * 4);
+
+            uint32_t st_size = static_cast<uint32_t>(enode.strides.size());
+            out.write(reinterpret_cast<const char *>(&st_size), 4);
+            if (st_size > 0)
+                out.write(reinterpret_cast<const char *>(enode.strides.data()), st_size * 8);
+
+            out.write(reinterpret_cast<const char *>(&enode.viewOffset), 8);
+            out.write(reinterpret_cast<const char *>(&enode.dtype), 4);
+            out.write(reinterpret_cast<const char *>(&enode.backend), 4);
+            out.write(reinterpret_cast<const char *>(&enode.sig), 8);
+        }
+        out.close();
+        std::cout << "[Planner] Dumped EGraph to " << path << std::endl;
+    }
 
     struct ENodeInfo
     {
@@ -1862,6 +1947,16 @@ public:
             }
             saturate(egraph, protectedEClasses);
         }
+
+#ifdef DEBUG
+        auto rootIt = baseState.nodeToEClass.find(rootId);
+        if (rootIt == baseState.nodeToEClass.end())
+        {
+            Error::throw_err("[Planner.plan] Root node missing from baseState.nodeToEClass.");
+        }
+        uint32_t rootEClassId = egraph.find(rootIt->second);
+        dumpEGraphBinary(egraph, egraph_dump_counter_++, rootEClassId);
+#endif
 
         std::unordered_map<uint32_t, uint32_t> updatedEClassToLogical;
         for (const auto &kv : eclassToLogical)

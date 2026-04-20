@@ -1,0 +1,67 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EGraph Viewer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Left Panel: EClass Selection -->
+        <aside class="side-panel">
+            <div class="panel-header">
+                <h2>📦 EClasses</h2>
+                <select id="file-select">
+                    <option value="">-- Select File --</option>
+                    {% for f in files %}
+                    <option value="{{ f }}">{{ f }}</option>
+                    {% endfor %}
+                </select>
+                <!-- Add Search Input -->
+                <input type="text" id="search-input" placeholder="Search op names..."
+                    style="margin-top: 10px; width: 100%; padding: 8px; box-sizing: border-box;">
+            </div>
+
+            <div class="legend">
+                <span class="legend-item"><span class="dot eclass"></span> EClass</span>
+                <span class="legend-item"><span class="dot enode"></span> ENode</span>
+                <span class="legend-item"><span class="dot selected"></span> Selected</span>
+            </div>
+
+            <div id="eclass-list" class="eclass-list">
+                <p class="placeholder">Select a file to view eclasses</p>
+            </div>
+        </aside>
+
+        <!-- Right Panel: Graph Visualization -->
+        <main class="main-panel">
+            <div class="graph-header">
+                <h2>🔍 Extracted Graph</h2>
+                <div class="controls">
+                    <button id="reset-btn">Reset Selections</button>
+                    <button id="zoom-in-btn">+ Zoom</button>
+                    <button id="zoom-out-btn">− Zoom</button>
+                </div>
+            </div>
+
+            <div id="graph-container" class="graph-container">
+                <svg id="graph-svg"></svg>
+                <div id="graph-empty" class="graph-empty">
+                    <p>Select an eclass and choose an enode to visualize the graph</p>
+                </div>
+            </div>
+
+            <div id="selection-info" class="selection-info">
+                <strong>Selection Map:</strong> <span id="selection-map-display">None</span>
+            </div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/viewer.js') }}"></script>
+</body>
+
+</html>
