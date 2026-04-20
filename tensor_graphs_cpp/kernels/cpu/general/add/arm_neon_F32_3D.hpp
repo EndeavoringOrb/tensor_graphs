@@ -1,6 +1,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
+#if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 
 inline bool matchAddF32_3D_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
@@ -42,3 +43,5 @@ inline uint32_t refFactoryAdd3D_NEON(const std::vector<uint32_t> &inputs, Graph 
 }
 
 REGISTER_KERNEL("Add_3D_NEON", 2, matchAddF32_3D_NEON, runAddF32_3D_NEON, refFactoryAdd3D_NEON, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 2048}, {1, 8, 2048}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+
+#endif // TG_HAS_NEON

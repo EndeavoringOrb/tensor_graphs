@@ -35,7 +35,7 @@ inline bool matchDotF32_3D_TransposedB_Optimized(const std::vector<TensorNode> &
 }
 
 inline void runDotF32_3D_TransposedB_Optimized(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                   const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+                                               const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
 {
     const float *A_ptr = static_cast<const float *>(inputs[0]);
     const float *B_ptr = static_cast<const float *>(inputs[1]);
@@ -54,14 +54,15 @@ inline void runDotF32_3D_TransposedB_Optimized(const std::vector<const void *> &
     const int64_t strideA_M = viewA.strides[1];
 
     const int64_t strideB_B = viewB.strides[0];
-    const int64_t strideB_N = viewB.strides[2]; 
+    const int64_t strideB_N = viewB.strides[2];
 
     const int64_t strideO_B = viewOut.strides[0];
     const int64_t strideO_M = viewOut.strides[1];
     const int64_t strideO_N = viewOut.strides[2];
 
     uint32_t num_threads = std::thread::hardware_concurrency();
-    if (num_threads == 0) num_threads = 1;
+    if (num_threads == 0)
+        num_threads = 1;
     std::vector<std::thread> workers;
     uint32_t total_rows = B_count * M;
     uint32_t rows_per_thread = (total_rows + num_threads - 1) / num_threads;
