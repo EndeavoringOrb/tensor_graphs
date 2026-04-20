@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <filesystem>
 #include <type_traits>
-
+#include <fstream>
 #include "core/memory.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
@@ -18,17 +18,15 @@
 #include "core/planner.hpp"
 #include "core/session.hpp"
 #include "core/loaders/safetensors.hpp"
-
+#include "core/cost_model.hpp" // For Record struct
 #include "generated/kernels_all.gen.hpp"
 
 // ============================================================
 // Helper Functions
 // ============================================================
-
 void fillRandom(void *ptr, size_t elements, DType dtype)
 {
     static std::mt19937 gen(42);
-
     switch (dtype)
     {
     case DType::FLOAT32:
@@ -36,9 +34,7 @@ void fillRandom(void *ptr, size_t elements, DType dtype)
         float *fptr = static_cast<float *>(ptr);
         std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
         for (size_t i = 0; i < elements; ++i)
-        {
             fptr[i] = dist(gen);
-        }
         break;
     }
     case DType::INT32:
@@ -46,9 +42,7 @@ void fillRandom(void *ptr, size_t elements, DType dtype)
         int32_t *iptr = static_cast<int32_t *>(ptr);
         std::uniform_int_distribution<int32_t> dist(1, 10);
         for (size_t i = 0; i < elements; ++i)
-        {
             iptr[i] = dist(gen);
-        }
         break;
     }
     case DType::BOOL:
@@ -56,9 +50,7 @@ void fillRandom(void *ptr, size_t elements, DType dtype)
         bool *bptr = static_cast<bool *>(ptr);
         std::uniform_int_distribution<int> dist(0, 1);
         for (size_t i = 0; i < elements; ++i)
-        {
             bptr[i] = dist(gen) != 0;
-        }
         break;
     }
     case DType::BF16:
@@ -145,7 +137,6 @@ void runRegionMergeTests()
         std::vector<Region> actual = mergeRegions({makeRegion({{0, 2}}), makeRegion({{2, 4}})});
         assertRegionListEquals(actual, {makeRegion({{0, 4}})}, "1D adjacent merge");
     }
-
     {
         std::vector<Region> actual = mergeRegions({
             makeRegion({{0, 4}, {0, 2}}),
@@ -158,7 +149,6 @@ void runRegionMergeTests()
                                        },
                                "two-step 2D merge");
     }
-
     {
         std::vector<Region> actual = mergeRegions({
             makeRegion({{0, 4}, {0, 2}}),
@@ -166,7 +156,6 @@ void runRegionMergeTests()
         });
         assertRegionListEquals(actual, {makeRegion({{0, 4}, {0, 4}})}, "full 2D merge");
     }
-
     {
         std::vector<Region> forwardA = mergeRegions({
             makeRegion({{2, 4}, {0, 1}}),
@@ -188,17 +177,14 @@ void runShapePropagationTests()
     std::cout << "shape propagation tests" << std::endl
               << std::flush;
     ShapePropagator prop;
-
     auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
     {
         return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
     };
-
     auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
     {
         return graph.input(shape, DType::FLOAT32, {}, StorageType::PERSISTENT);
     };
-
     {
         Graph graph;
         uint32_t x = makeFloatInput(graph, {4, 5});
@@ -211,7 +197,6 @@ void runShapePropagationTests()
         assertRegionListEquals(backward[0], {makeRegion({{1, 3}, {0, 5}})}, "SUM backward input");
         assertRegionListEquals(backward[1], makeFull(graph.getNode(axis).getShape()), "SUM backward axis");
     }
-
     {
         Graph graph;
         uint32_t x = makeFloatInput(graph, {4, 5});
@@ -223,7 +208,6 @@ void runShapePropagationTests()
         auto backward = prop.backward(graph.getNode(maxId), graph, {makeRegion({{0, 4}, {0, 1}})});
         assertRegionListEquals(backward[0], {makeRegion({{0, 4}, {0, 5}})}, "MAX backward input");
     }
-
     {
         Graph graph;
         uint32_t x = makeFloatInput(graph, {2, 3});
@@ -245,7 +229,6 @@ void runShapePropagationTests()
                                             },
                                "PERMUTE backward input");
     }
-
     {
         Graph graph;
         uint32_t a = makeFloatInput(graph, {2, 2});
@@ -265,7 +248,6 @@ void runShapePropagationTests()
         assertRegionListEquals(backward[0], {makeRegion({{0, 1}, {0, 2}})}, "CONCAT backward left");
         assertRegionListEquals(backward[1], {makeRegion({{1, 2}, {1, 2}})}, "CONCAT backward right");
     }
-
     {
         Graph graph;
         uint32_t x = makeFloatInput(graph, {2, 2});
@@ -278,7 +260,6 @@ void runShapePropagationTests()
         auto backward = prop.backward(graph.getNode(repeatId), graph, {makeRegion({{3, 6}, {0, 2}})});
         assertRegionListEquals(backward[0], {makeRegion({{1, 2}, {0, 2}})}, "REPEAT backward input");
     }
-
     {
         Graph graph;
         uint32_t x = makeFloatInput(graph, {8});
@@ -292,7 +273,6 @@ void runShapePropagationTests()
         auto backward = prop.backward(graph.getNode(sliceId), graph, {makeRegion({{0, 1}}), makeRegion({{3, 4}})});
         assertRegionListEquals(backward[0], {makeRegion({{2, 3}}), makeRegion({{5, 6}})}, "SLICE backward input");
     }
-
     {
         Graph graph;
         uint32_t target = makeFloatInput(graph, {8});
@@ -308,7 +288,6 @@ void runShapePropagationTests()
         assertRegionListEquals(backward[0], {makeRegion({{3, 5}})}, "SCATTER backward target");
         assertRegionListEquals(backward[1], {makeRegion({{1, 3}})}, "SCATTER backward updates");
     }
-
     {
         Graph graph;
         uint32_t data = makeFloatInput(graph, {4, 3});
@@ -321,7 +300,6 @@ void runShapePropagationTests()
         assertRegionListEquals(backward[0], {makeRegion({{2, 3}, {1, 3}})}, "GATHER backward data");
         assertRegionListEquals(backward[1], {makeRegion({{0, 2}})}, "GATHER backward idx");
     }
-
     {
         Graph graph;
         uint32_t data = makeFloatInput(graph, {4, 3});
@@ -344,7 +322,6 @@ std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const 
 {
     std::vector<uint32_t> order;
     std::unordered_set<uint32_t> visited;
-
     auto visit = [&](auto &self, uint32_t node) -> void
     {
         if (visited.count(node))
@@ -359,7 +336,6 @@ std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const 
         }
         order.push_back(node);
     };
-
     for (uint32_t root : roots)
     {
         visit(visit, root);
@@ -395,37 +371,26 @@ size_t getRequiredBufferSize(const TensorView &view)
 // ============================================================
 // Reference Graph Executor (Manual Traversal)
 // ============================================================
-
-/**
- * Executes a reference graph by manually traversing nodes in topological order
- * and calling reference kernels directly. No Session involvement.
- */
 std::vector<float> executeReferenceGraph(
     uint32_t rootId,
     Graph &graph,
     const std::unordered_map<uint32_t, std::vector<uint8_t>> &rawInputData,
     bool forceNonContiguous = false)
 {
-    // 1. Topological sort from root
     std::vector<uint32_t> topo = topologicalSort({rootId}, graph);
-
-    // 2. Run shape inference on all nodes
     ShapePropagator prop;
     for (uint32_t nodeId : topo)
     {
         prop.inferShape(nodeId, graph);
     }
 
-    // 3. Execute each node in order, storing results
     std::unordered_map<uint32_t, std::vector<uint8_t>> results;
     std::unordered_map<uint32_t, TensorView> views;
-
     for (uint32_t nodeId : topo)
     {
         const TensorNode &node = graph.getNode(nodeId);
         uint64_t elemSize = getDTypeSize(node.dtype);
 
-        // INPUT nodes: copy from input data or constant staging
         if (node.opType == OpType::INPUT)
         {
             TensorView view = makeView(node);
@@ -437,7 +402,6 @@ std::vector<float> executeReferenceGraph(
             views[nodeId] = view;
             size_t bufElements = getRequiredBufferSize(view);
             results[nodeId].resize(bufElements * elemSize, 0);
-
             std::vector<uint8_t> rawBytes;
             auto it = rawInputData.find(nodeId);
             if (it != rawInputData.end())
@@ -453,7 +417,6 @@ std::vector<float> executeReferenceGraph(
                 Error::throw_err("[executeReferenceGraph] input node value not found in constantStaging or inputData");
             }
 
-            // Scatter rawBytes into results
             uint64_t numElements = countElements(view);
             for (size_t i = 0; i < numElements; ++i)
             {
@@ -465,7 +428,6 @@ std::vector<float> executeReferenceGraph(
             continue;
         }
 
-        // Gather input pointers and views
         std::vector<const void *> inputPtrs;
         std::vector<TensorView> inputViews;
         std::vector<TensorNode> inputNodes;
@@ -493,14 +455,11 @@ std::vector<float> executeReferenceGraph(
         }
 
         TensorNode outNodeNC = node;
-
         auto refs_nc = KernelRegistry::get().findMatchingKernels(
             node.opType, node.opName, node.backend,
             inputNodes, outNodeNC, {}, true);
-
         TensorView chosenOutView;
         uint64_t chosenKernelUid = 0;
-
         if (forceNonContiguous && !refs_nc.empty())
         {
             chosenOutView = outViewNonContig;
@@ -523,15 +482,12 @@ std::vector<float> executeReferenceGraph(
         }
 
         const KernelEntry &kernel = KernelRegistry::get().getKernel(chosenKernelUid);
-
         if (kernel.isView)
         {
             TensorNode dummyOutNode = node;
             kernel.inferView(dummyOutNode, inputNodes, graph);
-
             uint32_t parentId = node.parentIds[0];
             results[nodeId] = results[parentId];
-
             chosenOutView.strides = dummyOutNode.strides;
             chosenOutView.baseOffset = dummyOutNode.viewOffset * elemSize;
             views[nodeId] = chosenOutView;
@@ -541,7 +497,6 @@ std::vector<float> executeReferenceGraph(
         views[nodeId] = chosenOutView;
         size_t bufElements = getRequiredBufferSize(chosenOutView);
         results[nodeId].resize(bufElements * elemSize, 0);
-
         std::vector<void *> outputPtrs = {results[nodeId].data()};
         std::vector<TensorView> outputViews = {chosenOutView};
 
@@ -554,7 +509,6 @@ std::vector<float> executeReferenceGraph(
     uint64_t numRootElems = countElements(graph.getNode(rootId));
     std::vector<float> finalOut(numRootElems, 0.0f);
     TensorView rootView = views[rootId];
-
     for (size_t i = 0; i < numRootElems; ++i)
     {
         uint64_t idx = getStridedIndex(i, rootView.getShape(), rootView.strides);
@@ -586,14 +540,12 @@ std::vector<float> executeReferenceGraph(
             Error::throw_err("[executeReferenceGraph] Unsupported dtype");
         }
     }
-
     return finalOut;
 }
 
 // ============================================================
 // Fused Kernel Direct Execution
 // ============================================================
-
 std::vector<float> executeFusedKernel(
     const KernelEntry &kernel,
     const std::vector<std::vector<uint8_t>> &inputData,
@@ -609,7 +561,6 @@ std::vector<float> executeFusedKernel(
                          std::to_string(inputData.size()));
     }
 
-    // Prepare input pointers and views
     std::vector<const void *> inputPtrs;
     std::vector<TensorView> inputViews;
     for (size_t i = 0; i < kernel.numInputs; ++i)
@@ -622,15 +573,11 @@ std::vector<float> executeFusedKernel(
         inputViews.push_back(view);
     }
 
-    // Allocate output buffer based on expected size from reference graph
     std::vector<float> output(expectedOutElements);
-
-    // For in-place kernels, handle view kernels vs regular in-place
     if (kernel.inplace && kernel.numInputs > 0)
     {
         if (kernel.inferView)
         {
-            // View-based materialization: populated output by reading from input[0] using inferred view
             std::vector<TensorNode> dummyInputs(kernel.numInputs);
             for (size_t i = 0; i < kernel.numInputs; ++i)
             {
@@ -643,9 +590,7 @@ std::vector<float> executeFusedKernel(
             TensorNode dummyOutput;
             dummyOutput.setShape(outShape);
             dummyOutput.dtype = DType::FLOAT32;
-
             kernel.inferView(dummyOutput, dummyInputs, graph);
-
             const float *src = reinterpret_cast<const float *>(inputData[0].data());
             for (size_t i = 0; i < expectedOutElements; ++i)
             {
@@ -654,7 +599,6 @@ std::vector<float> executeFusedKernel(
         }
         else
         {
-            // Regular in-place: copy the input that will be modified to the output buffer
             size_t inputSize = (inputData[0].size() / sizeof(float));
             size_t copyElements = std::min(expectedOutElements, inputSize);
             std::memcpy(output.data(), inputData[0].data(), copyElements * sizeof(float));
@@ -666,10 +610,9 @@ std::vector<float> executeFusedKernel(
     outView.setShape(outShape);
     outView.strides = calcContiguousStrides(outShape);
     outView.baseOffset = 0;
-    outView.dtype = DType::FLOAT32; // Assume FP32 output for fused kernels
+    outView.dtype = DType::FLOAT32;
     std::vector<TensorView> outputViews = {outView};
 
-    // Run
 #ifdef USE_CUDA
     bool runCuda = false;
     for (Backend b : kernel.backends)
@@ -677,14 +620,11 @@ std::vector<float> executeFusedKernel(
         if (b == Backend::CUDA)
             runCuda = true;
     }
-
     if (runCuda)
     {
         std::vector<void *> d_inputs;
         std::vector<void *> d_outputs;
         std::vector<bool> inputOnDevice(kernel.numInputs, false);
-
-        // Allocate and copy inputs to device if needed
         for (size_t i = 0; i < inputData.size(); ++i)
         {
             bool inputNeedsCuda = false;
@@ -701,9 +641,8 @@ std::vector<float> executeFusedKernel(
             }
             else
             {
-                inputNeedsCuda = true; // Fallback default
+                inputNeedsCuda = true;
             }
-
             if (inputNeedsCuda)
             {
                 void *d_ptr = nullptr;
@@ -718,33 +657,22 @@ std::vector<float> executeFusedKernel(
                 inputOnDevice[i] = false;
             }
         }
-
-        // Allocate output on device
         void *d_out = nullptr;
         uint64_t outBytes = expectedOutElements * sizeof(float);
         cudaMalloc(&d_out, outBytes);
-        // If it's in-place, we need to copy the starting state
         if (kernel.inplace)
         {
             cudaMemcpy(d_out, output.data(), outBytes, cudaMemcpyHostToDevice);
         }
         d_outputs.push_back(d_out);
 
-        // Map pointers for the run function
         std::vector<const void *> d_input_ptrs;
         for (void *p : d_inputs)
             d_input_ptrs.push_back(p);
-
         if (kernel.run)
-        {
             kernel.run(d_input_ptrs, d_outputs, inputViews, outputViews);
-        }
         cudaDeviceSynchronize();
-
-        // Copy result back
         cudaMemcpy(output.data(), d_out, outBytes, cudaMemcpyDeviceToHost);
-
-        // Cleanup
         for (size_t i = 0; i < d_inputs.size(); ++i)
         {
             if (inputOnDevice[i])
@@ -755,29 +683,23 @@ std::vector<float> executeFusedKernel(
     else
     {
         if (kernel.run)
-        {
             kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
-        }
     }
 #else
     if (kernel.run)
-    {
         kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
-    }
 #endif
-
     return output;
 }
 
 // ============================================================
 // Test Setup Helpers
 // ============================================================
-
 struct TestInputs
 {
     std::vector<uint32_t> inputIds;
     std::unordered_map<uint32_t, std::vector<uint8_t>> rawInputData;
-    std::vector<std::vector<uint8_t>> rawData; // For fused kernel execution - type-erased bytes
+    std::vector<std::vector<uint8_t>> rawData;
 };
 
 TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
@@ -785,41 +707,33 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
     TestInputs result;
     result.rawData.resize(kernel.numInputs);
     result.inputIds.resize(kernel.numInputs);
-
     for (size_t i = 0; i < kernel.numInputs; ++i)
     {
         uint32_t id = UINT32_MAX;
         DType dtype = kernel.dtypes[i];
         uint64_t elements = countElements(kernel.dummyShapes[i]);
         uint64_t sizeBytes = elements * getDTypeSize(dtype);
-
-        // For Repeat and Reshape operations, constant parameters must be created via graph.constant()
-        // so they're available in constantStaging for shape inference
         bool isConstantParam = (kernel.opName == "Repeat_Inplace" && i > 0) ||
                                (kernel.opName == "Reshape_Inplace" && i == 1) ||
                                (kernel.opName == "Permute_CUDA_Contiguous" && i == 1) ||
                                (kernel.opName.find("SCATTER") != std::string::npos && i >= 2);
-
         if (isConstantParam)
         {
-            // Create constant node for shape inference
             std::vector<int32_t> constData(elements);
             if (kernel.opName == "Repeat_Inplace")
             {
                 if (i == 1)
-                    constData[0] = 2; // repeats = 2
+                    constData[0] = 2;
                 if (i == 2)
-                    constData[0] = 0; // axis = 0
+                    constData[0] = 0;
             }
             else if (kernel.opName == "Reshape_Inplace")
             {
-                // For reshape, use the dummy shape values
                 for (size_t j = 0; j < elements; ++j)
                     constData[j] = static_cast<int32_t>(kernel.dummyShapes[0][j]);
             }
             else if (kernel.opName == "Permute_CUDA_Contiguous")
             {
-                // For permute, use a swap permutation if rank=2, otherwise identity
                 size_t rank = kernel.dummyShapes[0].size();
                 for (size_t j = 0; j < elements; ++j)
                 {
@@ -831,12 +745,12 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             }
             else if (kernel.opName.find("SCATTER") != std::string::npos)
             {
-                if (i == 2) // starts
+                if (i == 2)
                 {
                     for (size_t j = 0; j < elements; ++j)
                         constData[j] = 0;
                 }
-                else if (i == 3) // ends
+                else if (i == 3)
                 {
                     for (size_t j = 0; j < elements; ++j)
                     {
@@ -846,88 +760,230 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                             constData[j] = 1;
                     }
                 }
-                else if (i == 4) // steps
+                else if (i == 4)
                 {
                     for (size_t j = 0; j < elements; ++j)
                         constData[j] = 1;
                 }
             }
-
             id = graph.constant(kernel.dummyShapes[i], constData.data(), dtype);
-            // Resize rawData[i] to hold the bytes and copy directly
             result.rawData[i].resize(sizeBytes);
             std::memcpy(result.rawData[i].data(), constData.data(), sizeBytes);
         }
         else
         {
             id = graph.input(kernel.dummyShapes[i], dtype, {}, StorageType::PERSISTENT);
-
-            // Generate random data - resize based on dtype size
             result.rawData[i].resize(sizeBytes);
             fillRandom(result.rawData[i].data(), elements, dtype);
         }
-
         result.rawInputData[id] = result.rawData[i];
         result.inputIds[i] = id;
     }
-
     return result;
+}
+
+// ============================================================
+// JSONL / Record Testing Helpers
+// ============================================================
+std::vector<float> flattenOutput(const void *ptr, const std::vector<uint32_t> &shape,
+                                 const std::vector<uint64_t> &strides, DType dtype)
+{
+    std::vector<float> result;
+    uint64_t elems = countElements(shape);
+    result.reserve(elems);
+    if (dtype == DType::FLOAT32)
+    {
+        const float *src = static_cast<const float *>(ptr);
+        for (uint64_t i = 0; i < elems; ++i)
+            result.push_back(src[getStridedIndex(i, shape, strides)]);
+    }
+    else if (dtype == DType::INT32)
+    {
+        const int32_t *src = static_cast<const int32_t *>(ptr);
+        for (uint64_t i = 0; i < elems; ++i)
+            result.push_back(static_cast<float>(src[getStridedIndex(i, shape, strides)]));
+    }
+    else if (dtype == DType::BF16)
+    {
+        const uint16_t *src = static_cast<const uint16_t *>(ptr);
+        for (uint64_t i = 0; i < elems; ++i)
+        {
+            uint32_t bits = static_cast<uint32_t>(src[getStridedIndex(i, shape, strides)]) << 16;
+            float val;
+            std::memcpy(&val, &bits, 4);
+            result.push_back(val);
+        }
+    }
+    else
+    {
+        result.resize(elems, 0.0f);
+    }
+    return result;
+}
+
+bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
+{
+    try
+    {
+        if (rec.inputShapes.size() != kernel.numInputs && !kernel.isVariadic)
+            return true; // Skip mismatched variadic/arity records
+
+        std::vector<std::vector<uint8_t>> inData(rec.inputShapes.size());
+        std::vector<const void *> inPtrs(rec.inputShapes.size(), nullptr);
+        std::vector<TensorView> inViews(rec.inputShapes.size());
+        for (size_t i = 0; i < rec.inputShapes.size(); ++i)
+        {
+            uint64_t elements = countElements(rec.inputShapes[i]);
+            uint64_t bytes = elements * getDTypeSize(rec.inputDTypes[i]);
+            inData[i].resize(bytes);
+            if (i < rec.inputConstants.size() && !rec.inputConstants[i].empty() && rec.inputConstants[i].size() == bytes)
+                std::memcpy(inData[i].data(), rec.inputConstants[i].data(), bytes);
+            else
+                fillRandom(inData[i].data(), elements, rec.inputDTypes[i]);
+
+            inPtrs[i] = inData[i].data();
+            inViews[i].setShape(rec.inputShapes[i]);
+            inViews[i].strides = rec.inputStrides[i];
+            inViews[i].baseOffset = 0;
+            inViews[i].dtype = rec.inputDTypes[i];
+        }
+
+        std::vector<std::vector<uint8_t>> outData(rec.outputShapes.size());
+        std::vector<void *> outPtrs(rec.outputShapes.size(), nullptr);
+        std::vector<TensorView> outViews(rec.outputShapes.size());
+        for (size_t i = 0; i < rec.outputShapes.size(); ++i)
+        {
+            uint64_t elements = countElements(rec.outputShapes[i]);
+            uint64_t bytes = elements * getDTypeSize(rec.outputDTypes[i]);
+            outData[i].resize(bytes);
+            if (kernel.inplace && i == 0 && !inData.empty())
+            {
+                outData[i] = inData[0]; // alias
+                outPtrs[i] = inData[0].data();
+            }
+            else
+            {
+                outPtrs[i] = outData[i].data();
+            }
+            outViews[i].setShape(rec.outputShapes[i]);
+            outViews[i].strides = rec.outputStrides[i];
+            outViews[i].baseOffset = 0;
+            outViews[i].dtype = rec.outputDTypes[i];
+        }
+
+        // Setup dummy nodes for ref kernel matching
+        std::vector<TensorNode> refInNodes(rec.inputShapes.size());
+        Backend targetBackend = rec.backends.empty() ? Backend::CPU : rec.backends[0];
+        for (size_t i = 0; i < rec.inputShapes.size(); ++i)
+        {
+            refInNodes[i].setShape(rec.inputShapes[i]);
+            refInNodes[i].strides = rec.inputStrides[i];
+            refInNodes[i].dtype = rec.inputDTypes[i];
+            refInNodes[i].backend = rec.inputBackends.empty() || rec.inputBackends[i].empty() ? targetBackend : rec.inputBackends[i][0];
+        }
+        TensorNode refOutNode;
+        refOutNode.setShape(rec.outputShapes.empty() ? rec.inputShapes[0] : rec.outputShapes[0]);
+        refOutNode.strides = rec.outputShapes.empty() ? rec.inputStrides[0] : rec.outputStrides[0];
+        refOutNode.dtype = rec.outputDTypes.empty() ? rec.inputDTypes[0] : rec.outputDTypes[0];
+        refOutNode.backend = targetBackend;
+
+        auto refMatches = KernelRegistry::get().findMatchingKernels(kernel.opType, kernel.opName, refOutNode.backend, refInNodes, refOutNode, true, true, true);
+        if (refMatches.empty())
+            return true; // No ref kernel available to verify against
+
+        const KernelEntry &refKernel = KernelRegistry::get().getKernel(refMatches[0]);
+        refKernel.run(inPtrs, outPtrs, inViews, outViews);
+
+        std::vector<float> refOutput = flattenOutput(outPtrs[0], rec.outputShapes[0], rec.outputStrides[0], refOutNode.dtype);
+
+        // Reset & Run Target Kernel
+        for (size_t i = 0; i < outData.size(); ++i)
+        {
+            if (!(kernel.inplace && i == 0 && !inData.empty()))
+                std::memset(outData[i].data(), 0, outData[i].size());
+        }
+        for (size_t i = 0; i < outPtrs.size(); ++i)
+            outPtrs[i] = outData[i].data();
+        if (kernel.inplace && !inData.empty())
+        {
+            outPtrs[0] = inData[0].data();
+            // Restore input state for target run if needed
+            fillRandom(inData[0].data(), countElements(rec.inputShapes[0]), rec.inputDTypes[0]);
+            inPtrs[0] = inData[0].data();
+        }
+
+        kernel.run(inPtrs, outPtrs, inViews, outViews);
+        std::vector<float> tgtOutput = flattenOutput(outPtrs[0], rec.outputShapes[0], rec.outputStrides[0], refOutNode.dtype);
+
+        return compareOutputs(refOutput.data(), tgtOutput.data(), refOutput.size());
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "[Record Test Exception] " << e.what() << std::endl;
+        return false;
+    }
+}
+
+std::unordered_map<uint64_t, std::vector<Record>> loadCallRecords(const std::string &path)
+{
+    std::unordered_map<uint64_t, std::vector<Record>> records;
+    std::ifstream file(path);
+    if (!file.is_open())
+        return records;
+    std::string line;
+    while (std::getline(file, line))
+    {
+        if (line.empty())
+            continue;
+        json j = json::parse(line);
+        Record r = j.get<Record>();
+        records[r.kernelUid].push_back(std::move(r));
+    }
+    return records;
 }
 
 // ============================================================
 // Python Test Loop
 // ============================================================
-
 void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 {
     std::cout << "\n========================================" << std::endl;
     std::cout << "Running Python Reference Kernel Tests..." << std::endl;
     std::cout << "========================================" << std::endl;
-
     if (!std::filesystem::exists(testDir))
     {
         std::cout << "No " << testDir << " directory found. Skipping python reference tests." << std::endl;
         return;
     }
-
     int passed = 0;
     int total = 0;
-
     std::vector<std::string> testDirs;
     for (const auto &entry : std::filesystem::directory_iterator(testDir))
     {
         if (entry.is_directory())
-        {
             testDirs.push_back(entry.path().string());
-        }
     }
     std::sort(testDirs.begin(), testDirs.end(), [](const std::string &a, const std::string &b)
               {
-        std::string na = std::filesystem::path(a).filename().string();
-        std::string nb = std::filesystem::path(b).filename().string();
-        try { return std::stoi(na) < std::stoi(nb); } catch (...) { return a < b; } });
-
+                std::string na = std::filesystem::path(a).filename().string();
+                std::string nb = std::filesystem::path(b).filename().string();
+                try { return std::stoi(na) < std::stoi(nb); } catch (...) { return a < b; } });
     for (const std::string &testDir : testDirs)
     {
         total++;
         std::string infoPath = testDir + "/info.json";
         std::string dataPath = testDir + "/data.safetensors";
-
         std::ifstream infoFile(infoPath);
         if (!infoFile.is_open())
             continue;
         json info;
         infoFile >> info;
-
         OpType opType = info["optype"].get<OpType>();
-
         SafetensorsLoader loader(dataPath);
-
         std::vector<std::vector<uint8_t>> inputData;
         std::vector<TensorView> inViews;
         std::vector<TensorNode> dummyInputNodes;
         std::vector<const void *> inPtrs;
-
         Graph dummyGraph;
         int i = 0;
         for (const auto &inpJson : info["inputs"])
@@ -935,55 +991,41 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             std::vector<uint32_t> shape = inpJson["shape"].get<std::vector<uint32_t>>();
             std::vector<uint64_t> strides = inpJson["strides"].get<std::vector<uint64_t>>();
             DType dtype = inpJson["dtype"].get<DType>();
-
             std::string tensorName = "input." + std::to_string(i);
             uint64_t sizeBytes = countElements(shape) * getDTypeSize(dtype);
             std::vector<uint8_t> data(sizeBytes);
             loader.loadTensor(tensorName, data.data(), sizeBytes);
             inputData.push_back(std::move(data));
-
             TensorView view;
             view.baseOffset = 0;
             view.setShape(shape);
             view.strides = strides;
             view.dtype = dtype;
             inViews.push_back(view);
-
             TensorNode &node = dummyGraph.allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, Backend::CPU, StorageType::PERSISTENT);
             dummyInputNodes.push_back(node);
-
             if (dtype == DType::INT32)
-            {
                 dummyGraph.constantStaging[node.id] = inputData.back();
-            }
-
             i++;
         }
-
         for (auto &vec : inputData)
-        {
             inPtrs.push_back(vec.data());
-        }
 
         json outJson = info["output"];
         std::vector<uint32_t> outShape = outJson["shape"].get<std::vector<uint32_t>>();
         std::vector<uint64_t> outStrides = outJson["strides"].get<std::vector<uint64_t>>();
         DType outDType = outJson["dtype"].get<DType>();
-
         uint64_t outSizeBytes = countElements(outShape) * getDTypeSize(outDType);
         std::vector<uint8_t> expectedData(outSizeBytes);
         loader.loadTensor("output", expectedData.data(), outSizeBytes);
-
         std::vector<uint8_t> actualData(outSizeBytes);
         std::vector<void *> outPtrs = {actualData.data()};
-
         TensorView outView;
         outView.baseOffset = 0;
         outView.setShape(outShape);
         outView.strides = outStrides;
         outView.dtype = outDType;
         std::vector<TensorView> outViews = {outView};
-
         TensorNode outNode;
         outNode.id = i;
         outNode.dtype = outDType;
@@ -992,10 +1034,8 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         outNode.backend = Backend::CPU;
 
         std::cout << "Testing Python Ref " << testDir << " [" << toString(opType) << "] ... " << std::flush;
-
         std::vector<uint64_t> matches = KernelRegistry::get().findMatchingKernels(
             opType, "", Backend::CPU, dummyInputNodes, outNode, {}, true);
-
         if (matches.empty())
         {
             Error::throw_err("[runPythonTests] FAILED (No reference kernel found)");
@@ -1004,9 +1044,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         {
             Error::throw_err("[runPythonTests] Expected 1 kernel match, got " + std::to_string(matches.size()));
         }
-
         const KernelEntry &kernel = KernelRegistry::get().getKernel(matches.front());
-
         if (kernel.isView)
         {
             TensorNode dummyOutNode = outNode;
@@ -1016,7 +1054,6 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
                 dummyInputNodes[k].viewOffset = inViews[k].baseOffset / getDTypeSize(dummyInputNodes[k].dtype);
             }
             kernel.inferView(dummyOutNode, dummyInputNodes, dummyGraph);
-
             size_t elements = countElements(outShape);
             if (outDType == DType::FLOAT32)
             {
@@ -1057,7 +1094,6 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         {
             Error::throw_err("[runPythonTests] Unsupported type: " + (std::string)toString(outDType));
         }
-
         if (ok)
         {
             passed++;
@@ -1068,46 +1104,39 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             std::cout << "FAILED (Output Mismatch)" << std::endl;
         }
     }
-
     std::cout << "\n----------------------" << std::endl;
     std::cout << "Python Reference Tests Passed: " << passed << "/" << total << std::endl;
-    std::cout << "----------------------\n\n"
+    std::cout << "----------------------\n"
               << std::endl;
 }
 
 // ============================================================
 // Main Test Loop
 // ============================================================
-
 int main()
 {
     runPythonTests();
     runRegionMergeTests();
     runShapePropagationTests();
-
     std::cout << "Running Non-Reference Kernel Tests..." << std::endl;
-
     int passed = 0;
     int total = 0;
     int skipped = 0;
 
+    // Load benchmark records if available
+    auto recordsByUid = loadCallRecords("benchmarks/calls.jsonl");
+
     const auto &kernels = KernelRegistry::get().getAllKernels();
     for (const auto &kernel : kernels)
     {
-        // Skip reference implementations since they are the source of truth
         if (kernel.isReference)
-        {
             continue;
-        }
-
-        // Skip kernels without refFactory (cannot verify correctness)
         if (!kernel.refFactory)
         {
             std::cout << "Skipping " << kernel.opName << " (no refFactory)" << std::endl;
             skipped++;
             continue;
         }
-
         if (kernel.dummyShapes.size() != kernel.numInputs)
         {
             std::cout << "Skipping " << kernel.opName << " (dummy shapes mismatch)" << std::endl;
@@ -1118,33 +1147,47 @@ int main()
         total++;
         std::cout << "Testing " << kernel.opName << " ... " << std::flush;
 
-        // ========== REFERENCE EXECUTION ==========
-        // 1. Build reference graph using refFactory
+        // 1. Dummy Shapes Test
         Graph refGraph;
         TestInputs refInputs = createTestInputs(refGraph, kernel);
         uint32_t rootId = kernel.refFactory(refInputs.inputIds, refGraph);
-
-        // 2. Execute reference graph via manual traversal (Contiguous)
         std::vector<float> refOutput = executeReferenceGraph(rootId, refGraph, refInputs.rawInputData, false);
-
         size_t elements = refOutput.size();
-
-        // ========== FUSED KERNEL EXECUTION ==========
-        // Execute fused kernel directly
         std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refInputs.inputIds, refOutput.size(), refGraph.getNode(rootId).getShape(), refGraph);
 
-        // ========== COMPARE ==========
-        if (fusedOutput.size() != elements)
+        bool dummyOk = false;
+        if (fusedOutput.size() == elements)
+            dummyOk = compareOutputs(refOutput.data(), fusedOutput.data(), elements);
+
+        // 2. Record-Based Tests
+        bool recordOk = true;
+        auto it = recordsByUid.find(kernel.uid);
+        if (it != recordsByUid.end())
         {
-            std::cout << "FAILED (output size mismatch: " << fusedOutput.size()
-                      << " vs " << elements << ")" << std::endl;
-            continue;
+            std::cout << "\n  [Records] Testing " << it->second.size() << " configurations... " << std::flush;
+            for (const auto &rec : it->second)
+            {
+                if (!testKernelWithRecord(kernel, rec))
+                {
+                    recordOk = false;
+                    break;
+                }
+            }
+            if (recordOk)
+                std::cout << "OK" << std::endl;
+            else
+                std::cout << "FAILED" << std::endl;
+        }
+        else
+        {
+            std::cout << " (no records) ";
         }
 
-        if (compareOutputs(refOutput.data(), fusedOutput.data(), elements))
+        if (dummyOk && recordOk)
         {
-            std::cout << "OK" << std::endl;
             passed++;
+            if (it == recordsByUid.end())
+                std::cout << "OK" << std::endl;
         }
         else
         {
@@ -1155,10 +1198,7 @@ int main()
     std::cout << "\n----------------------" << std::endl;
     std::cout << "Tests Passed: " << passed << "/" << total << std::endl;
     if (skipped > 0)
-    {
         std::cout << "Tests Skipped: " << skipped << std::endl;
-    }
     std::cout << "----------------------" << std::endl;
-
     return 0;
 }
