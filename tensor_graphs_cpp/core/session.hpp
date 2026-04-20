@@ -693,6 +693,18 @@ public:
             Error::throw_err("[Session.run] no compiled bucket available for dirty regions: " + key);
         }
 
+        for (const auto &pair : compiled->constantStaging)
+        {
+            uint32_t nodeId = pair.first;
+            const TensorNode &node = compiled->nodesMap.at(nodeId);
+            uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
+            if (!memManager.has(node.backend, nodeId))
+            {
+                memManager.allocate(node.backend, nodeId, sizeBytes, StorageType::PERSISTENT);
+            }
+            memManager.write(node.backend, nodeId, pair.second.data(), sizeBytes);
+        }
+
         incrementBucketCount(key);
         saveBucketCounts();
         executor->run(inputs, *compiled, bucketIt->second);
