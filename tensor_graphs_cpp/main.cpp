@@ -532,9 +532,10 @@ int main()
 
     // Initial prompt tokens
     // std::vector<uint32_t> tokens = {2, 105, 2364, 107, 155122, 27825, 49087, 531, 496, 236743, 236810, 1051, 2255, 236761, 106, 107, 105, 4368, 107};
-    std::vector<uint32_t> tokens = {2, 9259};
-    uint32_t maxSeqLen = 8;
-    uint32_t numTokensToGenerate = 6; // Number of new tokens to generate
+    // std::vector<uint32_t> tokens = {2, 9259};
+    std::vector<uint32_t> tokens = {2, 24233, 236743, 236770, 107};
+    uint32_t maxSeqLen = 128;
+    uint32_t numTokensToGenerate = 126; // Number of new tokens to generate
     std::string modelPath = "resources/model.safetensors";
 
     ModelConfig cfg;
