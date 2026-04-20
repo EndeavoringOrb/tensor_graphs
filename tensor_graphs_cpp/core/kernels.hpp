@@ -8,19 +8,12 @@
 #include <string>
 #include <unordered_map>
 
-// A matching function checks the context of the requested operation to determine
-// if the kernel supports the specific layout, rank, dimensions, or dtypes.
 using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
-
-// The execution function receives raw pointers dynamically mapped to the device buffer,
-// alongside the TensorViews to access strides and shapes during execution.
 using KernelFunc = void (*)(const std::vector<const void *> &inputs,
                             const std::vector<void *> &outputs,
                             const std::vector<TensorView> &inViews,
                             const std::vector<TensorView> &outViews);
-
 using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph);
-
 using InferViewFunc = void (*)(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph);
 
 struct ReferenceGraphEntry
@@ -45,8 +38,8 @@ public:
         auto it = factories.find(name);
         if (it != factories.end())
         {
-            return; // TODO: somehow check that the reference graphs are the same
-            // Error::throw_err("A kernel with name \"" + name + "\" is already registered.");
+            // return; // TODO: somehow check that the reference graphs are the same
+            Error::throw_err("A kernel with name \"" + name + "\" is already registered.");
         }
         factories[name] = {numInputs, factory, dtypes, dummyShapes};
     }
@@ -59,10 +52,7 @@ public:
         return nullptr;
     }
 
-    const std::unordered_map<std::string, ReferenceGraphEntry> &getAll() const
-    {
-        return factories;
-    }
+    const std::unordered_map<std::string, ReferenceGraphEntry> &getAll() const { return factories; }
 
 private:
     std::unordered_map<std::string, ReferenceGraphEntry> factories;
@@ -87,6 +77,95 @@ struct KernelEntry
     std::vector<DType> dtypes;
     std::vector<std::vector<uint32_t>> dummyShapes;
     std::vector<bool> requiresContiguous;
+
+    // Abstracted validity check
+    bool matches(const std::vector<TensorNode> &inputs, const TensorNode &output,
+                 bool ignoreInputBackends = false, bool ignoreInputContig = false) const
+    {
+        // 1. Check number of inputs
+        if (isVariadic)
+        {
+            if (inputs.size() < 2)
+                return false;
+        }
+        else if (inputs.size() != numInputs)
+        {
+            return false;
+        }
+
+        // 2. Check input backends
+        if (!ignoreInputBackends)
+        {
+            for (size_t i = 0; i < inputs.size(); ++i)
+            {
+                size_t ruleIdx = isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                bool found = false;
+                for (Backend b : inputBackends[ruleIdx])
+                {
+                    if (inputs[i].backend == b)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    return false;
+            }
+        }
+
+        // 3. Check input contiguity
+        if (!ignoreInputContig)
+        {
+            for (size_t i = 0; i < inputs.size(); ++i)
+            {
+                size_t ruleIdx = isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                if (requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
+                    return false;
+            }
+        }
+
+        // 4. Check input dtypes if registered (skipping variadic operations like CONCAT)
+        if (!dtypes.empty() && !isVariadic)
+        {
+            for (size_t i = 0; i < std::min((size_t)numInputs, dtypes.size()); ++i)
+            {
+                if (i < inputs.size() && inputs[i].dtype != dtypes[i])
+                    return false;
+            }
+        }
+
+        // 5. Output backend check
+        bool backendFound = false;
+        for (Backend b : backends)
+        {
+            if (b == output.backend)
+            {
+                backendFound = true;
+                break;
+            }
+        }
+        if (!backendFound)
+            return false;
+
+        // 6. Inplace and view checks assume input and output are on the same backend
+        if (inplace && numInputs > 0 && !inputs.empty())
+        {
+            if (inputs[0].backend != output.backend)
+                return false;
+        }
+        if (isView && numInputs > 0 && !inputs.empty())
+        {
+            if (inputs[0].backend != output.backend)
+                return false;
+        }
+
+        // 7. Call custom match function
+        if (match)
+        {
+            return match(inputs, output);
+        }
+        return true;
+    }
 };
 
 class KernelRegistry
@@ -99,18 +178,12 @@ public:
     }
 
     void setReferenceOnly(bool refOnly) { referenceOnlyMode = refOnly; }
-
     const std::vector<KernelEntry> &getAllKernels() const { return entries; }
 
     std::vector<uint64_t> findMatchingKernelsByPattern(
-        const Graph &patternGraph,
-        uint32_t patternRootId,
-        Backend backend,
-        const std::vector<TensorNode> &inputs,
-        const TensorNode &output,
-        bool referenceOnly = false,
-        bool ignoreInputBackends = false,
-        bool ignoreInputContig = false) const
+        const Graph &patternGraph, uint32_t patternRootId, Backend backend,
+        const std::vector<TensorNode> &inputs, const TensorNode &output,
+        bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
     {
         std::vector<uint64_t> matches;
         for (const auto &entry : entries)
@@ -119,7 +192,6 @@ public:
                 continue;
 
             bool patternMatches = false;
-
             if (entry.opType == OpType::FUSED)
             {
                 if (entry.refFactory)
@@ -127,9 +199,7 @@ public:
                     Graph kGraph;
                     std::vector<uint32_t> kInputs;
                     for (size_t i = 0; i < entry.numInputs; ++i)
-                    {
                         kInputs.push_back(kGraph.input(entry.dummyShapes[i], entry.dtypes[i]));
-                    }
                     uint32_t kRootId = entry.refFactory(kInputs, kGraph);
                     patternMatches = isIsomorphic(patternGraph, patternRootId, kGraph, kRootId);
                 }
@@ -156,82 +226,10 @@ public:
             if (!patternMatches)
                 continue;
 
-            bool backendFound = false;
-            for (auto b : entry.backends)
-            {
-                if (b == backend)
-                {
-                    backendFound = true;
-                    break;
-                }
-            }
-            if (!backendFound)
+            if (!entry.matches(inputs, output, ignoreInputBackends, ignoreInputContig))
                 continue;
 
-            if (entry.isVariadic)
-            {
-                if (inputs.size() < 2)
-                    continue;
-            }
-            else if (inputs.size() != entry.numInputs)
-            {
-                continue;
-            }
-
-            if (!ignoreInputBackends)
-            {
-                bool inputBackendsMatch = true;
-                for (uint32_t i = 0; i < inputs.size(); ++i)
-                {
-                    size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
-                    bool currentInputMatch = false;
-                    for (uint32_t j = 0; j < entry.inputBackends[ruleIdx].size(); j++)
-                    {
-                        if (inputs[i].backend == entry.inputBackends[ruleIdx][j])
-                        {
-                            currentInputMatch = true;
-                            break;
-                        }
-                    }
-                    inputBackendsMatch = inputBackendsMatch && currentInputMatch;
-                    if (!inputBackendsMatch)
-                        break;
-                }
-                if (!inputBackendsMatch)
-                    continue;
-            }
-
-            if (entry.inplace && entry.numInputs > 0)
-            {
-                if (inputs[0].backend != backend)
-                    continue;
-            }
-            if (entry.isView && entry.numInputs > 0)
-            {
-                if (inputs[0].backend != backend)
-                    continue;
-            }
-
-            if (!ignoreInputContig)
-            {
-                bool contigMatch = true;
-                for (size_t i = 0; i < inputs.size(); ++i)
-                {
-                    size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
-                    if (entry.requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
-                    {
-                        contigMatch = false;
-                        break;
-                    }
-                }
-                if (!contigMatch)
-                    continue;
-            }
-
-            if (entry.match(inputs, output))
-            {
-                matches.push_back(entry.uid);
-            }
+            matches.push_back(entry.uid);
         }
         return matches;
     }
@@ -285,102 +283,24 @@ public:
     }
 
     std::vector<uint64_t> findMatchingKernels(
-        OpType op,
-        const std::string &opName,
-        Backend backend,
-        const std::vector<TensorNode> &inputs,
-        const TensorNode &output,
-        bool referenceOnly = false,
-        bool ignoreInputBackends = false,
-        bool ignoreInputContig = false) const
+        OpType op, const std::string &opName, Backend backend,
+        const std::vector<TensorNode> &inputs, const TensorNode &output,
+        bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
     {
         std::vector<uint64_t> matches;
         for (const auto &entry : entries)
         {
             if ((referenceOnlyMode || referenceOnly) && !entry.isReference)
                 continue;
-
             if (entry.opType != op)
                 continue;
-
-            bool backendFound = false;
-            for (auto b : entry.backends)
-            {
-                if (b == backend)
-                {
-                    backendFound = true;
-                    break;
-                }
-            }
-            if (!backendFound)
-                continue;
-
             if (op == OpType::FUSED && entry.opName != opName)
                 continue;
 
-            if (entry.isVariadic)
-            {
-                if (inputs.size() < 2)
-                    continue; // Must have at least 1 tensor + 1 axis
-            }
-            else if (inputs.size() != entry.numInputs)
-            {
-                Error::throw_err("[KernelRegistry.findMatchingKernels] expected " + std::to_string(entry.numInputs) + " inputs but got " + std::to_string(inputs.size()));
-            }
-            if (!ignoreInputBackends)
-            {
-                bool inputBackendsMatch = true;
-                for (uint32_t i = 0; i < inputs.size(); ++i)
-                {
-                    size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
-                    bool currentInputMatch = false;
-                    for (uint32_t j = 0; j < entry.inputBackends[ruleIdx].size(); j++)
-                    {
-                        if (inputs[i].backend == entry.inputBackends[ruleIdx][j])
-                        {
-                            currentInputMatch = true;
-                            break;
-                        }
-                    }
-                    inputBackendsMatch = inputBackendsMatch && currentInputMatch;
-                    if (!inputBackendsMatch)
-                        break;
-                }
-                if (!inputBackendsMatch)
-                    continue;
-            }
+            if (!entry.matches(inputs, output, ignoreInputBackends, ignoreInputContig))
+                continue;
 
-            if (entry.inplace && entry.numInputs > 0)
-            {
-                if (inputs[0].backend != backend)
-                    continue;
-            }
-            if (entry.isView && entry.numInputs > 0)
-            {
-                if (inputs[0].backend != backend)
-                    continue;
-            }
-
-            if (!ignoreInputContig)
-            {
-                bool contigMatch = true;
-                for (size_t i = 0; i < inputs.size(); ++i)
-                {
-                    size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
-                    if (entry.requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
-                    {
-                        contigMatch = false;
-                        break;
-                    }
-                }
-                if (!contigMatch)
-                    continue;
-            }
-
-            if (entry.match(inputs, output))
-            {
-                matches.push_back(entry.uid);
-            }
+            matches.push_back(entry.uid);
         }
         return matches;
     }

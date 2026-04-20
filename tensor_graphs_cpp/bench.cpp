@@ -174,11 +174,34 @@ int main()
         try
         {
             const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
-            // SAFETY CHECK: Ensure the Record from JSON matches the Kernel's expectations
-            if (r.inputShapes.size() < (kernel.inplace ? 1 : kernel.numInputs) && !kernel.isReference)
+
+            // Build dummy nodes for validation against centralized matching logic
+            std::vector<TensorNode> dummyInputs(r.inputShapes.size());
+            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
-                std::cerr << "Skipping kernel " << kernel.opName << ": Record has "
-                          << r.inputShapes.size() << " inputs, kernel requires " << kernel.numInputs << std::endl;
+                dummyInputs[idx].setShape(r.inputShapes[idx]);
+                dummyInputs[idx].strides = r.inputStrides[idx];
+                dummyInputs[idx].dtype = r.inputDTypes[idx];
+
+                Backend b = Backend::CPU;
+                if (!r.inputBackends.empty() && idx < r.inputBackends.size() && !r.inputBackends[idx].empty())
+                    b = r.inputBackends[idx][0];
+                dummyInputs[idx].backend = b;
+            }
+
+            TensorNode dummyOutput;
+            if (!r.outputShapes.empty())
+            {
+                dummyOutput.setShape(r.outputShapes[0]);
+                dummyOutput.strides = r.outputStrides[0];
+                dummyOutput.dtype = r.outputDTypes[0];
+                dummyOutput.backend = r.backends.empty() ? Backend::CPU : r.backends[0];
+            }
+
+            // Run central match that safely ignores OOB array evaluations
+            if (!kernel.matches(dummyInputs, dummyOutput))
+            {
+                std::cerr << "Skipping kernel " << kernel.opName << " (0x" << std::hex << kernelUid << "): record fails matches() validity check." << std::endl;
                 continue;
             }
 

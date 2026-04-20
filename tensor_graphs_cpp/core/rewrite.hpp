@@ -780,28 +780,18 @@ struct ContiguousElimination : public Rule
     {
         const ENode &enode = egraph.getENodes()[eNodeIdx];
 
-        // Skip nodes that don't have children or are inputs
-        if (enode.opType == OpType::INPUT || enode.children.empty())
+        if (enode.opType == OpType::INPUT || enode.children.empty() || enode.opType == OpType::CONTIGUOUS)
             return false;
 
         for (uint32_t childEClassId : enode.children)
         {
             const EClass &childCls = egraph.getEClass(childEClassId);
-
-            // Check if this child class contains a CONTIGUOUS node
             for (uint32_t childENodeIdx : childCls.enodes)
             {
                 const ENode &childENode = egraph.getENodes()[childENodeIdx];
-
                 if (childENode.opType == OpType::CONTIGUOUS && !childENode.children.empty())
                 {
-                    uint32_t sourceEClassId = childENode.children[0];
-
-                    // If the source of the contiguous node is already contiguous, we can eliminate the op
-                    if (isContiguous(egraph.getEClass(sourceEClassId)))
-                    {
-                        return true;
-                    }
+                    return true;
                 }
             }
         }
@@ -813,37 +803,94 @@ struct ContiguousElimination : public Rule
         const ENode consumerNode = egraph.getENodes()[eNodeIdx];
         uint32_t consumerEClassId = egraph.getENodeEClass(eNodeIdx);
 
-        std::vector<uint32_t> optimizedChildren = consumerNode.children;
-        bool changed = false;
-
-        for (size_t i = 0; i < optimizedChildren.size(); ++i)
+        for (size_t i = 0; i < consumerNode.children.size(); ++i)
         {
-            const EClass &childCls = egraph.getEClass(optimizedChildren[i]);
+            uint32_t childEClassId = consumerNode.children[i];
+            // Copy to avoid iterator invalidation during addENode
+            std::vector<uint32_t> childENodeIndices = egraph.getEClass(childEClassId).enodes;
 
-            for (uint32_t childENodeIdx : childCls.enodes)
+            for (uint32_t childENodeIdx : childENodeIndices)
             {
-                const ENode &childENode = egraph.getENodes()[childENodeIdx];
+                // Copy by value because getENodes() might reallocate during addENode
+                ENode childENode = egraph.getENodes()[childENodeIdx];
 
-                if (childENode.opType == OpType::CONTIGUOUS)
+                if (childENode.opType == OpType::CONTIGUOUS && !childENode.children.empty())
                 {
                     uint32_t sourceEClassId = childENode.children[0];
+
+                    std::vector<uint32_t> optimizedChildren = consumerNode.children;
+                    optimizedChildren[i] = sourceEClassId;
+
+                    // Fast path: source is natively contiguous, old kernel still applies perfectly
                     if (isContiguous(egraph.getEClass(sourceEClassId)))
                     {
-                        // Use the grandchild (the original source) instead of the redundant contiguous node
-                        optimizedChildren[i] = sourceEClassId;
-                        changed = true;
+                        ENode n = consumerNode;
+                        n.children = optimizedChildren;
+                        egraph.addENode(consumerEClassId, n);
                         break;
                     }
+
+                    // Strict validation: Does a kernel exist that natively supports this strided tensor?
+                    std::vector<TensorNode> inputNodes;
+                    Graph pGraph;
+                    std::vector<uint32_t> pInputs;
+
+                    for (uint32_t cId : optimizedChildren)
+                    {
+                        const EClass &cClass = egraph.getEClass(cId);
+                        TensorNode n;
+                        n.opType = OpType::INPUT;
+                        n.dtype = cClass.dtype;
+                        n.setShape(cClass.shape);
+                        n.strides = cClass.strides;
+                        n.backend = cClass.backend;
+                        inputNodes.push_back(n);
+
+                        pInputs.push_back(pGraph.input(n.getShape(), n.dtype));
+                    }
+
+                    TensorNode outNode;
+                    outNode.opType = consumerNode.opType;
+                    outNode.opName = consumerNode.opName;
+                    outNode.dtype = consumerNode.dtype;
+                    outNode.setShape(consumerNode.shape);
+                    outNode.strides = consumerNode.strides;
+                    outNode.backend = consumerNode.backend;
+
+                    uint32_t pRoot = UINT32_MAX;
+                    if (consumerNode.opType == OpType::FUSED)
+                    {
+                        const auto *refEntry = ReferenceGraphRegistry::get().getFactory(consumerNode.opName);
+                        if (refEntry)
+                        {
+                            pRoot = refEntry->factory(pInputs, pGraph);
+                        }
+                    }
+                    else
+                    {
+                        TensorNode &n = pGraph.allocateNode(consumerNode.opType, "", consumerNode.dtype, pInputs);
+                        pRoot = n.id;
+                    }
+
+                    if (pRoot != UINT32_MAX)
+                    {
+                        auto matches = KernelRegistry::get().findMatchingKernelsByPattern(
+                            pGraph, pRoot, consumerNode.backend, inputNodes, outNode, false, false, false);
+
+                        for (uint64_t uid : matches)
+                        {
+                            const auto &kernel = KernelRegistry::get().getKernel(uid);
+                            ENode n = consumerNode;
+                            n.children = optimizedChildren;
+                            n.kernelUid = uid;
+                            n.opType = kernel.opType;
+                            n.opName = kernel.opName;
+                            egraph.addENode(consumerEClassId, n);
+                        }
+                    }
+                    break;
                 }
             }
-        }
-
-        if (changed)
-        {
-            ENode newNode = consumerNode;
-            newNode.children = optimizedChildren;
-            // Add the optimized ENode to the original consumer's EClass
-            egraph.addENode(consumerEClassId, newNode);
         }
     }
 };
