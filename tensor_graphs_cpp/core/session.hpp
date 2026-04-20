@@ -518,12 +518,12 @@ public:
             for (const auto &nodePair : pair.second.nodesMap)
             {
                 const TensorNode &node = nodePair.second;
-                uint32_t eclassId = node.id;
-                uint32_t logicalId = pair.second.getLogicalId(eclassId);
+                uint32_t physId = node.id;
+                uint32_t logicalId = pair.second.getLogicalId(physId);
 
                 if (node.opType == OpType::INPUT && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
                 {
-                    uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : eclassId;
+                    uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : physId;
 
                     if (materialized.insert(memId).second)
                     {
@@ -536,9 +536,9 @@ public:
                         {
                             memManager.write(node.backend, memId, graph.constantStaging.at(logicalId).data(), sizeBytes);
                         }
-                        else if (pair.second.constantStaging.count(eclassId))
+                        else if (pair.second.constantStaging.count(physId))
                         {
-                            memManager.write(node.backend, memId, pair.second.constantStaging.at(eclassId).data(), sizeBytes);
+                            memManager.write(node.backend, memId, pair.second.constantStaging.at(physId).data(), sizeBytes);
                         }
                         else if (logicalId != UINT32_MAX && graph.weightSources.count(logicalId))
                         {
@@ -691,18 +691,6 @@ public:
         if (compiled == nullptr || bucketIt == cachedBuckets.end())
         {
             Error::throw_err("[Session.run] no compiled bucket available for dirty regions: " + key);
-        }
-
-        for (const auto &pair : compiled->constantStaging)
-        {
-            uint32_t nodeId = pair.first;
-            const TensorNode &node = compiled->nodesMap.at(nodeId);
-            uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
-            if (!memManager.has(node.backend, nodeId))
-            {
-                memManager.allocate(node.backend, nodeId, sizeBytes, StorageType::PERSISTENT);
-            }
-            memManager.write(node.backend, nodeId, pair.second.data(), sizeBytes);
         }
 
         incrementBucketCount(key);

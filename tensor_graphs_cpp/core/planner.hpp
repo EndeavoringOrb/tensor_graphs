@@ -225,6 +225,8 @@ static PlanningRegionState derivePlanningRegions(
 class Planner
 {
 private:
+    uint32_t nextPhysId = 0x80000000;
+
     struct ENodeInfo
     {
         float cost;
@@ -1281,13 +1283,19 @@ private:
         uint32_t rootEClassId = egraph.find(nodeToEClass.at(rootId));
         visit(rootEClassId);
 
+        std::unordered_map<uint32_t, uint32_t> eclassToPhys;
+        for (uint32_t eclassId : topo)
+        {
+            eclassToPhys[eclassId] = nextPhysId++;
+        }
+
         std::unordered_map<uint32_t, uint32_t> lastPhysIdForLogical;
         for (uint32_t eclassId : topo)
         {
             uint32_t logicalId = eclassToLogical.count(eclassId) ? eclassToLogical.at(eclassId) : UINT32_MAX;
             if (logicalId != UINT32_MAX)
             {
-                lastPhysIdForLogical[logicalId] = eclassId | 0x80000000;
+                lastPhysIdForLogical[logicalId] = eclassToPhys[eclassId];
             }
         }
 
@@ -1298,7 +1306,7 @@ private:
             uint32_t logicalId = eclassToLogical.count(eclassId) ? eclassToLogical.at(eclassId) : UINT32_MAX;
 
             // Offset physical IDs so they never collide with logical IDs from the original Graph
-            uint32_t physId = eclassId | 0x80000000;
+            uint32_t physId = eclassToPhys[eclassId];
 
             TensorNode tNode;
             tNode.id = physId;
@@ -1311,7 +1319,7 @@ private:
             tNode.backend = enode.backend;
             tNode.parentIds.reserve(enode.children.size());
             for (uint32_t c : enode.children)
-                tNode.parentIds.push_back(egraph.find(c) | 0x80000000);
+                tNode.parentIds.push_back(eclassToPhys[egraph.find(c)]);
 
             OpInstruction inst;
             inst.nodeId = physId;
@@ -1365,7 +1373,8 @@ private:
                 compiledRefCounts[pid]++;
             }
         }
-        compiledRefCounts[rootEClassId | 0x80000000] = std::max<uint32_t>(1, compiledRefCounts[rootEClassId | 0x80000000]);
+        uint32_t rootPhysId = eclassToPhys[rootEClassId];
+        compiledRefCounts[rootPhysId] = std::max<uint32_t>(1, compiledRefCounts[rootPhysId]);
         compiled.refCounts = compiledRefCounts;
 
         return compiled;
