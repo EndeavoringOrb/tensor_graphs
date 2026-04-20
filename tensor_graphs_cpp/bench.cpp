@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -30,6 +31,10 @@ int main()
 
     std::string callsPath = "benchmarks/calls.jsonl";
     std::string recordsPath = "benchmarks/records.jsonl";
+
+    // 1. Initialize CostModel and load existing records to provide estimates for sorting
+    CostModel costModel;
+    costModel.load(recordsPath);
 
     // Build a registry of already benchmarked kernels to skip redundancy
     std::unordered_set<std::string> recordedKeys;
@@ -117,21 +122,44 @@ int main()
         return 0;
     }
 
-    std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [](const json &a, const json &b)
+    // 2. Sort kernels by cost (cheapest first).
+    // Fallback to element count for kernels with no previous data (inf cost).
+    std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const json &ja, const json &jb)
                      {
-                         uint64_t uidA = std::stoull(a["kernelUid"].get<std::string>(), nullptr, 16);
-                         uint64_t uidB = std::stoull(b["kernelUid"].get<std::string>(), nullptr, 16);
+                         Record ra = ja.get<Record>();
+                         Record rb = jb.get<Record>();
 
-                         bool isRefA = KernelRegistry::get().getKernel(uidA).isReference;
-                         bool isRefB = KernelRegistry::get().getKernel(uidB).isReference;
+                         auto get_est = [&](const Record& r) {
+                             float cost = costModel.estimateCost(
+                                 r.kernelUid, 
+                                 r.outputShapes[0], 
+                                 r.outputStrides[0], 
+                                 r.outputDTypes[0],
+                                 r.inputShapes, 
+                                 r.inputStrides, 
+                                 r.inputDTypes, 
+                                 r.inputConstants
+                             );
+                             
+                             // If cost is unknown (inf), do it first
+                             if (std::isinf(cost)) {
+                                 return (double)-1.0f;
+                             }
+                             return (double)cost;
+                         };
 
-                         // If a is optimized (not ref) and b is a reference, a comes first
-                         if (isRefA != isRefB)
-                         {
-                             return !isRefA;
+                         double costA = get_est(ra);
+                         double costB = get_est(rb);
+
+                         if (std::abs(costA - costB) < 1e-7) {
+                             // Tie-break: Prioritize optimized kernels over reference kernels
+                             bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
+                             bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
+                             if (isRefA != isRefB) return !isRefA;
+                             return ra.kernelUid < rb.kernelUid;
                          }
-                         return false; // Maintain relative order if they are the same type
-                     });
+
+                         return costA < costB; });
 
     std::ofstream outFile(recordsPath, std::ios::app);
     std::cout << "Benchmarking " << toBenchmark.size() << " configurations..." << std::endl;
@@ -273,7 +301,7 @@ int main()
                     else if (r.inputDTypes[idx] == DType::INT32)
                     {
                         int32_t *iptr = reinterpret_cast<int32_t *>(inData[idx].data());
-                        if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos) // TODO: make the check based on reference graph instead of name
+                        if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos)
                         {
                             if (idx == 1 && r.inputShapes.size() > 0 && r.outputShapes.size() > 0 &&
                                 r.inputShapes[0].size() == r.outputShapes[0].size() && elements == r.inputShapes[0].size())
