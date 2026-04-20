@@ -1,6 +1,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
+#if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 #include <cmath>
 #include <algorithm>
@@ -125,3 +126,5 @@ inline uint32_t refFactorySoftmax(const std::vector<uint32_t> &inputs, Graph &g)
 }
 
 REGISTER_KERNEL("Softmax_NEON", 1, matchSoftmaxF32_NEON, runSoftmaxF32_NEON, refFactorySoftmax, {Backend::CPU}, {DType::FLOAT32}, {{4, 8, 8}}, {true}, {{Backend::CPU}});
+
+#endif

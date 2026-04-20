@@ -1,6 +1,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
+#if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 #include <cmath>
 
@@ -28,3 +29,5 @@ inline void runGeluF32_3D_NEON(const std::vector<const void *> &inputs, const st
 }
 
 REGISTER_KERNEL("Gelu_3D_NEON", 1, matchGeluF32_3D_NEON, runGeluF32_3D_NEON, refFactoryGelu, {Backend::CPU}, {DType::FLOAT32}, {{1, 8, 2048}}, {true}, {{Backend::CPU}});
+
+#endif // TG_HAS_NEON

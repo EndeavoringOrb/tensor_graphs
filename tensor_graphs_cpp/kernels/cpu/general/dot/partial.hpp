@@ -4,7 +4,6 @@
 #include "core/kernels.hpp"
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
-#endif
 #include <thread>
 #include <algorithm>
 #include <cstring>
@@ -161,3 +160,5 @@ REGISTER_KERNEL_INPLACE("PartialDot_F32_3D", 6, matchPartialDotF32_3D, runPartia
                         {{1, 8, 262144}, {1, 8, 640}, {1, 640, 2048}, {3}, {3}, {3}},
                         {false, true, true, false, false, false},
                         {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+
+#endif
