@@ -1585,106 +1585,128 @@ private:
                     {
                         const Region &pReg = parentRegions[i].front();
 
-                        auto addConst = [&](const std::vector<int32_t> &vals)
+                        bool isParentFull = false;
+                        const auto &pShape = egraph.getEClass(pEClass).shape;
+                        if (pReg.region.size() == pShape.size())
                         {
-                            uint32_t cls = egraph.addEClass({(uint32_t)vals.size()}, {1}, 0, DType::INT32, Backend::CPU);
-                            ENode n;
-                            n.opType = OpType::INPUT;
-                            n.dtype = DType::INT32;
-                            n.shape = {(uint32_t)vals.size()};
-                            n.strides = {1};
-                            n.backend = Backend::CPU;
-                            egraph.addENode(cls, n);
-                            std::vector<uint8_t> bytes(vals.size() * sizeof(int32_t));
-                            std::memcpy(bytes.data(), vals.data(), bytes.size());
-                            egraph.constantStaging[cls] = bytes;
-                            return cls;
-                        };
-
-                        std::vector<int32_t> starts, ends, steps;
-                        for (const Dim &d : pReg.region)
-                        {
-                            starts.push_back(d.start);
-                            ends.push_back(d.stop);
-                            steps.push_back(1);
+                            isParentFull = true;
+                            for (size_t d = 0; d < pShape.size(); ++d)
+                            {
+                                if (pReg.region[d].start != 0 || pReg.region[d].stop != pShape[d])
+                                {
+                                    isParentFull = false;
+                                    break;
+                                }
+                            }
                         }
 
-                        uint32_t startsId = addConst(starts);
-                        uint32_t endsId = addConst(ends);
-                        uint32_t stepsId = addConst(steps);
-
-                        std::vector<uint32_t> sliceShape;
-                        for (size_t d = 0; d < starts.size(); ++d)
-                            sliceShape.push_back(ends[d] - starts[d]);
-
-                        const EClass &pClass = egraph.getEClass(pEClass);
-                        std::vector<uint64_t> sliceStrides(pClass.strides.size());
-                        uint64_t sliceViewOffset = pClass.viewOffset;
-
-                        for (size_t d = 0; d < pClass.strides.size(); ++d)
+                        if (isParentFull)
                         {
-                            int32_t start = d < starts.size() ? starts[d] : 0;
-                            int32_t step = d < steps.size() ? steps[d] : 1;
-                            if (start < 0)
-                                start += pClass.shape[d];
-                            sliceViewOffset += start * pClass.strides[d];
-                            sliceStrides[d] = pClass.strides[d] * step;
+                            partialParents.push_back(pEClass);
                         }
-
-                        uint32_t sliceEClass = egraph.addEClass(sliceShape, sliceStrides, sliceViewOffset, pClass.dtype, pClass.backend);
-                        ENode sliceNode;
-                        sliceNode.opType = OpType::SLICE;
-                        sliceNode.children = {pEClass, startsId, endsId, stepsId};
-                        sliceNode.shape = sliceShape;
-                        sliceNode.strides = sliceStrides;
-                        sliceNode.viewOffset = sliceViewOffset;
-                        sliceNode.dtype = pClass.dtype;
-                        sliceNode.backend = pClass.backend;
-
-                        TensorNode dOut;
-                        dOut.setShape(sliceShape);
-                        dOut.dtype = sliceNode.dtype;
-                        dOut.backend = sliceNode.backend;
-                        std::vector<TensorNode> dIns(4);
-                        dIns[0].setShape(egraph.getEClass(pEClass).shape);
-                        dIns[0].dtype = sliceNode.dtype;
-                        dIns[0].backend = sliceNode.backend;
-                        dIns[1].setShape({(uint32_t)starts.size()});
-                        dIns[1].dtype = DType::INT32;
-                        dIns[1].backend = Backend::CPU;
-                        dIns[2].setShape({(uint32_t)ends.size()});
-                        dIns[2].dtype = DType::INT32;
-                        dIns[2].backend = Backend::CPU;
-                        dIns[3].setShape({(uint32_t)steps.size()});
-                        dIns[3].dtype = DType::INT32;
-                        dIns[3].backend = Backend::CPU;
-
-                        auto sliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", sliceNode.backend, dIns, dOut, true);
-                        for (uint64_t uid : sliceRefs)
+                        else
                         {
-                            ENode sn = sliceNode;
-                            sn.kernelUid = uid;
-                            egraph.addENode(sliceEClass, sn);
+                            auto addConst = [&](const std::vector<int32_t> &vals)
+                            {
+                                uint32_t cls = egraph.addEClass({(uint32_t)vals.size()}, {1}, 0, DType::INT32, Backend::CPU);
+                                ENode n;
+                                n.opType = OpType::INPUT;
+                                n.dtype = DType::INT32;
+                                n.shape = {(uint32_t)vals.size()};
+                                n.strides = {1};
+                                n.backend = Backend::CPU;
+                                egraph.addENode(cls, n);
+                                std::vector<uint8_t> bytes(vals.size() * sizeof(int32_t));
+                                std::memcpy(bytes.data(), vals.data(), bytes.size());
+                                egraph.constantStaging[cls] = bytes;
+                                return cls;
+                            };
+
+                            std::vector<int32_t> starts, ends, steps;
+                            for (const Dim &d : pReg.region)
+                            {
+                                starts.push_back(d.start);
+                                ends.push_back(d.stop);
+                                steps.push_back(1);
+                            }
+
+                            uint32_t startsId = addConst(starts);
+                            uint32_t endsId = addConst(ends);
+                            uint32_t stepsId = addConst(steps);
+
+                            std::vector<uint32_t> sliceShape;
+                            for (size_t d = 0; d < starts.size(); ++d)
+                                sliceShape.push_back(ends[d] - starts[d]);
+
+                            const EClass &pClass = egraph.getEClass(pEClass);
+                            std::vector<uint64_t> sliceStrides(pClass.strides.size());
+                            uint64_t sliceViewOffset = pClass.viewOffset;
+
+                            for (size_t d = 0; d < pClass.strides.size(); ++d)
+                            {
+                                int32_t start = d < starts.size() ? starts[d] : 0;
+                                int32_t step = d < steps.size() ? steps[d] : 1;
+                                if (start < 0)
+                                    start += pClass.shape[d];
+                                sliceViewOffset += start * pClass.strides[d];
+                                sliceStrides[d] = pClass.strides[d] * step;
+                            }
+
+                            uint32_t sliceEClass = egraph.addEClass(sliceShape, sliceStrides, sliceViewOffset, pClass.dtype, pClass.backend);
+                            ENode sliceNode;
+                            sliceNode.opType = OpType::SLICE;
+                            sliceNode.children = {pEClass, startsId, endsId, stepsId};
+                            sliceNode.shape = sliceShape;
+                            sliceNode.strides = sliceStrides;
+                            sliceNode.viewOffset = sliceViewOffset;
+                            sliceNode.dtype = pClass.dtype;
+                            sliceNode.backend = pClass.backend;
+
+                            TensorNode dOut;
+                            dOut.setShape(sliceShape);
+                            dOut.dtype = sliceNode.dtype;
+                            dOut.backend = sliceNode.backend;
+                            std::vector<TensorNode> dIns(4);
+                            dIns[0].setShape(egraph.getEClass(pEClass).shape);
+                            dIns[0].dtype = sliceNode.dtype;
+                            dIns[0].backend = sliceNode.backend;
+                            dIns[1].setShape({(uint32_t)starts.size()});
+                            dIns[1].dtype = DType::INT32;
+                            dIns[1].backend = Backend::CPU;
+                            dIns[2].setShape({(uint32_t)ends.size()});
+                            dIns[2].dtype = DType::INT32;
+                            dIns[2].backend = Backend::CPU;
+                            dIns[3].setShape({(uint32_t)steps.size()});
+                            dIns[3].dtype = DType::INT32;
+                            dIns[3].backend = Backend::CPU;
+
+                            auto sliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", sliceNode.backend, dIns, dOut, true);
+                            for (uint64_t uid : sliceRefs)
+                            {
+                                ENode sn = sliceNode;
+                                sn.kernelUid = uid;
+                                egraph.addENode(sliceEClass, sn);
+                            }
+
+                            uint32_t contigEClass = egraph.addEClass(sliceShape, calcContiguousStrides(sliceShape), 0, sliceNode.dtype, sliceNode.backend);
+                            ENode contigNode;
+                            contigNode.opType = OpType::CONTIGUOUS;
+                            contigNode.children = {sliceEClass};
+                            contigNode.shape = sliceShape;
+                            contigNode.strides = calcContiguousStrides(sliceShape);
+                            contigNode.dtype = sliceNode.dtype;
+                            contigNode.backend = sliceNode.backend;
+
+                            auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", contigNode.backend, {dOut}, dOut, true);
+                            for (uint64_t uid : contigRefs)
+                            {
+                                ENode cn = contigNode;
+                                cn.kernelUid = uid;
+                                egraph.addENode(contigEClass, cn);
+                            }
+
+                            partialParents.push_back(contigEClass);
                         }
-
-                        uint32_t contigEClass = egraph.addEClass(sliceShape, calcContiguousStrides(sliceShape), 0, sliceNode.dtype, sliceNode.backend);
-                        ENode contigNode;
-                        contigNode.opType = OpType::CONTIGUOUS;
-                        contigNode.children = {sliceEClass};
-                        contigNode.shape = sliceShape;
-                        contigNode.strides = calcContiguousStrides(sliceShape);
-                        contigNode.dtype = sliceNode.dtype;
-                        contigNode.backend = sliceNode.backend;
-
-                        auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", contigNode.backend, {dOut}, dOut, true);
-                        for (uint64_t uid : contigRefs)
-                        {
-                            ENode cn = contigNode;
-                            cn.kernelUid = uid;
-                            egraph.addENode(contigEClass, cn);
-                        }
-
-                        partialParents.push_back(contigEClass);
                     }
                     else
                     {

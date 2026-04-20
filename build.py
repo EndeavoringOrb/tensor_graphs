@@ -3,7 +3,7 @@ import os
 import sys
 import hashlib
 import subprocess
-import shutil
+import re
 from pathlib import Path
 
 from rich.console import Console
@@ -27,6 +27,16 @@ CORE_DEPENDENCIES = [
 USE_CUDA = False
 DEBUG_MODE = False
 
+# List of macros that register a kernel with a unique UID
+REGISTER_MACROS = [
+    "REGISTER_REF_KERNEL",
+    "REGISTER_REF_KERNEL_INPLACE",
+    "REGISTER_REF_KERNEL_VIEW",
+    "REGISTER_KERNEL",
+    "REGISTER_KERNEL_INPLACE",
+    "REGISTER_KERNEL_VIEW",
+]
+
 
 def get_compiler_cmd(fname: str):
     out_ext = ".exe" if os.name == "nt" else ""
@@ -43,10 +53,8 @@ def get_compiler_cmd(fname: str):
         ]
 
         if DEBUG_MODE:
-            # Debug flags: -g (host debug), -G (device debug), -O0 (no optimization)
             cmd.extend(["-g", "-G", "-O0", "-DDEBUG"])
         else:
-            # Release flags
             cmd.extend(["-O3"])
 
         cmd.append(str(ROOT_DIR / fname))
@@ -62,10 +70,8 @@ def get_compiler_cmd(fname: str):
             ]
 
             if DEBUG_MODE:
-                # Debug flags: /Zi (debug info), /Od (disable optimization), /RTC1 (runtime checks)
                 cmd.extend(["/Zi", "/Od", "/DDEBUG"])
             else:
-                # Release flags: /O2 (maximize speed)
                 cmd.extend(["/O2"])
 
             cmd.append(str(ROOT_DIR / fname))
@@ -120,7 +126,35 @@ def generate_kernel_uids(core_seed):
                 path = Path(root) / f
                 rel_path = path.relative_to(ROOT_DIR)
 
-                file_content_hash = get_file_hash(path)
+                # --- Validation: Ensure single registration per file ---
+                try:
+                    with open(path, "r", encoding="utf-8", errors="ignore") as f_in:
+                        content = f_in.read()
+
+                    reg_count = 0
+                    for macro in REGISTER_MACROS:
+                        # Use \b for word boundary to avoid matching substring macros
+                        # Multiline mode allows ^ to match start of lines
+                        matches = re.findall(rf"^\s*{macro}\b", content, re.MULTILINE)
+                        reg_count += len(matches)
+
+                    if reg_count > 1:
+                        console.print(
+                            Panel(
+                                f"[bold red]FATAL ERROR:[/bold red] Found {reg_count} kernel registrations in [cyan]{rel_path}[/cyan].\n\n"
+                                f"The build system generates UIDs based on file paths. To prevent ID collisions "
+                                f"and ensure correct kernel selection, each kernel variation must be in its own file.",
+                                title="Multiple Registrations Detected",
+                                border_style="red",
+                            )
+                        )
+                        sys.exit(1)
+                except Exception as e:
+                    console.print(
+                        f"[yellow]Warning: Could not scan {rel_path} for macros: {e}[/yellow]"
+                    )
+
+                file_content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 combined = core_seed + file_content_hash
                 full_hash = hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
@@ -186,12 +220,8 @@ def generate_kernel_includes(core_seed):
 
         for inc_path, uid in sorted(kernel_entries):
             f.write(f"// --- {inc_path} ---\n")
-            f.write(f"#undef REGISTER_REF_KERNEL\n")
-            f.write(f"#undef REGISTER_REF_KERNEL_INPLACE\n")
-            f.write(f"#undef REGISTER_REF_KERNEL_VIEW\n")
-            f.write(f"#undef REGISTER_KERNEL\n")
-            f.write(f"#undef REGISTER_KERNEL_INPLACE\n")
-            f.write(f"#undef REGISTER_KERNEL_VIEW\n")
+            for macro in REGISTER_MACROS:
+                f.write(f"#undef {macro}\n")
 
             f.write(
                 f"#define REGISTER_REF_KERNEL(op, n, m, r, ...) REGISTER_REF_KERNEL_INTERNAL({uid}, op, n, m, r, __VA_ARGS__)\n"
@@ -214,12 +244,8 @@ def generate_kernel_includes(core_seed):
             f.write(f'#include "{inc_path}"\n\n')
 
         f.write(f"// --- Clean up macros ---\n")
-        f.write(f"#undef REGISTER_REF_KERNEL\n")
-        f.write(f"#undef REGISTER_REF_KERNEL_INPLACE\n")
-        f.write(f"#undef REGISTER_KERNEL\n")
-        f.write(f"#undef REGISTER_KERNEL_INPLACE\n")
-        f.write(f"#undef REGISTER_KERNEL_INPLACE_VIEW\n")
-        f.write(f"#undef REGISTER_KERNEL_VIEW\n")
+        for macro in REGISTER_MACROS:
+            f.write(f"#undef {macro}\n")
 
     console.print(
         f"[dim]Generated {len(kernel_entries)} Kernel Includes with UID injection.[/dim]"
@@ -229,7 +255,6 @@ def generate_kernel_includes(core_seed):
 def generate_build_context():
     """Hashes compiler command arguments to detect build flag changes."""
     ctx_hpp = GENERATED_DIR / "build_context.gen.hpp"
-    # Note: Pass an empty string to get the base flags for hashing
     cmd_str = " ".join(get_compiler_cmd("")[:-2])
     ctx_hash = hashlib.sha256(cmd_str.encode("utf-8")).hexdigest()
 
@@ -250,7 +275,6 @@ def compile_binary(fname: str):
     compiler_args_str = " ".join(get_compiler_cmd(fname))
 
     if os.name == "nt":
-        # Keep your existing logic: amd64 for CUDA, arm64 for others
         arch = "amd64" if USE_CUDA else "arm64"
         full_command = f'"{VCVARS_PATH}" {arch} && {compiler_args_str}'
     else:

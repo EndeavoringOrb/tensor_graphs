@@ -2,6 +2,12 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
+#if defined(TG_HAS_NEON)
+#include <arm_neon.h>
+#endif
+#include <thread>
+#include <algorithm>
+#include <cstring>
 
 /**
  * KERNEL: Partial Dot F32 3D
@@ -105,7 +111,7 @@ inline void runPartialDotF32_3D(const std::vector<const void *> &inputs, const s
                     {
                         sum += a_row[k] * B[k * bK_stride + n * bN_stride];
                     }
-                    c_row[n] += sum;
+                    c_row[n] = sum;
                 }
             }
         }
@@ -129,7 +135,7 @@ inline void runPartialDotF32_3D(const std::vector<const void *> &inputs, const s
                     {
                         sum += a_row[k] * B[k * bK_stride + n * bN_stride];
                     }
-                    c_row[n * n_step] += sum;
+                    c_row[n * n_step] = sum;
                 }
             }
         }
@@ -145,15 +151,13 @@ inline uint32_t refFactoryPartialDot(const std::vector<uint32_t> &inputs, Graph 
     uint32_t ends = inputs[4];
     uint32_t steps = inputs[5];
 
-    // Directly map to the injected EGraph structure: DOT -> SCATTER
-    // B_partial is already the sliced & contiguous 3D weight from the planner
     uint32_t dot_res = graph.dot(A_partial, B_partial);
     return graph.scatter(cache, dot_res, starts, ends, steps);
 }
 
-REGISTER_KERNEL("PartialDot_F32_3D", 6, matchPartialDotF32_3D, runPartialDotF32_3D, refFactoryPartialDot,
-                {Backend::CPU},
-                {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32},
-                {{1, 8, 262144}, {1, 8, 640}, {1, 640, 2048}, {3}, {3}, {3}},
-                {false, true, true, false, false, false},
-                {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL_INPLACE("PartialDot_F32_3D", 6, matchPartialDotF32_3D, runPartialDotF32_3D, refFactoryPartialDot,
+                        {Backend::CPU},
+                        {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32},
+                        {{1, 8, 262144}, {1, 8, 640}, {1, 640, 2048}, {3}, {3}, {3}},
+                        {false, true, true, false, false, false},
+                        {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
