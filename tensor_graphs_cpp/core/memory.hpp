@@ -220,8 +220,9 @@ struct DeviceBuffer
         }
         else if (backend == Backend::CPU)
         {
-            cpu_arena.resize(sizeBytes);
-            arena_ptr = cpu_arena.data();
+            cpu_arena.resize(sizeBytes + 64);
+            uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
+            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
         }
         else
         {
@@ -230,8 +231,9 @@ struct DeviceBuffer
 #else
         if (backend == Backend::CPU)
         {
-            cpu_arena.resize(sizeBytes);
-            arena_ptr = cpu_arena.data();
+            cpu_arena.resize(sizeBytes + 64);
+            uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
+            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
         }
         else if (backend == Backend::CUDA)
         {
@@ -354,6 +356,9 @@ struct DeviceBuffer
                       const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr,
                       const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
     {
+        // Align allocated size to 64 bytes to maintain alignment of all internal blocks
+        _sizeBytes = (_sizeBytes + 63) & ~63ULL;
+
         // 1. If it's already cached, lock it and update
         auto mapIt = allocationMap.find(nodeId);
         if (mapIt != allocationMap.end())
