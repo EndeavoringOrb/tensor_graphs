@@ -716,7 +716,8 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         bool isConstantParam = (kernel.opName == "Repeat_Inplace" && i > 0) ||
                                (kernel.opName == "Reshape_Inplace" && i == 1) ||
                                (kernel.opName == "Permute_CUDA_Contiguous" && i == 1) ||
-                               (kernel.opName.find("SCATTER") != std::string::npos && i >= 2);
+                               (kernel.opName.find("SCATTER") != std::string::npos && i >= 2) ||
+                               (kernel.opName.find("PartialDot") != std::string::npos && i >= 3);
         if (isConstantParam)
         {
             std::vector<int32_t> constData(elements);
@@ -743,14 +744,18 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                         constData[j] = (int32_t)j;
                 }
             }
-            else if (kernel.opName.find("SCATTER") != std::string::npos)
+            else if (kernel.opName.find("SCATTER") != std::string::npos || kernel.opName.find("PartialDot") != std::string::npos)
             {
-                if (i == 2)
+                size_t startsIdx = kernel.opName.find("PartialDot") != std::string::npos ? 3 : 2;
+                size_t endsIdx = startsIdx + 1;
+                size_t stepsIdx = startsIdx + 2;
+
+                if (i == startsIdx)
                 {
                     for (size_t j = 0; j < elements; ++j)
                         constData[j] = 0;
                 }
-                else if (i == 3)
+                else if (i == endsIdx)
                 {
                     for (size_t j = 0; j < elements; ++j)
                     {
@@ -760,7 +765,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                             constData[j] = 1;
                     }
                 }
-                else if (i == 4)
+                else if (i == stepsIdx)
                 {
                     for (size_t j = 0; j < elements; ++j)
                         constData[j] = 1;
@@ -1165,12 +1170,16 @@ int main()
         if (it != recordsByUid.end())
         {
             std::cout << "\n  [Records] Testing " << it->second.size() << " configurations... " << std::flush;
-            for (const auto &rec : it->second)
             {
-                if (!testKernelWithRecord(kernel, rec))
+                ProgressTimer timer(it->second.size(), "  ");
+                for (const auto &rec : it->second)
                 {
-                    recordOk = false;
-                    break;
+                    if (!testKernelWithRecord(kernel, rec))
+                    {
+                        recordOk = false;
+                        break;
+                    }
+                    timer.tick();
                 }
             }
             if (recordOk)

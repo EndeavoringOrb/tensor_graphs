@@ -105,7 +105,7 @@ inline void runBF16TransposedGEMM_v4(const std::vector<const void *> &inputs, co
                                     res[i] += xv * wv;
                                 }
                             }
-                            vst1_f32(out_ptr, vld1_f32(res));
+                            vst1q_f32(out_ptr, vld1q_f32(res));
                         };
 
                         store_4(0, acc00, acc01, acc02, acc03);
