@@ -1204,17 +1204,37 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 int main(int argc, char *argv[])
 {
     std::string targetKernel = "";
-    if (argc > 1)
+    bool useRecords = true;
+
+    // Parse arguments
+    for (int i = 1; i < argc; ++i)
     {
-        targetKernel = argv[1];
+        std::string arg = argv[i];
+        if (arg == "--no-records")
+        {
+            useRecords = false;
+        }
+        else if (targetKernel.empty())
+        {
+            targetKernel = arg;
+        }
+    }
+
+    if (!targetKernel.empty())
+    {
         std::cout << "Filtering tests for kernel containing: " << targetKernel << std::endl;
+    }
+
+    if (!useRecords)
+    {
+        std::cout << "Record-based testing disabled (--no-records flag detected)." << std::endl;
     }
 
     if (targetKernel.empty())
     {
-        runPythonTests();
         runRegionMergeTests();
         runShapePropagationTests();
+        runPythonTests();
     }
 
     std::cout << "Running Non-Reference Kernel Tests..." << std::endl;
@@ -1222,8 +1242,16 @@ int main(int argc, char *argv[])
     int total = 0;
     int skipped = 0;
 
-    // Load benchmark records if available
-    auto recordsByUid = loadCallRecords("benchmarks/calls.jsonl");
+    // Load benchmark records if enabled
+    std::unordered_map<uint64_t, std::vector<Record>> recordsByUid;
+    if (useRecords)
+    {
+        recordsByUid = loadCallRecords("benchmarks/calls.jsonl");
+        if (recordsByUid.empty())
+        {
+            std::cout << "Warning: benchmarks/calls.jsonl not found or empty." << std::endl;
+        }
+    }
 
     const auto &kernels = KernelRegistry::get().getAllKernels();
     for (const auto &kernel : kernels)
@@ -1267,7 +1295,7 @@ int main(int argc, char *argv[])
         // 2. Record-Based Tests
         bool recordOk = true;
         auto it = recordsByUid.find(kernel.uid);
-        if (it != recordsByUid.end())
+        if (useRecords && it != recordsByUid.end())
         {
             std::cout << "\n  [Records] Testing " << it->second.size() << " configurations... " << std::flush;
             {
@@ -1287,7 +1315,7 @@ int main(int argc, char *argv[])
             else
                 std::cout << "  FAILED" << std::endl;
         }
-        else
+        else if (useRecords)
         {
             std::cout << " (no records) ";
         }
@@ -1295,7 +1323,8 @@ int main(int argc, char *argv[])
         if (dummyOk && recordOk)
         {
             passed++;
-            if (it == recordsByUid.end())
+            // Only print "OK" if we didn't just print a multi-line record result
+            if (!useRecords || it == recordsByUid.end())
                 std::cout << "OK" << std::endl;
         }
         else
