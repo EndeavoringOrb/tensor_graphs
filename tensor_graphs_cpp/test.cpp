@@ -1201,11 +1201,22 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 // ============================================================
 // Main Test Loop
 // ============================================================
-int main()
+int main(int argc, char *argv[])
 {
-    runPythonTests();
-    runRegionMergeTests();
-    runShapePropagationTests();
+    std::string targetKernel = "";
+    if (argc > 1)
+    {
+        targetKernel = argv[1];
+        std::cout << "Filtering tests for kernel containing: " << targetKernel << std::endl;
+    }
+
+    if (targetKernel.empty())
+    {
+        runPythonTests();
+        runRegionMergeTests();
+        runShapePropagationTests();
+    }
+
     std::cout << "Running Non-Reference Kernel Tests..." << std::endl;
     int passed = 0;
     int total = 0;
@@ -1219,6 +1230,10 @@ int main()
     {
         if (kernel.isReference)
             continue;
+
+        if (!targetKernel.empty() && kernel.opName.find(targetKernel) == std::string::npos)
+            continue;
+
         if (!kernel.refFactory)
         {
             std::cout << "Skipping " << kernel.opName << " (no refFactory)" << std::endl;
