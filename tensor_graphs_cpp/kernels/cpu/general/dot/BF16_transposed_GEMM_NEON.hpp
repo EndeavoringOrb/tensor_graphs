@@ -78,5 +78,5 @@ inline uint32_t refFactoryBF16TransposedGEMM(const std::vector<uint32_t> &inputs
     return graph.dot(inputs[0], graph.reshape(w_t, graph.constant({3}, s3, DType::INT32)));
 }
 
-REGISTER_KERNEL("BF16_Transposed_GEMM_NEON", 2, matchBF16TransposedGEMM, runBF16TransposedGEMM, refFactoryBF16TransposedGEMM, {Backend::CPU}, {DType::FLOAT32, DType::BF16}, {{1, 8, 640}, {262144, 640}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("BF16_Transposed_GEMM_NEON", 2, matchBF16TransposedGEMM, runBF16TransposedGEMM, refFactoryBF16TransposedGEMM, {Backend::CPU}, {DType::FLOAT32, DType::BF16}, {{1, 8, 64}, {1024, 64}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
 #endif

@@ -113,5 +113,5 @@ inline uint32_t refFactoryDotF32_3D_TransposedB_v2(const std::vector<uint32_t> &
     return graph.dot(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Dot_F32_3D_TransposedB_v2", 2, matchDotF32_3D_TransposedB_v2, runDotF32_3D_TransposedB_v2, refFactoryDotF32_3D_TransposedB_v2, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Dot_F32_3D_TransposedB_v2", 2, matchDotF32_3D_TransposedB_v2, runDotF32_3D_TransposedB_v2, refFactoryDotF32_3D_TransposedB_v2, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 1}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
 #endif
