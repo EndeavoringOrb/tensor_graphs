@@ -394,29 +394,34 @@ private:
         rules.emplace_back(std::make_unique<ScatterPushForward>());
         // rules.emplace_back(std::make_unique<DistributiveProperty>());
 
+        std::vector<uint32_t> protectedVec(protectedEClasses.begin(), protectedEClasses.end());
+
         size_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
 
+        ProgressTimer timer(0, "", true);
         while (changed)
         {
+            timer.reset();
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
             for (uint32_t eNodeIdx = 0; eNodeIdx < numENodes; eNodeIdx++)
             {
                 for (const auto &rule : rules)
                 {
-                    if (!rule->match(egraph, eNodeIdx, protectedEClasses))
+                    if (!rule->match(egraph, eNodeIdx, protectedVec))
                         continue;
 
-                    rule->apply(egraph, eNodeIdx, protectedEClasses);
+                    rule->apply(egraph, eNodeIdx, protectedVec);
                     changed = true;
                     nMatches++;
                 }
             }
             egraph.rebuild();
+            double elapsed = timer.elapsed();
             changed = egraph.getENodes().size() != numENodes;
-            std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << " " << std::endl;
+            std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << ", took " << std::to_string(elapsed) << "s" << std::endl;
         }
         std::cout << "Finished saturation in " << iterations << " iterations with " << nMatches << " matches\n"
                   << std::flush;

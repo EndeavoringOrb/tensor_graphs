@@ -13,14 +13,14 @@
 struct Rule
 {
     virtual ~Rule() = default;
-    virtual bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) = 0;
-    virtual void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) = 0;
+    virtual bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &protectedEClasses) = 0;
+    virtual void apply(EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &protectedEClasses) = 0;
 };
 
 // a*(b+c) -> (a*b)+(a*c)
 struct DistributiveProperty : public Rule
 {
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &protectedEClasses) override
     {
         const ENode enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::MUL || enode.children.size() != 2)
@@ -50,7 +50,7 @@ struct DistributiveProperty : public Rule
         return UINT32_MAX;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &protectedEClasses) override
     {
         const ENode mulNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
@@ -162,7 +162,7 @@ struct FusionRule : public Rule
         }
     }
 
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &protectedEClasses) override
     {
         activeMatches.clear();
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
@@ -171,25 +171,26 @@ struct FusionRule : public Rule
         if (it == patternsByOp.end())
             return false;
 
-        // Optimization: Canonicalize protected classes once per match call
-        std::unordered_set<uint32_t> canonicalProtected;
-        for (uint32_t id : protectedEClasses)
-        {
-            canonicalProtected.insert(egraph.findConst(id));
-        }
+        std::vector<std::pair<uint32_t, uint32_t>> bindingArr;
+        bindingArr.reserve(16);
 
         for (const auto &pattern : it->second)
         {
-            std::unordered_map<uint32_t, uint32_t> binding;
-            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern, binding, canonicalProtected))
+            bindingArr.clear();
+            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern, bindingArr, protectedEClasses))
             {
-                activeMatches.push_back({&pattern, std::move(binding)});
+                std::unordered_map<uint32_t, uint32_t> bindingMap;
+                for (const auto &p : bindingArr)
+                {
+                    bindingMap[p.first] = p.second;
+                }
+                activeMatches.push_back({&pattern, std::move(bindingMap)});
             }
         }
         return !activeMatches.empty();
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &protectedEClasses) override
     {
         for (const auto &match : activeMatches)
         {
@@ -449,8 +450,8 @@ struct FusionRule : public Rule
 
     static bool matchPatternClass(uint32_t eClassIdx, const EGraph &egraph,
                                   uint32_t patternId, const Pattern &pattern,
-                                  std::unordered_map<uint32_t, uint32_t> &binding,
-                                  const std::unordered_set<uint32_t> &canonicalProtected)
+                                  std::vector<std::pair<uint32_t, uint32_t>> &binding,
+                                  const std::vector<uint32_t> &protectedEClasses)
     {
         uint32_t canonicalClassIdx = egraph.findConst(eClassIdx);
 
@@ -463,39 +464,43 @@ struct FusionRule : public Rule
             if (varIdx < pattern.dtypes.size() && eclass.dtype != pattern.dtypes[varIdx])
                 return false;
 
-            auto bIt = binding.find(patternId);
-            if (bIt != binding.end())
+            for (const auto &p : binding)
             {
-                return bIt->second == canonicalClassIdx;
+                if (p.first == patternId)
+                {
+                    return p.second == canonicalClassIdx;
+                }
             }
-            binding[patternId] = canonicalClassIdx;
+            binding.push_back({patternId, canonicalClassIdx});
             return true;
         }
 
-        // Optimization: O(1) check for protected eclasses
         if (patternId != pattern.rootId)
         {
-            if (canonicalProtected.count(canonicalClassIdx))
-                return false;
+            for (uint32_t p : protectedEClasses)
+            {
+                if (egraph.findConst(p) == canonicalClassIdx)
+                    return false;
+            }
         }
 
         const EClass &eclass = egraph.getEClass(canonicalClassIdx);
         for (uint32_t enodeId : eclass.enodes)
         {
-            std::unordered_map<uint32_t, uint32_t> localBinding = binding;
-            if (matchPatternNode(enodeId, egraph, patternId, pattern, localBinding, canonicalProtected))
+            size_t restoreSize = binding.size();
+            if (matchPatternNode(enodeId, egraph, patternId, pattern, binding, protectedEClasses))
             {
-                binding = std::move(localBinding);
                 return true;
             }
+            binding.resize(restoreSize);
         }
         return false;
     }
 
     static bool matchPatternNode(uint32_t eNodeIdx, const EGraph &egraph,
                                  uint32_t patternId, const Pattern &pattern,
-                                 std::unordered_map<uint32_t, uint32_t> &binding,
-                                 const std::unordered_set<uint32_t> &canonicalProtected)
+                                 std::vector<std::pair<uint32_t, uint32_t>> &binding,
+                                 const std::vector<uint32_t> &protectedEClasses)
     {
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
         const auto &pNode = pattern.graph.getNode(patternId);
@@ -509,7 +514,7 @@ struct FusionRule : public Rule
 
         for (size_t i = 0; i < eNode.children.size(); ++i)
         {
-            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], pattern, binding, canonicalProtected))
+            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], pattern, binding, protectedEClasses))
             {
                 return false;
             }
@@ -541,7 +546,7 @@ struct CopyToOfContiguous : public Rule
         return UINT32_MAX;
     }
 
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &protectedEClasses) override
     {
         const ENode enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::COPY_TO || enode.children.size() != 1)
@@ -549,7 +554,7 @@ struct CopyToOfContiguous : public Rule
         return hasOp(egraph, enode.children[0], OpType::CONTIGUOUS);
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &protectedEClasses) override
     {
         const ENode copyToNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
@@ -669,7 +674,7 @@ struct ContiguousOfCopyTo : public Rule
         return UINT32_MAX;
     }
 
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &protectedEClasses) override
     {
         const ENode enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::CONTIGUOUS || enode.children.size() != 1)
@@ -677,7 +682,7 @@ struct ContiguousOfCopyTo : public Rule
         return hasOp(egraph, enode.children[0], OpType::COPY_TO);
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &protectedEClasses) override
     {
         const ENode contigNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
@@ -776,7 +781,7 @@ struct ContiguousOfCopyTo : public Rule
 
 struct ContiguousElimination : public Rule
 {
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &) override
     {
         const ENode &enode = egraph.getENodes()[eNodeIdx];
 
@@ -798,7 +803,7 @@ struct ContiguousElimination : public Rule
         return false;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &) override
     {
         const ENode consumerNode = egraph.getENodes()[eNodeIdx];
         uint32_t consumerEClassId = egraph.getENodeEClass(eNodeIdx);
@@ -939,7 +944,7 @@ inline uint32_t addConstInt32Array(EGraph &egraph, const std::vector<int32_t> &v
 
 struct ConstantFolding : public Rule
 {
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &) override
     {
         const ENode &enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType == OpType::INPUT || enode.opType == OpType::FUSED)
@@ -958,7 +963,7 @@ struct ConstantFolding : public Rule
         return true;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &) override
     {
         const ENode enode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
@@ -1014,7 +1019,7 @@ struct ConstantFolding : public Rule
 
 struct InfinityDomination : public Rule
 {
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &) override
     {
         const ENode &enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::ADD)
@@ -1027,7 +1032,7 @@ struct InfinityDomination : public Rule
         return false;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &) override
     {
         const ENode enode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
@@ -1164,7 +1169,7 @@ struct InfinityDomination : public Rule
 
 struct SlicePushBackward : public Rule
 {
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &) override
     {
         const ENode &enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::SLICE)
@@ -1178,7 +1183,7 @@ struct SlicePushBackward : public Rule
         return false;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &) override
     {
         const ENode sliceNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
@@ -1285,7 +1290,7 @@ struct SlicePushBackward : public Rule
 
 struct ScatterPushForward : public Rule
 {
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &) override
     {
         const ENode &enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType == OpType::INPUT || enode.opType == OpType::SCATTER || enode.opType == OpType::FUSED)
@@ -1303,7 +1308,7 @@ struct ScatterPushForward : public Rule
         return false;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::vector<uint32_t> &) override
     {
         const ENode enode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);

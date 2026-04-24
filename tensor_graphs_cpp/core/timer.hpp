@@ -76,6 +76,16 @@ struct ProgressTimer
         std::cout << "\r" << std::flush;
     }
 
+    void reset()
+    {
+        start = clock::now();
+    }
+
+    double elapsed()
+    {
+        return std::chrono::duration<double>(clock::now() - start).count();
+    }
+
     ~ProgressTimer()
     {
         if (disable)
