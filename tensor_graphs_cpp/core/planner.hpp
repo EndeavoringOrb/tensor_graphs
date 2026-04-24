@@ -397,9 +397,7 @@ private:
         size_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
-#ifdef DEBUG
-        ProgressTimer timer(0, "saturating ");
-#endif
+
         while (changed)
         {
             iterations++;
@@ -418,9 +416,6 @@ private:
             }
             egraph.rebuild();
             changed = egraph.getENodes().size() != numENodes;
-#ifdef DEBUG
-            timer.tick();
-#endif
             std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << " " << std::endl;
         }
         std::cout << "Finished saturation in " << iterations << " iterations with " << nMatches << " matches\n"
