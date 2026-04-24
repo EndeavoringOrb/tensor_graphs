@@ -206,9 +206,6 @@ static PlanningRegionState derivePlanningRegions(
         bool forceFull = (node.opType == OpType::ARANGE ||
                           node.opType == OpType::TRIU ||
                           node.opType == OpType::IM2COL ||
-                          node.opType == OpType::RESHAPE ||
-                          node.opType == OpType::PERMUTE ||
-                          node.opType == OpType::REPEAT ||
                           node.opType == OpType::FILL);
 
         auto dirtyIt = dirtyOutputRegions.find(nodeId);
