@@ -902,20 +902,39 @@ struct ContiguousElimination : public Rule
 };
 
 // Helper for rules
-static uint32_t addConstInt32Array(EGraph &egraph, const std::vector<int32_t> &vals)
+inline uint32_t getOrAddConstant(EGraph &egraph, const std::vector<uint32_t> &shape, DType dtype, const std::vector<uint8_t> &bytes)
 {
-    uint32_t cls = egraph.addEClass({(uint32_t)vals.size()}, {1}, 0, DType::INT32, Backend::CPU);
+    for (const auto &kv : egraph.constantStaging)
+    {
+        if (kv.second == bytes)
+        {
+            uint32_t cId = egraph.findConst(kv.first);
+            const EClass &cls = egraph.getEClass(cId);
+            if (cls.shape == shape && cls.dtype == dtype)
+            {
+                return cId;
+            }
+        }
+    }
+
+    uint32_t cls = egraph.addEClass(shape, calcContiguousStrides(shape), 0, dtype, Backend::CPU);
     ENode n;
     n.opType = OpType::INPUT;
-    n.dtype = DType::INT32;
-    n.shape = {(uint32_t)vals.size()};
-    n.strides = {1};
+    n.dtype = dtype;
+    n.shape = shape;
+    n.strides = calcContiguousStrides(shape);
     n.backend = Backend::CPU;
-    egraph.addENode(cls, n);
+    uint32_t finalCls = egraph.addENode(cls, n);
+    egraph.constantStaging[finalCls] = bytes;
+    return finalCls;
+}
+
+inline uint32_t addConstInt32Array(EGraph &egraph, const std::vector<int32_t> &vals)
+{
     std::vector<uint8_t> bytes(vals.size() * sizeof(int32_t));
     std::memcpy(bytes.data(), vals.data(), bytes.size());
-    egraph.constantStaging[cls] = bytes;
-    return cls;
+    std::vector<uint32_t> shape = {(uint32_t)vals.size()};
+    return getOrAddConstant(egraph, shape, DType::INT32, bytes);
 }
 
 struct ConstantFolding : public Rule
@@ -988,17 +1007,8 @@ struct ConstantFolding : public Rule
             kernel.run(inputPtrs, outputPtrs, inputViews, outViews);
         }
 
-        ENode constNode;
-        constNode.opType = OpType::INPUT;
-        constNode.dtype = enode.dtype;
-        constNode.shape = enode.shape;
-        constNode.strides = calcContiguousStrides(enode.shape);
-        constNode.backend = Backend::CPU;
-
-        uint32_t newClass = egraph.addEClass(constNode.shape, constNode.strides, 0, constNode.dtype, constNode.backend);
-        egraph.addENode(newClass, constNode);
-        egraph.constantStaging[newClass] = std::move(outBytes);
-        egraph.merge(eclassId, newClass);
+        uint32_t constCls = getOrAddConstant(egraph, enode.shape, enode.dtype, outBytes);
+        egraph.merge(eclassId, constCls);
     }
 };
 
@@ -1136,17 +1146,9 @@ struct InfinityDomination : public Rule
 
         // -1e9 base tensor to scatter into
         std::vector<float> infData(countElements(enode.shape), -1e9f);
-        uint32_t infCls = egraph.addEClass(enode.shape, calcContiguousStrides(enode.shape), 0, enode.dtype, Backend::CPU);
-        ENode infNode;
-        infNode.opType = OpType::INPUT;
-        infNode.shape = enode.shape;
-        infNode.strides = calcContiguousStrides(enode.shape);
-        infNode.dtype = enode.dtype;
-        infNode.backend = Backend::CPU;
-        egraph.addENode(infCls, infNode);
         std::vector<uint8_t> infBytes(infData.size() * sizeof(float));
         std::memcpy(infBytes.data(), infData.data(), infBytes.size());
-        egraph.constantStaging[infCls] = infBytes;
+        uint32_t infCls = getOrAddConstant(egraph, enode.shape, enode.dtype, infBytes);
 
         ENode scatterNode;
         scatterNode.opType = OpType::SCATTER;

@@ -420,8 +420,8 @@ private:
             changed = egraph.getENodes().size() != numENodes;
 #ifdef DEBUG
             timer.tick();
-            std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << std::endl;
 #endif
+            std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << " " << std::endl;
         }
         std::cout << "Finished saturation in " << iterations << " iterations with " << nMatches << " matches\n"
                   << std::flush;
@@ -1691,18 +1691,10 @@ private:
                         {
                             auto addConst = [&](const std::vector<int32_t> &vals)
                             {
-                                uint32_t cls = egraph.addEClass({(uint32_t)vals.size()}, {1}, 0, DType::INT32, Backend::CPU);
-                                ENode n;
-                                n.opType = OpType::INPUT;
-                                n.dtype = DType::INT32;
-                                n.shape = {(uint32_t)vals.size()};
-                                n.strides = {1};
-                                n.backend = Backend::CPU;
-                                egraph.addENode(cls, n);
                                 std::vector<uint8_t> bytes(vals.size() * sizeof(int32_t));
                                 std::memcpy(bytes.data(), vals.data(), bytes.size());
-                                egraph.constantStaging[cls] = bytes;
-                                return cls;
+                                std::vector<uint32_t> shape = {(uint32_t)vals.size()};
+                                return getOrAddConstant(egraph, shape, DType::INT32, bytes);
                             };
 
                             std::vector<int32_t> starts, ends, steps;
@@ -1835,18 +1827,10 @@ private:
 
                 auto addConst = [&](const std::vector<int32_t> &vals)
                 {
-                    uint32_t cls = egraph.addEClass({(uint32_t)vals.size()}, {1}, 0, DType::INT32, Backend::CPU);
-                    ENode n;
-                    n.opType = OpType::INPUT;
-                    n.dtype = DType::INT32;
-                    n.shape = {(uint32_t)vals.size()};
-                    n.strides = {1};
-                    n.backend = Backend::CPU;
-                    egraph.addENode(cls, n);
                     std::vector<uint8_t> bytes(vals.size() * sizeof(int32_t));
                     std::memcpy(bytes.data(), vals.data(), bytes.size());
-                    egraph.constantStaging[cls] = bytes;
-                    return cls;
+                    std::vector<uint32_t> shape = {(uint32_t)vals.size()};
+                    return getOrAddConstant(egraph, shape, DType::INT32, bytes);
                 };
 
                 std::vector<int32_t> starts, ends, steps;
