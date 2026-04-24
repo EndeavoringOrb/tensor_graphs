@@ -388,6 +388,10 @@ private:
         rules.emplace_back(std::make_unique<CopyToOfContiguous>());
         rules.emplace_back(std::make_unique<ContiguousOfCopyTo>());
         rules.emplace_back(std::make_unique<ContiguousElimination>());
+        rules.emplace_back(std::make_unique<ConstantFolding>());
+        rules.emplace_back(std::make_unique<InfinityDomination>());
+        rules.emplace_back(std::make_unique<SlicePushBackward>());
+        rules.emplace_back(std::make_unique<ScatterPushForward>());
         // rules.emplace_back(std::make_unique<DistributiveProperty>());
 
         size_t iterations = 0;
@@ -1918,6 +1922,7 @@ public:
         PlanningRegionState &regionState,
         const std::vector<Region> &outputNeeded,
         bool doSaturate = true,
+        bool protectCachedNodes = true,
         bool cheapInputCopy = false)
     {
         initBaseEGraph(rootId, graph, doSaturate);
@@ -1935,10 +1940,12 @@ public:
         if (doSaturate)
         {
             std::unordered_set<uint32_t> protectedEClasses;
-            for (const auto &kv : cachedNodes)
+            if (protectCachedNodes)
             {
-                uint32_t logicalId = kv.first;
-                protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
+                for (const auto &kv : cachedNodes)
+                {
+                    protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(kv.first)));
+                }
             }
             saturate(egraph, protectedEClasses);
         }
