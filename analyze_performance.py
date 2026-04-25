@@ -2,6 +2,7 @@ import json
 import os
 import argparse
 from collections import defaultdict
+from tqdm import tqdm
 
 
 def format_ms(ms):
@@ -13,7 +14,7 @@ def load_jsonl(path):
         return []
     data = []
     with open(path, "r") as f:
-        for line in f:
+        for line in tqdm(f):
             if line.strip():
                 data.append(json.loads(line))
     return data

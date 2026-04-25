@@ -71,6 +71,51 @@ public:
         hashcons.reserve(nodeCap * 2);
     }
 
+    uint32_t getOrAddConstant(const std::vector<uint32_t> &shape,
+                              const std::vector<uint64_t> &strides,
+                              DType dtype,
+                              Backend backend,
+                              const std::vector<uint8_t> &data)
+    {
+        for (const auto &kv : constantStaging)
+        {
+            uint32_t clsId = find(kv.first);
+            const EClass &cls = getEClass(clsId);
+            if (cls.dtype == dtype && cls.backend == backend &&
+                cls.shape == shape && cls.strides == strides)
+            {
+                if (kv.second == data)
+                {
+                    return clsId;
+                }
+            }
+        }
+
+        uint32_t cls = addEClass(shape, strides, 0, dtype, backend);
+        ENode n;
+        n.kernelUid = 0;
+        n.opType = OpType::INPUT;
+        n.dtype = dtype;
+        n.shape = shape;
+        n.strides = strides;
+        n.backend = backend;
+        addENode(cls, n);
+        constantStaging[cls] = data;
+        return cls;
+    }
+
+    template <typename T>
+    uint32_t getOrAddConstantData(const std::vector<uint32_t> &shape,
+                                  DType dtype,
+                                  Backend backend,
+                                  const std::vector<T> &vals)
+    {
+        std::vector<uint64_t> strides = calcContiguousStrides(shape);
+        std::vector<uint8_t> bytes(vals.size() * sizeof(T));
+        std::memcpy(bytes.data(), vals.data(), bytes.size());
+        return getOrAddConstant(shape, strides, dtype, backend, bytes);
+    }
+
     uint32_t addEClass(const std::vector<uint32_t> &shape,
                        const std::vector<uint64_t> &strides,
                        uint64_t viewOffset,
