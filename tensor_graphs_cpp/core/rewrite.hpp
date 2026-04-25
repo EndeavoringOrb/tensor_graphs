@@ -894,3 +894,197 @@ struct ContiguousElimination : public Rule
         }
     }
 };
+
+struct ConstantFolding : public Rule
+{
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    {
+        const ENode &eNode = egraph.getENodes()[eNodeIdx];
+
+        // If the operation is already an input/constant, nothing to fold.
+        if (eNode.opType == OpType::INPUT)
+            return false;
+
+        if (eNode.children.empty())
+            return false;
+
+        // Ensure all children are fully evaluated constants
+        for (uint32_t c : eNode.children)
+        {
+            uint32_t childEClassId = egraph.findConst(c);
+            if (egraph.constantStaging.find(childEClassId) == egraph.constantStaging.end())
+                return false;
+        }
+
+        uint32_t eclassId = egraph.findConst(egraph.getENodeEClass(eNodeIdx));
+        if (egraph.constantStaging.find(eclassId) != egraph.constantStaging.end())
+            return false; // Already folded
+
+        // If there's already a COPY_TO node connecting this to an evaluated CPU constant, skip folding to prevent infinite recursion
+        for (uint32_t enodeId : egraph.getEClass(eclassId).enodes)
+        {
+            const ENode &sibling = egraph.getENodes()[enodeId];
+            if (sibling.opType == OpType::COPY_TO && sibling.children.size() == 1)
+            {
+                uint32_t srcClass = egraph.findConst(sibling.children[0]);
+                if (egraph.getEClass(srcClass).backend == Backend::CPU &&
+                    egraph.constantStaging.find(srcClass) != egraph.constantStaging.end())
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    {
+        const ENode eNode = egraph.getENodes()[eNodeIdx];
+        uint32_t eclassId = egraph.find(egraph.getENodeEClass(eNodeIdx));
+
+        std::vector<TensorNode> inputNodes;
+        std::vector<TensorView> inViews;
+        std::vector<const void *> kernelInputs;
+
+        for (uint32_t c : eNode.children)
+        {
+            uint32_t childEClassId = egraph.find(c);
+            const EClass &childCls = egraph.getEClass(childEClassId);
+
+            TensorNode inNode;
+            inNode.opType = OpType::INPUT;
+            inNode.dtype = childCls.dtype;
+            inNode.setShape(childCls.shape);
+            inNode.strides = childCls.strides;
+            inNode.viewOffset = childCls.viewOffset;
+            inNode.backend = Backend::CPU; // Constant staged data evaluates on CPU
+            inputNodes.push_back(inNode);
+
+            const auto &stagedData = egraph.constantStaging.at(childEClassId);
+            size_t offsetBytes = childCls.viewOffset * getDTypeSize(childCls.dtype);
+
+            if (offsetBytes >= stagedData.size() && stagedData.size() > 0)
+            {
+                return; // Safeguard bounds
+            }
+
+            kernelInputs.push_back(stagedData.data() + offsetBytes);
+            inViews.push_back(TensorView(inNode, 0));
+        }
+
+        TensorNode outNode;
+        outNode.opType = eNode.opType;
+        outNode.opName = eNode.opName;
+        outNode.dtype = eNode.dtype;
+        outNode.setShape(eNode.shape);
+        outNode.strides = calcContiguousStrides(eNode.shape);
+        outNode.viewOffset = 0;
+        outNode.backend = Backend::CPU;
+
+        auto matches = KernelRegistry::get().findMatchingKernels(
+            eNode.opType, eNode.opName, Backend::CPU, inputNodes, outNode, false, true, true);
+
+        if (matches.empty())
+            return;
+
+        const KernelEntry *selectedKernel = nullptr;
+        for (uint64_t uid : matches)
+        {
+            const auto &k = KernelRegistry::get().getKernel(uid);
+            if (!k.inplace) // Avoid modifying existing staged constant data
+            {
+                selectedKernel = &k;
+                break;
+            }
+        }
+        if (!selectedKernel)
+            return; // Need a non-inplace suitable kernel implementation to fold
+
+        std::vector<uint8_t> outData;
+        if (selectedKernel->isView)
+        {
+            uint32_t firstChild = egraph.find(eNode.children[0]);
+            outData = egraph.constantStaging.at(firstChild);
+        }
+        else
+        {
+            if (!selectedKernel->run)
+                return;
+            outData.resize(getSizeBytes(outNode.getShape(), outNode.dtype));
+            std::vector<void *> kernelOutputs = {outData.data()};
+            std::vector<TensorView> outViews = {TensorView(outNode, 0)};
+            selectedKernel->run(kernelInputs, kernelOutputs, inViews, outViews);
+        }
+
+        ENode foldedNode;
+        foldedNode.kernelUid = 0;
+        foldedNode.opType = OpType::INPUT;
+        foldedNode.shape = eNode.shape;
+        if (selectedKernel->isView)
+        {
+            foldedNode.strides = eNode.strides;
+            foldedNode.viewOffset = eNode.viewOffset;
+        }
+        else
+        {
+            foldedNode.strides = outNode.strides;
+            foldedNode.viewOffset = 0;
+        }
+        foldedNode.dtype = eNode.dtype;
+        foldedNode.backend = Backend::CPU;
+
+        Backend originalBackend = egraph.getEClass(eclassId).backend;
+
+        // If identical backends, inject folded node directly.
+        if (originalBackend == Backend::CPU)
+        {
+            egraph.addENode(eclassId, foldedNode);
+            egraph.constantStaging[eclassId] = std::move(outData);
+        }
+        else
+        {
+            // Non-CPU original eclass. Create CPU eclass bridging to the original via COPY_TO.
+            uint32_t cpuEClass = egraph.addEClass(foldedNode.shape, foldedNode.strides, foldedNode.viewOffset, foldedNode.dtype, Backend::CPU);
+            egraph.addENode(cpuEClass, foldedNode);
+            egraph.constantStaging[cpuEClass] = std::move(outData);
+
+            TensorNode copyInNode;
+            copyInNode.opType = OpType::INPUT;
+            copyInNode.dtype = foldedNode.dtype;
+            copyInNode.setShape(foldedNode.shape);
+            copyInNode.strides = foldedNode.strides;
+            copyInNode.viewOffset = foldedNode.viewOffset;
+            copyInNode.backend = Backend::CPU;
+
+            TensorNode copyOutNode = copyInNode;
+            copyOutNode.opType = OpType::COPY_TO;
+            copyOutNode.backend = originalBackend;
+            copyOutNode.strides = calcContiguousStrides(copyOutNode.getShape());
+            copyOutNode.viewOffset = 0;
+
+            Graph copyGraph;
+            uint32_t copyIn = copyGraph.input(copyInNode.getShape(), copyInNode.dtype);
+            uint32_t copyRoot = copyGraph.copyto(copyIn, copyOutNode.backend);
+
+            auto copyMatches = KernelRegistry::get().findMatchingKernelsByPattern(
+                copyGraph, copyRoot, copyOutNode.backend, {copyInNode}, copyOutNode, false, false, false);
+
+            for (uint64_t uid : copyMatches)
+            {
+                const auto &copyKernel = KernelRegistry::get().getKernel(uid);
+                ENode copyNode;
+                copyNode.kernelUid = uid;
+                copyNode.opType = copyKernel.opType;
+                copyNode.opName = copyKernel.opName;
+                copyNode.children = {cpuEClass};
+                copyNode.shape = copyOutNode.getShape();
+                copyNode.strides = copyOutNode.strides;
+                copyNode.viewOffset = copyOutNode.viewOffset;
+                copyNode.dtype = copyOutNode.dtype;
+                copyNode.backend = copyOutNode.backend;
+                egraph.addENode(eclassId, copyNode);
+            }
+        }
+    }
+};
