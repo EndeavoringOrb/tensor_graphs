@@ -17,6 +17,99 @@ struct Rule
     virtual void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) = 0;
 };
 
+inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint32_t> &children, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &st, uint64_t viewOffset, DType dtype, Backend backend, uint32_t targetEClass = UINT32_MAX)
+{
+    uint32_t cls = (targetEClass == UINT32_MAX) ? egraph.addEClass(shape, st, viewOffset, dtype, backend) : targetEClass;
+
+    TensorNode outNode;
+    outNode.opType = op;
+    outNode.dtype = dtype;
+    outNode.setShape(shape);
+    outNode.strides = st;
+    outNode.viewOffset = viewOffset;
+    outNode.backend = backend;
+
+    std::vector<TensorNode> inNodes;
+    for (uint32_t c : children)
+    {
+        const EClass &childCls = egraph.getEClass(egraph.find(c));
+        TensorNode in;
+        in.opType = OpType::INPUT;
+        in.dtype = childCls.dtype;
+        in.setShape(childCls.shape);
+        in.strides = childCls.strides;
+        in.viewOffset = childCls.viewOffset;
+        in.backend = childCls.backend;
+        inNodes.push_back(in);
+    }
+
+    Graph pGraph;
+    std::vector<uint32_t> pInputs;
+    for (auto &in : inNodes)
+    {
+        pInputs.push_back(pGraph.input(in.getShape(), in.dtype));
+    }
+    uint32_t pRoot = UINT32_MAX;
+    if (op == OpType::SLICE)
+        pRoot = pGraph.slice(pInputs[0], pInputs[1], pInputs[2], pInputs[3]);
+    else if (op == OpType::CONTIGUOUS)
+        pRoot = pGraph.contiguous(pInputs[0]);
+    else if (op == OpType::ADD)
+        pRoot = pGraph.add(pInputs[0], pInputs[1]);
+    else if (op == OpType::MUL)
+        pRoot = pGraph.mul(pInputs[0], pInputs[1]);
+    else if (op == OpType::DIVIDE)
+        pRoot = pGraph.div(pInputs[0], pInputs[1]);
+    else if (op == OpType::POWER)
+        pRoot = pGraph.pow(pInputs[0], pInputs[1]);
+    else if (op == OpType::SIN)
+        pRoot = pGraph.sin(pInputs[0]);
+    else if (op == OpType::COS)
+        pRoot = pGraph.cos(pInputs[0]);
+    else if (op == OpType::NEGATE)
+        pRoot = pGraph.neg(pInputs[0]);
+    else if (op == OpType::CAST)
+        pRoot = pGraph.cast(pInputs[0], dtype);
+    else if (op == OpType::DOT)
+        pRoot = pGraph.dot(pInputs[0], pInputs[1]);
+    else if (op == OpType::COPY_TO)
+        pRoot = pGraph.copyto(pInputs[0], backend);
+    else if (op == OpType::SCATTER)
+        pRoot = pGraph.scatter(pInputs[0], pInputs[1], pInputs[2], pInputs[3], pInputs[4]);
+
+    if (pRoot != UINT32_MAX)
+    {
+        auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, backend, inNodes, outNode, false, true, true);
+        for (uint64_t uid : matches)
+        {
+            const auto &kernel = KernelRegistry::get().getKernel(uid);
+            ENode n;
+            n.kernelUid = uid;
+            n.opType = op;
+            n.opName = kernel.opName;
+            n.children = children;
+            n.shape = shape;
+            n.strides = st;
+            n.viewOffset = viewOffset;
+            n.dtype = dtype;
+            n.backend = backend;
+            egraph.addENode(cls, n);
+        }
+    }
+    return cls;
+}
+
+inline uint32_t copyToBackend(EGraph &egraph, uint32_t classId, Backend targetBackend)
+{
+    uint32_t canon = egraph.find(classId);
+    const EClass &cls = egraph.getEClass(canon);
+    if (cls.backend == targetBackend)
+        return canon;
+
+    std::vector<uint64_t> contigStrides = calcContiguousStrides(cls.shape);
+    return addOpToEGraph(egraph, OpType::COPY_TO, {canon}, cls.shape, contigStrides, 0, cls.dtype, targetBackend);
+}
+
 // a*(b+c) -> (a*b)+(a*c)
 struct DistributiveProperty : public Rule
 {
@@ -505,7 +598,7 @@ struct FusionRule : public Rule
         if (eNode.opType == OpType::FUSED && eNode.opName != pNode.opName)
             return false;
         if (eNode.children.size() != pNode.parentIds.size())
-            return false; // TODO: maybe remove this, if optype and opname are equal, this should never be hit
+            return false;
 
         for (size_t i = 0; i < eNode.children.size(); ++i)
         {
@@ -1128,163 +1221,358 @@ struct InfinityDomination : public Rule
         const auto &constData = egraph.constantStaging.at(constClass);
         const float *data = reinterpret_cast<const float *>(constData.data());
 
-        const EClass &cClass = egraph.getEClass(constClass);
+        const EClass cClass = egraph.getEClass(constClass);
         uint64_t numElements = countElements(cClass.shape);
 
         std::vector<uint32_t> minBounds(cClass.shape.size(), UINT32_MAX);
         std::vector<uint32_t> maxBounds(cClass.shape.size(), 0);
-        bool anyNonInf = false;
 
-        std::vector<uint64_t> contigStrides = calcContiguousStrides(cClass.shape);
-
-        // Find the bounding box of non-inf elements.
-        // The complement outside this bounding box is guaranteed to be purely -inf.
+        std::vector<Region> nonInfRegions;
         for (uint64_t i = 0; i < numElements; ++i)
         {
             uint64_t flat_idx = getStridedIndex(i, cClass.shape, cClass.strides) + cClass.viewOffset;
             if (data[flat_idx] > -1e8f)
             {
-                anyNonInf = true;
-                uint64_t temp = i;
-                for (size_t d = 0; d < cClass.shape.size(); ++d)
+                auto coords = coordsFromFlatIndex(i, cClass.shape);
+                Region r;
+                for (uint32_t c : coords)
                 {
-                    uint32_t coord = static_cast<uint32_t>(temp / contigStrides[d]);
-                    temp %= contigStrides[d];
-                    minBounds[d] = std::min(minBounds[d], coord);
-                    maxBounds[d] = std::max(maxBounds[d], coord);
+                    r.region.push_back({c, c + 1});
                 }
+                nonInfRegions.push_back(r);
+            }
+        }
+        nonInfRegions = mergeRegions(nonInfRegions);
+
+        const EClass vClass = egraph.getEClass(varClass);
+        const EClass outClass = egraph.getEClass(eclassId);
+
+        std::vector<uint64_t> contigStrides = calcContiguousStrides(outClass.shape);
+
+        uint32_t currentTarget = constClass;
+        if (cClass.backend != outClass.backend || cClass.strides != contigStrides || cClass.viewOffset != 0)
+        {
+            if (cClass.backend != outClass.backend)
+            {
+                currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
+            }
+            else
+            {
+                currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
             }
         }
 
-        if (!anyNonInf)
+        if (nonInfRegions.empty())
         {
             // add(a, -inf) -> -inf
-            egraph.merge(eclassId, constClass);
+            egraph.merge(eclassId, currentTarget);
             return;
         }
 
-        // We only proceed if the compute bounding box strictly saves work
-        bool strictlySmaller = false;
-        for (size_t d = 0; d < cClass.shape.size(); ++d)
+        if (nonInfRegions.size() == 1)
         {
-            if (minBounds[d] > 0 || maxBounds[d] + 1 < cClass.shape[d])
+            bool strictlySmaller = false;
+            const Region &reg = nonInfRegions[0];
+            for (size_t d = 0; d < cClass.shape.size(); ++d)
             {
-                strictlySmaller = true;
-                break;
-            }
-        }
-
-        if (!strictlySmaller)
-            return;
-
-        std::vector<int32_t> starts, ends, steps;
-        for (size_t d = 0; d < cClass.shape.size(); ++d)
-        {
-            starts.push_back(minBounds[d]);
-            ends.push_back(maxBounds[d] + 1);
-            steps.push_back(1);
-        }
-
-        uint32_t startsId = addIntConst(egraph, starts);
-        uint32_t endsId = addIntConst(egraph, ends);
-        uint32_t stepsId = addIntConst(egraph, steps);
-
-        std::vector<uint32_t> sliceShape;
-        for (size_t d = 0; d < starts.size(); ++d)
-        {
-            sliceShape.push_back(ends[d] - starts[d]);
-        }
-
-        // Helper to query KernelRegistry and generate specific pattern nodes
-        auto addOp = [&](OpType op, const std::vector<uint32_t> &children, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &st, uint64_t viewOffset, DType dtype, Backend backend, uint32_t targetEClass = UINT32_MAX) -> uint32_t
-        {
-            uint32_t cls = (targetEClass == UINT32_MAX) ? egraph.addEClass(shape, st, viewOffset, dtype, backend) : targetEClass;
-
-            TensorNode outNode;
-            outNode.opType = op;
-            outNode.dtype = dtype;
-            outNode.setShape(shape);
-            outNode.strides = st;
-            outNode.viewOffset = viewOffset;
-            outNode.backend = backend;
-
-            std::vector<TensorNode> inNodes;
-            for (uint32_t c : children)
-            {
-                const EClass &childCls = egraph.getEClass(c);
-                TensorNode in;
-                in.opType = OpType::INPUT;
-                in.dtype = childCls.dtype;
-                in.setShape(childCls.shape);
-                in.strides = childCls.strides;
-                in.viewOffset = childCls.viewOffset;
-                in.backend = childCls.backend;
-                inNodes.push_back(in);
-            }
-
-            Graph pGraph;
-            std::vector<uint32_t> pInputs;
-            for (auto &in : inNodes)
-            {
-                pInputs.push_back(pGraph.input(in.getShape(), in.dtype));
-            }
-            uint32_t pRoot = UINT32_MAX;
-            if (op == OpType::SLICE)
-                pRoot = pGraph.slice(pInputs[0], pInputs[1], pInputs[2], pInputs[3]);
-            else if (op == OpType::CONTIGUOUS)
-                pRoot = pGraph.contiguous(pInputs[0]);
-            else if (op == OpType::ADD)
-                pRoot = pGraph.add(pInputs[0], pInputs[1]);
-            else if (op == OpType::SCATTER)
-                pRoot = pGraph.scatter(pInputs[0], pInputs[1], pInputs[2], pInputs[3], pInputs[4]);
-
-            if (pRoot != UINT32_MAX)
-            {
-                auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, backend, inNodes, outNode, false, true, true);
-                for (uint64_t uid : matches)
+                if (reg.region[d].start > 0 || reg.region[d].stop < cClass.shape[d])
                 {
-                    const auto &kernel = KernelRegistry::get().getKernel(uid);
-                    ENode n;
-                    n.kernelUid = uid;
-                    n.opType = op;
-                    n.opName = kernel.opName;
-                    n.children = children;
-                    n.shape = shape;
-                    n.strides = st;
-                    n.viewOffset = viewOffset;
-                    n.dtype = dtype;
-                    n.backend = backend;
-                    egraph.addENode(cls, n);
+                    strictlySmaller = true;
+                    break;
                 }
             }
-            return cls;
-        };
-
-        const EClass &vClass = egraph.getEClass(varClass);
-        std::vector<uint64_t> sliceStridesV = vClass.strides;
-        uint64_t sliceViewOffsetV = vClass.viewOffset;
-        for (size_t d = 0; d < starts.size(); ++d)
-        {
-            sliceViewOffsetV += starts[d] * sliceStridesV[d];
+            if (!strictlySmaller)
+                return;
         }
-        uint32_t sliceV = addOp(OpType::SLICE, {varClass, startsId, endsId, stepsId}, sliceShape, sliceStridesV, sliceViewOffsetV, vClass.dtype, vClass.backend);
 
-        std::vector<uint64_t> sliceStridesC = cClass.strides;
-        uint64_t sliceViewOffsetC = cClass.viewOffset;
-        for (size_t d = 0; d < starts.size(); ++d)
+        for (const Region &reg : nonInfRegions)
         {
-            sliceViewOffsetC += starts[d] * sliceStridesC[d];
-        }
-        uint32_t sliceC = addOp(OpType::SLICE, {constClass, startsId, endsId, stepsId}, sliceShape, sliceStridesC, sliceViewOffsetC, cClass.dtype, vClass.backend); // Match backend
+            std::vector<int32_t> starts, ends, steps;
+            for (const Dim &d : reg.region)
+            {
+                starts.push_back(d.start);
+                ends.push_back(d.stop);
+                steps.push_back(1);
+            }
 
+            uint32_t startsId = addIntConst(egraph, starts);
+            uint32_t endsId = addIntConst(egraph, ends);
+            uint32_t stepsId = addIntConst(egraph, steps);
+
+            std::vector<uint32_t> sliceShape;
+            for (size_t d = 0; d < starts.size(); ++d)
+            {
+                sliceShape.push_back(ends[d] - starts[d]);
+            }
+
+            std::vector<uint64_t> sliceStridesV = vClass.strides;
+            uint64_t sliceViewOffsetV = vClass.viewOffset;
+            for (size_t d = 0; d < starts.size(); ++d)
+            {
+                sliceViewOffsetV += starts[d] * sliceStridesV[d];
+                sliceStridesV[d] *= steps[d];
+            }
+            uint32_t sliceV = addOpToEGraph(egraph, OpType::SLICE, {varClass, startsId, endsId, stepsId}, sliceShape, sliceStridesV, sliceViewOffsetV, vClass.dtype, vClass.backend);
+
+            std::vector<uint64_t> sliceStridesC = cClass.strides;
+            uint64_t sliceViewOffsetC = cClass.viewOffset;
+            for (size_t d = 0; d < starts.size(); ++d)
+            {
+                sliceViewOffsetC += starts[d] * sliceStridesC[d];
+                sliceStridesC[d] *= steps[d];
+            }
+            uint32_t sliceC = addOpToEGraph(egraph, OpType::SLICE, {constClass, startsId, endsId, stepsId}, sliceShape, sliceStridesC, sliceViewOffsetC, cClass.dtype, cClass.backend);
+
+            std::vector<uint64_t> sliceContigStrides = calcContiguousStrides(sliceShape);
+            uint32_t contigV = addOpToEGraph(egraph, OpType::CONTIGUOUS, {sliceV}, sliceShape, sliceContigStrides, 0, vClass.dtype, vClass.backend);
+            uint32_t contigC = addOpToEGraph(egraph, OpType::CONTIGUOUS, {sliceC}, sliceShape, sliceContigStrides, 0, cClass.dtype, cClass.backend);
+
+            contigV = copyToBackend(egraph, contigV, outClass.backend);
+            contigC = copyToBackend(egraph, contigC, outClass.backend);
+
+            uint32_t child0 = (constIdx == 0) ? contigC : contigV;
+            uint32_t child1 = (constIdx == 1) ? contigC : contigV;
+            uint32_t addId = addOpToEGraph(egraph, OpType::ADD, {child0, child1}, sliceShape, sliceContigStrides, 0, outClass.dtype, outClass.backend);
+
+            currentTarget = addOpToEGraph(egraph, OpType::SCATTER, {currentTarget, addId, startsId, endsId, stepsId}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
+        }
+
+        egraph.merge(eclassId, currentTarget);
+    }
+};
+
+struct SlicePushDownElementwise : public Rule
+{
+    std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId) const
+    {
+        uint32_t canon = egraph.findConst(eclassId);
+        if (egraph.constantStaging.count(canon))
+        {
+            const auto &data = egraph.constantStaging.at(canon);
+            std::vector<int32_t> res(data.size() / sizeof(int32_t));
+            std::memcpy(res.data(), data.data(), data.size());
+            return res;
+        }
+        return {};
+    }
+
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    {
+        const ENode &enode = egraph.getENodes()[eNodeIdx];
+        if (enode.opType != OpType::SLICE || enode.children.size() != 4)
+            return false;
+
+        uint32_t srcClass = egraph.findConst(enode.children[0]);
+        for (uint32_t srcNodeIdx : egraph.getEClass(srcClass).enodes)
+        {
+            OpType op = egraph.getENodes()[srcNodeIdx].opType;
+            if (op == OpType::ADD || op == OpType::MUL || op == OpType::DIVIDE || op == OpType::POWER ||
+                op == OpType::SIN || op == OpType::COS || op == OpType::NEGATE || op == OpType::CAST)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    {
+        const ENode &sliceNode = egraph.getENodes()[eNodeIdx];
+        uint32_t sliceClass = egraph.getENodeEClass(eNodeIdx);
+
+        uint32_t srcClass = egraph.find(sliceNode.children[0]);
+        uint32_t startsId = sliceNode.children[1];
+        uint32_t endsId = sliceNode.children[2];
+        uint32_t stepsId = sliceNode.children[3];
+
+        auto starts = getConstInt32(egraph, startsId);
+        auto ends = getConstInt32(egraph, endsId);
+        auto steps = getConstInt32(egraph, stepsId);
+        if (starts.empty() || ends.empty() || steps.empty())
+            return;
+
+        const std::vector<uint32_t> &sliceShape = sliceNode.shape;
         std::vector<uint64_t> sliceContigStrides = calcContiguousStrides(sliceShape);
-        uint32_t contigV = addOp(OpType::CONTIGUOUS, {sliceV}, sliceShape, sliceContigStrides, 0, vClass.dtype, vClass.backend);
-        uint32_t contigC = addOp(OpType::CONTIGUOUS, {sliceC}, sliceShape, sliceContigStrides, 0, cClass.dtype, vClass.backend);
 
-        uint32_t child0 = (constIdx == 0) ? contigC : contigV;
-        uint32_t child1 = (constIdx == 1) ? contigC : contigV;
-        uint32_t addId = addOp(OpType::ADD, {child0, child1}, sliceShape, sliceContigStrides, 0, vClass.dtype, vClass.backend);
+        for (uint32_t srcNodeIdx : egraph.getEClass(srcClass).enodes)
+        {
+            const ENode &opNode = egraph.getENodes()[srcNodeIdx];
+            OpType op = opNode.opType;
+            if (!(op == OpType::ADD || op == OpType::MUL || op == OpType::DIVIDE || op == OpType::POWER ||
+                  op == OpType::SIN || op == OpType::COS || op == OpType::NEGATE || op == OpType::CAST))
+            {
+                continue;
+            }
 
-        addOp(OpType::SCATTER, {constClass, addId, startsId, endsId, stepsId}, cClass.shape, cClass.strides, cClass.viewOffset, cClass.dtype, vClass.backend, eclassId);
+            std::vector<uint32_t> newChildren;
+            for (uint32_t childId : opNode.children)
+            {
+                const EClass &cClass = egraph.getEClass(egraph.find(childId));
+
+                std::vector<uint64_t> sliceStrides = cClass.strides;
+                uint64_t sliceViewOffset = cClass.viewOffset;
+                for (size_t d = 0; d < starts.size() && d < cClass.shape.size(); ++d)
+                {
+                    int32_t start = starts[d];
+                    if (start < 0)
+                        start += cClass.shape[d];
+                    sliceViewOffset += start * sliceStrides[d];
+                    sliceStrides[d] *= steps[d];
+                }
+
+                uint32_t childSlice = addOpToEGraph(egraph, OpType::SLICE, {childId, startsId, endsId, stepsId}, sliceShape, sliceStrides, sliceViewOffset, cClass.dtype, sliceNode.backend);
+
+                uint32_t childContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {childSlice}, sliceShape, sliceContigStrides, 0, cClass.dtype, sliceNode.backend);
+                newChildren.push_back(childContig);
+            }
+
+            addOpToEGraph(egraph, op, newChildren, sliceShape, sliceContigStrides, 0, sliceNode.dtype, sliceNode.backend, sliceClass);
+        }
+    }
+};
+
+struct SlicePushDownDot : public Rule
+{
+    std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId) const
+    {
+        uint32_t canon = egraph.findConst(eclassId);
+        if (egraph.constantStaging.count(canon))
+        {
+            const auto &data = egraph.constantStaging.at(canon);
+            std::vector<int32_t> res(data.size() / sizeof(int32_t));
+            std::memcpy(res.data(), data.data(), data.size());
+            return res;
+        }
+        return {};
+    }
+
+    uint32_t addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
+    {
+        return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, Backend::CPU, vals);
+    }
+
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    {
+        const ENode &enode = egraph.getENodes()[eNodeIdx];
+        if (enode.opType != OpType::SLICE || enode.children.size() != 4)
+            return false;
+
+        uint32_t srcClass = egraph.findConst(enode.children[0]);
+        for (uint32_t srcNodeIdx : egraph.getEClass(srcClass).enodes)
+        {
+            if (egraph.getENodes()[srcNodeIdx].opType == OpType::DOT)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    {
+        const ENode &sliceNode = egraph.getENodes()[eNodeIdx];
+        uint32_t sliceClass = egraph.getENodeEClass(eNodeIdx);
+
+        uint32_t srcClass = egraph.find(sliceNode.children[0]);
+        auto starts = getConstInt32(egraph, sliceNode.children[1]);
+        auto ends = getConstInt32(egraph, sliceNode.children[2]);
+        auto steps = getConstInt32(egraph, sliceNode.children[3]);
+
+        if (starts.empty() || ends.empty() || steps.empty())
+            return;
+
+        for (int32_t s : steps)
+        {
+            if (s != 1)
+                return; // Only support step=1 for pushing down through DOT
+        }
+
+        const EClass &outClass = egraph.getEClass(srcClass);
+        uint32_t rank = outClass.shape.size();
+        if (rank != 2 && rank != 3)
+            return; // DOT only supports rank 2 and 3
+
+        while (starts.size() < rank)
+            starts.push_back(0);
+        while (ends.size() < rank)
+            ends.push_back(outClass.shape[ends.size()]);
+
+        for (size_t d = 0; d < rank; ++d)
+        {
+            if (starts[d] < 0)
+                starts[d] += outClass.shape[d];
+            if (ends[d] < 0)
+                ends[d] += outClass.shape[d];
+            starts[d] = std::max(0, starts[d]);
+            ends[d] = std::min((int32_t)outClass.shape[d], std::max(starts[d], ends[d]));
+        }
+
+        const std::vector<uint32_t> &sliceShape = sliceNode.shape;
+        std::vector<uint64_t> sliceContigStrides = calcContiguousStrides(sliceShape);
+
+        for (uint32_t srcNodeIdx : egraph.getEClass(srcClass).enodes)
+        {
+            const ENode &dotNode = egraph.getENodes()[srcNodeIdx];
+            if (dotNode.opType != OpType::DOT)
+                continue;
+
+            uint32_t aClassId = dotNode.children[0];
+            uint32_t bClassId = dotNode.children[1];
+            const EClass &aClass = egraph.getEClass(egraph.find(aClassId));
+            const EClass &bClass = egraph.getEClass(egraph.find(bClassId));
+
+            uint32_t K = (rank == 2) ? aClass.shape[1] : aClass.shape[2];
+
+            std::vector<int32_t> startsA, endsA, stepsA(rank, 1);
+            std::vector<int32_t> startsB, endsB, stepsB(rank, 1);
+
+            if (rank == 2)
+            {
+                startsA = {starts[0], 0};
+                endsA = {ends[0], (int32_t)K};
+
+                startsB = {0, starts[1]};
+                endsB = {(int32_t)K, ends[1]};
+            }
+            else
+            {
+                startsA = {starts[0], starts[1], 0};
+                endsA = {ends[0], ends[1], (int32_t)K};
+
+                startsB = {starts[0], 0, starts[2]};
+                endsB = {ends[0], (int32_t)K, ends[2]};
+            }
+
+            uint32_t startsIdA = addIntConst(egraph, startsA);
+            uint32_t endsIdA = addIntConst(egraph, endsA);
+            uint32_t stepsIdA = addIntConst(egraph, stepsA);
+
+            uint32_t startsIdB = addIntConst(egraph, startsB);
+            uint32_t endsIdB = addIntConst(egraph, endsB);
+            uint32_t stepsIdB = addIntConst(egraph, stepsB);
+
+            auto createSlice = [&](uint32_t classId, const EClass &cls, const std::vector<int32_t> &st, const std::vector<int32_t> &en, uint32_t stId, uint32_t enId, uint32_t stepId)
+            {
+                std::vector<uint32_t> sShape;
+                for (size_t d = 0; d < st.size(); ++d)
+                    sShape.push_back(en[d] - st[d]);
+
+                std::vector<uint64_t> sStrides = cls.strides;
+                uint64_t sOffset = cls.viewOffset;
+                for (size_t d = 0; d < st.size(); ++d)
+                {
+                    sOffset += st[d] * sStrides[d];
+                }
+
+                uint32_t sClass = addOpToEGraph(egraph, OpType::SLICE, {classId, stId, enId, stepId}, sShape, sStrides, sOffset, cls.dtype, sliceNode.backend);
+                uint32_t sContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {sClass}, sShape, calcContiguousStrides(sShape), 0, cls.dtype, sliceNode.backend);
+                return sContig;
+            };
+
+            uint32_t aSliced = createSlice(aClassId, aClass, startsA, endsA, startsIdA, endsIdA, stepsIdA);
+            uint32_t bSliced = createSlice(bClassId, bClass, startsB, endsB, startsIdB, endsIdB, stepsIdB);
+
+            addOpToEGraph(egraph, OpType::DOT, {aSliced, bSliced}, sliceShape, sliceContigStrides, 0, sliceNode.dtype, sliceNode.backend, sliceClass);
+        }
     }
 };

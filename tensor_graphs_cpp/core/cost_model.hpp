@@ -146,8 +146,10 @@ struct CostModel
         std::string line;
         uint32_t total = 0;
         uint32_t valid = 0;
+        ProgressTimer timer(0, "loading records ");
         while (std::getline(file, line))
         {
+            timer.tick();
             if (line.empty())
                 continue;
             total++;

@@ -390,6 +390,8 @@ private:
         rules.emplace_back(std::make_unique<ContiguousElimination>());
         rules.emplace_back(std::make_unique<ConstantFolding>());
         rules.emplace_back(std::make_unique<InfinityDomination>());
+        rules.emplace_back(std::make_unique<SlicePushDownElementwise>());
+        // rules.emplace_back(std::make_unique<SlicePushDownDot>());
         // rules.emplace_back(std::make_unique<DistributiveProperty>());
 
         size_t iterations = 0;
@@ -402,9 +404,9 @@ private:
         {
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
-#ifdef DEBUG
-            ProgressTimer timer2(0, "");
-#endif
+// #ifdef DEBUG
+            ProgressTimer timer2(numENodes, "saturation round ");
+// #endif
             for (uint32_t eNodeIdx = 0; eNodeIdx < numENodes; eNodeIdx++)
             {
                 for (const auto &rule : rules)
@@ -416,9 +418,9 @@ private:
                     changed = true;
                     nMatches++;
                 }
-#ifdef DEBUG
+// #ifdef DEBUG
                 timer2.tick();
-#endif
+// #endif
             }
             egraph.rebuild();
             changed = egraph.getENodes().size() != numENodes;
