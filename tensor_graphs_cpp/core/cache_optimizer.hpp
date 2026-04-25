@@ -99,53 +99,38 @@ CacheOptimizationResult optimizeCacheByFusion(
     const std::vector<uint32_t> cacheableNodes = collectCacheableNodes(graph);
     const std::unordered_map<uint32_t, uint64_t> nodeMemorySizes = buildLogicalNodeMemorySizes(graph, cacheableNodes);
 
-    // 1. Identify a partial bucket to evaluate cache profitability organically
-    const BucketPlanRequest *partialBucket = nullptr;
-    for (const auto &b : buckets)
-    {
-        if (b.key != fullKey)
-        {
-            partialBucket = &b;
-            break;
-        }
-    }
-    if (!partialBucket)
-        partialBucket = &buckets[0];
-
-    std::cout << "[CacheOptimizer] Evaluating cache profitability organically on bucket: " << partialBucket->key << std::endl;
-
-    // Provide ALL nodes as potential caches
-    std::unordered_map<uint32_t, Backend> allCachedNodes;
-    for (uint32_t id : cacheableNodes)
-    {
-        allCachedNodes[id] = graph.getNode(id).backend;
-    }
+    std::cout << "[CacheOptimizer] Planning full bucket to find unfused nodes..." << std::endl;
 
     std::unordered_map<std::string, PlanningRegionState> regionStates;
-    regionStates[partialBucket->key] = derivePlanningRegions(rootId, graph, partialBucket->bucket.regions, partialBucket->bucket.outputNeeded);
-
-    // Plan with ALL nodes cached, but DO NOT protect them! This lets extractBest pick the fastest organic path.
-    CompiledGraph exploratoryPlan = planner.plan(
-        rootId, graph, partialBucket->bucket.regions, partialBucket->bucket.inputSlices,
-        allCachedNodes, regionStates[partialBucket->key], partialBucket->bucket.outputNeeded,
-        doSaturate, false, true); // <--- Note: protectCachedNodes = false
-
     std::unordered_map<uint32_t, Backend> survivingLogicalNodes;
-    for (const auto &inst : exploratoryPlan.instructions)
+
+    // First, plan all buckets to get regionStates, but explicitly extract survivors from the full bucket
+    for (const BucketPlanRequest &bucket : buckets)
     {
-        uint32_t logicalId = exploratoryPlan.getLogicalId(inst.nodeId);
-        if (logicalId != UINT32_MAX && allCachedNodes.count(logicalId))
+        regionStates[bucket.key] = derivePlanningRegions(rootId, graph, bucket.bucket.regions, bucket.bucket.outputNeeded);
+
+        if (bucket.key == fullKey)
         {
-            // If the logical ID survived in the graph (e.g. as a SCATTER update), it was deemed profitable!
-            survivingLogicalNodes[logicalId] = inst.backend;
+            CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, {}, regionStates[bucket.key], bucket.bucket.outputNeeded, doSaturate, true);
+            for (const auto &inst : plan.instructions)
+            {
+                uint32_t logicalId = plan.getLogicalId(inst.nodeId);
+                if (logicalId != UINT32_MAX)
+                {
+                    survivingLogicalNodes[logicalId] = inst.backend;
+                }
+            }
         }
     }
 
+    std::cout << "[CacheOptimizer] Sorting surviving nodes by size..." << std::endl;
     std::vector<uint32_t> candidateNodes;
     for (uint32_t id : cacheableNodes)
     {
         if (survivingLogicalNodes.count(id))
+        {
             candidateNodes.push_back(id);
+        }
     }
 
     std::sort(candidateNodes.begin(), candidateNodes.end(), [&](uint32_t a, uint32_t b)
@@ -175,30 +160,24 @@ CacheOptimizationResult optimizeCacheByFusion(
     {
         if (pair.second.opType == OpType::INPUT && pair.second.storageType == StorageType::PERSISTENT)
         {
-            selectedCachedNodes[pair.first] = pair.second.backend;
+            if (survivingLogicalNodes.count(pair.first))
+            {
+                selectedCachedNodes[pair.first] = survivingLogicalNodes.at(pair.first);
+            }
         }
     }
 
-    std::cout << "[CacheOptimizer] Selected " << selectedCachedNodes.size()
-              << " nodes for caching, using " << currentCacheMem << " bytes." << std::endl;
+    std::cout << "[CacheOptimizer] Final fusion-based cache set: " << selectedCachedNodes.size()
+              << " nodes, using " << currentCacheMem << " bytes." << std::endl;
 
     std::unordered_map<std::string, CompiledGraph> plans;
     float finalScore = 0.0f;
 
-    std::cout << "[CacheOptimizer] Generating final constrained plans for " << buckets.size() << " buckets..." << std::endl;
+    std::cout << "[CacheOptimizer] Generating plans for " << buckets.size() << " buckets..." << std::endl;
     for (const BucketPlanRequest &bucket : buckets)
     {
         bool isFullKey = (bucket.key == fullKey);
-        if (regionStates.find(bucket.key) == regionStates.end())
-        {
-            regionStates[bucket.key] = derivePlanningRegions(rootId, graph, bucket.bucket.regions, bucket.bucket.outputNeeded);
-        }
-
-        // Final plans DO protect the selected caches
-        CompiledGraph plan = planner.plan(
-            rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices,
-            selectedCachedNodes, regionStates[bucket.key], bucket.bucket.outputNeeded,
-            doSaturate, true, isFullKey);
+        CompiledGraph plan = planner.plan(rootId, graph, bucket.bucket.regions, bucket.bucket.inputSlices, selectedCachedNodes, regionStates[bucket.key], bucket.bucket.outputNeeded, doSaturate, isFullKey);
 
         float cost = getPlanRuntime(plan);
         auto countIt = bucketCallCounts.find(bucket.key);

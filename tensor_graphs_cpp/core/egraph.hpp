@@ -202,21 +202,6 @@ public:
         parent[rb] = ra;
         ufSize[ra] += ufSize[rb];
 
-        auto it = constantStaging.find(rb);
-        if (it != constantStaging.end())
-        {
-            auto ra_it = constantStaging.find(ra);
-            if (ra_it == constantStaging.end())
-            {
-                constantStaging[ra] = std::move(it->second);
-            }
-            else if (ra_it->second != it->second)
-            {
-                Error::throw_err("EClass merge constantStaging mismatch.");
-            }
-            constantStaging.erase(it);
-        }
-
         classes[ra].enodes.reserve(classes[ra].enodes.size() + classes[rb].enodes.size());
         for (uint32_t enodeId : classes[rb].enodes)
         {

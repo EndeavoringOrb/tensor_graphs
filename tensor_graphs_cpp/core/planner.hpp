@@ -388,40 +388,36 @@ private:
         rules.emplace_back(std::make_unique<CopyToOfContiguous>());
         rules.emplace_back(std::make_unique<ContiguousOfCopyTo>());
         rules.emplace_back(std::make_unique<ContiguousElimination>());
-        rules.emplace_back(std::make_unique<ConstantFolding>());
-        // rules.emplace_back(std::make_unique<InfinityDomination>());
-        // rules.emplace_back(std::make_unique<SlicePushBackward>());
-        // rules.emplace_back(std::make_unique<ScatterPushForward>());
         // rules.emplace_back(std::make_unique<DistributiveProperty>());
-
-        std::vector<uint32_t> protectedVec(protectedEClasses.begin(), protectedEClasses.end());
 
         size_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
-
-        ProgressTimer timer(0, "", true);
+#ifdef DEBUG
+        ProgressTimer timer(0, "saturating ");
+#endif
         while (changed)
         {
-            timer.reset();
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
             for (uint32_t eNodeIdx = 0; eNodeIdx < numENodes; eNodeIdx++)
             {
                 for (const auto &rule : rules)
                 {
-                    if (!rule->match(egraph, eNodeIdx, protectedVec))
+                    if (!rule->match(egraph, eNodeIdx, protectedEClasses))
                         continue;
 
-                    rule->apply(egraph, eNodeIdx, protectedVec);
+                    rule->apply(egraph, eNodeIdx, protectedEClasses);
                     changed = true;
                     nMatches++;
                 }
             }
             egraph.rebuild();
-            double elapsed = timer.elapsed();
             changed = egraph.getENodes().size() != numENodes;
-            std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << ", took " << std::to_string(elapsed) << "s" << std::endl;
+#ifdef DEBUG
+            timer.tick();
+            std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << std::endl;
+#endif
         }
         std::cout << "Finished saturation in " << iterations << " iterations with " << nMatches << " matches\n"
                   << std::flush;
@@ -1691,10 +1687,18 @@ private:
                         {
                             auto addConst = [&](const std::vector<int32_t> &vals)
                             {
+                                uint32_t cls = egraph.addEClass({(uint32_t)vals.size()}, {1}, 0, DType::INT32, Backend::CPU);
+                                ENode n;
+                                n.opType = OpType::INPUT;
+                                n.dtype = DType::INT32;
+                                n.shape = {(uint32_t)vals.size()};
+                                n.strides = {1};
+                                n.backend = Backend::CPU;
+                                egraph.addENode(cls, n);
                                 std::vector<uint8_t> bytes(vals.size() * sizeof(int32_t));
                                 std::memcpy(bytes.data(), vals.data(), bytes.size());
-                                std::vector<uint32_t> shape = {(uint32_t)vals.size()};
-                                return getOrAddConstant(egraph, shape, DType::INT32, bytes);
+                                egraph.constantStaging[cls] = bytes;
+                                return cls;
                             };
 
                             std::vector<int32_t> starts, ends, steps;
@@ -1827,10 +1831,18 @@ private:
 
                 auto addConst = [&](const std::vector<int32_t> &vals)
                 {
+                    uint32_t cls = egraph.addEClass({(uint32_t)vals.size()}, {1}, 0, DType::INT32, Backend::CPU);
+                    ENode n;
+                    n.opType = OpType::INPUT;
+                    n.dtype = DType::INT32;
+                    n.shape = {(uint32_t)vals.size()};
+                    n.strides = {1};
+                    n.backend = Backend::CPU;
+                    egraph.addENode(cls, n);
                     std::vector<uint8_t> bytes(vals.size() * sizeof(int32_t));
                     std::memcpy(bytes.data(), vals.data(), bytes.size());
-                    std::vector<uint32_t> shape = {(uint32_t)vals.size()};
-                    return getOrAddConstant(egraph, shape, DType::INT32, bytes);
+                    egraph.constantStaging[cls] = bytes;
+                    return cls;
                 };
 
                 std::vector<int32_t> starts, ends, steps;
@@ -1906,7 +1918,6 @@ public:
         PlanningRegionState &regionState,
         const std::vector<Region> &outputNeeded,
         bool doSaturate = true,
-        bool protectCachedNodes = true,
         bool cheapInputCopy = false)
     {
         initBaseEGraph(rootId, graph, doSaturate);
@@ -1924,12 +1935,10 @@ public:
         if (doSaturate)
         {
             std::unordered_set<uint32_t> protectedEClasses;
-            if (protectCachedNodes)
+            for (const auto &kv : cachedNodes)
             {
-                for (const auto &kv : cachedNodes)
-                {
-                    protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(kv.first)));
-                }
+                uint32_t logicalId = kv.first;
+                protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
             }
             saturate(egraph, protectedEClasses);
         }
