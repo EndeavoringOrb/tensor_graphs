@@ -6,7 +6,6 @@
 #include "core/planner.hpp"
 #include "core/executor.hpp"
 #include "core/shapes.hpp"
-#include "core/cache_optimizer.hpp"
 #include <unordered_map>
 #include <memory>
 #include <string>
@@ -146,7 +145,6 @@ private:
     bool isPlanned;
     bool isCompiled;
     uint32_t nBucketSizes = 0;
-    uint64_t maxCacheMemory;
     std::vector<ManualBucket> manualBuckets;
 
     std::string cachePath;
@@ -154,7 +152,6 @@ private:
     std::unordered_map<std::string, DirtyBucket> cachedBuckets;
     std::unordered_map<uint32_t, Backend> selectedCachedNodes;
 
-    // Bucket call tracking for cache optimization
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
     std::string bucketCountsPath = "benchmarks/bucket_counts.json";
     std::string recordsPath = "benchmarks/records.jsonl";
@@ -255,6 +252,12 @@ private:
             }
         }
     }
+
+    struct BucketPlanRequest
+    {
+        std::string key;
+        DirtyBucket bucket;
+    };
 
     std::vector<BucketPlanRequest> enumerateCanonicalBuckets(const std::vector<uint32_t> &inputNodeIds)
     {
@@ -520,8 +523,8 @@ public:
         manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
     }
 
-    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0, uint64_t _maxCacheMemory = std::numeric_limits<uint64_t>::max())
-        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes), maxCacheMemory(_maxCacheMemory)
+    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0)
+        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes)
     {
         ensureOutputDirectories();
         loadCache();
@@ -560,7 +563,6 @@ public:
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
         memManager.init();
 
-        // Prune the materialization step to only touch nodes actually used in any CompiledGraph
         std::unordered_set<uint32_t> countSet;
         for (const auto &pair : cachedGraphs)
         {
@@ -636,7 +638,6 @@ public:
 
         if (!manualBuckets.empty())
         {
-            // Try to find a manual bucket that covers inputDiffs
             for (const auto &manual : manualBuckets)
             {
                 bool covers = true;
@@ -661,7 +662,6 @@ public:
                 }
             }
 
-            // Fallback to full bucket
             std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
             std::vector<uint32_t> inputNodeIds = collectInputNodeIds();
             for (uint32_t nodeId : inputNodeIds)
@@ -725,11 +725,6 @@ public:
             compile(inputs);
         }
 
-        // Dirty-bucket flow:
-        // 1. compare current inputs with the previous invocation
-        // 2. canonicalize the dirty regions into bucket keys
-        // 3. look up or build the compiled graph for that bucket
-        // 4. execute using the bucket's output regions and input slices
         std::unordered_map<uint32_t, std::vector<Region>> inputDiffs;
 
         for (const auto &pair : inputs)
@@ -802,7 +797,6 @@ public:
         saveBucketCounts();
         executor->run(inputs, *compiled, bucketIt->second);
 
-        // get output
         const OpInstruction &lastInst = compiled->instructions[compiled->instructions.size() - 1];
         Backend backend = lastInst.backend;
         uint32_t outLogicalId = compiled->getLogicalId(lastInst.nodeId);
@@ -824,14 +818,6 @@ public:
         const std::vector<uint32_t> &shape,
         DType dtype) const
     {
-        // Uncomment to use baseline full plan for every run
-        // Region full;
-        // for (uint32_t dim : shape)
-        // {
-        //     full.region.push_back({0, dim});
-        // }
-        // return {full};
-
         if (shape.empty())
             return {};
 
@@ -969,34 +955,62 @@ public:
             cachedBuckets[bucket.key] = bucket.bucket;
         }
 
-        std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
-        for (uint32_t inId : inputNodeIds)
-        {
-            fullInputRegions[inId] = makeFull(graph.getNode(inId).getShape());
-        }
-        std::string fullKey = encodeCacheKey(fullInputRegions);
-
-        std::cout << "[Session.ensureCacheCoverage] Starting cache optimization..." << std::endl;
+        std::cout << "[Session.ensureCacheCoverage] Starting iterative cache optimization..." << std::endl;
         Planner planner(costModel, memManager.getBufferSizes());
-        CacheOptimizationResult optResult = optimizeCacheByFusion(
-            rootId, graph, buckets, fullKey, bucketCallCounts, maxCacheMemory, planner);
 
-        if (optResult.foundValidCombination)
+        std::unordered_map<uint32_t, Backend> protectedCachedNodes;
+
+        // Iterate updating caching nodes based on chosen scatters pointing into inputs.
+        for (size_t i = 0; i < buckets.size(); ++i)
         {
-            selectedCachedNodes = std::move(optResult.bestCachedNodes);
-            cachedGraphs = std::move(optResult.bucketPlans);
-            std::cout << "[Session.ensureCacheCoverage] Selected " << selectedCachedNodes.size()
-                      << " cached nodes with runtime score " << optResult.runtimeScore << std::endl;
+            const BucketPlanRequest &req = buckets[i];
 
-            if (cachedGraphs.count(fullKey) == 0)
+            CompiledGraph plan = planner.plan(
+                rootId, graph,
+                req.bucket.regions,
+                req.bucket.inputSlices,
+                protectedCachedNodes,
+                req.bucket.outputNeeded,
+                true, // doSaturate
+                false // cheapInputCopy
+            );
+
+            // Find all eclasses that need to be cached. Look for target buffers in chosen scatters.
+            for (const auto &inst : plan.instructions)
             {
-                Error::throw_err("[Session::ensureCacheCoverage] full key not in generated plans");
+                const TensorNode &node = plan.nodesMap.at(inst.nodeId);
+                if (node.opType == OpType::SCATTER)
+                {
+                    uint32_t targetPhysId = inst.inputNodeIds[0];
+                    const TensorNode &targetNode = plan.nodesMap.at(targetPhysId);
+
+                    if (targetNode.opType == OpType::INPUT)
+                    {
+                        uint32_t targetLogicalId = plan.physicalToLogicalNodeMap.at(targetPhysId);
+                        if (targetLogicalId != UINT32_MAX)
+                        {
+                            protectedCachedNodes[targetLogicalId] = targetNode.backend;
+                        }
+                    }
+                }
             }
         }
-        else
+
+        std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size() << " protected eclasses..." << std::endl;
+        for (const BucketPlanRequest &req : buckets)
         {
-            Error::throw_err("[Session.ensureCacheCoverage] Failed to build a valid plan for every bucket.");
+            CompiledGraph plan = planner.plan(
+                rootId, graph,
+                req.bucket.regions,
+                req.bucket.inputSlices,
+                protectedCachedNodes,
+                req.bucket.outputNeeded,
+                true,
+                false);
+            cachedGraphs[req.key] = std::move(plan);
         }
+
+        selectedCachedNodes = std::move(protectedCachedNodes);
 
         if (cachedGraphs.size() != buckets.size())
         {
@@ -1007,7 +1021,6 @@ public:
         persistCache();
     }
 
-    // TODO: fall back to larger buckets if exact match doesn't exist
     const CompiledGraph *lookupCache(
         const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions) const
     {
@@ -1136,7 +1149,6 @@ public:
                 CompiledGraph cg;
                 from_json(entry["graph"], cg);
 
-                // Verify kernel IDs are still valid
                 bool valid = true;
                 for (const auto &inst : cg.instructions)
                 {
@@ -1203,12 +1215,10 @@ public:
             invalidCacheReason = "Cache file missing 'constants' metadata (interrupted compilation).";
         }
 
-        // If the cache contains any mismatch (e.g. from an old build format or UID 0)
         if (hasInvalidCache)
         {
             std::cout << "[Session.loadCache] invalid or stale cache detected. ignoring entire cache to force recompilation." << std::endl;
             std::cout << "[Session.loadCache] invalid cache reason: " << invalidCacheReason << std::endl;
-            // Clear the file so we overwrite it instead of appending to a file full of stale entries
             std::ofstream clearFile(cachePath, std::ios::trunc);
             return;
         }
