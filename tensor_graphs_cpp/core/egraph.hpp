@@ -221,7 +221,7 @@ public:
         if (ufSize[ra] < ufSize[rb])
             std::swap(ra, rb);
 
-#ifndef NDEBUG
+#ifdef DEBUG
         if (classes[ra].shape != classes[rb].shape)
         {
             Error::throw_err("EClass merge shape mismatch: " + toString(classes[ra].shape) + ", " + toString(classes[rb].shape));
@@ -246,6 +246,17 @@ public:
 
         parent[rb] = ra;
         ufSize[ra] += ufSize[rb];
+
+        // Move constant staging from rb to ra to avoid losing constants
+        auto itB = constantStaging.find(rb);
+        if (itB != constantStaging.end())
+        {
+            if (constantStaging.find(ra) == constantStaging.end())
+            {
+                constantStaging[ra] = std::move(itB->second);
+            }
+            constantStaging.erase(itB);
+        }
 
         classes[ra].enodes.reserve(classes[ra].enodes.size() + classes[rb].enodes.size());
         for (uint32_t enodeId : classes[rb].enodes)

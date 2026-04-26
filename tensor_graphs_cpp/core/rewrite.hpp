@@ -1009,7 +1009,12 @@ struct ConstantFolding : public Rule
         if (egraph.constantStaging.find(eclassId) != egraph.constantStaging.end())
             return false;
 
-        for (uint32_t enodeId : egraph.getEClass(eclassId).enodes)
+        // Ensure we only fold into contiguous EClasses to prevent layout/offset mismatches
+        const EClass &targetCls = egraph.getEClass(eclassId);
+        if (!isContiguous(targetCls) || targetCls.viewOffset != 0)
+            return false;
+
+        for (uint32_t enodeId : targetCls.enodes)
         {
             const ENode &sibling = egraph.getENodes()[enodeId];
             if (sibling.opType == OpType::COPY_TO && sibling.children.size() == 1)
