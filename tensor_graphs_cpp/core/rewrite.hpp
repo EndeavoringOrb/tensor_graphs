@@ -861,6 +861,10 @@ struct ContiguousOfCopyTo : public Rule
 
 struct ContiguousElimination : public Rule
 {
+    std::unordered_set<uint64_t> visited_pairs;
+    uint32_t matched_i;
+    uint32_t matched_childENodeIdx;
+
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
     {
         const ENode &enode = egraph.getENodes()[eNodeIdx];
@@ -868,14 +872,20 @@ struct ContiguousElimination : public Rule
         if (enode.opType == OpType::INPUT || enode.children.empty() || enode.opType == OpType::CONTIGUOUS)
             return false;
 
-        for (uint32_t childEClassId : enode.children)
+        for (size_t i = 0; i < enode.children.size(); ++i)
         {
-            const EClass &childCls = egraph.getEClass(childEClassId);
+            const EClass &childCls = egraph.getEClass(egraph.findConst(enode.children[i]));
             for (uint32_t childENodeIdx : childCls.enodes)
             {
+                uint64_t pair_id = (static_cast<uint64_t>(eNodeIdx) << 32) | childENodeIdx;
+                if (visited_pairs.count(pair_id))
+                    continue;
+
                 const ENode &childENode = egraph.getENodes()[childENodeIdx];
                 if (childENode.opType == OpType::CONTIGUOUS && !childENode.children.empty())
                 {
+                    matched_i = i;
+                    matched_childENodeIdx = childENodeIdx;
                     return true;
                 }
             }
@@ -885,92 +895,81 @@ struct ContiguousElimination : public Rule
 
     void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
     {
+        uint64_t pair_id = (static_cast<uint64_t>(eNodeIdx) << 32) | matched_childENodeIdx;
+        visited_pairs.insert(pair_id);
+
         const ENode consumerNode = egraph.getENodes()[eNodeIdx];
         uint32_t consumerEClassId = egraph.getENodeEClass(eNodeIdx);
 
-        for (size_t i = 0; i < consumerNode.children.size(); ++i)
+        ENode childENode = egraph.getENodes()[matched_childENodeIdx];
+        uint32_t sourceEClassId = childENode.children[0];
+
+        std::vector<uint32_t> optimizedChildren = consumerNode.children;
+        optimizedChildren[matched_i] = sourceEClassId;
+
+        if (isContiguous(egraph.getEClass(egraph.findConst(sourceEClassId))))
         {
-            uint32_t childEClassId = consumerNode.children[i];
-            std::vector<uint32_t> childENodeIndices = egraph.getEClass(childEClassId).enodes;
+            ENode n = consumerNode;
+            n.children = optimizedChildren;
+            egraph.addENode(consumerEClassId, n);
+            return;
+        }
 
-            for (uint32_t childENodeIdx : childENodeIndices)
+        std::vector<TensorNode> inputNodes;
+        Graph pGraph;
+        std::vector<uint32_t> pInputs;
+
+        for (uint32_t cId : optimizedChildren)
+        {
+            const EClass cClass = egraph.getEClass(egraph.findConst(cId));
+            TensorNode n;
+            n.opType = OpType::INPUT;
+            n.dtype = cClass.dtype;
+            n.setShape(cClass.shape);
+            n.strides = cClass.strides;
+            n.backend = cClass.backend;
+            inputNodes.push_back(n);
+
+            pInputs.push_back(pGraph.input(n.getShape(), n.dtype));
+        }
+
+        TensorNode outNode;
+        outNode.opType = consumerNode.opType;
+        outNode.opName = consumerNode.opName;
+        outNode.dtype = consumerNode.dtype;
+        outNode.setShape(consumerNode.shape);
+        outNode.strides = consumerNode.strides;
+        outNode.backend = consumerNode.backend;
+
+        uint32_t pRoot = UINT32_MAX;
+        if (consumerNode.opType == OpType::FUSED)
+        {
+            const auto *refEntry = ReferenceGraphRegistry::get().getFactory(consumerNode.opName);
+            if (refEntry)
             {
-                ENode childENode = egraph.getENodes()[childENodeIdx];
+                pRoot = refEntry->factory(pInputs, pGraph);
+            }
+        }
+        else
+        {
+            TensorNode &n = pGraph.allocateNode(consumerNode.opType, "", consumerNode.dtype, pInputs);
+            pRoot = n.id;
+        }
 
-                if (childENode.opType == OpType::CONTIGUOUS && !childENode.children.empty())
-                {
-                    uint32_t sourceEClassId = childENode.children[0];
+        if (pRoot != UINT32_MAX)
+        {
+            auto matches = KernelRegistry::get().findMatchingKernelsByPattern(
+                pGraph, pRoot, consumerNode.backend, inputNodes, outNode, false, false, false);
 
-                    std::vector<uint32_t> optimizedChildren = consumerNode.children;
-                    optimizedChildren[i] = sourceEClassId;
-
-                    if (isContiguous(egraph.getEClass(sourceEClassId)))
-                    {
-                        ENode n = consumerNode;
-                        n.children = optimizedChildren;
-                        egraph.addENode(consumerEClassId, n);
-                        break;
-                    }
-
-                    std::vector<TensorNode> inputNodes;
-                    Graph pGraph;
-                    std::vector<uint32_t> pInputs;
-
-                    for (uint32_t cId : optimizedChildren)
-                    {
-                        const EClass cClass = egraph.getEClass(cId);
-                        TensorNode n;
-                        n.opType = OpType::INPUT;
-                        n.dtype = cClass.dtype;
-                        n.setShape(cClass.shape);
-                        n.strides = cClass.strides;
-                        n.backend = cClass.backend;
-                        inputNodes.push_back(n);
-
-                        pInputs.push_back(pGraph.input(n.getShape(), n.dtype));
-                    }
-
-                    TensorNode outNode;
-                    outNode.opType = consumerNode.opType;
-                    outNode.opName = consumerNode.opName;
-                    outNode.dtype = consumerNode.dtype;
-                    outNode.setShape(consumerNode.shape);
-                    outNode.strides = consumerNode.strides;
-                    outNode.backend = consumerNode.backend;
-
-                    uint32_t pRoot = UINT32_MAX;
-                    if (consumerNode.opType == OpType::FUSED)
-                    {
-                        const auto *refEntry = ReferenceGraphRegistry::get().getFactory(consumerNode.opName);
-                        if (refEntry)
-                        {
-                            pRoot = refEntry->factory(pInputs, pGraph);
-                        }
-                    }
-                    else
-                    {
-                        TensorNode &n = pGraph.allocateNode(consumerNode.opType, "", consumerNode.dtype, pInputs);
-                        pRoot = n.id;
-                    }
-
-                    if (pRoot != UINT32_MAX)
-                    {
-                        auto matches = KernelRegistry::get().findMatchingKernelsByPattern(
-                            pGraph, pRoot, consumerNode.backend, inputNodes, outNode, false, false, false);
-
-                        for (uint64_t uid : matches)
-                        {
-                            const auto &kernel = KernelRegistry::get().getKernel(uid);
-                            ENode n = consumerNode;
-                            n.children = optimizedChildren;
-                            n.kernelUid = uid;
-                            n.opType = kernel.opType;
-                            n.opName = kernel.opName;
-                            egraph.addENode(consumerEClassId, n);
-                        }
-                    }
-                    break;
-                }
+            for (uint64_t uid : matches)
+            {
+                const auto &kernel = KernelRegistry::get().getKernel(uid);
+                ENode n = consumerNode;
+                n.children = optimizedChildren;
+                n.kernelUid = uid;
+                n.opType = kernel.opType;
+                n.opName = kernel.opName;
+                egraph.addENode(consumerEClassId, n);
             }
         }
     }
