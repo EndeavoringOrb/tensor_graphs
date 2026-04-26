@@ -265,16 +265,16 @@ struct FusionRule : public Rule
         if (it == patternsByOp.end())
             return false;
 
-        std::unordered_set<uint32_t> canonicalProtected;
-        for (uint32_t id : protectedEClasses)
-        {
-            canonicalProtected.insert(egraph.findConst(id));
-        }
+        // std::unordered_set<uint32_t> canonicalProtected;
+        // for (uint32_t id : protectedEClasses)
+        // {
+        //     canonicalProtected.insert(egraph.findConst(id));
+        // }
 
         for (const auto &pattern : it->second)
         {
             std::unordered_map<uint32_t, uint32_t> binding;
-            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern, binding, canonicalProtected))
+            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern, binding, protectedEClasses))
             {
                 activeMatches.push_back({&pattern, std::move(binding)});
             }
