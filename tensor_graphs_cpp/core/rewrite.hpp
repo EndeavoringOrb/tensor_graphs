@@ -1093,7 +1093,20 @@ struct ConstantFolding : public Rule
         if (selectedKernel->isView)
         {
             uint32_t firstChild = egraph.find(eNode.children[0]);
-            outData = egraph.constantStaging.at(firstChild);
+            const auto &parentData = egraph.constantStaging.at(firstChild);
+
+            uint64_t numElements = countElements(eNode.shape);
+            uint64_t elemSize = getDTypeSize(eNode.dtype);
+            outData.resize(numElements * elemSize);
+
+            const uint8_t *src = parentData.data();
+            uint8_t *dst = outData.data();
+
+            for (uint64_t i = 0; i < numElements; ++i)
+            {
+                uint64_t flat_idx = getStridedIndex(i, eNode.shape, eNode.strides) + eNode.viewOffset;
+                std::memcpy(dst + i * elemSize, src + flat_idx * elemSize, elemSize);
+            }
         }
         else
         {
@@ -1109,16 +1122,8 @@ struct ConstantFolding : public Rule
         foldedNode.kernelUid = 0;
         foldedNode.opType = OpType::INPUT;
         foldedNode.shape = eNode.shape;
-        if (selectedKernel->isView)
-        {
-            foldedNode.strides = eNode.strides;
-            foldedNode.viewOffset = eNode.viewOffset;
-        }
-        else
-        {
-            foldedNode.strides = outNode.strides;
-            foldedNode.viewOffset = 0;
-        }
+        foldedNode.strides = calcContiguousStrides(eNode.shape);
+        foldedNode.viewOffset = 0;
         foldedNode.dtype = eNode.dtype;
         foldedNode.backend = Backend::CPU;
 

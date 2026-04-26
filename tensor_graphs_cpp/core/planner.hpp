@@ -245,7 +245,7 @@ private:
         rules.emplace_back(std::make_unique<ContiguousOfCopyTo>());
         rules.emplace_back(std::make_unique<ContiguousElimination>());
         rules.emplace_back(std::make_unique<ConstantFolding>());
-        rules.emplace_back(std::make_unique<InfinityDomination>());
+        // rules.emplace_back(std::make_unique<InfinityDomination>());
         rules.emplace_back(std::make_unique<SlicePushDownElementwise>());
         rules.emplace_back(std::make_unique<SlicePushDownDot>());
         // rules.emplace_back(std::make_unique<DistributiveProperty>());
