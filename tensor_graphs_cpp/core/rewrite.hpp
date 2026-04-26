@@ -90,10 +90,21 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
             n.opName = kernel.opName;
             n.children = children;
             n.shape = shape;
-            n.strides = st;
-            n.viewOffset = viewOffset;
             n.dtype = dtype;
             n.backend = backend;
+
+            // AUTOMATICALLY zero the offset if the kernel allocates fresh physical memory
+            if (kernel.isView)
+            {
+                n.strides = st;
+                n.viewOffset = viewOffset;
+            }
+            else
+            {
+                n.strides = calcContiguousStrides(shape);
+                n.viewOffset = 0;
+            }
+
             egraph.addENode(cls, n);
         }
     }
@@ -1237,21 +1248,20 @@ struct InfinityDomination : public Rule
 
         std::vector<uint64_t> contigStrides = calcContiguousStrides(outClass.shape);
 
-        uint32_t currentTarget = constClass;
-        if (cClass.backend != outClass.backend || cClass.strides != contigStrides || cClass.viewOffset != 0)
-        {
-            if (cClass.backend != outClass.backend)
-            {
-                currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
-            }
-            else
-            {
-                currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
-            }
-        }
-
         if (nonInfRegions.empty())
         {
+            uint32_t currentTarget = constClass;
+            if (cClass.backend != outClass.backend || cClass.strides != contigStrides || cClass.viewOffset != 0)
+            {
+                if (cClass.backend != outClass.backend)
+                {
+                    currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
+                }
+                else
+                {
+                    currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
+                }
+            }
             egraph.merge(eclassId, currentTarget);
             return;
         }
@@ -1271,6 +1281,19 @@ struct InfinityDomination : public Rule
             if (!strictlySmaller)
                 return;
         }
+
+        // Otherwise, we want to scatter to a cache input node so we do not overwrite the constant
+        uint32_t E_Cache = egraph.addEClass(outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
+        ENode cacheNode;
+        cacheNode.kernelUid = 0;
+        cacheNode.opType = OpType::INPUT;
+        cacheNode.dtype = outClass.dtype;
+        cacheNode.shape = outClass.shape;
+        cacheNode.strides = contigStrides;
+        cacheNode.backend = outClass.backend;
+        egraph.addENode(E_Cache, cacheNode);
+
+        uint32_t currentTarget = E_Cache;
 
         for (const Region &reg : nonInfRegions)
         {
@@ -1597,15 +1620,19 @@ struct SlicePushDownDot : public Rule
                 {
                     uint32_t canonId = egraph.find(classId);
                     std::vector<uint64_t> sStrides = egraph.getEClass(canonId).strides;
+                    uint64_t sOffset = egraph.getEClass(canonId).viewOffset;
                     DType cDtype = egraph.getEClass(canonId).dtype;
 
                     std::vector<uint32_t> sShape;
                     for (size_t d = 0; d < st.size(); ++d)
                         sShape.push_back(en[d] - st[d]);
 
-                    // SLICE is a runtime operation that handles its own structural offsetting via
-                    // stId and stepId. Passing a manual `sOffset` double-offsets the pointer.
-                    uint32_t sClass = addOpToEGraph(egraph, OpType::SLICE, {canonId, stId, enId, stepId}, sShape, sStrides, 0, cDtype, sliceNode.backend);
+                    for (size_t d = 0; d < st.size(); ++d)
+                    {
+                        sOffset += st[d] * sStrides[d];
+                    }
+
+                    uint32_t sClass = addOpToEGraph(egraph, OpType::SLICE, {canonId, stId, enId, stepId}, sShape, sStrides, sOffset, cDtype, sliceNode.backend);
                     uint32_t sContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {sClass}, sShape, calcContiguousStrides(sShape), 0, cDtype, sliceNode.backend);
                     return sContig;
                 };

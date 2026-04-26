@@ -1393,6 +1393,7 @@ private:
 
             for (uint64_t uid : refs)
             {
+                const auto &kernel = KernelRegistry::get().getKernel(uid);
                 ENode enode;
                 enode.kernelUid = uid;
                 enode.opType = node.opType;
@@ -1400,10 +1401,20 @@ private:
                 for (uint32_t pid : node.parentIds)
                     enode.children.push_back(baseState.nodeToEClass[pid]);
                 enode.shape = node.getShape();
-                enode.strides = node.strides;
-                enode.viewOffset = node.viewOffset;
                 enode.dtype = node.dtype;
                 enode.backend = node.backend;
+
+                if (kernel.isView)
+                {
+                    enode.strides = node.strides;
+                    enode.viewOffset = node.viewOffset;
+                }
+                else
+                {
+                    enode.strides = calcContiguousStrides(node.getShape());
+                    enode.viewOffset = 0;
+                }
+
                 baseState.egraph.addENode(eclassId, enode);
             }
         }
@@ -1546,8 +1557,19 @@ private:
             auto sliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", sliceNode.backend, dIns, dOut, true);
             for (uint64_t uid : sliceRefs)
             {
+                const auto &kernel = KernelRegistry::get().getKernel(uid);
                 ENode sn = sliceNode;
                 sn.kernelUid = uid;
+                if (kernel.isView)
+                {
+                    sn.strides = sliceStrides;
+                    sn.viewOffset = sliceViewOffset;
+                }
+                else
+                {
+                    sn.strides = calcContiguousStrides(partialShape);
+                    sn.viewOffset = 0;
+                }
                 egraph.addENode(sliceEClass, sn);
             }
 
@@ -1574,8 +1596,19 @@ private:
             auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", contigNode.backend, {cIn}, cOut, true);
             for (uint64_t uid : contigRefs)
             {
+                const auto &kernel = KernelRegistry::get().getKernel(uid);
                 ENode cn = contigNode;
                 cn.kernelUid = uid;
+                if (kernel.isView)
+                {
+                    cn.strides = sliceStrides;
+                    cn.viewOffset = sliceViewOffset;
+                }
+                else
+                {
+                    cn.strides = calcContiguousStrides(partialShape);
+                    cn.viewOffset = 0;
+                }
                 egraph.addENode(contigEClass, cn);
             }
 
@@ -1612,8 +1645,19 @@ private:
             auto scatterRefs = KernelRegistry::get().findMatchingKernels(OpType::SCATTER, "", scatterNode.backend, sIns, sOut, true);
             for (uint64_t uid : scatterRefs)
             {
+                const auto &kernel = KernelRegistry::get().getKernel(uid);
                 ENode sn = scatterNode;
                 sn.kernelUid = uid;
+                if (kernel.isView)
+                {
+                    sn.strides = sliceStrides;
+                    sn.viewOffset = sliceViewOffset;
+                }
+                else
+                {
+                    sn.strides = calcContiguousStrides(partialShape);
+                    sn.viewOffset = 0;
+                }
                 egraph.addENode(scatterEClass, sn);
             }
 
