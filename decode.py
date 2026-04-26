@@ -1,7 +1,7 @@
 from tokenizers import Tokenizer
 
 # 1. Load the tokenizer file from your resources folder
-tokenizer = Tokenizer.from_file("resources/tokenizer.json")
+tokenizer: Tokenizer = Tokenizer.from_file("resources/tokenizer.json")
 
 # 2. These are the tokens currently in your main.cpp
 tokens = [
@@ -39,11 +39,13 @@ tokens = [2, 9259, 236888, 564, 236789, 236757, 9775, 531]  # good "Hello! I'm e
 tokens = [2, 9259, 236888, 108, 106] # bad
 tokens = "2 9259 236888 564 236789 236757 9775 531 577 822 861 16326 236888 564 236789 236757 1590 531 1601 611 607 4326 699 6514 872 822 2881 532 15724 822 9395 531 6655 1938 532 1894 236761 564 236789 236757 27322 531 3449 532 2171 607 611 236761 108 236777 236789 236757 5293 531 3890 1027 4137 611 735 236764 532 564 236789 236757 2462 5508 531 6361 236761 108 236777 236789 236757 5508 531 1601 611 607 4658 611 1202 236888 108 236777 236789 236757 1590 531 1601 611 607 4326 699 6514 872 822 2881 532 15724 822 9395 531 6655 1938 532 1894 236761 564 236789 236757 27322 531 3449 532 2171 607 611 236761 108 236777 236789 236757 5508 531 1601 611 607 4326".split(" ")
 tokens = [int(item) for item in tokens]
-tokens = [2, 9259, 236888, 564, 236789, 236757, 5293, 531] # good "Hello! I'm happy to"
+# tokens = [2, 9259, 236888, 564, 236789, 236757, 5293, 531] # good "Hello! I'm happy to"
 output_text = tokenizer.decode(tokens)
 
 print(f"Tokens: {tokens}")
 print(f"Decoded Text: {output_text}")
+for tok in list(set(tokens)):
+    print(f"{tok}={tokenizer.decode([tok], False)}")
 
 input_ids = tokenizer.encode("Chapter 1\n").ids
 print(input_ids)

@@ -1597,19 +1597,15 @@ struct SlicePushDownDot : public Rule
                 {
                     uint32_t canonId = egraph.find(classId);
                     std::vector<uint64_t> sStrides = egraph.getEClass(canonId).strides;
-                    uint64_t sOffset = egraph.getEClass(canonId).viewOffset;
                     DType cDtype = egraph.getEClass(canonId).dtype;
 
                     std::vector<uint32_t> sShape;
                     for (size_t d = 0; d < st.size(); ++d)
                         sShape.push_back(en[d] - st[d]);
 
-                    for (size_t d = 0; d < st.size(); ++d)
-                    {
-                        sOffset += st[d] * sStrides[d];
-                    }
-
-                    uint32_t sClass = addOpToEGraph(egraph, OpType::SLICE, {canonId, stId, enId, stepId}, sShape, sStrides, sOffset, cDtype, sliceNode.backend);
+                    // SLICE is a runtime operation that handles its own structural offsetting via
+                    // stId and stepId. Passing a manual `sOffset` double-offsets the pointer.
+                    uint32_t sClass = addOpToEGraph(egraph, OpType::SLICE, {canonId, stId, enId, stepId}, sShape, sStrides, 0, cDtype, sliceNode.backend);
                     uint32_t sContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {sClass}, sShape, calcContiguousStrides(sShape), 0, cDtype, sliceNode.backend);
                     return sContig;
                 };
