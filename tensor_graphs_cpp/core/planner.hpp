@@ -261,7 +261,7 @@ private:
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
             // #ifdef DEBUG
-            ProgressTimer timer2(numENodes, "saturation round ");
+            ProgressTimer timer2(numENodes, "saturation round " + std::to_string(iterations-1) + " ");
             // #endif
             for (uint32_t eNodeIdx = 0; eNodeIdx < numENodes; eNodeIdx++)
             {

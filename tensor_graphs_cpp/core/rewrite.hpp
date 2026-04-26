@@ -1177,8 +1177,13 @@ struct ConstantFolding : public Rule
 
 struct InfinityDomination : public Rule
 {
+    std::unordered_set<uint32_t> visited_enodes;
+
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
+        if (visited_enodes.count(eNodeIdx))
+            return false;
+
         const ENode &enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::ADD || enode.children.size() != 2)
             return false;
@@ -1202,6 +1207,8 @@ struct InfinityDomination : public Rule
 
     void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
+        visited_enodes.insert(eNodeIdx);
+
         const ENode addNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
 
@@ -1282,18 +1289,10 @@ struct InfinityDomination : public Rule
                 return;
         }
 
-        // Otherwise, we want to scatter to a cache input node so we do not overwrite the constant
-        uint32_t E_Cache = egraph.addEClass(outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
-        ENode cacheNode;
-        cacheNode.kernelUid = 0;
-        cacheNode.opType = OpType::INPUT;
-        cacheNode.dtype = outClass.dtype;
-        cacheNode.shape = outClass.shape;
-        cacheNode.strides = contigStrides;
-        cacheNode.backend = outClass.backend;
-        egraph.addENode(E_Cache, cacheNode);
-
-        uint32_t currentTarget = E_Cache;
+        // We MUST copy the constant so we have a fresh transient buffer to scatter into.
+        // This prevents inplace scatter from corrupting the persistent constant buffer.
+        // Do NOT use a fresh INPUT node, because transient INPUT nodes are not allocated by the Session!
+        uint32_t currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
 
         for (const Region &reg : nonInfRegions)
         {
