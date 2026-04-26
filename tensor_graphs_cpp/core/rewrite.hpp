@@ -1518,7 +1518,7 @@ struct SlicePushDownDot : public Rule
             auto steps = getConstInt32(egraph, sliceNode.children[3]);
 
             if (starts.empty() || ends.empty() || steps.empty())
-                continue;
+                Error::throw_err("[SlicePushDownDot.apply] can't find constants for all slice args");
 
             bool validSteps = true;
             for (int32_t s : steps)

@@ -404,9 +404,9 @@ private:
         {
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
-// #ifdef DEBUG
+            // #ifdef DEBUG
             ProgressTimer timer2(numENodes, "saturation round ");
-// #endif
+            // #endif
             for (uint32_t eNodeIdx = 0; eNodeIdx < numENodes; eNodeIdx++)
             {
                 for (const auto &rule : rules)
@@ -418,9 +418,9 @@ private:
                     changed = true;
                     nMatches++;
                 }
-// #ifdef DEBUG
+                // #ifdef DEBUG
                 timer2.tick();
-// #endif
+                // #endif
             }
             egraph.rebuild();
             changed = egraph.getENodes().size() != numENodes;
@@ -723,16 +723,37 @@ private:
         uint32_t rootEClassId = egraph.find(rootIt->second);
 
         const size_t numClasses = egraph.getClasses().size();
-        const size_t bitWords = (numClasses + 63) >> 6;
 
-        auto bitTest = [](const std::vector<uint64_t> &bits, uint32_t idx) -> bool
+        std::vector<uint32_t> canonicalClasses;
+        std::vector<uint32_t> classToBitIdx(numClasses, UINT32_MAX);
+        for (size_t i = 0; i < numClasses; ++i)
         {
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId == i)
+            {
+                classToBitIdx[i] = static_cast<uint32_t>(canonicalClasses.size());
+                canonicalClasses.push_back(i);
+            }
+        }
+
+        const size_t numCanonical = canonicalClasses.size();
+        const size_t bitWords = numCanonical == 0 ? 0 : (numCanonical + 63) >> 6;
+
+        auto bitTest = [&](const std::vector<uint64_t> &bits, uint32_t eclassId) -> bool
+        {
+            uint32_t idx = classToBitIdx[eclassId];
+            if (idx == UINT32_MAX || bits.empty())
+                return false;
             return (bits[idx >> 6] >> (idx & 63)) & 1ULL;
         };
 
-        auto bitSet = [](std::vector<uint64_t> &bits, uint32_t idx)
+        auto bitSet = [&](std::vector<uint64_t> &bits, uint32_t eclassId)
         {
-            bits[idx >> 6] |= (1ULL << (idx & 63));
+            uint32_t idx = classToBitIdx[eclassId];
+            if (idx != UINT32_MAX && !bits.empty())
+            {
+                bits[idx >> 6] |= (1ULL << (idx & 63));
+            }
         };
 
         struct OptSummary
@@ -745,9 +766,10 @@ private:
         };
 
         std::vector<OptSummary> opt(numClasses);
-        for (auto &o : opt)
+        for (uint32_t canonId : canonicalClasses)
         {
-            o.coveredBits.assign(bitWords, 0);
+            // Only allocate and size vectors for canonical classes
+            opt[canonId].coveredBits.assign(bitWords, 0);
         }
 
         std::vector<std::vector<uint32_t>> parentMap(numClasses);
@@ -870,10 +892,11 @@ private:
                                     ++bit;
                                 }
 #endif
-                                uint32_t k = static_cast<uint32_t>((w << 6) + bit);
-                                if (k < numClasses)
+                                uint32_t k_idx = static_cast<uint32_t>((w << 6) + bit);
+                                if (k_idx < numCanonical)
                                 {
-                                    candidateCost += opt[k].intrinsic;
+                                    uint32_t k_eclass = canonicalClasses[k_idx];
+                                    candidateCost += opt[k_eclass].intrinsic;
                                 }
                                 newBits &= (newBits - 1);
                             }
@@ -1006,10 +1029,11 @@ private:
                                 ++bit;
                             }
 #endif
-                            uint32_t k = static_cast<uint32_t>((w << 6) + bit);
-                            if (k < numClasses)
+                            uint32_t k_idx = static_cast<uint32_t>((w << 6) + bit);
+                            if (k_idx < numCanonical)
                             {
-                                total += opt[k].intrinsic;
+                                uint32_t k_eclass = canonicalClasses[k_idx];
+                                total += opt[k_eclass].intrinsic;
                             }
                             newBits &= (newBits - 1);
                         }
@@ -1055,7 +1079,7 @@ private:
         float best_cost = INF;
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
 
-        int max_iters = 100;
+        int max_iters = 10000;
         ProgressTimer timer(max_iters, "extracting graphs ", stopOnFirstValid);
 
         while (max_iters-- > 0)
