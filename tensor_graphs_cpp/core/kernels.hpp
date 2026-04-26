@@ -58,6 +58,76 @@ private:
     std::unordered_map<std::string, ReferenceGraphEntry> factories;
 };
 
+struct PatternCacheKey
+{
+    OpType pOpType;
+    std::string pOpName;
+    Backend backend;
+    bool referenceOnly;
+    bool ignoreInputBackends;
+    bool ignoreInputContig;
+
+    std::vector<TensorNode> inputs;
+    TensorNode output;
+
+    bool operator==(const PatternCacheKey &o) const
+    {
+        if (pOpType != o.pOpType || pOpName != o.pOpName || backend != o.backend ||
+            referenceOnly != o.referenceOnly || ignoreInputBackends != o.ignoreInputBackends ||
+            ignoreInputContig != o.ignoreInputContig)
+            return false;
+        if (inputs.size() != o.inputs.size())
+            return false;
+        for (size_t i = 0; i < inputs.size(); ++i)
+        {
+            if (inputs[i].dtype != o.inputs[i].dtype || inputs[i].backend != o.inputs[i].backend ||
+                inputs[i].getShape() != o.inputs[i].getShape() || inputs[i].strides != o.inputs[i].strides ||
+                inputs[i].viewOffset != o.inputs[i].viewOffset)
+                return false;
+        }
+        if (output.dtype != o.output.dtype || output.backend != o.output.backend ||
+            output.getShape() != o.output.getShape() || output.strides != o.output.strides ||
+            output.viewOffset != o.output.viewOffset)
+            return false;
+        return true;
+    }
+};
+
+struct PatternCacheKeyHash
+{
+    size_t operator()(const PatternCacheKey &k) const
+    {
+        size_t h = 0;
+        auto combine = [&](size_t val)
+        { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
+        combine((size_t)k.pOpType);
+        if (!k.pOpName.empty())
+            combine(std::hash<std::string>()(k.pOpName));
+        combine((size_t)k.backend);
+        combine(k.referenceOnly);
+        combine(k.ignoreInputBackends);
+        combine(k.ignoreInputContig);
+        for (const auto &in : k.inputs)
+        {
+            combine((size_t)in.dtype);
+            combine((size_t)in.backend);
+            for (auto s : in.getShape())
+                combine(s);
+            for (auto s : in.strides)
+                combine(s);
+            combine((size_t)in.viewOffset);
+        }
+        combine((size_t)k.output.dtype);
+        combine((size_t)k.output.backend);
+        for (auto s : k.output.getShape())
+            combine(s);
+        for (auto s : k.output.strides)
+            combine(s);
+        combine((size_t)k.output.viewOffset);
+        return h;
+    }
+};
+
 struct KernelEntry
 {
     uint64_t uid;
@@ -177,10 +247,12 @@ public:
         return instance;
     }
 
+    mutable std::unordered_map<PatternCacheKey, std::vector<uint64_t>, PatternCacheKeyHash> patternCache;
+
     void setReferenceOnly(bool refOnly) { referenceOnlyMode = refOnly; }
     const std::vector<KernelEntry> &getAllKernels() const { return entries; }
 
-    std::vector<uint64_t> findMatchingKernelsByPattern(
+    std::vector<uint64_t> _findMatchingKernelsByPattern(
         const Graph &patternGraph, uint32_t patternRootId, Backend backend,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
         bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
@@ -231,6 +303,30 @@ public:
 
             matches.push_back(entry.uid);
         }
+        return matches;
+    }
+
+    std::vector<uint64_t> findMatchingKernelsByPattern(
+        const Graph &patternGraph, uint32_t patternRootId, Backend backend,
+        const std::vector<TensorNode> &inputs, const TensorNode &output,
+        bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
+    {
+        const TensorNode &rootNode = patternGraph.getNode(patternRootId);
+        PatternCacheKey key{
+            rootNode.opType, rootNode.opName, backend,
+            referenceOnly, ignoreInputBackends, ignoreInputContig,
+            inputs, output};
+
+        auto it = patternCache.find(key);
+        if (it != patternCache.end())
+        {
+            return it->second;
+        }
+
+        std::vector<uint64_t> matches = _findMatchingKernelsByPattern(
+            patternGraph, patternRootId, backend, inputs, output, referenceOnly, ignoreInputBackends, ignoreInputContig);
+
+        patternCache[key] = matches;
         return matches;
     }
 
