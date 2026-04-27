@@ -80,10 +80,20 @@ private:
     uint32_t egraph_dump_counter_ = 0;
     uint32_t nextPhysId = 0x80000000;
 
-    void dumpEGraphBinary(const EGraph &egraph, uint32_t idx, uint32_t rootEClassId)
+    void dumpEGraphBinary(const EGraph &egraph, uint32_t rootEClassId)
     {
-        std::filesystem::create_directories("egraph_viewer/egraphs");
-        std::string path = "egraphs_viewer/egraphs/" + std::to_string(idx) + ".bin";
+        const std::string dir = "egraph_viewer/egraphs";
+        std::filesystem::create_directories(dir);
+
+        std::string path;
+        while (true)
+        {
+            path = dir + "/" + std::to_string(egraph_dump_counter_) + ".bin";
+            egraph_dump_counter_++;
+            if (!std::filesystem::exists(path))
+                break;
+        }
+
         std::ofstream out(path, std::ios::binary);
         if (!out)
         {
@@ -261,7 +271,7 @@ private:
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
             // #ifdef DEBUG
-            ProgressTimer timer2(numENodes, "saturation round " + std::to_string(iterations-1) + " ");
+            ProgressTimer timer2(numENodes, "saturation round " + std::to_string(iterations - 1) + " ");
             // #endif
             for (uint32_t eNodeIdx = 0; eNodeIdx < numENodes; eNodeIdx++)
             {
@@ -1733,15 +1743,15 @@ public:
             saturate(egraph, protectedEClasses);
         }
 
-#ifdef DEBUG
+// #ifdef DEBUG
         auto rootIt = baseState.nodeToEClass.find(rootId);
         if (rootIt == baseState.nodeToEClass.end())
         {
             Error::throw_err("[Planner.plan] Root node missing from baseState.nodeToEClass.");
         }
         uint32_t rootEClassId = egraph.find(rootIt->second);
-        dumpEGraphBinary(egraph, egraph_dump_counter_++, rootEClassId);
-#endif
+        dumpEGraphBinary(egraph, rootEClassId);
+// #endif
 
         std::unordered_map<uint32_t, uint32_t> updatedEClassToLogical;
         for (const auto &kv : eclassToLogical)

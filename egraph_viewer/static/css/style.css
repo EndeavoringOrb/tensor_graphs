@@ -20,7 +20,7 @@ body {
 
 /* Side Panel */
 .side-panel {
-    width: 320px;
+    width: 340px;
     background: #fff;
     border-right: 1px solid #e0e6ed;
     display: flex;
@@ -49,15 +49,10 @@ body {
     background: white;
 }
 
-/* Add styling for search input */
-.panel-header input[type="text"] {
-    width: 100%;
-    padding: 8px 12px;
-    border: 1px solid #ced4da;
-    border-radius: 6px;
-    font-size: 0.9rem;
-    background: white;
-    margin-top: 10px;
+.file-info {
+    margin-top: 8px;
+    font-size: 0.8rem;
+    color: #6c757d;
 }
 
 .legend {
@@ -87,6 +82,10 @@ body {
     background: #97c2fc;
 }
 
+.dot.eclass.expanded {
+    background: #4dabf7;
+}
+
 .dot.enode {
     background: #ffb3b3;
 }
@@ -107,58 +106,46 @@ body {
     color: #adb5bd;
     padding: 24px;
     font-style: italic;
-}
-
-.eclass-item {
-    margin-bottom: 8px;
-    border: 1px solid #e9ecef;
-    border-radius: 8px;
-    overflow: hidden;
-    background: #fff;
-}
-
-.eclass-header {
-    padding: 10px 14px;
-    background: #f8f9fa;
-    font-weight: 600;
     font-size: 0.9rem;
-    cursor: pointer;
+    line-height: 1.6;
+}
+
+.focused-eclass-header {
+    padding: 12px 14px;
+    background: #e7f5ff;
+    border: 1px solid #a5d8ff;
+    border-radius: 8px;
+    margin-bottom: 8px;
     display: flex;
     justify-content: space-between;
     align-items: center;
 }
 
-.eclass-header:hover {
-    background: #e9ecef;
+.focused-eclass-header .eclass-id {
+    font-weight: 600;
+    color: #1971c2;
+    font-size: 1rem;
 }
 
-.eclass-header .eclass-id {
-    color: #495057;
-}
-
-.eclass-header .enode-count {
-    background: #e9ecef;
-    padding: 2px 8px;
+.focused-eclass-header .enode-count {
+    background: #a5d8ff;
+    padding: 2px 10px;
     border-radius: 10px;
     font-size: 0.75rem;
-    color: #6c757d;
+    color: #1864ab;
+    font-weight: 500;
 }
 
 .enodes-list {
-    padding: 8px 14px 14px;
-    display: none;
-}
-
-.enodes-list.expanded {
     display: block;
 }
 
 .enode-item {
-    padding: 6px 10px;
+    padding: 10px 12px;
     margin: 4px 0;
     background: #fff;
     border: 1px solid #dee2e6;
-    border-radius: 5px;
+    border-radius: 6px;
     font-size: 0.85rem;
     cursor: pointer;
     transition: all 0.15s;
@@ -182,10 +169,59 @@ body {
     font-family: monospace;
     color: #6c757d;
     font-size: 0.8rem;
+    min-width: 40px;
 }
 
 .enode-item .op-name {
     flex: 1;
+    font-weight: 500;
+}
+
+.enode-item .child-count {
+    font-size: 0.75rem;
+    color: #868e96;
+    background: #f1f3f5;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.enode-item.selected .child-count {
+    background: #c3e6cb;
+    color: #155724;
+}
+
+/* Breadcrumb for navigation */
+.breadcrumb {
+    padding: 8px 16px;
+    border-bottom: 1px solid #e0e6ed;
+    background: #f8f9fa;
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    overflow-x: auto;
+    white-space: nowrap;
+}
+
+.breadcrumb-item {
+    color: #1971c2;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+
+.breadcrumb-item:hover {
+    background: #e7f5ff;
+}
+
+.breadcrumb-item.active {
+    color: #495057;
+    cursor: default;
+    font-weight: 500;
+}
+
+.breadcrumb-sep {
+    color: #adb5bd;
 }
 
 /* Main Panel */
@@ -267,6 +303,9 @@ body {
     border-top: 1px solid #e0e6ed;
     font-size: 0.85rem;
     color: #6c757d;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 
 #selection-map-display {
@@ -274,22 +313,43 @@ body {
     color: #495057;
 }
 
+.visible-count {
+    font-size: 0.8rem;
+    color: #868e96;
+}
+
 /* Graph SVG Styles */
 .node.eclass {
     fill: #97c2fc;
     stroke: #5a9bd4;
     stroke-width: 2px;
+    cursor: pointer;
+}
+
+.node.eclass.expanded {
+    fill: #4dabf7;
+    stroke: #1971c2;
+}
+
+.node.eclass:hover {
+    stroke-width: 3px;
+    filter: brightness(1.1);
 }
 
 .node.enode {
     fill: #ffb3b3;
     stroke: #e67e7e;
     stroke-width: 2px;
+    cursor: pointer;
 }
 
 .node.enode.selected {
     fill: #28a745;
     stroke: #1e7e34;
+}
+
+.node.enode:hover {
+    stroke-width: 3px;
 }
 
 .node-label {
@@ -301,6 +361,11 @@ body {
     pointer-events: none;
 }
 
+.node-label.eclass-label {
+    font-weight: 600;
+    font-size: 10px;
+}
+
 .edge {
     stroke: #6c757d;
     stroke-width: 1.5px;
@@ -310,6 +375,11 @@ body {
 
 .edge.child {
     stroke-dasharray: 4 2;
+}
+
+.edge.contains {
+    stroke: #5a9bd4;
+    stroke-width: 2px;
 }
 
 /* Scrollbar styling */

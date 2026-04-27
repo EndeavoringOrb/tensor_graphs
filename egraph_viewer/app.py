@@ -6,11 +6,42 @@ app = Flask(__name__)
 EGRAPHS_DIR = "egraphs"
 STATIC_DIR = "static"
 
+# Cache parsed egraphs to avoid re-parsing
+egraph_cache = {}
+OP_TYPE_MAP = {
+    0: "INPUT",
+    1: "ADD",
+    2: "MUL",
+    3: "DIVIDE",
+    4: "DOT",
+    5: "SIN",
+    6: "COS",
+    7: "NEGATE",
+    8: "POWER",
+    9: "SUM",
+    10: "MAX",
+    11: "RESHAPE",
+    12: "PERMUTE",
+    13: "SLICE",
+    14: "CONCAT",
+    15: "CAST",
+    16: "REPEAT",
+    17: "ARANGE",
+    18: "TRIU",
+    19: "GATHER",
+    20: "FILL",
+    21: "COPY_TO",
+    22: "IM2COL",
+    23: "CONTIGUOUS",
+    24: "SCATTER",
+    25: "FUSED",
+}
+
 
 def parse_egraph_bin(filepath):
     """Parse binary egraph file and return structured data."""
-    eclasses = {}  # eclass_id -> {shape, backend, enodes: [...]}
-    enodes = {}  # enode_id -> {kernel_uid, op_name, children: [...], ...}
+    eclasses = {}
+    enodes = {}
 
     with open(filepath, "rb") as f:
         try:
@@ -20,7 +51,6 @@ def parse_egraph_bin(filepath):
         except struct.error:
             return {"eclasses": {}, "enodes": {}, "root_eclass": 0}
 
-        # Parse eclasses
         for _ in range(num_classes):
             cls_id = struct.unpack("<I", f.read(4))[0]
             shape_size = struct.unpack("<I", f.read(4))[0]
@@ -34,7 +64,6 @@ def parse_egraph_bin(filepath):
             enode_indices = [
                 struct.unpack("<I", f.read(4))[0] for _ in range(enodes_count)
             ]
-
             eclasses[cls_id] = {
                 "shape": shape,
                 "backend": backend,
@@ -42,14 +71,14 @@ def parse_egraph_bin(filepath):
                 "enodes": enode_indices,
             }
 
-        # Parse enodes
         for enode_idx in range(num_enodes):
             kernel_uid = struct.unpack("<Q", f.read(8))[0]
             op_type = struct.unpack("<I", f.read(4))[0]
             name_len = struct.unpack("<I", f.read(4))[0]
-            op_name = (
-                f.read(name_len).decode("utf-8") if name_len > 0 else f"Op{op_type}"
-            )
+            if name_len > 0:
+                op_name = f.read(name_len).decode("utf-8")
+            else:
+                op_name = OP_TYPE_MAP.get(op_type, f"Unknown({op_type})")
             children_count = struct.unpack("<I", f.read(4))[0]
             children = [
                 struct.unpack("<I", f.read(4))[0] for _ in range(children_count)
@@ -68,99 +97,21 @@ def parse_egraph_bin(filepath):
                 "kernel_uid": kernel_uid,
                 "op_name": op_name,
                 "op_type": op_type,
-                "children": children,  # List of child eclass IDs
+                "children": children,
                 "leaf_id": leaf_id,
                 "dtype": dtype,
                 "backend": backend,
             }
 
-    return {
-        "eclasses": eclasses,
-        "enodes": enodes,
-        "root_eclass": root_eclass_id,  # Assume eclass 0 is root; customize if needed
-    }
+    return {"eclasses": eclasses, "enodes": enodes, "root_eclass": root_eclass_id}
 
 
-def extract_graph(egraph_data, selection_map):
-    """
-    Extract a single graph from the egraph given a selection map.
-    selection_map: {eclass_id: selected_enode_id}
-    Returns: {nodes: [...], edges: [...]} for rendering
-    """
-    eclasses = egraph_data["eclasses"]
-    enodes = egraph_data["enodes"]
-    root_eclass = egraph_data["root_eclass"]
-
-    if not eclasses:
-        return {"nodes": [], "edges": []}
-
-    visited_eclasses = set()
-    visited_enodes = set()
-    nodes = []
-    edges = []
-
-    def extract_eclass(eclass_id, depth=0):
-        if eclass_id in visited_eclasses or eclass_id not in eclasses:
-            return None
-
-        visited_eclasses.add(eclass_id)
-        eclass = eclasses[eclass_id]
-
-        # Determine which enode to use for this eclass
-        selected_enode_id = selection_map.get(str(eclass_id))
-        if selected_enode_id is None or selected_enode_id not in enodes:
-            return None
-
-        if selected_enode_id in visited_enodes:
-            return f"C{eclass_id}"  # Return reference to existing eclass node
-
-        visited_enodes.add(selected_enode_id)
-        enode = enodes[selected_enode_id]
-
-        # Add enode to graph
-        enode_node_id = f"E{selected_enode_id}"
-        nodes.append(
-            {
-                "id": enode_node_id,
-                "type": "enode",
-                "label": enode["op_name"],
-                "eclass_id": eclass_id,
-                "enode_id": selected_enode_id,
-                "depth": depth,
-            }
-        )
-
-        # Add edge from eclass to selected enode
-        eclass_node_id = f"C{eclass_id}"
-        edges.append(
-            {"source": eclass_node_id, "target": enode_node_id, "type": "contains"}
-        )
-
-        # Process children
-        for child_eclass_id in enode["children"]:
-            child_ref = extract_eclass(child_eclass_id, depth + 1)
-            if child_ref:
-                edges.append(
-                    {"source": enode_node_id, "target": child_ref, "type": "child"}
-                )
-
-        return enode_node_id
-
-    # Start extraction from root
-    root_eclass_node = f"C{root_eclass}"
-    nodes.append(
-        {
-            "id": root_eclass_node,
-            "type": "eclass",
-            "label": f"EC{root_eclass}",
-            "eclass_id": root_eclass,
-            "depth": 0,
-        }
-    )
-
-    extract_eclass(root_eclass)
-
-    return {"nodes": nodes, "edges": edges}
+def get_or_parse_egraph(filename):
+    """Get cached egraph or parse and cache it."""
+    if filename not in egraph_cache:
+        filepath = os.path.join(EGRAPHS_DIR, filename)
+        egraph_cache[filename] = parse_egraph_bin(filepath)
+    return egraph_cache[filename]
 
 
 @app.route("/")
@@ -178,29 +129,125 @@ def list_files():
 
 
 @app.route("/api/egraph/<filename>")
-def get_egraph(filename):
+def get_egraph_meta(filename):
+    """Return only metadata, not full egraph data."""
     filepath = os.path.join(EGRAPHS_DIR, filename)
     if not os.path.exists(filepath):
         return jsonify({"error": "File not found"}), 404
 
-    print(f"parsing egraph file {filepath}")
-    data = parse_egraph_bin(filepath)
-    return jsonify(data)
+    data = get_or_parse_egraph(filename)
+    return jsonify(
+        {
+            "root_eclass": data["root_eclass"],
+            "num_eclasses": len(data["eclasses"]),
+            "num_enodes": len(data["enodes"]),
+        }
+    )
 
 
-@app.route("/api/extract", methods=["POST"])
-def extract():
+@app.route("/api/eclass/<filename>/<int:eclass_id>")
+def get_eclass(filename, eclass_id):
+    """Get a single eclass with its enodes (lazy loading)."""
+    filepath = os.path.join(EGRAPHS_DIR, filename)
+    if not os.path.exists(filepath):
+        return jsonify({"error": "File not found"}), 404
+
+    data = get_or_parse_egraph(filename)
+
+    if eclass_id not in data["eclasses"]:
+        return jsonify({"error": "EClass not found"}), 404
+
+    eclass = data["eclasses"][eclass_id]
+    enodes = []
+    for enode_id in eclass["enodes"]:
+        if enode_id in data["enodes"]:
+            enode = data["enodes"][enode_id]
+            enodes.append(
+                {
+                    "id": enode_id,
+                    "op_name": enode["op_name"],
+                    "op_type": enode["op_type"],
+                    "children": enode["children"],
+                    "dtype": enode["dtype"],
+                    "backend": enode["backend"],
+                }
+            )
+
+    return jsonify(
+        {
+            "id": eclass_id,
+            "shape": eclass["shape"],
+            "backend": eclass["backend"],
+            "dtype": eclass["dtype"],
+            "enodes": enodes,
+        }
+    )
+
+
+@app.route("/api/explore", methods=["POST"])
+def explore():
+    """Get graph data for visible eclasses only (incremental exploration)."""
     req = request.get_json()
     filename = req.get("filename")
     selection_map = req.get("selection_map", {})
+    visible_eclasses = req.get("visible_eclasses", [])
 
     filepath = os.path.join(EGRAPHS_DIR, filename)
     if not os.path.exists(filepath):
         return jsonify({"error": "File not found"}), 404
 
-    egraph_data = parse_egraph_bin(filepath)
-    graph = extract_graph(egraph_data, selection_map)
-    return jsonify(graph)
+    data = get_or_parse_egraph(filename)
+    eclasses = data["eclasses"]
+    enodes = data["enodes"]
+
+    if not visible_eclasses:
+        visible_eclasses = [data["root_eclass"]]
+
+    nodes = []
+    edges = []
+
+    for eclass_id in visible_eclasses:
+        if eclass_id not in eclasses:
+            continue
+
+        nodes.append(
+            {
+                "id": f"C{eclass_id}",
+                "type": "eclass",
+                "label": f"EC{eclass_id}",
+                "eclass_id": eclass_id,
+            }
+        )
+
+        selected_enode_id = selection_map.get(str(eclass_id))
+        if selected_enode_id is not None and selected_enode_id in enodes:
+            enode = enodes[selected_enode_id]
+            nodes.append(
+                {
+                    "id": f"E{selected_enode_id}",
+                    "type": "enode",
+                    "label": enode["op_name"],
+                    "eclass_id": eclass_id,
+                    "enode_id": selected_enode_id,
+                }
+            )
+            edges.append(
+                {
+                    "source": f"C{eclass_id}",
+                    "target": f"E{selected_enode_id}",
+                    "type": "contains",
+                }
+            )
+            for child_eclass_id in enode["children"]:
+                edges.append(
+                    {
+                        "source": f"E{selected_enode_id}",
+                        "target": f"C{child_eclass_id}",
+                        "type": "child",
+                    }
+                )
+
+    return jsonify({"nodes": nodes, "edges": edges})
 
 
 @app.route("/static/<path:filename>")

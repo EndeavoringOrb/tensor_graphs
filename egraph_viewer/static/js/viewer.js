@@ -1,15 +1,18 @@
 /**
- * Lightweight EGraph Viewer
- * Handles eclass selection, graph extraction, and SVG rendering
+ * Incremental EGraph Explorer
+ * Click eclass → see enodes in sidebar → select enode → expand children
  */
 
 class EGraphViewer {
     constructor() {
         this.currentFile = null;
-        this.egraphData = null;
-        this.selectionMap = {}; // { eclass_id: enode_id }
+        this.egraphMeta = null;
+        this.selectionMap = {};      // {eclass_id: enode_id}
+        this.visibleEclasses = new Set();
+        this.focusedEclass = null;
+        this.focusedEnodes = [];
+        this.navigationPath = [];    // For breadcrumb
         this.graphData = { nodes: [], edges: [] };
-        this.searchTerm = ''; // New: Store search term
 
         // SVG state
         this.svg = null;
@@ -18,9 +21,9 @@ class EGraphViewer {
         this.isDragging = false;
         this.dragStart = { x: 0, y: 0 };
 
-        // Layout constants
-        this.NODE_RADIUS = { eclass: 20, enode: 18 };
-        this.SPACING_X = 180;
+        // Layout
+        this.NODE_RADIUS = { eclass: 24, enode: 20 };
+        this.SPACING_X = 160;
         this.SPACING_Y = 80;
 
         this.init();
@@ -33,18 +36,10 @@ class EGraphViewer {
     }
 
     setupEventListeners() {
-        // File selection
         document.getElementById('file-select').addEventListener('change', (e) => {
             this.loadFile(e.target.value);
         });
 
-        // Search input
-        document.getElementById('search-input').addEventListener('input', (e) => {
-            this.searchTerm = e.target.value.toLowerCase();
-            this.renderEclassList();
-        });
-
-        // Controls
         document.getElementById('reset-btn').addEventListener('click', () => {
             this.resetSelections();
         });
@@ -55,7 +50,6 @@ class EGraphViewer {
             this.zoom(0.8);
         });
 
-        // SVG pan/zoom
         this.svg.addEventListener('wheel', (e) => this.handleWheel(e));
         this.svg.addEventListener('mousedown', (e) => this.handlePanStart(e));
         document.addEventListener('mousemove', (e) => this.handlePanMove(e));
@@ -67,15 +61,24 @@ class EGraphViewer {
 
         this.currentFile = filename;
         this.selectionMap = {};
-        this.searchTerm = ''; // Reset search on new file
-        document.getElementById('search-input').value = '';
+        this.visibleEclasses = new Set();
+        this.focusedEclass = null;
+        this.focusedEnodes = [];
+        this.navigationPath = [];
 
         try {
             const response = await fetch(`/api/egraph/${filename}`);
-            this.egraphData = await response.json();
-            this.renderEclassList();
-            this.updateSelectionDisplay();
-            this.extractAndRenderGraph();
+            this.egraphMeta = await response.json();
+
+            document.getElementById('file-info').textContent =
+                `${this.egraphMeta.num_eclasses.toLocaleString()} eclasses, ${this.egraphMeta.num_enodes.toLocaleString()} enodes`;
+
+            this.visibleEclasses.add(this.egraphMeta.root_eclass);
+            this.navigationPath = [this.egraphMeta.root_eclass];
+
+            this.updateSidebar();
+            this.updateBreadcrumb();
+            this.fetchAndRenderGraph();
         } catch (err) {
             console.error('Failed to load egraph:', err);
             document.getElementById('eclass-list').innerHTML =
@@ -83,127 +86,174 @@ class EGraphViewer {
         }
     }
 
-    renderEclassList() {
-        const container = document.getElementById('eclass-list');
-        const { eclasses } = this.egraphData;
+    async focusEclass(eclassId) {
+        if (this.focusedEclass === eclassId) return;
 
-        if (!eclasses || Object.keys(eclasses).length === 0) {
-            container.innerHTML = '<p class="placeholder">No eclasses found</p>';
-            return;
+        this.focusedEclass = eclassId;
+
+        // Update navigation path
+        const existingIdx = this.navigationPath.indexOf(eclassId);
+        if (existingIdx >= 0) {
+            this.navigationPath = this.navigationPath.slice(0, existingIdx + 1);
+        } else {
+            this.navigationPath.push(eclassId);
         }
 
-        // Sort eclasses by ID
-        const sortedIds = Object.keys(eclasses).map(Number).sort((a, b) => a - b);
-
-        container.innerHTML = sortedIds.map(eclassId => {
-            const eclass = eclasses[eclassId];
-            const enodes = eclass.enodes || [];
-
-            // Filter enodes based on search term
-            const filteredEnodes = enodes.filter(enodeId => {
-                const enode = this.egraphData.enodes[enodeId];
-                const opName = enode?.op_name || 'Unknown';
-                return opName.toLowerCase().includes(this.searchTerm);
-            });
-
-            // If search term is present and no enodes match, hide the eclass
-            if (this.searchTerm && filteredEnodes.length === 0) {
-                return '';
+        try {
+            const response = await fetch(`/api/eclass/${this.currentFile}/${eclassId}`);
+            if (!response.ok) {
+                this.focusedEnodes = [];
+                this.updateSidebar();
+                return;
             }
-
-            const isSelected = this.selectionMap[eclassId] !== undefined;
-
-            return `
-        <div class="eclass-item" data-eclass-id="${eclassId}">
-          <div class="eclass-header" onclick="viewer.toggleEclass(${eclassId})">
-            <span class="eclass-id">EC${eclassId}</span>
-            <span class="enode-count">${filteredEnodes.length} enode${filteredEnodes.length !== 1 ? 's' : ''}</span>
-          </div>
-          <div class="enodes-list ${isSelected ? 'expanded' : ''}" id="enodes-${eclassId}">
-            ${filteredEnodes.map(enodeId => {
-                const enode = this.egraphData.enodes[enodeId];
-                const isEnodeSelected = this.selectionMap[eclassId] === enodeId;
-                return `
-                <div class="enode-item ${isEnodeSelected ? 'selected' : ''}" 
-                     data-enode-id="${enodeId}"
-                     data-eclass-id="${eclassId}"
-                     onclick="viewer.selectEnode(${eclassId}, ${enodeId})">
-                  <span class="dot ${isEnodeSelected ? 'selected' : 'enode'}"></span>
-                  <span class="enode-id">EN${enodeId}</span>
-                  <span class="op-name">${enode?.op_name || 'Unknown'}</span>
-                </div>
-              `;
-            }).join('')}
-          </div>
-        </div>
-      `;
-        }).join('');
-    }
-
-    toggleEclass(eclassId) {
-        const list = document.getElementById(`enodes-${eclassId}`);
-        if (list) {
-            list.classList.toggle('expanded');
+            const data = await response.json();
+            this.focusedEnodes = data.enodes || [];
+            this.updateSidebar();
+            this.updateBreadcrumb();
+        } catch (err) {
+            console.error('Failed to load eclass:', err);
+            this.focusedEnodes = [];
+            this.updateSidebar();
         }
     }
 
-    selectEnode(eclassId, enodeId) {
-        // Toggle selection
+    async selectEnode(eclassId, enodeId, children) {
         if (this.selectionMap[eclassId] === enodeId) {
+            // Deselect
             delete this.selectionMap[eclassId];
         } else {
             this.selectionMap[eclassId] = enodeId;
+            // Add children to visible eclasses
+            if (children && children.length > 0) {
+                children.forEach(childId => this.visibleEclasses.add(childId));
+            }
         }
 
-        // Re-render eclass list to update selection styling
-        this.renderEclassList();
-        this.updateSelectionDisplay();
-
-        // Extract and render updated graph
-        this.extractAndRenderGraph();
+        this.updateSidebar();
+        this.fetchAndRenderGraph();
     }
 
     resetSelections() {
         this.selectionMap = {};
-        this.renderEclassList();
-        this.updateSelectionDisplay();
-        this.extractAndRenderGraph();
+        this.visibleEclasses = new Set([this.egraphMeta.root_eclass]);
+        this.focusedEclass = null;
+        this.focusedEnodes = [];
+        this.navigationPath = [this.egraphMeta.root_eclass];
+
+        this.updateSidebar();
+        this.updateBreadcrumb();
+        this.fetchAndRenderGraph();
+    }
+
+    updateBreadcrumb() {
+        const container = document.getElementById('breadcrumb');
+        if (!this.currentFile || this.navigationPath.length === 0) {
+            container.innerHTML = '';
+            return;
+        }
+
+        container.innerHTML = this.navigationPath.map((eclassId, idx) => {
+            const isLast = idx === this.navigationPath.length - 1;
+            const sep = idx > 0 ? '<span class="breadcrumb-sep">›</span>' : '';
+            const cls = isLast ? 'breadcrumb-item active' : 'breadcrumb-item';
+            return `${sep}<span class="${cls}" onclick="viewer.focusEclass(${eclassId})">EC${eclassId}</span>`;
+        }).join('');
+    }
+
+    updateSidebar() {
+        const container = document.getElementById('eclass-list');
+
+        if (!this.currentFile) {
+            container.innerHTML = '<p class="placeholder">Select a file to start exploring</p>';
+            return;
+        }
+
+        if (this.focusedEclass === null) {
+            container.innerHTML = `
+                <p class="placeholder">
+                    Click on an eclass node in the graph to see its enodes<br><br>
+                    <strong>💡 Tip:</strong> Start with EC${this.egraphMeta.root_eclass} (the root)
+                </p>`;
+            return;
+        }
+
+        const selectedEnodeId = this.selectionMap[this.focusedEclass];
+        const isExpanded = selectedEnodeId !== undefined;
+
+        let html = `
+            <div class="focused-eclass-header">
+                <span class="eclass-id">EClass ${this.focusedEclass}</span>
+                <span class="enode-count">${this.focusedEnodes.length} enode${this.focusedEnodes.length !== 1 ? 's' : ''}</span>
+            </div>
+            <div class="enodes-list">
+        `;
+
+        if (this.focusedEnodes.length === 0) {
+            html += '<p class="placeholder">No enodes found</p>';
+        } else {
+            this.focusedEnodes.forEach(enode => {
+                const isSelected = selectedEnodeId === enode.id;
+                const childrenStr = JSON.stringify(enode.children);
+                html += `
+                    <div class="enode-item ${isSelected ? 'selected' : ''}"
+                         onclick="viewer.selectEnode(${this.focusedEclass}, ${enode.id}, ${childrenStr})">
+                        <span class="dot ${isSelected ? 'selected' : 'enode'}"></span>
+                        <span class="enode-id">EN${enode.id}</span>
+                        <span class="op-name">${enode.op_name}</span>
+                        <span class="child-count">${enode.children.length}↓</span>
+                    </div>
+                `;
+            });
+        }
+
+        html += '</div>';
+        container.innerHTML = html;
     }
 
     updateSelectionDisplay() {
         const display = document.getElementById('selection-map-display');
+        const countEl = document.getElementById('visible-count');
         const entries = Object.entries(this.selectionMap);
 
         if (entries.length === 0) {
             display.textContent = 'None';
         } else {
-            display.textContent = entries
-                .map(([ec, en]) => `EC${ec}→EN${en}`)
-                .join(', ');
+            const displayEntries = entries.slice(0, 5).map(([ec, en]) => `EC${ec}→EN${en}`);
+            if (entries.length > 5) {
+                displayEntries.push(`...+${entries.length - 5} more`);
+            }
+            display.textContent = displayEntries.join(', ');
+        }
+
+        if (countEl) {
+            countEl.textContent = `${this.visibleEclasses.size} eclasses visible`;
         }
     }
 
-    async extractAndRenderGraph() {
+    async fetchAndRenderGraph() {
         if (!this.currentFile) {
-            document.getElementById('graph-empty').style.display = 'block';
             this.clearGraph();
+            document.getElementById('graph-empty').style.display = 'block';
             return;
         }
 
+        this.updateSelectionDisplay();
+
         try {
-            const response = await fetch('/api/extract', {
+            const response = await fetch('/api/explore', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     filename: this.currentFile,
-                    selection_map: this.selectionMap
+                    selection_map: this.selectionMap,
+                    visible_eclasses: Array.from(this.visibleEclasses)
                 })
             });
 
             this.graphData = await response.json();
             this.renderGraph();
         } catch (err) {
-            console.error('Failed to extract graph:', err);
+            console.error('Failed to fetch graph:', err);
         }
     }
 
@@ -228,16 +278,14 @@ class EGraphViewer {
         document.getElementById('graph-empty').style.display = 'none';
         this.clearGraph();
 
-        // Compute layout using hierarchical approach
         const layout = this.computeLayout(nodes, edges);
 
-        // Create SVG group for transforms
         const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
         g.setAttribute('id', 'graph-group');
         g.setAttribute('transform', `translate(${this.pan.x}, ${this.pan.y}) scale(${this.zoomLevel})`);
         this.svg.appendChild(g);
 
-        // Draw edges first (so they appear behind nodes)
+        // Draw edges first
         edges.forEach(edge => {
             const source = layout.nodes[edge.source];
             const target = layout.nodes[edge.target];
@@ -250,64 +298,89 @@ class EGraphViewer {
         nodes.forEach(node => {
             const pos = layout.nodes[node.id];
             if (pos) {
-                this.drawNode(g, node, pos, this.selectionMap[node.eclass_id] === node.enode_id);
+                const isExpanded = node.type === 'eclass' && this.selectionMap[node.eclass_id] !== undefined;
+                const isSelectedEnode = node.type === 'enode' && this.selectionMap[node.eclass_id] === node.enode_id;
+                this.drawNode(g, node, pos, isExpanded, isSelectedEnode);
             }
         });
 
-        // Set SVG viewBox
-        this.svg.setAttribute('viewBox', `${layout.bounds.x - 50} ${layout.bounds.y - 50} ${layout.bounds.width + 100} ${layout.bounds.height + 100}`);
+        // Center view on graph
+        const bounds = layout.bounds;
+        this.svg.setAttribute('viewBox',
+            `${bounds.x - 60} ${bounds.y - 60} ${bounds.width + 120} ${bounds.height + 120}`);
     }
 
     computeLayout(nodes, edges) {
-        // Simple hierarchical layout: group by depth, position horizontally
+        // Build depth using BFS from root
+        const depths = {};
+        const childTargets = new Set(edges.filter(e => e.type === 'child').map(e => e.target));
+        const rootCandidates = nodes.filter(n => !childTargets.has(n.id) && n.type === 'eclass');
+        const root = rootCandidates[0];
+
+        if (!root) {
+            nodes.forEach(n => depths[n.id] = 0);
+        } else {
+            const queue = [{ id: root.id, depth: 0 }];
+            depths[root.id] = 0;
+
+            while (queue.length > 0) {
+                const { id, depth } = queue.shift();
+                edges.filter(e => e.source === id).forEach(edge => {
+                    if (!(edge.target in depths)) {
+                        depths[edge.target] = depth + 1;
+                        queue.push({ id: edge.target, depth: depth + 1 });
+                    }
+                });
+            }
+        }
+
+        // Group by depth and track parent for better horizontal positioning
         const byDepth = {};
         nodes.forEach(node => {
-            const depth = node.depth || 0;
+            const depth = depths[node.id] || 0;
             if (!byDepth[depth]) byDepth[depth] = [];
             byDepth[depth].push(node);
         });
 
         const positions = {};
-        let maxY = 0;
 
-        // Position nodes by depth level
+        // Assign positions using subtree-aware spacing
         Object.keys(byDepth).sort((a, b) => a - b).forEach(depthStr => {
-            const depth = parseInt(depthStr);
-            const levelNodes = byDepth[depth];
+            const levelNodes = byDepth[depthStr];
             const levelWidth = levelNodes.length * this.SPACING_X;
             const startX = -levelWidth / 2 + this.SPACING_X / 2;
 
             levelNodes.forEach((node, i) => {
                 positions[node.id] = {
                     x: startX + i * this.SPACING_X,
-                    y: depth * this.SPACING_Y
+                    y: (depths[node.id] || 0) * this.SPACING_Y
                 };
             });
-
-            maxY = Math.max(maxY, depth * this.SPACING_Y);
         });
 
-        // Compute bounds
         const xs = Object.values(positions).map(p => p.x);
         const ys = Object.values(positions).map(p => p.y);
         const minX = Math.min(...xs), maxX = Math.max(...xs);
-        const minY = Math.min(...ys), maxY_val = Math.max(...ys);
+        const minY = Math.min(...ys), maxY = Math.max(...ys);
 
         return {
             nodes: positions,
             bounds: {
                 x: minX,
                 y: minY,
-                width: maxX - minX,
-                height: maxY_val - minY
+                width: Math.max(maxX - minX, 100),
+                height: Math.max(maxY - minY, 100)
             }
         };
     }
 
-    drawNode(group, node, pos, isSelected) {
+    drawNode(group, node, pos, isExpanded, isSelectedEnode) {
         const isEclass = node.type === 'eclass';
         const radius = isEclass ? this.NODE_RADIUS.eclass : this.NODE_RADIUS.enode;
-        const className = `node ${node.type}${isSelected ? ' selected' : ''}`;
+
+        let className = `node ${node.type}`;
+        if (isExpanded) className += ' expanded';
+        if (isSelectedEnode) className += ' selected';
 
         // Circle
         const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -316,23 +389,44 @@ class EGraphViewer {
         circle.setAttribute('r', radius);
         circle.setAttribute('class', className);
         circle.setAttribute('data-node-id', node.id);
+
         circle.addEventListener('click', (e) => {
             e.stopPropagation();
-            this.handleNodeClick(node);
+            if (isEclass) {
+                this.focusEclass(node.eclass_id);
+            } else {
+                // Click on enode focuses its parent eclass
+                this.focusEclass(node.eclass_id);
+            }
         });
+
         group.appendChild(circle);
 
         // Label
         const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         label.setAttribute('x', pos.x);
-        label.setAttribute('y', pos.y + (isEclass ? 0 : 2));
-        label.setAttribute('class', 'node-label');
-        label.textContent = node.label;
+        label.setAttribute('y', pos.y + (isEclass ? 1 : 2));
+        label.setAttribute('class', `node-label ${isEclass ? 'eclass-label' : ''}`);
+
+        // Truncate long labels
+        let labelText = node.label;
+        if (labelText.length > 10 && !isEclass) {
+            labelText = labelText.substring(0, 9) + '…';
+        }
+        label.textContent = labelText;
         group.appendChild(label);
 
-        // Tooltip (title)
-        circle.addEventListener('mouseenter', (e) => this.showTooltip(e, node));
-        circle.addEventListener('mouseleave', () => this.hideTooltip());
+        // Expanded indicator for eclasses
+        if (isExpanded && isEclass) {
+            const indicator = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            indicator.setAttribute('x', pos.x + radius + 4);
+            indicator.setAttribute('y', pos.y - radius + 4);
+            indicator.setAttribute('font-size', '10px');
+            indicator.setAttribute('fill', '#28a745');
+            indicator.textContent = '✓';
+            indicator.style.pointerEvents = 'none';
+            group.appendChild(indicator);
+        }
     }
 
     drawEdge(group, source, target, type) {
@@ -364,25 +458,6 @@ class EGraphViewer {
         this.svg.appendChild(defs);
     }
 
-    handleNodeClick(node) {
-        // If clicking an eclass, expand it in sidebar
-        if (node.type === 'eclass') {
-            this.toggleEclass(node.eclass_id);
-        }
-    }
-
-    // Tooltip handling
-    showTooltip(event, node) {
-        // Simple title attribute for now; could be enhanced with custom tooltip
-        event.target.setAttribute('title',
-            `${node.label}\nType: ${node.type}\nID: ${node.eclass_id || node.enode_id}`
-        );
-    }
-
-    hideTooltip() {
-        // No-op for native title tooltips
-    }
-
     // Zoom handling
     zoom(factor) {
         this.zoomLevel = Math.max(0.2, Math.min(3, this.zoomLevel * factor));
@@ -397,7 +472,7 @@ class EGraphViewer {
 
     // Pan handling
     handlePanStart(event) {
-        if (event.button !== 0) return; // Only left mouse button
+        if (event.button !== 0) return;
         this.isDragging = true;
         this.dragStart = { x: event.clientX - this.pan.x, y: event.clientY - this.pan.y };
         this.svg.style.cursor = 'grabbing';
@@ -423,7 +498,6 @@ class EGraphViewer {
     }
 }
 
-// Initialize viewer when DOM is ready
 let viewer;
 document.addEventListener('DOMContentLoaded', () => {
     viewer = new EGraphViewer();
