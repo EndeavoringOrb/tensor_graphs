@@ -1,3 +1,4 @@
+/* static/js/viewer.js */
 /**
  * Incremental EGraph Explorer
  * Click eclass → see enodes in sidebar → select enode → expand children
@@ -10,9 +11,11 @@ class EGraphViewer {
         this.selectionMap = {};      // {eclass_id: enode_id}
         this.visibleEclasses = new Set();
         this.focusedEclass = null;
+        this.focusedEclassData = null;
         this.focusedEnodes = [];
         this.navigationPath = [];    // For breadcrumb
         this.graphData = { nodes: [], edges: [] };
+        this.settings = { constant_limit: 3 };
 
         // SVG state
         this.svg = null;
@@ -33,6 +36,7 @@ class EGraphViewer {
         this.svg = document.getElementById('graph-svg');
         this.setupEventListeners();
         this.renderArrowMarker();
+        this.loadSettings();
     }
 
     setupEventListeners() {
@@ -50,10 +54,79 @@ class EGraphViewer {
             this.zoom(0.8);
         });
 
+        // Settings modal
+        document.getElementById('settings-btn').addEventListener('click', () => {
+            this.openSettingsModal();
+        });
+        document.getElementById('settings-close').addEventListener('click', () => {
+            this.closeSettingsModal();
+        });
+        document.getElementById('settings-cancel').addEventListener('click', () => {
+            this.closeSettingsModal();
+        });
+        document.getElementById('settings-save').addEventListener('click', () => {
+            this.saveSettings();
+        });
+        document.getElementById('settings-modal').addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) {
+                this.closeSettingsModal();
+            }
+        });
+
         this.svg.addEventListener('wheel', (e) => this.handleWheel(e));
         this.svg.addEventListener('mousedown', (e) => this.handlePanStart(e));
         document.addEventListener('mousemove', (e) => this.handlePanMove(e));
         document.addEventListener('mouseup', () => this.handlePanEnd());
+    }
+
+    async loadSettings() {
+        try {
+            const response = await fetch('/api/settings');
+            this.settings = await response.json();
+        } catch (err) {
+            console.error('Failed to load settings:', err);
+        }
+    }
+
+    openSettingsModal() {
+        document.getElementById('constant-limit-input').value = this.settings.constant_limit;
+        document.getElementById('settings-modal').style.display = 'flex';
+    }
+
+    closeSettingsModal() {
+        document.getElementById('settings-modal').style.display = 'none';
+    }
+
+    async saveSettings() {
+        const limit = parseInt(document.getElementById('constant-limit-input').value, 10);
+        if (isNaN(limit) || limit < 1) {
+            document.getElementById('settings-error').textContent = 'Must be a positive integer';
+            return;
+        }
+        if (limit > 1000) {
+            document.getElementById('settings-error').textContent = 'Maximum 1000 elements';
+            return;
+        }
+
+        document.getElementById('settings-error').textContent = '';
+
+        try {
+            const response = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ constant_limit: limit })
+            });
+            this.settings = await response.json();
+            this.closeSettingsModal();
+
+            // Refresh focused eclass to get updated constants
+            if (this.focusedEclass !== null) {
+                await this.focusEclass(this.focusedEclass);
+            }
+        } catch (err) {
+            console.error('Failed to save settings:', err);
+            document.getElementById('settings-error').textContent = 'Failed to save settings';
+        }
     }
 
     async loadFile(filename) {
@@ -63,6 +136,7 @@ class EGraphViewer {
         this.selectionMap = {};
         this.visibleEclasses = new Set();
         this.focusedEclass = null;
+        this.focusedEclassData = null;
         this.focusedEnodes = [];
         this.navigationPath = [];
 
@@ -103,16 +177,19 @@ class EGraphViewer {
             const response = await fetch(`/api/eclass/${this.currentFile}/${eclassId}`);
             if (!response.ok) {
                 this.focusedEnodes = [];
+                this.focusedEclassData = null;
                 this.updateSidebar();
                 return;
             }
             const data = await response.json();
+            this.focusedEclassData = data;
             this.focusedEnodes = data.enodes || [];
             this.updateSidebar();
             this.updateBreadcrumb();
         } catch (err) {
             console.error('Failed to load eclass:', err);
             this.focusedEnodes = [];
+            this.focusedEclassData = null;
             this.updateSidebar();
         }
     }
@@ -137,6 +214,7 @@ class EGraphViewer {
         this.selectionMap = {};
         this.visibleEclasses = new Set([this.egraphMeta.root_eclass]);
         this.focusedEclass = null;
+        this.focusedEclassData = null;
         this.focusedEnodes = [];
         this.navigationPath = [this.egraphMeta.root_eclass];
 
@@ -160,6 +238,66 @@ class EGraphViewer {
         }).join('');
     }
 
+    formatConstantValue(value, dtype) {
+        if (value === null || value === undefined) return '—';
+
+        if (typeof value === 'boolean') {
+            return value ? 'true' : 'false';
+        }
+
+        if (typeof value === 'number') {
+            if (dtype === 'FLOAT32' || dtype === 'BF16') {
+                return value.toFixed(6);
+            }
+            return value.toString();
+        }
+
+        if (typeof value === 'string') {
+            return value; // Already formatted (e.g., hex for BF16)
+        }
+
+        return String(value);
+    }
+
+    renderConstantSection(constant, dtype) {
+        if (!constant) return '';
+
+        const { values, total_count, is_truncated } = constant;
+
+        let html = `
+            <div class="constant-section">
+                <div class="constant-header">
+                    <span class="constant-title">📦 Constant Data</span>
+                    <span class="constant-meta">${total_count.toLocaleString()} elements</span>
+                </div>
+                <div class="constant-values">
+        `;
+
+        if (values.length === 0) {
+            html += '<span class="constant-empty">No data</span>';
+        } else {
+            values.forEach((val, idx) => {
+                const formatted = this.formatConstantValue(val, dtype);
+                html += `<span class="constant-value">${formatted}</span>`;
+                if (idx < values.length - 1) {
+                    html += '<span class="constant-sep">,</span>';
+                }
+            });
+
+            if (is_truncated) {
+                html += `<span class="constant-more">, ... (+${(total_count - values.length).toLocaleString()} more)</span>`;
+            }
+        }
+
+        html += `
+                </div>
+                ${is_truncated ? `<div class="constant-truncated-note">Showing first ${values.length} of ${total_count.toLocaleString()} elements</div>` : ''}
+            </div>
+        `;
+
+        return html;
+    }
+
     updateSidebar() {
         const container = document.getElementById('eclass-list');
 
@@ -177,6 +315,7 @@ class EGraphViewer {
             return;
         }
 
+        const data = this.focusedEclassData;
         const selectedEnodeId = this.selectionMap[this.focusedEclass];
         const isExpanded = selectedEnodeId !== undefined;
 
@@ -185,8 +324,37 @@ class EGraphViewer {
                 <span class="eclass-id">EClass ${this.focusedEclass}</span>
                 <span class="enode-count">${this.focusedEnodes.length} enode${this.focusedEnodes.length !== 1 ? 's' : ''}</span>
             </div>
-            <div class="enodes-list">
+            <div class="eclass-meta">
+                <div class="meta-row">
+                    <span class="meta-label">Shape:</span>
+                    <span class="meta-value">[${data.shape.join(', ')}]</span>
+                </div>
+                <div class="meta-row">
+                    <span class="meta-label">DType:</span>
+                    <span class="meta-value dtype-badge">${data.dtype}</span>
+                </div>
+                <div class="meta-row">
+                    <span class="meta-label">Backend:</span>
+                    <span class="meta-value backend-badge">${data.backend}</span>
+                </div>
+                <div class="meta-row">
+                    <span class="meta-label">Strides:</span>
+                    <span class="meta-value">[${data.strides.join(', ')}]</span>
+                </div>
+                <div class="meta-row">
+                    <span class="meta-label">Offset:</span>
+                    <span class="meta-value">${data.view_offset}</span>
+                </div>
+            </div>
         `;
+
+        // Add constant section if present
+        if (data.constant) {
+            html += this.renderConstantSection(data.constant, data.dtype);
+        }
+
+        html += `<div class="enodes-list">`;
+        html += `<div class="enodes-list-header">ENodes</div>`;
 
         if (this.focusedEnodes.length === 0) {
             html += '<p class="placeholder">No enodes found</p>';

@@ -1,12 +1,14 @@
 import os
+import json
 import struct
 from flask import Flask, render_template, jsonify, request, send_from_directory
 
 app = Flask(__name__)
 EGRAPHS_DIR = "egraphs"
 STATIC_DIR = "static"
+SETTINGS_FILE = "settings.json"
 
-# Cache parsed egraphs to avoid re-parsing
+# Name Maps
 egraph_cache = {}
 OP_TYPE_MAP = {
     0: "INPUT",
@@ -37,19 +39,61 @@ OP_TYPE_MAP = {
     25: "FUSED",
 }
 
+DTYPE_MAP = {0: "FLOAT32", 1: "INT32", 2: "BF16", 3: "BOOL"}
+BACKEND_MAP = {0: "CPU", 1: "CUDA"}
+
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE, "r") as f:
+            return json.load(f)
+    return {"constant_limit": 3}
+
+
+def save_settings(settings):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f)
+
+
+def interpret_constant(raw_bytes, dtype_id, limit):
+    if not raw_bytes:
+        return None
+
+    # Unpack based on DType
+    if dtype_id == 0:  # FLOAT32
+        count = len(raw_bytes) // 4
+        data = struct.unpack(f"<{count}f", raw_bytes)
+    elif dtype_id == 1:  # INT32
+        count = len(raw_bytes) // 4
+        data = struct.unpack(f"<{count}i", raw_bytes)
+    elif dtype_id == 2:  # BF16 (Interpret as uint16 and show hex/float approx)
+        count = len(raw_bytes) // 2
+        raw_vals = struct.unpack(f"<{count}H", raw_bytes)
+        data = [f"0x{v:04x}" for v in raw_vals]
+    elif dtype_id == 3:  # BOOL
+        data = [bool(b) for b in raw_bytes]
+    else:
+        data = list(raw_bytes)
+
+    return {
+        "values": data[:limit],
+        "total_count": len(data),
+        "is_truncated": len(data) > limit,
+    }
+
 
 def parse_egraph_bin(filepath):
-    """Parse binary egraph file and return structured data."""
+    if filepath in egraph_cache:
+        return egraph_cache[filepath]
+
     eclasses = {}
     enodes = {}
+    constants = {}
 
     with open(filepath, "rb") as f:
-        try:
-            num_classes = struct.unpack("<I", f.read(4))[0]
-            num_enodes = struct.unpack("<I", f.read(4))[0]
-            root_eclass_id = struct.unpack("<I", f.read(4))[0]
-        except struct.error:
-            return {"eclasses": {}, "enodes": {}, "root_eclass": 0}
+        num_classes = struct.unpack("<I", f.read(4))[0]
+        num_enodes = struct.unpack("<I", f.read(4))[0]
+        root_eclass_id = struct.unpack("<I", f.read(4))[0]
 
         for _ in range(num_classes):
             cls_id = struct.unpack("<I", f.read(4))[0]
@@ -64,10 +108,14 @@ def parse_egraph_bin(filepath):
             enode_indices = [
                 struct.unpack("<I", f.read(4))[0] for _ in range(enodes_count)
             ]
+
             eclasses[cls_id] = {
                 "shape": shape,
-                "backend": backend,
-                "dtype": dtype,
+                "strides": strides,
+                "view_offset": view_offset,
+                "backend_name": BACKEND_MAP.get(backend, f"UNK({backend})"),
+                "dtype_id": dtype,
+                "dtype_name": DTYPE_MAP.get(dtype, f"UNK({dtype})"),
                 "enodes": enode_indices,
             }
 
@@ -75,50 +123,55 @@ def parse_egraph_bin(filepath):
             kernel_uid = struct.unpack("<Q", f.read(8))[0]
             op_type = struct.unpack("<I", f.read(4))[0]
             name_len = struct.unpack("<I", f.read(4))[0]
-            if name_len > 0:
-                op_name = f.read(name_len).decode("utf-8")
-            else:
-                op_name = OP_TYPE_MAP.get(op_type, f"Unknown({op_type})")
+            op_name = (
+                f.read(name_len).decode("utf-8")
+                if name_len > 0
+                else OP_TYPE_MAP.get(op_type, "UNK")
+            )
             children_count = struct.unpack("<I", f.read(4))[0]
             children = [
                 struct.unpack("<I", f.read(4))[0] for _ in range(children_count)
             ]
             leaf_id = struct.unpack("<I", f.read(4))[0]
-            shape_size = struct.unpack("<I", f.read(4))[0]
-            [struct.unpack("<I", f.read(4))[0] for _ in range(shape_size)]
-            strides_size = struct.unpack("<I", f.read(4))[0]
-            [struct.unpack("<Q", f.read(8))[0] for _ in range(strides_size)]
-            view_offset = struct.unpack("<Q", f.read(8))[0]
-            dtype = struct.unpack("<I", f.read(4))[0]
-            backend = struct.unpack("<I", f.read(4))[0]
-            sig = struct.unpack("<Q", f.read(8))[0]
+
+            # Skip unused physical metadata in enode
+            sh_sz = struct.unpack("<I", f.read(4))[0]
+            f.read(sh_sz * 4)
+            st_sz = struct.unpack("<I", f.read(4))[0]
+            f.read(st_sz * 8)
+            f.read(8 + 4 + 4 + 8)  # view_offset, dtype, backend, sig
 
             enodes[enode_idx] = {
-                "kernel_uid": kernel_uid,
+                "id": enode_idx,
+                "kernel_uid": f"0x{kernel_uid:x}",
                 "op_name": op_name,
-                "op_type": op_type,
                 "children": children,
                 "leaf_id": leaf_id,
-                "dtype": dtype,
-                "backend": backend,
             }
 
-    return {"eclasses": eclasses, "enodes": enodes, "root_eclass": root_eclass_id}
+        # Constants Section
+        num_const_bytes = f.read(4)
+        if num_const_bytes:
+            num_constants = struct.unpack("<I", num_const_bytes)[0]
+            for _ in range(num_constants):
+                canon_id = struct.unpack("<I", f.read(4))[0]
+                data_size = struct.unpack("<Q", f.read(8))[0]
+                constants[canon_id] = f.read(data_size)
+
+    egraph_cache[filepath] = {
+        "eclasses": eclasses,
+        "enodes": enodes,
+        "root_eclass": root_eclass_id,
+        "constants": constants,
+    }
+    return egraph_cache[filepath]
 
 
-def get_or_parse_egraph(filename):
-    """Get cached egraph or parse and cache it."""
-    if filename not in egraph_cache:
-        filepath = os.path.join(EGRAPHS_DIR, filename)
-        egraph_cache[filename] = parse_egraph_bin(filepath)
-    return egraph_cache[filename]
-
-
-@app.route("/")
-def index():
-    os.makedirs(EGRAPHS_DIR, exist_ok=True)
-    files = sorted([f for f in os.listdir(EGRAPHS_DIR) if f.endswith(".bin")])
-    return render_template("index.html", files=files)
+@app.route("/api/settings", methods=["GET", "POST"])
+def settings_route():
+    if request.method == "POST":
+        save_settings(request.json)
+    return jsonify(load_settings())
 
 
 @app.route("/api/files")
@@ -135,7 +188,7 @@ def get_egraph_meta(filename):
     if not os.path.exists(filepath):
         return jsonify({"error": "File not found"}), 404
 
-    data = get_or_parse_egraph(filename)
+    data = parse_egraph_bin(filepath)
     return jsonify(
         {
             "root_eclass": data["root_eclass"],
@@ -147,39 +200,29 @@ def get_egraph_meta(filename):
 
 @app.route("/api/eclass/<filename>/<int:eclass_id>")
 def get_eclass(filename, eclass_id):
-    """Get a single eclass with its enodes (lazy loading)."""
-    filepath = os.path.join(EGRAPHS_DIR, filename)
-    if not os.path.exists(filepath):
-        return jsonify({"error": "File not found"}), 404
-
-    data = get_or_parse_egraph(filename)
-
+    data = parse_egraph_bin(os.path.join(EGRAPHS_DIR, filename))
     if eclass_id not in data["eclasses"]:
-        return jsonify({"error": "EClass not found"}), 404
+        return jsonify({"error": "Not found"}), 404
 
     eclass = data["eclasses"][eclass_id]
-    enodes = []
-    for enode_id in eclass["enodes"]:
-        if enode_id in data["enodes"]:
-            enode = data["enodes"][enode_id]
-            enodes.append(
-                {
-                    "id": enode_id,
-                    "op_name": enode["op_name"],
-                    "op_type": enode["op_type"],
-                    "children": enode["children"],
-                    "dtype": enode["dtype"],
-                    "backend": enode["backend"],
-                }
-            )
+    settings = load_settings()
+
+    constant_data = None
+    if eclass_id in data["constants"]:
+        constant_data = interpret_constant(
+            data["constants"][eclass_id], eclass["dtype_id"], settings["constant_limit"]
+        )
 
     return jsonify(
         {
             "id": eclass_id,
             "shape": eclass["shape"],
-            "backend": eclass["backend"],
-            "dtype": eclass["dtype"],
-            "enodes": enodes,
+            "strides": eclass["strides"],
+            "dtype": eclass["dtype_name"],
+            "backend": eclass["backend_name"],
+            "view_offset": eclass["view_offset"],
+            "constant": constant_data,
+            "enodes": [data["enodes"][eid] for eid in eclass["enodes"]],
         }
     )
 
@@ -196,7 +239,7 @@ def explore():
     if not os.path.exists(filepath):
         return jsonify({"error": "File not found"}), 404
 
-    data = get_or_parse_egraph(filename)
+    data = parse_egraph_bin(filepath)
     eclasses = data["eclasses"]
     enodes = data["enodes"]
 
@@ -253,6 +296,13 @@ def explore():
 @app.route("/static/<path:filename>")
 def serve_static(filename):
     return send_from_directory(STATIC_DIR, filename)
+
+
+@app.route("/")
+def index():
+    os.makedirs(EGRAPHS_DIR, exist_ok=True)
+    files = sorted([f for f in os.listdir(EGRAPHS_DIR) if f.endswith(".bin")])
+    return render_template("index.html", files=files)
 
 
 if __name__ == "__main__":

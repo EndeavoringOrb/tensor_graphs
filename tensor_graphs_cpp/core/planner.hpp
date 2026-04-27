@@ -168,6 +168,19 @@ private:
             out.write(reinterpret_cast<const char *>(&enode.backend), 4);
             out.write(reinterpret_cast<const char *>(&enode.sig), 8);
         }
+
+        // 3. Write Constants Section
+        uint32_t num_constants = static_cast<uint32_t>(egraph.constantStaging.size());
+        out.write(reinterpret_cast<const char *>(&num_constants), 4);
+        for (const auto &[eclassId, data] : egraph.constantStaging)
+        {
+            uint32_t canonId = eclassId; // Parser will use this to map to the canonical class
+            out.write(reinterpret_cast<const char *>(&canonId), 4);
+            uint64_t data_size = static_cast<uint64_t>(data.size());
+            out.write(reinterpret_cast<const char *>(&data_size), 8);
+            out.write(reinterpret_cast<const char *>(data.data()), data_size);
+        }
+
         out.close();
         std::cout << "[Planner] Dumped EGraph to " << path << std::endl;
     }
@@ -1743,7 +1756,7 @@ public:
             saturate(egraph, protectedEClasses);
         }
 
-// #ifdef DEBUG
+        // #ifdef DEBUG
         auto rootIt = baseState.nodeToEClass.find(rootId);
         if (rootIt == baseState.nodeToEClass.end())
         {
@@ -1751,7 +1764,7 @@ public:
         }
         uint32_t rootEClassId = egraph.find(rootIt->second);
         dumpEGraphBinary(egraph, rootEClassId);
-// #endif
+        // #endif
 
         std::unordered_map<uint32_t, uint32_t> updatedEClassToLogical;
         for (const auto &kv : eclassToLogical)
