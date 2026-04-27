@@ -9,6 +9,7 @@ class EGraphViewer {
         this.currentFile = null;
         this.egraphMeta = null;
         this.selectionMap = {};      // {eclass_id: enode_id}
+        this.childCache = {};
         this.visibleEclasses = new Set();
         this.focusedEclass = null;
         this.focusedEclassData = null;
@@ -129,6 +130,31 @@ class EGraphViewer {
         }
     }
 
+    updateVisibleEclasses() {
+        const newVisible = new Set();
+
+        // 1. Always show the root
+        if (this.egraphMeta) {
+            newVisible.add(this.egraphMeta.root_eclass);
+        }
+
+        // 2. Always show the currently focused e-class
+        if (this.focusedEclass !== null) {
+            newVisible.add(this.focusedEclass);
+        }
+
+        // 3. Show everything in the selection map and their children
+        for (const ecId in this.selectionMap) {
+            newVisible.add(parseInt(ecId));
+
+            // Add children associated with this selection from our cache
+            const children = this.childCache[ecId] || [];
+            children.forEach(childId => newVisible.add(childId));
+        }
+
+        this.visibleEclasses = newVisible;
+    }
+
     async loadFile(filename) {
         if (!filename) return;
 
@@ -139,6 +165,7 @@ class EGraphViewer {
         this.focusedEclassData = null;
         this.focusedEnodes = [];
         this.navigationPath = [];
+        this.childCache = {};
 
         try {
             const response = await fetch(`/api/egraph/${filename}`);
@@ -148,11 +175,7 @@ class EGraphViewer {
                 `${this.egraphMeta.num_eclasses.toLocaleString()} eclasses, ${this.egraphMeta.num_enodes.toLocaleString()} enodes`;
 
             this.visibleEclasses.add(this.egraphMeta.root_eclass);
-            this.navigationPath = [this.egraphMeta.root_eclass];
-
-            this.updateSidebar();
-            this.updateBreadcrumb();
-            this.fetchAndRenderGraph();
+            await this.focusEclass(this.egraphMeta.root_eclass);
         } catch (err) {
             console.error('Failed to load egraph:', err);
             document.getElementById('eclass-list').innerHTML =
@@ -182,10 +205,13 @@ class EGraphViewer {
                 return;
             }
             const data = await response.json();
+            console.log(data);
             this.focusedEclassData = data;
             this.focusedEnodes = data.enodes || [];
+            this.updateVisibleEclasses();
             this.updateSidebar();
             this.updateBreadcrumb();
+            this.fetchAndRenderGraph();
         } catch (err) {
             console.error('Failed to load eclass:', err);
             this.focusedEnodes = [];
@@ -198,26 +224,24 @@ class EGraphViewer {
         if (this.selectionMap[eclassId] === enodeId) {
             // Deselect
             delete this.selectionMap[eclassId];
+            delete this.childCache[eclassId];
         } else {
             this.selectionMap[eclassId] = enodeId;
-            // Add children to visible eclasses
-            if (children && children.length > 0) {
-                children.forEach(childId => this.visibleEclasses.add(childId));
-            }
+            this.childCache[eclassId] = children || [];
         }
 
+        this.updateVisibleEclasses();
         this.updateSidebar();
         this.fetchAndRenderGraph();
     }
 
     resetSelections() {
         this.selectionMap = {};
-        this.visibleEclasses = new Set([this.egraphMeta.root_eclass]);
-        this.focusedEclass = null;
-        this.focusedEclassData = null;
-        this.focusedEnodes = [];
+        this.childCache = {};
+        this.focusedEclass = this.egraphMeta.root_eclass;
         this.navigationPath = [this.egraphMeta.root_eclass];
 
+        this.updateVisibleEclasses();
         this.updateSidebar();
         this.updateBreadcrumb();
         this.fetchAndRenderGraph();
