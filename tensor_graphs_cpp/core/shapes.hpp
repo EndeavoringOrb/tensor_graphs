@@ -657,6 +657,10 @@ struct ShapePropagator
                 int32_t start = i < starts.size() ? starts[i] : 0;
                 int32_t end = i < ends.size() ? ends[i] : s0[i];
                 int32_t step = i < steps.size() ? steps[i] : 1;
+                if (step == 0)
+                {
+                    Error::throw_err("[ShapePropagator.inferShape] SLICE step cannot be zero.");
+                }
                 if (start < 0)
                     start += s0[i];
                 if (end < 0)

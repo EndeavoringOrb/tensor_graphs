@@ -988,8 +988,6 @@ struct ContiguousElimination : public Rule
 
 struct ConstantFolding : public Rule
 {
-    std::unordered_set<uint32_t> folded_non_contig_enodes;
-
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
@@ -1011,15 +1009,10 @@ struct ConstantFolding : public Rule
         if (egraph.constantStaging.find(eclassId) != egraph.constantStaging.end())
             return false;
 
+        // Ensure we only fold into contiguous EClasses to prevent layout/offset mismatches
         const EClass &targetCls = egraph.getEClass(eclassId);
-        bool isTargetContiguous = isContiguous(targetCls) && targetCls.viewOffset == 0;
-
-        // Prevent infinite matching loop for non-contiguous target EClasses
-        if (!isTargetContiguous)
-        {
-            if (folded_non_contig_enodes.count(eNodeIdx))
-                return false;
-        }
+        if (!isContiguous(targetCls) || targetCls.viewOffset != 0)
+            return false;
 
         for (uint32_t enodeId : targetCls.enodes)
         {
@@ -1043,14 +1036,6 @@ struct ConstantFolding : public Rule
         const ENode eNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.find(egraph.getENodeEClass(eNodeIdx));
 
-        const EClass &targetCls = egraph.getEClass(eclassId);
-        bool isTargetContiguous = isContiguous(targetCls) && targetCls.viewOffset == 0;
-
-        if (!isTargetContiguous)
-        {
-            folded_non_contig_enodes.insert(eNodeIdx);
-        }
-
         std::vector<TensorNode> inputNodes;
         std::vector<TensorView> inViews;
         std::vector<const void *> kernelInputs;
@@ -1073,7 +1058,9 @@ struct ConstantFolding : public Rule
             size_t offsetBytes = childCls.viewOffset * getDTypeSize(childCls.dtype);
 
             if (offsetBytes >= stagedData.size() && stagedData.size() > 0)
+            {
                 return;
+            }
 
             kernelInputs.push_back(stagedData.data() + offsetBytes);
             inViews.push_back(TensorView(inNode, 0));
@@ -1147,258 +1134,52 @@ struct ConstantFolding : public Rule
 
         Backend originalBackend = egraph.getEClass(eclassId).backend;
 
-        if (isTargetContiguous)
+        if (originalBackend == Backend::CPU)
         {
-            if (originalBackend == Backend::CPU)
-            {
-                egraph.addENode(eclassId, foldedNode);
-                egraph.constantStaging[eclassId] = std::move(outData);
-            }
-            else
-            {
-                uint32_t cpuEClass = egraph.addEClass(foldedNode.shape, foldedNode.strides, foldedNode.viewOffset, foldedNode.dtype, Backend::CPU);
-                egraph.addENode(cpuEClass, foldedNode);
-                egraph.constantStaging[cpuEClass] = std::move(outData);
-
-                TensorNode copyInNode;
-                copyInNode.opType = OpType::INPUT;
-                copyInNode.dtype = foldedNode.dtype;
-                copyInNode.setShape(foldedNode.shape);
-                copyInNode.strides = foldedNode.strides;
-                copyInNode.viewOffset = foldedNode.viewOffset;
-                copyInNode.backend = Backend::CPU;
-
-                TensorNode copyOutNode = copyInNode;
-                copyOutNode.opType = OpType::COPY_TO;
-                copyOutNode.backend = originalBackend;
-                copyOutNode.strides = calcContiguousStrides(copyOutNode.getShape());
-                copyOutNode.viewOffset = 0;
-
-                Graph copyGraph;
-                uint32_t copyIn = copyGraph.input(copyInNode.getShape(), copyInNode.dtype);
-                uint32_t copyRoot = copyGraph.copyto(copyIn, copyOutNode.backend);
-
-                auto copyMatches = KernelRegistry::get().findMatchingKernelsByPattern(
-                    copyGraph, copyRoot, copyOutNode.backend, {copyInNode}, copyOutNode, false, false, false);
-
-                for (uint64_t uid : copyMatches)
-                {
-                    const auto &copyKernel = KernelRegistry::get().getKernel(uid);
-                    ENode copyNode;
-                    copyNode.kernelUid = uid;
-                    copyNode.opType = copyKernel.opType;
-                    copyNode.opName = copyKernel.opName;
-                    copyNode.children = {cpuEClass};
-                    copyNode.shape = copyOutNode.getShape();
-                    copyNode.strides = copyOutNode.strides;
-                    copyNode.viewOffset = copyOutNode.viewOffset;
-                    copyNode.dtype = copyOutNode.dtype;
-                    copyNode.backend = copyOutNode.backend;
-                    egraph.addENode(eclassId, copyNode);
-                }
-            }
+            egraph.addENode(eclassId, foldedNode);
+            egraph.constantStaging[eclassId] = std::move(outData);
         }
         else
         {
-            // The target EClass is non-contiguous, create a NEW contiguous EClass for the evaluated data
-            uint32_t contigEClass = egraph.addEClass(foldedNode.shape, foldedNode.strides, 0, foldedNode.dtype, originalBackend);
+            uint32_t cpuEClass = egraph.addEClass(foldedNode.shape, foldedNode.strides, foldedNode.viewOffset, foldedNode.dtype, Backend::CPU);
+            egraph.addENode(cpuEClass, foldedNode);
+            egraph.constantStaging[cpuEClass] = std::move(outData);
 
-            if (originalBackend == Backend::CPU)
+            TensorNode copyInNode;
+            copyInNode.opType = OpType::INPUT;
+            copyInNode.dtype = foldedNode.dtype;
+            copyInNode.setShape(foldedNode.shape);
+            copyInNode.strides = foldedNode.strides;
+            copyInNode.viewOffset = foldedNode.viewOffset;
+            copyInNode.backend = Backend::CPU;
+
+            TensorNode copyOutNode = copyInNode;
+            copyOutNode.opType = OpType::COPY_TO;
+            copyOutNode.backend = originalBackend;
+            copyOutNode.strides = calcContiguousStrides(copyOutNode.getShape());
+            copyOutNode.viewOffset = 0;
+
+            Graph copyGraph;
+            uint32_t copyIn = copyGraph.input(copyInNode.getShape(), copyInNode.dtype);
+            uint32_t copyRoot = copyGraph.copyto(copyIn, copyOutNode.backend);
+
+            auto copyMatches = KernelRegistry::get().findMatchingKernelsByPattern(
+                copyGraph, copyRoot, copyOutNode.backend, {copyInNode}, copyOutNode, false, false, false);
+
+            for (uint64_t uid : copyMatches)
             {
-                egraph.addENode(contigEClass, foldedNode);
-                egraph.constantStaging[contigEClass] = std::move(outData);
-            }
-            else
-            {
-                uint32_t cpuEClass = egraph.addEClass(foldedNode.shape, foldedNode.strides, 0, foldedNode.dtype, Backend::CPU);
-                egraph.addENode(cpuEClass, foldedNode);
-                egraph.constantStaging[cpuEClass] = std::move(outData);
-
-                TensorNode copyInNode;
-                copyInNode.opType = OpType::INPUT;
-                copyInNode.dtype = foldedNode.dtype;
-                copyInNode.setShape(foldedNode.shape);
-                copyInNode.strides = foldedNode.strides;
-                copyInNode.viewOffset = 0;
-                copyInNode.backend = Backend::CPU;
-
-                TensorNode copyOutNode = copyInNode;
-                copyOutNode.opType = OpType::COPY_TO;
-                copyOutNode.backend = originalBackend;
-                copyOutNode.strides = calcContiguousStrides(copyOutNode.getShape());
-                copyOutNode.viewOffset = 0;
-
-                Graph copyGraph;
-                uint32_t copyIn = copyGraph.input(copyInNode.getShape(), copyInNode.dtype);
-                uint32_t copyRoot = copyGraph.copyto(copyIn, copyOutNode.backend);
-
-                auto copyMatches = KernelRegistry::get().findMatchingKernelsByPattern(
-                    copyGraph, copyRoot, copyOutNode.backend, {copyInNode}, copyOutNode, false, false, false);
-
-                for (uint64_t uid : copyMatches)
-                {
-                    const auto &copyKernel = KernelRegistry::get().getKernel(uid);
-                    ENode copyNode;
-                    copyNode.kernelUid = uid;
-                    copyNode.opType = copyKernel.opType;
-                    copyNode.opName = copyKernel.opName;
-                    copyNode.children = {cpuEClass};
-                    copyNode.shape = copyOutNode.getShape();
-                    copyNode.strides = copyOutNode.strides;
-                    copyNode.viewOffset = 0;
-                    copyNode.dtype = copyOutNode.dtype;
-                    copyNode.backend = copyOutNode.backend;
-                    egraph.addENode(contigEClass, copyNode);
-                }
-            }
-
-            // Bind the contiguous EClass strictly back to the non-contiguous EClass
-            TensorNode contigInNode;
-            contigInNode.opType = OpType::INPUT;
-            contigInNode.dtype = targetCls.dtype;
-            contigInNode.setShape(targetCls.shape);
-            contigInNode.strides = targetCls.strides;
-            contigInNode.viewOffset = targetCls.viewOffset;
-            contigInNode.backend = targetCls.backend;
-
-            TensorNode contigOutNode = contigInNode;
-            contigOutNode.opType = OpType::CONTIGUOUS;
-            contigOutNode.strides = foldedNode.strides;
-            contigOutNode.viewOffset = 0;
-
-            Graph contigGraph;
-            uint32_t contigIn = contigGraph.input(contigInNode.getShape(), contigInNode.dtype);
-            uint32_t contigRoot = contigGraph.contiguous(contigIn);
-
-            auto contigMatches = KernelRegistry::get().findMatchingKernelsByPattern(
-                contigGraph, contigRoot, contigOutNode.backend, {contigInNode}, contigOutNode, false, false, false);
-
-            for (uint64_t uid : contigMatches)
-            {
-                const auto &contigKernel = KernelRegistry::get().getKernel(uid);
-                ENode contigNode;
-                contigNode.kernelUid = uid;
-                contigNode.opType = contigKernel.opType;
-                contigNode.opName = contigKernel.opName;
-                contigNode.children = {eclassId}; // The child is the original non-contiguous EClass
-                contigNode.shape = contigOutNode.getShape();
-                contigNode.strides = contigOutNode.strides;
-                contigNode.viewOffset = 0;
-                contigNode.dtype = contigOutNode.dtype;
-                contigNode.backend = contigOutNode.backend;
-                egraph.addENode(contigEClass, contigNode);
-            }
-        }
-    }
-};
-
-struct UseContiguousConstant : public Rule
-{
-    std::unordered_set<uint64_t> visited_pairs;
-
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
-    {
-        const ENode &enode = egraph.getENodes()[eNodeIdx];
-        if (enode.opType == OpType::INPUT || enode.opType == OpType::CONTIGUOUS)
-            return false;
-
-        for (size_t i = 0; i < enode.children.size(); ++i)
-        {
-            uint32_t c = egraph.findConst(enode.children[i]);
-            if (egraph.constantStaging.count(c) == 0)
-            {
-                for (const auto &cls : egraph.getClasses())
-                {
-                    if (egraph.constantStaging.count(cls.id))
-                    {
-                        for (uint32_t enId : cls.enodes)
-                        {
-                            const ENode &c_en = egraph.getENodes()[enId];
-                            if (c_en.opType == OpType::CONTIGUOUS && c_en.children.size() == 1 && egraph.findConst(c_en.children[0]) == c)
-                            {
-                                uint64_t pair_id = ((uint64_t)eNodeIdx << 32) | cls.id;
-                                if (!visited_pairs.count(pair_id))
-                                    return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
-    {
-        const ENode consumerNode = egraph.getENodes()[eNodeIdx];
-        uint32_t consumerEClassId = egraph.getENodeEClass(eNodeIdx);
-
-        std::vector<uint32_t> newChildren = consumerNode.children;
-        bool changed = false;
-
-        for (size_t i = 0; i < consumerNode.children.size(); ++i)
-        {
-            uint32_t c = egraph.findConst(consumerNode.children[i]);
-            if (egraph.constantStaging.count(c) == 0)
-            {
-                for (const auto &cls : egraph.getClasses())
-                {
-                    if (egraph.constantStaging.count(cls.id))
-                    {
-                        for (uint32_t enId : cls.enodes)
-                        {
-                            const ENode &c_en = egraph.getENodes()[enId];
-                            if (c_en.opType == OpType::CONTIGUOUS && c_en.children.size() == 1 && egraph.findConst(c_en.children[0]) == c)
-                            {
-                                newChildren[i] = cls.id;
-                                changed = true;
-                                uint64_t pair_id = ((uint64_t)eNodeIdx << 32) | cls.id;
-                                visited_pairs.insert(pair_id);
-                                break;
-                            }
-                        }
-                    }
-                    if (changed)
-                        break;
-                }
-            }
-        }
-
-        if (changed)
-        {
-            std::vector<TensorNode> inNodes;
-            for (uint32_t childId : newChildren)
-            {
-                const EClass &childCls = egraph.getEClass(egraph.findConst(childId));
-                TensorNode in;
-                in.opType = OpType::INPUT;
-                in.dtype = childCls.dtype;
-                in.setShape(childCls.shape);
-                in.strides = childCls.strides;
-                in.backend = childCls.backend;
-                inNodes.push_back(in);
-            }
-
-            TensorNode outNode;
-            outNode.opType = consumerNode.opType;
-            outNode.opName = consumerNode.opName;
-            outNode.dtype = consumerNode.dtype;
-            outNode.setShape(consumerNode.shape);
-            outNode.strides = consumerNode.strides;
-            outNode.backend = consumerNode.backend;
-
-            auto matches = KernelRegistry::get().findMatchingKernels(
-                consumerNode.opType, consumerNode.opName, consumerNode.backend, inNodes, outNode, false, true, true);
-
-            for (uint64_t uid : matches)
-            {
-                const auto &k = KernelRegistry::get().getKernel(uid);
-                ENode n = consumerNode;
-                n.children = newChildren;
-                n.kernelUid = uid;
-                n.opType = k.opType;
-                n.opName = k.opName;
-                egraph.addENode(consumerEClassId, n);
+                const auto &copyKernel = KernelRegistry::get().getKernel(uid);
+                ENode copyNode;
+                copyNode.kernelUid = uid;
+                copyNode.opType = copyKernel.opType;
+                copyNode.opName = copyKernel.opName;
+                copyNode.children = {cpuEClass};
+                copyNode.shape = copyOutNode.getShape();
+                copyNode.strides = copyOutNode.strides;
+                copyNode.viewOffset = copyOutNode.viewOffset;
+                copyNode.dtype = copyOutNode.dtype;
+                copyNode.backend = copyOutNode.backend;
+                egraph.addENode(eclassId, copyNode);
             }
         }
     }

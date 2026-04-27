@@ -801,68 +801,186 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
     TestInputs result;
     result.rawData.resize(kernel.numInputs);
     result.inputIds.resize(kernel.numInputs);
+
+    std::vector<bool> isConstantParam(kernel.numInputs, false);
+    std::vector<std::vector<int32_t>> constantValues(kernel.numInputs);
+
+    if (!kernel.isReference && kernel.refFactory)
+    {
+        Graph tempGraph;
+        std::vector<uint32_t> tempInputs;
+        for (size_t i = 0; i < kernel.numInputs; ++i)
+        {
+            tempInputs.push_back(tempGraph.input(kernel.dummyShapes[i], kernel.dtypes[i]));
+        }
+
+        kernel.refFactory(tempInputs, tempGraph);
+
+        for (const auto &pair : tempGraph.nodes)
+        {
+            const TensorNode &n = pair.second;
+
+            auto traceToInputIdx = [&](uint32_t pid) -> int
+            {
+                uint32_t curr = pid;
+                while (tempGraph.hasNode(curr) &&
+                       (tempGraph.getNode(curr).opType == OpType::CONTIGUOUS ||
+                        tempGraph.getNode(curr).opType == OpType::CAST))
+                {
+                    if (tempGraph.getNode(curr).parentIds.empty())
+                        break;
+                    curr = tempGraph.getNode(curr).parentIds[0];
+                }
+                for (size_t i = 0; i < kernel.numInputs; ++i)
+                {
+                    if (tempInputs[i] == curr)
+                        return (int)i;
+                }
+                return -1;
+            };
+
+            auto checkParam = [&](size_t parentIdx, const std::vector<int32_t> &defaultVals)
+            {
+                if (parentIdx < n.parentIds.size())
+                {
+                    int inputIdx = traceToInputIdx(n.parentIds[parentIdx]);
+                    if (inputIdx >= 0)
+                    {
+                        isConstantParam[inputIdx] = true;
+                        if (constantValues[inputIdx].empty())
+                        {
+                            constantValues[inputIdx] = defaultVals;
+                        }
+                    }
+                }
+            };
+
+            if (n.opType == OpType::REPEAT)
+            {
+                checkParam(1, {2});
+                checkParam(2, {0});
+            }
+            else if (n.opType == OpType::RESHAPE)
+            {
+                std::vector<int32_t> shapeVals;
+                int srcIdx = traceToInputIdx(n.parentIds[0]);
+                if (srcIdx >= 0)
+                {
+                    for (auto s : kernel.dummyShapes[srcIdx])
+                        shapeVals.push_back((int32_t)s);
+                }
+                if (shapeVals.empty())
+                    shapeVals = {1};
+                checkParam(1, shapeVals);
+            }
+            else if (n.opType == OpType::PERMUTE)
+            {
+                std::vector<int32_t> perm;
+                int srcIdx = traceToInputIdx(n.parentIds[0]);
+                if (srcIdx >= 0)
+                {
+                    size_t rank = kernel.dummyShapes[srcIdx].size();
+                    for (size_t i = 0; i < rank; ++i)
+                    {
+                        perm.push_back(rank == 2 ? (int32_t)(1 - i) : (int32_t)i);
+                    }
+                }
+                if (perm.empty())
+                    perm = {0};
+                checkParam(1, perm);
+            }
+            else if (n.opType == OpType::SLICE)
+            {
+                std::vector<int32_t> starts, ends, steps;
+                int srcIdx = traceToInputIdx(n.parentIds[0]);
+                if (srcIdx >= 0)
+                {
+                    for (auto s : kernel.dummyShapes[srcIdx])
+                    {
+                        starts.push_back(0);
+                        ends.push_back((int32_t)s);
+                        steps.push_back(1);
+                    }
+                }
+                else
+                {
+                    starts = {0};
+                    ends = {1};
+                    steps = {1};
+                }
+                checkParam(1, starts);
+                checkParam(2, ends);
+                checkParam(3, steps);
+            }
+            else if (n.opType == OpType::SCATTER)
+            {
+                std::vector<int32_t> starts, ends, steps;
+                int srcIdx = traceToInputIdx(n.parentIds[0]); // Target tensor
+                if (srcIdx >= 0)
+                {
+                    for (auto s : kernel.dummyShapes[srcIdx])
+                    {
+                        starts.push_back(0);
+                        ends.push_back((int32_t)s);
+                        steps.push_back(1);
+                    }
+                }
+                else
+                {
+                    starts = {0};
+                    ends = {1};
+                    steps = {1};
+                }
+                checkParam(2, starts);
+                checkParam(3, ends);
+                checkParam(4, steps);
+            }
+            else if (n.opType == OpType::SUM || n.opType == OpType::MAX)
+            {
+                checkParam(1, {-1});
+            }
+            else if (n.opType == OpType::CONCAT)
+            {
+                checkParam(n.parentIds.size() - 1, {0});
+            }
+            else if (n.opType == OpType::TRIU)
+            {
+                checkParam(1, {1});
+            }
+            else if (n.opType == OpType::FILL)
+            {
+                checkParam(1, {1});
+            }
+            else if (n.opType == OpType::IM2COL)
+            {
+                checkParam(1, {1});
+                checkParam(2, {1});
+                checkParam(3, {0});
+            }
+            else if (n.opType == OpType::ARANGE)
+            {
+                checkParam(0, {0});
+                checkParam(1, {1});
+                checkParam(2, {1});
+            }
+        }
+    }
+
     for (size_t i = 0; i < kernel.numInputs; ++i)
     {
         uint32_t id = UINT32_MAX;
         DType dtype = kernel.dtypes[i];
         uint64_t elements = countElements(kernel.dummyShapes[i]);
         uint64_t sizeBytes = elements * getDTypeSize(dtype);
-        bool isConstantParam = (kernel.opName == "Repeat_Inplace" && i > 0) ||
-                               (kernel.opName == "Reshape_Inplace" && i == 1) ||
-                               (kernel.opName == "Permute_CUDA_Contiguous" && i == 1) ||
-                               (kernel.opName.find("SCATTER") != std::string::npos && i >= 2) ||
-                               (kernel.opName.find("PartialDot") != std::string::npos && i >= 3);
-        if (isConstantParam)
-        {
-            std::vector<int32_t> constData(elements);
-            if (kernel.opName == "Repeat_Inplace")
-            {
-                if (i == 1)
-                    constData[0] = 2;
-                if (i == 2)
-                    constData[0] = 0;
-            }
-            else if (kernel.opName == "Reshape_Inplace")
-            {
-                for (size_t j = 0; j < elements; ++j)
-                    constData[j] = static_cast<int32_t>(kernel.dummyShapes[0][j]);
-            }
-            else if (kernel.opName == "Permute_CUDA_Contiguous")
-            {
-                size_t rank = kernel.dummyShapes[0].size();
-                for (size_t j = 0; j < elements; ++j)
-                {
-                    if (rank == 2)
-                        constData[j] = (j == 0 ? 1 : 0);
-                    else
-                        constData[j] = (int32_t)j;
-                }
-            }
-            else if (kernel.opName.find("SCATTER") != std::string::npos || kernel.opName.find("PartialDot") != std::string::npos)
-            {
-                size_t startsIdx = kernel.opName.find("PartialDot") != std::string::npos ? 3 : 2;
-                size_t endsIdx = startsIdx + 1;
-                size_t stepsIdx = startsIdx + 2;
 
-                if (i == startsIdx)
+        if (isConstantParam[i])
+        {
+            std::vector<int32_t> constData(elements, 0); // default to 0
+            if (!constantValues[i].empty())
+            {
+                for (size_t j = 0; j < elements; ++j)
                 {
-                    for (size_t j = 0; j < elements; ++j)
-                        constData[j] = 0;
-                }
-                else if (i == endsIdx)
-                {
-                    for (size_t j = 0; j < elements; ++j)
-                    {
-                        if (j < kernel.dummyShapes[0].size())
-                            constData[j] = kernel.dummyShapes[0][j];
-                        else
-                            constData[j] = 1;
-                    }
-                }
-                else if (i == stepsIdx)
-                {
-                    for (size_t j = 0; j < elements; ++j)
-                        constData[j] = 1;
+                    constData[j] = constantValues[i][j % constantValues[i].size()];
                 }
             }
             id = graph.constant(kernel.dummyShapes[i], constData.data(), dtype);
