@@ -148,6 +148,15 @@ struct KernelEntry
     std::vector<std::vector<uint32_t>> dummyShapes;
     std::vector<bool> requiresContiguous;
 
+    std::string getName() const
+    {
+        if (opName != "")
+        {
+            return opName;
+        }
+        return toString(opType);
+    }
+
     // Abstracted validity check
     bool matches(const std::vector<TensorNode> &inputs, const TensorNode &output,
                  bool ignoreInputBackends = false, bool ignoreInputContig = false) const

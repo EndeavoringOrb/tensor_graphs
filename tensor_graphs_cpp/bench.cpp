@@ -201,7 +201,7 @@ int main()
             // Run central match that safely ignores OOB array evaluations
             if (!kernel.matches(dummyInputs, dummyOutput))
             {
-                std::cerr << "Skipping kernel " << kernel.opName << " (0x" << std::hex << kernelUid << "): record fails matches() validity check." << std::endl;
+                std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelUid << "): record fails matches() validity check." << std::endl;
                 continue;
             }
 
