@@ -11,6 +11,19 @@
 #include <string>
 #include <algorithm>
 
+inline bool isEClassProtected(uint32_t eclassId, const std::unordered_set<uint32_t> &protectedEClasses, const EGraph &egraph)
+{
+    uint32_t canon = egraph.findConst(eclassId);
+    if (protectedEClasses.count(canon))
+        return true;
+    for (uint32_t id : protectedEClasses)
+    {
+        if (egraph.findConst(id) == canon)
+            return true;
+    }
+    return false;
+}
+
 struct Rule
 {
     virtual ~Rule() = default;
@@ -142,7 +155,21 @@ inline uint32_t createCacheInputNode(EGraph &egraph, const ENode &sourceNode, ui
     uint32_t canonSrcClass = egraph.find(sourceClassId);
     auto it = eclassToLogical.find(canonSrcClass);
     if (it != eclassToLogical.end())
+    {
         srcLogicalId = it->second;
+    }
+    else
+    {
+        // Robust fallback checking underlying merged unions.
+        for (const auto &kv : eclassToLogical)
+        {
+            if (egraph.find(kv.first) == canonSrcClass)
+            {
+                srcLogicalId = kv.second;
+                break;
+            }
+        }
+    }
 
     eclassToLogical[op_cache] = srcLogicalId;
 
@@ -325,12 +352,6 @@ struct FusionRule : public Rule
         auto it = patternsByOp.find(eNode.opType);
         if (it == patternsByOp.end())
             return false;
-
-        // std::unordered_set<uint32_t> canonicalProtected;
-        // for (uint32_t id : protectedEClasses)
-        // {
-        //     canonicalProtected.insert(egraph.findConst(id));
-        // }
 
         for (const auto &pattern : it->second)
         {
@@ -607,7 +628,7 @@ struct FusionRule : public Rule
     static bool matchPatternClass(uint32_t eClassIdx, const EGraph &egraph,
                                   uint32_t patternId, const Pattern &pattern,
                                   std::unordered_map<uint32_t, uint32_t> &binding,
-                                  const std::unordered_set<uint32_t> &canonicalProtected)
+                                  const std::unordered_set<uint32_t> &protectedEClasses)
     {
         uint32_t canonicalClassIdx = egraph.findConst(eClassIdx);
 
@@ -631,7 +652,7 @@ struct FusionRule : public Rule
 
         if (patternId != pattern.rootId)
         {
-            if (canonicalProtected.count(canonicalClassIdx))
+            if (isEClassProtected(canonicalClassIdx, protectedEClasses, egraph))
                 return false;
         }
 
@@ -639,7 +660,7 @@ struct FusionRule : public Rule
         for (uint32_t enodeId : eclass.enodes)
         {
             std::unordered_map<uint32_t, uint32_t> localBinding = binding;
-            if (matchPatternNode(enodeId, egraph, patternId, pattern, localBinding, canonicalProtected))
+            if (matchPatternNode(enodeId, egraph, patternId, pattern, localBinding, protectedEClasses))
             {
                 binding = std::move(localBinding);
                 return true;
@@ -651,7 +672,7 @@ struct FusionRule : public Rule
     static bool matchPatternNode(uint32_t eNodeIdx, const EGraph &egraph,
                                  uint32_t patternId, const Pattern &pattern,
                                  std::unordered_map<uint32_t, uint32_t> &binding,
-                                 const std::unordered_set<uint32_t> &canonicalProtected)
+                                 const std::unordered_set<uint32_t> &protectedEClasses)
     {
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
         const auto &pNode = pattern.graph.getNode(patternId);
@@ -665,7 +686,7 @@ struct FusionRule : public Rule
 
         for (size_t i = 0; i < eNode.children.size(); ++i)
         {
-            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], pattern, binding, canonicalProtected))
+            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], pattern, binding, protectedEClasses))
             {
                 return false;
             }
@@ -2004,7 +2025,7 @@ struct ScatterSliceCancellation : public Rule
             if (sliceNode.opType == OpType::SLICE && sliceNode.children.size() == 4)
             {
                 uint32_t scatterClassId = egraph.findConst(sliceNode.children[0]);
-                if (protectedEClasses.count(scatterClassId))
+                if (isEClassProtected(scatterClassId, protectedEClasses, egraph))
                     continue; // *only if not in protected set*
 
                 for (uint32_t scatterEnodeIdx : egraph.getEClass(scatterClassId).enodes)
@@ -2045,7 +2066,7 @@ struct ScatterSliceCancellation : public Rule
             if (sliceNode.opType == OpType::SLICE && sliceNode.children.size() == 4)
             {
                 uint32_t scatterClassId = egraph.find(sliceNode.children[0]);
-                if (protectedEClasses.count(scatterClassId))
+                if (isEClassProtected(scatterClassId, protectedEClasses, egraph))
                     continue;
 
                 for (uint32_t scatterEnodeIdx : egraph.getEClass(scatterClassId).enodes)
