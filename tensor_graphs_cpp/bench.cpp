@@ -246,20 +246,6 @@ int main()
                 }
             }
             bool isOutputCuda = runCuda;
-
-            if (kernel.opType == OpType::COPY_TO)
-            {
-                if (runCuda)
-                {
-                    inIsCuda.assign(inIsCuda.size(), false);
-                    isOutputCuda = true;
-                }
-                else
-                {
-                    inIsCuda.assign(inIsCuda.size(), true);
-                    isOutputCuda = false;
-                }
-            }
 #else
             std::vector<bool> inIsCuda(r.inputShapes.size(), false);
             bool isOutputCuda = false;
