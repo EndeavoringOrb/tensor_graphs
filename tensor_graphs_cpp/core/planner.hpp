@@ -278,6 +278,7 @@ private:
         }
         // rules.emplace_back(std::make_unique<DistributiveProperty>());
 
+        std::map<std::string, uint32_t> ruleMatchCounts;
         size_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
@@ -300,6 +301,7 @@ private:
 
                     rule->apply(egraph, eNodeIdx, protectedEClasses, eclassToLogical);
                     changed = true;
+                    ruleMatchCounts[rule->name()]++;
                     nMatches++;
                 }
                 // #ifdef DEBUG
@@ -308,6 +310,12 @@ private:
             }
             egraph.rebuild();
             changed = egraph.getENodes().size() != numENodes;
+            std::cout << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
+            for (auto const &[name, count] : ruleMatchCounts)
+            {
+                std::cout << "  " << name << ": " << count << " matches" << std::endl;
+            }
+            std::cout << "Total Matches: " << nMatches << std::endl;
 #ifdef DEBUG
             timer.tick();
             std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << std::endl;

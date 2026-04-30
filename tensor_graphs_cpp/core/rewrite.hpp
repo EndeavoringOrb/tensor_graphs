@@ -14,6 +14,7 @@
 struct Rule
 {
     virtual ~Rule() = default;
+    virtual std::string name() const = 0;
     virtual bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) = 0;
     virtual void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical) = 0;
 };
@@ -151,6 +152,8 @@ inline uint32_t createCacheInputNode(EGraph &egraph, const ENode &sourceNode, ui
 // a*(b+c) -> (a*b)+(a*c)
 struct DistributiveProperty : public Rule
 {
+    std::string name() const override { return "DistributiveProperty"; }
+
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
         const ENode enode = egraph.getENodes()[eNodeIdx];
@@ -250,6 +253,8 @@ struct DistributiveProperty : public Rule
 
 struct FusionRule : public Rule
 {
+    std::string name() const override { return "FusionRule"; }
+
     struct Pattern
     {
         std::string opName;
@@ -652,6 +657,8 @@ struct FusionRule : public Rule
 
 struct CopyToOfContiguous : public Rule
 {
+    std::string name() const override { return "CopyToOfContiguous"; }
+
     bool hasOp(const EGraph &egraph, uint32_t eclassId, OpType op) const
     {
         for (uint32_t enodeId : egraph.getEClass(eclassId).enodes)
@@ -775,6 +782,8 @@ struct CopyToOfContiguous : public Rule
 
 struct ContiguousOfCopyTo : public Rule
 {
+    std::string name() const override { return "ContiguousOfCopyTo"; }
+
     bool hasOp(const EGraph &egraph, uint32_t eclassId, OpType op) const
     {
         for (uint32_t enodeId : egraph.getEClass(eclassId).enodes)
@@ -902,6 +911,8 @@ struct ContiguousElimination : public Rule
     uint32_t matched_i;
     uint32_t matched_childENodeIdx;
 
+    std::string name() const override { return "ContiguousElimination"; }
+
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &) override
     {
         const ENode &enode = egraph.getENodes()[eNodeIdx];
@@ -1014,6 +1025,8 @@ struct ContiguousElimination : public Rule
 
 struct ConstantFolding : public Rule
 {
+    std::string name() const override { return "ConstantFolding"; }
+
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
@@ -1216,6 +1229,8 @@ struct InfinityDomination : public Rule
 {
     std::unordered_set<uint32_t> visited_enodes;
 
+    std::string name() const override { return "InfinityDomination"; }
+
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
         if (visited_enodes.count(eNodeIdx))
@@ -1389,6 +1404,8 @@ struct InfinityDomination : public Rule
 
 struct SlicePushDownElementwise : public Rule
 {
+    std::string name() const override { return "SlicePushDownElementwise"; }
+
     std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId) const
     {
         uint32_t canon = egraph.findConst(eclassId);
@@ -1534,6 +1551,8 @@ struct SlicePushDownElementwise : public Rule
 
 struct SlicePushDownDot : public Rule
 {
+    std::string name() const override { return "SlicePushDownDot"; }
+
     std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId) const
     {
         uint32_t canon = egraph.findConst(eclassId);
@@ -1744,6 +1763,8 @@ struct SlicePullUpDot : public Rule
     };
 
     std::unordered_set<MatchKey, MatchKeyHash> visited;
+
+    std::string name() const override { return "SlicePullUpDot"; }
 
     std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId) const
     {
@@ -1992,6 +2013,8 @@ struct SlicePullUpDot : public Rule
 
 struct ScatterSliceCancellation : public Rule
 {
+    std::string name() const override { return "ScatterSliceCancellation"; }
+
     std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId) const
     {
         uint32_t canon = egraph.findConst(eclassId);
