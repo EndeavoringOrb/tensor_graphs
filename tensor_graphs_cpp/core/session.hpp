@@ -598,7 +598,18 @@ public:
                     if (materialized.insert(memId).second)
                     {
                         timer.tick();
-                        uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
+
+                        // Compute true spanned size in case of non-contiguous INPUT nodes (folded views)
+                        uint64_t maxOffset = node.viewOffset;
+                        for (size_t d = 0; d < node.getShape().size(); ++d)
+                        {
+                            if (node.getShape()[d] > 0)
+                            {
+                                maxOffset += (node.getShape()[d] - 1) * node.strides[d];
+                            }
+                        }
+                        uint64_t elementsSpan = node.getShape().empty() ? 1 : (maxOffset + 1);
+                        uint64_t sizeBytes = elementsSpan * getDTypeSize(node.dtype);
 
                         uint64_t offset = memManager.allocate(node.backend, memId, sizeBytes, node.storageType);
 

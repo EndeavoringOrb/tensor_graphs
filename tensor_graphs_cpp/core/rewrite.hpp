@@ -149,6 +149,25 @@ inline uint32_t createCacheInputNode(EGraph &egraph, const ENode &sourceNode, ui
     return op_cache;
 }
 
+std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId)
+{
+    uint32_t canon = egraph.findConst(eclassId);
+    if (egraph.constantStaging.count(canon))
+    {
+        const auto &data = egraph.constantStaging.at(canon);
+        const EClass &cls = egraph.getEClass(canon);
+        uint64_t numElements = countElements(cls.shape);
+        std::vector<int32_t> res(numElements);
+        const int32_t *src = reinterpret_cast<const int32_t *>(data.data()) + cls.viewOffset;
+        for (uint64_t i = 0; i < numElements; ++i)
+        {
+            res[i] = src[getStridedIndex(i, cls.shape, cls.strides)];
+        }
+        return res;
+    }
+    return {};
+}
+
 // a*(b+c) -> (a*b)+(a*c)
 struct DistributiveProperty : public Rule
 {
@@ -1048,10 +1067,7 @@ struct ConstantFolding : public Rule
         if (egraph.constantStaging.find(eclassId) != egraph.constantStaging.end())
             return false;
 
-        // Ensure we only fold into contiguous EClasses to prevent layout/offset mismatches
         const EClass &targetCls = egraph.getEClass(eclassId);
-        if (!isContiguous(targetCls) || targetCls.viewOffset != 0)
-            return false;
 
         for (uint32_t enodeId : targetCls.enodes)
         {
@@ -1105,13 +1121,14 @@ struct ConstantFolding : public Rule
             inViews.push_back(TensorView(inNode, 0));
         }
 
+        const EClass targetCls = egraph.getEClass(eclassId);
         TensorNode outNode;
         outNode.opType = eNode.opType;
         outNode.opName = eNode.opName;
         outNode.dtype = eNode.dtype;
         outNode.setShape(eNode.shape);
-        outNode.strides = calcContiguousStrides(eNode.shape);
-        outNode.viewOffset = 0;
+        outNode.strides = targetCls.strides;
+        outNode.viewOffset = targetCls.viewOffset;
         outNode.backend = Backend::CPU;
 
         auto matches = KernelRegistry::get().findMatchingKernels(
@@ -1137,42 +1154,40 @@ struct ConstantFolding : public Rule
         if (selectedKernel->isView)
         {
             uint32_t firstChild = egraph.find(eNode.children[0]);
-            const auto &parentData = egraph.constantStaging.at(firstChild);
-
-            uint64_t numElements = countElements(eNode.shape);
-            uint64_t elemSize = getDTypeSize(eNode.dtype);
-            outData.resize(numElements * elemSize);
-
-            const uint8_t *src = parentData.data();
-            uint8_t *dst = outData.data();
-
-            for (uint64_t i = 0; i < numElements; ++i)
-            {
-                uint64_t flat_idx = getStridedIndex(i, eNode.shape, eNode.strides) + eNode.viewOffset;
-                std::memcpy(dst + i * elemSize, src + flat_idx * elemSize, elemSize);
-            }
+            outData = egraph.constantStaging.at(firstChild);
         }
         else
         {
             if (!selectedKernel->run)
                 return;
-            outData.resize(getSizeBytes(outNode.getShape(), outNode.dtype));
-            std::vector<void *> kernelOutputs = {outData.data()};
-            std::vector<TensorView> outViews = {TensorView(outNode, 0)};
+
+            uint64_t maxOffset = targetCls.viewOffset;
+            for (size_t d = 0; d < targetCls.shape.size(); ++d)
+            {
+                if (targetCls.shape[d] > 0)
+                {
+                    maxOffset += (targetCls.shape[d] - 1) * targetCls.strides[d];
+                }
+            }
+            uint64_t reqBytes = (targetCls.shape.empty() ? 1 : (maxOffset + 1)) * getDTypeSize(targetCls.dtype);
+            outData.resize(reqBytes);
+
+            std::vector<void *> kernelOutputs = {outData.data() + targetCls.viewOffset * getDTypeSize(targetCls.dtype)};
+            std::vector<TensorView> outViews = {TensorView(outNode, targetCls.viewOffset * getDTypeSize(targetCls.dtype))};
             selectedKernel->run(kernelInputs, kernelOutputs, inViews, outViews);
         }
 
         ENode foldedNode;
         foldedNode.kernelUid = 0;
         foldedNode.opType = OpType::INPUT;
-        foldedNode.shape = eNode.shape;
-        foldedNode.strides = calcContiguousStrides(eNode.shape);
-        foldedNode.viewOffset = 0;
-        foldedNode.dtype = eNode.dtype;
+        foldedNode.shape = targetCls.shape;
+        foldedNode.strides = targetCls.strides;
+        foldedNode.viewOffset = targetCls.viewOffset;
+        foldedNode.dtype = targetCls.dtype;
         foldedNode.backend = Backend::CPU;
         foldedNode.leafId = eNodeIdx | 0x40000000;
 
-        Backend originalBackend = egraph.getEClass(eclassId).backend;
+        Backend originalBackend = targetCls.backend;
 
         if (originalBackend == Backend::CPU)
         {
@@ -1196,8 +1211,8 @@ struct ConstantFolding : public Rule
             TensorNode copyOutNode = copyInNode;
             copyOutNode.opType = OpType::COPY_TO;
             copyOutNode.backend = originalBackend;
-            copyOutNode.strides = calcContiguousStrides(copyOutNode.getShape());
-            copyOutNode.viewOffset = 0;
+            copyOutNode.strides = targetCls.strides;
+            copyOutNode.viewOffset = targetCls.viewOffset;
 
             Graph copyGraph;
             uint32_t copyIn = copyGraph.input(copyInNode.getShape(), copyInNode.dtype);
@@ -1406,19 +1421,6 @@ struct SlicePushDownElementwise : public Rule
 {
     std::string name() const override { return "SlicePushDownElementwise"; }
 
-    std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId) const
-    {
-        uint32_t canon = egraph.findConst(eclassId);
-        if (egraph.constantStaging.count(canon))
-        {
-            const auto &data = egraph.constantStaging.at(canon);
-            std::vector<int32_t> res(data.size() / sizeof(int32_t));
-            std::memcpy(res.data(), data.data(), data.size());
-            return res;
-        }
-        return {};
-    }
-
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
         const ENode &enode = egraph.getENodes()[eNodeIdx];
@@ -1552,19 +1554,6 @@ struct SlicePushDownElementwise : public Rule
 struct SlicePushDownDot : public Rule
 {
     std::string name() const override { return "SlicePushDownDot"; }
-
-    std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId) const
-    {
-        uint32_t canon = egraph.findConst(eclassId);
-        if (egraph.constantStaging.count(canon))
-        {
-            const auto &data = egraph.constantStaging.at(canon);
-            std::vector<int32_t> res(data.size() / sizeof(int32_t));
-            std::memcpy(res.data(), data.data(), data.size());
-            return res;
-        }
-        return {};
-    }
 
     uint32_t addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
     {
@@ -1765,19 +1754,6 @@ struct SlicePullUpDot : public Rule
     std::unordered_set<MatchKey, MatchKeyHash> visited;
 
     std::string name() const override { return "SlicePullUpDot"; }
-
-    std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId) const
-    {
-        uint32_t canon = egraph.findConst(eclassId);
-        if (egraph.constantStaging.count(canon))
-        {
-            const auto &data = egraph.constantStaging.at(canon);
-            std::vector<int32_t> res(data.size() / sizeof(int32_t));
-            std::memcpy(res.data(), data.data(), data.size());
-            return res;
-        }
-        return {};
-    }
 
     uint32_t addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
     {
@@ -2014,19 +1990,6 @@ struct SlicePullUpDot : public Rule
 struct ScatterSliceCancellation : public Rule
 {
     std::string name() const override { return "ScatterSliceCancellation"; }
-
-    std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId) const
-    {
-        uint32_t canon = egraph.findConst(eclassId);
-        if (egraph.constantStaging.count(canon))
-        {
-            const auto &data = egraph.constantStaging.at(canon);
-            std::vector<int32_t> res(data.size() / sizeof(int32_t));
-            std::memcpy(res.data(), data.data(), data.size());
-            return res;
-        }
-        return {};
-    }
 
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {

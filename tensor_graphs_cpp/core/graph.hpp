@@ -461,8 +461,14 @@ inline std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)
     if (graph.constantStaging.count(id))
     {
         const auto &data = graph.constantStaging.at(id);
-        std::vector<int32_t> res(data.size() / sizeof(int32_t));
-        std::memcpy(res.data(), data.data(), data.size());
+        const auto &node = graph.getNode(id);
+        uint64_t numElements = countElements(node.getShape());
+        std::vector<int32_t> res(numElements);
+        const int32_t *src = reinterpret_cast<const int32_t *>(data.data()) + node.viewOffset;
+        for (uint64_t i = 0; i < numElements; ++i)
+        {
+            res[i] = src[getStridedIndex(i, node.getShape(), node.strides)];
+        }
         return res;
     }
     std::stringstream ss;
