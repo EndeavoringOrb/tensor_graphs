@@ -20,3 +20,9 @@ is it properly slicing backward gather for the first gather with gather(embeddin
 remove duplicate logic from kernel match functions and findMatchingKernels
 
 constant fold non-contiguous values (repeat), or just look past them?
+
+something more robust for collision than 0x40000000 and 0x80000000
+
+make sure we don't have stale cache when needed region (push down from output needed) is smaller than dirty region (pulled up from input)
+
+DRY scatter add eclass with eclassToLogical

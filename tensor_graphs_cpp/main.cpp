@@ -560,7 +560,7 @@ int main()
     Session session(g, mem, logits_id, "dirty_region_caches/gemma-3-270m-cpp.jsonl");
 
     // Add manual buckets for decoding
-    for (uint32_t i = 0; i < maxSeqLen; ++i)
+    for (uint32_t i = tokens.size(); i < maxSeqLen; ++i) // TODO: initialize i = 0, tokens.size() is just a shortcut to avoid compiling for decode buckets we won't use in this single run example
     {
         std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
         Region inputRegion;

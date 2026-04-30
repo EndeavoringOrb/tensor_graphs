@@ -147,16 +147,9 @@ public:
             child = find(child);
         }
 
-        if (node.opType == OpType::INPUT)
+        if (node.opType == OpType::INPUT && node.leafId == UINT32_MAX)
         {
             node.leafId = nextLeafId++;
-            node.sig = computeSignature(node);
-
-            uint32_t enodeId = static_cast<uint32_t>(enodes.size());
-            enodes.push_back(std::move(node));
-            classes[canonical].enodes.push_back(enodeId);
-            nodeToEClass.push_back(canonical);
-            return canonical;
         }
 
         node.sig = computeSignature(node);
@@ -290,32 +283,29 @@ public:
             uint32_t cls = find(nodeToEClass[i]);
             nodeToEClass[i] = cls;
 
-            if (node.opType != OpType::INPUT)
+            if (childrenChanged || node.sig == 0)
             {
-                if (childrenChanged || node.sig == 0)
-                {
-                    node.sig = computeSignature(node);
-                }
+                node.sig = computeSignature(node);
+            }
 
-                auto &bucket = newHash[node.sig];
-                bool merged = false;
+            auto &bucket = newHash[node.sig];
+            bool merged = false;
 
-                for (uint32_t otherEnodeId : bucket)
+            for (uint32_t otherEnodeId : bucket)
+            {
+                const uint32_t otherCls = find(nodeToEClass[otherEnodeId]);
+                if (node == enodes[otherEnodeId])
                 {
-                    const uint32_t otherCls = find(nodeToEClass[otherEnodeId]);
-                    if (node == enodes[otherEnodeId])
-                    {
-                        merge(otherCls, cls);
-                        nodeToEClass[i] = find(otherCls);
-                        merged = true;
-                        break;
-                    }
+                    merge(otherCls, cls);
+                    nodeToEClass[i] = find(otherCls);
+                    merged = true;
+                    break;
                 }
+            }
 
-                if (!merged)
-                {
-                    bucket.push_back(i);
-                }
+            if (!merged)
+            {
+                bucket.push_back(i);
             }
         }
 

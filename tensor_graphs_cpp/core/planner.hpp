@@ -260,7 +260,7 @@ private:
         return order;
     }
 
-    void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses)
+    void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical, bool injected)
     {
         std::vector<std::unique_ptr<Rule>> rules;
         rules.emplace_back(std::make_unique<FusionRule>());
@@ -268,9 +268,14 @@ private:
         rules.emplace_back(std::make_unique<ContiguousOfCopyTo>());
         rules.emplace_back(std::make_unique<ContiguousElimination>());
         rules.emplace_back(std::make_unique<ConstantFolding>());
-        rules.emplace_back(std::make_unique<InfinityDomination>());
-        rules.emplace_back(std::make_unique<SlicePushDownElementwise>());
-        rules.emplace_back(std::make_unique<SlicePushDownDot>());
+        if (injected)
+        {
+            rules.emplace_back(std::make_unique<InfinityDomination>());
+            rules.emplace_back(std::make_unique<SlicePushDownElementwise>());
+            rules.emplace_back(std::make_unique<SlicePushDownDot>());
+            rules.emplace_back(std::make_unique<SlicePullUpDot>());
+            rules.emplace_back(std::make_unique<ScatterSliceCancellation>());
+        }
         // rules.emplace_back(std::make_unique<DistributiveProperty>());
 
         size_t iterations = 0;
@@ -284,16 +289,16 @@ private:
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
             // #ifdef DEBUG
-            ProgressTimer timer2(numENodes, "saturation round " + std::to_string(iterations - 1) + " ");
+            ProgressTimer timer2(0, "saturation round " + std::to_string(iterations - 1) + " ");
             // #endif
-            for (uint32_t eNodeIdx = 0; eNodeIdx < numENodes; eNodeIdx++)
+            for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getENodes().size(); eNodeIdx++)
             {
                 for (const auto &rule : rules)
                 {
                     if (!rule->match(egraph, eNodeIdx, protectedEClasses))
                         continue;
 
-                    rule->apply(egraph, eNodeIdx, protectedEClasses);
+                    rule->apply(egraph, eNodeIdx, protectedEClasses, eclassToLogical);
                     changed = true;
                     nMatches++;
                 }
@@ -344,6 +349,7 @@ private:
 
         std::function<void(uint32_t)> visit = [&](uint32_t eclass)
         {
+            eclass = egraph.findConst(eclass);
             if (visited.count(eclass))
                 return;
             visited.insert(eclass);
@@ -372,7 +378,7 @@ private:
 
             for (size_t i = 0; i < node.children.size(); ++i)
             {
-                uint32_t c = node.children[i];
+                uint32_t c = egraph.findConst(node.children[i]);
                 ref[c]--;
                 if (ref[c] == 0)
                 {
@@ -408,7 +414,7 @@ private:
                                  const std::unordered_map<uint32_t, Backend> &cachedNodes,
                                  const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
                                  const std::unordered_set<uint32_t> &immutable_eclasses,
-                                 bool stopOnFirstValid = false,
+                                 bool stopOnFirstValid = true,
                                  bool cheapInputCopy = false)
     {
         constexpr float INF = std::numeric_limits<float>::infinity();
@@ -1094,10 +1100,7 @@ private:
                 {
                     best_cost = current_cost;
                     best_selection_map = selection_map;
-                    if (!stopOnFirstValid)
-                    {
-                        std::cout << "new best cost: " << std::to_string(best_cost) << std::endl;
-                    }
+                    std::cout << "new best cost: " << std::to_string(best_cost) << std::endl;
                 }
 
                 if (stopOnFirstValid)
@@ -1205,10 +1208,6 @@ private:
 
         ExtractionResult result;
         result.totalCost = best_cost;
-        if (stopOnFirstValid)
-        {
-            return result;
-        }
 
         for (auto const &kv : best_selection_map)
         {
@@ -1348,6 +1347,20 @@ private:
         compiledRefCounts[rootPhysId] = std::max<uint32_t>(1, compiledRefCounts[rootPhysId]);
         compiled.refCounts = compiledRefCounts;
 
+        // Validate all INPUT nodes
+        for (const auto &pair : compiled.nodesMap)
+        {
+            const TensorNode &node = pair.second;
+            if (node.opType == OpType::INPUT && node.storageType == StorageType::TRANSIENT)
+            {
+                uint32_t logicalId = compiled.getLogicalId(node.id);
+                if (logicalId == UINT32_MAX)
+                {
+                    Error::throw_err("[buildCompiledGraph] Orphan cache INPUT node " + std::to_string(node.id) + " has no logicalId mapping and is TRANSIENT. This will crash at runtime. A rewrite rule forgot to register its cache node in eclassToLogical.");
+                }
+            }
+        }
+
         return compiled;
     }
 
@@ -1403,6 +1416,7 @@ private:
                 enode.viewOffset = node.viewOffset;
                 enode.dtype = node.dtype;
                 enode.backend = node.backend;
+                enode.leafId = node.id;
                 baseState.egraph.addENode(eclassId, enode);
                 continue;
             }
@@ -1442,12 +1456,6 @@ private:
             }
         }
 
-        if (doSaturate)
-        {
-            std::unordered_set<uint32_t> emptyProtected;
-            saturate(baseState.egraph, emptyProtected);
-        }
-
         for (const auto &kv : baseState.nodeToEClass)
         {
             uint32_t physId = kv.first; // Here physId == logicalId
@@ -1455,10 +1463,16 @@ private:
             baseState.eclassToLogical[ecl] = physId;
         }
 
+        if (doSaturate)
+        {
+            std::unordered_set<uint32_t> emptyProtected;
+            saturate(baseState.egraph, emptyProtected, baseState.eclassToLogical, false);
+        }
+
         baseStateInitialized = true;
     }
 
-    void injectPartialPath(
+    bool injectPartialPath(
         EGraph &egraph,
         const Graph &graph,
         uint32_t logicalId,
@@ -1467,12 +1481,13 @@ private:
         const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
         std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
     {
+        bool injected = false;
         uint32_t E_L = egraph.find(nodeToEClass.at(logicalId));
         const TensorNode &sourceNode = graph.getNode(logicalId);
 
         if (sourceNode.opType == OpType::INPUT)
         {
-            return;
+            return injected;
         }
 
         bool isFullRegion = false;
@@ -1496,7 +1511,7 @@ private:
 
         if (isFullRegion)
         {
-            return;
+            return injected;
         }
 
         Backend targetBackend = sourceNode.backend;
@@ -1513,6 +1528,7 @@ private:
         cacheNode.shape = sourceNode.getShape();
         cacheNode.strides = calcContiguousStrides(cacheNode.shape);
         cacheNode.backend = targetBackend;
+        cacheNode.leafId = logicalId;
         egraph.addENode(E_Cache, cacheNode);
 
         eclassToLogical[E_Cache] = logicalId;
@@ -1880,9 +1896,10 @@ private:
 
         egraph.merge(E_L, current_E);
         eclassToLogical[egraph.find(E_L)] = logicalId;
+        return true;
     }
 
-    void injectInputOutputPartialPaths(
+    bool injectInputOutputPartialPaths(
         EGraph &egraph,
         const Graph &graph,
         uint32_t rootId,
@@ -1892,9 +1909,10 @@ private:
         const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
         std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
     {
+        bool injected = false;
         if (!outputNeeded.empty())
         {
-            injectPartialPath(egraph, graph, rootId, outputNeeded, cachedNodes, nodeToEClass, eclassToLogical);
+            injected = injected || injectPartialPath(egraph, graph, rootId, outputNeeded, cachedNodes, nodeToEClass, eclassToLogical);
         }
 
         for (const auto &kv : dirtyOutputRegions)
@@ -1908,11 +1926,12 @@ private:
             {
                 if (!kv.second.empty())
                 {
-                    injectPartialPath(egraph, graph, nodeId, kv.second, cachedNodes, nodeToEClass, eclassToLogical);
+                    injected = injected || injectPartialPath(egraph, graph, nodeId, kv.second, cachedNodes, nodeToEClass, eclassToLogical);
                 }
             }
         }
         egraph.rebuild();
+        return injected;
     }
 
 public:
@@ -1934,7 +1953,8 @@ public:
         EGraph egraph = baseState.egraph;
         auto eclassToLogical = baseState.eclassToLogical;
 
-        injectInputOutputPartialPaths(egraph, graph, rootId, outputNeeded, dirtyOutputRegions, cachedNodes, baseState.nodeToEClass, eclassToLogical);
+        bool injected = injectInputOutputPartialPaths(egraph, graph, rootId, outputNeeded, dirtyOutputRegions, cachedNodes, baseState.nodeToEClass, eclassToLogical);
+        std::cout << "Injected: " << injected << std::endl;
 
         if (doSaturate)
         {
@@ -1944,7 +1964,7 @@ public:
                 uint32_t logicalId = kv.first;
                 protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
             }
-            saturate(egraph, protectedEClasses);
+            saturate(egraph, protectedEClasses, eclassToLogical, injected);
         }
 
         // #ifdef DEBUG
@@ -1976,7 +1996,7 @@ public:
             }
         }
 
-        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, false, cheapInputCopy);
+        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, true, cheapInputCopy);
 
         return buildCompiledGraph(
             rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes, eclassToLogical);
