@@ -423,7 +423,8 @@ private:
                                  const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
                                  const std::unordered_set<uint32_t> &immutable_eclasses,
                                  bool stopOnFirstValid = true,
-                                 bool cheapInputCopy = false)
+                                 bool cheapInputCopy = false,
+                                 bool strictCache = false)
     {
         constexpr float INF = std::numeric_limits<float>::infinity();
         constexpr float EPS = 1e-6f;
@@ -474,6 +475,16 @@ private:
             if (enode.opType == OpType::INPUT)
             {
                 info.cost = 0.0f;
+                if (strictCache && (enode.leafId & 0x80000000))
+                {
+                    uint32_t eclassId = egraph.getENodeEClass(i);
+                    uint32_t canonId = egraph.findConst(eclassId);
+                    uint32_t logicalId = eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : UINT32_MAX;
+                    if (logicalId == UINT32_MAX || cachedNodes.find(logicalId) == cachedNodes.end())
+                    {
+                        info.cost = INF;
+                    }
+                }
             }
             else if (enode.kernelUid != 0)
             {
@@ -1941,7 +1952,8 @@ public:
         const std::unordered_map<uint32_t, Backend> &cachedNodes,
         const std::vector<Region> &outputNeeded,
         bool doSaturate = true,
-        bool cheapInputCopy = false)
+        bool cheapInputCopy = false,
+        bool strictCache = false)
     {
         initBaseEGraph(rootId, graph, doSaturate);
 
@@ -1991,7 +2003,7 @@ public:
             }
         }
 
-        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, true, cheapInputCopy);
+        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, true, cheapInputCopy, strictCache);
 
         return buildCompiledGraph(
             rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes, eclassToLogical);

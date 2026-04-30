@@ -1031,7 +1031,8 @@ public:
                 protectedCachedNodes,
                 req.bucket.outputNeeded,
                 true,
-                false);
+                false,
+                true);
             cachedGraphs[req.key] = std::move(plan);
         }
 
