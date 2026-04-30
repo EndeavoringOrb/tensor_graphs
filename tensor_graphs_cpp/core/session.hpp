@@ -978,10 +978,24 @@ public:
             // Find all eclasses that need to be cached. Look for target buffers in chosen scatters.
             for (const auto &inst : plan.instructions)
             {
+                bool isScatter = false;
+                uint32_t targetIdx = 0;
+
                 const TensorNode &node = plan.nodesMap.at(inst.nodeId);
                 if (node.opType == OpType::SCATTER)
                 {
-                    uint32_t targetPhysId = inst.inputNodeIds[0];
+                    isScatter = true;
+                    targetIdx = 0;
+                }
+                else if (inst.inplaceInputIndex >= 0)
+                {
+                    isScatter = true;
+                    targetIdx = inst.inplaceInputIndex;
+                }
+
+                if (isScatter)
+                {
+                    uint32_t targetPhysId = inst.inputNodeIds[targetIdx];
                     const TensorNode &targetNode = plan.nodesMap.at(targetPhysId);
 
                     if (targetNode.opType == OpType::INPUT)

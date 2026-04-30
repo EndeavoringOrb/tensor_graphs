@@ -443,35 +443,22 @@ private:
                 {
                     info.isScatter = true;
                 }
-                else if (enode.opType == OpType::FUSED && kernel.numInputs == 5)
+                else if (enode.opType == OpType::FUSED)
                 {
-                    Graph pGraph;
-                    std::vector<TensorNode> dummyInputs;
-                    for (size_t k = 0; k < 5; ++k)
+                    const auto *refEntry = ReferenceGraphRegistry::get().getFactory(kernel.opName);
+                    if (refEntry)
                     {
-                        pGraph.input(kernel.dummyShapes[k], kernel.dtypes[k]);
-                        TensorNode inNode;
-                        inNode.opType = OpType::INPUT;
-                        inNode.dtype = kernel.dtypes[k];
-                        inNode.setShape(kernel.dummyShapes[k]);
-                        inNode.backend = enode.backend;
-                        dummyInputs.push_back(inNode);
-                    }
-
-                    uint32_t pRoot = pGraph.scatter(0, 1, 2, 3, 4);
-
-                    TensorNode dummyOut;
-                    dummyOut.opType = enode.opType;
-                    dummyOut.dtype = enode.dtype;
-                    dummyOut.setShape(enode.shape);
-                    dummyOut.backend = enode.backend;
-
-                    auto matches = KernelRegistry::get().findMatchingKernelsByPattern(
-                        pGraph, pRoot, enode.backend, dummyInputs, dummyOut, false, true, true);
-
-                    if (std::find(matches.begin(), matches.end(), enode.kernelUid) != matches.end())
-                    {
-                        info.isScatter = true;
+                        Graph pGraph;
+                        std::vector<uint32_t> pInputs;
+                        for (size_t k = 0; k < kernel.numInputs; ++k)
+                        {
+                            pInputs.push_back(pGraph.input(kernel.dummyShapes[k], kernel.dtypes[k]));
+                        }
+                        uint32_t pRoot = refEntry->factory(pInputs, pGraph);
+                        if (pGraph.getNode(pRoot).opType == OpType::SCATTER)
+                        {
+                            info.isScatter = true;
+                        }
                     }
                 }
             }
