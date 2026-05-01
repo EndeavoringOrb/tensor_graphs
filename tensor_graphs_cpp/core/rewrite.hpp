@@ -1574,6 +1574,29 @@ struct SlicePushDownElementwise : public Rule
 
 struct SlicePushDownDot : public Rule
 {
+    struct MatchKey
+    {
+        uint32_t eNodeIdx;
+        uint32_t childNodeIdx;
+        uint32_t srcNodeIdx;
+        bool operator==(const MatchKey &o) const
+        {
+            return eNodeIdx == o.eNodeIdx && childNodeIdx == o.childNodeIdx && srcNodeIdx == o.srcNodeIdx;
+        }
+    };
+
+    struct MatchKeyHash
+    {
+        std::size_t operator()(const MatchKey &k) const
+        {
+            return std::hash<uint32_t>{}(k.eNodeIdx) ^
+                   (std::hash<uint32_t>{}(k.childNodeIdx) << 1) ^
+                   (std::hash<uint32_t>{}(k.srcNodeIdx) << 2);
+        }
+    };
+
+    std::unordered_set<MatchKey, MatchKeyHash> visited;
+
     std::string name() const override { return "SlicePushDownDot"; }
 
     uint32_t addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
@@ -1598,7 +1621,9 @@ struct SlicePushDownDot : public Rule
                 {
                     if (egraph.getENodes()[srcNodeIdx].opType == OpType::DOT)
                     {
-                        return true;
+                        MatchKey key{eNodeIdx, childNodeIdx, srcNodeIdx};
+                        if (visited.find(key) == visited.end())
+                            return true;
                     }
                 }
             }
@@ -1627,45 +1652,6 @@ struct SlicePushDownDot : public Rule
             const ENode sliceNode = egraph.getENodes()[sliceNodeIdx];
 
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
-            auto starts = getConstInt32(egraph, sliceNode.children[1]);
-            auto ends = getConstInt32(egraph, sliceNode.children[2]);
-            auto steps = getConstInt32(egraph, sliceNode.children[3]);
-
-            if (starts.empty() || ends.empty() || steps.empty())
-                Error::throw_err("[SlicePushDownDot.apply] can't find constants for all slice args");
-
-            bool validSteps = true;
-            for (int32_t s : steps)
-            {
-                if (s != 1)
-                    validSteps = false; // Only support step=1 for pushing down through DOT
-            }
-            if (!validSteps)
-                continue;
-
-            std::vector<uint32_t> outClassShape = egraph.getEClass(srcClass).shape;
-            uint32_t rank = outClassShape.size();
-            if (rank != 2 && rank != 3)
-                continue; // DOT only supports rank 2 and 3
-
-            while (starts.size() < rank)
-                starts.push_back(0);
-            while (ends.size() < rank)
-                ends.push_back(outClassShape[ends.size()]);
-
-            for (size_t d = 0; d < rank; ++d)
-            {
-                if (starts[d] < 0)
-                    starts[d] += outClassShape[d];
-                if (ends[d] < 0)
-                    ends[d] += outClassShape[d];
-                starts[d] = std::max(0, starts[d]);
-                ends[d] = std::min((int32_t)outClassShape[d], std::max(starts[d], ends[d]));
-            }
-
-            const std::vector<uint32_t> sliceShape = sliceNode.shape;
-            std::vector<uint64_t> sliceContigStrides = calcContiguousStrides(sliceShape);
-
             std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
 
             for (uint32_t srcNodeIdx : srcEnodes)
@@ -1673,6 +1659,49 @@ struct SlicePushDownDot : public Rule
                 const ENode dotNode = egraph.getENodes()[srcNodeIdx];
                 if (dotNode.opType != OpType::DOT)
                     continue;
+
+                MatchKey key{eNodeIdx, sliceNodeIdx, srcNodeIdx};
+                if (!visited.insert(key).second)
+                    continue;
+
+                auto starts = getConstInt32(egraph, sliceNode.children[1]);
+                auto ends = getConstInt32(egraph, sliceNode.children[2]);
+                auto steps = getConstInt32(egraph, sliceNode.children[3]);
+
+                if (starts.empty() || ends.empty() || steps.empty())
+                    Error::throw_err("[SlicePushDownDot.apply] can't find constants for all slice args");
+
+                bool validSteps = true;
+                for (int32_t s : steps)
+                {
+                    if (s != 1)
+                        validSteps = false; // Only support step=1 for pushing down through DOT
+                }
+                if (!validSteps)
+                    continue;
+
+                std::vector<uint32_t> outClassShape = egraph.getEClass(srcClass).shape;
+                uint32_t rank = outClassShape.size();
+                if (rank != 2 && rank != 3)
+                    continue; // DOT only supports rank 2 and 3
+
+                while (starts.size() < rank)
+                    starts.push_back(0);
+                while (ends.size() < rank)
+                    ends.push_back(outClassShape[ends.size()]);
+
+                for (size_t d = 0; d < rank; ++d)
+                {
+                    if (starts[d] < 0)
+                        starts[d] += outClassShape[d];
+                    if (ends[d] < 0)
+                        ends[d] += outClassShape[d];
+                    starts[d] = std::max(0, starts[d]);
+                    ends[d] = std::min((int32_t)outClassShape[d], std::max(starts[d], ends[d]));
+                }
+
+                const std::vector<uint32_t> sliceShape = sliceNode.shape;
+                std::vector<uint64_t> sliceContigStrides = calcContiguousStrides(sliceShape);
 
                 uint32_t aClassId = dotNode.children[0];
                 uint32_t bClassId = dotNode.children[1];
