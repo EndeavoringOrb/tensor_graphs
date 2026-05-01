@@ -122,41 +122,42 @@ int main()
         return 0;
     }
 
+    for (uint32_t i = 0; i < toBenchmark.size(); i++)
+    {
+        json &j = toBenchmark[i];
+        Record r = j.get<Record>();
+        float cost = costModel.estimateCost(
+            r.kernelUid,
+            r.outputShapes[0],
+            r.outputStrides[0],
+            r.outputDTypes[0],
+            r.inputShapes,
+            r.inputStrides,
+            r.inputDTypes,
+            r.inputConstants);
+        if (std::isinf(cost))
+        {
+            j["runTime"] = -1.0f;
+        }
+        else
+        {
+            j["runTime"] = cost;
+        }
+    }
+
     // 2. Sort kernels by cost (cheapest first).
     // Fallback to element count for kernels with no previous data (inf cost).
     std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const json &ja, const json &jb)
                      {
-                         Record ra = ja.get<Record>();
-                         Record rb = jb.get<Record>();
-
-                         auto get_est = [&](const Record& r) {
-                             float cost = costModel.estimateCost(
-                                 r.kernelUid, 
-                                 r.outputShapes[0], 
-                                 r.outputStrides[0], 
-                                 r.outputDTypes[0],
-                                 r.inputShapes, 
-                                 r.inputStrides, 
-                                 r.inputDTypes, 
-                                 r.inputConstants
-                             );
-                             
-                             // If cost is unknown (inf), do it first
-                             if (std::isinf(cost)) {
-                                 return (double)-1.0f;
-                             }
-                             return (double)cost;
-                         };
-
-                         double costA = get_est(ra);
-                         double costB = get_est(rb);
+                         float costA = ja["runTime"];
+                         float costB = jb["runTime"];
 
                          if (std::abs(costA - costB) < 1e-7) {
                              // Tie-break: Prioritize optimized kernels over reference kernels
-                             bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
-                             bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
+                             bool isRefA = KernelRegistry::get().getKernel(ja["kernelUid"]).isReference;
+                             bool isRefB = KernelRegistry::get().getKernel(jb["kernelUid"]).isReference;
                              if (isRefA != isRefB) return !isRefA;
-                             return ra.kernelUid < rb.kernelUid;
+                             return ja["kernelUid"] < jb["kernelUid"];
                          }
 
                          return costA < costB; });
