@@ -60,6 +60,9 @@ public:
     uint32_t nextLeafId = 0;
     std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
 
+    // Hash map for fast constant lookup: data hash -> list of class ids
+    std::unordered_map<uint64_t, std::vector<uint32_t>> constantHashIndex;
+
     void reserve(size_t classCap, size_t nodeCap)
     {
         classes.reserve(classCap);
@@ -77,14 +80,22 @@ public:
                               Backend backend,
                               const std::vector<uint8_t> &data)
     {
-        for (const auto &kv : constantStaging)
+        uint64_t dataHash = computeConstantHash(shape, strides, dtype, backend, data);
+
+        auto it = constantHashIndex.find(dataHash);
+        if (it != constantHashIndex.end())
         {
-            uint32_t clsId = find(kv.first);
-            const EClass &cls = getEClass(clsId);
-            if (cls.dtype == dtype && cls.backend == backend &&
-                cls.shape == shape && cls.strides == strides)
+            for (uint32_t candidateClsId : it->second)
             {
-                if (kv.second == data)
+                uint32_t clsId = find(candidateClsId);
+                auto stagingIt = constantStaging.find(clsId);
+                if (stagingIt == constantStaging.end())
+                    continue;
+
+                const EClass &cls = getEClass(clsId);
+                if (cls.dtype == dtype && cls.backend == backend &&
+                    cls.shape == shape && cls.strides == strides &&
+                    stagingIt->second == data)
                 {
                     return clsId;
                 }
@@ -101,6 +112,7 @@ public:
         n.backend = backend;
         addENode(cls, n);
         constantStaging[cls] = data;
+        constantHashIndex[dataHash].push_back(cls);
         return cls;
     }
 
@@ -310,6 +322,9 @@ public:
         }
 
         hashcons = std::move(newHash);
+
+        // Rebuild constant hash index to remove stale entries from merges
+        rebuildConstantHashIndex();
     }
 
     const std::vector<EClass> &getClasses() const { return classes; }
@@ -365,6 +380,59 @@ private:
         hashCombine(h, static_cast<uint64_t>(node.backend));
 
         return h;
+    }
+
+    static uint64_t computeConstantHash(const std::vector<uint32_t> &shape,
+                                        const std::vector<uint64_t> &strides,
+                                        DType dtype,
+                                        Backend backend,
+                                        const std::vector<uint8_t> &data) noexcept
+    {
+        uint64_t h = static_cast<uint64_t>(dtype);
+        hashCombine(h, static_cast<uint64_t>(backend));
+
+        for (uint32_t s : shape)
+            hashCombine(h, static_cast<uint64_t>(s));
+
+        for (uint64_t s : strides)
+            hashCombine(h, s);
+
+        // Hash the data bytes efficiently - process 8 bytes at a time
+        const uint8_t *ptr = data.data();
+        size_t len = data.size();
+        size_t i = 0;
+
+        for (; i + 8 <= len; i += 8)
+        {
+            uint64_t val;
+            std::memcpy(&val, ptr + i, 8);
+            hashCombine(h, val);
+        }
+
+        // Handle remaining bytes
+        if (i < len)
+        {
+            uint64_t val = 0;
+            std::memcpy(&val, ptr + i, len - i);
+            hashCombine(h, val);
+        }
+
+        return h;
+    }
+
+    void rebuildConstantHashIndex()
+    {
+        constantHashIndex.clear();
+        for (const auto &kv : constantStaging)
+        {
+            uint32_t canonicalId = find(kv.first);
+            if (canonicalId != kv.first)
+                continue; // Skip non-canonical entries (data was moved during merge)
+
+            const EClass &cls = getEClass(canonicalId);
+            uint64_t h = computeConstantHash(cls.shape, cls.strides, cls.dtype, cls.backend, kv.second);
+            constantHashIndex[h].push_back(canonicalId);
+        }
     }
 
 private:
