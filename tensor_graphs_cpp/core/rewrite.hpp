@@ -2010,6 +2010,29 @@ struct SlicePullUpDot : public Rule
 
 struct ScatterSliceCancellation : public Rule
 {
+    struct MatchKey
+    {
+        uint32_t contigIdx;
+        uint32_t sliceIdx;
+        uint32_t scatterIdx;
+        bool operator==(const MatchKey &o) const
+        {
+            return contigIdx == o.contigIdx && sliceIdx == o.sliceIdx && scatterIdx == o.scatterIdx;
+        }
+    };
+
+    struct MatchKeyHash
+    {
+        std::size_t operator()(const MatchKey &k) const
+        {
+            return std::hash<uint32_t>{}(k.contigIdx) ^
+                   (std::hash<uint32_t>{}(k.sliceIdx) << 1) ^
+                   (std::hash<uint32_t>{}(k.scatterIdx) << 2);
+        }
+    };
+
+    std::unordered_set<MatchKey, MatchKeyHash> visited;
+
     std::string name() const override { return "ScatterSliceCancellation"; }
 
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
@@ -2033,6 +2056,10 @@ struct ScatterSliceCancellation : public Rule
                     const ENode &scatterNode = egraph.getENodes()[scatterEnodeIdx];
                     if (scatterNode.opType == OpType::SCATTER && scatterNode.children.size() == 5)
                     {
+                        MatchKey key{eNodeIdx, sliceEnodeIdx, scatterEnodeIdx};
+                        if (visited.find(key) != visited.end())
+                            continue;
+
                         auto st1 = getConstInt32(egraph, scatterNode.children[2]);
                         auto en1 = getConstInt32(egraph, scatterNode.children[3]);
                         auto step1 = getConstInt32(egraph, scatterNode.children[4]);
@@ -2074,6 +2101,10 @@ struct ScatterSliceCancellation : public Rule
                     const ENode &scatterNode = egraph.getENodes()[scatterEnodeIdx];
                     if (scatterNode.opType == OpType::SCATTER && scatterNode.children.size() == 5)
                     {
+                        MatchKey key{eNodeIdx, sliceEnodeIdx, scatterEnodeIdx};
+                        if (!visited.insert(key).second)
+                            continue;
+
                         auto st1 = getConstInt32(egraph, scatterNode.children[2]);
                         auto en1 = getConstInt32(egraph, scatterNode.children[3]);
                         auto step1 = getConstInt32(egraph, scatterNode.children[4]);
