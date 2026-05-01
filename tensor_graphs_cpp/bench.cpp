@@ -149,15 +149,17 @@ int main()
     // Fallback to element count for kernels with no previous data (inf cost).
     std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const json &ja, const json &jb)
                      {
-                         float costA = ja["runTime"];
-                         float costB = jb["runTime"];
+                        Record ra = ja.get<Record>();
+                        Record rb = jb.get<Record>();
+                         float costA = ra.runTime;
+                         float costB = rb.runTime;
 
                          if (std::abs(costA - costB) < 1e-7) {
                              // Tie-break: Prioritize optimized kernels over reference kernels
-                             bool isRefA = KernelRegistry::get().getKernel(ja["kernelUid"]).isReference;
-                             bool isRefB = KernelRegistry::get().getKernel(jb["kernelUid"]).isReference;
+                             bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
+                             bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
                              if (isRefA != isRefB) return !isRefA;
-                             return ja["kernelUid"] < jb["kernelUid"];
+                             return ra.kernelUid < rb.kernelUid;
                          }
 
                          return costA < costB; });
