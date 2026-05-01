@@ -483,7 +483,7 @@ struct ShapePropagator
             else if (r0 == 3)
             {
                 if (s0[2] != s1[1])
-                    Error::throw_err("DOT: K-dim mismatch[B,M,K] @ [B,K,N]");
+                    Error::throw_err("DOT: K-dim mismatch [B,M,K] @ [B,K,N], " + std::to_string(s0[2]) + " != " + std::to_string(s1[1]));
                 graph.getNode(nodeId).setShape({s0[0], s0[1], s1[2]});
             }
             else

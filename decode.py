@@ -44,6 +44,7 @@ tokens = [int(item) for item in tokens]
 # tokens = [2, 9259, 236888, 564, 236789, 236757, 5293, 531] # good "Hello! I'm happy to"
 # tokens = [2, 9259, 9259, 236823] # bad
 # tokens = [2, 9259, 236888, 108] # bad
+tokens = [2, 9259, 236888, 12410] # bad
 output_text = tokenizer.decode(tokens)
 
 print(f"Tokens: {tokens}")
