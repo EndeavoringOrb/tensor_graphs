@@ -326,13 +326,12 @@ inline std::vector<Region> mergeRegions(const std::vector<Region> &regions)
         return result;
 
     const size_t rank = result.front().region.size();
-    for (size_t dim = 0; dim < rank; ++dim)
+    for (size_t dim = rank - 1; dim >= 0; dim--) // TODO: maybe merge top down? could discover different optimizations in InfinityDomination if we merge different ways?
     {
         std::vector<Region> next = mergeRegionsAlongDim(result, dim);
         if (encodeRegionList(next) != encodeRegionList(result))
         {
             result = std::move(next);
-            break;
         }
     }
 

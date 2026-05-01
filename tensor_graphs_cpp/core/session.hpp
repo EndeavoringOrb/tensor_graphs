@@ -290,8 +290,10 @@ private:
 
         if (!manualBuckets.empty())
         {
+            ProgressTimer timer(manualBuckets.size(), "Caching dirty region propagation: ");
             for (const auto &manual : manualBuckets)
             {
+                timer.tick();
                 const std::string key = encodeCacheKey(manual.inputDirtyRegions);
                 if (bucketByKey.find(key) != bucketByKey.end())
                     continue;
