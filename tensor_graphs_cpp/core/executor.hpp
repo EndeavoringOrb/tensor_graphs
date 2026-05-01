@@ -23,7 +23,7 @@ public:
         : memManager(mm) {}
 
     void run(const std::unordered_map<uint32_t, const void *> &inputs,
-             const CompiledGraph &compiled, const DirtyBucket &bucket)
+             const CompiledGraph &compiled)
     {
         std::cout << "running..." << std::endl;
 
@@ -135,10 +135,18 @@ public:
 
             if (inst.viewInputIndex < 0)
             {
-                MemBlock &outBlock = memManager.getBlock(node.backend, outputMemId);
-                outBlock.refCount = compiled.refCounts.at(inst.nodeId);
-                outBlock.storageType = inst.outputStorageType;
-                outBlock.isLocked = true;
+                if (memManager.aliasMap.find(outputMemId) != memManager.aliasMap.end())
+                {
+                    memManager.aliasRefCounts[outputMemId] = compiled.refCounts.at(inst.nodeId);
+                    memManager.aliasStorageTypes[outputMemId] = inst.outputStorageType;
+                }
+                else
+                {
+                    MemBlock &outBlock = memManager.getBlock(node.backend, outputMemId);
+                    outBlock.refCount = compiled.refCounts.at(inst.nodeId);
+                    outBlock.storageType = inst.outputStorageType;
+                    outBlock.isLocked = true;
+                }
             }
 
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.fullKernelId);

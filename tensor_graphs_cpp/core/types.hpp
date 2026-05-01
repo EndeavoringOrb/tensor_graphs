@@ -523,17 +523,6 @@ inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toSt
 inline std::ostream &operator<<(std::ostream &os, Backend backend) { return os << toString(backend); }
 inline std::ostream &operator<<(std::ostream &os, StorageType storage) { return os << toString(storage); }
 
-struct DirtyBucket
-{
-    // Canonical meaning:
-    // - regions[nodeId] is the logical output region list for nodeId.
-    // - inputSlices[nodeId][parentIndex][regionIndex] is the corresponding
-    //   parent slice needed to compute regions[nodeId][regionIndex].
-    std::unordered_map<uint32_t, std::vector<Region>> regions;
-    std::unordered_map<uint32_t, std::vector<std::vector<Region>>> inputSlices;
-    std::vector<Region> outputNeeded;
-};
-
 class SHA256
 {
 private:

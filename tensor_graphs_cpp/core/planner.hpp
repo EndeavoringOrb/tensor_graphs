@@ -1948,7 +1948,6 @@ public:
         uint32_t rootId,
         const Graph &graph,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
-        const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
         const std::unordered_map<uint32_t, Backend> &cachedNodes,
         const std::vector<Region> &outputNeeded,
         bool doSaturate = true,
@@ -1974,7 +1973,7 @@ public:
             saturate(egraph, protectedEClasses, eclassToLogical, injected);
         }
 
-        // #ifdef DEBUG
+#ifdef DEBUG
         auto rootIt = baseState.nodeToEClass.find(rootId);
         if (rootIt == baseState.nodeToEClass.end())
         {
@@ -1982,7 +1981,7 @@ public:
         }
         uint32_t rootEClassId = egraph.find(rootIt->second);
         dumpEGraphBinary(egraph, rootEClassId);
-        // #endif
+#endif
 
         std::unordered_map<uint32_t, uint32_t> updatedEClassToLogical;
         for (const auto &kv : eclassToLogical)

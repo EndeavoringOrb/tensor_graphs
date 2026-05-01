@@ -66,70 +66,47 @@ namespace dirty_cache_json
         }
         return regions;
     }
+}
 
-    inline json bucketToJson(const DirtyBucket &bucket)
+static std::string encodeCacheKey(
+    const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)
+{
+    std::vector<uint32_t> ids;
+    ids.reserve(inputRegions.size());
+    for (const auto &pair : inputRegions)
     {
-        json obj;
-
-        json regionsObj;
-        for (const auto &pair : bucket.regions)
-        {
-            regionsObj[std::to_string(pair.first)] = regionsToJson(normalizeRegions(pair.second));
-        }
-        obj["regions"] = regionsObj;
-
-        json slicesObj;
-        for (const auto &pair : bucket.inputSlices)
-        {
-            json perNode = json::array();
-            for (const auto &perParent : pair.second)
-            {
-                json perParentRegions = regionsToJson(normalizeRegions(perParent));
-                perNode.push_back(perParentRegions);
-            }
-            slicesObj[std::to_string(pair.first)] = perNode;
-        }
-        obj["input_slices"] = slicesObj;
-
-        obj["output_needed"] = regionsToJson(normalizeRegions(bucket.outputNeeded));
-
-        return obj;
+        ids.push_back(pair.first);
     }
+    std::sort(ids.begin(), ids.end());
 
-    inline DirtyBucket bucketFromJson(const json &obj)
+    std::stringstream ss;
+    for (size_t i = 0; i < ids.size(); ++i)
     {
-        DirtyBucket bucket;
+        if (i > 0)
+            ss << ";";
+        ss << ids[i] << ":[";
 
-        for (auto it = obj["regions"].begin(); it != obj["regions"].end(); ++it)
+        const auto &regions = inputRegions.at(ids[i]);
+        const std::vector<Region> canonicalRegions = normalizeRegions(regions);
+        for (size_t r = 0; r < canonicalRegions.size(); ++r)
         {
-            uint32_t nodeId = std::stoul(it.key());
-            bucket.regions[nodeId] = regionsFromJson(it.value());
+            if (r > 0)
+                ss << ",";
+            ss << encodeRegion(canonicalRegions[r]);
         }
-
-        for (auto it = obj["input_slices"].begin(); it != obj["input_slices"].end(); ++it)
-        {
-            uint32_t nodeId = std::stoul(it.key());
-            std::vector<std::vector<Region>> perNode;
-            for (const auto &perParent : it.value())
-            {
-                perNode.push_back(regionsFromJson(perParent));
-            }
-            bucket.inputSlices[nodeId] = perNode;
-        }
-
-        if (obj.contains("output_needed"))
-        {
-            bucket.outputNeeded = regionsFromJson(obj["output_needed"]);
-        }
-
-        return bucket;
+        ss << "]";
     }
+    return ss.str();
 }
 
 struct ManualBucket
 {
     std::unordered_map<uint32_t, std::vector<Region>> inputDirtyRegions;
     std::vector<Region> outputNeededRegion;
+    std::string key() const
+    {
+        return encodeCacheKey(inputDirtyRegions);
+    }
 };
 
 class Session
@@ -149,7 +126,6 @@ private:
 
     std::string cachePath;
     std::unordered_map<std::string, CompiledGraph> cachedGraphs;
-    std::unordered_map<std::string, DirtyBucket> cachedBuckets;
     std::unordered_map<uint32_t, Backend> selectedCachedNodes;
 
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
@@ -253,201 +229,6 @@ private:
         }
     }
 
-    struct BucketPlanRequest
-    {
-        std::string key;
-        DirtyBucket bucket;
-    };
-
-    std::vector<BucketPlanRequest> enumerateCanonicalBuckets(const std::vector<uint32_t> &inputNodeIds)
-    {
-        std::cout << "[Session.ensureCacheCoverage] Enumerating canonical dirty buckets..." << std::endl;
-
-        std::vector<uint32_t> atomicTopo = buildAtomicTopoAndInferShapes();
-        std::unordered_map<std::string, DirtyBucket> bucketByKey;
-
-        // 1. Always include the "Full" bucket (all inputs dirty, full output needed)
-        {
-            std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
-            for (uint32_t nodeId : inputNodeIds)
-            {
-                fullInputRegions[nodeId] = {makeFull(graph.getNode(nodeId).getShape())};
-            }
-            const std::string key = encodeCacheKey(fullInputRegions);
-
-            std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions = fullInputRegions;
-            std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions;
-
-            Graph forwardGraph = graph;
-            propagateDirtyRegionsAtomic(atomicTopo, forwardGraph, dirtyOutputRegions, dirtyInputRegions);
-
-            DirtyBucket bucket;
-            bucket.regions = std::move(dirtyOutputRegions);
-            bucket.inputSlices = std::move(dirtyInputRegions);
-            bucket.outputNeeded = {makeFull(graph.getNode(rootId).getShape())};
-            bucketByKey[key] = std::move(bucket);
-        }
-
-        if (!manualBuckets.empty())
-        {
-            ProgressTimer timer(manualBuckets.size(), "Caching dirty region propagation: ");
-            for (const auto &manual : manualBuckets)
-            {
-                timer.tick();
-                const std::string key = encodeCacheKey(manual.inputDirtyRegions);
-                if (bucketByKey.find(key) != bucketByKey.end())
-                    continue;
-
-                std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions = manual.inputDirtyRegions;
-                std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions;
-
-                Graph forwardGraph = graph;
-                propagateDirtyRegionsAtomic(atomicTopo, forwardGraph, dirtyOutputRegions, dirtyInputRegions);
-
-                DirtyBucket bucket;
-                bucket.regions = std::move(dirtyOutputRegions);
-                bucket.inputSlices = std::move(dirtyInputRegions);
-                bucket.outputNeeded = manual.outputNeededRegion;
-                bucketByKey[key] = std::move(bucket);
-            }
-        }
-        else
-        {
-            struct InputOption
-            {
-                uint32_t nodeId;
-                std::vector<std::vector<Dim>> dimSlices;
-            };
-
-            std::vector<InputOption> inputOptions;
-
-            for (uint32_t nodeId : inputNodeIds)
-            {
-                if (graph.getNode(nodeId).opType != OpType::INPUT)
-                    continue;
-
-                InputOption option;
-                option.nodeId = nodeId;
-                for (uint32_t dimLen : graph.getNode(nodeId).getShape())
-                {
-                    option.dimSlices.push_back(generateSlicesForDim(dimLen, nBucketSizes));
-                }
-                inputOptions.push_back(std::move(option));
-            }
-
-            if (inputOptions.empty())
-            {
-                DirtyBucket bucket;
-                bucket.regions[rootId] = makeFull(graph.getNode(rootId).getShape());
-                bucket.outputNeeded = makeFull(graph.getNode(rootId).getShape());
-                return {{"", bucket}};
-            }
-
-            struct InputRegionSet
-            {
-                uint32_t nodeId;
-                std::vector<std::vector<Region>> options;
-            };
-
-            std::vector<InputRegionSet> perInput;
-            for (const InputOption &opt : inputOptions)
-            {
-                InputRegionSet regionSet;
-                regionSet.nodeId = opt.nodeId;
-
-                std::vector<Region> current = {Region{}};
-                for (const auto &dimSlices : opt.dimSlices)
-                {
-                    std::vector<Region> next;
-                    for (const Region &existing : current)
-                    {
-                        for (const Dim &slice : dimSlices)
-                        {
-                            Region region = existing;
-                            region.region.push_back(slice);
-                            next.push_back(region);
-                        }
-                    }
-                    current = std::move(next);
-                }
-
-                regionSet.options.push_back({});
-                for (const Region &region : current)
-                {
-                    regionSet.options.push_back({region});
-                }
-
-                std::cout << "[Session.ensureCacheCoverage] input node " << regionSet.nodeId
-                          << " has " << regionSet.options.size() << " buckets (including clean state)." << std::endl;
-                perInput.push_back(std::move(regionSet));
-            }
-
-            std::vector<size_t> indices(perInput.size(), 0);
-            std::vector<size_t> sizes;
-            size_t totalSize = 1;
-            for (const auto &regionSet : perInput)
-            {
-                sizes.push_back(regionSet.options.size());
-                totalSize *= regionSet.options.size();
-            }
-
-            ProgressTimer timer(totalSize, "Caching dirty region propagation: ");
-
-            while (true)
-            {
-                timer.tick();
-
-                std::unordered_map<uint32_t, std::vector<Region>> inputRegions;
-                for (size_t i = 0; i < perInput.size(); ++i)
-                {
-                    inputRegions[perInput[i].nodeId] = perInput[i].options[indices[i]];
-                }
-
-                const std::string key = encodeCacheKey(inputRegions);
-                if (bucketByKey.find(key) == bucketByKey.end())
-                {
-                    Graph forwardGraph = graph;
-                    std::unordered_map<uint32_t, std::vector<Region>> dirtyOutputRegions = inputRegions;
-                    std::unordered_map<uint32_t, std::vector<std::vector<Region>>> dirtyInputRegions;
-                    propagateDirtyRegionsAtomic(atomicTopo, forwardGraph, dirtyOutputRegions, dirtyInputRegions);
-
-                    DirtyBucket bucket;
-                    bucket.regions = std::move(dirtyOutputRegions);
-                    bucket.inputSlices = std::move(dirtyInputRegions);
-                    bucket.outputNeeded = {makeFull(graph.getNode(rootId).getShape())};
-                    bucketByKey.emplace(key, std::move(bucket));
-                }
-
-                int position = static_cast<int>(indices.size()) - 1;
-                while (position >= 0)
-                {
-                    indices[position]++;
-                    if (indices[position] < sizes[position])
-                        break;
-                    indices[position] = 0;
-                    position--;
-                }
-
-                if (position < 0)
-                    break;
-            }
-        }
-
-        std::vector<std::string> orderedKeys;
-        orderedKeys.reserve(bucketByKey.size());
-        for (const auto &kv : bucketByKey)
-            orderedKeys.push_back(kv.first);
-        std::sort(orderedKeys.begin(), orderedKeys.end());
-
-        std::vector<BucketPlanRequest> buckets;
-        buckets.reserve(orderedKeys.size());
-        for (const std::string &key : orderedKeys)
-        {
-            buckets.push_back({key, bucketByKey.at(key)});
-        }
-        return buckets;
-    }
-
     void persistCache() const
     {
         if (cachePath.empty())
@@ -476,8 +257,7 @@ private:
         keys.reserve(cachedGraphs.size());
         for (const auto &pair : cachedGraphs)
         {
-            if (cachedBuckets.find(pair.first) != cachedBuckets.end())
-                keys.push_back(pair.first);
+            keys.push_back(pair.first);
         }
         std::sort(keys.begin(), keys.end());
 
@@ -487,7 +267,6 @@ private:
             bucketEntry["type"] = "compiled_bucket";
             bucketEntry["key"] = key;
             to_json(bucketEntry["graph"], cachedGraphs.at(key));
-            bucketEntry["bucket"] = dirty_cache_json::bucketToJson(cachedBuckets.at(key));
             file << bucketEntry.dump() << "\n";
         }
 
@@ -800,15 +579,9 @@ public:
         std::string key = encodeCacheKey(canonicalDiffs);
         const CompiledGraph *compiled = lookupCache(canonicalDiffs);
 
-        auto bucketIt = cachedBuckets.find(key);
-        if (compiled == nullptr || bucketIt == cachedBuckets.end())
-        {
-            Error::throw_err("[Session.run] no compiled bucket available for dirty regions: " + key);
-        }
-
         incrementBucketCount(key);
         saveBucketCounts();
-        executor->run(inputs, *compiled, bucketIt->second);
+        executor->run(inputs, *compiled);
 
         const OpInstruction &lastInst = compiled->instructions[compiled->instructions.size() - 1];
         Backend backend = lastInst.backend;
@@ -924,49 +697,24 @@ public:
         return slices;
     }
 
-    static std::string encodeCacheKey(
-        const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)
-    {
-        std::vector<uint32_t> ids;
-        ids.reserve(inputRegions.size());
-        for (const auto &pair : inputRegions)
-        {
-            ids.push_back(pair.first);
-        }
-        std::sort(ids.begin(), ids.end());
-
-        std::stringstream ss;
-        for (size_t i = 0; i < ids.size(); ++i)
-        {
-            if (i > 0)
-                ss << ";";
-            ss << ids[i] << ":[";
-
-            const auto &regions = inputRegions.at(ids[i]);
-            const std::vector<Region> canonicalRegions = normalizeRegions(regions);
-            for (size_t r = 0; r < canonicalRegions.size(); ++r)
-            {
-                if (r > 0)
-                    ss << ",";
-                ss << encodeRegion(canonicalRegions[r]);
-            }
-            ss << "]";
-        }
-        return ss.str();
-    }
-
     void ensureCacheCoverage(const std::vector<uint32_t> &inputNodeIds)
     {
-        const std::vector<BucketPlanRequest> buckets = enumerateCanonicalBuckets(inputNodeIds);
+        std::vector<uint32_t> atomicTopo = buildAtomicTopoAndInferShapes();
+        {
+            std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
+            for (uint32_t nodeId : inputNodeIds)
+            {
+                fullInputRegions[nodeId] = {makeFull(graph.getNode(nodeId).getShape())};
+            }
+
+            ManualBucket bucket;
+            bucket.inputDirtyRegions = fullInputRegions;
+            bucket.outputNeededRegion = {makeFull(graph.getNode(rootId).getShape())};
+            manualBuckets.push_back(bucket);
+        }
 
         cachedGraphs.clear();
-        cachedBuckets.clear();
         selectedCachedNodes.clear();
-
-        for (const BucketPlanRequest &bucket : buckets)
-        {
-            cachedBuckets[bucket.key] = bucket.bucket;
-        }
 
         std::cout << "[Session.ensureCacheCoverage] Starting iterative cache optimization..." << std::endl;
         Planner planner(costModel, memManager.getBufferSizes());
@@ -974,16 +722,15 @@ public:
         std::unordered_map<uint32_t, Backend> protectedCachedNodes;
 
         // Iterate updating caching nodes based on chosen scatters pointing into inputs.
-        for (size_t i = 0; i < buckets.size(); ++i)
+        for (size_t i = 0; i < manualBuckets.size(); ++i)
         {
-            const BucketPlanRequest &req = buckets[i];
+            const ManualBucket &bucket = manualBuckets[i];
 
             CompiledGraph plan = planner.plan(
                 rootId, graph,
-                req.bucket.regions,
-                req.bucket.inputSlices,
+                bucket.inputDirtyRegions,
                 protectedCachedNodes,
-                req.bucket.outputNeeded,
+                bucket.outputNeededRegion,
                 true, // doSaturate
                 false // cheapInputCopy
             );
@@ -1024,26 +771,26 @@ public:
         }
 
         std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size() << " protected eclasses..." << std::endl;
-        for (const BucketPlanRequest &req : buckets)
+        for (size_t i = 0; i < manualBuckets.size(); ++i)
         {
+            const ManualBucket &bucket = manualBuckets[i];
             CompiledGraph plan = planner.plan(
                 rootId, graph,
-                req.bucket.regions,
-                req.bucket.inputSlices,
+                bucket.inputDirtyRegions,
                 protectedCachedNodes,
-                req.bucket.outputNeeded,
+                bucket.outputNeededRegion,
                 true,
                 false,
                 true);
-            cachedGraphs[req.key] = std::move(plan);
+            cachedGraphs[bucket.key()] = std::move(plan);
         }
 
         selectedCachedNodes = std::move(protectedCachedNodes);
 
-        if (cachedGraphs.size() != buckets.size())
+        if (cachedGraphs.size() != manualBuckets.size())
         {
             Error::throw_err("[Session.ensureCacheCoverage] Planned " + std::to_string(cachedGraphs.size()) +
-                             " buckets, but expected " + std::to_string(buckets.size()) + ".");
+                             " buckets, but expected " + std::to_string(manualBuckets.size()) + ".");
         }
 
         persistCache();
@@ -1078,7 +825,6 @@ public:
         bool sawMetadata = false;
         std::string invalidCacheReason = "";
         std::unordered_map<std::string, CompiledGraph> tempGraphs;
-        std::unordered_map<std::string, DirtyBucket> tempBuckets;
         std::unordered_map<uint32_t, std::vector<uint8_t>> tempStaging;
         std::unordered_map<uint32_t, Backend> tempSelectedCachedNodes;
 
@@ -1154,10 +900,10 @@ public:
             else if (type == "compiled_bucket")
             {
                 std::string key = entry["key"].get<std::string>();
-                if (!entry.contains("graph") || !entry.contains("bucket"))
+                if (!entry.contains("graph"))
                 {
                     hasInvalidCache = true;
-                    invalidCacheReason = "Compiled bucket entry is missing graph or bucket payload.";
+                    invalidCacheReason = "Compiled bucket entry is missing graph payload.";
                     break;
                 }
 
@@ -1220,7 +966,6 @@ public:
                 }
 
                 tempGraphs[key] = std::move(cg);
-                tempBuckets[key] = dirty_cache_json::bucketFromJson(entry["bucket"]);
                 hasValidCache = true;
             }
             else
@@ -1254,7 +999,6 @@ public:
         if (hasValidCache)
         {
             cachedGraphs = std::move(tempGraphs);
-            cachedBuckets = std::move(tempBuckets);
             selectedCachedNodes = std::move(tempSelectedCachedNodes);
             isPlanned = true;
             for (const auto &pair : tempStaging)
