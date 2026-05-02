@@ -1318,7 +1318,7 @@ private:
                 {
                     tNode.storageType = graph.getNode(logicalId).storageType;
                 }
-                if (cachedNodes.count(logicalId) && physId == lastPhysIdForLogical[logicalId])
+                if (cachedNodes.count(logicalId) && (physId == lastPhysIdForLogical[logicalId] || tNode.opType == OpType::INPUT))
                 {
                     tNode.storageType = StorageType::PINNED;
                 }
