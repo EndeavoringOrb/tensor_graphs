@@ -3,7 +3,6 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 #include "core/graph.hpp"
-#include "core/shapes.hpp"
 #include <cstring>
 #include <cmath>
 #include <algorithm>
@@ -81,7 +80,7 @@ inline void runPartialBF16TransposedGEMM(const std::vector<const void *> &inputs
 
     int32_t startsC[3], endsC[3], stepsC[3];
     int32_t startsA[3], endsA[3], stepsA[3];
-    int32_t startsW[2], endsW[2], stepsW[2];
+    int32_t startsW[3], endsW[3], stepsW[3];
 
     for (int i = 0; i < 3; ++i)
     {
@@ -94,10 +93,10 @@ inline void runPartialBF16TransposedGEMM(const std::vector<const void *> &inputs
         stepsA[i] = (inViews[8].getShape().empty() || i >= inViews[8].getShape()[0]) ? 1 : stepsA_raw[i];
     }
 
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < 3; ++i)
     {
         startsW[i] = (inViews[9].getShape().empty() || i >= inViews[9].getShape()[0]) ? 0 : startsW_raw[i];
-        endsW[i] = (inViews[10].getShape().empty() || i >= inViews[10].getShape()[0]) ? view_W.getShape()[i] : endsW_raw[i];
+        endsW[i] = (inViews[10].getShape().empty() || i >= inViews[10].getShape()[0]) ? (i == 0 ? 1 : (i == 1 ? view_W.getShape()[1] : view_W.getShape()[0])) : endsW_raw[i];
         stepsW[i] = (inViews[11].getShape().empty() || i >= inViews[11].getShape()[0]) ? 1 : stepsW_raw[i];
     }
 
@@ -133,9 +132,9 @@ inline void runPartialBF16TransposedGEMM(const std::vector<const void *> &inputs
     int32_t startA_k = startsA[2] < 0 ? startsA[2] + view_A.getShape()[2] : startsA[2];
     int32_t stepA_b = stepsA[0], stepA_s = stepsA[1], stepA_k = stepsA[2];
 
-    int32_t startW_n = startsW[0] < 0 ? startsW[0] + view_W.getShape()[0] : startsW[0];
+    int32_t startW_n = startsW[2] < 0 ? startsW[2] + view_W.getShape()[0] : startsW[2];
     int32_t startW_k = startsW[1] < 0 ? startsW[1] + view_W.getShape()[1] : startsW[1];
-    int32_t stepW_n = stepsW[0], stepW_k = stepsW[1];
+    int32_t stepW_n = stepsW[2], stepW_k = stepsW[1];
 
     const int64_t strideA_B = view_A.strides[0];
     const int64_t strideA_S = view_A.strides[1];
@@ -338,60 +337,21 @@ inline uint32_t refFactoryPartialBF16TransposedGEMM(const std::vector<uint32_t> 
     uint32_t sliceA = graph.slice(inIds[1], inIds[6], inIds[7], inIds[8]);
     uint32_t contigA = graph.contiguous(sliceA);
 
-    uint32_t sliceW = graph.slice(inIds[2], inIds[9], inIds[10], inIds[11]);
-    uint32_t contigW = graph.contiguous(sliceW);
-
-    uint32_t w_cast = graph.cast(contigW, DType::FLOAT32);
+    uint32_t w_cast = graph.cast(inIds[2], DType::FLOAT32);
     int32_t perm[] = {1, 0};
     uint32_t w_t = graph.contiguous(graph.permute(w_cast, graph.constant({2}, perm, DType::INT32)));
 
-    std::vector<int32_t> startsW, endsW, stepsW;
-    bool has_consts = evaluateInt32TensorForPlanning(inIds[9], graph, startsW) &&
-                      evaluateInt32TensorForPlanning(inIds[10], graph, endsW) &&
-                      evaluateInt32TensorForPlanning(inIds[11], graph, stepsW);
+    auto w_full_shape = graph.getNode(inIds[2]).getShape();
+    int32_t N_full = w_full_shape.size() > 0 ? w_full_shape[0] : 1;
+    int32_t K_full = w_full_shape.size() > 1 ? w_full_shape[1] : 1;
 
-    int32_t N_slice = 1;
-    int32_t K_slice = 1;
-
-    if (has_consts)
-    {
-        auto w_full_shape = graph.getNode(inIds[2]).getShape();
-        N_slice = w_full_shape.size() > 0 ? w_full_shape[0] : 1;
-        K_slice = w_full_shape.size() > 1 ? w_full_shape[1] : 1;
-
-        if (startsW.size() > 0 && endsW.size() > 0 && stepsW.size() > 0)
-        {
-            int32_t st = startsW[0];
-            int32_t en = endsW[0];
-            int32_t step = stepsW[0];
-            if (st < 0)
-                st += w_full_shape[0];
-            if (en < 0)
-                en += w_full_shape[0];
-            st = std::max(0, std::min(st, (int32_t)w_full_shape[0]));
-            en = std::max(0, std::min(en, (int32_t)w_full_shape[0]));
-            N_slice = step > 0 ? std::max(0, (en - st + step - 1) / step) : 0;
-        }
-
-        if (startsW.size() > 1 && endsW.size() > 1 && stepsW.size() > 1)
-        {
-            int32_t st = startsW[1];
-            int32_t en = endsW[1];
-            int32_t step = stepsW[1];
-            if (st < 0)
-                st += w_full_shape[1];
-            if (en < 0)
-                en += w_full_shape[1];
-            st = std::max(0, std::min(st, (int32_t)w_full_shape[1]));
-            en = std::max(0, std::min(en, (int32_t)w_full_shape[1]));
-            K_slice = step > 0 ? std::max(0, (en - st + step - 1) / step) : 0;
-        }
-    }
-
-    int32_t s3[] = {1, K_slice, N_slice};
+    int32_t s3[] = {1, K_full, N_full};
     uint32_t w_3d = graph.reshape(w_t, graph.constant({3}, s3, DType::INT32));
 
-    uint32_t dot = graph.dot(contigA, w_3d);
+    uint32_t sliceW = graph.slice(w_3d, inIds[9], inIds[10], inIds[11]);
+    uint32_t contigW = graph.contiguous(sliceW);
+
+    uint32_t dot = graph.dot(contigA, contigW);
     uint32_t contigDot = graph.contiguous(dot);
 
     return graph.scatter(inIds[0], contigDot, inIds[3], inIds[4], inIds[5]);
@@ -408,7 +368,7 @@ REGISTER_KERNEL_INPLACE(
      DType::INT32, DType::INT32, DType::INT32,
      DType::INT32, DType::INT32, DType::INT32,
      DType::INT32, DType::INT32, DType::INT32},
-    {{1, 8, 2048}, {1, 8, 2048}, {2048, 2048}, {3}, {3}, {3}, {3}, {3}, {3}, {2}, {2}, {2}},
+    {{1, 8, 2048}, {1, 8, 2048}, {2048, 2048}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}},
     {false, false, false, false, false, false, false, false, false, false, false, false},
     {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
 
