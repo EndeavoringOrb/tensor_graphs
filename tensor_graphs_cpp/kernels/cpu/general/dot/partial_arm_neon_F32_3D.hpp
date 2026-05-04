@@ -19,10 +19,13 @@
  * without needing to inspect constant values during planning.
  */
 
-inline bool matchScatterDotF32_3D_Optimized(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchScatterDotF32_3D_Optimized_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // Signature: [cache, A, B, starts, ends, steps, startsA, endsA, stepsA, startsB, endsB, stepsB] (12 inputs)
     if (inputs.size() != 12)
+        return false;
+
+    if (inputs[0].storageType == StorageType::PERSISTENT)
         return false;
 
     // Check main tensor dtypes
@@ -46,12 +49,11 @@ inline bool matchScatterDotF32_3D_Optimized(const std::vector<TensorNode> &input
     return true;
 }
 
-inline void runScatterDotF32_3D_Optimized(const std::vector<const void *> &inputs,
-                                          const std::vector<void *> &outputs,
-                                          const std::vector<TensorView> &inViews,
-                                          const std::vector<TensorView> &outViews)
+inline void runScatterDotF32_3D_Optimized_Inplace(const std::vector<const void *> &inputs,
+                                                  const std::vector<void *> &outputs,
+                                                  const std::vector<TensorView> &inViews,
+                                                  const std::vector<TensorView> &outViews)
 {
-    const float *target_ptr = static_cast<const float *>(inputs[0]);
     const float *A_ptr = static_cast<const float *>(inputs[1]);
     const float *B_ptr = static_cast<const float *>(inputs[2]);
 
@@ -67,19 +69,9 @@ inline void runScatterDotF32_3D_Optimized(const std::vector<const void *> &input
 
     float *out_cache_ptr = static_cast<float *>(outputs[0]);
 
-    const TensorView &view_cache = inViews[0];
+    const TensorView &view_cache = outViews[0];
     const TensorView &view_A = inViews[1];
     const TensorView &view_B = inViews[2];
-
-    if (target_ptr != out_cache_ptr)
-    {
-        uint64_t n_target = countElements(outViews[0].getShape());
-        for (uint64_t i = 0; i < n_target; ++i)
-        {
-            out_cache_ptr[getStridedIndex(i, outViews[0].getShape(), outViews[0].strides)] =
-                target_ptr[getStridedIndex(i, outViews[0].getShape(), inViews[0].strides)];
-        }
-    }
 
     int32_t starts[3], ends[3], steps[3];
     int32_t startsA[3], endsA[3], stepsA[3];
@@ -87,17 +79,17 @@ inline void runScatterDotF32_3D_Optimized(const std::vector<const void *> &input
 
     for (int i = 0; i < 3; ++i)
     {
-        starts[i] = (inViews[3].getShape().empty() || i >= inViews[3].getShape()[0]) ? 0 : starts_raw[i];
-        ends[i] = (inViews[4].getShape().empty() || i >= inViews[4].getShape()[0]) ? view_cache.getShape()[i] : ends_raw[i];
-        steps[i] = (inViews[5].getShape().empty() || i >= inViews[5].getShape()[0]) ? 1 : steps_raw[i];
+        starts[i] = (inViews[3].getShape().empty() || i >= (int)inViews[3].getShape()[0]) ? 0 : starts_raw[i];
+        ends[i] = (inViews[4].getShape().empty() || i >= (int)inViews[4].getShape()[0]) ? view_cache.getShape()[i] : ends_raw[i];
+        steps[i] = (inViews[5].getShape().empty() || i >= (int)inViews[5].getShape()[0]) ? 1 : steps_raw[i];
 
-        startsA[i] = (inViews[6].getShape().empty() || i >= inViews[6].getShape()[0]) ? 0 : startsA_raw[i];
-        endsA[i] = (inViews[7].getShape().empty() || i >= inViews[7].getShape()[0]) ? view_A.getShape()[i] : endsA_raw[i];
-        stepsA[i] = (inViews[8].getShape().empty() || i >= inViews[8].getShape()[0]) ? 1 : stepsA_raw[i];
+        startsA[i] = (inViews[6].getShape().empty() || i >= (int)inViews[6].getShape()[0]) ? 0 : startsA_raw[i];
+        endsA[i] = (inViews[7].getShape().empty() || i >= (int)inViews[7].getShape()[0]) ? view_A.getShape()[i] : endsA_raw[i];
+        stepsA[i] = (inViews[8].getShape().empty() || i >= (int)inViews[8].getShape()[0]) ? 1 : stepsA_raw[i];
 
-        startsB[i] = (inViews[9].getShape().empty() || i >= inViews[9].getShape()[0]) ? 0 : startsB_raw[i];
-        endsB[i] = (inViews[10].getShape().empty() || i >= inViews[10].getShape()[0]) ? view_B.getShape()[i] : endsB_raw[i];
-        stepsB[i] = (inViews[11].getShape().empty() || i >= inViews[11].getShape()[0]) ? 1 : stepsB_raw[i];
+        startsB[i] = (inViews[9].getShape().empty() || i >= (int)inViews[9].getShape()[0]) ? 0 : startsB_raw[i];
+        endsB[i] = (inViews[10].getShape().empty() || i >= (int)inViews[10].getShape()[0]) ? view_B.getShape()[i] : endsB_raw[i];
+        stepsB[i] = (inViews[11].getShape().empty() || i >= (int)inViews[11].getShape()[0]) ? 1 : stepsB_raw[i];
     }
 
     auto get_dim = [](int32_t s, int32_t e, int32_t st, uint32_t dim_len) -> uint32_t
@@ -192,6 +184,7 @@ inline void runScatterDotF32_3D_Optimized(const std::vector<const void *> &input
                 float *row_out = out_cache_ptr + (b_global * stride_C_B) + (m_global * stride_C_M);
                 const float *rowA = A_ptr + (b_idx * stride_A_B) + (m_idx * stride_A_M);
 
+                // Zero-out destination chunk before dot product accumulation
                 if (can_simd) {
                     uint32_t n = 0;
                     float32x4_t vZero = vdupq_n_f32(0.0f);
@@ -208,6 +201,7 @@ inline void runScatterDotF32_3D_Optimized(const std::vector<const void *> &input
                     }
                 }
 
+                // SIMD / Scalar inner dot loop
                 for (uint32_t k = 0; k < K; ++k) {
                     float a_val = rowA[k * stride_A_K];
                     const float *k_B = B_ptr + (b_idx * stride_B_B) + (k * stride_B_K);
@@ -237,7 +231,7 @@ inline void runScatterDotF32_3D_Optimized(const std::vector<const void *> &input
         th.join();
 }
 
-inline uint32_t refFactoryScatterDotF32_3D_Optimized(const std::vector<uint32_t> &inIds, Graph &graph)
+inline uint32_t refFactoryScatterDotF32_3D_Optimized_Inplace(const std::vector<uint32_t> &inIds, Graph &graph)
 {
     // inIds: [cache, A, B, sS, eS, tS, sA, eA, tA, sB, eB, tB]
     uint32_t sliceA = graph.slice(inIds[1], inIds[6], inIds[7], inIds[8]);
@@ -252,12 +246,12 @@ inline uint32_t refFactoryScatterDotF32_3D_Optimized(const std::vector<uint32_t>
     return graph.scatter(inIds[0], contigDot, inIds[3], inIds[4], inIds[5]);
 }
 
-REGISTER_KERNEL(
-    "Scatter_Dot_F32_3D_CPU_Optimized",
+REGISTER_KERNEL_INPLACE(
+    "Scatter_Dot_F32_3D_CPU_Optimized_inplace",
     12,
-    matchScatterDotF32_3D_Optimized,
-    runScatterDotF32_3D_Optimized,
-    refFactoryScatterDotF32_3D_Optimized,
+    matchScatterDotF32_3D_Optimized_Inplace,
+    runScatterDotF32_3D_Optimized_Inplace,
+    refFactoryScatterDotF32_3D_Optimized_Inplace,
     {Backend::CPU},
     {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32,
      DType::INT32, DType::INT32, DType::INT32,
@@ -266,5 +260,4 @@ REGISTER_KERNEL(
     {{1, 4, 8}, {1, 4, 8}, {1, 8, 8}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}},
     {false, false, false, false, false, false, false, false, false, false, false, false},
     {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
-
 #endif // TG_HAS_NEON
