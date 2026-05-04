@@ -3,6 +3,7 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 #include "core/graph.hpp"
+#include "core/shapes.hpp"
 #include <cstring>
 #include <cmath>
 #include <algorithm>
@@ -344,8 +345,50 @@ inline uint32_t refFactoryPartialBF16TransposedGEMM(const std::vector<uint32_t> 
     int32_t perm[] = {1, 0};
     uint32_t w_t = graph.contiguous(graph.permute(w_cast, graph.constant({2}, perm, DType::INT32)));
 
-    auto w_shape = graph.getNode(contigW).getShape(); // [N_slice, K_slice]
-    int32_t s3[] = {1, (int32_t)w_shape[1], (int32_t)w_shape[0]};
+    std::vector<int32_t> startsW, endsW, stepsW;
+    bool has_consts = evaluateInt32TensorForPlanning(inIds[9], graph, startsW) &&
+                      evaluateInt32TensorForPlanning(inIds[10], graph, endsW) &&
+                      evaluateInt32TensorForPlanning(inIds[11], graph, stepsW);
+
+    int32_t N_slice = 1;
+    int32_t K_slice = 1;
+
+    if (has_consts)
+    {
+        auto w_full_shape = graph.getNode(inIds[2]).getShape();
+        N_slice = w_full_shape.size() > 0 ? w_full_shape[0] : 1;
+        K_slice = w_full_shape.size() > 1 ? w_full_shape[1] : 1;
+
+        if (startsW.size() > 0 && endsW.size() > 0 && stepsW.size() > 0)
+        {
+            int32_t st = startsW[0];
+            int32_t en = endsW[0];
+            int32_t step = stepsW[0];
+            if (st < 0)
+                st += w_full_shape[0];
+            if (en < 0)
+                en += w_full_shape[0];
+            st = std::max(0, std::min(st, (int32_t)w_full_shape[0]));
+            en = std::max(0, std::min(en, (int32_t)w_full_shape[0]));
+            N_slice = step > 0 ? std::max(0, (en - st + step - 1) / step) : 0;
+        }
+
+        if (startsW.size() > 1 && endsW.size() > 1 && stepsW.size() > 1)
+        {
+            int32_t st = startsW[1];
+            int32_t en = endsW[1];
+            int32_t step = stepsW[1];
+            if (st < 0)
+                st += w_full_shape[1];
+            if (en < 0)
+                en += w_full_shape[1];
+            st = std::max(0, std::min(st, (int32_t)w_full_shape[1]));
+            en = std::max(0, std::min(en, (int32_t)w_full_shape[1]));
+            K_slice = step > 0 ? std::max(0, (en - st + step - 1) / step) : 0;
+        }
+    }
+
+    int32_t s3[] = {1, K_slice, N_slice};
     uint32_t w_3d = graph.reshape(w_t, graph.constant({3}, s3, DType::INT32));
 
     uint32_t dot = graph.dot(contigA, w_3d);
