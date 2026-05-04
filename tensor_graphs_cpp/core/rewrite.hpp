@@ -1440,6 +1440,9 @@ struct InfinityDomination : public Rule
 
 struct SlicePushDownElementwise : public Rule
 {
+    bool allowPushDownOnProtected;
+    SlicePushDownElementwise(bool allowPushDownOnProtected = false) : allowPushDownOnProtected(allowPushDownOnProtected) {}
+
     std::string name() const override { return "SlicePushDownElementwise"; }
 
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
@@ -1455,17 +1458,18 @@ struct SlicePushDownElementwise : public Rule
             if (childNode.opType == OpType::SLICE && childNode.children.size() == 4)
             {
                 uint32_t srcClass = egraph.findConst(childNode.children[0]);
+                // PROTECTED CHECK
+                if (!allowPushDownOnProtected && isEClassProtected(srcClass, protectedEClasses, egraph))
+                    continue;
+
                 for (uint32_t srcNodeIdx : egraph.getEClass(srcClass).enodes)
                 {
                     const ENode &opNode = egraph.getENodes()[srcNodeIdx];
                     OpType op = opNode.opType;
                     if (!(op == OpType::ADD || op == OpType::MUL || op == OpType::DIVIDE || op == OpType::POWER ||
                           op == OpType::SIN || op == OpType::COS || op == OpType::NEGATE || op == OpType::CAST))
-                    {
                         continue;
-                    }
-                    // reject if any child shape differs from the op's output shape
-                    // (broadcast inputs would get wrong offsets in apply)
+
                     bool hasBroadcastChild = false;
                     for (uint32_t cid : opNode.children)
                     {
@@ -1596,6 +1600,9 @@ struct SlicePushDownDot : public Rule
     };
 
     std::unordered_set<MatchKey, MatchKeyHash> visited;
+    bool allowPushDownOnProtected;
+
+    SlicePushDownDot(bool allowPushDownOnProtected = false) : allowPushDownOnProtected(allowPushDownOnProtected) {}
 
     std::string name() const override { return "SlicePushDownDot"; }
 
@@ -1617,6 +1624,10 @@ struct SlicePushDownDot : public Rule
             if (childNode.opType == OpType::SLICE && childNode.children.size() == 4)
             {
                 uint32_t srcClass = egraph.findConst(childNode.children[0]);
+                // PROTECTED CHECK: do not push slice down if the dot’s eclass is protected
+                if (!allowPushDownOnProtected && isEClassProtected(srcClass, protectedEClasses, egraph))
+                    continue;
+
                 for (uint32_t srcNodeIdx : egraph.getEClass(srcClass).enodes)
                 {
                     if (egraph.getENodes()[srcNodeIdx].opType == OpType::DOT)
@@ -1802,6 +1813,9 @@ struct SlicePullUpDot : public Rule
     };
 
     std::unordered_set<MatchKey, MatchKeyHash> visited;
+    bool allowPushDownOnProtected;
+
+    SlicePullUpDot(bool allowPushDownOnProtected = false) : allowPushDownOnProtected(allowPushDownOnProtected) {}
 
     std::string name() const override { return "SlicePullUpDot"; }
 
@@ -1837,6 +1851,10 @@ struct SlicePullUpDot : public Rule
             return false;
 
         uint32_t dotClass = egraph.findConst(enode.children[0]);
+        // PROTECTED CHECK
+        if (!allowPushDownOnProtected && isEClassProtected(dotClass, protectedEClasses, egraph))
+            return false;
+
         for (uint32_t dotNodeIdx : egraph.getEClass(dotClass).enodes)
         {
             const ENode &dotNode = egraph.getENodes()[dotNodeIdx];
@@ -2061,6 +2079,9 @@ struct ScatterSliceCancellation : public Rule
     };
 
     std::unordered_set<MatchKey, MatchKeyHash> visited;
+    bool allowPushDownOnProtected;
+
+    ScatterSliceCancellation(bool allowPushDownOnProtected = false) : allowPushDownOnProtected(allowPushDownOnProtected) {}
 
     std::string name() const override { return "ScatterSliceCancellation"; }
 
@@ -2077,7 +2098,7 @@ struct ScatterSliceCancellation : public Rule
             if (sliceNode.opType == OpType::SLICE && sliceNode.children.size() == 4)
             {
                 uint32_t scatterClassId = egraph.findConst(sliceNode.children[0]);
-                if (isEClassProtected(scatterClassId, protectedEClasses, egraph))
+                if (!allowPushDownOnProtected && isEClassProtected(scatterClassId, protectedEClasses, egraph))
                     continue; // *only if not in protected set*
 
                 for (uint32_t scatterEnodeIdx : egraph.getEClass(scatterClassId).enodes)
@@ -2122,7 +2143,7 @@ struct ScatterSliceCancellation : public Rule
             if (sliceNode.opType == OpType::SLICE && sliceNode.children.size() == 4)
             {
                 uint32_t scatterClassId = egraph.find(sliceNode.children[0]);
-                if (isEClassProtected(scatterClassId, protectedEClasses, egraph))
+                if (!allowPushDownOnProtected && isEClassProtected(scatterClassId, protectedEClasses, egraph))
                     continue;
 
                 for (uint32_t scatterEnodeIdx : egraph.getEClass(scatterClassId).enodes)

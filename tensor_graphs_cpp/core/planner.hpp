@@ -260,7 +260,7 @@ private:
         return order;
     }
 
-    void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical, bool injected)
+    void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical, bool injected, bool allowPushDownOnProtected = false)
     {
         std::vector<std::unique_ptr<Rule>> rules;
         rules.emplace_back(std::make_unique<FusionRule>());
@@ -271,10 +271,10 @@ private:
         if (injected)
         {
             rules.emplace_back(std::make_unique<InfinityDomination>());
-            rules.emplace_back(std::make_unique<SlicePushDownElementwise>());
-            rules.emplace_back(std::make_unique<SlicePushDownDot>());
-            rules.emplace_back(std::make_unique<SlicePullUpDot>());
-            rules.emplace_back(std::make_unique<ScatterSliceCancellation>());
+            rules.emplace_back(std::make_unique<SlicePushDownElementwise>(allowPushDownOnProtected));
+            rules.emplace_back(std::make_unique<SlicePushDownDot>(allowPushDownOnProtected));
+            rules.emplace_back(std::make_unique<SlicePullUpDot>(allowPushDownOnProtected));
+            rules.emplace_back(std::make_unique<ScatterSliceCancellation>(allowPushDownOnProtected));
         }
         // rules.emplace_back(std::make_unique<DistributiveProperty>());
 
@@ -1905,22 +1905,15 @@ private:
         return true;
     }
 
-    bool injectInputOutputPartialPaths(
+    bool injectInputPartialPaths(
         EGraph &egraph,
         const Graph &graph,
-        uint32_t rootId,
-        const std::vector<Region> &outputNeeded,
         const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
         const std::unordered_map<uint32_t, Backend> &cachedNodes,
         const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
         std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
     {
         bool injected = false;
-        if (!outputNeeded.empty())
-        {
-            injected = injected || injectPartialPath(egraph, graph, rootId, outputNeeded, cachedNodes, nodeToEClass, eclassToLogical);
-        }
-
         for (const auto &kv : dirtyOutputRegions)
         {
             uint32_t nodeId = kv.first;
@@ -1936,7 +1929,31 @@ private:
                 }
             }
         }
-        egraph.rebuild();
+        if (injected)
+        {
+            egraph.rebuild();
+        }
+        return injected;
+    }
+
+    bool injectOutputPartialPaths(
+        EGraph &egraph,
+        const Graph &graph,
+        uint32_t rootId,
+        const std::vector<Region> &outputNeeded,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
+        const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
+        std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
+    {
+        bool injected = false;
+        if (!outputNeeded.empty())
+        {
+            injected = injectPartialPath(egraph, graph, rootId, outputNeeded, cachedNodes, nodeToEClass, eclassToLogical);
+        }
+        if (injected)
+        {
+            egraph.rebuild();
+        }
         return injected;
     }
 
@@ -1954,24 +1971,39 @@ public:
         bool cheapInputCopy = false,
         bool strictCache = false)
     {
+        // 1. saturate base egraph
         initBaseEGraph(rootId, graph, doSaturate);
 
         EGraph egraph = baseState.egraph;
         auto eclassToLogical = baseState.eclassToLogical;
 
-        bool injected = injectInputOutputPartialPaths(egraph, graph, rootId, outputNeeded, dirtyOutputRegions, cachedNodes, baseState.nodeToEClass, eclassToLogical);
-        std::cout << "Injected: " << injected << std::endl;
-
-        if (doSaturate)
+        std::unordered_set<uint32_t> protectedEClasses;
+        for (const auto &kv : cachedNodes)
         {
-            std::unordered_set<uint32_t> protectedEClasses;
-            for (const auto &kv : cachedNodes)
-            {
-                uint32_t logicalId = kv.first;
-                protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
-            }
-            saturate(egraph, protectedEClasses, eclassToLogical, injected);
+            uint32_t logicalId = kv.first;
+            protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
         }
+
+        // 2. inject input dirty slices
+        bool dirtyInjected = injectInputPartialPaths(egraph, graph, dirtyOutputRegions, cachedNodes, baseState.nodeToEClass, eclassToLogical);
+
+        // 3. saturate
+        if (doSaturate && dirtyInjected)
+        {
+            saturate(egraph, protectedEClasses, eclassToLogical, true, true);
+        }
+
+        // 4. inject output needed regions
+        bool neededInjected = injectOutputPartialPaths(egraph, graph, rootId, outputNeeded, cachedNodes, baseState.nodeToEClass, eclassToLogical);
+
+        // 5. saturate again, but this time don't allow slice push down/pull up if the eclass is protected
+        if (doSaturate && neededInjected)
+        {
+            saturate(egraph, protectedEClasses, eclassToLogical, true, false);
+        }
+
+        bool injected = dirtyInjected || neededInjected;
+        std::cout << "Injected: " << injected << std::endl;
 
 #ifdef DEBUG
         auto rootIt = baseState.nodeToEClass.find(rootId);
