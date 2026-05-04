@@ -592,10 +592,10 @@ private:
                 }
             }
 
-            if (validEnodes.empty())
-            {
-                std::cout << "[Planner.extractBest] Warning: EClass " << eclassId << " has NO valid enodes\n";
-            }
+            // if (validEnodes.empty())
+            // {
+            //     std::cout << "[Planner.extractBest] Warning: EClass " << eclassId << " has NO valid enodes\n";
+            // }
 
             cls.enodes = std::move(validEnodes);
         }
