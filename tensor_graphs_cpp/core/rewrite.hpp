@@ -140,7 +140,7 @@ inline uint32_t copyToBackend(EGraph &egraph, uint32_t classId, Backend targetBa
 inline uint32_t createCacheInputNode(EGraph &egraph, const ENode &sourceNode, uint32_t sourceClassId, uint32_t partialPathId, std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
 {
     uint32_t canonSrcClass = egraph.find(sourceClassId);
-    const EClass &srcClass = egraph.getEClass(canonSrcClass);
+    const EClass srcClass = egraph.getEClass(canonSrcClass);
 
     uint32_t op_cache = egraph.addEClass(srcClass.shape, srcClass.strides, srcClass.viewOffset, srcClass.dtype, srcClass.backend);
     ENode cacheNode;
@@ -1567,7 +1567,7 @@ struct SlicePushDownElementwise : public Rule
                 uint32_t op_cache = createCacheInputNode(egraph, opNode, srcClass, partialPathId, eclassToLogical);
 
                 // Create SCATTER and merge with srcClass
-                const EClass &srcEClass = egraph.getEClass(egraph.find(srcClass));
+                const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigSlicedOp, startsId, endsId, stepsId}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
                 egraph.merge(srcClass, scatterClass);
@@ -1781,7 +1781,7 @@ struct SlicePushDownDot : public Rule
                 uint32_t op_cache = createCacheInputNode(egraph, dotNode, srcClass, partialPathId, eclassToLogical);
 
                 // Create SCATTER and merge with srcClass using the sliceNode's children for parameters
-                const EClass &srcEClass = egraph.getEClass(egraph.find(srcClass));
+                const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigSlicedOp, sliceNode.children[1], sliceNode.children[2], sliceNode.children[3]}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, dotNode.dtype, dotNode.backend, UINT32_MAX, partialPathId);
 
                 egraph.merge(srcClass, scatterClass);
@@ -1937,7 +1937,7 @@ struct SlicePullUpDot : public Rule
 
         for (uint32_t dotNodeIdx : dotNodes)
         {
-            const ENode &dotNode = egraph.getENodes()[dotNodeIdx];
+            const ENode dotNode = egraph.getENodes()[dotNodeIdx];
             uint32_t aClassId = dotNode.children[0];
             uint32_t bClassId = dotNode.children[1];
 
@@ -2140,7 +2140,7 @@ struct ScatterSliceCancellation : public Rule
 
         for (uint32_t sliceEnodeIdx : egraph.getEClass(sliceClassId).enodes)
         {
-            const ENode &sliceNode = egraph.getENodes()[sliceEnodeIdx];
+            const ENode sliceNode = egraph.getENodes()[sliceEnodeIdx];
             if (sliceNode.opType == OpType::SLICE && sliceNode.children.size() == 4)
             {
                 uint32_t scatterClassId = egraph.find(sliceNode.children[0]);
@@ -2149,7 +2149,7 @@ struct ScatterSliceCancellation : public Rule
 
                 for (uint32_t scatterEnodeIdx : egraph.getEClass(scatterClassId).enodes)
                 {
-                    const ENode &scatterNode = egraph.getENodes()[scatterEnodeIdx];
+                    const ENode scatterNode = egraph.getENodes()[scatterEnodeIdx];
                     if (scatterNode.opType == OpType::SCATTER && scatterNode.children.size() == 5)
                     {
                         MatchKey key{eNodeIdx, sliceEnodeIdx, scatterEnodeIdx};
@@ -2264,12 +2264,12 @@ struct SlicePushDownContiguous : public Rule
 
         for (uint32_t sliceIdx : sliceNodes)
         {
-            const ENode &sliceNode = egraph.getENodes()[sliceIdx];
+            const ENode sliceNode = egraph.getENodes()[sliceIdx];
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
 
             for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
             {
-                const ENode &opNode = egraph.getENodes()[srcIdx];
+                const ENode opNode = egraph.getENodes()[srcIdx];
                 if (opNode.opType != OpType::CONTIGUOUS)
                     continue;
 
@@ -2286,13 +2286,14 @@ struct SlicePushDownContiguous : public Rule
                 if (starts.empty() || ends.empty() || steps.empty())
                     continue;
 
-                std::vector<uint64_t> sliceStrides = egraph.getEClass(egraph.find(aClassId)).strides;
-                uint64_t sliceOffset = egraph.getEClass(egraph.find(aClassId)).viewOffset;
+                const EClass aClass = egraph.getEClass(egraph.find(aClassId));
+                std::vector<uint64_t> sliceStrides = aClass.strides;
+                uint64_t sliceOffset = aClass.viewOffset;
                 for (size_t d = 0; d < starts.size() && d < sliceStrides.size(); ++d)
                 {
                     int32_t start = starts[d];
                     if (start < 0)
-                        start += egraph.getEClass(egraph.find(aClassId)).shape[d];
+                        start += aClass.shape[d];
                     sliceOffset += start * sliceStrides[d];
                     sliceStrides[d] *= steps[d];
                 }
@@ -2300,7 +2301,7 @@ struct SlicePushDownContiguous : public Rule
                 uint32_t newSlice = addOpToEGraph(egraph, OpType::SLICE, {aClassId, sliceNode.children[1], sliceNode.children[2], sliceNode.children[3]}, sliceNode.shape, sliceStrides, sliceOffset, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
                 uint32_t newContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {newSlice}, sliceNode.shape, calcContiguousStrides(sliceNode.shape), 0, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
-                const EClass &srcEClass = egraph.getEClass(egraph.find(srcClass));
+                const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t op_cache = createCacheInputNode(egraph, opNode, srcClass, partialPathId, eclassToLogical);
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, newContig, sliceNode.children[1], sliceNode.children[2], sliceNode.children[3]}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
@@ -2392,12 +2393,12 @@ struct SlicePushDownPermute : public Rule
 
         for (uint32_t sliceIdx : sliceNodes)
         {
-            const ENode &sliceNode = egraph.getENodes()[sliceIdx];
+            const ENode sliceNode = egraph.getENodes()[sliceIdx];
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
 
             for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
             {
-                const ENode &opNode = egraph.getENodes()[srcIdx];
+                const ENode opNode = egraph.getENodes()[srcIdx];
                 if (opNode.opType != OpType::PERMUTE)
                     continue;
 
@@ -2437,7 +2438,7 @@ struct SlicePushDownPermute : public Rule
                 uint32_t nEndsId = addIntConst(egraph, new_ends);
                 uint32_t nStepsId = addIntConst(egraph, new_steps);
 
-                const EClass &aClass = egraph.getEClass(egraph.find(aClassId));
+                const EClass aClass = egraph.getEClass(egraph.find(aClassId));
                 std::vector<uint64_t> sliceStrides = aClass.strides;
                 uint64_t sliceOffset = aClass.viewOffset;
                 std::vector<uint32_t> sliceShape(rank);
@@ -2463,7 +2464,7 @@ struct SlicePushDownPermute : public Rule
                 uint32_t newPermute = addOpToEGraph(egraph, OpType::PERMUTE, {newContig, opNode.children[1]}, sliceNode.shape, pStrides, 0, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
                 uint32_t newPermuteContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {newPermute}, sliceNode.shape, calcContiguousStrides(sliceNode.shape), 0, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
-                const EClass &srcEClass = egraph.getEClass(egraph.find(srcClass));
+                const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t op_cache = createCacheInputNode(egraph, opNode, srcClass, partialPathId, eclassToLogical);
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, newPermuteContig, sliceNode.children[1], sliceNode.children[2], sliceNode.children[3]}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
@@ -2555,12 +2556,12 @@ struct SlicePushDownReshape : public Rule
 
         for (uint32_t sliceIdx : sliceNodes)
         {
-            const ENode &sliceNode = egraph.getENodes()[sliceIdx];
+            const ENode sliceNode = egraph.getENodes()[sliceIdx];
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
 
             for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
             {
-                const ENode &opNode = egraph.getENodes()[srcIdx];
+                const ENode opNode = egraph.getENodes()[srcIdx];
                 if (opNode.opType != OpType::RESHAPE)
                     continue;
 
@@ -2569,7 +2570,7 @@ struct SlicePushDownReshape : public Rule
                     continue;
 
                 uint32_t aClassId = opNode.children[0];
-                const EClass &aClass = egraph.getEClass(egraph.find(aClassId));
+                const EClass aClass = egraph.getEClass(egraph.find(aClassId));
                 std::vector<uint32_t> aShape = aClass.shape;
                 uint32_t aRank = aShape.size();
 
@@ -2672,7 +2673,7 @@ struct SlicePushDownReshape : public Rule
                 uint32_t newReshape = addOpToEGraph(egraph, OpType::RESHAPE, {newContig, nShapeId}, sliceNode.shape, calcContiguousStrides(sliceNode.shape), 0, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
                 uint32_t newReshapeContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {newReshape}, sliceNode.shape, calcContiguousStrides(sliceNode.shape), 0, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
-                const EClass &srcEClass = egraph.getEClass(egraph.find(srcClass));
+                const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t op_cache = createCacheInputNode(egraph, opNode, srcClass, partialPathId, eclassToLogical);
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, newReshapeContig, sliceNode.children[1], sliceNode.children[2], sliceNode.children[3]}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
@@ -2764,12 +2765,12 @@ struct SlicePushDownConcat : public Rule
 
         for (uint32_t sliceIdx : sliceNodes)
         {
-            const ENode &sliceNode = egraph.getENodes()[sliceIdx];
+            const ENode sliceNode = egraph.getENodes()[sliceIdx];
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
 
             for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
             {
-                const ENode &opNode = egraph.getENodes()[srcIdx];
+                const ENode opNode = egraph.getENodes()[srcIdx];
                 if (opNode.opType != OpType::CONCAT)
                     continue;
 
@@ -2879,7 +2880,7 @@ struct SlicePushDownConcat : public Rule
 
                 uint32_t resultContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {resultClass}, sliceNode.shape, calcContiguousStrides(sliceNode.shape), 0, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
-                const EClass &srcEClass = egraph.getEClass(egraph.find(srcClass));
+                const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t op_cache = createCacheInputNode(egraph, opNode, srcClass, partialPathId, eclassToLogical);
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, resultContig, sliceNode.children[1], sliceNode.children[2], sliceNode.children[3]}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
@@ -2971,12 +2972,12 @@ struct SlicePushDownRepeat : public Rule
 
         for (uint32_t sliceIdx : sliceNodes)
         {
-            const ENode &sliceNode = egraph.getENodes()[sliceIdx];
+            const ENode sliceNode = egraph.getENodes()[sliceIdx];
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
 
             for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
             {
-                const ENode &opNode = egraph.getENodes()[srcIdx];
+                const ENode opNode = egraph.getENodes()[srcIdx];
                 if (opNode.opType != OpType::REPEAT)
                     continue;
 
@@ -3035,7 +3036,7 @@ struct SlicePushDownRepeat : public Rule
                 uint32_t nStepsId = addIntConst(egraph, steps);
 
                 uint32_t aClassId = egraph.find(opNode.children[0]);
-                const EClass &aClass = egraph.getEClass(aClassId);
+                const EClass aClass = egraph.getEClass(aClassId);
 
                 std::vector<uint32_t> sliceInShape = aClass.shape;
                 std::vector<uint64_t> sliceInStrides = aClass.strides;
@@ -3090,7 +3091,7 @@ struct SlicePushDownRepeat : public Rule
                 uint32_t sliceOut = addOpToEGraph(egraph, OpType::SLICE, {repNew, fStartsId, fEndsId, fStepsId}, sliceNode.shape, sliceOutStrides, sliceOutOffset, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
                 uint32_t contigOut = addOpToEGraph(egraph, OpType::CONTIGUOUS, {sliceOut}, sliceNode.shape, calcContiguousStrides(sliceNode.shape), 0, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
-                const EClass &srcEClass = egraph.getEClass(egraph.find(srcClass));
+                const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t op_cache = createCacheInputNode(egraph, opNode, srcClass, partialPathId, eclassToLogical);
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigOut, sliceNode.children[1], sliceNode.children[2], sliceNode.children[3]}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
