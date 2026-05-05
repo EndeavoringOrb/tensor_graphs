@@ -2974,8 +2974,8 @@ struct SlicePushDownRepeat : public Rule
         {
             const ENode sliceNode = egraph.getENodes()[sliceIdx];
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
-
-            for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
+            const std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
+            for (uint32_t srcIdx : srcEnodes)
             {
                 const ENode opNode = egraph.getENodes()[srcIdx];
                 if (opNode.opType != OpType::REPEAT)
