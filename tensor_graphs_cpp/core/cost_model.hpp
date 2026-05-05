@@ -253,7 +253,8 @@ struct CostModel
         {
             if (r.inputShapes == inShapes && r.outputShapes == outShapes &&
                 r.inputStrides == inStrides && r.outputStrides == outStrides &&
-                r.inputDTypes == inDTypes && r.outputDTypes == outDTypes)
+                r.inputDTypes == inDTypes && r.outputDTypes == outDTypes &&
+                r.inputConstants == inConstants)
             {
                 return r.runTime;
             }
