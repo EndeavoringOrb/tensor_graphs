@@ -3,36 +3,49 @@ import json
 import os
 import argparse
 import re
+import struct
+
+
+def format_constants(data, dtype):
+    """
+    Reinterprets a list of integers (bytes) into the specified dtype.
+    """
+    if not data:
+        return ""
+
+    # Convert list of ints to bytes
+    raw_bytes = bytes(data)
+
+    if dtype == "FLOAT32":
+        count = len(raw_bytes) // 4
+        return list(struct.unpack(f"<{count}f", raw_bytes))
+
+    elif dtype == "INT32":
+        count = len(raw_bytes) // 4
+        return list(struct.unpack(f"<{count}i", raw_bytes))
+
+    raise ValueError("Unknown dtype")
 
 
 def load_uids_from_cpp(header_path):
-    """
-    Parses the C++ header file to map Hex UIDs to their Constant Names.
-    """
+    """Parses the C++ header file to map Hex UIDs to their Constant Names."""
     uid_to_name = {}
     if not header_path or not os.path.exists(header_path):
         return uid_to_name
 
-    # Regex to find: constexpr uint64_t NAME = 0xHEXULL;
     pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
-
     with open(header_path, "r") as f:
         content = f.read()
         matches = pattern.findall(content)
         for name, hex_val in matches:
-            # Convert hex to decimal integer
             val_int = int(hex_val, 16)
-            # Store both string decimal and hex representation to be safe
             uid_to_name[str(val_int)] = name
             uid_to_name[hex_val.lower()] = name
-
     return uid_to_name
 
 
 def load_uid_map(cache_path):
-    """
-    Scans the compiled bucket cache to associate kernel UIDs with human names.
-    """
+    """Scans the compiled bucket cache to associate kernel UIDs with human names."""
     uid_to_name = {}
     if not cache_path or not os.path.exists(cache_path):
         return uid_to_name
@@ -67,30 +80,22 @@ def main():
     parser.add_argument(
         "--cache",
         default="dirty_region_caches/gemma-3-270m-cpp.jsonl",
-        help="Path to cache file to resolve OpNames",
+        help="Path to cache",
     )
     parser.add_argument(
         "--header",
         default="tensor_graphs_cpp/generated/kernel_uids.gen.hpp",
-        help="Path to the C++ header file containing Kernel IDs",
+        help="Path to C++ header",
     )
-    parser.add_argument(
-        "--op", help="Regex/Substring filter for OpName (e.g. 'MUL' or 'RMS')"
-    )
-    parser.add_argument(
-        "--shape", help="String filter for OutputShape (e.g. '[1, 8, 640]')"
-    )
+    parser.add_argument("--op", help="Regex/Substring filter for OpName")
+    parser.add_argument("--shape", help="String filter for OutputShape")
     args = parser.parse_args()
 
     if not os.path.exists(args.records):
         print(f"Error: {args.records} not found.")
         return
 
-    # 1. Load mapping from Cache (OpTypes)
     uid_map = load_uid_map(args.cache)
-
-    # 2. Load mapping from C++ Header (Specific Kernel Names)
-    # This will overwrite the generic Cache names with specific kernel names if available
     header_map = load_uids_from_cpp(args.header)
     uid_map.update(header_map)
 
@@ -100,14 +105,11 @@ def main():
             if line.strip():
                 records.append(json.loads(line))
 
-    # Apply Filters
     filtered = []
     for r in records:
-        # Normalize uid to string for lookup
         uid = str(r["kernelUid"])
         name = uid_map.get(uid, "UNKNOWN")
 
-        # Filter by OpName/Type
         if (
             args.op
             and not re.search(args.op, name, re.IGNORECASE)
@@ -115,14 +117,12 @@ def main():
         ):
             continue
 
-        # Filter by (Output + Input) Shape string matching
         out_shapes_str = str(r.get("outputShapes", [])) + str(r.get("inputShapes", []))
         if args.shape and args.shape not in out_shapes_str:
             continue
 
         filtered.append((name, r))
 
-    # Print in bench.cpp format
     total = len(filtered)
     for i, (name, r) in enumerate(filtered):
         uid = r["kernelUid"]
@@ -134,11 +134,19 @@ def main():
         in_shapes = r.get("inputShapes", [])
         in_dtypes = r.get("inputDTypes", [])
         in_strides = r.get("inputStrides", [])
+        in_consts = r.get("inputConstants", [])
+
         for idx in range(len(in_shapes)):
             dt = in_dtypes[idx] if idx < len(in_dtypes) else "???"
             sh = in_shapes[idx]
             st = in_strides[idx] if idx < len(in_strides) else []
-            print(f"  In  #{idx}: dtype={dt}, shape={sh}, strides={st}")
+
+            # Reinterpret constants based on dtype
+            ic_raw = in_consts[idx] if idx < len(in_consts) else []
+            ic_formatted = format_constants(ic_raw, dt)
+            const_str = f", constants={ic_formatted}" if ic_formatted else ""
+
+            print(f"  In  #{idx}: dtype={dt}, shape={sh}, strides={st}{const_str}")
 
         # Outputs
         out_shapes = r.get("outputShapes", [])
@@ -151,8 +159,7 @@ def main():
             print(f"  Out #{idx}: dtype={dt}, shape={sh}, strides={st}")
 
         runtime = r.get("runTime", 0.0)
-        print(f"  Benchmarking... -> {runtime:.6f} ms")
-        print()
+        print(f"  Benchmarking... -> {runtime:.6f} ms\n")
 
 
 if __name__ == "__main__":
