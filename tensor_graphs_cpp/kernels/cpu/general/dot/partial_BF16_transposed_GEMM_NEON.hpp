@@ -68,16 +68,6 @@ inline void runPartialBF16TransposedGEMM(const std::vector<const void *> &inputs
     const TensorView &view_A = inViews[1];
     const TensorView &view_W = inViews[2];
 
-    if (target_ptr != out_cache_ptr)
-    {
-        uint64_t n_target = countElements(outViews[0].getShape());
-        for (uint64_t i = 0; i < n_target; ++i)
-        {
-            out_cache_ptr[getStridedIndex(i, outViews[0].getShape(), outViews[0].strides)] =
-                target_ptr[getStridedIndex(i, outViews[0].getShape(), inViews[0].strides)];
-        }
-    }
-
     int32_t startsC[3], endsC[3], stepsC[3];
     int32_t startsA[3], endsA[3], stepsA[3];
     int32_t startsW[3], endsW[3], stepsW[3];
