@@ -1140,6 +1140,22 @@ struct ConstantFolding : public Rule
                 return;
             }
 
+            // CRITICAL SAFETY CHECK: Ensure the stagedData actually encompasses the maximum offset
+            // required by the child class strides.
+            size_t maxInOffset = childCls.viewOffset;
+            for (size_t d = 0; d < childCls.shape.size(); ++d)
+            {
+                if (childCls.shape[d] > 0)
+                {
+                    maxInOffset += (childCls.shape[d] - 1) * childCls.strides[d];
+                }
+            }
+            size_t reqInBytes = (childCls.shape.empty() ? 1 : (maxInOffset + 1)) * getDTypeSize(childCls.dtype);
+            if (reqInBytes > stagedData.size() && stagedData.size() > 0)
+            {
+                return; // Abort folding gracefully if the buffer does not physically support this view
+            }
+
             kernelInputs.push_back(stagedData.data() + offsetBytes);
             inViews.push_back(TensorView(inNode, 0));
         }
@@ -2423,6 +2439,22 @@ struct SlicePushDownPermute : public Rule
                     continue;
 
                 size_t rank = dims.size();
+                const EClass aClass = egraph.getEClass(egraph.find(aClassId));
+
+                if (rank != aClass.shape.size())
+                    continue;
+
+                bool dimsOk = true;
+                for (int32_t dim : dims)
+                {
+                    if (dim < 0 || dim >= (int32_t)rank)
+                    {
+                        dimsOk = false;
+                        break;
+                    }
+                }
+                if (!dimsOk)
+                    continue;
                 while (starts.size() < rank)
                     starts.push_back(0);
                 while (ends.size() < rank)
@@ -2443,7 +2475,6 @@ struct SlicePushDownPermute : public Rule
                 uint32_t nEndsId = addIntConst(egraph, new_ends);
                 uint32_t nStepsId = addIntConst(egraph, new_steps);
 
-                const EClass aClass = egraph.getEClass(egraph.find(aClassId));
                 std::vector<uint64_t> sliceStrides = aClass.strides;
                 uint64_t sliceOffset = aClass.viewOffset;
                 std::vector<uint32_t> sliceShape(rank);
@@ -2816,7 +2847,7 @@ struct SlicePushDownConcat : public Rule
                 if (axis < 0)
                     axis += rank;
 
-                if (steps[axis] != 1)
+                if (axis < 0 || axis >= (int32_t)rank || steps[axis] != 1)
                     continue;
 
                 std::vector<uint32_t> inputs;
@@ -3018,7 +3049,7 @@ struct SlicePushDownRepeat : public Rule
 
                 if (axis < 0)
                     axis += rank;
-                if (steps[axis] != 1)
+                if (axis < 0 || axis >= (int32_t)rank || steps[axis] != 1)
                     continue;
 
                 for (size_t d = 0; d < rank; ++d)
