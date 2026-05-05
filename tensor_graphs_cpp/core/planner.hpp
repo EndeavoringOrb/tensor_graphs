@@ -275,6 +275,11 @@ private:
             rules.emplace_back(std::make_unique<SlicePushDownDot>(allowPushDownOnProtected));
             rules.emplace_back(std::make_unique<SlicePullUpDot>(allowPushDownOnProtected));
             rules.emplace_back(std::make_unique<ScatterSliceCancellation>(allowPushDownOnProtected));
+            rules.emplace_back(std::make_unique<SlicePushDownContiguous>(allowPushDownOnProtected));
+            rules.emplace_back(std::make_unique<SlicePushDownPermute>(allowPushDownOnProtected));
+            rules.emplace_back(std::make_unique<SlicePushDownReshape>(allowPushDownOnProtected));
+            rules.emplace_back(std::make_unique<SlicePushDownConcat>(allowPushDownOnProtected));
+            rules.emplace_back(std::make_unique<SlicePushDownRepeat>(allowPushDownOnProtected));
         }
         // rules.emplace_back(std::make_unique<DistributiveProperty>());
 
