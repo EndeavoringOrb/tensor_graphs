@@ -1532,12 +1532,15 @@ private:
             targetBackend = it->second;
         }
 
-        uint32_t E_Cache = egraph.addEClass(sourceNode.getShape(), calcContiguousStrides(sourceNode.getShape()), 0, sourceNode.dtype, targetBackend);
+        const EClass &lClass = egraph.getEClass(E_L);
+
+        uint32_t E_Cache = egraph.addEClass(lClass.shape, lClass.strides, lClass.viewOffset, lClass.dtype, targetBackend);
         ENode cacheNode;
         cacheNode.opType = OpType::INPUT;
-        cacheNode.dtype = sourceNode.dtype;
-        cacheNode.shape = sourceNode.getShape();
-        cacheNode.strides = calcContiguousStrides(cacheNode.shape);
+        cacheNode.dtype = lClass.dtype;
+        cacheNode.shape = lClass.shape;
+        cacheNode.strides = lClass.strides;
+        cacheNode.viewOffset = lClass.viewOffset;
         cacheNode.backend = targetBackend;
         cacheNode.leafId = logicalId;
         egraph.addENode(E_Cache, cacheNode);
@@ -1853,13 +1856,14 @@ private:
                 egraph.addENode(contigEClass, cn);
             }
 
-            uint32_t scatterEClass = egraph.addEClass(sourceNode.getShape(), calcContiguousStrides(sourceNode.getShape()), 0, sourceNode.dtype, targetBackend);
+            uint32_t scatterEClass = egraph.addEClass(lClass.shape, lClass.strides, lClass.viewOffset, lClass.dtype, targetBackend);
             ENode scatterNode;
             scatterNode.opType = OpType::SCATTER;
             scatterNode.children = {current_E, contigEClass, startsId, endsId, stepsId};
-            scatterNode.shape = sourceNode.getShape();
-            scatterNode.strides = calcContiguousStrides(scatterNode.shape);
-            scatterNode.dtype = sourceNode.dtype;
+            scatterNode.shape = lClass.shape;
+            scatterNode.strides = lClass.strides;
+            scatterNode.viewOffset = lClass.viewOffset;
+            scatterNode.dtype = lClass.dtype;
             scatterNode.backend = targetBackend;
 
             TensorNode sOut;
@@ -1889,10 +1893,10 @@ private:
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
                 ENode sn = scatterNode;
                 sn.kernelUid = uid;
-                if (kernel.isView)
+                if (kernel.isView || kernel.inplace)
                 {
-                    sn.strides = calcContiguousStrides(scatterNode.shape);
-                    sn.viewOffset = 0;
+                    sn.strides = lClass.strides;
+                    sn.viewOffset = lClass.viewOffset;
                 }
                 else
                 {
