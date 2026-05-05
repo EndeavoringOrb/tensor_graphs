@@ -45,11 +45,11 @@ tools = [
                 "properties": {
                     "op": {
                         "type": "string",
-                        "description": "Optional substring filter for OpName",
+                        "description": "Regex pattern to filter OpName (e.g., 'Dot.*F32' or '^Softmax'). Case-insensitive.",
                     },
                     "shape": {
                         "type": "string",
-                        "description": "Optional substring filter for OutputShape",
+                        "description": "Regex pattern to filter OutputShape or InputShape (e.g., '128, 768' or '\\[.*, 4096\\]').",
                     },
                 },
             },
@@ -166,7 +166,9 @@ def run_agentic_loop():
                     result = handle_tool_call(tool_call)
                     content = json.dumps(result, indent=2)
                     if len(content) > 10000:
-                        content = "Content exceeded maximum length. Please narrow parameters."
+                        content = (
+                            "Content exceeded maximum length. Please narrow parameters."
+                        )
                     messages.append(
                         {
                             "role": "tool",

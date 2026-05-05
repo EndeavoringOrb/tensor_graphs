@@ -2,6 +2,8 @@
 from flask import Flask, jsonify, request, render_template
 import os
 import json
+import re
+import struct
 from pathlib import Path
 from collections import defaultdict
 from .jobs import (
@@ -15,6 +17,20 @@ from .jobs import (
 
 app = Flask(__name__)
 start_worker()
+
+
+def format_constants(data, dtype):
+    """Reinterprets a list of integers (bytes) into the specified dtype."""
+    if not data:
+        return data
+    raw_bytes = bytes(data)
+    if dtype == "FLOAT32":
+        count = len(raw_bytes) // 4
+        return list(struct.unpack(f"<{count}f", raw_bytes))
+    elif dtype == "INT32":
+        count = len(raw_bytes) // 4
+        return list(struct.unpack(f"<{count}i", raw_bytes))
+    return data
 
 
 @app.route("/")
@@ -45,11 +61,8 @@ def read_kernel_file(job_id):
     if not job or not job.get("kernel_file"):
         return jsonify({"error": "File not found"}), 404
 
-    try:
-        content = Path(job["kernel_file"]).read_text()
-        return jsonify({"content": content})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    content = Path(job["kernel_file"]).read_text()
+    return jsonify({"content": content})
 
 
 @app.get("/api/jobs/<job_id>")
@@ -75,25 +88,83 @@ def get_hardware_info():
 
 @app.get("/api/read_benchmarks")
 def get_read_benchmarks():
-    op_filter = request.args.get("op", "").lower()
+    op_filter = request.args.get("op", "")
     shape_filter = request.args.get("shape", "")
+    target_model = request.args.get("target_model", "gemma-3-270m")
 
     records_path = PROJECT_ROOT / "benchmarks" / "records.jsonl"
+    cache_path = PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.jsonl"
+    header_path = (
+        PROJECT_ROOT / "tensor_graphs_cpp" / "generated" / "kernel_uids.gen.hpp"
+    )
+
     if not records_path.exists():
         return jsonify({"records": []})
+
+    # Build Map for resolving human-readable Names
+    uid_map = {}
+
+    # 1. Load UIDs from Cache
+    if cache_path.exists():
+        with open(cache_path, "r") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                if entry.get("type") == "compiled_bucket":
+                    nodes = entry["graph"]["nodesMap"]
+                    for inst in entry["graph"]["instructions"]:
+                        uid = str(inst["fullKernelId"])
+                        node = nodes[str(inst["nodeId"])]
+                        op_name = node["opType"]
+                        if op_name == "FUSED":
+                            op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
+                        uid_map[uid] = op_name
+
+    # 2. Load UIDs from C++ Header
+    if header_path.exists():
+        pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
+
+        with open(header_path, "r") as f:
+            for name, hex_val in pattern.findall(f.read()):
+                val_int = int(hex_val, 16)
+                uid_map[str(val_int)] = name
+                uid_map[hex_val.lower()] = name
 
     records = []
     with open(records_path, "r") as f:
         for line in f:
             if line.strip():
                 r = json.loads(line)
-                opname = r.get("opName", "UNKNOWN").lower()
+                uid = str(r.get("kernelUid", ""))
+
+                # Resolve the proper human-readable opName
+                opname = uid_map.get(uid, r.get("opName", "UNKNOWN"))
+                r["opName"] = opname  # Replace so the agent gets the proper name
+
                 shapes = str(r.get("outputShapes", [])) + str(r.get("inputShapes", []))
 
-                if op_filter and op_filter not in opname:
-                    continue
-                if shape_filter and shape_filter not in shapes:
-                    continue
+                # Apply Regex for OpName (against Name and UID)
+                if op_filter:
+                    if not re.search(
+                        op_filter, opname, re.IGNORECASE
+                    ) and not re.search(op_filter, uid, re.IGNORECASE):
+                        continue
+
+                # Apply Regex for Shapes
+                if shape_filter:
+                    if not re.search(shape_filter, shapes):
+                        continue
+
+                # Format Constants (from raw byte array to Float/Int arrays)
+                in_consts = r.get("inputConstants", [])
+                in_dtypes = r.get("inputDTypes", [])
+                if in_consts and in_dtypes:
+                    formatted_consts = []
+                    for idx, data in enumerate(in_consts):
+                        dt = in_dtypes[idx] if idx < len(in_dtypes) else ""
+                        formatted_consts.append(format_constants(data, dt))
+                    r["inputConstants"] = formatted_consts
 
                 records.append(r)
 
