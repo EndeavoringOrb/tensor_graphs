@@ -1532,7 +1532,7 @@ private:
             targetBackend = it->second;
         }
 
-        const EClass &lClass = egraph.getEClass(E_L);
+        const EClass lClass = egraph.getEClass(E_L);
 
         uint32_t E_Cache = egraph.addEClass(lClass.shape, lClass.strides, lClass.viewOffset, lClass.dtype, targetBackend);
         ENode cacheNode;
