@@ -1,94 +1,192 @@
-from flask import Flask, jsonify, request
-
-from .jobs import create_job, jobs, load_benchmark_records, run_cmd, start_worker, TIMEOUTS
+# File: kernel_bench/app.py
+from flask import Flask, jsonify, request, render_template
+import os
+import json
+from pathlib import Path
+from collections import defaultdict
+from .jobs import (
+    create_job,
+    jobs,
+    load_job_history,
+    get_hw_info,
+    start_worker,
+    PROJECT_ROOT,
+)
 
 app = Flask(__name__)
-
-# Start background worker thread
 start_worker()
 
 
 @app.route("/")
 def index():
-    return jsonify({
-        "message": "Kernel Bench API",
-        "endpoints": [
-            "POST /api/kernels/test",
-            "GET  /api/jobs/<job_id>",
-            "GET  /api/benchmarks",
-            "GET  /api/analyze",
-        ],
-    })
+    return render_template("index.html")
 
 
 @app.post("/api/kernels/test")
 def submit_kernel():
     data = request.get_json(force=True, silent=True)
-    if not data or not data.get("source"):
-        return jsonify({"error": "Missing 'source' field in request body"}), 400
+    if not data or not data.get("source") or not data.get("opname"):
+        return jsonify({"error": "Missing 'source' or 'opname'"}), 400
 
-    source = data["source"]
     backend = data.get("backend", "cpu")
-    if backend not in ("cpu", "cuda"):
-        return jsonify({"error": "backend must be 'cpu' or 'cuda'"}), 400
+    target_model = data.get("target_model", "gemma-3-270m")
 
-    job_id = create_job(source, backend)
+    job_id = create_job(data["source"], data["opname"], backend, target_model)
     return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+
+@app.get("/api/kernels/file/<job_id>")
+def read_kernel_file(job_id):
+    history = load_job_history()
+    job = next((j for j in history if j["job_id"] == job_id), None)
+    if not job and job_id in jobs:
+        job = jobs[job_id]
+
+    if not job or not job.get("kernel_file"):
+        return jsonify({"error": "File not found"}), 404
+
+    try:
+        content = Path(job["kernel_file"]).read_text()
+        return jsonify({"content": content})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.get("/api/jobs/<job_id>")
 def get_job(job_id):
     job = jobs.get(job_id)
     if not job:
+        history = load_job_history()
+        job = next((j for j in history if j["job_id"] == job_id), None)
+    if not job:
         return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
 
 
-@app.get("/api/benchmarks")
-def get_benchmarks():
-    limit = request.args.get("limit", type=int)
-    kernel_uid = request.args.get("kernel_uid")
-    sort = request.args.get("sort")
+@app.get("/api/history")
+def get_history():
+    return jsonify(load_job_history())
 
-    records = load_benchmark_records()
 
-    if kernel_uid:
-        records = [r for r in records if r.get("kernelUid") == kernel_uid]
-    if sort == "runtime":
-        records.sort(key=lambda r: r.get("runTime", 0), reverse=True)
-    if limit is not None:
-        records = records[:limit]
+@app.get("/api/hwinfo")
+def get_hardware_info():
+    return jsonify({"hwinfo": get_hw_info()})
 
-    return jsonify({"count": len(records), "records": records})
+
+@app.get("/api/read_benchmarks")
+def get_read_benchmarks():
+    op_filter = request.args.get("op", "").lower()
+    shape_filter = request.args.get("shape", "")
+
+    records_path = PROJECT_ROOT / "benchmarks" / "records.jsonl"
+    if not records_path.exists():
+        return jsonify({"records": []})
+
+    records = []
+    with open(records_path, "r") as f:
+        for line in f:
+            if line.strip():
+                r = json.loads(line)
+                opname = r.get("opName", "UNKNOWN").lower()
+                shapes = str(r.get("outputShapes", [])) + str(r.get("inputShapes", []))
+
+                if op_filter and op_filter not in opname:
+                    continue
+                if shape_filter and shape_filter not in shapes:
+                    continue
+
+                records.append(r)
+
+    return jsonify({"records": records})
 
 
 @app.get("/api/analyze")
 def get_analyze():
-    from .jobs import PROJECT_ROOT, CACHE_DIR, BENCHMARKS_DIR, parse_analyze_output
+    target_model = request.args.get("target_model", "gemma-3-270m")
+    records_path = PROJECT_ROOT / "benchmarks" / "records.jsonl"
+    cache_path = PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.jsonl"
 
-    graph = request.args.get("graph", str(CACHE_DIR / "gemma-3-270m-cpp.jsonl"))
-    records = request.args.get("records", str(BENCHMARKS_DIR / "records.jsonl"))
-    top_n = request.args.get("top_n", 20, type=int)
-    chain_len = request.args.get("chain_len", 1, type=int)
+    if not records_path.exists() or not cache_path.exists():
+        return jsonify({"error": "No benchmark or cache data available yet."}), 404
 
-    res = run_cmd(
-        ["python", "analyze_performance.py",
-         "--graph", graph,
-         "--records", records,
-         "--top_n", str(top_n),
-         "--chain_len", str(chain_len)],
-        TIMEOUTS["analyze"],
+    bench_map = {}
+    with open(records_path, "r") as f:
+        for line in f:
+            if line.strip():
+                r = json.loads(line)
+                key = (
+                    r["kernelUid"],
+                    tuple(r["outputShapes"][0]),
+                    tuple(r["outputStrides"][0]),
+                )
+                bench_map[key] = r["runTime"]
+
+    total_estimated_time = 0.0
+    extracted_uids = set()
+    chain_stats = defaultdict(lambda: {"time": 0.0, "count": 0})
+    op_type_stats = defaultdict(float)
+
+    with open(cache_path, "r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if entry.get("type") != "compiled_bucket":
+                continue
+
+            graph = entry["graph"]
+            nodes = graph["nodesMap"]
+
+            for inst in graph["instructions"]:
+                node_id = str(inst["nodeId"])
+                node = nodes[node_id]
+                uid = inst["fullKernelId"]
+                extracted_uids.add(uid)
+
+                op_name = node["opType"]
+                if op_name == "FUSED":
+                    op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
+
+                shape = tuple(node["shape"])
+                strides = tuple(node["strides"])
+                bench_key = (uid, shape, strides)
+
+                runtime = bench_map.get(bench_key, 0.0)
+                total_estimated_time += runtime
+                op_type_stats[op_name] += runtime
+
+                # Length-1 chain registration
+                input_shapes = [
+                    nodes[str(pid)]["shape"] if str(pid) in nodes else []
+                    for pid in node["parentIds"]
+                ]
+                identity = f"{op_name}({input_shapes}->{list(shape)})"
+                chain_stats[identity]["time"] += runtime
+                chain_stats[identity]["count"] += 1
+
+    top_chains = sorted(
+        [
+            {"chain": k, "time": v["time"], "count": v["count"]}
+            for k, v in chain_stats.items()
+        ],
+        key=lambda x: x["time"],
+        reverse=True,
+    )[:20]
+
+    top_ops = sorted(
+        [{"op": k, "time": v} for k, v in op_type_stats.items()],
+        key=lambda x: x["time"],
+        reverse=True,
     )
 
-    if res["exit_code"] != 0:
-        return jsonify({
-            "error": "analyze_performance.py failed",
-            "exit_code": res["exit_code"],
-            "stdout": res["stdout"],
-            "stderr": res["stderr"],
-        }), 500
-
-    return jsonify(parse_analyze_output(res["stdout"]))
+    return jsonify(
+        {
+            "total_estimated_time_ms": total_estimated_time,
+            "extracted_uids": list(extracted_uids),
+            "top_chains": top_chains,
+            "top_ops": top_ops,
+        }
+    )
 
 
 if __name__ == "__main__":

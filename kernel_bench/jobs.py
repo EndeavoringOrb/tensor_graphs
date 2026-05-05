@@ -1,9 +1,11 @@
+# File: kernel_bench/jobs.py
 import json
 import os
 import subprocess
 import threading
 import time
 import uuid
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,24 +13,56 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KERNELS_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "kernels"
 BENCHMARKS_DIR = PROJECT_ROOT / "benchmarks"
 CACHE_DIR = PROJECT_ROOT / "dirty_region_caches"
+HISTORY_FILE = PROJECT_ROOT / "jobs_history.jsonl"
+GENERATED_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "generated"
 
 TIMEOUTS = {
     "build": 600,
     "test": 600,
     "infer": 1200,
     "bench": 1800,
-    "analyze": 120,
 }
 
 jobs: dict = {}
 worker_lock = threading.Lock()
-active_job_id: str | None = None
+
+
+def get_hw_info():
+    info = ""
+    try:
+        if os.name != "nt":
+            lscpu = subprocess.run(["lscpu"], capture_output=True, text=True)
+            info += lscpu.stdout + "\n"
+            dq = subprocess.run(["./deviceQuery"], capture_output=True, text=True)
+            if dq.returncode == 0:
+                info += "\n" + dq.stdout + "\n"
+    except Exception:
+        pass
+    hwinfo_path = PROJECT_ROOT / "hwinfo.txt"
+    if hwinfo_path.exists():
+        info += hwinfo_path.read_text()
+    return info
+
+
+def save_job_history(job):
+    with open(HISTORY_FILE, "a") as f:
+        f.write(json.dumps(job) + "\n")
+
+
+def load_job_history():
+    history = []
+    if HISTORY_FILE.exists():
+        with open(HISTORY_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    history.append(json.loads(line))
+    return history
 
 
 def find_next_slot(backend: str) -> str:
     base = KERNELS_DIR / backend / "general" / "generated"
-    ext = ".cu" if backend == "cuda" else ".hpp"
     os.makedirs(base, exist_ok=True)
+    ext = ".cu" if backend == "cuda" else ".hpp"
     n = 0
     while True:
         path = base / f"{n:05d}{ext}"
@@ -41,11 +75,7 @@ def run_cmd(cmd: list[str], timeout: int) -> dict:
     start = time.time()
     try:
         result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=PROJECT_ROOT,
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=PROJECT_ROOT
         )
         return {
             "exit_code": result.returncode,
@@ -62,148 +92,75 @@ def run_cmd(cmd: list[str], timeout: int) -> dict:
         }
 
 
-def parse_test_output(stdout: str) -> dict:
-    result = {"python_ref": None, "kernel": None, "region_merge": None, "shape_prop": None}
-    for line in stdout.splitlines():
-        line = line.strip()
-        if "Python Reference Tests Passed:" in line:
-            parts = line.split(":")[-1].strip()
-            if "/" in parts:
-                p, t = parts.split("/")
-                result["python_ref"] = {"passed": int(p), "total": int(t)}
-        elif line.startswith("Tests Passed:") and "Non-Reference" not in stdout[:stdout.index(line) + 1]:
-            parts = line.split(":")[-1].strip()
-            if "/" in parts:
-                p, t = parts.split("/")
-                result["kernel"] = {"passed": int(p), "total": int(t)}
-        elif "Region Merge Tests Passed:" in line:
-            parts = line.split(":")[-1].strip()
-            if "/" in parts:
-                p, t = parts.split("/")
-                result["region_merge"] = {"passed": int(p), "total": int(t)}
-        elif "Shape Propagation Tests Passed:" in line:
-            parts = line.split(":")[-1].strip()
-            if "/" in parts:
-                p, t = parts.split("/")
-                result["shape_prop"] = {"passed": int(p), "total": int(t)}
-    failures = 0
-    for section in result.values():
-        if section and section["passed"] < section["total"]:
-            failures += 1
-    result["failures"] = failures
-    return result
+def get_uid_for_file(rel_path: str):
+    header_path = GENERATED_DIR / "kernel_uids.gen.hpp"
+    if not header_path.exists():
+        return None
+    const_name = rel_path.replace("/", "_").replace("\\", "_").replace(".", "_").upper()
+    content = header_path.read_text()
+    match = re.search(
+        rf"constexpr uint64_t {const_name} = (0x[0-9a-fA-F]+ULL);", content
+    )
+    if match:
+        return match.group(1).replace("ULL", "")
+    return None
 
 
-def parse_analyze_output(stdout: str) -> dict:
-    result = {
-        "total_estimated_time_ms": None,
-        "bucket_count": None,
-        "top_chains": [],
-        "op_type_breakdown": [],
-        "missing_benchmarks": [],
-        "raw_output": stdout,
-    }
+def analyze_total_time(target_model: str):
+    records_path = BENCHMARKS_DIR / "records.jsonl"
+    cache_path = CACHE_DIR / f"{target_model}-cpp.jsonl"
 
-    for line in stdout.splitlines():
-        if "Total Estimated Execution Time:" in line:
-            ms_str = line.split(":")[-1].strip().replace(" ms", "")
-            try:
-                result["total_estimated_time_ms"] = float(ms_str)
-            except ValueError:
-                pass
-        if "Analyzed" in line and "compiled buckets" in line:
-            parts = line.split()
-            for i, w in enumerate(parts):
-                if w == "Analyzed" and i + 1 < len(parts):
-                    try:
-                        result["bucket_count"] = int(parts[i + 1])
-                    except ValueError:
-                        pass
+    if not records_path.exists() or not cache_path.exists():
+        return 0.0, set()
 
-    # Parse top chains table
-    lines = stdout.splitlines()
-    in_chains = False
-    in_ops = False
-    in_warnings = False
-
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("=" * 10):
-            in_chains = True
-            in_ops = False
-            continue
-        if stripped.startswith("-" * 10) and in_chains:
-            continue
-        if in_chains and "|" in stripped and not stripped.startswith("-"):
-            parts = [p.strip() for p in stripped.split("|")]
-            if len(parts) >= 4:
-                chain_label = parts[0].strip()
-                try:
-                    count = int(parts[1].strip())
-                except ValueError:
-                    count = 0
-                total_str = parts[2].strip().replace(" ms", "").replace("ms", "").strip()
-                avg_str = parts[3].strip().replace(" ms", "").replace("ms", "").strip()
-                try:
-                    total_time = float(total_str) if total_str else None
-                except ValueError:
-                    total_time = None
-                try:
-                    avg_time = float(avg_str) if avg_str else None
-                except ValueError:
-                    avg_time = None
-                if chain_label and not chain_label.startswith("Top") and not chain_label.startswith("Kernels"):
-                    result["top_chains"].append({
-                        "label": chain_label,
-                        "count": count,
-                        "total_time_ms": total_time,
-                        "avg_time_ms": avg_time,
-                    })
-            continue
-        if stripped.startswith("=" * 10) and len(result["top_chains"]):
-            in_chains = False
-        if stripped.startswith("Operation Type") or (stripped.startswith("-" * 10) and not in_chains and len(result["top_chains"])):
-            in_ops = True
-            continue
-        if in_ops and "|" in stripped and not stripped.startswith("-"):
-            parts = [p.strip() for p in stripped.split("|")]
-            if len(parts) >= 2:
-                op_name = parts[0].strip()
-                time_str = parts[1].strip().replace(" ms", "").replace("ms", "").strip()
-                try:
-                    total_time = float(time_str) if time_str else None
-                except ValueError:
-                    total_time = None
-                if op_name and op_name != "Operation Type":
-                    result["op_type_breakdown"].append({
-                        "op_name": op_name,
-                        "total_time_ms": total_time,
-                    })
-            continue
-        if "[Warning]" in stripped:
-            in_warnings = True
-        if in_warnings and stripped.startswith("Run bench.cpp"):
-            break
-        if in_warnings and "(" in stripped and "UID:" in stripped:
-            result["missing_benchmarks"].append(stripped)
-
-    return result
-
-
-def load_benchmark_records() -> list:
-    path = BENCHMARKS_DIR / "records.jsonl"
-    if not path.exists():
-        return []
-    records = []
-    with open(path) as f:
+    bench_map = {}
+    with open(records_path) as f:
         for line in f:
             if line.strip():
-                records.append(json.loads(line))
-    return records
+                r = json.loads(line)
+                key = (
+                    r["kernelUid"],
+                    tuple(r["outputShapes"][0]),
+                    tuple(r["outputStrides"][0]),
+                )
+                bench_map[key] = r["runTime"]
+
+    total_time = 0.0
+    extracted_uids = set()
+    with open(cache_path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if entry.get("type") != "compiled_bucket":
+                continue
+
+            for inst in entry["graph"]["instructions"]:
+                uid = inst["fullKernelId"]
+                node = entry["graph"]["nodesMap"][str(inst["nodeId"])]
+                extracted_uids.add(uid)
+                key = (uid, tuple(node["shape"]), tuple(node["strides"]))
+                total_time += bench_map.get(key, 0.0)
+
+    return total_time, extracted_uids
+
+
+def get_benchmark_scores(uid_str):
+    scores = []
+    records_path = BENCHMARKS_DIR / "records.jsonl"
+    if not records_path.exists() or not uid_str:
+        return scores
+    target_uid = f"0x{int(uid_str, 16):x}"
+    with open(records_path) as f:
+        for line in f:
+            if line.strip():
+                r = json.loads(line)
+                if r["kernelUid"] == target_uid:
+                    scores.append(r["runTime"])
+    return scores
 
 
 def run_worker():
-    """Background worker that processes jobs sequentially."""
     while True:
         job_id = None
         with worker_lock:
@@ -211,7 +168,6 @@ def run_worker():
                 if job["status"] == "queued":
                     job_id = jid
                     job["status"] = "running"
-                    active_job_id = jid
                     break
 
         if not job_id:
@@ -220,117 +176,104 @@ def run_worker():
 
         job = jobs[job_id]
         job["started_at"] = datetime.now(timezone.utc).isoformat()
-        steps = job["steps"]
+        opname = job["opname"]
+        target_model = job["target_model"]
 
         try:
-            # Step 1: Write kernel file
-            steps[0]["status"] = "running"
+            # 1. Write kernel
             kernel_path = find_next_slot(job["backend"])
             with open(kernel_path, "w") as f:
                 f.write(job["source"])
             job["kernel_file"] = kernel_path
-            steps[0]["status"] = "done"
-
-            # Step 2: Clear dirty region caches
-            steps[1]["status"] = "running"
-            for f in CACHE_DIR.iterdir():
-                if f.is_file():
-                    f.unlink()
-            steps[1]["status"] = "done"
-
-            # Step 3: Build
-            steps[2]["status"] = "running"
-            res = run_cmd(["python", "build.py", "--cuda"], TIMEOUTS["build"])
-            steps[2].update(res)
-            steps[2]["status"] = "done" if res["exit_code"] == 0 else "failed"
-            if res["exit_code"] != 0:
-                job["status"] = "failed"
-                job["error"] = f"Build failed with exit code {res['exit_code']}"
-                job["completed_at"] = datetime.now(timezone.utc).isoformat()
-                with worker_lock:
-                    active_job_id = None
-                break
-
-            # Step 4: Test
-            steps[3]["status"] = "running"
-            res = run_cmd(["./tensor_graphs_cpp/test"], TIMEOUTS["test"])
-            steps[3].update(res)
-            test_results = parse_test_output(res["stdout"])
-            job["test_results"] = test_results
-            if res["exit_code"] != 0 or test_results.get("failures", 0) > 0:
-                steps[3]["status"] = "failed"
-                job["status"] = "failed"
-                job["error"] = "Tests failed"
-                job["completed_at"] = datetime.now(timezone.utc).isoformat()
-                with worker_lock:
-                    active_job_id = None
-                break
-            steps[3]["status"] = "done"
-
-            # Steps 5-6: Inference + benchmark loop
-            max_iterations = 20
-            bench_done = False
-            bench_combined = ""
-
-            for i in range(max_iterations):
-                # Infer
-                steps[4]["status"] = "running"
-                res = run_cmd(["./tensor_graphs_cpp/main"], TIMEOUTS["infer"])
-                steps[4].update({
-                    "stdout": res["stdout"],
-                    "stderr": res["stderr"],
-                    "exit_code": res["exit_code"],
-                    "duration_ms": res["duration_ms"],
-                })
-                if res["exit_code"] != 0:
-                    steps[4]["status"] = "failed"
-                    job["status"] = "failed"
-                    job["error"] = f"Inference failed (iteration {i + 1})"
-                    job["completed_at"] = datetime.now(timezone.utc).isoformat()
-                    with worker_lock:
-                        active_job_id = None
-                    break
-                steps[4]["status"] = "done"
-
-                # Bench
-                steps[5]["status"] = "running"
-                res = run_cmd(["./tensor_graphs_cpp/bench"], TIMEOUTS["bench"])
-                bench_combined += res["stdout"] + "\n"
-                steps[5].update({
-                    "stdout": res["stdout"],
-                    "stderr": res["stderr"],
-                    "exit_code": res["exit_code"],
-                    "duration_ms": res["duration_ms"],
-                })
-                job["benchmark_iterations"] = i + 1
-
-                if "All calls already benchmarked or no new kernels to test" in res["stdout"]:
-                    steps[5]["status"] = "done"
-                    bench_done = True
-                    break
-                steps[5]["status"] = "done"
-
-            if not bench_done:
-                if job["status"] != "failed":
-                    job["status"] = "failed"
-                    job["error"] = f"Benchmark did not converge after {max_iterations} iterations"
-                    job["completed_at"] = datetime.now(timezone.utc).isoformat()
-                    with worker_lock:
-                        active_job_id = None
-                    break
-
-            # Step 7: Analyze
-            steps[6]["status"] = "running"
-            res = run_cmd(
-                ["python", "analyze_performance.py",
-                 "--graph", str(CACHE_DIR / "gemma-3-270m-cpp.jsonl"),
-                 "--records", str(BENCHMARKS_DIR / "records.jsonl")],
-                TIMEOUTS["analyze"],
+            rel_path = (
+                Path(kernel_path)
+                .relative_to(PROJECT_ROOT / "tensor_graphs_cpp")
+                .as_posix()
             )
-            steps[6].update(res)
-            analysis = parse_analyze_output(res["stdout"])
-            job["analysis_output"] = analysis
-            steps[6]["status"] = "done"
+
+            # Clear specific cache
+            cache_file = CACHE_DIR / f"{target_model}-cpp.jsonl"
+            if cache_file.exists():
+                cache_file.unlink()
+
+            # 2. Compile
+            build_res = run_cmd(
+                (
+                    ["python", "build.py", "--cuda"]
+                    if job["backend"] == "cuda"
+                    else ["python", "build.py"]
+                ),
+                TIMEOUTS["build"],
+            )
+            job["steps"]["compile"] = build_res
+            if build_res["exit_code"] != 0:
+                raise Exception("Compilation failed")
+
+            uid_str = get_uid_for_file("kernels/" + rel_path)
+            job["assigned_uid"] = uid_str
+
+            # 3. Test No Records
+            test_no_rec_res = run_cmd(
+                [
+                    str(PROJECT_ROOT / "tensor_graphs_cpp" / "test"),
+                    opname,
+                    "--no-records",
+                ],
+                TIMEOUTS["test"],
+            )
+            job["steps"]["test_no_records"] = test_no_rec_res
+            if (
+                test_no_rec_res["exit_code"] != 0
+                or "FAILED" in test_no_rec_res["stdout"]
+            ):
+                raise Exception("Test without records failed")
+
+            # 4. Main to build calls.jsonl
+            run_cmd(
+                [str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"), target_model],
+                TIMEOUTS["infer"],
+            )
+            calls_path = BENCHMARKS_DIR / "calls.jsonl"
+            matched = False
+            if calls_path.exists() and uid_str:
+                uid_int = int(uid_str, 16)
+                with open(calls_path) as f:
+                    for line in f:
+                        if f'"kernelUid":"0x{uid_int:x}"' in line:
+                            matched = True
+                            break
+            job["steps"]["matched"] = matched
+
+            # 5. Test with Records
+            test_rec_res = run_cmd(
+                [str(PROJECT_ROOT / "tensor_graphs_cpp" / "test"), opname],
+                TIMEOUTS["test"],
+            )
+            job["steps"]["test_records"] = test_rec_res
+            if test_rec_res["exit_code"] != 0 or "FAILED" in test_rec_res["stdout"]:
+                raise Exception("Test with records failed")
+
+            # 6. Benchmark
+            bench_res = run_cmd(
+                [str(PROJECT_ROOT / "tensor_graphs_cpp" / "bench"), opname],
+                TIMEOUTS["bench"],
+            )
+            job["steps"]["bench"] = bench_res
+
+            # 7. Main again to construct cache with optimized routes
+            run_cmd(
+                [str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"), target_model],
+                TIMEOUTS["infer"],
+            )
+
+            total_time, extracted_uids = analyze_total_time(target_model)
+            if uid_str:
+                job["steps"]["extracted"] = (
+                    uid_str in extracted_uids
+                    or f"0x{int(uid_str, 16):x}" in extracted_uids
+                )
+            job["total_estimated_time_ms"] = total_time
+            job["benchmark_scores"] = get_benchmark_scores(uid_str)
 
             job["status"] = "completed"
 
@@ -339,8 +282,7 @@ def run_worker():
             job["error"] = str(e)
 
         job["completed_at"] = datetime.now(timezone.utc).isoformat()
-        with worker_lock:
-            active_job_id = None
+        save_job_history(job)
 
 
 def start_worker():
@@ -349,29 +291,28 @@ def start_worker():
     return t
 
 
-def create_job(source: str, backend: str = "cpu") -> dict:
+def create_job(source: str, opname: str, backend: str, target_model: str) -> str:
     job_id = uuid.uuid4().hex[:12]
     job = {
         "job_id": job_id,
         "status": "queued",
         "backend": backend,
+        "target_model": target_model,
+        "opname": opname,
         "source": source,
-        "kernel_file": None,
+        "assigned_uid": None,
         "started_at": None,
         "completed_at": None,
-        "benchmark_iterations": 0,
-        "test_results": None,
-        "analysis_output": None,
-        "error": None,
-        "steps": [
-            {"name": "write_kernel", "status": "pending"},
-            {"name": "clear_caches", "status": "pending"},
-            {"name": "build", "status": "pending"},
-            {"name": "test", "status": "pending"},
-            {"name": "infer", "status": "pending"},
-            {"name": "benchmark_loop", "status": "pending"},
-            {"name": "analyze", "status": "pending"},
-        ],
+        "total_estimated_time_ms": None,
+        "benchmark_scores": [],
+        "steps": {
+            "compile": None,
+            "test_no_records": None,
+            "matched": False,
+            "test_records": None,
+            "bench": None,
+            "extracted": False,
+        },
     }
     with worker_lock:
         jobs[job_id] = job
