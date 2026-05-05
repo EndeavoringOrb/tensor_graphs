@@ -28,19 +28,10 @@ worker_lock = threading.Lock()
 
 
 def get_hw_info():
-    info = ""
-    try:
-        if os.name != "nt":
-            lscpu = subprocess.run(["lscpu"], capture_output=True, text=True)
-            info += lscpu.stdout + "\n"
-            dq = subprocess.run(["./deviceQuery"], capture_output=True, text=True)
-            if dq.returncode == 0:
-                info += "\n" + dq.stdout + "\n"
-    except Exception:
-        pass
+    info = "not available"
     hwinfo_path = PROJECT_ROOT / "hwinfo.txt"
     if hwinfo_path.exists():
-        info += hwinfo_path.read_text()
+        info = hwinfo_path.read_text()
     return info
 
 

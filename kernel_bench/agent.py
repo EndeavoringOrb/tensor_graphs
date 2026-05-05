@@ -3,12 +3,12 @@ import json
 import time
 import requests
 
-LLM_API_URL = "http://127.0.0.1:11434/v1/chat/completions"
+LLM_API_URL = "http://localhost:55554/v1/chat/completions"
 BENCH_API_URL = "http://127.0.0.1:8080"
 MODEL = "my-model-id"
 
 # Set the optimization target!
-TARGET_MODEL = "flux-klein-4b"  # or "gemma-3-270m"
+TARGET_MODEL = "gemma-3-270m"  # "flux-klein-4b" or "gemma-3-270m"
 
 tools = [
     {
@@ -153,7 +153,6 @@ def run_agentic_loop():
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": "auto",
-                "temperature": 0.2,
             }
 
             response = requests.post(LLM_API_URL, json=payload)
