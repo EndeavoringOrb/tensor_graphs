@@ -1746,13 +1746,25 @@ struct SlicePushDownDot : public Rule
                     startsB = {0, starts[1]};
                     endsB = {(int32_t)K, ends[1]};
                 }
-                else
+                else if (rank == 3)
                 {
                     startsA = {starts[0], starts[1], 0};
                     endsA = {ends[0], ends[1], (int32_t)K};
 
                     startsB = {starts[0], 0, starts[2]};
                     endsB = {ends[0], (int32_t)K, ends[2]};
+                }
+                else if (rank == 4)
+                {
+                    // A: [B, H, M, K], B: [B, H, K, N]
+                    startsA = {starts[0], starts[1], starts[2], 0};
+                    endsA = {ends[0], ends[1], ends[2], (int32_t)K};
+                    startsB = {starts[0], starts[1], 0, starts[3]};
+                    endsB = {ends[0], ends[1], (int32_t)K, ends[3]};
+                }
+                else
+                {
+                    Error::throw_err("[SlicePushDownDot.apply] expected rank=2,3,4 got rank=" + std::to_string(rank));
                 }
 
                 uint32_t startsIdA = addIntConst(egraph, startsA);

@@ -486,9 +486,17 @@ struct ShapePropagator
                     Error::throw_err("DOT: K-dim mismatch [B,M,K] @ [B,K,N], " + std::to_string(s0[2]) + " != " + std::to_string(s1[1]));
                 graph.getNode(nodeId).setShape({s0[0], s0[1], s1[2]});
             }
+            else if (r0 == 4)
+            {
+                if (s0[0] != s1[0] || s0[1] != s1[1] || s0[3] != s1[2])
+                {
+                    Error::throw_err("DOT 4D: Dimension mismatch [B,H,M,K] @ [B,H,K,N], " + std::to_string(s0[2]) + " != " + std::to_string(s1[1]));
+                }
+                graph.getNode(nodeId).setShape({s0[0], s0[1], s0[2], s1[3]});
+            }
             else
             {
-                Error::throw_err("DOT: Only Rank 2 and Rank 3 are currently supported in this framework.");
+                Error::throw_err("DOT: Only Rank 2 and Rank 3 are currently supported in this framework. Got r0=" + std::to_string(r0) + ", r1=" + std::to_string(r1));
             }
             break;
         }
@@ -783,7 +791,14 @@ struct ShapePropagator
         for (const auto &box : rA)
         {
             Region outBox;
-            if (sA.size() == 3)
+            if (sA.size() == 4)
+            {
+                outBox.region.push_back(box.region[0]);    // B
+                outBox.region.push_back(box.region[1]);    // H
+                outBox.region.push_back(box.region[2]);    // M
+                outBox.region.push_back({0, outShape[3]}); // N (Full row needed)
+            }
+            else if (sA.size() == 3)
             {
                 outBox.region.push_back(box.region[0]);    // B
                 outBox.region.push_back(box.region[1]);    // M
@@ -828,7 +843,12 @@ struct ShapePropagator
         for (const auto &outBox : outputRegions)
         {
             Region aBox, bBox;
-            if (sA.size() == 3)
+            if (sA.size() == 4)
+            {
+                aBox.region = {outBox.region[0], outBox.region[1], outBox.region[2], {0, sA[3]}}; // [B, H, M, K]
+                bBox.region = {outBox.region[0], outBox.region[1], {0, sB[2]}, outBox.region[3]}; // [B, H, K, N]
+            }
+            else if (sA.size() == 3)
             {
                 aBox.region.push_back(outBox.region[0]); // B
                 aBox.region.push_back(outBox.region[1]); // M

@@ -18,21 +18,21 @@ using json = nlohmann::json;
 
 // --- OS Detection ---
 #if defined(_WIN32) || defined(_WIN64)
-    #define TG_OS_WINDOWS
+#define TG_OS_WINDOWS
 #elif defined(__APPLE__)
-    #define TG_OS_MACOS
+#define TG_OS_MACOS
 #elif defined(__linux__)
-    #define TG_OS_LINUX
+#define TG_OS_LINUX
 #endif
 
 // --- Architecture Detection ---
 #if defined(__aarch64__) || defined(_M_ARM64)
-    #define TG_ARCH_ARM64
-    #if defined(__ARM_NEON) || defined(TG_OS_WINDOWS) // Windows ARM64 always has NEON
-        #define TG_HAS_NEON
-    #endif
+#define TG_ARCH_ARM64
+#if defined(__ARM_NEON) || defined(TG_OS_WINDOWS) // Windows ARM64 always has NEON
+#define TG_HAS_NEON
+#endif
 #elif defined(__x86_64__) || defined(_M_X64)
-    #define TG_ARCH_X64
+#define TG_ARCH_X64
 #endif
 
 namespace Error
@@ -77,6 +77,7 @@ enum class DType : uint32_t
 {
     FLOAT32,
     INT32,
+    INT64,
     BF16,
     BOOL,
     _COUNT
@@ -90,6 +91,8 @@ inline uint64_t getDTypeSize(DType dtype)
         return 4;
     case DType::INT32:
         return 4;
+    case DType::INT64:
+        return 8;
     case DType::BF16:
         return 2;
     case DType::BOOL:
@@ -366,7 +369,7 @@ private:
     std::vector<uint32_t> shape;
 
 public:
-    uint64_t baseOffset = 0;      // Offset into the MemoryManager's DeviceBuffer
+    uint64_t baseOffset = 0;       // Offset into the MemoryManager's DeviceBuffer
     std::vector<uint64_t> strides; // Strides in terms of elements, not bytes
     DType dtype;
 
@@ -409,6 +412,8 @@ inline std::string toString(DType dtype)
         return "F32";
     case DType::INT32:
         return "I32";
+    case DType::INT64:
+        return "I64";
     case DType::BF16:
         return "BF16";
     case DType::BOOL:
@@ -659,6 +664,7 @@ public:
 NLOHMANN_JSON_SERIALIZE_ENUM(DType, {
                                         {DType::FLOAT32, "FLOAT32"},
                                         {DType::INT32, "INT32"},
+                                        {DType::INT64, "INT64"},
                                         {DType::BF16, "BF16"},
                                         {DType::BOOL, "BOOL"},
                                     })

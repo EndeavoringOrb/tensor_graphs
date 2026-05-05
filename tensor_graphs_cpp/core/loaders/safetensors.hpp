@@ -1,5 +1,9 @@
 #pragma once
 #include "core/types.hpp"
+#include <filesystem>
+#include <vector>
+
+namespace fs = std::filesystem;
 
 struct TensorMetadata
 {
@@ -7,6 +11,7 @@ struct TensorMetadata
     std::vector<uint32_t> shape;
     uint64_t dataOffsetStart;
     uint64_t dataOffsetEnd;
+    size_t fileIndex; // Index into the files vector
 
     uint64_t sizeBytes() const
     {
@@ -14,34 +19,41 @@ struct TensorMetadata
     }
 };
 
-// TODO: make safetensors loader handle multiple files
 class SafetensorsLoader
 {
 public:
-    SafetensorsLoader(const std::string &filepath) : filename(filepath)
+    SafetensorsLoader(const std::string &path)
     {
-        std::ifstream file(filepath, std::ios::binary);
-        if (!file.is_open())
+        std::vector<std::string> filepaths;
+
+        if (fs::is_directory(path))
         {
-            Error::throw_err("[SafetensorsLoader.SafetensorsLoader] Could not open safetensors file: " + filepath);
+            for (const auto &entry : fs::directory_iterator(path))
+            {
+                if (entry.path().extension() == ".safetensors")
+                {
+                    filepaths.push_back(entry.path().string());
+                }
+            }
+            if (filepaths.empty())
+            {
+                Error::throw_err("[SafetensorsLoader] No .safetensors files found in directory: " + path);
+            }
+            std::sort(filepaths.begin(), filepaths.end());
+        }
+        else
+        {
+            if (!fs::exists(path))
+            {
+                Error::throw_err("[SafetensorsLoader] Safetensors file not found: " + path);
+            }
+            filepaths.push_back(path);
         }
 
-        // Read 8-byte header size (Safetensors spec relies on little-endian layout here)
-        uint64_t headerSize = 0;
-        if (!file.read(reinterpret_cast<char *>(&headerSize), sizeof(headerSize)))
+        for (size_t i = 0; i < filepaths.size(); ++i)
         {
-            Error::throw_err("[SafetensorsLoader.SafetensorsLoader] Could not read safetensors header size.");
+            loadFile(filepaths[i], i);
         }
-
-        // Read JSON Header
-        jsonHeader.resize(headerSize);
-        if (!file.read(&jsonHeader[0], headerSize))
-        {
-            Error::throw_err("[SafetensorsLoader.SafetensorsLoader] Could not read safetensors JSON header.");
-        }
-
-        dataStartOffset = 8 + headerSize;
-        parseJson(jsonHeader);
     }
 
     const TensorMetadata &getMetadata(const std::string &name) const
@@ -49,7 +61,7 @@ public:
         auto it = metadata.find(name);
         if (it == metadata.end())
         {
-            Error::throw_err("[SafetensorsLoader.getMetadata] Tensor not found in safetensors: " + name);
+            Error::throw_err("[SafetensorsLoader.getMetadata] Tensor not found: " + name);
         }
         return it->second;
     }
@@ -64,77 +76,83 @@ public:
         const auto &meta = getMetadata(name);
         if (meta.sizeBytes() > destSize)
         {
-            Error::throw_err("[SafetensorsLoader.loadTensor] Destination buffer too small for tensor: " + name);
+            Error::throw_err("[SafetensorsLoader.loadTensor] Destination buffer too small for: " + name);
         }
 
-        std::ifstream file(filename, std::ios::binary);
+        const std::string &fname = files[meta.fileIndex].path;
+        std::ifstream file(fname, std::ios::binary);
         if (!file.is_open())
         {
-            Error::throw_err("[SafetensorsLoader.loadTensor] Could not open safetensors file: " + filename);
+            Error::throw_err("[SafetensorsLoader.loadTensor] Could not open file: " + fname);
         }
 
-        file.seekg(dataStartOffset + meta.dataOffsetStart, std::ios::beg);
+        file.seekg(files[meta.fileIndex].dataStartOffset + meta.dataOffsetStart, std::ios::beg);
         file.read(reinterpret_cast<char *>(dest), meta.sizeBytes());
     }
 
 private:
-    std::string filename;
-    uint64_t dataStartOffset;
-    std::unordered_map<std::string, TensorMetadata> metadata;
-    std::string jsonHeader;
-
-    void parseJson(const std::string &json_str)
+    struct FileInfo
     {
-        auto root = json::parse(json_str);
+        std::string path;
+        uint64_t dataStartOffset;
+    };
 
+    std::vector<FileInfo> files;
+    std::unordered_map<std::string, TensorMetadata> metadata;
+
+    void loadFile(const std::string &filepath, size_t fileIdx)
+    {
+        std::ifstream file(filepath, std::ios::binary);
+        if (!file.is_open())
+        {
+            Error::throw_err("[SafetensorsLoader] Could not open: " + filepath);
+        }
+
+        uint64_t headerSize = 0;
+        if (!file.read(reinterpret_cast<char *>(&headerSize), sizeof(headerSize)))
+        {
+            Error::throw_err("[SafetensorsLoader] Could not read header size from: " + filepath);
+        }
+
+        std::string jsonHeader(headerSize, '\0');
+        if (!file.read(&jsonHeader[0], headerSize))
+        {
+            Error::throw_err("[SafetensorsLoader] Could not read JSON header from: " + filepath);
+        }
+
+        FileInfo info;
+        info.path = filepath;
+        info.dataStartOffset = 8 + headerSize;
+        files.push_back(info);
+
+        auto root = json::parse(jsonHeader);
         for (const auto &[key, val] : root.items())
         {
-            if (key == "__metadata__")
-            {
-                continue; // Skip global metadata
-            }
-
-            // Expecting tensor definition object: { "dtype": "...", "shape": [], "data_offsets": [] }
-            if (!val.is_object())
+            if (key == "__metadata__" || !val.is_object())
                 continue;
 
             TensorMetadata meta;
-            bool valid = true;
+            meta.fileIndex = fileIdx;
 
-            // 1. Parse DType
-            std::string dtype_str = val.at("dtype").get<std::string>();
-            try
-            {
-                meta.dtype = fromString(dtype_str);
-            }
-            catch (const std::runtime_error &)
-            {
-                valid = false;
-            }
+            // 1. DType
+            meta.dtype = fromString(val.at("dtype").get<std::string>());
 
-            // 2. Parse Shape
-            auto shapeArr = val.at("shape");
-            for (const auto &dim : shapeArr)
+            // 2. Shape
+            for (const auto &dim : val.at("shape"))
             {
                 meta.shape.push_back(static_cast<uint32_t>(dim.get<int64_t>()));
             }
 
-            // 3. Parse Data Offsets
-            auto offsetArr = val.at("data_offsets");
-            if (offsetArr.size() >= 2)
-            {
-                meta.dataOffsetStart = static_cast<uint64_t>(offsetArr[0].get<int64_t>());
-                meta.dataOffsetEnd = static_cast<uint64_t>(offsetArr[1].get<int64_t>());
-            }
-            else
-            {
-                valid = false;
-            }
+            // 3. Offsets
+            auto offsets = val.at("data_offsets");
+            meta.dataOffsetStart = static_cast<uint64_t>(offsets[0].get<int64_t>());
+            meta.dataOffsetEnd = static_cast<uint64_t>(offsets[1].get<int64_t>());
 
-            if (valid)
+            if (metadata.count(key))
             {
-                metadata[key] = std::move(meta);
+                Error::throw_err("[SafetensorsLoader] Duplicate tensor '" + key + "' found in shards.");
             }
+            metadata[key] = std::move(meta);
         }
     }
 };
