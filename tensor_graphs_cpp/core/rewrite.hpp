@@ -155,7 +155,6 @@ inline uint32_t createCacheInputNode(EGraph &egraph, const ENode &sourceNode, ui
     op_cache = egraph.addENode(op_cache, cacheNode);
 
     uint32_t srcLogicalId = UINT32_MAX;
-    uint32_t canonSrcClass = egraph.find(sourceClassId);
     auto it = eclassToLogical.find(canonSrcClass);
     if (it != eclassToLogical.end())
     {
