@@ -2175,14 +2175,15 @@ struct ScatterSliceCancellation : public Rule
 
         for (uint32_t updateClass : updates)
         {
-            if (egraph.getEClass(updateClass).strides != egraph.getEClass(contigClassId).strides)
-            {
-                egraph.merge(sliceClassId, updateClass);
-            }
-            else
+            if (egraph.getEClass(updateClass).strides == egraph.getEClass(contigClassId).strides)
             {
                 egraph.merge(contigClassId, updateClass);
             }
+            else if (egraph.getEClass(updateClass).strides == egraph.getEClass(sliceClassId).strides)
+            {
+                egraph.merge(sliceClassId, updateClass);
+            }
+            // TODO: handle else case?
         }
     }
 };
