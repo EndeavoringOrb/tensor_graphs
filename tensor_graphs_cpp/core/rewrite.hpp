@@ -2233,7 +2233,8 @@ struct SlicePushDownContiguous : public Rule
                 if (!allowPushDownOnProtected && isEClassProtected(srcClass, protectedEClasses, egraph))
                     continue;
 
-                for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
+                const std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
+                for (uint32_t srcIdx : srcEnodes)
                 {
                     if (egraph.getENodes()[srcIdx].opType == OpType::CONTIGUOUS)
                     {
@@ -2267,7 +2268,8 @@ struct SlicePushDownContiguous : public Rule
             const ENode sliceNode = egraph.getENodes()[sliceIdx];
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
 
-            for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
+            const std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
+            for (uint32_t srcIdx : srcEnodes)
             {
                 const ENode opNode = egraph.getENodes()[srcIdx];
                 if (opNode.opType != OpType::CONTIGUOUS)
@@ -2362,7 +2364,8 @@ struct SlicePushDownPermute : public Rule
                 if (!allowPushDownOnProtected && isEClassProtected(srcClass, protectedEClasses, egraph))
                     continue;
 
-                for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
+                const std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
+                for (uint32_t srcIdx : srcEnodes)
                 {
                     if (egraph.getENodes()[srcIdx].opType == OpType::PERMUTE)
                     {
@@ -2396,7 +2399,8 @@ struct SlicePushDownPermute : public Rule
             const ENode sliceNode = egraph.getENodes()[sliceIdx];
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
 
-            for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
+            const std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
+            for (uint32_t srcIdx : srcEnodes)
             {
                 const ENode opNode = egraph.getENodes()[srcIdx];
                 if (opNode.opType != OpType::PERMUTE)
@@ -2525,7 +2529,8 @@ struct SlicePushDownReshape : public Rule
                 if (!allowPushDownOnProtected && isEClassProtected(srcClass, protectedEClasses, egraph))
                     continue;
 
-                for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
+                const std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
+                for (uint32_t srcIdx : srcEnodes)
                 {
                     if (egraph.getENodes()[srcIdx].opType == OpType::RESHAPE)
                     {
@@ -2559,7 +2564,8 @@ struct SlicePushDownReshape : public Rule
             const ENode sliceNode = egraph.getENodes()[sliceIdx];
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
 
-            for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
+            const std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
+            for (uint32_t srcIdx : srcEnodes)
             {
                 const ENode opNode = egraph.getENodes()[srcIdx];
                 if (opNode.opType != OpType::RESHAPE)
@@ -2734,7 +2740,8 @@ struct SlicePushDownConcat : public Rule
                 if (!allowPushDownOnProtected && isEClassProtected(srcClass, protectedEClasses, egraph))
                     continue;
 
-                for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
+                const std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
+                for (uint32_t srcIdx : srcEnodes)
                 {
                     if (egraph.getENodes()[srcIdx].opType == OpType::CONCAT)
                     {
@@ -2768,7 +2775,8 @@ struct SlicePushDownConcat : public Rule
             const ENode sliceNode = egraph.getENodes()[sliceIdx];
             uint32_t srcClass = egraph.find(sliceNode.children[0]);
 
-            for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
+            const std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
+            for (uint32_t srcIdx : srcEnodes)
             {
                 const ENode opNode = egraph.getENodes()[srcIdx];
                 if (opNode.opType != OpType::CONCAT)
@@ -2941,7 +2949,8 @@ struct SlicePushDownRepeat : public Rule
                 if (!allowPushDownOnProtected && isEClassProtected(srcClass, protectedEClasses, egraph))
                     continue;
 
-                for (uint32_t srcIdx : egraph.getEClass(srcClass).enodes)
+                const std::vector<uint32_t> srcEnodes = egraph.getEClass(srcClass).enodes;
+                for (uint32_t srcIdx : srcEnodes)
                 {
                     if (egraph.getENodes()[srcIdx].opType == OpType::REPEAT)
                     {
