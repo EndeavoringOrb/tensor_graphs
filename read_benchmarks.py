@@ -77,8 +77,8 @@ def main():
         ):
             continue
 
-        # Filter by Output Shape string matching
-        out_shapes_str = str(r.get("outputShapes", []))
+        # Filter by (Output + Input) Shape string matching
+        out_shapes_str = str(r.get("outputShapes", [])) + str(r.get("inputShapes", []))
         if args.shape and args.shape not in out_shapes_str:
             continue
 
