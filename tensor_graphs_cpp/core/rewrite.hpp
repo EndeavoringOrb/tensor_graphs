@@ -1377,10 +1377,7 @@ struct InfinityDomination : public Rule
                 return;
         }
 
-        // We MUST copy the constant so we have a fresh transient buffer to scatter into.
-        // This prevents inplace scatter from corrupting the persistent constant buffer.
-        // Do NOT use a fresh INPUT node, because transient INPUT nodes are not allocated by the Session!
-        uint32_t currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
+        uint32_t currentTarget = createCacheInputNode(egraph, addNode, eclassId, eNodeIdx | 0x80000000, eclassToLogical);
 
         for (const Region &reg : nonInfRegions)
         {
