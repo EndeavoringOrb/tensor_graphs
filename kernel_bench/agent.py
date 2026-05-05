@@ -164,12 +164,15 @@ def run_agentic_loop():
             if message.get("tool_calls"):
                 for tool_call in message["tool_calls"]:
                     result = handle_tool_call(tool_call)
+                    content = json.dumps(result, indent=2)
+                    if len(content) > 10000:
+                        content = "Content exceeded maximum length. Please narrow parameters."
                     messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_call["id"],
                             "name": tool_call["function"]["name"],
-                            "content": json.dumps(result, indent=2),
+                            "content": content,
                         }
                     )
             else:

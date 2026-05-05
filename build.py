@@ -5,7 +5,7 @@ import hashlib
 import subprocess
 import re
 from pathlib import Path
-
+import platform
 from rich.console import Console
 from rich.panel import Panel
 
@@ -41,6 +41,7 @@ REGISTER_MACROS = [
 def get_compiler_cmd(fname: str):
     out_ext = ".exe" if os.name == "nt" else ""
     out_name = f"tensor_graphs_cpp/{fname.split('.')[0]}{out_ext}"
+    is_arm64 = platform.machine().lower() in ("aarch64", "arm64")
 
     if USE_CUDA:
         cmd = [
@@ -49,8 +50,12 @@ def get_compiler_cmd(fname: str):
             f"-I{ROOT_DIR}",
             "-DUSE_CUDA",
             "-x",
-            "cu",  # Force CUDA compilation for .cpp files
+            "cu",
         ]
+
+        # Fix for ARM64 NEON errors when using nvcc (pass flag to host compiler)
+        if is_arm64:
+            cmd.extend(["-Xcompiler", "-march=armv8-a"])
 
         if DEBUG_MODE:
             cmd.extend(["-g", "-G", "-O0", "-DDEBUG"])
