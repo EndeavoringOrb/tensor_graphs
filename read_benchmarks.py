@@ -5,6 +5,30 @@ import argparse
 import re
 
 
+def load_uids_from_cpp(header_path):
+    """
+    Parses the C++ header file to map Hex UIDs to their Constant Names.
+    """
+    uid_to_name = {}
+    if not header_path or not os.path.exists(header_path):
+        return uid_to_name
+
+    # Regex to find: constexpr uint64_t NAME = 0xHEXULL;
+    pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
+
+    with open(header_path, "r") as f:
+        content = f.read()
+        matches = pattern.findall(content)
+        for name, hex_val in matches:
+            # Convert hex to decimal integer
+            val_int = int(hex_val, 16)
+            # Store both string decimal and hex representation to be safe
+            uid_to_name[str(val_int)] = name
+            uid_to_name[hex_val.lower()] = name
+
+    return uid_to_name
+
+
 def load_uid_map(cache_path):
     """
     Scans the compiled bucket cache to associate kernel UIDs with human names.
@@ -17,16 +41,19 @@ def load_uid_map(cache_path):
         for line in f:
             if not line.strip():
                 continue
-            entry = json.loads(line)
-            if entry.get("type") == "compiled_bucket":
-                nodes = entry["graph"]["nodesMap"]
-                for inst in entry["graph"]["instructions"]:
-                    uid = inst["fullKernelId"]
-                    node = nodes[str(inst["nodeId"])]
-                    op_name = node["opType"]
-                    if op_name == "FUSED":
-                        op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
-                    uid_to_name[uid] = op_name
+            try:
+                entry = json.loads(line)
+                if entry.get("type") == "compiled_bucket":
+                    nodes = entry["graph"]["nodesMap"]
+                    for inst in entry["graph"]["instructions"]:
+                        uid = str(inst["fullKernelId"])
+                        node = nodes[str(inst["nodeId"])]
+                        op_name = node["opType"]
+                        if op_name == "FUSED":
+                            op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
+                        uid_to_name[uid] = op_name
+            except (json.JSONDecodeError, KeyError):
+                continue
     return uid_to_name
 
 
@@ -43,6 +70,11 @@ def main():
         help="Path to cache file to resolve OpNames",
     )
     parser.add_argument(
+        "--header",
+        default="tensor_graphs_cpp/generated/kernel_uids.gen.hpp",
+        help="Path to the C++ header file containing Kernel IDs",
+    )
+    parser.add_argument(
         "--op", help="Regex/Substring filter for OpName (e.g. 'MUL' or 'RMS')"
     )
     parser.add_argument(
@@ -54,8 +86,13 @@ def main():
         print(f"Error: {args.records} not found.")
         return
 
-    # Load mapping from UID to Name
+    # 1. Load mapping from Cache (OpTypes)
     uid_map = load_uid_map(args.cache)
+
+    # 2. Load mapping from C++ Header (Specific Kernel Names)
+    # This will overwrite the generic Cache names with specific kernel names if available
+    header_map = load_uids_from_cpp(args.header)
+    uid_map.update(header_map)
 
     records = []
     with open(args.records, "r") as f:
@@ -66,7 +103,8 @@ def main():
     # Apply Filters
     filtered = []
     for r in records:
-        uid = r["kernelUid"]
+        # Normalize uid to string for lookup
+        uid = str(r["kernelUid"])
         name = uid_map.get(uid, "UNKNOWN")
 
         # Filter by OpName/Type
