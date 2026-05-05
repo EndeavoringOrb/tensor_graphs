@@ -276,6 +276,7 @@ public:
     {
         std::unordered_map<uint64_t, std::vector<uint32_t>> newHash;
         newHash.reserve(enodes.size() * 2);
+        uint32_t nDupes = 0;
 
         for (uint32_t i = 0, n = static_cast<uint32_t>(enodes.size()); i < n; ++i)
         {
@@ -308,6 +309,7 @@ public:
                 const uint32_t otherCls = find(nodeToEClass[otherEnodeId]);
                 if (node == enodes[otherEnodeId])
                 {
+                    nDupes++;
                     merge(otherCls, cls);
                     nodeToEClass[i] = find(otherCls);
                     merged = true;
@@ -320,6 +322,7 @@ public:
                 bucket.push_back(i);
             }
         }
+        std::cout << "[EGraph.rebuild] Found " << nDupes << " duplicate enodes" << std::endl;
 
         hashcons = std::move(newHash);
 
