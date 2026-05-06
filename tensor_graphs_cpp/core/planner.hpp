@@ -816,7 +816,6 @@ private:
         ProgressTimer optTimer(0, "calculating optimistic cost");
         while (!worklist.empty())
         {
-            std::cout << "worklist size: " << worklist.size() << std::endl;
             for (uint32_t eclassId : worklist)
             {
                 inQueue[eclassId] = false;

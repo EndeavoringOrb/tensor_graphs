@@ -13,6 +13,7 @@ private:
         uint32_t w = weight(w_name);
         int32_t p[] = {1, 0};
         uint32_t w_t = g.permute(w, g.constant({2}, p, DType::INT32));
+        w_t = g.contiguous(w_t);
         int32_t sh3[] = {1, (int32_t)in_d, (int32_t)out_d};
         return g.dot(x, g.reshape(w_t, g.constant({3}, sh3, DType::INT32)));
     }
@@ -99,7 +100,9 @@ private:
             int32_t starts[] = {0, 0, (int32_t)(i * cfg.hidden_size)};
             int32_t ends[] = {1, 1, (int32_t)((i + 1) * cfg.hidden_size)};
             int32_t steps[] = {1, 1, 1};
-            results.push_back(g.slice(mod, g.constant({3}, starts, DType::INT32), g.constant({3}, ends, DType::INT32), g.constant({3}, steps, DType::INT32)));
+            uint32_t out = g.slice(mod, g.constant({3}, starts, DType::INT32), g.constant({3}, ends, DType::INT32), g.constant({3}, steps, DType::INT32));
+            out = g.contiguous(out);
+            results.push_back(out);
         }
         return results;
     }
@@ -107,8 +110,8 @@ private:
     uint32_t apply_mod(uint32_t norm, uint32_t shift, uint32_t scale, uint32_t seq)
     {
         int32_t sh3[] = {1, 1, (int32_t)cfg.hidden_size};
-        uint32_t scale_3d = repeat_ax(g.reshape(scale, g.constant({3}, sh3, DType::INT32)), seq, 1);
-        uint32_t shift_3d = repeat_ax(g.reshape(shift, g.constant({3}, sh3, DType::INT32)), seq, 1);
+        uint32_t scale_3d = repeat_ax(g.reshape(g.contiguous(scale), g.constant({3}, sh3, DType::INT32)), seq, 1);
+        uint32_t shift_3d = repeat_ax(g.reshape(g.contiguous(shift), g.constant({3}, sh3, DType::INT32)), seq, 1);
         uint32_t scaled = g.add(expand_scalar_to_3d(1.0f, 1, seq, cfg.hidden_size), scale_3d);
         return g.add(g.mul(norm, scaled), shift_3d);
     }
@@ -133,6 +136,7 @@ public:
         // NLC
         int32_t p_img[] = {0, 2, 3, 1};
         uint32_t img_perm = g.permute(img_latent, g.constant({4}, p_img, DType::INT32));
+        img_perm = g.contiguous(img_perm);
         int32_t sh_img[] = {1, (int32_t)img_seq_len, (int32_t)cfg.latent_channels};
         uint32_t img_hidden = linear(g.reshape(img_perm, g.constant({3}, sh_img, DType::INT32)), "x_embedder.weight", cfg.latent_channels, cfg.hidden_size);
         uint32_t txt_hidden = linear(txt_emb, "context_embedder.weight", cfg.text_dim, cfg.hidden_size);
@@ -163,7 +167,7 @@ public:
             {
                 int32_t sh4[] = {1, L, (int32_t)cfg.num_heads, (int32_t)cfg.head_dim};
                 int32_t p[] = {0, 2, 1, 3};
-                return g.permute(g.reshape(x, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32));
+                return g.permute(g.reshape(g.contiguous(x), g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32));
             };
 
             uint32_t img_q = apply_rope_2d_consecutive(rms_norm_atomic(reshape_for_attn(linear(img_mod, p + ".attn.to_q.weight", cfg.hidden_size, cfg.hidden_size), img_seq_len), p + ".attn.norm_q.weight", img_seq_len, cfg.num_heads, cfg.head_dim), img_cos, img_sin, img_seq_len);
@@ -190,6 +194,7 @@ public:
                 uint32_t ctx = g.dot(probs, v);
                 int32_t p_c[] = {0, 2, 1, 3};
                 ctx = g.permute(ctx, g.constant({4}, p_c, DType::INT32));
+                ctx = g.contiguous(ctx);
                 int32_t sh3[] = {1, (int32_t)L_q, (int32_t)cfg.hidden_size};
                 return g.reshape(ctx, g.constant({3}, sh3, DType::INT32));
             };
@@ -242,7 +247,7 @@ public:
             {
                 int32_t sh4[] = {1, (int32_t)total_seq_len, (int32_t)cfg.num_heads, (int32_t)cfg.head_dim};
                 int32_t p_[] = {0, 2, 1, 3};
-                return g.permute(g.reshape(x, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_, DType::INT32));
+                return g.permute(g.reshape(g.contiguous(x), g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_, DType::INT32));
             };
 
             uint32_t q = apply_rope_2d_consecutive(rms_norm_atomic(reshape_for_attn(slice_feat(0, cfg.hidden_size)), p + ".attn.norm_q.weight", total_seq_len, cfg.num_heads, cfg.head_dim), rope_cos, rope_sin, total_seq_len);
