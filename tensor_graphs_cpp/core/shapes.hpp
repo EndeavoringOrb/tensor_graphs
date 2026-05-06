@@ -469,8 +469,8 @@ struct ShapePropagator
             if (r0 != r1)
             {
                 std::stringstream ss;
-                ss << "[ShapePropagator.inferShape] DOT requires equal ranks. Got " << r0 << " and " << r1
-                   << ". Implicit broadcasting is disabled; use explicit reshape to align ranks.";
+                ss << "[ShapePropagator.inferShape] nodeId=" + std::to_string(nodeId) + " DOT requires equal ranks. Got " << r0 << " (" + toString(s0) + ") and " << r1
+                   << " (" + toString(s1) + "). Implicit broadcasting is disabled; use explicit reshape to align ranks.";
                 Error::throw_err(ss.str());
             }
 

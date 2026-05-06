@@ -199,7 +199,7 @@ void run_flux()
     Graph g_trans;
     FluxTransformer trans(cfg, g_trans, mem, "flux-klein-4b/transformer", latent_h, latent_w);
     uint32_t in_latent = g_trans.input({1, cfg.latent_channels, latent_h, latent_w}, DType::FLOAT32, {}, StorageType::PERSISTENT);
-    uint32_t in_txt_emb = g_trans.input({1, txt_seq, cfg.hidden_size}, DType::FLOAT32, {}, StorageType::PERSISTENT);
+    uint32_t in_txt_emb = g_trans.input({1, txt_seq, cfg.text_dim}, DType::FLOAT32, {}, StorageType::PERSISTENT);
     uint32_t in_t = g_trans.input({1}, DType::FLOAT32, {}, StorageType::PERSISTENT);
     uint32_t in_cos = g_trans.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32, {}, StorageType::PERSISTENT);
     uint32_t in_sin = g_trans.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32, {}, StorageType::PERSISTENT);

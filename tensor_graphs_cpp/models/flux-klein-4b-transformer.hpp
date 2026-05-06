@@ -74,8 +74,9 @@ private:
         int32_t starts_odd[] = {0, 0, 0, 1};
         uint32_t x_odd = g.slice(x, g.constant({4}, starts_odd, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32));
 
-        uint32_t c = repeat_ax(g.slice(cos, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32)), cfg.num_heads, 1);
-        uint32_t s = repeat_ax(g.slice(sin, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32)), cfg.num_heads, 1);
+        int32_t ends_cos[] = {1, 1, (int32_t)seq, (int32_t)cfg.head_dim};
+        uint32_t c = repeat_ax(g.slice(cos, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends_cos, DType::INT32), g.constant({4}, steps, DType::INT32)), cfg.num_heads, 1);
+        uint32_t s = repeat_ax(g.slice(sin, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends_cos, DType::INT32), g.constant({4}, steps, DType::INT32)), cfg.num_heads, 1);
 
         uint32_t out_even = g.add(g.mul(x_even, c), g.neg(g.mul(x_odd, s)));
         uint32_t out_odd = g.add(g.mul(x_odd, c), g.mul(x_even, s));
@@ -95,10 +96,10 @@ private:
         std::vector<uint32_t> results;
         for (int i = 0; i < chunks; ++i)
         {
-            int32_t starts[] = {0, (int32_t)(i * cfg.hidden_size)};
-            int32_t ends[] = {1, (int32_t)((i + 1) * cfg.hidden_size)};
-            int32_t steps[] = {1, 1};
-            results.push_back(g.slice(mod, g.constant({2}, starts, DType::INT32), g.constant({2}, ends, DType::INT32), g.constant({2}, steps, DType::INT32)));
+            int32_t starts[] = {0, 0, (int32_t)(i * cfg.hidden_size)};
+            int32_t ends[] = {1, 1, (int32_t)((i + 1) * cfg.hidden_size)};
+            int32_t steps[] = {1, 1, 1};
+            results.push_back(g.slice(mod, g.constant({3}, starts, DType::INT32), g.constant({3}, ends, DType::INT32), g.constant({3}, steps, DType::INT32)));
         }
         return results;
     }
@@ -124,8 +125,8 @@ public:
     {
         uint32_t ts_mul = g.mul(timestep, expand_scalar_to_1d(1000.0f, 1));
         uint32_t t_sincos = timestep_embedding(ts_mul, 256);
-        int32_t sh2[] = {1, 256};
-        uint32_t t_emb_raw = linear(g.reshape(t_sincos, g.constant({2}, sh2, DType::INT32)), "time_guidance_embed.timestep_embedder.linear_1.weight", 256, cfg.hidden_size);
+        int32_t sh3_t[] = {1, 1, 256};
+        uint32_t t_emb_raw = linear(g.reshape(t_sincos, g.constant({3}, sh3_t, DType::INT32)), "time_guidance_embed.timestep_embedder.linear_1.weight", 256, cfg.hidden_size);
         uint32_t t_emb_silu = silu_atomic(t_emb_raw, 1, 1, cfg.hidden_size);
         t_emb_silu = linear(t_emb_silu, "time_guidance_embed.timestep_embedder.linear_2.weight", cfg.hidden_size, cfg.hidden_size);
 
