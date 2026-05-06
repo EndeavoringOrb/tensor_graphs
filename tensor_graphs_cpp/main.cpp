@@ -273,7 +273,7 @@ int main(int argc, char *argv[])
     _controlfp_s(nullptr, _EM_INVALID | _EM_ZERODIVIDE | _EM_OVERFLOW, _MCW_EM);
 #endif
 
-    std::string model = "gemma-3-270m";
+    std::string model = "flux-klein-4b";
     if (argc > 1)
         model = argv[1];
 

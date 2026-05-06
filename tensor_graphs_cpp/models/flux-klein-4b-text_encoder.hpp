@@ -73,15 +73,15 @@ public:
         int32_t starts1[] = {0, 0, 0, 0};
         int32_t ends1[] = {1, (int32_t)n_groups, (int32_t)cfg.text_max_seq, (int32_t)cfg.text_head_dim / 2};
         int32_t steps[] = {1, 1, 1, 1};
-        uint32_t x1 = g.contiguous(g.slice(x, g.constant({4}, starts1, DType::INT32),
+        uint32_t x1 = g.slice(x, g.constant({4}, starts1, DType::INT32),
                                            g.constant({4}, ends1, DType::INT32),
-                                           g.constant({4}, steps, DType::INT32)));
+                                           g.constant({4}, steps, DType::INT32));
 
         int32_t starts2[] = {0, 0, 0, (int32_t)cfg.text_head_dim / 2};
         int32_t ends2[] = {1, (int32_t)n_groups, (int32_t)cfg.text_max_seq, (int32_t)cfg.text_head_dim};
-        uint32_t x2 = g.contiguous(g.slice(x, g.constant({4}, starts2, DType::INT32),
+        uint32_t x2 = g.slice(x, g.constant({4}, starts2, DType::INT32),
                                            g.constant({4}, ends2, DType::INT32),
-                                           g.constant({4}, steps, DType::INT32)));
+                                           g.constant({4}, steps, DType::INT32));
         int32_t ax = 3;
         uint32_t rotated = g.concat({g.neg(x2), x1}, g.constant({1}, &ax, DType::INT32));
 
@@ -139,7 +139,7 @@ public:
 
         auto proj = [&](const std::string &name, int out_d)
         {
-            uint32_t w = g.contiguous(g.permute(weight(prefix + name), p_node));
+            uint32_t w = g.permute(weight(prefix + name), p_node);
             int32_t sh3[] = {1, (int32_t)cfg.text_hidden_size, (int32_t)out_d};
             return g.dot(x, g.reshape(w, g.constant({3}, sh3, DType::INT32)));
         };
@@ -152,7 +152,7 @@ public:
         {
             int32_t sh4[] = {1, (int32_t)cfg.text_max_seq, heads, (int32_t)cfg.text_head_dim};
             int32_t p[] = {0, 2, 1, 3};
-            return g.contiguous(g.permute(g.reshape(t, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32)));
+            return g.permute(g.reshape(t, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32));
         };
 
         q = prep(q, cfg.text_num_heads);
@@ -176,7 +176,7 @@ public:
         q = g.mul(q, expand_scalar_to_4d(scale_val, 1, cfg.text_num_heads, cfg.text_max_seq, cfg.text_head_dim));
 
         int32_t p_k[] = {0, 1, 3, 2};
-        uint32_t k_t = g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)));
+        uint32_t k_t = g.permute(k, g.constant({4}, p_k, DType::INT32));
         uint32_t scores = g.add(g.dot(q, k_t), repeat_ax(mask, cfg.text_num_heads, 1));
 
         // Softmax
@@ -189,7 +189,7 @@ public:
 
         uint32_t ctx = g.dot(probs, v);
         int32_t p_c[] = {0, 2, 1, 3};
-        ctx = g.contiguous(g.permute(ctx, g.constant({4}, p_c, DType::INT32)));
+        ctx = g.permute(ctx, g.constant({4}, p_c, DType::INT32));
         int32_t sh_c[] = {1, (int32_t)cfg.text_max_seq, (int32_t)(cfg.text_num_heads * cfg.text_head_dim)};
         ctx = g.reshape(ctx, g.constant({3}, sh_c, DType::INT32));
 
@@ -204,7 +204,7 @@ public:
 
         auto proj = [&](const std::string &name, uint32_t out_d)
         {
-            uint32_t w = g.contiguous(g.permute(weight(prefix + name), p_node));
+            uint32_t w = g.permute(weight(prefix + name), p_node);
             int32_t sh3[] = {1, (int32_t)cfg.text_hidden_size, (int32_t)out_d};
             return g.reshape(w, g.constant({3}, sh3, DType::INT32));
         };
@@ -220,7 +220,7 @@ public:
         gate = silu_atomic(gate, 1, cfg.text_max_seq, mlp_d);
         uint32_t up = g.dot(x, proj("up_proj.weight", mlp_d));
 
-        uint32_t w_down = g.contiguous(g.permute(weight(prefix + "down_proj.weight"), p_node));
+        uint32_t w_down = g.permute(weight(prefix + "down_proj.weight"), p_node);
         int32_t sh3[] = {1, (int32_t)mlp_d, (int32_t)cfg.text_hidden_size};
         return g.dot(g.mul(gate, up), g.reshape(w_down, g.constant({3}, sh3, DType::INT32)));
     }
@@ -248,7 +248,7 @@ public:
             uint32_t p_node = g.constant({2}, p_t, DType::INT32);
             auto proj_local = [&](const std::string &name, uint32_t in_d, uint32_t out_d, uint32_t inp)
             {
-                uint32_t w = g.contiguous(g.permute(weight(prefix + ".self_attn." + name), p_node));
+                uint32_t w = g.permute(weight(prefix + ".self_attn." + name), p_node);
                 int32_t sh3[] = {1, (int32_t)in_d, (int32_t)out_d};
                 return g.dot(inp, g.reshape(w, g.constant({3}, sh3, DType::INT32)));
             };
@@ -262,7 +262,7 @@ public:
             {
                 int32_t sh4[] = {1, (int32_t)cfg.text_max_seq, heads, (int32_t)cfg.text_head_dim};
                 int32_t p[] = {0, 2, 1, 3};
-                return g.contiguous(g.permute(g.reshape(t, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32)));
+                return g.permute(g.reshape(t, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32));
             };
 
             q = prep(q, cfg.text_num_heads);
@@ -285,7 +285,7 @@ public:
             float scale_val = 1.0f / std::sqrt((float)cfg.text_head_dim);
             q = g.mul(q, expand_scalar_to_4d(scale_val, 1, cfg.text_num_heads, cfg.text_max_seq, cfg.text_head_dim));
             int32_t p_k[] = {0, 1, 3, 2};
-            uint32_t scores = g.add(g.dot(q, g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)))), repeat_ax(mask, cfg.text_num_heads, 1));
+            uint32_t scores = g.add(g.dot(q, g.permute(k, g.constant({4}, p_k, DType::INT32))), repeat_ax(mask, cfg.text_num_heads, 1));
 
             int32_t ax = -1;
             uint32_t max_s = repeat_ax(g.max(scores, g.constant({1}, &ax, DType::INT32)), cfg.text_max_seq, 3);
@@ -295,7 +295,7 @@ public:
             uint32_t ctx = g.dot(g.div(exps, sums), v);
 
             int32_t p_c[] = {0, 2, 1, 3};
-            ctx = g.contiguous(g.permute(ctx, g.constant({4}, p_c, DType::INT32)));
+            ctx = g.permute(ctx, g.constant({4}, p_c, DType::INT32));
             int32_t sh_c[] = {1, (int32_t)cfg.text_max_seq, (int32_t)(cfg.text_num_heads * cfg.text_head_dim)};
             ctx = g.reshape(ctx, g.constant({3}, sh_c, DType::INT32));
 

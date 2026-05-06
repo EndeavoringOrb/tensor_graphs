@@ -455,3 +455,50 @@ inline bool isContiguous(const EClass &eclass)
 {
     return isContiguous(eclass.strides, eclass.shape);
 }
+
+inline std::string toString(const ENode &node)
+{
+    std::stringstream ss;
+    ss << "ENode {\n"
+       << "  KernelUID:  0x" << std::hex << node.kernelUid << std::dec << "\n"
+       << "  OpType:     " << toString(node.opType) << "\n"
+       << "  OpName:     " << (node.opName.empty() ? "N/A" : node.opName) << "\n"
+       << "  Children:   [";
+    for (size_t i = 0; i < node.children.size(); ++i)
+    {
+        ss << node.children[i] << (i == node.children.size() - 1 ? "" : ", ");
+    }
+    ss << "]\n"
+       << "  LeafID:     " << (node.leafId == UINT32_MAX ? "N/A" : std::to_string(node.leafId)) << "\n"
+       << "  Shape:      " << ::toString(node.shape) << "\n"
+       << "  Strides:    " << ::toString(node.strides) << "\n"
+       << "  ViewOffset: " << node.viewOffset << "\n"
+       << "  DType:      " << ::toString(node.dtype) << "\n"
+       << "  Backend:    " << ::toString(node.backend) << "\n"
+       << "  Signature:  0x" << std::hex << node.sig << std::dec << "\n"
+       << "}";
+    return ss.str();
+}
+
+inline std::string toString(const EClass &cls)
+{
+    std::stringstream ss;
+    ss << "EClass {\n"
+       << "  ID:         " << cls.id << "\n"
+       << "  Shape:      " << ::toString(cls.shape) << "\n"
+       << "  Strides:    " << ::toString(cls.strides) << "\n"
+       << "  ViewOffset: " << cls.viewOffset << "\n"
+       << "  DType:      " << ::toString(cls.dtype) << "\n"
+       << "  Backend:    " << ::toString(cls.backend) << "\n"
+       << "  ENodes:     [";
+
+    for (size_t i = 0; i < cls.enodes.size(); ++i)
+    {
+        ss << cls.enodes[i] << (i == cls.enodes.size() - 1 ? "" : ", ");
+    }
+    ss << "]\n"
+       << "}";
+    return ss.str();
+}
+
+inline std::ostream &operator<<(std::ostream &os, const EClass &cls) { return os << toString(cls); }

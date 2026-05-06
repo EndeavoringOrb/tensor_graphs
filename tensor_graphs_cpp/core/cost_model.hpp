@@ -224,7 +224,6 @@ struct CostModel
                 r.backends = entry.backends;
                 r.inputBackends = entry.inputBackends;
                 r.runTime = 0.0f;
-
                 json callObj = r;
                 std::string callStr = callObj.dump();
 

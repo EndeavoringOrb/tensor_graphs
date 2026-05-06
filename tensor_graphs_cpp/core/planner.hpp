@@ -434,6 +434,7 @@ private:
         constexpr float INF = std::numeric_limits<float>::infinity();
         constexpr float EPS = 1e-6f;
 
+        ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info ");
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
         for (size_t i = 0; i < egraph.getENodes().size(); ++i)
         {
@@ -525,8 +526,9 @@ private:
                     inDTypes.reserve(enode.children.size());
                     inConstants.reserve(enode.children.size());
 
-                    for (uint32_t childEClassId : enode.children)
+                    for (int i = 0; i < enode.children.size(); i++)
                     {
+                        uint32_t childEClassId = enode.children[i];
                         const EClass &childCls = egraph.getEClass(egraph.find(childEClassId));
                         inShapes.push_back(childCls.shape);
 
@@ -539,7 +541,35 @@ private:
                         inDTypes.push_back(childCls.dtype);
 
                         uint32_t canonChild = egraph.find(childEClassId);
-                        if (egraph.constantStaging.count(canonChild))
+                        // filter to avoid serializing large folded constants
+                        if ((enode.opType == OpType::ADD && (i == 0 || i == 1)) ||
+                            (enode.opType == OpType::MUL && (i == 0 || i == 1)) ||
+                            (enode.opType == OpType::DIVIDE && (i == 0 || i == 1)) ||
+                            (enode.opType == OpType::DOT && (i == 0 || i == 1)) ||
+                            (enode.opType == OpType::SIN && (i == 0)) ||
+                            (enode.opType == OpType::COS && (i == 0)) ||
+                            (enode.opType == OpType::NEGATE && (i == 0)) ||
+                            (enode.opType == OpType::POWER && (i == 0 || i == 1)) ||
+                            (enode.opType == OpType::SUM && (i == 0)) ||
+                            (enode.opType == OpType::MAX && (i == 0)) ||
+                            (enode.opType == OpType::RESHAPE && (i == 0)) ||
+                            (enode.opType == OpType::PERMUTE && (i == 0)) ||
+                            (enode.opType == OpType::SLICE && (i == 0)) ||
+                            (enode.opType == OpType::CONCAT && (i != (enode.children.size() - 1))) ||
+                            (enode.opType == OpType::CAST && (i == 0)) ||
+                            (enode.opType == OpType::REPEAT && (i == 0)) ||
+                            // arange
+                            (enode.opType == OpType::TRIU && (i == 0)) ||
+                            (enode.opType == OpType::GATHER && (i == 0)) ||
+                            // fill
+                            (enode.opType == OpType::COPY_TO && (i == 0)) ||
+                            // TODO: im2col
+                            (enode.opType == OpType::CONTIGUOUS && (i == 0)) ||
+                            (enode.opType == OpType::SCATTER && (i == 0 || i == 1)))
+                        {
+                            inConstants.push_back({});
+                        }
+                        else if (egraph.constantStaging.count(canonChild))
                         {
                             inConstants.push_back(egraph.constantStaging.at(canonChild));
                         }
@@ -572,6 +602,7 @@ private:
             }
 
             enodeInfos[i] = std::move(info);
+            timer3.tick();
         }
 
         bool droppedInf = false;
@@ -597,10 +628,15 @@ private:
                 }
             }
 
-            // if (validEnodes.empty())
-            // {
-            //     std::cout << "[Planner.extractBest] Warning: EClass " << eclassId << " has NO valid enodes\n";
-            // }
+            if (validEnodes.empty())
+            {
+                std::cout << "[Planner.extractBest] Warning: EClass " << eclassId << " has NO valid enodes (out of " + std::to_string(cls.enodes.size()) + ")\n";
+                std::cout << cls << std::endl;
+                for (uint32_t enodeId : cls.enodes)
+                {
+                    std::cout << toString(egraph.getENodes()[enodeId]) << std::endl;
+                }
+            }
 
             cls.enodes = std::move(validEnodes);
         }
@@ -713,8 +749,10 @@ private:
         std::vector<uint64_t> candidateBits(bitWords, 0);
         std::vector<float> optimisticEnodeDagCost(egraph.getENodes().size(), INF);
 
+        ProgressTimer optTimer(0, "calculating optimistic cost");
         while (!worklist.empty())
         {
+            std::cout << "worklist size: " << worklist.size() << std::endl;
             for (uint32_t eclassId : worklist)
             {
                 inQueue[eclassId] = false;
@@ -838,6 +876,7 @@ private:
 
             worklist.clear();
             std::swap(worklist, next_worklist);
+            optTimer.tick();
         }
 
         std::vector<float> eclassMinCost(numClasses, INF);

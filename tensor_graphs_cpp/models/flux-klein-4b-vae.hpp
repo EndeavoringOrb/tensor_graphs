@@ -137,11 +137,11 @@ private:
         {
             int32_t p[] = {0, 2, 3, 1};
             int32_t sh3[] = {1, (int32_t)(H * W), (int32_t)C};
-            return g.reshape(g.contiguous(g.permute(t, g.constant({4}, p, DType::INT32))), g.constant({3}, sh3, DType::INT32));
+            return g.reshape(g.permute(t, g.constant({4}, p, DType::INT32)), g.constant({3}, sh3, DType::INT32));
         };
 
         int32_t p_k[] = {0, 2, 1};
-        uint32_t scores = g.mul(g.dot(flat(q), g.contiguous(g.permute(flat(k), g.constant({3}, p_k, DType::INT32)))), expand_scalar_to_3d(1.0f / std::sqrt((float)C), 1, H * W, H * W));
+        uint32_t scores = g.mul(g.dot(flat(q), g.permute(flat(k), g.constant({3}, p_k, DType::INT32))), expand_scalar_to_3d(1.0f / std::sqrt((float)C), 1, H * W, H * W));
 
         int32_t ax = -1;
         uint32_t max_s = repeat_ax(g.max(scores, g.constant({1}, &ax, DType::INT32)), H * W, 2);
@@ -151,7 +151,7 @@ private:
         uint32_t out = g.dot(probs, flat(v));
         int32_t sh4[] = {1, (int32_t)H, (int32_t)W, (int32_t)C};
         int32_t p_out[] = {0, 3, 1, 2};
-        out = conv2d_atomic(g.contiguous(g.permute(g.reshape(out, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_out, DType::INT32))), pfx + ".to_out.0.weight", pfx + ".to_out.0.bias", 1, 1, 0, H, W);
+        out = conv2d_atomic(g.permute(g.reshape(out, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_out, DType::INT32)), pfx + ".to_out.0.weight", pfx + ".to_out.0.bias", 1, 1, 0, H, W);
         return g.add(out, x);
     }
 
@@ -173,7 +173,7 @@ public:
         uint32_t curr_h = initial_h * cfg.patch_size;
         uint32_t curr_w = initial_w * cfg.patch_size;
         int32_t sh2[] = {1, (int32_t)cfg.vae_z_channels, (int32_t)curr_h, (int32_t)curr_w};
-        h = g.reshape(g.contiguous(g.permute(g.reshape(h, g.constant({6}, sh1, DType::INT32)), g.constant({6}, p_u, DType::INT32))), g.constant({4}, sh2, DType::INT32));
+        h = g.reshape(g.permute(g.reshape(h, g.constant({6}, sh1, DType::INT32)), g.constant({6}, p_u, DType::INT32)), g.constant({4}, sh2, DType::INT32));
 
         h = conv2d_atomic(h, "post_quant_conv.weight", "post_quant_conv.bias", 1, 1, 0, curr_h, curr_w);
         h = conv2d_atomic(h, "decoder.conv_in.weight", "decoder.conv_in.bias", 3, 1, 1, curr_h, curr_w);

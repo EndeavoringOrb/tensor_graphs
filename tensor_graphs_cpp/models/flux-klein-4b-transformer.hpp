@@ -12,7 +12,7 @@ private:
     {
         uint32_t w = weight(w_name);
         int32_t p[] = {1, 0};
-        uint32_t w_t = g.contiguous(g.permute(w, g.constant({2}, p, DType::INT32)));
+        uint32_t w_t = g.permute(w, g.constant({2}, p, DType::INT32));
         int32_t sh3[] = {1, (int32_t)in_d, (int32_t)out_d};
         return g.dot(x, g.reshape(w_t, g.constant({3}, sh3, DType::INT32)));
     }
@@ -69,13 +69,13 @@ private:
         int32_t starts1[] = {0, 0, 0, 0};
         int32_t ends1[] = {1, (int32_t)cfg.num_heads, (int32_t)seq, (int32_t)cfg.head_dim};
         int32_t steps[] = {1, 1, 1, 2};
-        uint32_t x_even = g.contiguous(g.slice(x, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32)));
+        uint32_t x_even = g.slice(x, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32));
 
         int32_t starts_odd[] = {0, 0, 0, 1};
-        uint32_t x_odd = g.contiguous(g.slice(x, g.constant({4}, starts_odd, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32)));
+        uint32_t x_odd = g.slice(x, g.constant({4}, starts_odd, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32));
 
-        uint32_t c = repeat_ax(g.contiguous(g.slice(cos, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32))), cfg.num_heads, 1);
-        uint32_t s = repeat_ax(g.contiguous(g.slice(sin, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32))), cfg.num_heads, 1);
+        uint32_t c = repeat_ax(g.slice(cos, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32)), cfg.num_heads, 1);
+        uint32_t s = repeat_ax(g.slice(sin, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends1, DType::INT32), g.constant({4}, steps, DType::INT32)), cfg.num_heads, 1);
 
         uint32_t out_even = g.add(g.mul(x_even, c), g.neg(g.mul(x_odd, s)));
         uint32_t out_odd = g.add(g.mul(x_odd, c), g.mul(x_even, s));
@@ -98,7 +98,7 @@ private:
             int32_t starts[] = {0, (int32_t)(i * cfg.hidden_size)};
             int32_t ends[] = {1, (int32_t)((i + 1) * cfg.hidden_size)};
             int32_t steps[] = {1, 1};
-            results.push_back(g.contiguous(g.slice(mod, g.constant({2}, starts, DType::INT32), g.constant({2}, ends, DType::INT32), g.constant({2}, steps, DType::INT32))));
+            results.push_back(g.slice(mod, g.constant({2}, starts, DType::INT32), g.constant({2}, ends, DType::INT32), g.constant({2}, steps, DType::INT32)));
         }
         return results;
     }
@@ -131,7 +131,7 @@ public:
 
         // NLC
         int32_t p_img[] = {0, 2, 3, 1};
-        uint32_t img_perm = g.contiguous(g.permute(img_latent, g.constant({4}, p_img, DType::INT32)));
+        uint32_t img_perm = g.permute(img_latent, g.constant({4}, p_img, DType::INT32));
         int32_t sh_img[] = {1, (int32_t)img_seq_len, (int32_t)cfg.latent_channels};
         uint32_t img_hidden = linear(g.reshape(img_perm, g.constant({3}, sh_img, DType::INT32)), "x_embedder.weight", cfg.latent_channels, cfg.hidden_size);
         uint32_t txt_hidden = linear(txt_emb, "context_embedder.weight", cfg.text_dim, cfg.hidden_size);
@@ -143,13 +143,13 @@ public:
         int32_t slice_t_s[] = {0, 0, 0, 0};
         int32_t slice_txt_e[] = {1, 1, (int32_t)cfg.text_max_seq, (int32_t)cfg.head_dim};
         int32_t slice_step[] = {1, 1, 1, 1};
-        uint32_t txt_cos = g.contiguous(g.slice(rope_cos, g.constant({4}, slice_t_s, DType::INT32), g.constant({4}, slice_txt_e, DType::INT32), g.constant({4}, slice_step, DType::INT32)));
-        uint32_t txt_sin = g.contiguous(g.slice(rope_sin, g.constant({4}, slice_t_s, DType::INT32), g.constant({4}, slice_txt_e, DType::INT32), g.constant({4}, slice_step, DType::INT32)));
+        uint32_t txt_cos = g.slice(rope_cos, g.constant({4}, slice_t_s, DType::INT32), g.constant({4}, slice_txt_e, DType::INT32), g.constant({4}, slice_step, DType::INT32));
+        uint32_t txt_sin = g.slice(rope_sin, g.constant({4}, slice_t_s, DType::INT32), g.constant({4}, slice_txt_e, DType::INT32), g.constant({4}, slice_step, DType::INT32));
 
         int32_t slice_img_s[] = {0, 0, (int32_t)cfg.text_max_seq, 0};
         int32_t slice_img_e[] = {1, 1, (int32_t)total_seq_len, (int32_t)cfg.head_dim};
-        uint32_t img_cos = g.contiguous(g.slice(rope_cos, g.constant({4}, slice_img_s, DType::INT32), g.constant({4}, slice_img_e, DType::INT32), g.constant({4}, slice_step, DType::INT32)));
-        uint32_t img_sin = g.contiguous(g.slice(rope_sin, g.constant({4}, slice_img_s, DType::INT32), g.constant({4}, slice_img_e, DType::INT32), g.constant({4}, slice_step, DType::INT32)));
+        uint32_t img_cos = g.slice(rope_cos, g.constant({4}, slice_img_s, DType::INT32), g.constant({4}, slice_img_e, DType::INT32), g.constant({4}, slice_step, DType::INT32));
+        uint32_t img_sin = g.slice(rope_sin, g.constant({4}, slice_img_s, DType::INT32), g.constant({4}, slice_img_e, DType::INT32), g.constant({4}, slice_step, DType::INT32));
 
         for (uint32_t i = 0; i < cfg.num_double_layers; ++i)
         {
@@ -162,7 +162,7 @@ public:
             {
                 int32_t sh4[] = {1, L, (int32_t)cfg.num_heads, (int32_t)cfg.head_dim};
                 int32_t p[] = {0, 2, 1, 3};
-                return g.contiguous(g.permute(g.reshape(x, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32)));
+                return g.permute(g.reshape(x, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32));
             };
 
             uint32_t img_q = apply_rope_2d_consecutive(rms_norm_atomic(reshape_for_attn(linear(img_mod, p + ".attn.to_q.weight", cfg.hidden_size, cfg.hidden_size), img_seq_len), p + ".attn.norm_q.weight", img_seq_len, cfg.num_heads, cfg.head_dim), img_cos, img_sin, img_seq_len);
@@ -180,7 +180,7 @@ public:
             auto attn = [&](uint32_t q, uint32_t k, uint32_t v, int L_q)
             {
                 int32_t p_k[] = {0, 1, 3, 2};
-                uint32_t scores = g.mul(g.dot(q, g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)))), expand_scalar_to_4d(1.0f / std::sqrt((float)cfg.head_dim), 1, cfg.num_heads, L_q, total_seq_len));
+                uint32_t scores = g.mul(g.dot(q, g.permute(k, g.constant({4}, p_k, DType::INT32))), expand_scalar_to_4d(1.0f / std::sqrt((float)cfg.head_dim), 1, cfg.num_heads, L_q, total_seq_len));
                 int32_t ax = -1;
                 uint32_t shifted = g.add(scores, g.neg(repeat_ax(g.max(scores, g.constant({1}, &ax, DType::INT32)), total_seq_len, 3)));
                 uint32_t exps = g.pow(expand_scalar_to_4d(2.7182818f, 1, cfg.num_heads, L_q, total_seq_len), shifted);
@@ -188,7 +188,7 @@ public:
 
                 uint32_t ctx = g.dot(probs, v);
                 int32_t p_c[] = {0, 2, 1, 3};
-                ctx = g.contiguous(g.permute(ctx, g.constant({4}, p_c, DType::INT32)));
+                ctx = g.permute(ctx, g.constant({4}, p_c, DType::INT32));
                 int32_t sh3[] = {1, (int32_t)L_q, (int32_t)cfg.hidden_size};
                 return g.reshape(ctx, g.constant({3}, sh3, DType::INT32));
             };
@@ -207,10 +207,10 @@ public:
                 int32_t s_gate[] = {0, 0, 0};
                 int32_t e_gate[] = {1, (int32_t)seq, (int32_t)cfg.mlp_hidden};
                 int32_t step[] = {1, 1, 1};
-                uint32_t ff_gate = g.contiguous(g.slice(ff, g.constant({3}, s_gate, DType::INT32), g.constant({3}, e_gate, DType::INT32), g.constant({3}, step, DType::INT32)));
+                uint32_t ff_gate = g.slice(ff, g.constant({3}, s_gate, DType::INT32), g.constant({3}, e_gate, DType::INT32), g.constant({3}, step, DType::INT32));
                 int32_t s_up[] = {0, 0, (int32_t)cfg.mlp_hidden};
                 int32_t e_up[] = {1, (int32_t)seq, (int32_t)cfg.mlp_hidden * 2};
-                uint32_t ff_up = g.contiguous(g.slice(ff, g.constant({3}, s_up, DType::INT32), g.constant({3}, e_up, DType::INT32), g.constant({3}, step, DType::INT32)));
+                uint32_t ff_up = g.slice(ff, g.constant({3}, s_up, DType::INT32), g.constant({3}, e_up, DType::INT32), g.constant({3}, step, DType::INT32));
 
                 uint32_t out = linear(g.mul(silu_atomic(ff_gate, 1, seq, cfg.mlp_hidden), ff_up), pfx + "_out.weight", cfg.mlp_hidden, cfg.hidden_size);
                 return g.add(h, g.mul(repeat_ax(g.reshape(gate, g.constant({3}, sh3_gate, DType::INT32)), seq, 1), out));
@@ -234,14 +234,14 @@ public:
                 int32_t s[] = {0, 0, start};
                 int32_t e[] = {1, (int32_t)total_seq_len, end};
                 int32_t step[] = {1, 1, 1};
-                return g.contiguous(g.slice(fused, g.constant({3}, s, DType::INT32), g.constant({3}, e, DType::INT32), g.constant({3}, step, DType::INT32)));
+                return g.slice(fused, g.constant({3}, s, DType::INT32), g.constant({3}, e, DType::INT32), g.constant({3}, step, DType::INT32));
             };
 
             auto reshape_for_attn = [&](uint32_t x)
             {
                 int32_t sh4[] = {1, (int32_t)total_seq_len, (int32_t)cfg.num_heads, (int32_t)cfg.head_dim};
                 int32_t p_[] = {0, 2, 1, 3};
-                return g.contiguous(g.permute(g.reshape(x, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_, DType::INT32)));
+                return g.permute(g.reshape(x, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_, DType::INT32));
             };
 
             uint32_t q = apply_rope_2d_consecutive(rms_norm_atomic(reshape_for_attn(slice_feat(0, cfg.hidden_size)), p + ".attn.norm_q.weight", total_seq_len, cfg.num_heads, cfg.head_dim), rope_cos, rope_sin, total_seq_len);
@@ -251,7 +251,7 @@ public:
             uint32_t mlp_up = slice_feat(cfg.hidden_size * 3 + cfg.mlp_hidden, cfg.hidden_size * 3 + cfg.mlp_hidden * 2);
 
             int32_t p_k[] = {0, 1, 3, 2};
-            uint32_t scores = g.mul(g.dot(q, g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)))), expand_scalar_to_4d(1.0f / std::sqrt((float)cfg.head_dim), 1, cfg.num_heads, total_seq_len, total_seq_len));
+            uint32_t scores = g.mul(g.dot(q, g.permute(k, g.constant({4}, p_k, DType::INT32))), expand_scalar_to_4d(1.0f / std::sqrt((float)cfg.head_dim), 1, cfg.num_heads, total_seq_len, total_seq_len));
             int32_t ax_ = -1;
             uint32_t shifted = g.add(scores, g.neg(repeat_ax(g.max(scores, g.constant({1}, &ax_, DType::INT32)), total_seq_len, 3)));
             uint32_t exps = g.pow(expand_scalar_to_4d(2.7182818f, 1, cfg.num_heads, total_seq_len, total_seq_len), shifted);
@@ -259,7 +259,7 @@ public:
 
             uint32_t ctx = g.dot(probs, v);
             int32_t p_c[] = {0, 2, 1, 3};
-            ctx = g.reshape(g.contiguous(g.permute(ctx, g.constant({4}, p_c, DType::INT32))), g.constant({3}, std::vector<int32_t>{1, (int32_t)total_seq_len, (int32_t)cfg.hidden_size}.data(), DType::INT32));
+            ctx = g.reshape(g.permute(ctx, g.constant({4}, p_c, DType::INT32)), g.constant({3}, std::vector<int32_t>{1, (int32_t)total_seq_len, (int32_t)cfg.hidden_size}.data(), DType::INT32));
 
             uint32_t mlp_out = g.mul(silu_atomic(mlp_gate, 1, total_seq_len, cfg.mlp_hidden), mlp_up);
             int32_t ax_concat = 2;
@@ -272,7 +272,7 @@ public:
         int32_t slice_s[] = {0, (int32_t)cfg.text_max_seq, 0};
         int32_t slice_e[] = {1, (int32_t)total_seq_len, (int32_t)cfg.hidden_size};
         int32_t slice_step_out[] = {1, 1, 1};
-        uint32_t img_out = g.contiguous(g.slice(combined, g.constant({3}, slice_s, DType::INT32), g.constant({3}, slice_e, DType::INT32), g.constant({3}, slice_step_out, DType::INT32)));
+        uint32_t img_out = g.slice(combined, g.constant({3}, slice_s, DType::INT32), g.constant({3}, slice_e, DType::INT32), g.constant({3}, slice_step_out, DType::INT32));
 
         auto final_mods = compute_mods(t_emb_silu, "norm_out.linear.weight", 2);
         uint32_t mod_out = apply_mod(layer_norm_atomic(img_out, img_seq_len), final_mods[1], final_mods[0], img_seq_len);
@@ -280,6 +280,6 @@ public:
 
         int32_t sh_out[] = {1, (int32_t)latent_h, (int32_t)latent_w, (int32_t)cfg.latent_channels};
         int32_t p_out[] = {0, 3, 1, 2};
-        return g.contiguous(g.permute(g.reshape(output, g.constant({4}, sh_out, DType::INT32)), g.constant({4}, p_out, DType::INT32)));
+        return g.permute(g.reshape(output, g.constant({4}, sh_out, DType::INT32)), g.constant({4}, p_out, DType::INT32));
     }
 };
