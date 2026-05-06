@@ -446,6 +446,15 @@ struct MemoryManager
         {
             buf.second.init();
         }
+        // Clear stale alias entries left over from any previous execution cycle.
+        // Multiple sessions sharing a MemoryManager have overlapping node-ID spaces
+        // (each graph numbers its nodes independently from 0). A transient alias
+        // created during session N's execution and not fully cleaned up will
+        // silently redirect writes for session N+1's newly-allocated persistent
+        // nodes — whose IDs coincidentally collide — to already-freed addresses.
+        aliasMap.clear();
+        aliasRefCounts.clear();
+        aliasStorageTypes.clear();
     }
 
     void addAlias(Backend backend, uint32_t srcId, uint32_t dstId, uint32_t additionalRefs, StorageType storageType = StorageType::TRANSIENT)
