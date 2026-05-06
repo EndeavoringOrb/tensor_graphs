@@ -1314,7 +1314,16 @@ struct InfinityDomination : public Rule
                 return;
         }
 
-        uint32_t currentTarget = createCacheInputNode(egraph, addNode, eclassId, eNodeIdx | 0x80000000, eclassToLogical);
+        uint32_t currentTarget;
+        if (cClass.backend != outClass.backend)
+        {
+            currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
+        }
+        else
+        {
+            // Forces a fresh buffer initialized strictly with the mask's original state
+            currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
+        }
 
         for (const Region &reg : nonInfRegions)
         {
