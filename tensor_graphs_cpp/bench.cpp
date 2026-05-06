@@ -156,7 +156,7 @@ int main()
                          float costA = ra.runTime;
                          float costB = rb.runTime;
 
-                         if (std::abs(costA - costB) < 1e-7) {
+                         if (std::abs(costA - costB) < 1e-7 && costA != std::numeric_limits<float>::infinity()) {
                              // Tie-break: Prioritize optimized kernels over reference kernels
                              bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
                              bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
