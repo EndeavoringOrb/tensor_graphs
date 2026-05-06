@@ -517,6 +517,10 @@ private:
                     {
                         info.cost = INF;
                     }
+                    else if (enode.backend != cachedNodes.at(logicalId))
+                    {
+                        info.cost = INF;
+                    }
                 }
             }
             else if (enode.kernelUid != 0)
@@ -1541,7 +1545,8 @@ private:
             std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(
                 node.opType, node.opName, node.backend, inputs, node, true);
 
-            if (refs.size() == 0) {
+            if (refs.size() == 0)
+            {
                 Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels to init EClass " + std::to_string(eclassId) + " " + toString(baseState.egraph.getEClass(eclassId)) + "\nNode " + toString(node, tempGraph));
             }
             for (uint64_t uid : refs)
@@ -1647,7 +1652,7 @@ private:
         cacheNode.strides = lClass.strides;
         cacheNode.viewOffset = lClass.viewOffset;
         cacheNode.backend = targetBackend;
-        cacheNode.leafId = logicalId;
+        cacheNode.leafId = logicalId | 0x80000000;
         egraph.addENode(E_Cache, cacheNode);
 
         eclassToLogical[E_Cache] = logicalId;
