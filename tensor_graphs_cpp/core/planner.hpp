@@ -434,6 +434,33 @@ private:
         constexpr float INF = std::numeric_limits<float>::infinity();
         constexpr float EPS = 1e-6f;
 
+        auto isConstantNeeded = [](OpType op, size_t inputIdx, size_t numInputs) -> bool
+        {
+            if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
+                return true;
+            if (op == OpType::RESHAPE && inputIdx == 1)
+                return true;
+            if (op == OpType::PERMUTE && inputIdx == 1)
+                return true;
+            if (op == OpType::SLICE && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
+                return true;
+            if (op == OpType::SCATTER && (inputIdx == 2 || inputIdx == 3 || inputIdx == 4))
+                return true;
+            if ((op == OpType::SUM || op == OpType::MAX) && inputIdx == 1)
+                return true;
+            if (op == OpType::CONCAT && inputIdx == numInputs - 1)
+                return true;
+            if (op == OpType::TRIU && inputIdx == 1)
+                return true;
+            if (op == OpType::FILL && inputIdx == 1)
+                return true;
+            if (op == OpType::IM2COL && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
+                return true;
+            if (op == OpType::ARANGE && (inputIdx == 0 || inputIdx == 1 || inputIdx == 2))
+                return true;
+            return false;
+        };
+
         ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info ");
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
         for (size_t i = 0; i < egraph.getENodes().size(); ++i)
@@ -526,7 +553,7 @@ private:
                     inDTypes.reserve(enode.children.size());
                     inConstants.reserve(enode.children.size());
 
-                    for (int i = 0; i < enode.children.size(); i++)
+                    for (size_t i = 0; i < enode.children.size(); i++)
                     {
                         uint32_t childEClassId = enode.children[i];
                         const EClass &childCls = egraph.getEClass(egraph.find(childEClassId));
@@ -542,30 +569,67 @@ private:
 
                         uint32_t canonChild = egraph.find(childEClassId);
                         // filter to avoid serializing large folded constants
-                        if ((enode.opType == OpType::ADD && (i == 0 || i == 1)) ||
-                            (enode.opType == OpType::MUL && (i == 0 || i == 1)) ||
-                            (enode.opType == OpType::DIVIDE && (i == 0 || i == 1)) ||
-                            (enode.opType == OpType::DOT && (i == 0 || i == 1)) ||
-                            (enode.opType == OpType::SIN && (i == 0)) ||
-                            (enode.opType == OpType::COS && (i == 0)) ||
-                            (enode.opType == OpType::NEGATE && (i == 0)) ||
-                            (enode.opType == OpType::POWER && (i == 0 || i == 1)) ||
-                            (enode.opType == OpType::SUM && (i == 0)) ||
-                            (enode.opType == OpType::MAX && (i == 0)) ||
-                            (enode.opType == OpType::RESHAPE && (i == 0)) ||
-                            (enode.opType == OpType::PERMUTE && (i == 0)) ||
-                            (enode.opType == OpType::SLICE && (i == 0)) ||
-                            (enode.opType == OpType::CONCAT && (i != (enode.children.size() - 1))) ||
-                            (enode.opType == OpType::CAST && (i == 0)) ||
-                            (enode.opType == OpType::REPEAT && (i == 0)) ||
-                            // arange
-                            (enode.opType == OpType::TRIU && (i == 0)) ||
-                            (enode.opType == OpType::GATHER && (i == 0)) ||
-                            // fill
-                            (enode.opType == OpType::COPY_TO && (i == 0)) ||
-                            // TODO: im2col
-                            (enode.opType == OpType::CONTIGUOUS && (i == 0)) ||
-                            (enode.opType == OpType::SCATTER && (i == 0 || i == 1)))
+                        bool needed = false;
+                        if (enode.opType == OpType::FUSED)
+                        {
+                            const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
+                            const auto *refEntry = ReferenceGraphRegistry::get().getFactory(kernel.opName);
+                            if (refEntry)
+                            {
+                                Graph pGraph;
+                                std::vector<uint32_t> pInputs;
+                                for (size_t k = 0; k < kernel.numInputs; ++k)
+                                {
+                                    pInputs.push_back(pGraph.input(kernel.dummyShapes[k], kernel.dtypes[k]));
+                                }
+                                refEntry->factory(pInputs, pGraph);
+
+                                auto traceToInputIdx = [&](uint32_t pid) -> int
+                                {
+                                    uint32_t curr = pid;
+                                    while (pGraph.hasNode(curr) &&
+                                           (pGraph.getNode(curr).opType == OpType::CONTIGUOUS ||
+                                            pGraph.getNode(curr).opType == OpType::CAST ||
+                                            pGraph.getNode(curr).opType == OpType::COPY_TO))
+                                    {
+                                        if (pGraph.getNode(curr).parentIds.empty())
+                                            break;
+                                        curr = pGraph.getNode(curr).parentIds[0];
+                                    }
+                                    for (size_t k = 0; k < kernel.numInputs; ++k)
+                                    {
+                                        if (pInputs[k] == curr)
+                                            return (int)k;
+                                    }
+                                    return -1;
+                                };
+
+                                for (const auto &pair : pGraph.nodes)
+                                {
+                                    const TensorNode &n = pair.second;
+                                    for (size_t p_idx = 0; p_idx < n.parentIds.size(); ++p_idx)
+                                    {
+                                        if (isConstantNeeded(n.opType, p_idx, n.parentIds.size()))
+                                        {
+                                            int inputIdx = traceToInputIdx(n.parentIds[p_idx]);
+                                            if (inputIdx == (int)i)
+                                            {
+                                                needed = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (needed)
+                                        break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            needed = isConstantNeeded(enode.opType, i, enode.children.size());
+                        }
+
+                        if (!needed)
                         {
                             inConstants.push_back({});
                         }
