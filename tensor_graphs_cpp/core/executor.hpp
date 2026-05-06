@@ -88,13 +88,14 @@ public:
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {
                 const uint32_t inId = inst.inputNodeIds[i];
+                const TensorNode &inNode = compiled.nodesMap.at(inId);
                 uint32_t activeInId = inId;
                 uint32_t inLogicalId = compiled.getLogicalId(inId);
-                if (!memManager.has(compiled.nodesMap.at(inId).backend, inId) && memManager.has(compiled.nodesMap.at(inId).backend, inLogicalId))
+                if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
                 {
                     activeInId = inLogicalId;
                 }
-                TensorNode debugInput = compiled.nodesMap.at(inId);
+                TensorNode debugInput = inNode;
                 debugInput.id = activeInId;
                 Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId));
             }
@@ -102,24 +103,26 @@ public:
             if (inst.inplaceInputIndex >= 0)
             {
                 uint32_t inId = inst.inputNodeIds[inst.inplaceInputIndex];
+                const TensorNode &inNode = compiled.nodesMap.at(inId);
                 uint32_t srcId = inId;
                 uint32_t inLogicalId = compiled.getLogicalId(inId);
-                if (!memManager.has(inst.backend, inId) && memManager.has(inst.backend, inLogicalId))
+                if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
                 {
                     srcId = inLogicalId;
                 }
-                memManager.transferOwnership(inst.backend, srcId, outputMemId);
+                memManager.transferOwnership(inNode.backend, srcId, outputMemId);
             }
             else if (inst.viewInputIndex >= 0)
             {
                 uint32_t inId = inst.inputNodeIds[inst.viewInputIndex];
+                const TensorNode &inNode = compiled.nodesMap.at(inId);
                 uint32_t srcId = inId;
                 uint32_t inLogicalId = compiled.getLogicalId(inId);
-                if (!memManager.has(inst.backend, inId) && memManager.has(inst.backend, inLogicalId))
+                if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
                 {
                     srcId = inLogicalId;
                 }
-                memManager.addAlias(inst.backend, srcId, outputMemId, compiled.refCounts.at(inst.nodeId), inst.outputStorageType);
+                memManager.addAlias(inNode.backend, srcId, outputMemId, compiled.refCounts.at(inst.nodeId), inst.outputStorageType);
             }
 
             auto it = memManager.buffers.find(node.backend);
@@ -168,13 +171,14 @@ public:
                     continue;
 
                 uint32_t inId = inst.inputNodeIds[i];
+                const TensorNode &inNode = compiled.nodesMap.at(inId);
                 uint32_t activeInId = inId;
                 uint32_t inLogicalId = compiled.getLogicalId(inId);
-                if (!memManager.has(compiled.nodesMap.at(inId).backend, inId) && memManager.has(compiled.nodesMap.at(inId).backend, inLogicalId))
+                if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
                 {
                     activeInId = inLogicalId;
                 }
-                memManager.release(compiled.nodesMap.at(inId).backend, activeInId);
+                memManager.release(inNode.backend, activeInId);
             }
 
             if (outputMemId == inst.nodeId && inst.logicalNodeId != UINT32_MAX && inst.logicalNodeId != inst.nodeId)

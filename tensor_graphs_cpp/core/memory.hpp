@@ -267,7 +267,7 @@ struct DeviceBuffer
         }
         else
         {
-            Error::throw_err("Cannot write to unallocated node");
+            Error::throw_err("Cannot write to unallocated node (nodeId=" + std::to_string(nodeId) + ",size=" + std::to_string(size) + ")");
         }
     }
 
@@ -452,6 +452,12 @@ struct MemoryManager
     {
         if (srcId == dstId)
             return;
+        // Resolve srcId to the final underlying allocation so that dstId never
+        // holds a link to an intermediate alias that may be erased by release().
+        while (aliasMap.find(srcId) != aliasMap.end())
+        {
+            srcId = aliasMap.at(srcId);
+        }
         aliasMap[dstId] = srcId;
         aliasRefCounts[dstId] = additionalRefs;
         aliasStorageTypes[dstId] = storageType;
@@ -565,7 +571,12 @@ struct MemoryManager
         auto aliasIt = aliasMap.find(srcId);
         if (aliasIt != aliasMap.end())
         {
-            aliasMap[dstId] = aliasIt->second;
+            uint32_t resolvedTarget = aliasIt->second;
+            while (aliasMap.find(resolvedTarget) != aliasMap.end())
+            {
+                resolvedTarget = aliasMap.at(resolvedTarget);
+            }
+            aliasMap[dstId] = resolvedTarget;
             aliasRefCounts[dstId] = aliasRefCounts[srcId];
             aliasStorageTypes[dstId] = aliasStorageTypes[srcId];
             aliasMap.erase(aliasIt);
@@ -586,21 +597,31 @@ struct MemoryManager
         auto srcIt = buf.allocationMap.find(srcId);
         if (srcIt != buf.allocationMap.end())
         {
-            auto dstIt = buf.allocationMap.find(dstId);
-            if (dstIt != buf.allocationMap.end())
-            {
-                dstIt->second->nodeId = UINT32_MAX;
-                dstIt->second->isLocked = false;
-                buf.allocationMap.erase(dstIt);
-                buf.mergeFreeBlocks();
-            }
-
             auto blockIt = srcIt->second;
-            buf.allocationMap.erase(srcIt);
 
-            // Update node identity
-            blockIt->nodeId = dstId;
-            buf.allocationMap[dstId] = blockIt;
+            if (blockIt->storageType == StorageType::PERSISTENT || blockIt->storageType == StorageType::PINNED)
+            {
+                // Cannot transfer ownership of a persistent/pinned block (it must survive!)
+                // Create an alias to share the inplace memory safely instead.
+                addAlias(backend, srcId, dstId, 0, StorageType::TRANSIENT);
+            }
+            else
+            {
+                auto dstIt = buf.allocationMap.find(dstId);
+                if (dstIt != buf.allocationMap.end())
+                {
+                    dstIt->second->nodeId = UINT32_MAX;
+                    dstIt->second->isLocked = false;
+                    buf.allocationMap.erase(dstIt);
+                    buf.mergeFreeBlocks();
+                }
+
+                buf.allocationMap.erase(srcIt);
+
+                // Update node identity
+                blockIt->nodeId = dstId;
+                buf.allocationMap[dstId] = blockIt;
+            }
         }
         else
         {
