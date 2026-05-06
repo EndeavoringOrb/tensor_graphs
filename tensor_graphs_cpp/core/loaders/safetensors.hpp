@@ -76,7 +76,7 @@ public:
         const auto &meta = getMetadata(name);
         if (meta.sizeBytes() > destSize)
         {
-            Error::throw_err("[SafetensorsLoader.loadTensor] Destination buffer too small for: " + name);
+            Error::throw_err("[SafetensorsLoader.loadTensor] Destination buffer too small for tensor '" + name + "' (dst=" + std::to_string(destSize) + "), (tensor_size=" + std::to_string(meta.sizeBytes()) + ")");
         }
 
         const std::string &fname = files[meta.fileIndex].path;
