@@ -91,6 +91,33 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
         pRoot = pGraph.copyto(pInputs[0], backend);
     else if (op == OpType::SCATTER)
         pRoot = pGraph.scatter(pInputs[0], pInputs[1], pInputs[2], pInputs[3], pInputs[4]);
+    else if (op == OpType::RESHAPE)
+        pRoot = pGraph.reshape(pInputs[0], pInputs[1]);
+    else if (op == OpType::PERMUTE)
+        pRoot = pGraph.permute(pInputs[0], pInputs[1]);
+    else if (op == OpType::CONCAT)
+    {
+        std::vector<uint32_t> concatIns;
+        for (size_t i = 0; i < pInputs.size() - 1; ++i)
+            concatIns.push_back(pInputs[i]);
+        pRoot = pGraph.concat(concatIns, pInputs.back());
+    }
+    else if (op == OpType::REPEAT)
+        pRoot = pGraph.repeat(pInputs[0], pInputs[1], pInputs[2]);
+    else if (op == OpType::ARANGE)
+        pRoot = pGraph.arange(pInputs[0], pInputs[1], pInputs[2]);
+    else if (op == OpType::TRIU)
+        pRoot = pGraph.triu(pInputs[0], pInputs[1]);
+    else if (op == OpType::GATHER)
+        pRoot = pGraph.gather(pInputs[0], pInputs[1]);
+    else if (op == OpType::FILL)
+        pRoot = pGraph.fill(pInputs[0], pInputs[1]);
+    else if (op == OpType::IM2COL)
+        pRoot = pGraph.im2col(pInputs[0], pInputs[1], pInputs[2], pInputs[3]);
+    else if (op == OpType::SUM)
+        pRoot = pGraph.sum(pInputs[0], pInputs[1]);
+    else if (op == OpType::MAX)
+        pRoot = pGraph.max(pInputs[0], pInputs[1]);
 
     if (pRoot != UINT32_MAX)
     {
@@ -470,88 +497,13 @@ struct FusionRule : public Rule
 
             if (needCopy)
             {
-                TensorNode inNode;
-                inNode.opType = OpType::INPUT;
-                inNode.dtype = currentClass.dtype;
-                inNode.setShape(currentClass.shape);
-                inNode.strides = currentClass.strides;
-                inNode.viewOffset = currentClass.viewOffset;
-                inNode.backend = currentClass.backend;
-
-                TensorNode outNode = inNode;
-                outNode.opType = OpType::COPY_TO;
-                outNode.backend = expectedBackend;
-                outNode.strides = calcContiguousStrides(outNode.getShape());
-                outNode.viewOffset = 0;
-
-                Graph pGraph;
-                uint32_t pIn = pGraph.input(inNode.getShape(), inNode.dtype);
-                uint32_t pRoot = pGraph.copyto(pIn, outNode.backend);
-
-                auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, outNode.backend, {inNode}, outNode, false, false, false);
-                if (matches.empty())
-                    return;
-
-                uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
-                for (uint64_t uid : matches)
-                {
-                    const auto &copyKernel = KernelRegistry::get().getKernel(uid);
-                    ENode copyNode;
-                    copyNode.kernelUid = uid;
-                    copyNode.opType = copyKernel.opType;
-                    copyNode.opName = copyKernel.opName;
-                    copyNode.children = {currentPid};
-                    copyNode.shape = outNode.getShape();
-                    copyNode.strides = outNode.strides;
-                    copyNode.viewOffset = outNode.viewOffset;
-                    copyNode.dtype = outNode.dtype;
-                    copyNode.backend = outNode.backend;
-                    egraph.addENode(newEClass, copyNode);
-                }
-                currentPid = newEClass;
-                currentClass = egraph.getEClass(newEClass);
+                currentPid = addOpToEGraph(egraph, OpType::COPY_TO, {currentPid}, currentClass.shape, calcContiguousStrides(currentClass.shape), 0, currentClass.dtype, expectedBackend);
+                currentClass = egraph.getEClass(egraph.find(currentPid));
             }
 
             if (needContig)
             {
-                TensorNode inNode;
-                inNode.opType = OpType::INPUT;
-                inNode.dtype = currentClass.dtype;
-                inNode.setShape(currentClass.shape);
-                inNode.strides = currentClass.strides;
-                inNode.viewOffset = currentClass.viewOffset;
-                inNode.backend = currentClass.backend;
-
-                TensorNode outNode = inNode;
-                outNode.opType = OpType::CONTIGUOUS;
-                outNode.strides = calcContiguousStrides(outNode.getShape());
-                outNode.viewOffset = 0;
-
-                Graph pGraph;
-                uint32_t pIn = pGraph.input(inNode.getShape(), inNode.dtype);
-                uint32_t pRoot = pGraph.contiguous(pIn);
-
-                auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, outNode.backend, {inNode}, outNode, false, false, false);
-                if (matches.empty())
-                    return;
-
-                uint32_t newEClass = egraph.addEClass(outNode.getShape(), outNode.strides, outNode.viewOffset, outNode.dtype, outNode.backend);
-                for (uint64_t uid : matches)
-                {
-                    const auto &contigKernel = KernelRegistry::get().getKernel(uid);
-                    ENode contigNode;
-                    contigNode.kernelUid = uid;
-                    contigNode.opType = contigKernel.opType;
-                    contigNode.opName = contigKernel.opName;
-                    contigNode.children = {currentPid};
-                    contigNode.shape = outNode.getShape();
-                    contigNode.strides = outNode.strides;
-                    contigNode.viewOffset = outNode.viewOffset;
-                    contigNode.dtype = outNode.dtype;
-                    contigNode.backend = outNode.backend;
-                    egraph.addENode(newEClass, contigNode);
-                }
-                currentPid = newEClass;
+                currentPid = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentPid}, currentClass.shape, calcContiguousStrides(currentClass.shape), 0, currentClass.dtype, currentClass.backend);
             }
             adaptedParents.push_back(currentPid);
         }
@@ -590,40 +542,7 @@ struct FusionRule : public Rule
             uint32_t newEClass = egraph.addEClass(enode.shape, enode.strides, enode.viewOffset, enode.dtype, targetBackend);
             newEClass = egraph.addENode(newEClass, enode);
 
-            TensorNode dummyIn;
-            dummyIn.opType = OpType::INPUT;
-            dummyIn.setShape(enode.shape);
-            dummyIn.strides = enode.strides;
-            dummyIn.viewOffset = enode.viewOffset;
-            dummyIn.dtype = enode.dtype;
-            dummyIn.backend = targetBackend;
-
-            TensorNode dummyOut = dummyIn;
-            dummyOut.opType = OpType::COPY_TO;
-            dummyOut.backend = originalBackend;
-            dummyOut.strides = calcContiguousStrides(dummyOut.getShape());
-            dummyOut.viewOffset = 0;
-
-            Graph pGraph;
-            uint32_t pIn = pGraph.input(dummyIn.getShape(), dummyIn.dtype);
-            uint32_t pRoot = pGraph.copyto(pIn, dummyOut.backend);
-
-            auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, dummyOut.backend, {dummyIn}, dummyOut, false, false, false);
-            for (uint64_t uid : matches)
-            {
-                const auto &copyKernel = KernelRegistry::get().getKernel(uid);
-                ENode copyNode;
-                copyNode.kernelUid = uid;
-                copyNode.opType = copyKernel.opType;
-                copyNode.opName = copyKernel.opName;
-                copyNode.children = {newEClass};
-                copyNode.shape = dummyOut.getShape();
-                copyNode.strides = dummyOut.strides;
-                copyNode.viewOffset = dummyOut.viewOffset;
-                copyNode.dtype = dummyOut.dtype;
-                copyNode.backend = dummyOut.backend;
-                egraph.addENode(eclassId, copyNode);
-            }
+            addOpToEGraph(egraph, OpType::COPY_TO, {newEClass}, enode.shape, calcContiguousStrides(enode.shape), 0, enode.dtype, originalBackend, eclassId);
         }
     }
 
@@ -1709,8 +1628,8 @@ struct SlicePushDownDot : public Rule
 
                 std::vector<uint32_t> outClassShape = egraph.getEClass(srcClass).shape;
                 uint32_t rank = outClassShape.size();
-                if (rank != 2 && rank != 3)
-                    continue; // DOT only supports rank 2 and 3
+                if (rank != 2 && rank != 3 && rank != 4)
+                    continue; // DOT only supports rank 2, 3, 4
 
                 while (starts.size() < rank)
                     starts.push_back(0);
@@ -1733,7 +1652,8 @@ struct SlicePushDownDot : public Rule
                 uint32_t aClassId = dotNode.children[0];
                 uint32_t bClassId = dotNode.children[1];
 
-                uint32_t K = (rank == 2) ? egraph.getEClass(egraph.find(aClassId)).shape[1] : egraph.getEClass(egraph.find(aClassId)).shape[2];
+                uint32_t K = (rank == 2) ? egraph.getEClass(egraph.find(aClassId)).shape[1] : (rank == 3) ? egraph.getEClass(egraph.find(aClassId)).shape[2]
+                                                                                                          : egraph.getEClass(egraph.find(aClassId)).shape[3];
 
                 std::vector<int32_t> startsA, endsA, stepsA(rank, 1);
                 std::vector<int32_t> startsB, endsB, stepsB(rank, 1);
@@ -2016,7 +1936,7 @@ struct SlicePullUpDot : public Rule
                         if (bInfo.starts[0] != 0 || bInfo.ends[0] != (int32_t)K)
                             continue;
                     }
-                    else
+                    else if (rank == 3)
                     {
                         if (aInfo.fullShape[0] != bInfo.fullShape[0])
                             continue;
@@ -2033,6 +1953,27 @@ struct SlicePullUpDot : public Rule
                         if (bInfo.starts[1] != 0 || bInfo.ends[1] != (int32_t)K)
                             continue;
                     }
+                    else if (rank == 4)
+                    {
+                        if (aInfo.fullShape[0] != bInfo.fullShape[0])
+                            continue;
+                        if (aInfo.fullShape[1] != bInfo.fullShape[1])
+                            continue;
+                        if (aInfo.fullShape[3] != bInfo.fullShape[2])
+                            continue;
+
+                        // Batches and heads must slice equivalently
+                        if (aInfo.starts[0] != bInfo.starts[0] || aInfo.ends[0] != bInfo.ends[0])
+                            continue;
+                        if (aInfo.starts[1] != bInfo.starts[1] || aInfo.ends[1] != bInfo.ends[1])
+                            continue;
+
+                        uint32_t K = aInfo.fullShape[3];
+                        if (aInfo.starts[3] != 0 || aInfo.ends[3] != (int32_t)K)
+                            continue;
+                        if (bInfo.starts[2] != 0 || bInfo.ends[2] != (int32_t)K)
+                            continue;
+                    }
 
                     // Generate the full un-sliced DOT
                     std::vector<uint32_t> fullDotShape;
@@ -2040,9 +1981,13 @@ struct SlicePullUpDot : public Rule
                     {
                         fullDotShape = {aInfo.fullShape[0], bInfo.fullShape[1]};
                     }
-                    else
+                    else if (rank == 3)
                     {
                         fullDotShape = {aInfo.fullShape[0], aInfo.fullShape[1], bInfo.fullShape[2]};
+                    }
+                    else if (rank == 4)
+                    {
+                        fullDotShape = {aInfo.fullShape[0], aInfo.fullShape[1], aInfo.fullShape[2], bInfo.fullShape[3]};
                     }
 
                     std::vector<uint64_t> fullDotStrides = calcContiguousStrides(fullDotShape);
@@ -2056,10 +2001,15 @@ struct SlicePullUpDot : public Rule
                         dotStarts = {aInfo.starts[0], bInfo.starts[1]};
                         dotEnds = {aInfo.ends[0], bInfo.ends[1]};
                     }
-                    else
+                    else if (rank == 3)
                     {
                         dotStarts = {aInfo.starts[0], aInfo.starts[1], bInfo.starts[2]};
                         dotEnds = {aInfo.ends[0], aInfo.ends[1], bInfo.ends[2]};
+                    }
+                    else if (rank == 4)
+                    {
+                        dotStarts = {aInfo.starts[0], aInfo.starts[1], aInfo.starts[2], bInfo.starts[3]};
+                        dotEnds = {aInfo.ends[0], aInfo.ends[1], aInfo.ends[2], bInfo.ends[3]};
                     }
 
                     uint32_t startsId = addIntConst(egraph, dotStarts);
