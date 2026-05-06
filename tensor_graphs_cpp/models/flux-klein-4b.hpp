@@ -32,6 +32,7 @@ struct FluxConfig
     uint32_t text_dim = 7680;
     uint32_t text_vocab_size = 151936;
     uint32_t text_hidden_size = 2560;
+    uint32_t text_mlp_hidden_size = 9728;
     uint32_t text_num_layers = 36;
     uint32_t text_num_heads = 32;
     uint32_t text_num_kv_heads = 8;

@@ -230,19 +230,13 @@ public:
         };
 
         // Qwen mlp sizes
-        uint32_t gate = g.dot(x, proj("gate_proj.weight", 13696)); // approximated typical size, wait, we don't have text config for ffn hidden!
-        // We can just rely on the shape from the dot product by looking at the python code...
-        // But in C++, dot needs shapes if reshaped... actually `[1, in, out]` works perfectly.
-        // Wait! We can retrieve the size if we had it, but Qwen3-4b intermediate size is usually ~13696.
-        // Let's use `cfg.text_hidden_size * 4` as a safe fallback or dynamic. We will use a huge value or standard Qwen 4B value.
-        // Since we didn't add `text_mlp_hidden`, let's just assume we can get it from weights, or hardcode 13696.
-        uint32_t mlp_d = 13696;
-        gate = silu_atomic(gate, 1, cfg.text_max_seq, mlp_d);
-        uint32_t up = g.dot(x, proj("up_proj.weight", mlp_d));
+        uint32_t gate = g.dot(x, proj("gate_proj.weight", cfg.text_mlp_hidden_size));
+        gate = silu_atomic(gate, 1, cfg.text_max_seq, cfg.text_mlp_hidden_size);
+        uint32_t up = g.dot(x, proj("up_proj.weight", cfg.text_mlp_hidden_size));
 
         uint32_t w_down = g.permute(weight(prefix + "down_proj.weight"), p_node);
         w_down = g.contiguous(w_down);
-        int32_t sh3[] = {1, (int32_t)mlp_d, (int32_t)cfg.text_hidden_size};
+        int32_t sh3[] = {1, (int32_t)cfg.text_mlp_hidden_size, (int32_t)cfg.text_hidden_size};
         return g.dot(g.mul(gate, up), g.reshape(w_down, g.constant({3}, sh3, DType::INT32)));
     }
 
@@ -300,8 +294,24 @@ public:
             int reps = cfg.text_num_heads / cfg.text_num_kv_heads;
             if (reps > 1)
             {
-                k = repeat_ax(k, reps, 1);
-                v = repeat_ax(v, reps, 1);
+                // 1. Reshape [1, 8, 512, 128] -> [1, 8, 1, 512, 128] to create a unit dim at axis 2
+                int32_t sh5[] = {1, (int32_t)cfg.text_num_kv_heads, 1, (int32_t)cfg.text_max_seq, (int32_t)cfg.text_head_dim};
+                uint32_t sh5_node = g.constant({5}, sh5, DType::INT32);
+                k = g.reshape(k, sh5_node);
+                v = g.reshape(v, sh5_node);
+
+                // 2. Repeat the unit dim (axis 2)
+                k = repeat_ax(k, reps, 2);
+                v = repeat_ax(v, reps, 2);
+
+                k = g.contiguous(k);
+                v = g.contiguous(v);
+
+                // 3. Reshape back to [1, 32, 512, 128]
+                int32_t sh4[] = {1, (int32_t)cfg.text_num_heads, (int32_t)cfg.text_max_seq, (int32_t)cfg.text_head_dim};
+                uint32_t sh4_node = g.constant({4}, sh4, DType::INT32);
+                k = g.reshape(k, sh4_node);
+                v = g.reshape(v, sh4_node);
             }
 
             float scale_val = 1.0f / std::sqrt((float)cfg.text_head_dim);
