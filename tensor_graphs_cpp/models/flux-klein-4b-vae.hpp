@@ -137,7 +137,7 @@ private:
         {
             int32_t p[] = {0, 2, 3, 1};
             int32_t sh3[] = {1, (int32_t)(H * W), (int32_t)C};
-            return g.reshape(g.permute(t, g.constant({4}, p, DType::INT32)), g.constant({3}, sh3, DType::INT32));
+            return g.reshape(g.contiguous(g.permute(t, g.constant({4}, p, DType::INT32))), g.constant({3}, sh3, DType::INT32));
         };
 
         int32_t p_k[] = {0, 2, 1};
@@ -173,7 +173,7 @@ public:
         uint32_t curr_h = initial_h * cfg.patch_size;
         uint32_t curr_w = initial_w * cfg.patch_size;
         int32_t sh2[] = {1, (int32_t)cfg.vae_z_channels, (int32_t)curr_h, (int32_t)curr_w};
-        h = g.reshape(g.permute(g.reshape(h, g.constant({6}, sh1, DType::INT32)), g.constant({6}, p_u, DType::INT32)), g.constant({4}, sh2, DType::INT32));
+        h = g.reshape(g.contiguous(g.permute(g.reshape(h, g.constant({6}, sh1, DType::INT32)), g.constant({6}, p_u, DType::INT32))), g.constant({4}, sh2, DType::INT32));
 
         h = conv2d_atomic(h, "post_quant_conv.weight", "post_quant_conv.bias", 1, 1, 0, curr_h, curr_w);
         h = conv2d_atomic(h, "decoder.conv_in.weight", "decoder.conv_in.bias", 3, 1, 1, curr_h, curr_w);

@@ -259,7 +259,7 @@ public:
 
             uint32_t ctx = g.dot(probs, v);
             int32_t p_c[] = {0, 2, 1, 3};
-            ctx = g.reshape(g.permute(ctx, g.constant({4}, p_c, DType::INT32)), g.constant({3}, std::vector<int32_t>{1, (int32_t)total_seq_len, (int32_t)cfg.hidden_size}.data(), DType::INT32));
+            ctx = g.reshape(g.contiguous(g.permute(ctx, g.constant({4}, p_c, DType::INT32))), g.constant({3}, std::vector<int32_t>{1, (int32_t)total_seq_len, (int32_t)cfg.hidden_size}.data(), DType::INT32));
 
             uint32_t mlp_out = g.mul(silu_atomic(mlp_gate, 1, total_seq_len, cfg.mlp_hidden), mlp_up);
             int32_t ax_concat = 2;

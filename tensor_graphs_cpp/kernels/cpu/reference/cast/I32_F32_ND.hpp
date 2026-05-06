@@ -23,7 +23,7 @@ inline bool matchCastI32_F32_ND(const std::vector<TensorNode> &inputs, const Ten
         return false;
 
     // Reference implementation requires contiguity
-    if (!isContiguous(inputs[0]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
 
     return true;
@@ -44,4 +44,4 @@ inline void runCastI32_F32_ND(const std::vector<const void *> &inputs, const std
 }
 
 // Register as a CPU kernel for the CAST operation
-REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastI32_F32_ND, runCastI32_F32_ND, {Backend::CPU}, {DType::INT32}, {{8, 32}}, {false}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastI32_F32_ND, runCastI32_F32_ND, {Backend::CPU}, {DType::INT32}, {{8, 32}}, {true}, {{Backend::CPU}});

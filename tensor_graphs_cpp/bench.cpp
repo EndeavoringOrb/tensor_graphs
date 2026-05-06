@@ -156,12 +156,25 @@ int main()
                          float costA = ra.runTime;
                          float costB = rb.runTime;
 
-                         if (std::abs(costA - costB) < 1e-7 && costA != std::numeric_limits<float>::infinity()) {
-                             // Tie-break: Prioritize optimized kernels over reference kernels
-                             bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
-                             bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
-                             if (isRefA != isRefB) return !isRefA;
-                             return ra.kernelUid < rb.kernelUid;
+                         if (std::abs(costA - costB) < 1e-7) {
+                            // Tie-break: Prioritize optimized kernels over reference kernels
+                            bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
+                            bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
+                            if (isRefA != isRefB) return !isRefA;
+                            uint64_t sizeA = 1;
+                            for (size_t i = 0; i < ra.outputShapes.size(); i++) {
+                                for (uint32_t dim : ra.outputShapes[i]) {
+                                    sizeA *= dim;
+                                }
+                            }
+                            uint64_t sizeB = 1;
+                            for (size_t i = 0; i < rb.outputShapes.size(); i++) {
+                                for (uint32_t dim : rb.outputShapes[i]) {
+                                    sizeB *= dim;
+                                }
+                            }
+                            
+                            return sizeA < sizeB;
                          }
 
                          return costA < costB; });

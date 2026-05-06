@@ -86,6 +86,7 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
     ss << prefix << "Node " << node.id << " [" << toString(node.opType) << "]\n"
        << prefix << "  DType:      " << toString(node.dtype) << "\n"
        << prefix << "  Shape:      " << toString(node.getShape()) << "\n"
+       << prefix << "  Strides:    " << toString(node.strides) << "\n"
        << prefix << "  Backend:    " << node.backend << "\n"
        << prefix << "  Contiguous: " << (isContiguous(node) ? "true" : "false") << "\n"
        << prefix << "  Parents (" << node.parentIds.size() << "):";

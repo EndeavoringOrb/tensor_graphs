@@ -16,4 +16,4 @@ inline void inferViewReshape(TensorNode &node, const std::vector<TensorNode> &in
     node.viewOffset = inputs[0].viewOffset;
 }
 
-REGISTER_REF_KERNEL_VIEW(OpType::RESHAPE, 2, matchReshapeView, inferViewReshape, {Backend::CPU, Backend::CUDA}, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {true, false}, {{Backend::CPU, Backend::CUDA}, {Backend::CPU}});
+REGISTER_REF_KERNEL_VIEW(OpType::RESHAPE, 2, matchReshapeView, inferViewReshape, {Backend::CPU, Backend::CUDA}, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {true, true}, {{Backend::CPU, Backend::CUDA}, {Backend::CPU}});

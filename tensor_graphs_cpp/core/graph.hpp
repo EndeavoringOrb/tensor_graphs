@@ -228,7 +228,7 @@ struct Graph
         }
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::RESHAPE, "", dtype, {id0, id1});
-        return contiguous(node.id);
+        return node.id;
     }
 
     uint32_t permute(uint32_t id0, uint32_t id1)
@@ -241,7 +241,7 @@ struct Graph
         }
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::PERMUTE, "", dtype, {id0, id1});
-        return contiguous(node.id);
+        return node.id;
     }
 
     uint32_t slice(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3)
@@ -266,7 +266,7 @@ struct Graph
         }
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::SLICE, "", dtype, {id0, id1, id2, id3});
-        return contiguous(node.id);
+        return node.id;
     }
 
     uint32_t scatter(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3, uint32_t id4)
@@ -350,7 +350,7 @@ struct Graph
         }
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::REPEAT, "", dtype, {id0, repeats_id, axis_id});
-        return contiguous(node.id);
+        return node.id;
     }
 
     uint32_t arange(uint32_t id1, uint32_t id2, uint32_t id3)

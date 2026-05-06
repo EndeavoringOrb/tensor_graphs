@@ -1542,6 +1542,9 @@ private:
             std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(
                 node.opType, node.opName, node.backend, inputs, node, true);
 
+            if (refs.size() == 0) {
+                Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels to init EClass " + std::to_string(eclassId) + " " + toString(baseState.egraph.getEClass(eclassId)) + "\nNode " + toString(node, tempGraph));
+            }
             for (uint64_t uid : refs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
