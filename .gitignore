@@ -25,6 +25,8 @@ tensor_graphs_cpp/main.exe
 tensor_graphs_cpp/bench.exe
 tensor_graphs_cpp/test.exe
 hwinfo-*.txt
+*.png
+**/*.png
 
 # Profiling artifacts
 profile_output*

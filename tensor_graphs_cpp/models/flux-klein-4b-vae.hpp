@@ -63,9 +63,9 @@ private:
             Error::throw_err("Conv2D expects 2D or 4D weights");
         }
 
-        // Weight Reshape: [C_out, K]
-        std::vector<int32_t> w_flat_sh = {C_out, K};
-        uint32_t w_flat = g.reshape(w_id, g.constant({2}, w_flat_sh.data(), DType::INT32));
+        // Weight Reshape: [1, C_out, K] // TODO: add dot kernel for 2D dot so we don't have to add batch dimension
+        std::vector<int32_t> w_flat_sh = {1, C_out, K};
+        uint32_t w_flat = g.reshape(w_id, g.constant({3}, w_flat_sh.data(), DType::INT32));
 
         // 4. Prepare Im2Col for Dot Product
         // col is [N, K, M] -> Permute to [K, N, M]
@@ -78,10 +78,11 @@ private:
         int W_out = (W + 2 * padding - kernel) / stride + 1;
         int M = H_out * W_out;
 
-        std::vector<int32_t> col_flat_sh = {K, N * M};
-        uint32_t col_flat = g.reshape(col_perm, g.constant({2}, col_flat_sh.data(), DType::INT32));
+        std::vector<int32_t> col_flat_sh = {1, K, N * M};
+        col_perm = g.contiguous(col_perm);
+        uint32_t col_flat = g.reshape(col_perm, g.constant({3}, col_flat_sh.data(), DType::INT32));
 
-        // 5. Dot Product: [C_out, K] @ [K, N*M] -> [C_out, N*M]
+        // 5. Dot Product: [1, C_out, K] @ [1, K, N*M] -> [1, C_out, N*M]
         uint32_t out_flat = g.dot(w_flat, col_flat);
 
         // 6. Reshape back to NCHW
@@ -94,6 +95,7 @@ private:
         uint32_t out_perm = g.permute(out_res1, g.constant({3}, p_out, DType::INT32));
 
         std::vector<int32_t> final_sh = {N, C_out, H_out, W_out};
+        out_perm = g.contiguous(out_perm);
         uint32_t result = g.reshape(out_perm, g.constant({4}, final_sh.data(), DType::INT32));
 
         // 7. Add Bias
@@ -111,22 +113,59 @@ private:
         return result;
     }
 
-    uint32_t upsample2x_atomic(uint32_t x)
+    uint32_t upsample2x_atomic(uint32_t x, int C, int H, int W)
     {
-        return repeat_ax(repeat_ax(x, 2, 2), 2, 3);
+        int32_t r_val = 2;
+        uint32_t r_node = g.constant({1}, &r_val, DType::INT32);
+
+        // 1. Upsample Height: [1, C, H, W] -> [1, C, H, 1, W] -> [1, C, H, 2, W] -> [1, C, 2H, W]
+        int32_t sh_h_pre[] = {1, (int32_t)C, (int32_t)H, 1, (int32_t)W};
+        int32_t ax3_val = 3;
+        uint32_t h_rep = g.repeat(g.reshape(x, g.constant({5}, sh_h_pre, DType::INT32)),
+                                  r_node, g.constant({1}, &ax3_val, DType::INT32));
+
+        // Materialize the tiling before reshaping back
+        h_rep = g.contiguous(h_rep);
+
+        int32_t sh_h_post[] = {1, (int32_t)C, (int32_t)H * 2, (int32_t)W};
+        uint32_t h_res = g.reshape(h_rep, g.constant({4}, sh_h_post, DType::INT32));
+
+        // 2. Upsample Width: [1, C, 2H, W] -> [1, C, 2H, W, 1] -> [1, C, 2H, W, 2] -> [1, C, 2H, 2W]
+        int32_t sh_w_pre[] = {1, (int32_t)C, (int32_t)H * 2, (int32_t)W, 1};
+        int32_t ax4_val = 4;
+        uint32_t w_rep = g.repeat(g.reshape(h_res, g.constant({5}, sh_w_pre, DType::INT32)),
+                                  r_node, g.constant({1}, &ax4_val, DType::INT32));
+
+        w_rep = g.contiguous(w_rep);
+
+        int32_t sh_w_post[] = {1, (int32_t)C, (int32_t)H * 2, (int32_t)W * 2};
+        return g.reshape(w_rep, g.constant({4}, sh_w_post, DType::INT32));
     }
 
-    uint32_t resblock(uint32_t x, const std::string &pfx, int C, int H, int W)
+    uint32_t resblock(uint32_t x, const std::string &pfx, int C_in, int C_out, int H, int W, bool has_shortcut)
     {
-        uint32_t h = group_norm_atomic(x, pfx + ".norm1.weight", pfx + ".norm1.bias", 1, C, H, W);
-        h = silu_4d_atomic(h, 1, C, H, W);
+        // 1. First Norm + Activation + Conv (Changes channels from C_in to C_out)
+        uint32_t h = group_norm_atomic(x, pfx + ".norm1.weight", pfx + ".norm1.bias", 1, C_in, H, W);
+        h = silu_4d_atomic(h, 1, C_in, H, W);
         h = conv2d_atomic(h, pfx + ".conv1.weight", pfx + ".conv1.bias", 3, 1, 1, H, W);
 
-        h = group_norm_atomic(h, pfx + ".norm2.weight", pfx + ".norm2.bias", 1, C, H, W);
-        h = silu_4d_atomic(h, 1, C, H, W);
+        // 2. Second Norm + Activation + Conv (Stays at C_out)
+        h = group_norm_atomic(h, pfx + ".norm2.weight", pfx + ".norm2.bias", 1, C_out, H, W);
+        h = silu_4d_atomic(h, 1, C_out, H, W);
         h = conv2d_atomic(h, pfx + ".conv2.weight", pfx + ".conv2.bias", 3, 1, 1, H, W);
 
-        return g.add(h, x);
+        // 3. Handle Shortcut
+        if (has_shortcut)
+        {
+            // Project x from C_in to C_out using 1x1 conv
+            uint32_t skip = conv2d_atomic(x, pfx + ".conv_shortcut.weight", pfx + ".conv_shortcut.bias", 1, 1, 0, H, W);
+            return g.add(h, skip);
+        }
+        else
+        {
+            // Standard identity skip connection
+            return g.add(h, x);
+        }
     }
 
     uint32_t attnblock(uint32_t x, const std::string &pfx, int C, int H, int W)
@@ -179,30 +218,50 @@ public:
         h = g.reshape(g.contiguous(g.permute(g.reshape(h, g.constant({6}, sh1, DType::INT32)), g.constant({6}, p_u, DType::INT32))), g.constant({4}, sh2, DType::INT32));
 
         h = conv2d_atomic(h, "post_quant_conv.weight", "post_quant_conv.bias", 1, 1, 0, curr_h, curr_w);
+
+        // conv_in: 32 -> 512
         h = conv2d_atomic(h, "decoder.conv_in.weight", "decoder.conv_in.bias", 3, 1, 1, curr_h, curr_w);
 
-        h = resblock(h, "decoder.mid_block.resnets.0", cfg.vae_channels, curr_h, curr_w);
-        h = attnblock(h, "decoder.mid_block.attentions.0", cfg.vae_channels, curr_h, curr_w);
-        h = resblock(h, "decoder.mid_block.resnets.1", cfg.vae_channels, curr_h, curr_w);
+        // Mid block stays at 512
+        int current_channels = 512;
+        h = resblock(h, "decoder.mid_block.resnets.0", current_channels, current_channels, curr_h, curr_w, false);
+        h = attnblock(h, "decoder.mid_block.attentions.0", current_channels, curr_h, curr_w);
+        h = resblock(h, "decoder.mid_block.resnets.1", current_channels, current_channels, curr_h, curr_w, false);
 
-        for (int level = 3; level >= 0; --level)
+        // Up Blocks
+        // Flux Decoder channel levels: [512, 512, 256, 128]
+        std::vector<int> channel_levels = {512, 512, 256, 128};
+
+        for (int i = 0; i < 4; ++i)
         {
+            int level_out_channels = channel_levels[i];
+
             for (int r = 0; r < 3; ++r)
             {
-                std::string p = "decoder.up_blocks." + std::to_string(3 - level) + ".resnets." + std::to_string(r);
-                h = resblock(h, p, cfg.vae_channels, curr_h, curr_w);
+                std::string p = "decoder.up_blocks." + std::to_string(i) + ".resnets." + std::to_string(r);
+
+                // A shortcut is needed if the input channels to this block don't match output
+                bool has_shortcut = (current_channels != level_out_channels);
+
+                h = resblock(h, p, current_channels, level_out_channels, curr_h, curr_w, has_shortcut);
+
+                // After the first resnet in a level, the channels have transitioned
+                current_channels = level_out_channels;
             }
-            if (level > 0)
+
+            if (i < 3) // Upsample between blocks (but not after the last one)
             {
-                h = upsample2x_atomic(h);
+                h = upsample2x_atomic(h, current_channels, curr_h, curr_w);
                 curr_h *= 2;
                 curr_w *= 2;
-                h = conv2d_atomic(h, "decoder.up_blocks." + std::to_string(3 - level) + ".upsamplers.0.conv.weight", "decoder.up_blocks." + std::to_string(3 - level) + ".upsamplers.0.conv.bias", 3, 1, 1, curr_h, curr_w);
+                h = conv2d_atomic(h, "decoder.up_blocks." + std::to_string(i) + ".upsamplers.0.conv.weight",
+                                  "decoder.up_blocks." + std::to_string(i) + ".upsamplers.0.conv.bias", 3, 1, 1, curr_h, curr_w);
             }
         }
 
-        h = group_norm_atomic(h, "decoder.conv_norm_out.weight", "decoder.conv_norm_out.bias", 1, cfg.vae_channels, curr_h, curr_w);
-        h = silu_4d_atomic(h, 1, cfg.vae_channels, curr_h, curr_w);
+        // Final layers
+        h = group_norm_atomic(h, "decoder.conv_norm_out.weight", "decoder.conv_norm_out.bias", 1, current_channels, curr_h, curr_w);
+        h = silu_4d_atomic(h, 1, current_channels, curr_h, curr_w);
         return conv2d_atomic(h, "decoder.conv_out.weight", "decoder.conv_out.bias", 3, 1, 1, curr_h, curr_w);
     }
 };

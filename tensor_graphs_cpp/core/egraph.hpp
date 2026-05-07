@@ -502,3 +502,62 @@ inline std::string toString(const EClass &cls)
 }
 
 inline std::ostream &operator<<(std::ostream &os, const EClass &cls) { return os << toString(cls); }
+
+inline std::string toString(const ENode &node, const EGraph &egraph, const std::string &prefix = "")
+{
+    std::stringstream ss;
+    ss << prefix << "ENode [" << toString(node.opType);
+    if (!node.opName.empty())
+    {
+        ss << " (" << node.opName << ")";
+    }
+    ss << "]\n"
+       << prefix << "  DType:      " << toString(node.dtype) << "\n"
+       << prefix << "  Shape:      " << toString(node.shape) << "\n"
+       << prefix << "  Strides:    " << toString(node.strides) << "\n"
+       << prefix << "  Backend:    " << toString(node.backend) << "\n"
+       << prefix << "  ViewOffset: " << node.viewOffset << "\n"
+       << prefix << "  Signature:  0x" << std::hex << node.sig << std::dec << "\n";
+
+    if (node.leafId != UINT32_MAX)
+    {
+        ss << prefix << "  LeafID:     " << node.leafId << "\n";
+    }
+
+    if (node.kernelUid != 0)
+    {
+        ss << prefix << "  KernelUID:  0x" << std::hex << node.kernelUid << std::dec << "\n";
+    }
+
+    ss << prefix << "  Children (" << node.children.size() << "):";
+
+    if (node.children.empty())
+    {
+        ss << " None";
+    }
+    else
+    {
+        for (size_t i = 0; i < node.children.size(); ++i)
+        {
+            uint32_t childClassId = node.children[i];
+            // Resolve the canonical EClass from the graph
+            const EClass &childCls = egraph.getEClass(childClassId);
+
+            ss << "\n"
+               << prefix << "    [" << i << "] EClass " << childClassId;
+
+            // If the ID we have isn't the canonical one, note the redirect
+            uint32_t canonicalId = egraph.findConst(childClassId);
+            if (childClassId != canonicalId)
+            {
+                ss << " -> (Canonical: " << canonicalId << ")";
+            }
+
+            ss << "\n"
+               << prefix << "      Shape:   " << toString(childCls.shape) << "\n"
+               << prefix << "      DType:   " << toString(childCls.dtype) << "\n"
+               << prefix << "      ENodes:  " << childCls.enodes.size();
+        }
+    }
+    return ss.str();
+}

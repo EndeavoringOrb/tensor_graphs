@@ -702,7 +702,7 @@ private:
                 std::cout << cls << std::endl;
                 for (uint32_t enodeId : cls.enodes)
                 {
-                    std::cout << toString(egraph.getENodes()[enodeId]) << std::endl;
+                    std::cout << toString(egraph.getENodes()[enodeId], egraph) << std::endl;
                 }
             }
 

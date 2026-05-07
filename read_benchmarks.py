@@ -108,7 +108,9 @@ def main():
     filtered = []
     for r in records:
         uid = str(r["kernelUid"])
-        name = uid_map.get(uid, "UNKNOWN")
+        name = uid_map.get(uid, None)
+        if not name:
+            continue
 
         if (
             args.op
