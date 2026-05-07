@@ -108,6 +108,16 @@ protected:
         uint32_t sig = g.div(expand_scalar_to_3d(1.0f, N, L, D), den);
         return g.mul(x, sig);
     }
+
+    uint32_t silu_4d_atomic(uint32_t x, uint32_t N, uint32_t C, uint32_t H, uint32_t W)
+    {
+        uint32_t neg_x = g.neg(x);
+        // Use 4D expansion to match the spatial rank of the VAE tensors
+        uint32_t exp_neg = g.pow(expand_scalar_to_4d(2.7182818f, N, C, H, W), neg_x);
+        uint32_t den = g.add(expand_scalar_to_4d(1.0f, N, C, H, W), exp_neg);
+        uint32_t sig = g.div(expand_scalar_to_4d(1.0f, N, C, H, W), den);
+        return g.mul(x, sig);
+    }
 };
 
 #include "flux-klein-4b-text_encoder.hpp"

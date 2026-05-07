@@ -101,8 +101,11 @@ private:
         {
             uint32_t b_id = weight(b_name);
             std::vector<int32_t> b_sh = {1, C_out, 1, 1};
-            uint32_t b_reshaped = g.reshape(b_id, g.constant({4}, b_sh.data(), DType::INT32));
-            result = g.add(result, b_reshaped);
+            uint32_t b_4d = g.reshape(b_id, g.constant({4}, b_sh.data(), DType::INT32));
+            uint32_t b_exp = repeat_ax(b_4d, N, 0); // Match Batch
+            b_exp = repeat_ax(b_exp, H_out, 2);     // Match Height
+            b_exp = repeat_ax(b_exp, W_out, 3);     // Match Width
+            result = g.add(result, b_exp);
         }
 
         return result;
@@ -116,11 +119,11 @@ private:
     uint32_t resblock(uint32_t x, const std::string &pfx, int C, int H, int W)
     {
         uint32_t h = group_norm_atomic(x, pfx + ".norm1.weight", pfx + ".norm1.bias", 1, C, H, W);
-        h = silu_atomic(h, 1, C, H * W); // Works nicely since it's element-wise
+        h = silu_4d_atomic(h, 1, C, H, W);
         h = conv2d_atomic(h, pfx + ".conv1.weight", pfx + ".conv1.bias", 3, 1, 1, H, W);
 
         h = group_norm_atomic(h, pfx + ".norm2.weight", pfx + ".norm2.bias", 1, C, H, W);
-        h = silu_atomic(h, 1, C, H * W);
+        h = silu_4d_atomic(h, 1, C, H, W);
         h = conv2d_atomic(h, pfx + ".conv2.weight", pfx + ".conv2.bias", 3, 1, 1, H, W);
 
         return g.add(h, x);
@@ -199,7 +202,7 @@ public:
         }
 
         h = group_norm_atomic(h, "decoder.conv_norm_out.weight", "decoder.conv_norm_out.bias", 1, cfg.vae_channels, curr_h, curr_w);
-        h = silu_atomic(h, 1, cfg.vae_channels, curr_h * curr_w);
+        h = silu_4d_atomic(h, 1, cfg.vae_channels, curr_h, curr_w);
         return conv2d_atomic(h, "decoder.conv_out.weight", "decoder.conv_out.bias", 3, 1, 1, curr_h, curr_w);
     }
 };
