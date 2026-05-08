@@ -211,7 +211,7 @@ def generate_kernel_includes(core_seed):
         for f in files:
             path = Path(root) / f
             rel_path = path.relative_to(ROOT_DIR)
-            
+
             if f.endswith(".hpp"):
                 file_content_hash = get_file_hash(path)
                 combined = core_seed + file_content_hash
@@ -239,12 +239,24 @@ def generate_kernel_includes(core_seed):
                 for macro in REGISTER_MACROS:
                     f.write(f"#undef {macro}\n")
 
-                f.write(f"#define REGISTER_REF_KERNEL(op, n, match, run, ...) REGISTER_REF_KERNEL_INTERNAL({uid}, op, n, match, run, __VA_ARGS__)\n")
-                f.write(f"#define REGISTER_REF_KERNEL_INPLACE(op, n, match, run, ...) REGISTER_REF_KERNEL_INPLACE_INTERNAL({uid}, op, n, match, run, __VA_ARGS__)\n")
-                f.write(f"#define REGISTER_REF_KERNEL_VIEW(op, n, match, inferView, ...) REGISTER_REF_KERNEL_VIEW_INTERNAL({uid}, op, n, match, inferView, __VA_ARGS__)\n")
-                f.write(f"#define REGISTER_KERNEL(name, n, match, run, ref, ...) REGISTER_KERNEL_INTERNAL({uid}, name, n, match, run, ref, __VA_ARGS__)\n")
-                f.write(f"#define REGISTER_KERNEL_INPLACE(name, n, match, run, ref, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, name, n, match, run, ref, __VA_ARGS__)\n")
-                f.write(f"#define REGISTER_KERNEL_VIEW(name, n, match, ref, inferView, ...) REGISTER_KERNEL_VIEW_INTERNAL({uid}, name, n, match, ref, inferView, __VA_ARGS__)\n")
+                f.write(
+                    f"#define REGISTER_REF_KERNEL(op, n, match, run, ...) REGISTER_REF_KERNEL_INTERNAL({uid}, op, n, match, run, __VA_ARGS__)\n"
+                )
+                f.write(
+                    f"#define REGISTER_REF_KERNEL_INPLACE(op, n, match, run, ...) REGISTER_REF_KERNEL_INPLACE_INTERNAL({uid}, op, n, match, run, __VA_ARGS__)\n"
+                )
+                f.write(
+                    f"#define REGISTER_REF_KERNEL_VIEW(op, n, match, inferView, ...) REGISTER_REF_KERNEL_VIEW_INTERNAL({uid}, op, n, match, inferView, __VA_ARGS__)\n"
+                )
+                f.write(
+                    f"#define REGISTER_KERNEL(name, n, match, run, ref, ...) REGISTER_KERNEL_INTERNAL({uid}, name, n, match, run, ref, __VA_ARGS__)\n"
+                )
+                f.write(
+                    f"#define REGISTER_KERNEL_INPLACE(name, n, match, run, ref, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid}, name, n, match, run, ref, __VA_ARGS__)\n"
+                )
+                f.write(
+                    f"#define REGISTER_KERNEL_VIEW(name, n, match, ref, inferView, ...) REGISTER_KERNEL_VIEW_INTERNAL({uid}, name, n, match, ref, inferView, __VA_ARGS__)\n"
+                )
                 f.write(f'#include "{inc_path}"\n\n')
 
             f.write(f"// --- Clean up macros ---\n")
@@ -278,15 +290,13 @@ def generate_build_context():
         f.write(f"// Mode: {mode}\n")
         f.write(f"constexpr uint64_t BUILD_CONTEXT_ID = 0x{ctx_hash[:16]}ULL;\n")
 
-    console.print(
-        f"[dim]Build Context ID: 0x{ctx_hash[:16]} ({mode})[/dim]"
-    )
+    console.print(f"[dim]Build Context ID: 0x{ctx_hash[:16]} ({mode})[/dim]")
 
 
 def compile_project():
     out_ext = ".exe" if os.name == "nt" else ""
     is_arm64 = platform.machine().lower() in ("aarch64", "arm64")
-    
+
     if os.name == "nt":
         cxx = "cl.exe"
         nvcc = "nvcc"
@@ -305,19 +315,6 @@ def compile_project():
         else:
             cxx_flags.extend(["/O2"])
             nvcc_flags.extend(["-O3"])
-        
-        if USE_CUDA:
-            # Detect CUDA Path
-            cuda_path = os.environ.get("CUDA_PATH", "/usr/local/cuda")
-            
-            if os.name == "nt":
-                cxx_flags.append("/DUSE_CUDA")
-                cxx_flags.append(f"/I\"{cuda_path}\\include\"") # Add CUDA include for MSVC
-                nvcc_flags.append("-DUSE_CUDA")
-            else:
-                cxx_flags.append("-DUSE_CUDA")
-                cxx_flags.append(f"-I{cuda_path}/include")    # Add CUDA include for G++
-                nvcc_flags.append("-DUSE_CUDA")
     else:
         cxx_flags.extend(["-std=c++17"])
         if DEBUG_MODE:
@@ -326,16 +323,24 @@ def compile_project():
         else:
             cxx_flags.extend(["-O3"])
             nvcc_flags.extend(["-O3"])
-            
-        if USE_CUDA:
-            cxx_flags.append("-DUSE_CUDA")
+
+    if USE_CUDA:
+        # Detect CUDA Path
+        cuda_path = os.environ.get("CUDA_PATH", "/usr/local/cuda")
+
+        if os.name == "nt":
+            cxx_flags.append("/DUSE_CUDA")
+            cxx_flags.append(f'/I"{cuda_path}\\include"')  # Add CUDA include for MSVC
             nvcc_flags.append("-DUSE_CUDA")
-            
-        if USE_CUDA and is_arm64:
-            nvcc_flags.extend(["-Xcompiler", "-march=armv8-a"])
+        else:
+            cxx_flags.append("-DUSE_CUDA")
+            cxx_flags.append(f"-I{cuda_path}/include")  # Add CUDA include for G++
+            nvcc_flags.append("-DUSE_CUDA")
+            if is_arm64:
+                nvcc_flags.extend(["-Xcompiler", "-march=armv8-a"])
 
     mains = ["main.cpp", "bench.cpp", "test.cpp"]
-    
+
     obj_ext = ".obj" if os.name == "nt" else ".o"
     cuda_obj = str(GENERATED_DIR / f"cuda_kernels{obj_ext}")
 
@@ -346,11 +351,19 @@ def compile_project():
             full_command = f'"{VCVARS_PATH}" {arch} && {cmd_str}'
         else:
             full_command = cmd_str
-            
+
         print(f"Running {full_command}")
-        result = subprocess.run(full_command, capture_output=True, text=True, shell=True)
+        result = subprocess.run(
+            full_command, capture_output=True, text=True, shell=True
+        )
         if result.returncode != 0:
-            console.print(Panel(f"[red]{result.stdout}[/red]\n\n[red]{result.stderr}[/red]", title="[bold red]COMPILER ERROR[/bold red]", border_style="red"))
+            console.print(
+                Panel(
+                    f"[red]{result.stdout}[/red]\n\n[red]{result.stderr}[/red]",
+                    title="[bold red]COMPILER ERROR[/bold red]",
+                    border_style="red",
+                )
+            )
             sys.exit(1)
         return result
 
@@ -361,27 +374,39 @@ def compile_project():
             cmd = [nvcc] + nvcc_flags + ["-c", cuda_src, "-o", cuda_obj]
         else:
             cmd = [nvcc] + nvcc_flags + ["-c", cuda_src, "-o", cuda_obj]
-        
+
         result = run_cmd(cmd)
         if result.stdout.strip():
-            console.print(Panel(f"[green]{result.stdout}[/green]", title="[bold green]BUILD SUCCESS[/bold green]", border_style="green"))
+            console.print(
+                Panel(
+                    f"[green]{result.stdout}[/green]",
+                    title="[bold green]BUILD SUCCESS[/bold green]",
+                    border_style="green",
+                )
+            )
         else:
-            console.print(Panel(f"[green]No output[/green]", title="[bold green]BUILD SUCCESS[/bold green]", border_style="green"))
+            console.print(
+                Panel(
+                    f"[green]No output[/green]",
+                    title="[bold green]BUILD SUCCESS[/bold green]",
+                    border_style="green",
+                )
+            )
 
     for main_file in mains:
         console.print(f"\n[bold blue]Compiling {main_file}...[/bold blue]")
         main_src = str(ROOT_DIR / main_file)
         out_name = f"tensor_graphs_cpp/{main_file.split('.')[0]}{out_ext}"
-        
+
         if USE_CUDA:
             main_obj = str(GENERATED_DIR / f"{main_file.split('.')[0]}{obj_ext}")
-            
+
             if os.name == "nt":
                 cmd = [cxx] + cxx_flags + ["/c", main_src, f"/Fo:{main_obj}"]
             else:
                 cmd = [cxx] + cxx_flags + ["-c", main_src, "-o", main_obj]
             run_cmd(cmd)
-            
+
             cmd = [nvcc] + [main_obj, cuda_obj, "-o", out_name]
             if os.name == "nt" and DEBUG_MODE:
                 cmd.append("-g")
@@ -394,9 +419,21 @@ def compile_project():
             result = run_cmd(cmd)
 
         if result.stdout.strip():
-            console.print(Panel(f"[green]{result.stdout}[/green]", title="[bold green]BUILD SUCCESS[/bold green]", border_style="green"))
+            console.print(
+                Panel(
+                    f"[green]{result.stdout}[/green]",
+                    title="[bold green]BUILD SUCCESS[/bold green]",
+                    border_style="green",
+                )
+            )
         else:
-            console.print(Panel(f"[green]No output[/green]", title="[bold green]BUILD SUCCESS[/bold green]", border_style="green"))
+            console.print(
+                Panel(
+                    f"[green]No output[/green]",
+                    title="[bold green]BUILD SUCCESS[/bold green]",
+                    border_style="green",
+                )
+            )
 
 
 def main():
