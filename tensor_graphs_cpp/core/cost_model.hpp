@@ -42,7 +42,7 @@
 #define HW_TAG PLAT_OS_STR "_" PLAT_ARCH_STR
 #endif
 
-// Uncomment the following line to enable logging calls to `benchmarks/calls.jsonl`
+// Uncomment the following line to enable logging calls to `benchmarks/calls.bin`
 #define TENSOR_GRAPHS_LOG_COST_CALLS
 
 struct Record
@@ -63,46 +63,38 @@ struct Record
     float runTime;
 };
 
-inline void to_json(json &j, const Record &r)
+inline void tg_serialize(BinaryWriter &bw, const Record &val)
 {
-    std::stringstream uid_ss, build_ss;
-    uid_ss << "0x" << std::hex << r.kernelUid;
-    build_ss << "0x" << std::hex << r.buildContextId;
-
-    j = json{
-        {"kernelUid", uid_ss.str()},
-        {"buildContextId", build_ss.str()},
-        {"hwTag", r.hwTag},
-        {"inputShapes", r.inputShapes},
-        {"outputShapes", r.outputShapes},
-        {"inputStrides", r.inputStrides},
-        {"outputStrides", r.outputStrides},
-        {"inputDTypes", r.inputDTypes},
-        {"outputDTypes", r.outputDTypes},
-        {"inputConstants", r.inputConstants},
-        {"backends", r.backends},
-        {"inputBackends", r.inputBackends},
-        {"runTime", r.runTime}};
+    bw.write(val.kernelUid);
+    bw.write(val.buildContextId);
+    bw.write(val.hwTag);
+    bw.write(val.inputShapes);
+    bw.write(val.outputShapes);
+    bw.write(val.inputStrides);
+    bw.write(val.outputStrides);
+    bw.write(val.inputDTypes);
+    bw.write(val.outputDTypes);
+    bw.write(val.inputConstants);
+    bw.write(val.backends);
+    bw.write(val.inputBackends);
+    bw.write(val.runTime);
 }
 
-inline void from_json(const json &j, Record &r)
+inline void tg_deserialize(BinaryReader &br, Record &val)
 {
-    r.kernelUid = std::stoull(j.at("kernelUid").get<std::string>(), nullptr, 16);
-    r.buildContextId = std::stoull(j.at("buildContextId").get<std::string>(), nullptr, 16);
-    r.hwTag = j.at("hwTag").get<std::string>();
-
-    r.inputShapes = j.at("inputShapes").get<std::vector<std::vector<uint32_t>>>();
-    r.outputShapes = j.at("outputShapes").get<std::vector<std::vector<uint32_t>>>();
-    r.inputStrides = j.at("inputStrides").get<std::vector<std::vector<uint64_t>>>();
-    r.outputStrides = j.at("outputStrides").get<std::vector<std::vector<uint64_t>>>();
-
-    r.inputDTypes = j.at("inputDTypes").get<std::vector<DType>>();
-    r.outputDTypes = j.at("outputDTypes").get<std::vector<DType>>();
-    r.inputConstants = j.at("inputConstants").get<std::vector<std::vector<uint8_t>>>();
-    r.backends = j.at("backends").get<std::vector<Backend>>();
-    r.inputBackends = j.at("inputBackends").get<std::vector<std::vector<Backend>>>();
-
-    r.runTime = j.at("runTime").get<float>();
+    br.read(val.kernelUid);
+    br.read(val.buildContextId);
+    br.read(val.hwTag);
+    br.read(val.inputShapes);
+    br.read(val.outputShapes);
+    br.read(val.inputStrides);
+    br.read(val.outputStrides);
+    br.read(val.inputDTypes);
+    br.read(val.outputDTypes);
+    br.read(val.inputConstants);
+    br.read(val.backends);
+    br.read(val.inputBackends);
+    br.read(val.runTime);
 }
 
 struct CostModel
@@ -116,21 +108,23 @@ struct CostModel
     CostModel()
     {
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS
-        const std::string path = "benchmarks/calls.jsonl";
+        const std::string path = "benchmarks/calls.bin";
         std::filesystem::create_directories(std::filesystem::path(path).parent_path());
         {
-            std::ifstream inFile(path);
+            std::ifstream inFile(path, std::ios::binary);
             if (inFile.is_open())
             {
-                std::string line;
-                while (std::getline(inFile, line))
+                BinaryReader br(inFile);
+                while (inFile.peek() != EOF)
                 {
-                    if (!line.empty())
-                        loggedCalls.insert(std::hash<std::string>{}(line)); // <-- HASH IT
+                    Record r;
+                    br.read(r);
+                    r.runTime = 0.0f; // normalize for hash
+                    loggedCalls.insert(std::hash<std::string>{}(serializeToString(r)));
                 }
             }
         }
-        callFile.open(path, std::ios::app);
+        callFile.open(path, std::ios::app | std::ios::binary);
         if (!callFile.is_open())
             std::cerr << "Failed to open " << path << " for appending.\n";
 #endif
@@ -139,29 +133,32 @@ struct CostModel
     void load(std::string benchmarkPath)
     {
         records.clear();
-        std::ifstream file(benchmarkPath);
+        std::ifstream file(benchmarkPath, std::ios::binary);
         if (!file.is_open())
             return;
 
-        std::string line;
-        uint32_t total = 0;
-        uint32_t valid = 0;
+        BinaryReader br(file);
+        uint32_t total = 0, valid = 0;
         ProgressTimer timer(0, "loading records ");
-        while (std::getline(file, line))
+        while (file.peek() != EOF)
         {
             timer.tick();
-            if (line.empty())
-                continue;
+            Record r;
+            try
+            {
+                br.read(r);
+            }
+            catch (...)
+            {
+                break;
+            }
             total++;
-            auto j = json::parse(line);
-            Record r = j.get<Record>();
-            bool hasKernel = KernelRegistry::get().hasKernel(r.kernelUid);
-            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID || !hasKernel)
+            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID || !KernelRegistry::get().hasKernel(r.kernelUid))
                 continue;
             valid++;
-            records[r.kernelUid].push_back(r);
+            records[r.kernelUid].push_back(std::move(r));
         }
-        std::cout << "Loaded " << valid << " valid records out of " << total << " total records from " << benchmarkPath << std::endl;
+        std::cout << "Loaded " << valid << " valid records from " << benchmarkPath << std::endl;
     }
 
     float interpolate(const std::vector<Record> &kernelRecords, uint64_t targetElements)
@@ -224,8 +221,7 @@ struct CostModel
                 r.backends = entry.backends;
                 r.inputBackends = entry.inputBackends;
                 r.runTime = 0.0f;
-                json callObj = r;
-                std::string callStr = callObj.dump();
+                std::string callStr = serializeToString(r);
                 size_t callHash = std::hash<std::string>{}(callStr);
 
                 std::lock_guard<std::mutex> lock(logMtx);
@@ -234,7 +230,8 @@ struct CostModel
                     loggedCalls.insert(callHash);
                     if (callFile.is_open())
                     {
-                        callFile << callStr << "\n";
+                        BinaryWriter bw(callFile);
+                        bw.write(r);
                         callFile.flush();
                     }
                 }
@@ -278,8 +275,7 @@ struct CostModel
             r.inputBackends = entry.inputBackends;
             r.runTime = 0.0f;
 
-            json callObj = r;
-            std::string callStr = callObj.dump();
+            std::string callStr = serializeToString(r);
             size_t callHash = std::hash<std::string>{}(callStr);
 
             std::lock_guard<std::mutex> lock(logMtx);
@@ -288,7 +284,8 @@ struct CostModel
                 loggedCalls.insert(callHash);
                 if (callFile.is_open())
                 {
-                    callFile << callStr << "\n";
+                    BinaryWriter bw(callFile);
+                    bw.write(r);
                     callFile.flush();
                 }
             }

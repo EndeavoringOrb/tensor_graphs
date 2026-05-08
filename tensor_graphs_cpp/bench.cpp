@@ -29,8 +29,8 @@ int main()
 {
     std::filesystem::create_directories("benchmarks");
 
-    std::string callsPath = "benchmarks/calls.jsonl";
-    std::string recordsPath = "benchmarks/records.jsonl";
+    std::string callsPath = "benchmarks/calls.bin";
+    std::string recordsPath = "benchmarks/records.bin";
 
     // 1. Initialize CostModel and load existing records to provide estimates for sorting
     CostModel costModel;
@@ -38,82 +38,44 @@ int main()
 
     // Build a registry of already benchmarked kernels to skip redundancy
     std::unordered_set<std::string> recordedKeys;
-    std::ifstream recordsFile(recordsPath);
+    std::ifstream recordsFile(recordsPath, std::ios::binary);
     if (recordsFile.is_open())
     {
-        std::string line;
-        while (std::getline(recordsFile, line))
+        BinaryReader br(recordsFile);
+        while (recordsFile.peek() != EOF)
         {
-            if (line.empty())
-                continue;
-
-            auto j = json::parse(line);
-            Record r = j.get<Record>();
-            json keyObj;
-            std::stringstream uid_ss, build_ss;
-            uid_ss << "0x" << std::hex << r.kernelUid;
-            keyObj["kernelUid"] = uid_ss.str();
-            build_ss << "0x" << std::hex << r.buildContextId;
-            keyObj["buildContextId"] = build_ss.str();
-            keyObj["hwTag"] = r.hwTag;
-            keyObj["inputShapes"] = r.inputShapes;
-            keyObj["outputShapes"] = r.outputShapes;
-            keyObj["inputStrides"] = r.inputStrides;
-            keyObj["outputStrides"] = r.outputStrides;
-            keyObj["inputDTypes"] = r.inputDTypes;
-            keyObj["outputDTypes"] = r.outputDTypes;
-            keyObj["inputConstants"] = r.inputConstants;
-            keyObj["backends"] = r.backends;
-            keyObj["inputBackends"] = r.inputBackends;
-            std::string key = keyObj.dump();
-            recordedKeys.insert(key);
+            Record r;
+            br.read(r);
+            recordedKeys.insert(serializeToString(r));
         }
     }
 
-    std::ifstream callsFile(callsPath);
+    std::ifstream callsFile(callsPath, std::ios::binary);
     if (!callsFile.is_open())
     {
         std::cerr << "No calls file found at " << callsPath << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference pass first." << std::endl;
         return 0;
     }
 
-    std::vector<json> toBenchmark;
+    std::vector<Record> toBenchmark;
     std::unordered_set<std::string> seenCalls;
-    std::ostringstream ss;
-    ss << "0x" << std::hex << BUILD_CONTEXT_ID;
-    std::string BUILD_CONTEXT_ID_STRING = ss.str();
 
-    std::string line;
-    while (std::getline(callsFile, line))
+    BinaryReader br(callsFile);
+    while (callsFile.peek() != EOF)
     {
-        if (line.empty())
-            continue;
-
-        auto j = json::parse(line);
-        Record r = j.get<Record>();
-        json keyObj;
-        std::stringstream uid_ss;
-        uid_ss << "0x" << std::hex << r.kernelUid;
-        keyObj["kernelUid"] = uid_ss.str();
-        keyObj["buildContextId"] = BUILD_CONTEXT_ID_STRING;
-        keyObj["hwTag"] = r.hwTag;
-        keyObj["inputShapes"] = r.inputShapes;
-        keyObj["outputShapes"] = r.outputShapes;
-        keyObj["inputStrides"] = r.inputStrides;
-        keyObj["outputStrides"] = r.outputStrides;
-        keyObj["inputDTypes"] = r.inputDTypes;
-        keyObj["outputDTypes"] = r.outputDTypes;
-        keyObj["inputConstants"] = r.inputConstants;
-        keyObj["backends"] = r.backends;
-        keyObj["inputBackends"] = r.inputBackends;
-        std::string key = keyObj.dump();
+        Record r;
+        br.read(r);
+        
+        r.runTime = 0.0f;
+        std::string key = serializeToString(r);
 
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
         {
             seenCalls.insert(key);
-            if (j["hwTag"].get<std::string>() == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
+            if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
             {
-                toBenchmark.push_back(j);
+                r.buildContextId = BUILD_CONTEXT_ID;
+                toBenchmark.push_back(std::move(r));
             }
         }
     }
@@ -126,8 +88,7 @@ int main()
 
     for (uint32_t i = 0; i < toBenchmark.size(); i++)
     {
-        json &j = toBenchmark[i];
-        Record r = j.get<Record>();
+        Record &r = toBenchmark[i];
         float cost = costModel.estimateCost(
             r.kernelUid,
             r.outputShapes[0],
@@ -137,57 +98,47 @@ int main()
             r.inputStrides,
             r.inputDTypes,
             r.inputConstants);
-        if (std::isinf(cost))
-        {
-            j["runTime"] = -1.0f;
-        }
-        else
-        {
-            j["runTime"] = cost;
-        }
+        r.runTime = std::isinf(cost) ? -1.0f : cost;
     }
 
     // 2. Sort kernels by cost (cheapest first).
     // Fallback to element count for kernels with no previous data (inf cost).
-    std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const json &ja, const json &jb)
+    std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb)
                      {
-                        Record ra = ja.get<Record>();
-                        Record rb = jb.get<Record>();
-                         float costA = ra.runTime;
-                         float costB = rb.runTime;
+                          float costA = ra.runTime;
+                          float costB = rb.runTime;
 
-                         if (std::abs(costA - costB) < 1e-7) {
-                            // Tie-break: Prioritize optimized kernels over reference kernels
-                            bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
-                            bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
-                            if (isRefA != isRefB) return !isRefA;
-                            uint64_t sizeA = 1;
-                            for (size_t i = 0; i < ra.outputShapes.size(); i++) {
-                                for (uint32_t dim : ra.outputShapes[i]) {
-                                    sizeA *= dim;
-                                }
-                            }
-                            uint64_t sizeB = 1;
-                            for (size_t i = 0; i < rb.outputShapes.size(); i++) {
-                                for (uint32_t dim : rb.outputShapes[i]) {
-                                    sizeB *= dim;
-                                }
-                            }
-                            
-                            return sizeA < sizeB;
-                         }
+                          if (std::abs(costA - costB) < 1e-7) {
+                             // Tie-break: Prioritize optimized kernels over reference kernels
+                             bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
+                             bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
+                             if (isRefA != isRefB) return !isRefA;
+                             uint64_t sizeA = 1;
+                             for (size_t i = 0; i < ra.outputShapes.size(); i++) {
+                                 for (uint32_t dim : ra.outputShapes[i]) {
+                                     sizeA *= dim;
+                                 }
+                             }
+                             uint64_t sizeB = 1;
+                             for (size_t i = 0; i < rb.outputShapes.size(); i++) {
+                                 for (uint32_t dim : rb.outputShapes[i]) {
+                                     sizeB *= dim;
+                                 }
+                             }
+                             
+                             return sizeA < sizeB;
+                          }
 
-                         return costA < costB; });
+                          return costA < costB; });
 
-    std::ofstream outFile(recordsPath, std::ios::app);
+    std::ofstream outFile(recordsPath, std::ios::app | std::ios::binary);
+    BinaryWriter bw(outFile);
     std::cout << "Benchmarking " << toBenchmark.size() << " configurations..." << std::endl;
 
     for (size_t i = 0; i < toBenchmark.size(); ++i)
     {
-        auto &call = toBenchmark[i];
-        uint64_t kernelUid = std::stoull(call["kernelUid"].get<std::string>(), nullptr, 16);
-
-        Record r = call.get<Record>();
+        Record &r = toBenchmark[i];
+        uint64_t kernelUid = r.kernelUid;
 
         try
         {
@@ -523,9 +474,9 @@ int main()
                 }
             }
 
-            call["runTime"] = runtimeMs;
-            call["buildContextId"] = BUILD_CONTEXT_ID_STRING;
-            outFile << call.dump() << "\n";
+            r.runTime = runtimeMs;
+            r.buildContextId = BUILD_CONTEXT_ID;
+            bw.write(r);
             outFile.flush();
 
             std::cout << " -> " << runtimeMs << " ms" << std::endl;

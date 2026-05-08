@@ -825,7 +825,10 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 uint32_t curr = pid;
                 while (tempGraph.hasNode(curr) &&
                        (tempGraph.getNode(curr).opType == OpType::CONTIGUOUS ||
-                        tempGraph.getNode(curr).opType == OpType::CAST))
+                        tempGraph.getNode(curr).opType == OpType::CAST ||
+                        tempGraph.getNode(curr).opType == OpType::RESHAPE ||
+                        tempGraph.getNode(curr).opType == OpType::PERMUTE ||
+                        tempGraph.getNode(curr).opType == OpType::COPY_TO))
                 {
                     if (tempGraph.getNode(curr).parentIds.empty())
                         break;
@@ -905,7 +908,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 else
                 {
                     starts = {0};
-                    ends = {1};
+                    ends = {2147483647};
                     steps = {1};
                 }
                 checkParam(1, starts);
@@ -928,7 +931,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 else
                 {
                     starts = {0};
-                    ends = {1};
+                    ends = {2147483647};
                     steps = {1};
                 }
                 checkParam(2, starts);
@@ -1133,16 +1136,15 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
 std::unordered_map<uint64_t, std::vector<Record>> loadCallRecords(const std::string &path)
 {
     std::unordered_map<uint64_t, std::vector<Record>> records;
-    std::ifstream file(path);
+    std::ifstream file(path, std::ios::binary);
     if (!file.is_open())
         return records;
-    std::string line;
-    while (std::getline(file, line))
+    
+    BinaryReader br(file);
+    while (file.peek() != EOF)
     {
-        if (line.empty())
-            continue;
-        json j = json::parse(line);
-        Record r = j.get<Record>();
+        Record r;
+        br.read(r);
         records[r.kernelUid].push_back(std::move(r));
     }
     return records;
@@ -1173,7 +1175,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
               {
                 std::string na = std::filesystem::path(a).filename().string();
                 std::string nb = std::filesystem::path(b).filename().string();
-                try { return std::stoi(na) < std::stoi(nb); } catch (...) { return a < b; } });
+                return std::stoi(na) < std::stoi(nb); });
     for (const std::string &testDir : testDirs)
     {
         total++;
@@ -1364,10 +1366,10 @@ int main(int argc, char *argv[])
     std::unordered_map<uint64_t, std::vector<Record>> recordsByUid;
     if (useRecords)
     {
-        recordsByUid = loadCallRecords("benchmarks/calls.jsonl");
+        recordsByUid = loadCallRecords("benchmarks/calls.bin");
         if (recordsByUid.empty())
         {
-            std::cout << "Warning: benchmarks/calls.jsonl not found or empty." << std::endl;
+            std::cout << "Warning: benchmarks/calls.bin not found or empty." << std::endl;
         }
     }
 

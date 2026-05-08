@@ -15,58 +15,7 @@
 #include <queue>
 #include <filesystem>
 
-namespace dirty_cache_json
-{
-    inline json dimToJson(const Dim &d)
-    {
-        return json::array({d.start, d.stop});
-    }
-
-    inline Dim dimFromJson(const json &j)
-    {
-        return {j[0].get<uint32_t>(), j[1].get<uint32_t>()};
-    }
-
-    inline json regionToJson(const Region &r)
-    {
-        json arr = json::array();
-        for (const auto &d : r.region)
-        {
-            arr.push_back(dimToJson(d));
-        }
-        return arr;
-    }
-
-    inline Region regionFromJson(const json &j)
-    {
-        Region r;
-        for (const auto &dimJson : j)
-        {
-            r.region.push_back(dimFromJson(dimJson));
-        }
-        return r;
-    }
-
-    inline json regionsToJson(const std::vector<Region> &regions)
-    {
-        json arr = json::array();
-        for (const auto &r : regions)
-        {
-            arr.push_back(regionToJson(r));
-        }
-        return arr;
-    }
-
-    inline std::vector<Region> regionsFromJson(const json &j)
-    {
-        std::vector<Region> regions;
-        for (const auto &rj : j)
-        {
-            regions.push_back(regionFromJson(rj));
-        }
-        return regions;
-    }
-}
+// dirty_cache_json removal
 
 static std::string encodeCacheKey(
     const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)
@@ -129,8 +78,8 @@ private:
     std::unordered_map<uint32_t, Backend> selectedCachedNodes;
 
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
-    std::string bucketCountsPath = "benchmarks/bucket_counts.json";
-    std::string recordsPath = "benchmarks/records.jsonl";
+    std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
+    std::string recordsPath = "benchmarks/records.bin";
 
     std::unordered_map<uint32_t, std::vector<uint8_t>> previousInputData;
 
@@ -233,48 +182,31 @@ private:
     {
         if (cachePath.empty())
             return;
-        std::cout << "[Session.persistCache] writing cache" << std::endl;
-
         ensureOutputDirectories();
-
-        std::ofstream file(cachePath, std::ios::trunc);
+        std::ofstream file(cachePath, std::ios::trunc | std::ios::binary);
         if (!file.is_open())
             return;
 
-        json cachedNodesJson = json::object();
-        for (const auto &kv : selectedCachedNodes)
-        {
-            cachedNodesJson[std::to_string(kv.first)] = kv.second;
-        }
+        BinaryWriter bw(file);
 
-        json metadata;
-        metadata["type"] = "metadata";
-        metadata["cacheVersion"] = kCacheFileVersion;
-        metadata["rootId"] = rootId;
-        metadata["selectedCachedNodes"] = cachedNodesJson;
-        file << metadata.dump() << "\n";
+        bw.write<uint8_t>(0); // Metadata block type
+        bw.write<uint32_t>(kCacheFileVersion);
+        bw.write<uint32_t>(rootId);
+        bw.write(selectedCachedNodes);
 
         std::vector<std::string> keys;
-        keys.reserve(cachedGraphs.size());
         for (const auto &pair : cachedGraphs)
-        {
             keys.push_back(pair.first);
-        }
         std::sort(keys.begin(), keys.end());
 
         for (const std::string &key : keys)
         {
-            json bucketEntry;
-            bucketEntry["type"] = "compiled_bucket";
-            bucketEntry["key"] = key;
-            to_json(bucketEntry["graph"], cachedGraphs.at(key));
-            file << bucketEntry.dump() << "\n";
+            bw.write<uint8_t>(1); // Bucket block type
+            bw.write(key);
+            bw.write(cachedGraphs.at(key));
         }
 
-        json entry;
-        entry["type"] = "constants";
-
-        json constantsObj = json::object();
+        bw.write<uint8_t>(2); // Constants block type
         std::unordered_set<uint32_t> neededConstants;
         for (const auto &pair : cachedGraphs)
         {
@@ -282,22 +214,19 @@ private:
             {
                 uint32_t logicalId = pair.second.getLogicalId(nodePair.first);
                 if (logicalId != UINT32_MAX && graph.constantStaging.count(logicalId))
-                {
                     neededConstants.insert(logicalId);
-                }
             }
         }
 
         std::vector<uint32_t> orderedConstants(neededConstants.begin(), neededConstants.end());
         std::sort(orderedConstants.begin(), orderedConstants.end());
+
+        bw.write<uint32_t>(static_cast<uint32_t>(orderedConstants.size()));
         for (uint32_t logicalId : orderedConstants)
         {
-            constantsObj[std::to_string(logicalId)] = *graph.constantStaging.at(logicalId);
+            bw.write(logicalId);
+            bw.write(*graph.constantStaging.at(logicalId));
         }
-
-        entry["constants"] = constantsObj;
-        file << entry.dump() << "\n";
-        std::cout << "[Session.persistCache] finished writing cache" << std::endl;
     }
 
 public:
@@ -819,240 +748,122 @@ public:
     {
         if (cachePath.empty())
             return;
-        std::ifstream file(cachePath);
+        std::ifstream file(cachePath, std::ios::binary);
         if (!file.is_open())
             return;
 
-        std::string line;
-        bool hasValidCache = false;
+        BinaryReader br(file);
         bool hasInvalidCache = false;
-        bool sawConstants = false;
-        bool sawMetadata = false;
         std::string invalidCacheReason = "";
         std::unordered_map<std::string, CompiledGraph> tempGraphs;
-        std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> tempStaging;
         std::unordered_map<uint32_t, Backend> tempSelectedCachedNodes;
 
-        while (std::getline(file, line))
+        while (file.peek() != EOF)
         {
-            if (line.empty())
-                continue;
-            json entry;
-            try
-            {
-                entry = json::parse(line);
-            }
-            catch (const std::exception &e)
-            {
-                hasInvalidCache = true;
-                invalidCacheReason = "[Session.loadCache]: JSON parse error: " + std::string(e.what());
-                break;
-            }
+            uint8_t type;
+            br.read(type);
 
-            std::string type = entry["type"].get<std::string>();
-
-            if (type == "metadata")
+            if (type == 0) // Metadata
             {
-                if (!entry.contains("cacheVersion") || !entry.contains("selectedCachedNodes"))
+                uint32_t version;
+                uint32_t cachedRootId;
+                br.read(version);
+                br.read(cachedRootId);
+                br.read(tempSelectedCachedNodes);
+
+                if (version != kCacheFileVersion || cachedRootId != rootId)
                 {
                     hasInvalidCache = true;
-                    invalidCacheReason = "Cache metadata is missing versioned fields.";
+                    invalidCacheReason = "Version or RootId mismatch";
                     break;
-                }
-
-                const uint32_t version = entry["cacheVersion"].get<uint32_t>();
-                const uint32_t cachedRootId = entry.contains("rootId") ? entry["rootId"].get<uint32_t>() : UINT32_MAX;
-                if (version != kCacheFileVersion)
-                {
-                    hasInvalidCache = true;
-                    invalidCacheReason = "Cache version " + std::to_string(version) +
-                                         " does not match expected version " + std::to_string(kCacheFileVersion) + ".";
-                    break;
-                }
-                if (cachedRootId != rootId)
-                {
-                    hasInvalidCache = true;
-                    invalidCacheReason = "Cache rootId " + std::to_string(cachedRootId) +
-                                         " does not match session rootId " + std::to_string(rootId) + ".";
-                    break;
-                }
-
-                tempSelectedCachedNodes.clear();
-                if (entry["selectedCachedNodes"].is_object())
-                {
-                    for (auto it = entry["selectedCachedNodes"].begin(); it != entry["selectedCachedNodes"].end(); ++it)
-                    {
-                        tempSelectedCachedNodes[std::stoul(it.key())] = it.value().get<Backend>();
-                    }
-                }
-                else
-                {
-                    hasInvalidCache = true;
-                    invalidCacheReason = "Cache metadata selectedCachedNodes format changed.";
-                    break;
-                }
-                sawMetadata = true;
-            }
-            else if (type == "constants")
-            {
-                sawConstants = true;
-                for (auto it = entry["constants"].begin(); it != entry["constants"].end(); ++it)
-                {
-                    uint32_t nodeId = std::stoul(it.key());
-                    tempStaging[nodeId] = std::make_shared<std::vector<uint8_t>>(it.value().get<std::vector<uint8_t>>());
                 }
             }
-            else if (type == "compiled_bucket")
+            else if (type == 1) // Compiled Bucket
             {
-                std::string key = entry["key"].get<std::string>();
-                if (!entry.contains("graph"))
-                {
-                    hasInvalidCache = true;
-                    invalidCacheReason = "Compiled bucket entry is missing graph payload.";
-                    break;
-                }
-
-                for (const auto &instJson : entry["graph"]["instructions"])
-                {
-                    if (!instJson.contains("logicalNodeId") ||
-                        !instJson.contains("cachedKernelIds"))
-                    {
-                        hasInvalidCache = true;
-                        invalidCacheReason = "Compiled bucket entry is missing region-kernel metadata.";
-                        break;
-                    }
-                }
-                if (hasInvalidCache)
-                    break;
-
+                std::string key;
                 CompiledGraph cg;
-                from_json(entry["graph"], cg);
+                br.read(key);
+                br.read(cg);
 
                 bool valid = true;
                 for (const auto &inst : cg.instructions)
                 {
                     if (inst.fullKernelId == 0 || !KernelRegistry::get().hasKernel(inst.fullKernelId))
                     {
-                        if (inst.fullKernelId == 0)
-                        {
-                            invalidCacheReason = "Kernel ID 0 found in cached graph for inst.fullKernelId\n" + toString(inst);
-                        }
-                        else
-                        {
-                            invalidCacheReason = "Kernel ID " + std::to_string(inst.fullKernelId) + " not found in kernel registry for inst.fullKernelId\n" + toString(inst);
-                        }
                         valid = false;
                         break;
                     }
                     for (uint64_t kid : inst.cachedKernelIds)
-                    {
                         if (kid == 0 || !KernelRegistry::get().hasKernel(kid))
                         {
-                            if (kid == 0)
-                            {
-                                invalidCacheReason = "Kernel ID 0 found in cached graph for inst.cachedKernelIds\n" + toString(inst);
-                            }
-                            else
-                            {
-                                invalidCacheReason = "Kernel ID " + std::to_string(kid) + " not found in kernel registry for inst.cachedKernelIds\n" + toString(inst);
-                            }
                             valid = false;
                             break;
                         }
-                    }
                     if (!valid)
                         break;
                 }
-
                 if (!valid)
                 {
                     hasInvalidCache = true;
+                    invalidCacheReason = "Invalid Kernel ID";
                     break;
                 }
-
                 tempGraphs[key] = std::move(cg);
-                hasValidCache = true;
+            }
+            else if (type == 2) // Constants
+            {
+                uint32_t count;
+                br.read(count);
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    uint32_t nodeId;
+                    std::vector<uint8_t> data;
+                    br.read(nodeId);
+                    br.read(data);
+                    graph.constantStaging[nodeId] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                }
             }
             else
             {
                 hasInvalidCache = true;
-                invalidCacheReason = "Unknown cache entry type: " + type;
+                invalidCacheReason = "Unknown block type";
                 break;
             }
         }
 
-        if (!sawMetadata && hasValidCache)
-        {
-            hasInvalidCache = true;
-            invalidCacheReason = "Cache file missing versioned metadata entry.";
-        }
-
-        if (!sawConstants && hasValidCache)
-        {
-            hasInvalidCache = true;
-            invalidCacheReason = "Cache file missing 'constants' metadata (interrupted compilation).";
-        }
-
         if (hasInvalidCache)
         {
-            std::cout << "[Session.loadCache] invalid or stale cache detected. ignoring entire cache to force recompilation." << std::endl;
-            std::cout << "[Session.loadCache] invalid cache reason: " << invalidCacheReason << std::endl;
-            std::ofstream clearFile(cachePath, std::ios::trunc);
+            std::cout << "[Session.loadCache] invalid cache: " << invalidCacheReason << std::endl;
+            std::ofstream clearFile(cachePath, std::ios::trunc | std::ios::binary);
             return;
         }
 
-        if (hasValidCache)
+        if (!tempGraphs.empty())
         {
             cachedGraphs = std::move(tempGraphs);
             selectedCachedNodes = std::move(tempSelectedCachedNodes);
             isPlanned = true;
-            for (const auto &pair : tempStaging)
-            {
-                graph.constantStaging[pair.first] = pair.second;
-            }
         }
     }
 
     void loadBucketCounts()
     {
         ensureOutputDirectories();
-        std::ifstream file(bucketCountsPath);
+        std::ifstream file(bucketCountsPath, std::ios::binary);
         if (!file.is_open())
             return;
-
-        try
-        {
-            json countsObj = json::parse(file);
-            for (auto it = countsObj.begin(); it != countsObj.end(); ++it)
-            {
-                bucketCallCounts[it.key()] = it.value().get<uint64_t>();
-            }
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "[Session.loadBucketCounts] Failed to load bucket counts: " << e.what() << std::endl;
-        }
+        BinaryReader br(file);
+        br.read(bucketCallCounts);
     }
 
     void saveBucketCounts() const
     {
         ensureOutputDirectories();
-        std::ofstream file(bucketCountsPath);
+        std::ofstream file(bucketCountsPath, std::ios::binary);
         if (!file.is_open())
             return;
-
-        json countsObj = json::object();
-        std::vector<std::string> keys;
-        keys.reserve(bucketCallCounts.size());
-        for (const auto &pair : bucketCallCounts)
-            keys.push_back(pair.first);
-        std::sort(keys.begin(), keys.end());
-
-        for (const std::string &key : keys)
-        {
-            countsObj[key] = bucketCallCounts.at(key);
-        }
-        file << countsObj.dump(2) << "\n";
+        BinaryWriter bw(file);
+        bw.write(bucketCallCounts);
     }
 
     void incrementBucketCount(const std::string &bucketKey)

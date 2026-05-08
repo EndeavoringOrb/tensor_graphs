@@ -14,6 +14,7 @@
 #include <map>
 #include <iomanip>
 #include <json.hpp>
+#include "core/serialization.hpp"
 using json = nlohmann::json;
 
 // --- OS Detection ---
@@ -219,20 +220,20 @@ struct Region
 
 inline bool regionsMatch(const Region &r1, const Region &r2);
 
-inline void to_json(json &j, const Region &r)
-{
-    j = json::array();
-    for (const auto &dim : r.region)
-        j.push_back(json::array({dim.start, dim.stop}));
+inline void tg_serialize(BinaryWriter& bw, const Dim& val) {
+    bw.write(val.start);
+    bw.write(val.stop);
+}
+inline void tg_deserialize(BinaryReader& br, Dim& val) {
+    br.read(val.start);
+    br.read(val.stop);
 }
 
-inline void from_json(const json &j, Region &r)
-{
-    r.region.clear();
-    for (const auto &dimJson : j)
-    {
-        r.region.push_back({dimJson[0].get<uint32_t>(), dimJson[1].get<uint32_t>()});
-    }
+inline void tg_serialize(BinaryWriter& bw, const Region& val) {
+    bw.write(val.region);
+}
+inline void tg_deserialize(BinaryReader& br, Region& val) {
+    br.read(val.region);
 }
 
 inline std::string encodeRegion(const Region &r)
@@ -661,54 +662,6 @@ public:
     }
 };
 
-NLOHMANN_JSON_SERIALIZE_ENUM(DType, {
-                                        {DType::FLOAT32, "FLOAT32"},
-                                        {DType::INT32, "INT32"},
-                                        {DType::INT64, "INT64"},
-                                        {DType::BF16, "BF16"},
-                                        {DType::BOOL, "BOOL"},
-                                    })
-
-NLOHMANN_JSON_SERIALIZE_ENUM(OpType, {
-                                         {OpType::INPUT, "INPUT"},
-                                         {OpType::ADD, "ADD"},
-                                         {OpType::MUL, "MUL"},
-                                         {OpType::DIVIDE, "DIVIDE"},
-                                         {OpType::DOT, "DOT"},
-                                         {OpType::SIN, "SIN"},
-                                         {OpType::COS, "COS"},
-                                         {OpType::NEGATE, "NEGATE"},
-                                         {OpType::POWER, "POWER"},
-                                         {OpType::SUM, "SUM"},
-                                         {OpType::MAX, "MAX"},
-                                         {OpType::RESHAPE, "RESHAPE"},
-                                         {OpType::PERMUTE, "PERMUTE"},
-                                         {OpType::SLICE, "SLICE"},
-                                         {OpType::CONCAT, "CONCAT"},
-                                         {OpType::CAST, "CAST"},
-                                         {OpType::REPEAT, "REPEAT"},
-                                         {OpType::ARANGE, "ARANGE"},
-                                         {OpType::TRIU, "TRIU"},
-                                         {OpType::GATHER, "GATHER"},
-                                         {OpType::FILL, "FILL"},
-                                         {OpType::COPY_TO, "COPY_TO"},
-                                         {OpType::IM2COL, "IM2COL"},
-                                         {OpType::CONTIGUOUS, "CONTIGUOUS"},
-                                         {OpType::SCATTER, "SCATTER"},
-                                         {OpType::FUSED, "FUSED"},
-                                     })
-
-NLOHMANN_JSON_SERIALIZE_ENUM(Backend, {
-                                          {Backend::CPU, "CPU"},
-                                          {Backend::CUDA, "CUDA"},
-                                      })
-
-NLOHMANN_JSON_SERIALIZE_ENUM(StorageType, {
-                                              {StorageType::TRANSIENT, "TRANSIENT"},
-                                              {StorageType::PERSISTENT, "PERSISTENT"},
-                                              {StorageType::PINNED, "PINNED"},
-                                          })
-
 struct OpInstruction
 {
     uint32_t nodeId;
@@ -740,165 +693,102 @@ struct CompiledGraph
     }
 };
 
-inline void to_json(json &j, const Dim &d) { j = json{d.start, d.stop}; }
-inline void from_json(const json &j, Dim &d)
-{
-    d.start = j[0];
-    d.stop = j[1];
+inline void tg_serialize(BinaryWriter& bw, const TensorView& val) {
+    bw.write(val.baseOffset);
+    bw.write(val.getShape());
+    bw.write(val.strides);
+    bw.write(val.dtype);
+}
+inline void tg_deserialize(BinaryReader& br, TensorView& val) {
+    br.read(val.baseOffset);
+    std::vector<uint32_t> shape;
+    br.read(shape);
+    val.setShape(shape);
+    br.read(val.strides);
+    br.read(val.dtype);
 }
 
-inline void to_json(json &j, const TensorView &v)
-{
-    j = json{
-        {"baseOffset", v.baseOffset},
-        {"shape", v.getShape()},
-        {"strides", v.strides},
-        {"dtype", v.dtype}};
+inline void tg_serialize(BinaryWriter& bw, const TensorNode& val) {
+    bw.write(val.id);
+    bw.write(val.opType);
+    bw.write(val.opName);
+    bw.write(val.dtype);
+    bw.write(val.parentIds);
+    bw.write(val.getShape());
+    bw.write(val.strides);
+    bw.write(val.viewOffset);
+    bw.write(val.backend);
+    bw.write(val.storageType);
+    bw.write(val.contentHash);
 }
-inline void from_json(const json &j, TensorView &v)
-{
-    v.baseOffset = j.at("baseOffset").get<uint64_t>();
-    v.setShape(j.at("shape").get<std::vector<uint32_t>>());
-    v.strides = j.at("strides").get<std::vector<uint64_t>>();
-    v.dtype = j.at("dtype").get<DType>();
-}
-
-inline void to_json(json &j, const TensorNode &n)
-{
-    j = json{
-        {"id", n.id},
-        {"opType", n.opType},
-        {"opName", n.opName},
-        {"dtype", n.dtype},
-        {"parentIds", n.parentIds},
-        {"shape", n.getShape()},
-        {"strides", n.strides},
-        {"viewOffset", n.viewOffset},
-        {"backend", n.backend},
-        {"storageType", n.storageType},
-        {"contentHash", n.contentHash}};
-}
-inline void from_json(const json &j, TensorNode &n)
-{
-    n.id = j.at("id").get<uint32_t>();
-    n.opType = j.at("opType").get<OpType>();
-    n.opName = j.at("opName").get<std::string>();
-    n.dtype = j.at("dtype").get<DType>();
-    n.parentIds = j.at("parentIds").get<std::vector<uint32_t>>();
-    n.setShape(j.at("shape").get<std::vector<uint32_t>>());
-    n.strides = j.at("strides").get<std::vector<uint64_t>>();
-    n.viewOffset = j.contains("viewOffset") ? j.at("viewOffset").get<uint64_t>() : 0;
-    n.backend = j.at("backend").get<Backend>();
-    n.storageType = j.at("storageType").get<StorageType>();
-    n.contentHash = j.at("contentHash").get<std::string>();
+inline void tg_deserialize(BinaryReader& br, TensorNode& val) {
+    br.read(val.id);
+    br.read(val.opType);
+    br.read(val.opName);
+    br.read(val.dtype);
+    br.read(val.parentIds);
+    std::vector<uint32_t> shape;
+    br.read(shape);
+    val.setShape(shape);
+    br.read(val.strides);
+    br.read(val.viewOffset);
+    br.read(val.backend);
+    br.read(val.storageType);
+    br.read(val.contentHash);
 }
 
-inline void to_json(json &j, const OpInstruction &i)
-{
-    json fullId;
-    {
-        std::stringstream pss;
-        pss << "0x" << std::hex << i.fullKernelId;
-        fullId = pss.str();
+inline void tg_serialize(BinaryWriter& bw, const OpInstruction& val) {
+    bw.write(val.nodeId);
+    bw.write(val.logicalNodeId);
+    bw.write(val.fullKernelId);
+    bw.write(val.cachedKernelIds);
+    bw.write(val.inputNodeIds);
+    bw.write(val.inplaceInputIndex);
+    bw.write(val.viewInputIndex);
+    bw.write(val.backend);
+    bw.write(val.outputStorageType);
+}
+inline void tg_deserialize(BinaryReader& br, OpInstruction& val) {
+    br.read(val.nodeId);
+    br.read(val.logicalNodeId);
+    br.read(val.fullKernelId);
+    br.read(val.cachedKernelIds);
+    br.read(val.inputNodeIds);
+    br.read(val.inplaceInputIndex);
+    br.read(val.viewInputIndex);
+    br.read(val.backend);
+    br.read(val.outputStorageType);
+}
+
+inline void tg_serialize(BinaryWriter& bw, const CompiledGraph& val) {
+    bw.write(val.instructions);
+    bw.write(val.refCounts);
+    bw.write(val.nodesMap);
+    bw.write(val.nodeCosts);
+    bw.write(val.physicalToLogicalNodeMap);
+    
+    uint32_t constSize = static_cast<uint32_t>(val.constantStaging.size());
+    bw.write(constSize);
+    for (const auto& pair : val.constantStaging) {
+        bw.write(pair.first);
+        bw.write(*pair.second);
     }
-
-    json cachedIds = json::array();
-    for (uint64_t k : i.cachedKernelIds)
-    {
-        std::stringstream pss;
-        pss << "0x" << std::hex << k;
-        cachedIds.push_back(pss.str());
-    }
-
-    j = json{
-        {"nodeId", i.nodeId},
-        {"logicalNodeId", i.logicalNodeId},
-        {"fullKernelId", fullId},
-        {"cachedKernelIds", cachedIds},
-        {"inputNodeIds", i.inputNodeIds},
-        {"inplaceInputIndex", i.inplaceInputIndex},
-        {"viewInputIndex", i.viewInputIndex},
-        {"backend", i.backend},
-        {"outputStorageType", i.outputStorageType}};
 }
-inline void from_json(const json &j, OpInstruction &i)
-{
-    i.nodeId = j.at("nodeId").get<uint32_t>();
-    i.logicalNodeId = j.contains("logicalNodeId") ? j.at("logicalNodeId").get<uint32_t>() : UINT32_MAX;
-    i.fullKernelId = std::stoull(j.at("fullKernelId").get<std::string>(), nullptr, 16);
-    i.cachedKernelIds.clear();
-    for (const auto &pkStr : j.at("cachedKernelIds"))
-    {
-        i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
+inline void tg_deserialize(BinaryReader& br, CompiledGraph& val) {
+    br.read(val.instructions);
+    br.read(val.refCounts);
+    br.read(val.nodesMap);
+    br.read(val.nodeCosts);
+    br.read(val.physicalToLogicalNodeMap);
+    
+    uint32_t constSize;
+    br.read(constSize);
+    val.constantStaging.clear();
+    for (uint32_t i = 0; i < constSize; ++i) {
+        uint32_t k;
+        br.read(k);
+        std::vector<uint8_t> v;
+        br.read(v);
+        val.constantStaging[k] = std::make_shared<std::vector<uint8_t>>(std::move(v));
     }
-
-    i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();
-    i.inplaceInputIndex = j.at("inplaceInputIndex").get<int32_t>();
-    i.viewInputIndex = j.at("viewInputIndex").get<int32_t>();
-    i.backend = j.at("backend").get<Backend>();
-    i.outputStorageType = j.contains("outputStorageType") ? j.at("outputStorageType").get<StorageType>() : StorageType::TRANSIENT;
-}
-inline void to_json(json &j, const CompiledGraph &cg)
-{
-    json refCounts = json::object();
-    for (const auto &kv : cg.refCounts)
-        refCounts[std::to_string(kv.first)] = kv.second;
-
-    json nodesMap = json::object();
-    for (const auto &kv : cg.nodesMap)
-        nodesMap[std::to_string(kv.first)] = kv.second;
-
-    json nodeCosts = json::object();
-    for (const auto &kv : cg.nodeCosts)
-        nodeCosts[std::to_string(kv.first)] = kv.second;
-
-    json logicalMap = json::object();
-    for (const auto &kv : cg.physicalToLogicalNodeMap)
-        logicalMap[std::to_string(kv.first)] = kv.second;
-
-    json constStaging = json::object();
-    for (const auto &kv : cg.constantStaging)
-        constStaging[std::to_string(kv.first)] = *kv.second;
-
-    j = json{
-        {"instructions", cg.instructions},
-        {"refCounts", refCounts},
-        {"nodesMap", nodesMap},
-        {"nodeCosts", nodeCosts},
-        {"physicalToLogicalNodeMap", logicalMap},
-        {"constantStaging", constStaging}};
-}
-
-inline void from_json(const json &j, CompiledGraph &cg)
-{
-    cg.instructions = j.at("instructions").get<std::vector<OpInstruction>>();
-
-    cg.refCounts.clear();
-    for (const auto &item : j.at("refCounts").items())
-        cg.refCounts[std::stoul(item.key())] = item.value().get<uint32_t>();
-
-    cg.nodesMap.clear();
-    for (const auto &item : j.at("nodesMap").items())
-        cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
-
-    cg.nodeCosts.clear();
-    for (const auto &item : j.at("nodeCosts").items())
-    {
-        if (item.value().is_null())
-        {
-            cg.nodeCosts[std::stoul(item.key())] = std::numeric_limits<float>::infinity();
-        }
-        else
-        {
-            cg.nodeCosts[std::stoul(item.key())] = item.value().get<float>();
-        }
-    }
-
-    cg.physicalToLogicalNodeMap.clear();
-    for (const auto &item : j.at("physicalToLogicalNodeMap").items())
-        cg.physicalToLogicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
-
-    cg.constantStaging.clear();
-    for (const auto &item : j.at("constantStaging").items())
-        cg.constantStaging[std::stoul(item.key())] = std::make_shared<std::vector<uint8_t>>(item.value().get<std::vector<uint8_t>>());
 }

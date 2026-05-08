@@ -13,25 +13,25 @@ from .jobs import (
     get_hw_info,
     start_worker,
     PROJECT_ROOT,
-    KERNELS_DIR
+    KERNELS_DIR,
+    BinaryReader
 )
 
 app = Flask(__name__)
 start_worker()
 
 
-def format_constants(data, dtype):
-    """Reinterprets a list of integers (bytes) into the specified dtype."""
-    if not data:
-        return data
-    raw_bytes = bytes(data)
-    if dtype == "FLOAT32":
+def format_constants(raw_bytes, dtype):
+    if not raw_bytes: return ""
+    dtypes = ["FLOAT32", "INT32", "BF16", "UINT8"]
+    dt_str = dtypes[dtype] if isinstance(dtype, int) and dtype < len(dtypes) else str(dtype)
+    if dt_str == "FLOAT32":
         count = len(raw_bytes) // 4
         return list(struct.unpack(f"<{count}f", raw_bytes))
-    elif dtype == "INT32":
+    elif dt_str == "INT32":
         count = len(raw_bytes) // 4
         return list(struct.unpack(f"<{count}i", raw_bytes))
-    return data
+    return list(raw_bytes)
 
 
 @app.route("/")
@@ -93,39 +93,40 @@ def get_read_benchmarks():
     shape_filter = request.args.get("shape", "")
     target_model = request.args.get("target_model", "gemma-3-270m")
 
-    records_path = PROJECT_ROOT / "benchmarks" / "records.jsonl"
-    cache_path = PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.jsonl"
-    header_path = (
-        PROJECT_ROOT / "tensor_graphs_cpp" / "generated" / "kernel_uids.gen.hpp"
-    )
+    records_path = PROJECT_ROOT / "benchmarks" / "records.bin"
+    cache_path = PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.bin"
+    header_path = PROJECT_ROOT / "tensor_graphs_cpp" / "generated" / "kernel_uids.gen.hpp"
 
     if not records_path.exists():
         return jsonify({"records": []})
 
-    # Build Map for resolving human-readable Names
     uid_map = {}
-
-    # 1. Load UIDs from Cache
     if cache_path.exists():
-        with open(cache_path, "r") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                entry = json.loads(line)
-                if entry.get("type") == "compiled_bucket":
-                    nodes = entry["graph"]["nodesMap"]
-                    for inst in entry["graph"]["instructions"]:
+        with open(cache_path, "rb") as f:
+            br = BinaryReader(f)
+            while True:
+                t = br.read_u8()
+                if t is None: break
+                if t == 1: # Compiled Bucket
+                    br.read_string() # key
+                    graph = br.read_compiled_graph()
+                    nodes = graph["nodesMap"]
+                    for inst in graph["instructions"]:
                         uid = str(inst["fullKernelId"])
                         node = nodes[str(inst["nodeId"])]
                         op_name = node["opType"]
                         if op_name == "FUSED":
                             op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
                         uid_map[uid] = op_name
+                elif t == 0: # Metadata
+                    br.read_u32(); br.read_u32(); br.read_map(br.read_u32, br.read_backend)
+                elif t == 2: # Constants
+                    count = br.read_u32()
+                    for _ in range(count): br.read_u32(); f.read(br.read_u32())
+                else: break
 
-    # 2. Load UIDs from C++ Header
     if header_path.exists():
         pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
-
         with open(header_path, "r") as f:
             for name, hex_val in pattern.findall(f.read()):
                 val_int = int(hex_val, 16)
@@ -133,41 +134,34 @@ def get_read_benchmarks():
                 uid_map[hex_val.lower()] = name
 
     records = []
-    with open(records_path, "r") as f:
-        for line in f:
-            if line.strip():
-                r = json.loads(line)
-                uid = str(r.get("kernelUid", ""))
+    with open(records_path, "rb") as f:
+        br = BinaryReader(f)
+        while True:
+            r = br.read_record()
+            if r is None: break
+            
+            uid = str(r.get("kernelUid", ""))
+            opname = uid_map.get(uid, uid_map.get(hex(r.get("kernelUid", 0)), r.get("opName", "UNKNOWN")))
+            r["opName"] = opname
+            r["kernelUid"] = hex(r["kernelUid"]) # Keep it as hex string for agent compatibility if needed
+            
+            shapes = str(r.get("outputShapes", [])) + str(r.get("inputShapes", []))
+            if op_filter:
+                if not re.search(op_filter, opname, re.IGNORECASE) and not re.search(op_filter, uid, re.IGNORECASE):
+                    continue
+            if shape_filter:
+                if not re.search(shape_filter, shapes):
+                    continue
 
-                # Resolve the proper human-readable opName
-                opname = uid_map.get(uid, r.get("opName", "UNKNOWN"))
-                r["opName"] = opname  # Replace so the agent gets the proper name
-
-                shapes = str(r.get("outputShapes", [])) + str(r.get("inputShapes", []))
-
-                # Apply Regex for OpName (against Name and UID)
-                if op_filter:
-                    if not re.search(
-                        op_filter, opname, re.IGNORECASE
-                    ) and not re.search(op_filter, uid, re.IGNORECASE):
-                        continue
-
-                # Apply Regex for Shapes
-                if shape_filter:
-                    if not re.search(shape_filter, shapes):
-                        continue
-
-                # Format Constants (from raw byte array to Float/Int arrays)
-                in_consts = r.get("inputConstants", [])
-                in_dtypes = r.get("inputDTypes", [])
-                if in_consts and in_dtypes:
-                    formatted_consts = []
-                    for idx, data in enumerate(in_consts):
-                        dt = in_dtypes[idx] if idx < len(in_dtypes) else ""
-                        formatted_consts.append(format_constants(data, dt))
-                    r["inputConstants"] = formatted_consts
-
-                records.append(r)
+            in_consts = r.get("inputConstants", [])
+            in_dtypes = r.get("inputDTypes", [])
+            if in_consts and in_dtypes:
+                formatted_consts = []
+                for idx, data in enumerate(in_consts):
+                    dt = in_dtypes[idx] if idx < len(in_dtypes) else -1
+                    formatted_consts.append(format_constants(data, dt))
+                r["inputConstants"] = formatted_consts
+            records.append(r)
 
     return jsonify({"records": records})
 
@@ -175,13 +169,13 @@ def get_read_benchmarks():
 @app.get("/api/analyze")
 def get_analyze():
     target_model = request.args.get("target_model", "gemma-3-270m")
-    records_path = PROJECT_ROOT / "benchmarks" / "records.jsonl"
+    records_path = PROJECT_ROOT / "benchmarks" / "records.bin"
     if target_model == "gemma-3-270m":
-        cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.jsonl"]
+        cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.bin"]
     elif target_model == "flux-klein-4b":
-        cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"flux-text.jsonl",
-                       PROJECT_ROOT / "dirty_region_caches" / f"flux-trans.jsonl",
-                       PROJECT_ROOT / "dirty_region_caches" / f"flux-vae.jsonl"]
+        cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"flux-text.bin",
+                       PROJECT_ROOT / "dirty_region_caches" / f"flux-trans.bin",
+                       PROJECT_ROOT / "dirty_region_caches" / f"flux-vae.bin"]
     else:
         return jsonify({"error": f"Unrecognized target model \"{target_model}\""}), 404
 
@@ -189,16 +183,13 @@ def get_analyze():
         return jsonify({"error": "No benchmark or cache data available yet."}), 404
 
     bench_map = {}
-    with open(records_path, "r") as f:
-        for line in f:
-            if line.strip():
-                r = json.loads(line)
-                key = (
-                    r["kernelUid"],
-                    tuple(r["outputShapes"][0]),
-                    tuple(r["outputStrides"][0]),
-                )
-                bench_map[key] = r["runTime"]
+    with open(records_path, "rb") as f:
+        br = BinaryReader(f)
+        while True:
+            r = br.read_record()
+            if r is None: break
+            key = (r["kernelUid"], tuple(r["outputShapes"][0]), tuple(r["outputStrides"][0]))
+            bench_map[key] = r["runTime"]
 
     total_estimated_time = 0.0
     extracted_uids = set()
@@ -206,67 +197,49 @@ def get_analyze():
     op_type_stats = defaultdict(float)
 
     for cache_path in cache_paths:
-        with open(cache_path, "r") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                entry = json.loads(line)
-                if entry.get("type") != "compiled_bucket":
-                    continue
+        with open(cache_path, "rb") as f:
+            br = BinaryReader(f)
+            while True:
+                t = br.read_u8()
+                if t is None: break
+                if t == 1: # Compiled Bucket
+                    br.read_string() # key
+                    graph = br.read_compiled_graph()
+                    nodes = graph["nodesMap"]
+                    for inst in graph["instructions"]:
+                        node_id = str(inst["nodeId"])
+                        node = nodes[node_id]
+                        uid = inst["fullKernelId"]
+                        extracted_uids.add(uid)
+                        op_name = node["opType"]
+                        if op_name == "FUSED":
+                            op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
+                        shape = tuple(node["shape"])
+                        strides = tuple(node["strides"])
+                        bench_key = (uid, shape, strides)
+                        runtime = bench_map.get(bench_key, 0.0)
+                        total_estimated_time += runtime
+                        op_type_stats[op_name] += runtime
+                        input_shapes = [nodes[str(pid)]["shape"] if str(pid) in nodes else [] for pid in node["parentIds"]]
+                        identity = f"{op_name}({input_shapes}->{list(shape)})"
+                        chain_stats[identity]["time"] += runtime
+                        chain_stats[identity]["count"] += 1
+                elif t == 0: # Metadata
+                    br.read_u32(); br.read_u32(); br.read_map(br.read_u32, br.read_backend)
+                elif t == 2: # Constants
+                    count = br.read_u32()
+                    for _ in range(count): br.read_u32(); f.read(br.read_u32())
+                else: break
 
-                graph = entry["graph"]
-                nodes = graph["nodesMap"]
+    top_chains = sorted([{"chain": k, "time": v["time"], "count": v["count"]} for k, v in chain_stats.items()], key=lambda x: x["time"], reverse=True)[:20]
+    top_ops = sorted([{"op": k, "time": v} for k, v in op_type_stats.items()], key=lambda x: x["time"], reverse=True)
 
-                for inst in graph["instructions"]:
-                    node_id = str(inst["nodeId"])
-                    node = nodes[node_id]
-                    uid = inst["fullKernelId"]
-                    extracted_uids.add(uid)
-
-                    op_name = node["opType"]
-                    if op_name == "FUSED":
-                        op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
-
-                    shape = tuple(node["shape"])
-                    strides = tuple(node["strides"])
-                    bench_key = (uid, shape, strides)
-
-                    runtime = bench_map.get(bench_key, 0.0)
-                    total_estimated_time += runtime
-                    op_type_stats[op_name] += runtime
-
-                    # Length-1 chain registration
-                    input_shapes = [
-                        nodes[str(pid)]["shape"] if str(pid) in nodes else []
-                        for pid in node["parentIds"]
-                    ]
-                    identity = f"{op_name}({input_shapes}->{list(shape)})"
-                    chain_stats[identity]["time"] += runtime
-                    chain_stats[identity]["count"] += 1
-
-    top_chains = sorted(
-        [
-            {"chain": k, "time": v["time"], "count": v["count"]}
-            for k, v in chain_stats.items()
-        ],
-        key=lambda x: x["time"],
-        reverse=True,
-    )[:20]
-
-    top_ops = sorted(
-        [{"op": k, "time": v} for k, v in op_type_stats.items()],
-        key=lambda x: x["time"],
-        reverse=True,
-    )
-
-    return jsonify(
-        {
-            "total_estimated_time_ms": total_estimated_time,
-            "extracted_uids": list(extracted_uids),
-            "top_chains": top_chains,
-            "top_ops": top_ops,
-        }
-    )
+    return jsonify({
+        "total_estimated_time_ms": total_estimated_time,
+        "extracted_uids": [hex(u) for u in extracted_uids],
+        "top_chains": top_chains,
+        "top_ops": top_ops,
+    })
 
 
 @app.get("/api/kernels/list")

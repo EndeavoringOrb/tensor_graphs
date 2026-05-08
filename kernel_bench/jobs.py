@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 import re
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,82 @@ BENCHMARKS_DIR = PROJECT_ROOT / "benchmarks"
 CACHE_DIR = PROJECT_ROOT / "dirty_region_caches"
 HISTORY_FILE = PROJECT_ROOT / "jobs_history.jsonl"
 GENERATED_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "generated"
+
+class BinaryReader:
+    def __init__(self, f):
+        self.f = f
+    def read_u8(self):
+        buf = self.f.read(1)
+        if not buf: return None
+        return struct.unpack("<B", buf)[0]
+    def read_u32(self):
+        buf = self.f.read(4)
+        if not buf: return None
+        return struct.unpack("<I", buf)[0]
+    def read_u64(self):
+        buf = self.f.read(8)
+        if not buf: return None
+        return struct.unpack("<Q", buf)[0]
+    def read_i32(self):
+        buf = self.f.read(4)
+        if not buf: return None
+        return struct.unpack("<i", buf)[0]
+    def read_float(self):
+        buf = self.f.read(4)
+        if not buf: return None
+        return struct.unpack("<f", buf)[0]
+    def read_string(self):
+        size = self.read_u32()
+        if size is None: return None
+        if size == 0: return ""
+        return self.f.read(size).decode('utf-8', errors='ignore')
+    def read_vector(self, read_func):
+        size = self.read_u32()
+        if size is None: return None
+        return [read_func() for _ in range(size)]
+    def read_dtype(self): return self.read_u32()
+    def read_backend(self): return self.read_u32()
+    def read_map(self, read_key, read_val):
+        size = self.read_u32()
+        if size is None: return None
+        return {read_key(): read_val() for _ in range(size)}
+    def read_record(self):
+        kernelUid = self.read_u64()
+        if kernelUid is None: return None
+        buildContextId = self.read_u64()
+        hwTag = self.read_string()
+        inputShapes = self.read_vector(lambda: self.read_vector(self.read_u32))
+        outputShapes = self.read_vector(lambda: self.read_vector(self.read_u32))
+        inputStrides = self.read_vector(lambda: self.read_vector(self.read_u64))
+        outputStrides = self.read_vector(lambda: self.read_vector(self.read_u64))
+        inputDTypes = self.read_vector(self.read_dtype)
+        outputDTypes = self.read_vector(self.read_dtype)
+        inputConstants = self.read_vector(lambda: self.f.read(self.read_u32()))
+        backends = self.read_vector(self.read_backend)
+        inputBackends = self.read_vector(lambda: self.read_vector(self.read_backend))
+        runTime = self.read_float()
+        return {
+            "kernelUid": kernelUid, 
+            "outputShapes": outputShapes, 
+            "outputStrides": outputStrides, 
+            "runTime": runTime,
+            "inputShapes": inputShapes,
+            "inputStrides": inputStrides,
+            "inputDTypes": inputDTypes,
+            "outputDTypes": outputDTypes,
+            "inputConstants": inputConstants,
+            "backends": backends,
+            "inputBackends": inputBackends,
+            "hwTag": hwTag,
+            "buildContextId": buildContextId
+        }
+    def read_op_instruction(self):
+        return {"nodeId": self.read_u32(), "logicalNodeId": self.read_u32(), "fullKernelId": self.read_u64(), "cachedKernelIds": self.read_vector(self.read_u64), "inputNodeIds": self.read_vector(self.read_u32), "inplaceInputIndex": self.read_i32(), "viewInputIndex": self.read_i32(), "backend": self.read_backend(), "outputStorageType": self.read_u32()}
+    def read_tensor_node(self):
+        _id = self.read_u32(); opType = self.read_u32(); opName = self.read_string(); dtype = self.read_dtype(); parentIds = self.read_vector(self.read_u32); shape = self.read_vector(self.read_u32); strides = self.read_vector(self.read_u64); viewOffset = self.read_u64(); backend = self.read_backend(); storageType = self.read_u32(); contentHash = self.read_string()
+        return {"id": _id, "shape": shape, "strides": strides}
+    def read_compiled_graph(self):
+        return {"instructions": self.read_vector(self.read_op_instruction), "refCounts": self.read_map(self.read_u32, self.read_u32), "nodesMap": {str(k): v for k, v in self.read_map(self.read_u32, self.read_tensor_node).items()}, "nodeCosts": self.read_map(self.read_u32, self.read_float), "physicalToLogicalNodeMap": self.read_map(self.read_u32, self.read_u32), "constStaging": self.read_vector(lambda: (self.read_u32(), self.f.read(self.read_u32())))}
 
 TIMEOUTS = {
     "build": 600,
@@ -111,60 +188,62 @@ def get_uid_for_file(rel_path: str):
 
 def analyze_total_time(target_model: str):
     print(f"[INFO] Analyzing total time for model: {target_model}")
-    records_path = BENCHMARKS_DIR / "records.jsonl"
-    cache_path = CACHE_DIR / f"{target_model}-cpp.jsonl"
+    records_path = BENCHMARKS_DIR / "records.bin"
+    cache_path = CACHE_DIR / f"{target_model}-cpp.bin"
 
     if not records_path.exists() or not cache_path.exists():
-        print("[WARN] records.jsonl or cache file missing, skipping analysis.")
+        print("[WARN] records.bin or cache file missing, skipping analysis.")
         return 0.0, set()
 
     bench_map = {}
-    with open(records_path) as f:
-        for line in f:
-            if line.strip():
-                r = json.loads(line)
-                key = (
-                    r["kernelUid"],
-                    tuple(r["outputShapes"][0]),
-                    tuple(r["outputStrides"][0]),
-                )
-                bench_map[key] = r["runTime"]
+    with open(records_path, "rb") as f:
+        br = BinaryReader(f)
+        while True:
+            r = br.read_record()
+            if r is None: break
+            key = (r["kernelUid"], tuple(r["outputShapes"][0]), tuple(r["outputStrides"][0]))
+            bench_map[key] = r["runTime"]
 
     total_time = 0.0
     extracted_uids = set()
-    with open(cache_path) as f:
-        for line in f:
-            if not line.strip():
-                continue
-            entry = json.loads(line)
-            if entry.get("type") != "compiled_bucket":
-                continue
+    with open(cache_path, "rb") as f:
+        br = BinaryReader(f)
+        while True:
+            t = br.read_u8()
+            if t is None: break
+            if t == 1: # Compiled Bucket
+                br.read_string() # key
+                graph = br.read_compiled_graph()
+                for inst in graph["instructions"]:
+                    uid = inst["fullKernelId"]
+                    node = graph["nodesMap"][str(inst["nodeId"])]
+                    extracted_uids.add(uid)
+                    key = (uid, tuple(node["shape"]), tuple(node["strides"]))
+                    total_time += bench_map.get(key, 0.0)
+            elif t == 0: # Metadata
+                br.read_u32(); br.read_u32(); br.read_map(br.read_u32, br.read_backend)
+            elif t == 2: # Constants
+                count = br.read_u32()
+                for _ in range(count): br.read_u32(); f.read(br.read_u32())
+            else: break
 
-            for inst in entry["graph"]["instructions"]:
-                uid = inst["fullKernelId"]
-                node = entry["graph"]["nodesMap"][str(inst["nodeId"])]
-                extracted_uids.add(uid)
-                key = (uid, tuple(node["shape"]), tuple(node["strides"]))
-                total_time += bench_map.get(key, 0.0)
-
-    print(
-        f"[INFO] Analysis complete. Total time: {total_time:.4f}ms, Unique UIDs: {len(extracted_uids)}"
-    )
+    print(f"[INFO] Analysis complete. Total time: {total_time:.4f}ms, Unique UIDs: {len(extracted_uids)}")
     return total_time, extracted_uids
 
 
 def get_benchmark_scores(uid_str):
     scores = []
-    records_path = BENCHMARKS_DIR / "records.jsonl"
+    records_path = BENCHMARKS_DIR / "records.bin"
     if not records_path.exists() or not uid_str:
         return scores
-    target_uid = f"0x{int(uid_str, 16):x}"
-    with open(records_path) as f:
-        for line in f:
-            if line.strip():
-                r = json.loads(line)
-                if r["kernelUid"] == target_uid:
-                    scores.append(r["runTime"])
+    target_uid = int(uid_str, 16)
+    with open(records_path, "rb") as f:
+        br = BinaryReader(f)
+        while True:
+            r = br.read_record()
+            if r is None: break
+            if r["kernelUid"] == target_uid:
+                scores.append(r["runTime"])
     return scores
 
 
@@ -204,7 +283,7 @@ def run_worker():
             )
 
             # Clear specific cache
-            cache_file = CACHE_DIR / f"{target_model}-cpp.jsonl"
+            cache_file = CACHE_DIR / f"{target_model}-cpp.bin"
             if cache_file.exists():
                 print(f"[JOB {job_id}] Clearing existing cache: {cache_file}")
                 cache_file.unlink()
@@ -249,13 +328,16 @@ def run_worker():
                 [str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"), target_model],
                 TIMEOUTS["infer"],
             )
-            calls_path = BENCHMARKS_DIR / "calls.jsonl"
+            calls_path = BENCHMARKS_DIR / "calls.bin"
             matched = False
             if calls_path.exists() and uid_str:
                 uid_int = int(uid_str, 16)
-                with open(calls_path) as f:
-                    for line in f:
-                        if f'"kernelUid":"0x{uid_int:x}"' in line:
+                with open(calls_path, "rb") as f:
+                    br = BinaryReader(f)
+                    while True:
+                        r = br.read_record()
+                        if r is None: break
+                        if r["kernelUid"] == uid_int:
                             matched = True
                             break
             print(f"[JOB {job_id}] UID Match Result: {matched}")

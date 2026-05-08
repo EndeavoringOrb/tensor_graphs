@@ -673,6 +673,8 @@ struct ShapePropagator
                     start += s0[i];
                 if (end < 0)
                     end += s0[i];
+                start = std::clamp<int32_t>(start, 0, s0[i]);
+                end = std::clamp<int32_t>(end, 0, s0[i]);
                 out_shape[i] = std::max(0, (end - start + step - 1) / step);
                 if (out_shape[i] == 0)
                 {
@@ -689,6 +691,7 @@ struct ShapePropagator
                 int32_t step = i < steps.size() ? steps[i] : 1;
                 if (start < 0)
                     start += s0[i];
+                start = std::clamp<int32_t>(start, 0, s0[i]);
                 offset += start * parentStrides[i];
                 graph.getNode(nodeId).strides[i] = parentStrides[i] * step;
             }

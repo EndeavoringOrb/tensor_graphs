@@ -600,7 +600,9 @@ private:
                                     while (pGraph->hasNode(curr) &&
                                            (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
                                             pGraph->getNode(curr).opType == OpType::CAST ||
-                                            pGraph->getNode(curr).opType == OpType::COPY_TO))
+                                            pGraph->getNode(curr).opType == OpType::COPY_TO ||
+                                            pGraph->getNode(curr).opType == OpType::RESHAPE ||
+                                            pGraph->getNode(curr).opType == OpType::PERMUTE))
                                     {
                                         if (pGraph->getNode(curr).parentIds.empty())
                                             break;
