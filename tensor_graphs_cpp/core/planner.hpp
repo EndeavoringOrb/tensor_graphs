@@ -553,9 +553,28 @@ private:
                     inDTypes.reserve(enode.children.size());
                     inConstants.reserve(enode.children.size());
 
-                    for (size_t i = 0; i < enode.children.size(); i++)
+                    const ReferenceGraphEntry *refEntry = nullptr;
+                    std::unique_ptr<Graph> pGraph;
+                    std::vector<uint32_t> pInputs;
+
+                    if (enode.opType == OpType::FUSED)
                     {
-                        uint32_t childEClassId = enode.children[i];
+                        const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
+                        refEntry = ReferenceGraphRegistry::get().getFactory(kernel.opName);
+                        if (refEntry)
+                        {
+                            pGraph = std::make_unique<Graph>();
+                            for (size_t k = 0; k < kernel.numInputs; ++k)
+                            {
+                                pInputs.push_back(pGraph->input(kernel.dummyShapes[k], kernel.dtypes[k]));
+                            }
+                            refEntry->factory(pInputs, *pGraph);
+                        }
+                    }
+
+                    for (size_t j = 0; j < enode.children.size(); j++)
+                    {
+                        uint32_t childEClassId = enode.children[j];
                         const EClass &childCls = egraph.getEClass(egraph.find(childEClassId));
                         inShapes.push_back(childCls.shape);
 
@@ -568,35 +587,25 @@ private:
                         inDTypes.push_back(childCls.dtype);
 
                         uint32_t canonChild = egraph.find(childEClassId);
-                        // filter to avoid serializing large folded constants
                         bool needed = false;
+
                         if (enode.opType == OpType::FUSED)
                         {
-                            const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
-                            const auto *refEntry = ReferenceGraphRegistry::get().getFactory(kernel.opName);
-                            if (refEntry)
+                            if (refEntry && pGraph)
                             {
-                                Graph pGraph;
-                                std::vector<uint32_t> pInputs;
-                                for (size_t k = 0; k < kernel.numInputs; ++k)
-                                {
-                                    pInputs.push_back(pGraph.input(kernel.dummyShapes[k], kernel.dtypes[k]));
-                                }
-                                refEntry->factory(pInputs, pGraph);
-
                                 auto traceToInputIdx = [&](uint32_t pid) -> int
                                 {
                                     uint32_t curr = pid;
-                                    while (pGraph.hasNode(curr) &&
-                                           (pGraph.getNode(curr).opType == OpType::CONTIGUOUS ||
-                                            pGraph.getNode(curr).opType == OpType::CAST ||
-                                            pGraph.getNode(curr).opType == OpType::COPY_TO))
+                                    while (pGraph->hasNode(curr) &&
+                                           (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
+                                            pGraph->getNode(curr).opType == OpType::CAST ||
+                                            pGraph->getNode(curr).opType == OpType::COPY_TO))
                                     {
-                                        if (pGraph.getNode(curr).parentIds.empty())
+                                        if (pGraph->getNode(curr).parentIds.empty())
                                             break;
-                                        curr = pGraph.getNode(curr).parentIds[0];
+                                        curr = pGraph->getNode(curr).parentIds[0];
                                     }
-                                    for (size_t k = 0; k < kernel.numInputs; ++k)
+                                    for (size_t k = 0; k < pInputs.size(); ++k)
                                     {
                                         if (pInputs[k] == curr)
                                             return (int)k;
@@ -604,7 +613,7 @@ private:
                                     return -1;
                                 };
 
-                                for (const auto &pair : pGraph.nodes)
+                                for (const auto &pair : pGraph->nodes)
                                 {
                                     const TensorNode &n = pair.second;
                                     for (size_t p_idx = 0; p_idx < n.parentIds.size(); ++p_idx)
@@ -612,7 +621,7 @@ private:
                                         if (isConstantNeeded(n.opType, p_idx, n.parentIds.size()))
                                         {
                                             int inputIdx = traceToInputIdx(n.parentIds[p_idx]);
-                                            if (inputIdx == (int)i)
+                                            if (inputIdx == (int)j)
                                             {
                                                 needed = true;
                                                 break;
@@ -626,7 +635,7 @@ private:
                         }
                         else
                         {
-                            needed = isConstantNeeded(enode.opType, i, enode.children.size());
+                            needed = isConstantNeeded(enode.opType, j, enode.children.size());
                         }
 
                         if (!needed)
