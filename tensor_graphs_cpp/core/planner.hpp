@@ -743,6 +743,8 @@ private:
 
         const size_t numCanonical = canonicalClasses.size();
         const size_t bitWords = numCanonical == 0 ? 0 : (numCanonical + 63) >> 6;
+        std::cout << "numCanonical=" << std::to_string(numCanonical) << std::endl;
+        std::cout << "bitWords=" << std::to_string(bitWords) << std::endl;
 
         auto bitTest = [&](const std::vector<uint64_t> &bits, uint32_t eclassId) -> bool
         {
@@ -776,6 +778,7 @@ private:
             // Only allocate and size vectors for canonical classes
             opt[canonId].coveredBits.assign(bitWords, 0);
         }
+        std::cout << "finished allocating opt" << std::endl;
 
         std::vector<std::vector<uint32_t>> parentMap(numClasses);
         for (size_t i = 0; i < numClasses; ++i)

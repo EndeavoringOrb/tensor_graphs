@@ -233,6 +233,7 @@ private:
     {
         if (cachePath.empty())
             return;
+        std::cout << "[Session.persistCache] writing cache" << std::endl;
 
         ensureOutputDirectories();
 
