@@ -36,6 +36,7 @@ def get_hw_info():
 
 
 def save_job_history(job):
+    print(f"[INFO] Saving job {job['job_id']} history to {HISTORY_FILE}")
     with open(HISTORY_FILE, "a") as f:
         f.write(json.dumps(job) + "\n")
 
@@ -64,17 +65,25 @@ def find_next_slot(backend: str) -> str:
 
 def run_cmd(cmd: list[str], timeout: int) -> dict:
     start = time.time()
+    cmd_str = " ".join(cmd)
+    print(f"[EXEC] Running: {cmd_str} (Timeout: {timeout}s)")
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, cwd=PROJECT_ROOT
         )
+        duration = (time.time() - start) * 1000
+        print(f"[EXEC] Finished in {duration:.2f}ms with exit code {result.returncode}")
+        if result.returncode != 0:
+            print(f"[WARN] Command stderr: {result.stderr.strip()[:200]}...")
+
         return {
             "exit_code": result.returncode,
             "stdout": result.stdout,
             "stderr": result.stderr,
-            "duration_ms": (time.time() - start) * 1000,
+            "duration_ms": duration,
         }
     except subprocess.TimeoutExpired:
+        print(f"[ERROR] Command TIMED OUT after {timeout}s: {cmd_str}")
         return {
             "exit_code": -1,
             "stdout": "",
@@ -93,15 +102,19 @@ def get_uid_for_file(rel_path: str):
         rf"constexpr uint64_t {const_name} = (0x[0-9a-fA-F]+ULL);", content
     )
     if match:
-        return match.group(1).replace("ULL", "")
+        uid = match.group(1).replace("ULL", "")
+        print(f"[INFO] Resolved UID {uid} for {rel_path}")
+        return uid
     return None
 
 
 def analyze_total_time(target_model: str):
+    print(f"[INFO] Analyzing total time for model: {target_model}")
     records_path = BENCHMARKS_DIR / "records.jsonl"
     cache_path = CACHE_DIR / f"{target_model}-cpp.jsonl"
 
     if not records_path.exists() or not cache_path.exists():
+        print("[WARN] records.jsonl or cache file missing, skipping analysis.")
         return 0.0, set()
 
     bench_map = {}
@@ -133,6 +146,9 @@ def analyze_total_time(target_model: str):
                 key = (uid, tuple(node["shape"]), tuple(node["strides"]))
                 total_time += bench_map.get(key, 0.0)
 
+    print(
+        f"[INFO] Analysis complete. Total time: {total_time:.4f}ms, Unique UIDs: {len(extracted_uids)}"
+    )
     return total_time, extracted_uids
 
 
@@ -152,6 +168,7 @@ def get_benchmark_scores(uid_str):
 
 
 def run_worker():
+    print("[SYSTEM] Worker thread started and waiting for jobs...")
     while True:
         job_id = None
         with worker_lock:
@@ -170,9 +187,12 @@ def run_worker():
         opname = job["opname"]
         target_model = job["target_model"]
 
+        print(f"\n[JOB {job_id}] Processing op: {opname} for model: {target_model}")
+
         try:
             # 1. Write kernel
             kernel_path = find_next_slot(job["backend"])
+            print(f"[JOB {job_id}] Writing kernel source to {kernel_path}")
             with open(kernel_path, "w") as f:
                 f.write(job["source"])
             job["kernel_file"] = kernel_path
@@ -185,9 +205,11 @@ def run_worker():
             # Clear specific cache
             cache_file = CACHE_DIR / f"{target_model}-cpp.jsonl"
             if cache_file.exists():
+                print(f"[JOB {job_id}] Clearing existing cache: {cache_file}")
                 cache_file.unlink()
 
             # 2. Compile
+            print(f"[JOB {job_id}] Step 1/7: Compiling...")
             build_res = run_cmd(
                 (
                     ["python", "build.py", "--cuda"]
@@ -204,6 +226,7 @@ def run_worker():
             job["assigned_uid"] = uid_str
 
             # 3. Test No Records
+            print(f"[JOB {job_id}] Step 2/7: Testing without records...")
             test_no_rec_res = run_cmd(
                 [
                     str(PROJECT_ROOT / "tensor_graphs_cpp" / "test"),
@@ -220,6 +243,7 @@ def run_worker():
                 raise Exception("Test without records failed")
 
             # 4. Main to build calls.jsonl
+            print(f"[JOB {job_id}] Step 3/7: Running inference to build calls.jsonl...")
             run_cmd(
                 [str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"), target_model],
                 TIMEOUTS["infer"],
@@ -233,9 +257,11 @@ def run_worker():
                         if f'"kernelUid":"0x{uid_int:x}"' in line:
                             matched = True
                             break
+            print(f"[JOB {job_id}] UID Match Result: {matched}")
             job["steps"]["matched"] = matched
 
             # 5. Test with Records
+            print(f"[JOB {job_id}] Step 4/7: Testing with records...")
             test_rec_res = run_cmd(
                 [str(PROJECT_ROOT / "tensor_graphs_cpp" / "test"), opname],
                 TIMEOUTS["test"],
@@ -245,6 +271,7 @@ def run_worker():
                 raise Exception("Test with records failed")
 
             # 6. Benchmark
+            print(f"[JOB {job_id}] Step 5/7: Benchmarking kernel...")
             bench_res = run_cmd(
                 [str(PROJECT_ROOT / "tensor_graphs_cpp" / "bench"), opname],
                 TIMEOUTS["bench"],
@@ -252,11 +279,15 @@ def run_worker():
             job["steps"]["bench"] = bench_res
 
             # 7. Main again to construct cache with optimized routes
+            print(
+                f"[JOB {job_id}] Step 6/7: Regenerating cache with optimized routes..."
+            )
             run_cmd(
                 [str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"), target_model],
                 TIMEOUTS["infer"],
             )
 
+            print(f"[JOB {job_id}] Step 7/7: Final time analysis...")
             total_time, extracted_uids = analyze_total_time(target_model)
             if uid_str:
                 job["steps"]["extracted"] = (
@@ -267,10 +298,12 @@ def run_worker():
             job["benchmark_scores"] = get_benchmark_scores(uid_str)
 
             job["status"] = "completed"
+            print(f"[SUCCESS] Job {job_id} completed successfully.")
 
         except Exception as e:
             job["status"] = "failed"
             job["error"] = str(e)
+            print(f"[ERROR] Job {job_id} failed: {e}")
 
         job["completed_at"] = datetime.now(timezone.utc).isoformat()
         save_job_history(job)
@@ -284,6 +317,7 @@ def start_worker():
 
 def create_job(source: str, opname: str, backend: str, target_model: str) -> str:
     job_id = uuid.uuid4().hex[:12]
+    print(f"[SYSTEM] Creating job {job_id} for {opname} ({backend})")
     job = {
         "job_id": job_id,
         "status": "queued",

@@ -63,7 +63,7 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "source_code": {
+                    "source": {
                         "type": "string",
                         "description": "The full C++ source code of the kernel.",
                     },
@@ -77,7 +77,7 @@ tools = [
                         "description": "Target backend.",
                     },
                 },
-                "required": ["source_code", "opname", "backend"],
+                "required": ["source", "opname", "backend"],
             },
         },
     },
@@ -147,6 +147,7 @@ def handle_tool_call(tool_call):
             time.sleep(5)
             status = call_bench_api(f"/api/jobs/{job_id}")
             if status.get("status") in ["completed", "failed"]:
+                print(f"  finished with status '{status.get("status")}'")
                 return status
             print("  ...still running...")
 
