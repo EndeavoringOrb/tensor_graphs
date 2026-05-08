@@ -129,9 +129,12 @@ public:
         uint32_t ts_mul = g.mul(timestep, expand_scalar_to_1d(1000.0f, 1));
         uint32_t t_sincos = timestep_embedding(ts_mul, 256);
         int32_t sh3_t[] = {1, 1, 256};
-        uint32_t t_emb_raw = linear(g.reshape(t_sincos, g.constant({3}, sh3_t, DType::INT32)), "time_guidance_embed.timestep_embedder.linear_1.weight", 256, cfg.hidden_size);
-        uint32_t t_emb_silu = silu_atomic(t_emb_raw, 1, 1, cfg.hidden_size);
-        t_emb_silu = linear(t_emb_silu, "time_guidance_embed.timestep_embedder.linear_2.weight", cfg.hidden_size, cfg.hidden_size);
+        uint32_t t_emb_raw = linear(g.reshape(t_sincos, g.constant({3}, sh3_t, DType::INT32)),
+                                    "time_guidance_embed.timestep_embedder.linear_1.weight", 256, cfg.hidden_size);
+        uint32_t t_emb_mid = silu_atomic(t_emb_raw, 1, 1, cfg.hidden_size);
+        uint32_t t_emb_out = linear(t_emb_mid,
+                                    "time_guidance_embed.timestep_embedder.linear_2.weight", cfg.hidden_size, cfg.hidden_size);
+        uint32_t t_emb_silu = silu_atomic(t_emb_out, 1, 1, cfg.hidden_size);
 
         // NLC
         int32_t p_img[] = {0, 2, 3, 1};
