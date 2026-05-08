@@ -58,7 +58,8 @@ def find_next_slot(backend: str) -> str:
     n = 0
     while True:
         path = base / f"{n:05d}{ext}"
-        if not path.exists():
+        failed_path = base / f"{n:05d}{ext}.failed"
+        if not path.exists() and not failed_path.exists():
             return str(path)
         n += 1
 
@@ -304,6 +305,16 @@ def run_worker():
             job["status"] = "failed"
             job["error"] = str(e)
             print(f"[ERROR] Job {job_id} failed: {e}")
+
+            # Rename the faulty file to prevent it from breaking subsequent compilations
+            if job.get("kernel_file") and os.path.exists(job["kernel_file"]):
+                failed_path = job["kernel_file"] + ".failed"
+                try:
+                    os.rename(job["kernel_file"], failed_path)
+                    job["kernel_file"] = failed_path
+                    print(f"[INFO] Renamed failed kernel to {failed_path}")
+                except Exception as rename_err:
+                    print(f"[WARN] Failed to rename {job['kernel_file']}: {rename_err}")
 
         job["completed_at"] = datetime.now(timezone.utc).isoformat()
         save_job_history(job)
