@@ -307,8 +307,17 @@ def compile_project():
             nvcc_flags.extend(["-O3"])
         
         if USE_CUDA:
-            cxx_flags.append("/DUSE_CUDA")
-            nvcc_flags.append("-DUSE_CUDA")
+            # Detect CUDA Path
+            cuda_path = os.environ.get("CUDA_PATH", "/usr/local/cuda")
+            
+            if os.name == "nt":
+                cxx_flags.append("/DUSE_CUDA")
+                cxx_flags.append(f"/I\"{cuda_path}\\include\"") # Add CUDA include for MSVC
+                nvcc_flags.append("-DUSE_CUDA")
+            else:
+                cxx_flags.append("-DUSE_CUDA")
+                cxx_flags.append(f"-I{cuda_path}/include")    # Add CUDA include for G++
+                nvcc_flags.append("-DUSE_CUDA")
     else:
         cxx_flags.extend(["-std=c++17"])
         if DEBUG_MODE:
