@@ -8,7 +8,7 @@ BENCH_API_URL = "http://127.0.0.1:8080"
 MODEL = "my-model-id"
 
 # Set the optimization target!
-TARGET_MODEL = "gemma-3-270m"  # "flux-klein-4b" or "gemma-3-270m"
+TARGET_MODEL = "flux-klein-4b"  # "flux-klein-4b" or "gemma-3-270m"
 
 tools = [
     {
