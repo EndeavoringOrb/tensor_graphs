@@ -347,6 +347,7 @@ def compile_project():
         else:
             full_command = cmd_str
             
+        print(f"Running {full_command}")
         result = subprocess.run(full_command, capture_output=True, text=True, shell=True)
         if result.returncode != 0:
             console.print(Panel(f"[red]{result.stdout}[/red]\n\n[red]{result.stderr}[/red]", title="[bold red]COMPILER ERROR[/bold red]", border_style="red"))
