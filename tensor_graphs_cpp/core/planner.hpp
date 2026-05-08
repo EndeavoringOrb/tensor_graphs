@@ -172,10 +172,11 @@ private:
         // 3. Write Constants Section
         uint32_t num_constants = static_cast<uint32_t>(egraph.constantStaging.size());
         out.write(reinterpret_cast<const char *>(&num_constants), 4);
-        for (const auto &[eclassId, data] : egraph.constantStaging)
+        for (const auto &[eclassId, data_ptr] : egraph.constantStaging)
         {
             uint32_t canonId = eclassId; // Parser will use this to map to the canonical class
             out.write(reinterpret_cast<const char *>(&canonId), 4);
+            const auto &data = *data_ptr;
             uint64_t data_size = static_cast<uint64_t>(data.size());
             out.write(reinterpret_cast<const char *>(&data_size), 8);
             out.write(reinterpret_cast<const char *>(data.data()), data_size);
@@ -644,7 +645,7 @@ private:
                         }
                         else if (egraph.constantStaging.count(canonChild))
                         {
-                            inConstants.push_back(egraph.constantStaging.at(canonChild));
+                            inConstants.push_back(*egraph.constantStaging.at(canonChild));
                         }
                         else
                         {

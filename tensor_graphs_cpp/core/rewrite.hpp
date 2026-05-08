@@ -210,7 +210,7 @@ std::vector<int32_t> getConstInt32(const EGraph &egraph, uint32_t eclassId)
     uint32_t canon = egraph.findConst(eclassId);
     if (egraph.constantStaging.count(canon))
     {
-        const auto &data = egraph.constantStaging.at(canon);
+        const auto &data = *egraph.constantStaging.at(canon);
         const EClass &cls = egraph.getEClass(canon);
         uint64_t numElements = countElements(cls.shape);
         std::vector<int32_t> res(numElements);
@@ -1054,7 +1054,7 @@ struct ConstantFolding : public Rule
             const auto &stagedData = egraph.constantStaging.at(childEClassId);
             size_t offsetBytes = childCls.viewOffset * getDTypeSize(childCls.dtype);
 
-            if (offsetBytes >= stagedData.size() && stagedData.size() > 0)
+            if (offsetBytes >= stagedData->size() && stagedData->size() > 0)
             {
                 return;
             }
@@ -1070,16 +1070,31 @@ struct ConstantFolding : public Rule
                 }
             }
             size_t reqInBytes = (childCls.shape.empty() ? 1 : (maxInOffset + 1)) * getDTypeSize(childCls.dtype);
-            if (reqInBytes > stagedData.size() && stagedData.size() > 0)
+            if (reqInBytes > stagedData->size() && stagedData->size() > 0)
             {
                 return; // Abort folding gracefully if the buffer does not physically support this view
             }
 
-            kernelInputs.push_back(stagedData.data() + offsetBytes);
+            kernelInputs.push_back(stagedData->data() + offsetBytes);
             inViews.push_back(TensorView(inNode, 0));
         }
 
         const EClass targetCls = egraph.getEClass(eclassId);
+
+        uint64_t maxOffset = targetCls.viewOffset;
+        for (size_t d = 0; d < targetCls.shape.size(); ++d)
+        {
+            if (targetCls.shape[d] > 0)
+            {
+                maxOffset += (targetCls.shape[d] - 1) * targetCls.strides[d];
+            }
+        }
+        uint64_t reqBytes = (targetCls.shape.empty() ? 1 : (maxOffset + 1)) * getDTypeSize(targetCls.dtype);
+
+        // Prevent massive static arrays from gobbling RAM
+        if (reqBytes > 16 * 1024 * 1024)
+            return;
+
         TensorNode outNode;
         outNode.opType = eNode.opType;
         outNode.opName = eNode.opName;
@@ -1108,7 +1123,7 @@ struct ConstantFolding : public Rule
         if (!selectedKernel)
             return;
 
-        std::vector<uint8_t> outData;
+        std::shared_ptr<std::vector<uint8_t>> outData;
         if (selectedKernel->isView)
         {
             uint32_t firstChild = egraph.find(eNode.children[0]);
@@ -1119,18 +1134,8 @@ struct ConstantFolding : public Rule
             if (!selectedKernel->run)
                 return;
 
-            uint64_t maxOffset = targetCls.viewOffset;
-            for (size_t d = 0; d < targetCls.shape.size(); ++d)
-            {
-                if (targetCls.shape[d] > 0)
-                {
-                    maxOffset += (targetCls.shape[d] - 1) * targetCls.strides[d];
-                }
-            }
-            uint64_t reqBytes = (targetCls.shape.empty() ? 1 : (maxOffset + 1)) * getDTypeSize(targetCls.dtype);
-            outData.resize(reqBytes);
-
-            std::vector<void *> kernelOutputs = {outData.data() + targetCls.viewOffset * getDTypeSize(targetCls.dtype)};
+            outData = std::make_shared<std::vector<uint8_t>>(reqBytes);
+            std::vector<void *> kernelOutputs = {outData->data() + targetCls.viewOffset * getDTypeSize(targetCls.dtype)};
             std::vector<TensorView> outViews = {TensorView(outNode, targetCls.viewOffset * getDTypeSize(targetCls.dtype))};
             selectedKernel->run(kernelInputs, kernelOutputs, inViews, outViews);
         }
@@ -1150,13 +1155,13 @@ struct ConstantFolding : public Rule
         if (originalBackend == Backend::CPU)
         {
             egraph.addENode(eclassId, foldedNode);
-            egraph.constantStaging[eclassId] = std::move(outData);
+            egraph.constantStaging[eclassId] = outData;
         }
         else
         {
             uint32_t cpuEClass = egraph.addEClass(foldedNode.shape, foldedNode.strides, foldedNode.viewOffset, foldedNode.dtype, Backend::CPU);
             egraph.addENode(cpuEClass, foldedNode);
-            egraph.constantStaging[cpuEClass] = std::move(outData);
+            egraph.constantStaging[cpuEClass] = outData;
 
             TensorNode copyInNode;
             copyInNode.opType = OpType::INPUT;
@@ -1243,7 +1248,7 @@ struct InfinityDomination : public Rule
         uint32_t constClass = egraph.find(addNode.children[constIdx]);
         uint32_t varClass = egraph.find(addNode.children[varIdx]);
 
-        const auto &constData = egraph.constantStaging.at(constClass);
+        const auto &constData = *egraph.constantStaging.at(constClass);
         const float *data = reinterpret_cast<const float *>(constData.data());
 
         const EClass cClass = egraph.getEClass(constClass);

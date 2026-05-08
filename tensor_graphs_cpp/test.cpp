@@ -414,7 +414,7 @@ std::vector<float> executeReferenceGraph(
             }
             else if (graph.constantStaging.count(nodeId))
             {
-                rawBytes = graph.constantStaging.at(nodeId);
+                rawBytes = *graph.constantStaging.at(nodeId);
             }
             else
             {
@@ -1211,7 +1211,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             TensorNode &node = dummyGraph.allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, Backend::CPU, StorageType::PERSISTENT);
             dummyInputNodes.push_back(node);
             if (dtype == DType::INT32)
-                dummyGraph.constantStaging[node.id] = inputData.back();
+                dummyGraph.constantStaging[node.id] = std::make_shared<std::vector<uint8_t>>(inputData.back());
             i++;
         }
         for (auto &vec : inputData)

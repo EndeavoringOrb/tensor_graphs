@@ -731,7 +731,7 @@ struct CompiledGraph
     // Canonical direction:
     // compiled physical node id -> original logical node id.
     std::unordered_map<uint32_t, uint32_t> physicalToLogicalNodeMap;
-    std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
+    std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
     const uint32_t getLogicalId(uint32_t id) const
     {
@@ -858,7 +858,7 @@ inline void to_json(json &j, const CompiledGraph &cg)
 
     json constStaging = json::object();
     for (const auto &kv : cg.constantStaging)
-        constStaging[std::to_string(kv.first)] = kv.second;
+        constStaging[std::to_string(kv.first)] = *kv.second;
 
     j = json{
         {"instructions", cg.instructions},
@@ -900,5 +900,5 @@ inline void from_json(const json &j, CompiledGraph &cg)
 
     cg.constantStaging.clear();
     for (const auto &item : j.at("constantStaging").items())
-        cg.constantStaging[std::stoul(item.key())] = item.value().get<std::vector<uint8_t>>();
+        cg.constantStaging[std::stoul(item.key())] = std::make_shared<std::vector<uint8_t>>(item.value().get<std::vector<uint8_t>>());
 }

@@ -22,7 +22,7 @@ struct Graph
     std::unordered_map<std::string, std::shared_ptr<SafetensorsLoader>> loaders;     // Mapping of path -> Loader instance
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
 
-    std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
+    std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
     Graph() : allocator(std::make_shared<IdAllocator>()) {}
 
@@ -66,9 +66,9 @@ struct Graph
         TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, {}, Backend::CPU, StorageType::PERSISTENT, sha.digest());
         uint32_t id = node.id;
 
-        std::vector<uint8_t> buffer(sizeBytes);
-        std::memcpy(buffer.data(), dataPtr, sizeBytes);
-        constantStaging[id] = std::move(buffer);
+        auto buffer = std::make_shared<std::vector<uint8_t>>(sizeBytes);
+        std::memcpy(buffer->data(), dataPtr, sizeBytes);
+        constantStaging[id] = buffer;
 
         return id;
     }
@@ -460,7 +460,7 @@ inline std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)
 {
     if (graph.constantStaging.count(id))
     {
-        const auto &data = graph.constantStaging.at(id);
+        const auto &data = *graph.constantStaging.at(id);
         const auto &node = graph.getNode(id);
         uint64_t numElements = countElements(node.getShape());
         std::vector<int32_t> res(numElements);

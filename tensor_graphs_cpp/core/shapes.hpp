@@ -47,10 +47,10 @@ inline bool evaluateInt32TensorForPlanning(uint32_t nodeId, const Graph &graph, 
         if (it == graph.constantStaging.end())
             return false;
         const auto &data = it->second;
-        if (data.size() % sizeof(int32_t) != 0)
+        if (data->size() % sizeof(int32_t) != 0)
             return false;
-        outValues.resize(data.size() / sizeof(int32_t));
-        std::memcpy(outValues.data(), data.data(), data.size());
+        outValues.resize(data->size() / sizeof(int32_t));
+        std::memcpy(outValues.data(), data->data(), data->size());
         return true;
     }
     case OpType::COPY_TO:

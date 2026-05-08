@@ -58,7 +58,7 @@ class EGraph
 {
 public:
     uint32_t nextLeafId = 0;
-    std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
+    std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
     // Hash map for fast constant lookup: data hash -> list of class ids
     std::unordered_map<uint64_t, std::vector<uint32_t>> constantHashIndex;
@@ -95,7 +95,7 @@ public:
                 const EClass &cls = getEClass(clsId);
                 if (cls.dtype == dtype && cls.backend == backend &&
                     cls.shape == shape && cls.strides == strides &&
-                    stagingIt->second == data)
+                    *stagingIt->second == data)
                 {
                     return clsId;
                 }
@@ -111,7 +111,7 @@ public:
         n.strides = strides;
         n.backend = backend;
         addENode(cls, n);
-        constantStaging[cls] = data;
+        constantStaging[cls] = std::make_shared<std::vector<uint8_t>>(data);
         constantHashIndex[dataHash].push_back(cls);
         return cls;
     }
@@ -433,7 +433,7 @@ private:
                 continue; // Skip non-canonical entries (data was moved during merge)
 
             const EClass &cls = getEClass(canonicalId);
-            uint64_t h = computeConstantHash(cls.shape, cls.strides, cls.dtype, cls.backend, kv.second);
+            uint64_t h = computeConstantHash(cls.shape, cls.strides, cls.dtype, cls.backend, *kv.second);
             constantHashIndex[h].push_back(canonicalId);
         }
     }

@@ -216,7 +216,7 @@ private:
 
             if (graph.constantStaging.count(node.id))
             {
-                memManager.write(node.backend, logicalId, graph.constantStaging[node.id].data(), sizeBytes);
+                memManager.write(node.backend, logicalId, graph.constantStaging.at(node.id)->data(), sizeBytes);
             }
             else if (graph.weightSources.count(node.id))
             {
@@ -292,7 +292,7 @@ private:
         std::sort(orderedConstants.begin(), orderedConstants.end());
         for (uint32_t logicalId : orderedConstants)
         {
-            constantsObj[std::to_string(logicalId)] = graph.constantStaging.at(logicalId);
+            constantsObj[std::to_string(logicalId)] = *graph.constantStaging.at(logicalId);
         }
 
         entry["constants"] = constantsObj;
@@ -397,11 +397,11 @@ public:
 
                         if (logicalId != UINT32_MAX && graph.constantStaging.count(logicalId))
                         {
-                            memManager.write(node.backend, memId, graph.constantStaging.at(logicalId).data(), sizeBytes);
+                            memManager.write(node.backend, memId, graph.constantStaging.at(logicalId)->data(), sizeBytes);
                         }
                         else if (pair.second.constantStaging.count(physId))
                         {
-                            memManager.write(node.backend, memId, pair.second.constantStaging.at(physId).data(), sizeBytes);
+                            memManager.write(node.backend, memId, pair.second.constantStaging.at(physId)->data(), sizeBytes);
                         }
                         else if (logicalId != UINT32_MAX && graph.weightSources.count(logicalId))
                         {
@@ -829,7 +829,7 @@ public:
         bool sawMetadata = false;
         std::string invalidCacheReason = "";
         std::unordered_map<std::string, CompiledGraph> tempGraphs;
-        std::unordered_map<uint32_t, std::vector<uint8_t>> tempStaging;
+        std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> tempStaging;
         std::unordered_map<uint32_t, Backend> tempSelectedCachedNodes;
 
         while (std::getline(file, line))
@@ -898,7 +898,7 @@ public:
                 for (auto it = entry["constants"].begin(); it != entry["constants"].end(); ++it)
                 {
                     uint32_t nodeId = std::stoul(it.key());
-                    tempStaging[nodeId] = it.value().get<std::vector<uint8_t>>();
+                    tempStaging[nodeId] = std::make_shared<std::vector<uint8_t>>(it.value().get<std::vector<uint8_t>>());
                 }
             }
             else if (type == "compiled_bucket")
