@@ -13,6 +13,7 @@ from .jobs import (
     get_hw_info,
     start_worker,
     PROJECT_ROOT,
+    KERNELS_DIR
 )
 
 app = Flask(__name__)
@@ -258,6 +259,46 @@ def get_analyze():
             "top_ops": top_ops,
         }
     )
+
+
+@app.get("/api/kernels/list")
+def list_kernel_files():
+    """Recursively lists all kernel files in the kernels directory."""
+    try:
+        files = []
+        # rglob("*") finds all files and directories recursively
+        for path in KERNELS_DIR.rglob("*"):
+            if path.is_file():
+                # Get path relative to the kernels directory for the agent
+                files.append(str(path.relative_to(KERNELS_DIR)))
+        return jsonify({"files": sorted(files)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.get("/api/kernels/read_source")
+def read_kernel_source():
+    """Reads the content of a specific kernel file."""
+    rel_path = request.args.get("path")
+    if not rel_path:
+        return jsonify({"error": "Missing 'path' parameter"}), 400
+
+    try:
+        # Security check: Ensure the path is inside KERNELS_DIR
+        safe_path = (KERNELS_DIR / rel_path).resolve()
+        if not str(safe_path).startswith(str(KERNELS_DIR.resolve())):
+            return (
+                jsonify({"error": "Access denied: Path outside kernels directory"}),
+                403,
+            )
+
+        if not safe_path.exists():
+            return jsonify({"error": "File not found"}), 404
+
+        content = safe_path.read_text()
+        return jsonify({"content": content, "path": rel_path})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

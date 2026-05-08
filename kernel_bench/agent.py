@@ -81,6 +81,31 @@ tools = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_kernel_files",
+            "description": "Recursively list all existing C++ and CUDA kernel files to see what is already implemented.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_kernel_source",
+            "description": "Read the source code of an existing kernel file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The relative path of the file (e.g., 'cpu/general/matmul.hpp').",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
 ]
 
 
@@ -106,6 +131,10 @@ def handle_tool_call(tool_call):
         return call_bench_api("/api/analyze", json_data={"target_model": TARGET_MODEL})
     elif name == "read_benchmarks":
         return call_bench_api("/api/read_benchmarks", json_data=args)
+    elif name == "list_kernel_files":
+        return call_bench_api("/api/kernels/list")
+    elif name == "read_kernel_source":
+        return call_bench_api("/api/kernels/read_source", json_data=args)
     elif name == "submit_and_test_kernel":
         args["target_model"] = TARGET_MODEL
         res = call_bench_api("/api/kernels/test", method="POST", json_data=args)
