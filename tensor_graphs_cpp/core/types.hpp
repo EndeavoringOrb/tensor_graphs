@@ -62,7 +62,7 @@ inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> 
     return stridedIndex;
 }
 
-uint64_t countElements(std::vector<uint32_t> shape)
+inline uint64_t countElements(std::vector<uint32_t> shape)
 {
     uint64_t count = 1;
     for (uint32_t val : shape)
@@ -279,7 +279,7 @@ inline std::string encodeRegionList(const std::vector<Region> &regions)
     return ss.str();
 }
 
-bool isContiguous(const std::vector<uint64_t> &strides, const std::vector<uint32_t> &shape)
+inline bool isContiguous(const std::vector<uint64_t> &strides, const std::vector<uint32_t> &shape)
 {
     int64_t expectedStride = 1;
     for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
@@ -353,12 +353,12 @@ public:
     }
 };
 
-bool isContiguous(const TensorNode &node)
+inline bool isContiguous(const TensorNode &node)
 {
     return isContiguous(node.strides, node.getShape());
 }
 
-uint64_t countElements(const TensorNode &node)
+inline uint64_t countElements(const TensorNode &node)
 {
     return countElements(node.getShape());
 }
@@ -389,12 +389,12 @@ public:
     }
 };
 
-bool isContiguous(const TensorView &view)
+inline bool isContiguous(const TensorView &view)
 {
     return isContiguous(view.strides, view.getShape());
 }
 
-uint64_t countElements(const TensorView &view)
+inline uint64_t countElements(const TensorView &view)
 {
     return countElements(view.getShape());
 }

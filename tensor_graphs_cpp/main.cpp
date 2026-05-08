@@ -186,7 +186,7 @@ void run_flux()
 #endif
     MemoryManager mem(bufferSizes);
 
-    uint32_t width = 256, height = 256;
+    uint32_t width = 512, height = 512;
     uint32_t latent_w = width / 16, latent_h = height / 16;
     uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
 

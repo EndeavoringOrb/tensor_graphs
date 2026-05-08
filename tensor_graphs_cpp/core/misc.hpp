@@ -128,7 +128,7 @@ inline void printNode(const TensorNode &node, const Graph &graph, const std::str
               << "\n-----------------------" << std::endl;
 }
 
-std::string toString(const Region &reg)
+inline std::string toString(const Region &reg)
 {
     std::stringstream ss;
     ss << "[";
@@ -144,7 +144,7 @@ std::string toString(const Region &reg)
     return ss.str();
 }
 
-std::string toString(const OpInstruction &inst)
+inline std::string toString(const OpInstruction &inst)
 {
     std::stringstream ss;
     ss << "OpInstruction\n"
@@ -156,7 +156,7 @@ std::string toString(const OpInstruction &inst)
     return ss.str();
 }
 
-std::string toString(const TensorView &view)
+inline std::string toString(const TensorView &view)
 {
     std::stringstream ss;
     ss << "TensorView\n"

@@ -476,7 +476,7 @@ inline std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)
     Error::throw_err(ss.str());
 }
 
-bool isIsomorphic(const Graph &g1, uint32_t root1, const Graph &g2, uint32_t root2)
+inline bool isIsomorphic(const Graph &g1, uint32_t root1, const Graph &g2, uint32_t root2)
 {
     const TensorNode &n1 = g1.getNode(root1);
     const TensorNode &n2 = g2.getNode(root2);
