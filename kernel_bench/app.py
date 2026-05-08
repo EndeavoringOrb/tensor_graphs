@@ -176,9 +176,16 @@ def get_read_benchmarks():
 def get_analyze():
     target_model = request.args.get("target_model", "gemma-3-270m")
     records_path = PROJECT_ROOT / "benchmarks" / "records.jsonl"
-    cache_path = PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.jsonl"
+    if target_model == "gemma-3-270m":
+        cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.jsonl"]
+    elif target_model == "flux-klein-4b":
+        cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"flux-text.jsonl",
+                       PROJECT_ROOT / "dirty_region_caches" / f"flux-trans.jsonl",
+                       PROJECT_ROOT / "dirty_region_caches" / f"flux-vae.jsonl"]
+    else:
+        return jsonify({"error": f"Unrecognized target model \"{target_model}\""}), 404
 
-    if not records_path.exists() or not cache_path.exists():
+    if not records_path.exists() or any(not cache_path.exists() for cache_path in cache_paths):
         return jsonify({"error": "No benchmark or cache data available yet."}), 404
 
     bench_map = {}
@@ -198,43 +205,44 @@ def get_analyze():
     chain_stats = defaultdict(lambda: {"time": 0.0, "count": 0})
     op_type_stats = defaultdict(float)
 
-    with open(cache_path, "r") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            entry = json.loads(line)
-            if entry.get("type") != "compiled_bucket":
-                continue
+    for cache_path in cache_paths:
+        with open(cache_path, "r") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                if entry.get("type") != "compiled_bucket":
+                    continue
 
-            graph = entry["graph"]
-            nodes = graph["nodesMap"]
+                graph = entry["graph"]
+                nodes = graph["nodesMap"]
 
-            for inst in graph["instructions"]:
-                node_id = str(inst["nodeId"])
-                node = nodes[node_id]
-                uid = inst["fullKernelId"]
-                extracted_uids.add(uid)
+                for inst in graph["instructions"]:
+                    node_id = str(inst["nodeId"])
+                    node = nodes[node_id]
+                    uid = inst["fullKernelId"]
+                    extracted_uids.add(uid)
 
-                op_name = node["opType"]
-                if op_name == "FUSED":
-                    op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
+                    op_name = node["opType"]
+                    if op_name == "FUSED":
+                        op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
 
-                shape = tuple(node["shape"])
-                strides = tuple(node["strides"])
-                bench_key = (uid, shape, strides)
+                    shape = tuple(node["shape"])
+                    strides = tuple(node["strides"])
+                    bench_key = (uid, shape, strides)
 
-                runtime = bench_map.get(bench_key, 0.0)
-                total_estimated_time += runtime
-                op_type_stats[op_name] += runtime
+                    runtime = bench_map.get(bench_key, 0.0)
+                    total_estimated_time += runtime
+                    op_type_stats[op_name] += runtime
 
-                # Length-1 chain registration
-                input_shapes = [
-                    nodes[str(pid)]["shape"] if str(pid) in nodes else []
-                    for pid in node["parentIds"]
-                ]
-                identity = f"{op_name}({input_shapes}->{list(shape)})"
-                chain_stats[identity]["time"] += runtime
-                chain_stats[identity]["count"] += 1
+                    # Length-1 chain registration
+                    input_shapes = [
+                        nodes[str(pid)]["shape"] if str(pid) in nodes else []
+                        for pid in node["parentIds"]
+                    ]
+                    identity = f"{op_name}({input_shapes}->{list(shape)})"
+                    chain_stats[identity]["time"] += runtime
+                    chain_stats[identity]["count"] += 1
 
     top_chains = sorted(
         [
