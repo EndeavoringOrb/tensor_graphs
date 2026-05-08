@@ -1175,30 +1175,32 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
               {
                 std::string na = std::filesystem::path(a).filename().string();
                 std::string nb = std::filesystem::path(b).filename().string();
-                return std::stoi(na) < std::stoi(nb); });
+                return a < b; });
     for (const std::string &testDir : testDirs)
     {
         total++;
-        std::string infoPath = testDir + "/info.json";
+        std::string infoPath = testDir + "/info.bin";
         std::string dataPath = testDir + "/data.safetensors";
-        std::ifstream infoFile(infoPath);
+        std::ifstream infoFile(infoPath, std::ios::binary);
         if (!infoFile.is_open())
             continue;
-        json info;
-        infoFile >> info;
-        OpType opType = info["optype"].get<OpType>();
+
+        BinaryReader br(infoFile);
+        Record rec;
+        br.read(rec);
+        OpType opType = static_cast<OpType>(rec.kernelUid);
+
         SafetensorsLoader loader(dataPath);
         std::vector<std::vector<uint8_t>> inputData;
         std::vector<TensorView> inViews;
         std::vector<TensorNode> dummyInputNodes;
         std::vector<const void *> inPtrs;
         Graph dummyGraph;
-        int i = 0;
-        for (const auto &inpJson : info["inputs"])
+        for (size_t i = 0; i < rec.inputShapes.size(); ++i)
         {
-            std::vector<uint32_t> shape = inpJson["shape"].get<std::vector<uint32_t>>();
-            std::vector<uint64_t> strides = inpJson["strides"].get<std::vector<uint64_t>>();
-            DType dtype = inpJson["dtype"].get<DType>();
+            std::vector<uint32_t> shape = rec.inputShapes[i];
+            std::vector<uint64_t> strides = rec.inputStrides[i];
+            DType dtype = rec.inputDTypes[i];
             std::string tensorName = "input." + std::to_string(i);
             uint64_t sizeBytes = countElements(shape) * getDTypeSize(dtype);
             std::vector<uint8_t> data(sizeBytes);
@@ -1214,15 +1216,13 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             dummyInputNodes.push_back(node);
             if (dtype == DType::INT32)
                 dummyGraph.constantStaging[node.id] = std::make_shared<std::vector<uint8_t>>(inputData.back());
-            i++;
         }
         for (auto &vec : inputData)
             inPtrs.push_back(vec.data());
 
-        json outJson = info["output"];
-        std::vector<uint32_t> outShape = outJson["shape"].get<std::vector<uint32_t>>();
-        std::vector<uint64_t> outStrides = outJson["strides"].get<std::vector<uint64_t>>();
-        DType outDType = outJson["dtype"].get<DType>();
+        std::vector<uint32_t> outShape = rec.outputShapes[0];
+        std::vector<uint64_t> outStrides = rec.outputStrides[0];
+        DType outDType = rec.outputDTypes[0];
         uint64_t outSizeBytes = countElements(outShape) * getDTypeSize(outDType);
         std::vector<uint8_t> expectedData(outSizeBytes);
         loader.loadTensor("output", expectedData.data(), outSizeBytes);
@@ -1235,7 +1235,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         outView.dtype = outDType;
         std::vector<TensorView> outViews = {outView};
         TensorNode outNode;
-        outNode.id = i;
+        outNode.id = (uint32_t)rec.inputShapes.size();
         outNode.dtype = outDType;
         outNode.setShape(outShape);
         outNode.strides = outStrides;
