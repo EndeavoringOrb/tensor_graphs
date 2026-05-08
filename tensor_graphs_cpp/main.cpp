@@ -218,7 +218,16 @@ void run_flux()
 
     std::cout << "Executing Text Encoder..." << std::endl;
     std::vector<int32_t> input_ids(txt_seq, 151643);
-    input_ids[0] = 2; // Fake token padding
+    // "cat"
+    input_ids[0] = 151644;
+    input_ids[1] = 872;
+    input_ids[2] = 198;
+    input_ids[3] = 4616;
+    input_ids[4] = 151645;
+    input_ids[5] = 198;
+    input_ids[6] = 151644;
+    input_ids[7] = 77091;
+    input_ids[8] = 198;
     std::unordered_map<uint32_t, const void *> text_inputs = {{in_ids, input_ids.data()}};
     const float *text_emb_ptr = static_cast<const float *>(sess_text.run(text_inputs));
 #ifdef USE_CUDA
