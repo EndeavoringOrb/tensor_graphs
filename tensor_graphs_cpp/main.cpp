@@ -189,14 +189,18 @@ void run_flux()
     uint32_t latent_w = width / 16, latent_h = height / 16;
     uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
 
+    auto shared_alloc = std::make_shared<IdAllocator>();
+
     std::cout << "Building FLUX Text Encoder..." << std::endl;
     Graph g_text;
+    g_text.allocator = shared_alloc;
     FluxTextEncoder text_encoder(cfg, g_text, mem, "flux-klein-4b/text_encoder");
     uint32_t in_ids = g_text.input({1, txt_seq}, DType::INT32, {}, StorageType::PERSISTENT);
     Session sess_text(g_text, mem, text_encoder.build_graph(in_ids), "dirty_region_caches/flux-text.jsonl");
 
     std::cout << "Building FLUX Transformer..." << std::endl;
     Graph g_trans;
+    g_trans.allocator = shared_alloc;
     FluxTransformer trans(cfg, g_trans, mem, "flux-klein-4b/transformer", latent_h, latent_w);
     uint32_t in_latent = g_trans.input({1, cfg.latent_channels, latent_h, latent_w}, DType::FLOAT32, {}, StorageType::PERSISTENT);
     uint32_t in_txt_emb = g_trans.input({1, txt_seq, cfg.text_dim}, DType::FLOAT32, {}, StorageType::PERSISTENT);
@@ -207,6 +211,7 @@ void run_flux()
 
     std::cout << "Building FLUX VAE..." << std::endl;
     Graph g_vae;
+    g_vae.allocator = shared_alloc;
     FluxVAEDecoder vae(cfg, g_vae, mem, "flux-klein-4b/vae", latent_h, latent_w);
     uint32_t in_vae_latent = g_vae.input({1, cfg.vae_channels, latent_h, latent_w}, DType::FLOAT32, {}, StorageType::PERSISTENT);
     Session sess_vae(g_vae, mem, vae.build_graph(in_vae_latent), "dirty_region_caches/flux-vae.jsonl");
