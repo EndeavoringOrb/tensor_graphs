@@ -121,7 +121,7 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
 
     if (pRoot != UINT32_MAX)
     {
-        auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, backend, inNodes, outNode, false, true, true);
+        auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, backend, inNodes, outNode, false);
         for (uint64_t uid : matches)
         {
             const auto &kernel = KernelRegistry::get().getKernel(uid);
@@ -1090,7 +1090,7 @@ struct ConstantFolding : public Rule
         outNode.backend = Backend::CPU;
 
         auto matches = KernelRegistry::get().findMatchingKernels(
-            eNode.opType, eNode.opName, Backend::CPU, inputNodes, outNode, false, true, true);
+            eNode.opType, eNode.opName, Backend::CPU, inputNodes, outNode, false);
 
         if (matches.empty())
             return;
