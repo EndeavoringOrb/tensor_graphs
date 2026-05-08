@@ -581,7 +581,10 @@ public:
 
         incrementBucketCount(key);
         saveBucketCounts();
+        ProgressTimer runTimer(0, "", true);
         executor->run(inputs, *compiled);
+        double elapsed = runTimer.getElapsed();
+        std::cout << "[Session.run] execution finished in " << std::to_string(elapsed) << "s" << std::endl;
 
         const OpInstruction &lastInst = compiled->instructions[compiled->instructions.size() - 1];
         Backend backend = lastInst.backend;

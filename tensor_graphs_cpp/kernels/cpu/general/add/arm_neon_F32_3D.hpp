@@ -12,8 +12,6 @@ inline bool matchAddF32_3D_NEON(const std::vector<TensorNode> &inputs, const Ten
         return false;
     // Only match if both inputs and output are contiguous to allow simple linear NEON processing
     return inputs[0].getShape().size() == 3 &&
-           isContiguous(inputs[0]) &&
-           isContiguous(inputs[1]) &&
            isContiguous(output);
 }
 
