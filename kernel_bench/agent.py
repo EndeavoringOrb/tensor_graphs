@@ -153,8 +153,8 @@ def handle_tool_call(tool_call):
     return {"error": f"Unknown tool {name}"}
 
 
-def run_agentic_loop():
-    messages = [
+def get_initial_messages():
+    return [
         {
             "role": "system",
             "content": (
@@ -172,6 +172,10 @@ def run_agentic_loop():
             "content": "Begin optimizing the kernels. First get hardware info and performance analysis.",
         },
     ]
+
+
+def run_agentic_loop():
+    messages = get_initial_messages()
 
     print("Starting Autonomous Optimization Loop...")
 
@@ -191,8 +195,18 @@ def run_agentic_loop():
             messages.append(message)
 
             if message.get("tool_calls"):
+                reset_context = False
                 for tool_call in message["tool_calls"]:
                     result = handle_tool_call(tool_call)
+
+                    # Watch for a successful kernel job run
+                    if tool_call["function"]["name"] == "submit_and_test_kernel":
+                        if (
+                            isinstance(result, dict)
+                            and result.get("status") == "completed"
+                        ):
+                            reset_context = True
+
                     content = json.dumps(result, indent=2)
                     if len(content) > 10000:
                         content = (
@@ -206,6 +220,14 @@ def run_agentic_loop():
                             "content": content,
                         }
                     )
+
+                # Reset to start fresh and use real codebase/benchmarks as state
+                if reset_context:
+                    print(
+                        "\n[Agent] Job completed successfully! Resetting context to start fresh...\n"
+                    )
+                    messages = get_initial_messages()
+
             else:
                 print(f"\n[Agent says]:\n{message.get('content')}\n")
                 messages.append(
