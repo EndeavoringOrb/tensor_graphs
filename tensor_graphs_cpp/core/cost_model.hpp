@@ -108,7 +108,7 @@ inline void from_json(const json &j, Record &r)
 struct CostModel
 {
     std::unordered_map<uint64_t, std::vector<Record>> records;
-    std::unordered_set<std::string> loggedCalls;
+    std::unordered_set<size_t> loggedCalls; // <-- CHANGE TO size_t
     std::ofstream callFile;
     std::mutex logMtx;
     bool doneWarning = false;
@@ -126,7 +126,7 @@ struct CostModel
                 while (std::getline(inFile, line))
                 {
                     if (!line.empty())
-                        loggedCalls.insert(line);
+                        loggedCalls.insert(std::hash<std::string>{}(line)); // <-- HASH IT
                 }
             }
         }
@@ -226,11 +226,12 @@ struct CostModel
                 r.runTime = 0.0f;
                 json callObj = r;
                 std::string callStr = callObj.dump();
+                size_t callHash = std::hash<std::string>{}(callStr);
 
                 std::lock_guard<std::mutex> lock(logMtx);
-                if (loggedCalls.find(callStr) == loggedCalls.end())
+                if (loggedCalls.find(callHash) == loggedCalls.end())
                 {
-                    loggedCalls.insert(callStr);
+                    loggedCalls.insert(callHash);
                     if (callFile.is_open())
                     {
                         callFile << callStr << "\n";
@@ -279,11 +280,12 @@ struct CostModel
 
             json callObj = r;
             std::string callStr = callObj.dump();
+            size_t callHash = std::hash<std::string>{}(callStr);
 
             std::lock_guard<std::mutex> lock(logMtx);
-            if (loggedCalls.find(callStr) == loggedCalls.end())
+            if (loggedCalls.find(callHash) == loggedCalls.end())
             {
-                loggedCalls.insert(callStr);
+                loggedCalls.insert(callHash);
                 if (callFile.is_open())
                 {
                     callFile << callStr << "\n";
