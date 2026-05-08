@@ -237,7 +237,7 @@ def match_pattern(concrete_node, pattern_node, variables, binding) -> bool:
 
     # 3. Constant value matching
     if pattern_node.op_type == OpType.CONSTANT:
-        return np.isclose(
+        return np.allclose(
             concrete_node.attrs.get("value"), pattern_node.attrs.get("value")
         )
 

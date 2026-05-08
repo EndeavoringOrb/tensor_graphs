@@ -4,6 +4,7 @@
 #include <string>
 #include <chrono>
 #include <cmath>
+#include <random>
 
 #if defined(_WIN32)
 #include <float.h>
@@ -243,7 +244,13 @@ void run_flux()
 
     int num_steps = 4;
     std::vector<float> schedule = get_flux_schedule(num_steps, img_seq);
-    std::vector<float> z(1 * cfg.latent_channels * latent_h * latent_w, 0.1f); // Fake noise for testing
+    std::vector<float> z(1 * cfg.latent_channels * latent_h * latent_w);
+    std::mt19937 gen(42);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    for (size_t j = 0; j < z.size(); ++j)
+    {
+        z[j] = dist(gen);
+    }
 
     for (int i = 0; i < num_steps; ++i)
     {
@@ -271,10 +278,26 @@ void run_flux()
 #endif
 
     std::vector<uint8_t> image_data(height * width * 3);
-    for (size_t i = 0; i < height * width * 3; ++i)
+    for (uint32_t y = 0; y < height; ++y)
     {
-        float val = std::max(0.0f, std::min(1.0f, (img_ptr[i] + 1.0f) * 0.5f));
-        image_data[i] = static_cast<uint8_t>(val * 255.0f);
+        for (uint32_t x = 0; x < width; ++x)
+        {
+            // Extract from planar CHW format
+            float r = img_ptr[0 * height * width + y * width + x];
+            float g = img_ptr[1 * height * width + y * width + x];
+            float b = img_ptr[2 * height * width + y * width + x];
+
+            // Normalize [-1, 1] to [0, 1]
+            r = std::max(0.0f, std::min(1.0f, (r + 1.0f) * 0.5f));
+            g = std::max(0.0f, std::min(1.0f, (g + 1.0f) * 0.5f));
+            b = std::max(0.0f, std::min(1.0f, (b + 1.0f) * 0.5f));
+
+            // Write to interleaved HWC format
+            uint32_t idx = (y * width + x) * 3;
+            image_data[idx + 0] = static_cast<uint8_t>(r * 255.0f);
+            image_data[idx + 1] = static_cast<uint8_t>(g * 255.0f);
+            image_data[idx + 2] = static_cast<uint8_t>(b * 255.0f);
+        }
     }
     stbi_write_png("flux_output.png", width, height, 3, image_data.data(), width * 3);
     std::cout << "Saved flux_output.png successfully!" << std::endl;

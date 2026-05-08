@@ -286,6 +286,6 @@ public:
 
         int32_t sh_out[] = {1, (int32_t)latent_h, (int32_t)latent_w, (int32_t)cfg.latent_channels};
         int32_t p_out[] = {0, 3, 1, 2};
-        return g.permute(g.reshape(output, g.constant({4}, sh_out, DType::INT32)), g.constant({4}, p_out, DType::INT32));
+        return g.contiguous(g.permute(g.reshape(output, g.constant({4}, sh_out, DType::INT32)), g.constant({4}, p_out, DType::INT32)));
     }
 };
