@@ -297,6 +297,7 @@ private:
 
         entry["constants"] = constantsObj;
         file << entry.dump() << "\n";
+        std::cout << "[Session.persistCache] finished writing cache" << std::endl;
     }
 
 public:
