@@ -1384,7 +1384,7 @@ private:
         std::unordered_map<uint32_t, uint32_t> eclassToPhys;
         for (uint32_t eclassId : topo)
         {
-            eclassToPhys[eclassId] = GlobalNextPhysId.fetch_add(1);
+            eclassToPhys[eclassId] = GlobalNextPhysId++;
         }
 
         std::unordered_map<uint32_t, uint32_t> lastPhysIdForLogical;

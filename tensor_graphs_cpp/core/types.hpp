@@ -17,7 +17,7 @@
 #include "core/serialization.hpp"
 using json = nlohmann::json;
 
-inline std::atomic<uint32_t> GlobalNextPhysId{0x80000000};
+inline uint32_t GlobalNextPhysId = 0x80000000;
 
 // --- OS Detection ---
 #if defined(_WIN32) || defined(_WIN64)
@@ -705,7 +705,7 @@ struct CompiledGraph
         {
             if (pair.first >= 0x80000000)
             {
-                oldToNew[pair.first] = GlobalNextPhysId.fetch_add(1);
+                oldToNew[pair.first] = GlobalNextPhysId++;
             }
         }
 
