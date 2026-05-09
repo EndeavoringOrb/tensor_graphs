@@ -7,7 +7,7 @@ inline bool matchSinF32_ND(const std::vector<TensorNode> &inputs, const TensorNo
 {
     if (inputs.size() != 1)
         return false;
-    return inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && isContiguous(inputs[0]) && isContiguous(output);
+    return inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && isContiguous(output);
 }
 
 inline void runSinF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

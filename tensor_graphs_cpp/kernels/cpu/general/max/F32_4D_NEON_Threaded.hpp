@@ -10,7 +10,7 @@
 
 inline bool matchMaxF32_4D_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs[0].dtype != DType::FLOAT32 || !isContiguous(inputs[0]) || !isContiguous(output))
+    if (inputs[0].dtype != DType::FLOAT32 || !isContiguous(output))
         return false;
     return inputs[0].getShape().size() == 4;
 }

@@ -30,7 +30,7 @@ inline bool matchCastBF16_F32_ND(const std::vector<TensorNode> &inputs, const Te
         return false;
 
     // Reference implementation requires contiguity for flat iteration
-    if (!isContiguous(inputs[0]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
 
     return true;

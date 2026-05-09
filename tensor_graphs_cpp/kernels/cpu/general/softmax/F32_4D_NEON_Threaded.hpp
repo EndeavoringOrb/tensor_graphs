@@ -10,7 +10,7 @@
 
 inline bool matchSoftmaxF32_4D_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs[0].getShape().size() == 4 && isContiguous(inputs[0]) && isContiguous(output);
+    return inputs[0].getShape().size() == 4 && isContiguous(output);
 }
 
 inline void runSoftmaxF32_4D_Threaded(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

@@ -8,7 +8,7 @@
 
 inline bool matchDivF32_ND_Fast(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs[0].getShape() == inputs[1].getShape() && isContiguous(inputs[0]) && isContiguous(inputs[1]) && isContiguous(output);
+    return inputs[0].getShape() == inputs[1].getShape() && isContiguous(output);
 }
 
 inline void runDivF32_ND_Fast(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

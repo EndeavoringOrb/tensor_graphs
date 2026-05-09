@@ -11,7 +11,7 @@ inline bool matchSoftmaxF32_NEON(const std::vector<TensorNode> &inputs, const Te
     if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
     // Softmax typically operates on the last dimension of a 3D tensor [Batch, Seq, Hidden]
-    if (inputs[0].getShape().size() != 3 || !isContiguous(inputs[0]) || !isContiguous(output))
+    if (inputs[0].getShape().size() != 3 || !isContiguous(output))
         return false;
     return true;
 }

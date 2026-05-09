@@ -7,7 +7,7 @@ inline bool matchReshapeView(const std::vector<TensorNode> &inputs, const Tensor
 {
     if (inputs.size() != 2)
         return false;
-    return isContiguous(inputs[0]) && countElements(inputs[0].getShape()) == countElements(output.getShape());
+    return countElements(inputs[0].getShape()) == countElements(output.getShape());
 }
 
 inline void inferViewReshape(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)

@@ -7,7 +7,7 @@
 
 inline bool matchGeluF32_3D_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs[0].getShape().size() == 3 && isContiguous(inputs[0]) && isContiguous(output);
+    return inputs[0].getShape().size() == 3 && isContiguous(output);
 }
 
 inline void runGeluF32_3D_NEON(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

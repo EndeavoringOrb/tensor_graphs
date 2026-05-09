@@ -8,7 +8,7 @@
 
 inline bool matchGeluF32_3D_Inplace_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs[0].getShape().size() == 3 && isContiguous(inputs[0]) && isContiguous(output) && inputs[0].storageType != StorageType::PERSISTENT;
+    return inputs[0].getShape().size() == 3 && isContiguous(output) && inputs[0].storageType != StorageType::PERSISTENT;
 }
 
 inline void runGeluF32_3D_Inplace_Threaded(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

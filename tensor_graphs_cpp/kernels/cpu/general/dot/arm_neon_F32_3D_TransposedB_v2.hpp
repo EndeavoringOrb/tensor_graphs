@@ -21,7 +21,7 @@ inline bool matchDotF32_3D_TransposedB_v2(const std::vector<TensorNode> &inputs,
         return false;
     if (so[0] != s0[0] || so[1] != s0[1] || so[2] != s1[2])
         return false;
-    if (!isContiguous(output) || !isContiguous(inputs[0]))
+    if (!isContiguous(output))
         return false;
     if (inputs[1].strides[1] != 1)
         return false;

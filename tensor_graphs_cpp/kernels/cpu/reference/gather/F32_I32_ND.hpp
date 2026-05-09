@@ -23,7 +23,7 @@ inline bool matchGatherF32_I32_ND(const std::vector<TensorNode> &inputs, const T
         return false;
 
     // Reference implementation requires contiguity
-    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
 
     return true;

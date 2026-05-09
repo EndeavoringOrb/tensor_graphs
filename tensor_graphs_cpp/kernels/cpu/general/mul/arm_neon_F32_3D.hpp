@@ -11,8 +11,6 @@ inline bool matchMulF32_3D_NEON(const std::vector<TensorNode> &inputs, const Ten
     if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
         return false;
     return inputs[0].getShape().size() == 3 &&
-           isContiguous(inputs[0]) &&
-           isContiguous(inputs[1]) &&
            isContiguous(output);
 }
 
