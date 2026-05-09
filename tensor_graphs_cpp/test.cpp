@@ -29,6 +29,7 @@ void fillRandom(void *ptr, size_t elements, DType dtype)
     static std::mt19937 gen(42);
     switch (dtype)
     {
+    case DType::ANY:
     case DType::FLOAT32:
     {
         float *fptr = static_cast<float *>(ptr);

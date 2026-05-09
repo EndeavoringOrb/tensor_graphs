@@ -126,7 +126,7 @@ class BinaryReader:
             "constStaging": self.read_vector(lambda: (self.read_u32(), self.f.read(self.read_u32())))
         }
 
-def format_constants(raw_bytes, dtype):
+def _format_constants(raw_bytes, dtype):
     if not raw_bytes: return ""
     dtypes = ["FLOAT32", "INT32", "BF16", "UINT8"]
     dt_str = dtypes[dtype] if isinstance(dtype, int) and dtype < len(dtypes) else str(dtype)
@@ -138,6 +138,14 @@ def format_constants(raw_bytes, dtype):
         count = len(raw_bytes) // 4
         return list(struct.unpack(f"<{count}i", raw_bytes))
     return list(raw_bytes)
+
+def format_constants(raw_bytes, dtype):
+    formatted = _format_constants(raw_bytes, dtype)
+    if len(formatted) > 10:
+        formatted = str(formatted[:10]) + "..."
+    else:
+        formatted = str(formatted)
+    return formatted
 
 def load_uids_from_cpp(header_path):
     uid_to_name = {}
