@@ -18,8 +18,6 @@ inline bool matchAddF32_3D_Broadcast0_Inplace(const std::vector<TensorNode> &inp
         return false;
     if (!isContiguous(output))
         return false;
-    if (!isContiguous(inputs[0]))
-        return false;
     if (inputs[0].storageType == StorageType::PERSISTENT)
         return false;
 

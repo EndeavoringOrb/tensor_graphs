@@ -1,3 +1,4 @@
+# File: build.py
 import argparse
 import os
 import sys
@@ -36,6 +37,54 @@ REGISTER_MACROS = [
     "REGISTER_KERNEL_INPLACE",
     "REGISTER_KERNEL_VIEW",
 ]
+
+
+def validate_kernel_contiguity_logic(rel_path, content):
+    """
+    Checks for the 'Rule of Thumb': Match functions should not manually check
+    input contiguity if the registration macro already specifies it.
+
+    Manually checking 'isContiguous(inputs[i])' inside a match function
+    breaks the Planner's ability to 'repair' the graph by inserting
+    CONTIGUOUS nodes, because the Planner bypasses registration-level
+    contiguity checks but cannot bypass hardcoded ones in the match function.
+    """
+
+    # 1. Find all registration macros in the file
+    # Pattern captures: Macro Type, Match Function Name, and the arguments list
+    reg_pattern = r"(REGISTER_[\w_]+)\s*\(\s*.*?\s*,\s*.*?\s*,\s*([\w_]+)\s*,.*?\)\s*;"
+    registrations = re.findall(reg_pattern, content, re.DOTALL)
+
+    for macro_type, match_func_name in registrations:
+        # 2. Extract the body of the match function
+        # Simple regex to find the function body. Note: might be fragile for complex nesting,
+        # but kernel match functions are typically flat and simple.
+        func_body_pattern = rf"inline\s+bool\s+{match_func_name}\s*\([^{{]+\{{(.*?)\}}"
+        func_body_match = re.search(func_body_pattern, content, re.DOTALL)
+
+        if func_body_match:
+            body = func_body_match.group(1)
+
+            # 3. Look for forbidden manual contiguity checks on inputs or inViews
+            # We allow isContiguous(output) as that is often required by kernels.
+            forbidden_pattern = r"isContiguous\s*\(\s*(inputs|inViews)\s*\["
+
+            if re.search(forbidden_pattern, body):
+                console.print(
+                    Panel(
+                        f"[bold red]CONTIGUITY LOGIC ERROR:[/bold red] in [cyan]{rel_path}[/cyan]\n\n"
+                        f"The match function [yellow]{match_func_name}[/yellow] contains a manual "
+                        f"contiguity check on an input tensor.\n\n"
+                        f"[white]Reason:[/white] Hardcoding 'isContiguous(inputs[i])' in the match function "
+                        f"prevents the Planner from performing 'Contiguity Repair'.\n\n"
+                        f"[white]Fix:[/white] Remove the manual check from the C++ function and ensure "
+                        f"the corresponding index in the registration macro's contiguity "
+                        f"list is set to [green]true[/green].",
+                        title="Architecture Violation",
+                        border_style="red",
+                    )
+                )
+                sys.exit(1)
 
 
 def get_compiler_cmd(fname: str):
@@ -136,6 +185,9 @@ def generate_kernel_uids(core_seed):
                     with open(path, "r", encoding="utf-8", errors="ignore") as f_in:
                         content = f_in.read()
 
+                    # LINT: Check for redundant contiguity logic
+                    validate_kernel_contiguity_logic(rel_path, content)
+
                     reg_count = 0
                     for macro in REGISTER_MACROS:
                         # Use \b for word boundary to avoid matching substring macros
@@ -155,6 +207,9 @@ def generate_kernel_uids(core_seed):
                         )
                         sys.exit(1)
                 except Exception as e:
+                    # If it's the specific exit we triggered, just propagate
+                    if isinstance(e, SystemExit):
+                        raise e
                     console.print(
                         f"[yellow]Warning: Could not scan {rel_path} for macros: {e}[/yellow]"
                     )

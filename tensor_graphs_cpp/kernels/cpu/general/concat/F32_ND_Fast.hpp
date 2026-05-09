@@ -10,9 +10,6 @@ inline bool matchConcatF32_Fast(const std::vector<TensorNode> &inputs, const Ten
 {
     if (inputs.size() < 2 || output.dtype != DType::FLOAT32 || !isContiguous(output))
         return false;
-    for (size_t i = 0; i < inputs.size() - 1; ++i)
-        if (!isContiguous(inputs[i]))
-            return false;
     return true;
 }
 
