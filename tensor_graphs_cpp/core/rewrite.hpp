@@ -988,10 +988,16 @@ struct ContiguousElimination : public Rule
 
 struct ConstantFolding : public Rule
 {
+    std::unordered_set<uint32_t> visited_enodes; // Match guard
+
     std::string name() const override { return "ConstantFolding"; }
 
     bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
     {
+        // 1. Guard against already processed nodes
+        if (visited_enodes.count(eNodeIdx))
+            return false;
+
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
 
         if (eNode.opType == OpType::INPUT)
@@ -1032,6 +1038,7 @@ struct ConstantFolding : public Rule
 
     void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical) override
     {
+        visited_enodes.insert(eNodeIdx); // Mark as visited
         const ENode eNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.find(egraph.getENodeEClass(eNodeIdx));
 
