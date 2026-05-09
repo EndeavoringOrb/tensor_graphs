@@ -209,7 +209,7 @@ struct KernelEntry
             for (size_t i = 0; i < inputs.size(); ++i)
             {
                 size_t ruleIdx = isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
-                if (ruleIdx < dtypes.size() && (dtypes[ruleIdx] == DType::ANY || inputs[i].dtype != dtypes[ruleIdx]))
+                if (ruleIdx < dtypes.size() && dtypes[ruleIdx] != DType::ANY && inputs[i].dtype != dtypes[ruleIdx])
                     return false;
             }
         }
