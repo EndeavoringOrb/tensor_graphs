@@ -10,15 +10,11 @@
 
 inline bool matchAddF32_3D_Broadcast0_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
     if (inputs[0].getShape().size() != 3 || inputs[1].getShape().size() != 3)
         return false;
     if (inputs[0].getShape() != output.getShape())
         return false;
     if (!isContiguous(output))
-        return false;
-    if (inputs[0].storageType == StorageType::PERSISTENT)
         return false;
 
     if (inputs[1].strides[0] != 0)

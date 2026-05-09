@@ -6,10 +6,6 @@
 
 inline bool matchAddF32_3D_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
     // Only match if both inputs and output are contiguous to allow simple linear NEON processing
     return inputs[0].getShape().size() == 3 &&
            isContiguous(output);

@@ -8,12 +8,6 @@
 
 inline bool matchDotTransposedBF16(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::BF16)
-        return false;
-    if (output.dtype != DType::FLOAT32)
-        return false;
 
     auto sX = inputs[0].getShape();
     auto sW = inputs[1].getShape();

@@ -8,7 +8,7 @@
 
 inline bool matchConcatF32_Fast(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() < 2 || output.dtype != DType::FLOAT32 || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
     return true;
 }

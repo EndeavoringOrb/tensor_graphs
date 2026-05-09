@@ -9,8 +9,6 @@
 
 inline bool matchBF16TransposedGEMM_v2(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::BF16)
-        return false;
     auto sX = inputs[0].getShape(); // [B, S, K]
     auto sW = inputs[1].getShape(); // [N, K]
     auto sO = output.getShape();    // [B, S, N]
