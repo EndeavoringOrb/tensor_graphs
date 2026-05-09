@@ -350,28 +350,35 @@ public:
     {
         bool isVariadic = (op == OpType::CONCAT);
         if (op == OpType::FUSED && refFactory != nullptr && numInputs >= 2 &&
-            dummyShapes.size() == numInputs && dtypes.size() == numInputs)
+            dummyShapes.size() == numInputs && dtypes.size() == numInputs && dtypes.back() == DType::INT32)
         {
-            Graph dummyGraph;
-            std::vector<uint32_t> dummyInp;
-            for (size_t i = 0; i < numInputs; ++i)
+            try
             {
-                dummyInp.push_back(dummyGraph.input(dummyShapes[i], dtypes[i]));
-            }
-            uint32_t rootId = refFactory(dummyInp, dummyGraph);
+                Graph dummyGraph;
+                std::vector<uint32_t> dummyInp;
+                for (size_t i = 0; i < numInputs; ++i)
+                {
+                    dummyInp.push_back(dummyGraph.input(dummyShapes[i], dtypes[i]));
+                }
+                uint32_t rootId = refFactory(dummyInp, dummyGraph);
 
-            Graph pureGraph;
-            std::vector<uint32_t> pureInp;
-            for (size_t i = 0; i < numInputs; ++i)
-            {
-                pureInp.push_back(pureGraph.input(dummyShapes[i], dtypes[i]));
-            }
-            std::vector<uint32_t> tensors(pureInp.begin(), pureInp.end() - 1);
-            uint32_t pureRootId = pureGraph.concat(tensors, pureInp.back());
+                Graph pureGraph;
+                std::vector<uint32_t> pureInp;
+                for (size_t i = 0; i < numInputs; ++i)
+                {
+                    pureInp.push_back(pureGraph.input(dummyShapes[i], dtypes[i]));
+                }
+                std::vector<uint32_t> tensors(pureInp.begin(), pureInp.end() - 1);
+                uint32_t pureRootId = pureGraph.concat(tensors, pureInp.back());
 
-            if (isIsomorphic(dummyGraph, rootId, pureGraph, pureRootId))
+                if (isIsomorphic(dummyGraph, rootId, pureGraph, pureRootId))
+                {
+                    isVariadic = true;
+                }
+            }
+            catch (const std::exception &e)
             {
-                isVariadic = true;
+                std::cerr << "[KernelRegistry.registerKernel] failed to ascertain if isVariadic: " << e.what() << std::endl;
             }
         }
 
