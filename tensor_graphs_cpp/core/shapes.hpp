@@ -505,11 +505,17 @@ struct ShapePropagator
         case OpType::NEGATE:
         case OpType::CAST:
         case OpType::TRIU:
-        case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
         case OpType::SCATTER:
         {
             graph.getNode(nodeId).setShape(graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape());
+            break;
+        }
+        case OpType::COPY_TO:
+        {
+            graph.getNode(nodeId).setShape(graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape());
+            graph.getNode(nodeId).strides = graph.getNode(graph.getNode(nodeId).parentIds[0]).strides;
+            graph.getNode(nodeId).viewOffset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
             break;
         }
         case OpType::SUM:

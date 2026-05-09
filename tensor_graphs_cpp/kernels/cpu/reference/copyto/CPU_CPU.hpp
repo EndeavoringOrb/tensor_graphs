@@ -30,6 +30,9 @@ inline bool matchCopyTo_CPU_CPU(const std::vector<TensorNode> &inputs, const Ten
     if (inputs[0].getShape() != output.getShape())
         return false;
 
+    if (inputs[0].strides != output.strides)
+        return false;
+
     return true;
 }
 

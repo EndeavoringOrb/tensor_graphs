@@ -143,7 +143,7 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
             n.leafId = leafId;
 
             // AUTOMATICALLY zero the offset if the kernel allocates fresh physical memory
-            if (kernel.isView || kernel.inplace)
+            if (kernel.isView || kernel.inplace || op == OpType::COPY_TO)
             {
                 n.strides = st;
                 n.viewOffset = viewOffset;
@@ -167,8 +167,7 @@ inline uint32_t copyToBackend(EGraph &egraph, uint32_t classId, Backend targetBa
     if (cls.backend == targetBackend)
         return canon;
 
-    std::vector<uint64_t> contigStrides = calcContiguousStrides(cls.shape);
-    return addOpToEGraph(egraph, OpType::COPY_TO, {canon}, cls.shape, contigStrides, 0, cls.dtype, targetBackend);
+    return addOpToEGraph(egraph, OpType::COPY_TO, {canon}, cls.shape, cls.strides, cls.viewOffset, cls.dtype, targetBackend);
 }
 
 inline uint32_t createCacheInputNode(EGraph &egraph, const ENode &sourceNode, uint32_t sourceClassId, uint32_t partialPathId, std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
@@ -504,7 +503,7 @@ struct FusionRule : public Rule
 
             if (needCopy)
             {
-                currentPid = addOpToEGraph(egraph, OpType::COPY_TO, {currentPid}, currentClass.shape, calcContiguousStrides(currentClass.shape), 0, currentClass.dtype, expectedBackend);
+                currentPid = addOpToEGraph(egraph, OpType::COPY_TO, {currentPid}, currentClass.shape, currentClass.strides, currentClass.viewOffset, currentClass.dtype, expectedBackend);
                 currentClass = egraph.getEClass(egraph.find(currentPid));
             }
 
@@ -549,7 +548,7 @@ struct FusionRule : public Rule
             uint32_t newEClass = egraph.addEClass(enode.shape, enode.strides, enode.viewOffset, enode.dtype, targetBackend);
             newEClass = egraph.addENode(newEClass, enode);
 
-            addOpToEGraph(egraph, OpType::COPY_TO, {newEClass}, enode.shape, calcContiguousStrides(enode.shape), 0, enode.dtype, originalBackend, eclassId);
+            addOpToEGraph(egraph, OpType::COPY_TO, {newEClass}, enode.shape, enode.strides, enode.viewOffset, enode.dtype, originalBackend, eclassId);
         }
     }
 
@@ -679,8 +678,8 @@ struct CopyToOfContiguous : public Rule
             TensorNode copyOutNode = copyInNode;
             copyOutNode.opType = OpType::COPY_TO;
             copyOutNode.backend = copyToNode.backend;
-            copyOutNode.strides = calcContiguousStrides(copyOutNode.getShape());
-            copyOutNode.viewOffset = 0;
+            copyOutNode.strides = copyInNode.strides;
+            copyOutNode.viewOffset = copyInNode.viewOffset;
 
             Graph copyGraph;
             uint32_t copyIn = copyGraph.input(copyInNode.getShape(), copyInNode.dtype);
@@ -826,8 +825,8 @@ struct ContiguousOfCopyTo : public Rule
             TensorNode copyOutNode = copyInNode;
             copyOutNode.opType = OpType::COPY_TO;
             copyOutNode.backend = contigNode.backend;
-            copyOutNode.strides = calcContiguousStrides(copyOutNode.getShape());
-            copyOutNode.viewOffset = 0;
+            copyOutNode.strides = copyInNode.strides;
+            copyOutNode.viewOffset = copyInNode.viewOffset;
 
             Graph copyGraph;
             uint32_t copyIn = copyGraph.input(copyInNode.getShape(), copyInNode.dtype);

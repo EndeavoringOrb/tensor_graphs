@@ -33,7 +33,7 @@ __global__ void unpackKernelBytes(const uint8_t *__restrict__ src,
 
 inline bool matchCopyTo_CPU_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return (inputs.size() == 1 && inputs[0].backend == Backend::CPU && output.backend == Backend::CUDA && inputs[0].dtype == output.dtype && inputs[0].getShape() == output.getShape());
+    return (inputs.size() == 1 && inputs[0].backend == Backend::CPU && output.backend == Backend::CUDA && inputs[0].dtype == output.dtype && inputs[0].getShape() == output.getShape() && inputs[0].strides == output.strides);
 }
 
 inline void runCopyTo_CPU_CUDA(const std::vector<const void *> &inputs, const std::vector<void *> &outputs, const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)

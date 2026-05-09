@@ -1,6 +1,7 @@
 // tensor_graphs_cpp/core/memory.hpp
 #pragma once
 #include "core/types.hpp"
+#include "core/hardware.hpp"
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -208,14 +209,27 @@ struct DeviceBuffer
     {
         if (initialized)
             return;
+        auto &caps = HardwareCaps::get();
 
 #ifdef USE_CUDA
         if (backend == Backend::CUDA)
         {
-            cudaError_t err = cudaMalloc(&arena_ptr, sizeBytes);
-            if (err != cudaSuccess)
+            if (caps.has_unified_memory)
             {
-                Error::throw_err("CUDA malloc failed: " + std::string(cudaGetErrorString(err)));
+                // Physically shared memory
+                cudaError_t err = cudaMallocManaged(&arena_ptr, sizeBytes);
+                if (err != cudaSuccess)
+                {
+                    Error::throw_err("[DeviceBuffer] cudaMallocManaged failed: " + std::string(cudaGetErrorString(err)));
+                }
+            }
+            else
+            {
+                cudaError_t err = cudaMalloc(&arena_ptr, sizeBytes);
+                if (err != cudaSuccess)
+                {
+                    Error::throw_err("[DeviceBuffer] cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
+                }
             }
         }
         else if (backend == Backend::CPU)
@@ -649,24 +663,26 @@ struct MemoryManager
 
     TensorView getView(const TensorNode &node) const
     {
-        auto it = buffers.find(node.backend);
-        if (it == buffers.end())
-        {
-            Error::throw_err("[MemoryManager.getView] Backend buffer not initialized");
-        }
-
-        const DeviceBuffer &buf = it->second;
         uint32_t targetId = node.id;
         while (aliasMap.find(targetId) != aliasMap.end())
         {
             targetId = aliasMap.at(targetId);
         }
 
+        // Cross-backend lookup for Unified Memory
+        Backend actualBackend = node.backend;
+        if (buffers.at(Backend::CUDA).allocationMap.count(targetId))
+        {
+            actualBackend = Backend::CUDA;
+        }
+        else if (buffers.at(Backend::CPU).allocationMap.count(targetId))
+        {
+            actualBackend = Backend::CPU;
+        }
+
+        const DeviceBuffer &buf = buffers.at(actualBackend);
         uint64_t arenaOffset = buf.getOffset(targetId);
-
-        TensorView view = TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype));
-
-        return view;
+        return TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype));
     }
 
     bool has(Backend backend, uint32_t nodeId) const

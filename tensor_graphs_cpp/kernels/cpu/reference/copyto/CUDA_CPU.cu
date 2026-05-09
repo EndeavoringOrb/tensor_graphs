@@ -58,6 +58,9 @@ inline bool matchCopyTo_CUDA_CPU(const std::vector<TensorNode> &inputs,
     if (inputs[0].getShape() != output.getShape())
         return false;
 
+    if (inputs[0].strides != output.strides)
+        return false;
+
     return true;
 }
 
