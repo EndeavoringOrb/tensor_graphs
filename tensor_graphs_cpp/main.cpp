@@ -305,6 +305,13 @@ void run_flux()
 
 int main(int argc, char *argv[])
 {
+    auto &caps = HardwareCaps::get();
+    std::cout << "Hardware:\n"
+              << "  has_unified_memory: " << caps.has_unified_memory << "\n"
+              << "  has_cuda: " << caps.has_cuda << "\n"
+              << "  has_neon: " << caps.has_neon << "\n"
+              << "  hw_tag: " << caps.hw_tag << "\n"
+              << "  num_threads: " << caps.num_threads << "\n";
 #if defined(_WIN32)
     _controlfp_s(nullptr, 0, 0);
     _controlfp_s(nullptr, _EM_INVALID | _EM_ZERODIVIDE | _EM_OVERFLOW, _MCW_EM);

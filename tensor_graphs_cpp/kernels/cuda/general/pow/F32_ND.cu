@@ -5,29 +5,34 @@
 #include <cuda_runtime.h>
 #include <math_functions.h>
 
-__global__ void pow_f32_nd_kernel(const float* A, const float* B, float* Out, uint64_t n) {
+__global__ void pow_f32_nd_kernel(const float *A, const float *B, float *Out, uint64_t n)
+{
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    if (idx < n)
+    {
         Out[idx] = powf(A[idx], B[idx]);
     }
 }
 
-inline bool matchPowF32_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output) {
-    if (inputs.size() != 2) return false;
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32) return false;
-    if (inputs[0].getShape() != inputs[1].getShape() || inputs[0].getShape() != output.getShape()) return false;
-    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output)) return false;
+inline bool matchPowF32_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
+{
+    if (inputs[0].getShape() != inputs[1].getShape() || inputs[0].getShape() != output.getShape())
+        return false;
+    if (!isContiguous(output))
+        return false;
     return true;
 }
 
 inline void runPowF32_CUDA_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews) {
+                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+{
     const float *A = static_cast<const float *>(inputs[0]);
     const float *B = static_cast<const float *>(inputs[1]);
     float *Out = static_cast<float *>(outputs[0]);
 
     uint64_t n = countElements(outViews[0].getShape());
-    if (n == 0) return;
+    if (n == 0)
+        return;
 
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
@@ -35,7 +40,8 @@ inline void runPowF32_CUDA_ND(const std::vector<const void *> &inputs, const std
     pow_f32_nd_kernel<<<numBlocks, blockSize>>>(A, B, Out, n);
 
     cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
+    if (err != cudaSuccess)
+    {
         Error::throw_err("CUDA kernel launch failed in Pow_CUDA_ND: " + std::string(cudaGetErrorString(err)));
     }
 }
