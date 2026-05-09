@@ -2263,3 +2263,77 @@ struct BatchFlattenDot : public Rule
         egraph.merge(eclassId, outReshape);
     }
 };
+
+struct EliminateCopyTo : public Rule
+{
+    std::unordered_set<uint64_t> visited;
+
+    std::string name() const override { return "EliminateCopyTo"; }
+
+    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    {
+        const ENode &enode = egraph.getENodes()[eNodeIdx];
+        if (enode.opType != OpType::COPY_TO || enode.children.empty())
+            return false;
+
+        uint32_t childClass = egraph.findConst(enode.children[0]);
+        for (uint32_t childEnodeIdx : egraph.getEClass(childClass).enodes)
+        {
+            const ENode &childNode = egraph.getENodes()[childEnodeIdx];
+            if (childNode.opType == OpType::COPY_TO && !childNode.children.empty())
+            {
+                uint64_t pair_id = (static_cast<uint64_t>(eNodeIdx) << 32) | childEnodeIdx;
+                if (visited.find(pair_id) == visited.end())
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical) override
+    {
+        const ENode &enode = egraph.getENodes()[eNodeIdx];
+        uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
+        uint32_t childClass = egraph.find(enode.children[0]);
+
+        std::vector<uint32_t> matches;
+        for (uint32_t childEnodeIdx : egraph.getEClass(childClass).enodes)
+        {
+            const ENode &childNode = egraph.getENodes()[childEnodeIdx];
+            if (childNode.opType == OpType::COPY_TO && !childNode.children.empty())
+            {
+                uint64_t pair_id = (static_cast<uint64_t>(eNodeIdx) << 32) | childEnodeIdx;
+                if (visited.insert(pair_id).second)
+                {
+                    matches.push_back(childEnodeIdx);
+                }
+            }
+        }
+
+        for (uint32_t childEnodeIdx : matches)
+        {
+            const ENode &childNode = egraph.getENodes()[childEnodeIdx];
+            uint32_t grandChildClass = egraph.find(childNode.children[0]);
+            const EClass &grandClass = egraph.getEClass(grandChildClass);
+            const EClass &outClass = egraph.getEClass(eclassId);
+
+            if (grandClass.backend == outClass.backend)
+            {
+                if (outClass.shape == grandClass.shape && outClass.strides == grandClass.strides && outClass.viewOffset == grandClass.viewOffset)
+                {
+                    egraph.merge(eclassId, grandChildClass);
+                }
+                else
+                {
+                    uint32_t contig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {grandChildClass}, outClass.shape, outClass.strides, outClass.viewOffset, outClass.dtype, outClass.backend);
+                    egraph.merge(eclassId, contig);
+                }
+            }
+            else
+            {
+                uint32_t shortcutClass = addOpToEGraph(egraph, OpType::COPY_TO, {grandChildClass}, outClass.shape, outClass.strides, outClass.viewOffset, outClass.dtype, outClass.backend);
+                egraph.merge(eclassId, shortcutClass);
+            }
+        }
+    }
+};

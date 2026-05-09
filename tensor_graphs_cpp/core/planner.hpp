@@ -269,6 +269,7 @@ private:
         rules.emplace_back(std::make_unique<ContiguousElimination>());
         rules.emplace_back(std::make_unique<ConstantFolding>());
         rules.emplace_back(std::make_unique<BatchFlattenDot>());
+        rules.emplace_back(std::make_unique<EliminateCopyTo>());
         if (injected)
         {
             rules.emplace_back(std::make_unique<InfinityDomination>());
