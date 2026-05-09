@@ -151,8 +151,7 @@ REGISTER_KERNEL(
     runFastContiguous_ND,
     refFactoryFastContiguous_ND,
     {Backend::CPU},
-    {},
+    {DType::ANY},
     {{8, 32}},
     {false},
     {{Backend::CPU}});
-

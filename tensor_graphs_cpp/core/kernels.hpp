@@ -203,12 +203,13 @@ struct KernelEntry
             }
         }
 
-        // 4. Check input dtypes if registered (skipping variadic operations like CONCAT)
-        if (!dtypes.empty() && !isVariadic)
+        // 4. Check input dtypes if registered
+        if (!dtypes.empty())
         {
-            for (size_t i = 0; i < std::min((size_t)numInputs, dtypes.size()); ++i)
+            for (size_t i = 0; i < inputs.size(); ++i)
             {
-                if (i < inputs.size() && inputs[i].dtype != dtypes[i])
+                size_t ruleIdx = isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                if (ruleIdx < dtypes.size() && dtypes[ruleIdx] != DType::ANY && inputs[i].dtype != dtypes[ruleIdx])
                     return false;
             }
         }
@@ -363,6 +364,15 @@ public:
                              "  # DTypes: " + std::to_string(dtypes.size()) + "\n" +
                              "  # Dummy Shapes: " + std::to_string(dummyShapes.size()) + "\n" +
                              "  # Contiguous: " + std::to_string(contiguous.size()) + "\n");
+        }
+        if (!isVariadic && dtypes.size() != numInputs)
+        {
+            Error::throw_err("[KernelRegistry.registerKernel] expected dtypes.size() == " + std::to_string(numInputs) + " but got " + std::to_string(dtypes.size()) + ". Info:\n" +
+                             "  UID: " + std::to_string(uid) + "\n" +
+                             "  OpType: " + toString(op) + "\n" +
+                             "  OpName: " + opName + "\n" +
+                             "  # Inputs: " + std::to_string(numInputs) + "\n" +
+                             "  # DTypes: " + std::to_string(dtypes.size()) + "\n");
         }
         if (!isVariadic && contiguous.size() != numInputs)
         {

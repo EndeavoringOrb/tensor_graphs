@@ -252,7 +252,7 @@ REGISTER_KERNEL(
     runRecursiveContiguous_ND,
     refFactoryRecursiveContiguous_ND,
     {Backend::CPU},
-    {},
+    {DType::ANY},
     {{8, 32}},
     {false},
     {{Backend::CPU}});

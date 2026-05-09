@@ -83,6 +83,7 @@ enum class DType : uint32_t
     INT64,
     BF16,
     BOOL,
+    ANY,
     _COUNT
 };
 
@@ -100,6 +101,8 @@ inline uint64_t getDTypeSize(DType dtype)
         return 2;
     case DType::BOOL:
         return 1;
+    case DType::ANY:
+        return 0;
     default:
         Error::throw_err("Unknown DType size");
     }
@@ -425,6 +428,8 @@ inline std::string toString(DType dtype)
         return "BF16";
     case DType::BOOL:
         return "BOOL";
+    case DType::ANY:
+        return "ANY";
     default:
         return "UNKNOWN_DTYPE";
     }

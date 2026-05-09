@@ -124,7 +124,7 @@ inline uint32_t refFactoryContiguous_CUDA_ND(const std::vector<uint32_t> &inputs
 
 // Register as a named general kernel for CUDA
 REGISTER_KERNEL("Contiguous_CUDA_ND", 1, matchContiguous_CUDA_ND, runContiguous_CUDA_ND, refFactoryContiguous_CUDA_ND, {Backend::CUDA},
-                {},               // Input DType
+                {DType::ANY},     // Input DType
                 {{1024, 640}},    // Dummy shape
                 {false},          // Input does NOT require contiguity (that's the point of this kernel)
                 {{Backend::CUDA}} // Input backends
