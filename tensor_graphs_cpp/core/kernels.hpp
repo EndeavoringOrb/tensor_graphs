@@ -228,12 +228,7 @@ struct KernelEntry
             return false;
 
         // 6. Inplace and view checks assume input and output are on the same backend
-        if (inplace && numInputs > 0 && !inputs.empty())
-        {
-            if (inputs[0].backend != output.backend)
-                return false;
-        }
-        if (isView && numInputs > 0 && !inputs.empty())
+        if ((inplace || isView) && numInputs > 0 && !inputs.empty())
         {
             if (inputs[0].backend != output.backend)
                 return false;
