@@ -289,6 +289,11 @@ private:
 #endif
         while (changed)
         {
+            if (InterruptManager::isInterrupted())
+            {
+                InterruptManager::cleanup();
+                std::exit(SIGINT);
+            }
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
             // #ifdef DEBUG

@@ -2319,15 +2319,7 @@ struct EliminateCopyTo : public Rule
 
             if (grandClass.backend == outClass.backend)
             {
-                if (outClass.shape == grandClass.shape && outClass.strides == grandClass.strides && outClass.viewOffset == grandClass.viewOffset)
-                {
-                    egraph.merge(eclassId, grandChildClass);
-                }
-                else
-                {
-                    uint32_t contig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {grandChildClass}, outClass.shape, outClass.strides, outClass.viewOffset, outClass.dtype, outClass.backend);
-                    egraph.merge(eclassId, contig);
-                }
+                egraph.merge(eclassId, grandChildClass);
             }
             else
             {
