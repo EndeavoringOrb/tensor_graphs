@@ -378,7 +378,7 @@ public:
             }
             catch (const std::exception &e)
             {
-                std::cerr << "[KernelRegistry.registerKernel] failed to ascertain if isVariadic: " << e.what() << std::endl;
+                std::cerr << "[KernelRegistry.registerKernel] failed to ascertain if isVariadic. defaulting to isVariadic=false: " << e.what() << std::endl;
             }
         }
 
