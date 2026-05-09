@@ -13,10 +13,9 @@ __global__ void cast_bf16_f32_nd_kernel(const uint16_t* A, float* Out, uint64_t 
 }
 
 inline bool matchCastBF16_F32_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output) {
-    if (inputs.size() != 1) return false;
-    if (inputs[0].dtype != DType::BF16 || output.dtype != DType::FLOAT32) return false;
+    if (output.dtype != DType::FLOAT32) return false;
     if (inputs[0].getShape() != output.getShape()) return false;
-    if (!isContiguous(inputs[0]) || !isContiguous(output)) return false;
+    if (!isContiguous(output)) return false;
     return true;
 }
 

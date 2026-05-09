@@ -18,12 +18,7 @@ __global__ void concat_f32_nd_kernel(const float* A, float* Out, uint64_t O, uin
 }
 
 inline bool matchConcatF32_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output) {
-    if (inputs.size() < 2) return false;
     if (output.dtype != DType::FLOAT32) return false;
-    for (size_t i = 0; i < inputs.size() - 1; ++i) {
-        if (inputs[i].dtype != DType::FLOAT32 || !isContiguous(inputs[i])) return false;
-    }
-    if (inputs.back().dtype != DType::INT32) return false;
     if (!isContiguous(output)) return false;
     return true;
 }

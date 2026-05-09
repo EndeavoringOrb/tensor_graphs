@@ -12,10 +12,9 @@ __global__ void div_f32_nd_kernel(const float* A, const float* B, float* Out, ui
 }
 
 inline bool matchDivF32_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output) {
-    if (inputs.size() != 2) return false;
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32) return false;
+    if (output.dtype != DType::FLOAT32) return false;
     if (inputs[0].getShape() != inputs[1].getShape() || inputs[0].getShape() != output.getShape()) return false;
-    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output)) return false;
+    if (!isContiguous(output)) return false;
     return true;
 }
 
