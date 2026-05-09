@@ -1,3 +1,4 @@
+// tensor_graphs_cpp/core/debug.hpp
 #pragma once
 #include <cmath>
 #include <iostream>
@@ -13,6 +14,12 @@ namespace Debug
 #ifndef DEBUG
         return;
 #endif
+        // Skip checking model weights/inputs for NaNs, as they are out of our control
+        if (node.opType == OpType::INPUT)
+        {
+            return;
+        }
+
         // INT32 and BOOL cannot represent NaNs, so we skip them
         if (node.dtype != DType::FLOAT32 && node.dtype != DType::BF16)
         {
