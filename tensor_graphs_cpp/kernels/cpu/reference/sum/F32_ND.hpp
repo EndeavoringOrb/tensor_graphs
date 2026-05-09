@@ -4,7 +4,7 @@
 
 inline bool matchSumF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() == 2 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && inputs[1].dtype == DType::INT32;
+    return output.dtype == DType::FLOAT32;
 }
 
 inline void runSumF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

@@ -33,7 +33,7 @@ __global__ void dot_f32_3d_kernel(const float *A, const float *B, float *Out,
 inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // Check Dtypes
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
+    if (output.dtype != DType::FLOAT32)
         return false;
 
     const auto &s0 = inputs[0].getShape();

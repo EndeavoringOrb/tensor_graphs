@@ -43,9 +43,7 @@ __global__ void im2col_f32_nd_kernel(const float* img, float* col,
 }
 
 inline bool matchIm2ColF32_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output) {
-    if (inputs.size() != 4) return false;
-    if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32) return false;
-    if (inputs[1].dtype != DType::INT32 || inputs[2].dtype != DType::INT32 || inputs[3].dtype != DType::INT32) return false;
+    if (output.dtype != DType::FLOAT32) return false;
     if (inputs[0].getShape().size() != 4 || output.getShape().size() != 3) return false;
     if (!isContiguous(output)) return false;
     return true;

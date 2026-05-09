@@ -19,8 +19,7 @@ __global__ void max_f32_nd_kernel(const float* A, float* Out, uint64_t O, uint64
 }
 
 inline bool matchMaxF32_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output) {
-    if (inputs.size() != 2) return false;
-    if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32 || inputs[1].dtype != DType::INT32) return false;
+    if (output.dtype != DType::FLOAT32) return false;
     if (!isContiguous(output)) return false;
     return true;
 }

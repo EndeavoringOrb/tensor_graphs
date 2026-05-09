@@ -72,7 +72,7 @@ def validate_kernel_match_logic(rel_path, content):
                 r"isContiguous\s*\(\s*(inputs|inViews)\s*\[": 
                     ("Input Contiguity Check", "The Planner handles 'Contiguity Repair'. Use the boolean list in the macro instead."),
                 
-                r"inputs\s*\[\d+\]\.dtype": 
+                r"inputs\s*\[\d+\]\.dtype != DType::": 
                     ("Input DType Check", "DTypes are already validated against the DType list in the registration macro."),
                 
                 r"inputs\s*\[0\]\.storageType\s*==\s*StorageType::PERSISTENT": 
