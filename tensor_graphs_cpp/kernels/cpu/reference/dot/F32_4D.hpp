@@ -5,7 +5,6 @@
 inline bool matchDotF32_4D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     const auto &s0 = inputs[0].getShape();
-    const auto &s0 = inputs[0].getShape();
     const auto &s1 = inputs[1].getShape();
     const auto &so = output.getShape();
 

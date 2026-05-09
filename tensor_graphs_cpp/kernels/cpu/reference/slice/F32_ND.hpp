@@ -6,7 +6,7 @@
 
 inline bool matchSliceView(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() == 4;
+    return true;
 }
 
 inline void inferViewSlice(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
