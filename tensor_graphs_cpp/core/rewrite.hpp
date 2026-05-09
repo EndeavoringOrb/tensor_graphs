@@ -2347,9 +2347,8 @@ struct EliminateCopyTo : public Rule
                 }
                 else
                 {
-                    Error::throw_err("[EliminateCopyTo.apply] this shouldn't happen");
-                    // uint32_t shortcutClass = addOpToEGraph(egraph, OpType::CONTIGUOUS, {grandChildClass}, outClass.shape, outClass.strides, outClass.viewOffset, outClass.dtype, outClass.backend);
-                    // egraph.merge(eclassId, shortcutClass);
+                    uint32_t shortcutClass = addOpToEGraph(egraph, OpType::CONTIGUOUS, {grandChildClass}, outClass.shape, outClass.strides, outClass.viewOffset, outClass.dtype, outClass.backend);
+                    egraph.merge(eclassId, shortcutClass);
                 }
             }
             else
