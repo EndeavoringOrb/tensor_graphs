@@ -1213,6 +1213,55 @@ private:
 
             if (valid)
             {
+                std::vector<uint32_t> indegree(numClasses, 0);
+                for (const auto &kv : selection_map)
+                {
+                    uint32_t sel = kv.second;
+                    const ENode &enode = egraph.getENodes()[egraph.getEClass(kv.first).enodes[sel]];
+                    for (uint32_t child : enode.children)
+                    {
+                        indegree[egraph.find(child)]++;
+                    }
+                }
+
+                std::vector<uint32_t> zero_indegree;
+                for (const auto &kv : selection_map)
+                {
+                    if (indegree[kv.first] == 0)
+                    {
+                        zero_indegree.push_back(kv.first);
+                    }
+                }
+
+                uint32_t processed = 0;
+                while (!zero_indegree.empty())
+                {
+                    uint32_t curr = zero_indegree.back();
+                    zero_indegree.pop_back();
+                    processed++;
+
+                    uint32_t sel = selection_map[curr];
+                    const ENode &enode = egraph.getENodes()[egraph.getEClass(curr).enodes[sel]];
+                    for (uint32_t child : enode.children)
+                    {
+                        uint32_t canonChild = egraph.find(child);
+                        indegree[canonChild]--;
+                        if (indegree[canonChild] == 0)
+                        {
+                            zero_indegree.push_back(canonChild);
+                        }
+                    }
+                }
+
+                if (processed < selection_map.size())
+                {
+                    valid = false;
+                    reason = "cycle";
+                }
+            }
+
+            if (valid)
+            {
                 std::unordered_map<Backend, uint64_t> peak = computePeakMemory(
                     egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical);
 

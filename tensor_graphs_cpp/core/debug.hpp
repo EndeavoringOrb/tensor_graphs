@@ -11,7 +11,7 @@ namespace Debug
 {
     inline void checkNan(const TensorNode &node, const MemoryManager &mem, const std::string &context)
     {
-#ifndef DEBUG
+#ifndef DEBUG_CHECKNAN
         return;
 #endif
         // Skip checking model weights/inputs for NaNs, as they are out of our control
