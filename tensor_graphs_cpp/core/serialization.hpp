@@ -34,18 +34,26 @@ public:
 // Global generic serializers for fundamental and standard types
 template<typename T, std::enable_if_t<std::is_arithmetic_v<T> || std::is_enum_v<T>, int> = 0>
 void tg_serialize(BinaryWriter& bw, const T& val) {
-    bw.getStream().write(reinterpret_cast<const char*>(&val), sizeof(T));
+    if (!bw.getStream().write(reinterpret_cast<const char*>(&val), sizeof(T))) {
+        throw std::runtime_error("BinaryWriter: Failed to write arithmetic type");
+    }
 }
 
 template<typename T, std::enable_if_t<std::is_arithmetic_v<T> || std::is_enum_v<T>, int> = 0>
 void tg_deserialize(BinaryReader& br, T& val) {
-    br.getStream().read(reinterpret_cast<char*>(&val), sizeof(T));
+    if (!br.getStream().read(reinterpret_cast<char*>(&val), sizeof(T))) {
+        throw std::runtime_error("BinaryReader: Failed to read arithmetic type");
+    }
 }
 
 inline void tg_serialize(BinaryWriter& bw, const std::string& val) {
     uint32_t size = static_cast<uint32_t>(val.size());
     bw.write(size);
-    if (size > 0) bw.getStream().write(val.data(), size);
+    if (size > 0) {
+        if (!bw.getStream().write(val.data(), size)) {
+            throw std::runtime_error("BinaryWriter: Failed to write string data");
+        }
+    }
 }
 
 inline void tg_deserialize(BinaryReader& br, std::string& val) {
@@ -53,7 +61,9 @@ inline void tg_deserialize(BinaryReader& br, std::string& val) {
     br.read(size);
     if (size > 0) {
         val.resize(size);
-        br.getStream().read(val.data(), size);
+        if (!br.getStream().read(val.data(), size)) {
+            throw std::runtime_error("BinaryReader: Failed to read string data");
+        }
     } else {
         val.clear();
     }
@@ -64,7 +74,11 @@ void tg_serialize(BinaryWriter& bw, const std::vector<T>& val) {
     uint32_t size = static_cast<uint32_t>(val.size());
     bw.write(size);
     if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) {
-        if (size > 0) bw.getStream().write(reinterpret_cast<const char*>(val.data()), size * sizeof(T));
+        if (size > 0) {
+            if (!bw.getStream().write(reinterpret_cast<const char*>(val.data()), size * sizeof(T))) {
+                throw std::runtime_error("BinaryWriter: Failed to write vector data");
+            }
+        }
     } else {
         for (const auto& item : val) {
             bw.write(item);
@@ -78,7 +92,11 @@ void tg_deserialize(BinaryReader& br, std::vector<T>& val) {
     br.read(size);
     val.resize(size);
     if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) {
-        if (size > 0) br.getStream().read(reinterpret_cast<char*>(val.data()), size * sizeof(T));
+        if (size > 0) {
+            if (!br.getStream().read(reinterpret_cast<char*>(val.data()), size * sizeof(T))) {
+                throw std::runtime_error("BinaryReader: Failed to read vector data");
+            }
+        }
     } else {
         for (uint32_t i = 0; i < size; ++i) {
             br.read(val[i]);

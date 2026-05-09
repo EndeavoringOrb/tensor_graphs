@@ -46,6 +46,7 @@ int main()
         {
             Record r;
             br.read(r);
+            r.runTime = 0.0f; // Normalize for skip comparison
             recordedKeys.insert(serializeToString(r));
         }
     }
@@ -67,6 +68,7 @@ int main()
         br.read(r);
         
         r.runTime = 0.0f;
+        r.buildContextId = BUILD_CONTEXT_ID;
         std::string key = serializeToString(r);
 
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
@@ -74,7 +76,6 @@ int main()
             seenCalls.insert(key);
             if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
             {
-                r.buildContextId = BUILD_CONTEXT_ID;
                 toBenchmark.push_back(std::move(r));
             }
         }

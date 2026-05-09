@@ -1139,7 +1139,7 @@ std::unordered_map<uint64_t, std::vector<Record>> loadCallRecords(const std::str
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open())
         return records;
-    
+
     BinaryReader br(file);
     while (file.peek() != EOF)
     {
