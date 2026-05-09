@@ -294,6 +294,7 @@ public:
 
         ProgressTimer timer(countSet.size(), "");
         std::unordered_set<uint32_t> materialized;
+        std::unordered_set<uint32_t> written;
 
         for (const auto &pair : cachedGraphs)
         {
@@ -307,31 +308,35 @@ public:
                 {
                     uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : physId;
 
+                    // Compute true spanned size in case of non-contiguous INPUT nodes (folded views)
+                    uint64_t maxOffset = node.viewOffset;
+                    for (size_t d = 0; d < node.getShape().size(); ++d)
+                    {
+                        if (node.getShape()[d] > 0)
+                        {
+                            maxOffset += (node.getShape()[d] - 1) * node.strides[d];
+                        }
+                    }
+                    uint64_t elementsSpan = node.getShape().empty() ? 1 : (maxOffset + 1);
+                    uint64_t sizeBytes = elementsSpan * getDTypeSize(node.dtype);
+
                     if (materialized.insert(memId).second)
                     {
                         timer.tick();
-
-                        // Compute true spanned size in case of non-contiguous INPUT nodes (folded views)
-                        uint64_t maxOffset = node.viewOffset;
-                        for (size_t d = 0; d < node.getShape().size(); ++d)
-                        {
-                            if (node.getShape()[d] > 0)
-                            {
-                                maxOffset += (node.getShape()[d] - 1) * node.strides[d];
-                            }
-                        }
-                        uint64_t elementsSpan = node.getShape().empty() ? 1 : (maxOffset + 1);
-                        uint64_t sizeBytes = elementsSpan * getDTypeSize(node.dtype);
-
                         uint64_t offset = memManager.allocate(node.backend, memId, sizeBytes, node.storageType);
+                    }
 
+                    if (written.find(memId) == written.end())
+                    {
                         if (logicalId != UINT32_MAX && graph.constantStaging.count(logicalId))
                         {
                             memManager.write(node.backend, memId, graph.constantStaging.at(logicalId)->data(), sizeBytes);
+                            written.insert(memId);
                         }
                         else if (pair.second.constantStaging.count(physId))
                         {
                             memManager.write(node.backend, memId, pair.second.constantStaging.at(physId)->data(), sizeBytes);
+                            written.insert(memId);
                         }
                         else if (logicalId != UINT32_MAX && graph.weightSources.count(logicalId))
                         {
@@ -340,6 +345,7 @@ public:
                             std::vector<uint8_t> temp(sizeBytes);
                             loader->loadTensor(source.second, temp.data(), sizeBytes);
                             memManager.write(node.backend, memId, temp.data(), sizeBytes);
+                            written.insert(memId);
                         }
                     }
                 }
