@@ -16,13 +16,6 @@ inline bool matchSumF32_4D_Threaded(const std::vector<TensorNode> &inputs, const
     if (shape.size() != 4)
         return false;
 
-    // Optimized specifically for last-dimension reduction as seen in Attention bottlenecks
-    int32_t axis = -1;
-    if (inputs[1].dtype == DType::INT32)
-    {
-        auto vals = getConstantInt32(inputs[1].id, KernelRegistry::get().getKernel(0).opName == "" ? (Graph &)inputs[0] : (Graph &)inputs[0]); // Placeholder for eval
-        // Note: Actual planner logic handles axis normalization, we check if last dim
-    }
     return true;
 }
 
