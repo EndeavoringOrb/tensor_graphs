@@ -6,12 +6,6 @@
 
 inline bool matchIm2ColF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 4)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
-    if (inputs[1].dtype != DType::INT32 || inputs[2].dtype != DType::INT32 || inputs[3].dtype != DType::INT32)
-        return false;
     if (inputs[0].getShape().size() != 4)
         return false;
     if (output.getShape().size() != 3)

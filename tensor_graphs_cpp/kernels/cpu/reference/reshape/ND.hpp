@@ -5,8 +5,6 @@
 
 inline bool matchReshapeView(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
     return countElements(inputs[0].getShape()) == countElements(output.getShape());
 }
 

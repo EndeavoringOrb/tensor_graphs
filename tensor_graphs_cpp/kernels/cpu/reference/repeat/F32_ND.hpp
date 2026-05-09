@@ -6,11 +6,6 @@
 inline bool matchRepeatView(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // Inputs: Data (0), Repeats (1), Axis (2)
-    if (inputs.size() != 3)
-        return false;
-
-    if (inputs[1].dtype != DType::INT32 || inputs[2].dtype != DType::INT32)
-        return false;
 
     // Strides can only natively represent repeating a dimension if it originally had size 1.
     for (size_t d = 0; d < inputs[0].getShape().size(); ++d)

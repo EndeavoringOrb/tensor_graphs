@@ -11,9 +11,6 @@
 
 inline bool matchContiguous_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-
     const auto &in = inputs[0];
 
     // Check Dtypes and Shapes

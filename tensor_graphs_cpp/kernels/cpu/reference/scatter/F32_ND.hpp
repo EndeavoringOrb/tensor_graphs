@@ -6,10 +6,7 @@
 
 inline bool matchScatterF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() == 5 &&
-           inputs[0].dtype == DType::FLOAT32 &&
-           inputs[1].dtype == DType::FLOAT32 &&
-           output.dtype == DType::FLOAT32;
+    return true;
 }
 
 inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

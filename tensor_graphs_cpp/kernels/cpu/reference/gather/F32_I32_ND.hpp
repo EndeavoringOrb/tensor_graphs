@@ -11,12 +11,7 @@
 
 inline bool matchGatherF32_I32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-
     // inputs[0] = data, inputs[1] = indices
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::INT32 || output.dtype != DType::FLOAT32)
-        return false;
 
     // Simple check: data must be at least 1D
     if (inputs[0].getShape().empty())

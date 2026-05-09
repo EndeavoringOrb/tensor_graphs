@@ -18,19 +18,15 @@
  */
 inline bool matchCopyTo_CPU_CPU(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
+    const auto &in = inputs[0];
+
+    if (in.dtype != output.dtype)
         return false;
 
-    if (inputs[0].backend != Backend::CPU || output.backend != Backend::CPU)
+    if (in.getShape() != output.getShape())
         return false;
 
-    if (inputs[0].dtype != output.dtype)
-        return false;
-
-    if (inputs[0].getShape() != output.getShape())
-        return false;
-
-    if (inputs[0].strides != output.strides)
+    if (in.strides != output.strides)
         return false;
 
     return true;

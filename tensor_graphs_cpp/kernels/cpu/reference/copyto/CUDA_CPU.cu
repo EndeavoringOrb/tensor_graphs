@@ -46,15 +46,6 @@ __global__ void gatherKernelBytes(const uint8_t *__restrict__ src,
 inline bool matchCopyTo_CUDA_CPU(const std::vector<TensorNode> &inputs,
                                  const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-
-    if (inputs[0].backend != Backend::CUDA || output.backend != Backend::CPU)
-        return false;
-
-    if (inputs[0].dtype != output.dtype)
-        return false;
-
     if (inputs[0].getShape() != output.getShape())
         return false;
 

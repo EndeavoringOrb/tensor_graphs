@@ -76,17 +76,14 @@ def validate_kernel_match_logic(rel_path, content):
                     ("Input DType Check", "DTypes are already validated against the DType list in the registration macro."),
                 
                 r"inputs\s*\[0\]\.storageType\s*==\s*StorageType::PERSISTENT": 
-                    ("Persistent Storage Check", "The engine's inplace safety logic now handles this automatically."),
-                
-                r"inputs\s*\[0\]\.backend\s*!=\s*output\.backend":
-                    ("Backend Mismatch Check", "Inplace/View kernels are automatically checked for backend consistency by the core.")
+                    ("Persistent Storage Check", "The engine's inplace safety logic now handles this automatically.")
             }
 
             for pattern, (name, reason) in redundancies.items():
                 if re.search(pattern, body):
                     console.print(
                         Panel(
-                            f"[bold red]REDUNDANT LOGIC DETECTED:[/bold red] in [cyan]{rel_path}[/cyan]\n\n"
+                            f"[bold red]REDUNDANT LOGIC DETECTED:[/bold red] in [cyan]{ROOT_DIR / rel_path}[/cyan]\n\n"
                             f"The match function [yellow]{match_func_name}[/yellow] contains a manual [bold]{name}[/bold].\n\n"
                             f"[white]Reason:[/white] {reason}\n\n"
                             f"[white]Fix:[/white] Remove the check from the C++ body. Use the registration macro "

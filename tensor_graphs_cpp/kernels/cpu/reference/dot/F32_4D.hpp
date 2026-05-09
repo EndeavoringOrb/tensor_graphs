@@ -4,11 +4,7 @@
 
 inline bool matchDotF32_4D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
-
+    const auto &s0 = inputs[0].getShape();
     const auto &s0 = inputs[0].getShape();
     const auto &s1 = inputs[1].getShape();
     const auto &so = output.getShape();
