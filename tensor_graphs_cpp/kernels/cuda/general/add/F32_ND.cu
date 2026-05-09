@@ -39,6 +39,17 @@ inline void runAddF32_CUDA_ND(const std::vector<const void *> &inputs, const std
     }
 }
 
-REGISTER_REF_KERNEL(OpType::ADD, 2, matchAddF32_CUDA_ND, runAddF32_CUDA_ND, {Backend::CUDA}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{Backend::CUDA}, {Backend::CUDA}});
+/**
+ * Reference Factory
+ */
+inline uint32_t refFactoryAddF32_ND_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+{
+    if (inputs.size() != 2)
+        Error::throw_err("Add ND requires 2 inputs");
+
+    return graph.add(inputs[0], inputs[1]);
+}
+
+REGISTER_KERNEL("Add_F32_ND_CUDA", 2, matchAddF32_CUDA_ND, runAddF32_CUDA_ND, refFactoryAddF32_ND_CUDA, {Backend::CUDA}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{Backend::CUDA}, {Backend::CUDA}});
 
 #endif

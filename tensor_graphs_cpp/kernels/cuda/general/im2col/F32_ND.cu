@@ -81,6 +81,17 @@ inline void runIm2ColF32_CUDA_ND(const std::vector<const void *> &inputs, const 
     }
 }
 
-REGISTER_REF_KERNEL(OpType::IM2COL, 4, matchIm2ColF32_CUDA_ND, runIm2ColF32_CUDA_ND, {Backend::CUDA}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1, 3, 64, 64}, {1}, {1}, {1}}, {true, false, false, false}, {{Backend::CUDA}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+/**
+ * Reference Factory
+ */
+inline uint32_t refFactoryIm2ColF32_ND_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+{
+    if (inputs.size() != 4)
+        Error::throw_err("Im2Col ND requires 4 inputs");
+
+    return graph.im2col(inputs[0], inputs[1], inputs[2], inputs[3]);
+}
+
+REGISTER_KERNEL("Im2Col_F32_ND_CUDA", 4, matchIm2ColF32_CUDA_ND, runIm2ColF32_CUDA_ND, refFactoryIm2ColF32_ND_CUDA, {Backend::CUDA}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1, 3, 64, 64}, {1}, {1}, {1}}, {true, false, false, false}, {{Backend::CUDA}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
 
 #endif

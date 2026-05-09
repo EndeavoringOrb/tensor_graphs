@@ -39,6 +39,17 @@ inline void runCastBF16_F32_CUDA_ND(const std::vector<const void *> &inputs, con
     }
 }
 
-REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastBF16_F32_CUDA_ND, runCastBF16_F32_CUDA_ND, {Backend::CUDA}, {DType::BF16}, {{1024}}, {true}, {{Backend::CUDA}});
+/**
+ * Reference Factory
+ */
+inline uint32_t refFactoryCastBF16_F32_ND_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+{
+    if (inputs.size() != 1)
+        Error::throw_err("Cast BF16->F32 ND requires 1 input");
+
+    return graph.cast(inputs[0], DType::FLOAT32);
+}
+
+REGISTER_KERNEL("Cast_BF16_F32_ND_CUDA", 1, matchCastBF16_F32_CUDA_ND, runCastBF16_F32_CUDA_ND, refFactoryCastBF16_F32_ND_CUDA, {Backend::CUDA}, {DType::BF16}, {{1024}}, {true}, {{Backend::CUDA}});
 
 #endif

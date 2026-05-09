@@ -53,6 +53,17 @@ inline void runSumF32_CUDA_ND(const std::vector<const void *> &inputs, const std
     }
 }
 
-REGISTER_REF_KERNEL(OpType::SUM, 2, matchSumF32_CUDA_ND, runSumF32_CUDA_ND, {Backend::CUDA}, {DType::FLOAT32, DType::INT32}, {{1024, 1024}, {1}}, {true, false}, {{Backend::CUDA}, {Backend::CPU}});
+/**
+ * Reference Factory
+ */
+inline uint32_t refFactorySumF32_ND_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+{
+    if (inputs.size() != 2)
+        Error::throw_err("Sum ND requires 2 inputs");
+
+    return graph.sum(inputs[0], inputs[1]);
+}
+
+REGISTER_KERNEL("Sum_F32_ND_CUDA", 2, matchSumF32_CUDA_ND, runSumF32_CUDA_ND, refFactorySumF32_ND_CUDA, {Backend::CUDA}, {DType::FLOAT32, DType::INT32}, {{1024, 1024}, {1}}, {true, false}, {{Backend::CUDA}, {Backend::CPU}});
 
 #endif
