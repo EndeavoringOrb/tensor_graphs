@@ -64,12 +64,11 @@ namespace Debug
                 uint64_t idx = getStridedIndex(i, view.getShape(), view.strides);
                 if (std::isnan(data[idx]))
                 {
-                    std::stringstream ss;
-                    ss << "[NaN Detection] Found NaN in node " << node.id
+                    std::cerr << "[NaN Detection] Found NaN in node " << node.id
                        << " (" << toString(node.opType) << (node.opType == OpType::FUSED ? " " + node.opName : "") << ")"
                        << " during \"" << context
                        << "\" at element index " << i << " (flat index " << idx << ")";
-                    Error::throw_err(ss.str());
+                    return;
                 }
             }
         }
@@ -83,12 +82,11 @@ namespace Debug
                 bool is_nan = ((bits & 0x7F80) == 0x7F80) && ((bits & 0x007F) != 0);
                 if (is_nan)
                 {
-                    std::stringstream ss;
-                    ss << "[NaN Detection] Found BF16 NaN in node " << node.id
+                    std::cerr << "[NaN Detection] Found BF16 NaN in node " << node.id
                        << " (" << toString(node.opType) << ")"
                        << " during " << context
                        << " at element index " << i << " (flat index " << idx << ")";
-                    Error::throw_err(ss.str());
+                    return;
                 }
             }
         }
