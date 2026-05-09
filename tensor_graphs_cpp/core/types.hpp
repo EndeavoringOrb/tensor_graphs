@@ -17,6 +17,8 @@
 #include "core/serialization.hpp"
 using json = nlohmann::json;
 
+inline std::atomic<uint32_t> GlobalNextPhysId{0x80000000};
+
 // --- OS Detection ---
 #if defined(_WIN32) || defined(_WIN64)
 #define TG_OS_WINDOWS
@@ -220,19 +222,23 @@ struct Region
 
 inline bool regionsMatch(const Region &r1, const Region &r2);
 
-inline void tg_serialize(BinaryWriter& bw, const Dim& val) {
+inline void tg_serialize(BinaryWriter &bw, const Dim &val)
+{
     bw.write(val.start);
     bw.write(val.stop);
 }
-inline void tg_deserialize(BinaryReader& br, Dim& val) {
+inline void tg_deserialize(BinaryReader &br, Dim &val)
+{
     br.read(val.start);
     br.read(val.stop);
 }
 
-inline void tg_serialize(BinaryWriter& bw, const Region& val) {
+inline void tg_serialize(BinaryWriter &bw, const Region &val)
+{
     bw.write(val.region);
 }
-inline void tg_deserialize(BinaryReader& br, Region& val) {
+inline void tg_deserialize(BinaryReader &br, Region &val)
+{
     br.read(val.region);
 }
 
@@ -691,15 +697,88 @@ struct CompiledGraph
         auto it = physicalToLogicalNodeMap.find(id);
         return it != physicalToLogicalNodeMap.end() ? it->second : id;
     }
+
+    void remapPhysIds()
+    {
+        std::unordered_map<uint32_t, uint32_t> oldToNew;
+        for (const auto &pair : nodesMap)
+        {
+            if (pair.first >= 0x80000000)
+            {
+                oldToNew[pair.first] = GlobalNextPhysId.fetch_add(1);
+            }
+        }
+
+        if (oldToNew.empty())
+            return;
+
+        auto mapId = [&](uint32_t id)
+        {
+            auto it = oldToNew.find(id);
+            return it != oldToNew.end() ? it->second : id;
+        };
+
+        for (auto &inst : instructions)
+        {
+            inst.nodeId = mapId(inst.nodeId);
+            for (auto &inId : inst.inputNodeIds)
+            {
+                inId = mapId(inId);
+            }
+        }
+
+        std::unordered_map<uint32_t, uint32_t> newRefCounts;
+        for (const auto &pair : refCounts)
+        {
+            newRefCounts[mapId(pair.first)] = pair.second;
+        }
+        refCounts = std::move(newRefCounts);
+
+        std::unordered_map<uint32_t, TensorNode> newNodesMap;
+        for (auto &pair : nodesMap)
+        {
+            TensorNode &node = pair.second;
+            node.id = mapId(node.id);
+            for (auto &pId : node.parentIds)
+            {
+                pId = mapId(pId);
+            }
+            newNodesMap[node.id] = std::move(node);
+        }
+        nodesMap = std::move(newNodesMap);
+
+        std::unordered_map<uint32_t, float> newNodeCosts;
+        for (const auto &pair : nodeCosts)
+        {
+            newNodeCosts[mapId(pair.first)] = pair.second;
+        }
+        nodeCosts = std::move(newNodeCosts);
+
+        std::unordered_map<uint32_t, uint32_t> newPhysToLog;
+        for (const auto &pair : physicalToLogicalNodeMap)
+        {
+            newPhysToLog[mapId(pair.first)] = pair.second;
+        }
+        physicalToLogicalNodeMap = std::move(newPhysToLog);
+
+        std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> newConst;
+        for (auto &pair : constantStaging)
+        {
+            newConst[mapId(pair.first)] = std::move(pair.second);
+        }
+        constantStaging = std::move(newConst);
+    }
 };
 
-inline void tg_serialize(BinaryWriter& bw, const TensorView& val) {
+inline void tg_serialize(BinaryWriter &bw, const TensorView &val)
+{
     bw.write(val.baseOffset);
     bw.write(val.getShape());
     bw.write(val.strides);
     bw.write(val.dtype);
 }
-inline void tg_deserialize(BinaryReader& br, TensorView& val) {
+inline void tg_deserialize(BinaryReader &br, TensorView &val)
+{
     br.read(val.baseOffset);
     std::vector<uint32_t> shape;
     br.read(shape);
@@ -708,7 +787,8 @@ inline void tg_deserialize(BinaryReader& br, TensorView& val) {
     br.read(val.dtype);
 }
 
-inline void tg_serialize(BinaryWriter& bw, const TensorNode& val) {
+inline void tg_serialize(BinaryWriter &bw, const TensorNode &val)
+{
     bw.write(val.id);
     bw.write(val.opType);
     bw.write(val.opName);
@@ -721,7 +801,8 @@ inline void tg_serialize(BinaryWriter& bw, const TensorNode& val) {
     bw.write(val.storageType);
     bw.write(val.contentHash);
 }
-inline void tg_deserialize(BinaryReader& br, TensorNode& val) {
+inline void tg_deserialize(BinaryReader &br, TensorNode &val)
+{
     br.read(val.id);
     br.read(val.opType);
     br.read(val.opName);
@@ -737,7 +818,8 @@ inline void tg_deserialize(BinaryReader& br, TensorNode& val) {
     br.read(val.contentHash);
 }
 
-inline void tg_serialize(BinaryWriter& bw, const OpInstruction& val) {
+inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
+{
     bw.write(val.nodeId);
     bw.write(val.logicalNodeId);
     bw.write(val.fullKernelId);
@@ -748,7 +830,8 @@ inline void tg_serialize(BinaryWriter& bw, const OpInstruction& val) {
     bw.write(val.backend);
     bw.write(val.outputStorageType);
 }
-inline void tg_deserialize(BinaryReader& br, OpInstruction& val) {
+inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
+{
     br.read(val.nodeId);
     br.read(val.logicalNodeId);
     br.read(val.fullKernelId);
@@ -760,31 +843,35 @@ inline void tg_deserialize(BinaryReader& br, OpInstruction& val) {
     br.read(val.outputStorageType);
 }
 
-inline void tg_serialize(BinaryWriter& bw, const CompiledGraph& val) {
+inline void tg_serialize(BinaryWriter &bw, const CompiledGraph &val)
+{
     bw.write(val.instructions);
     bw.write(val.refCounts);
     bw.write(val.nodesMap);
     bw.write(val.nodeCosts);
     bw.write(val.physicalToLogicalNodeMap);
-    
+
     uint32_t constSize = static_cast<uint32_t>(val.constantStaging.size());
     bw.write(constSize);
-    for (const auto& pair : val.constantStaging) {
+    for (const auto &pair : val.constantStaging)
+    {
         bw.write(pair.first);
         bw.write(*pair.second);
     }
 }
-inline void tg_deserialize(BinaryReader& br, CompiledGraph& val) {
+inline void tg_deserialize(BinaryReader &br, CompiledGraph &val)
+{
     br.read(val.instructions);
     br.read(val.refCounts);
     br.read(val.nodesMap);
     br.read(val.nodeCosts);
     br.read(val.physicalToLogicalNodeMap);
-    
+
     uint32_t constSize;
     br.read(constSize);
     val.constantStaging.clear();
-    for (uint32_t i = 0; i < constSize; ++i) {
+    for (uint32_t i = 0; i < constSize; ++i)
+    {
         uint32_t k;
         br.read(k);
         std::vector<uint8_t> v;

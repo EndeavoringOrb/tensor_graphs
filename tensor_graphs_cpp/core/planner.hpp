@@ -78,7 +78,6 @@ class Planner
 {
 private:
     uint32_t egraph_dump_counter_ = 0;
-    uint32_t nextPhysId = 0x80000000;
 
     void dumpEGraphBinary(const EGraph &egraph, uint32_t rootEClassId)
     {
@@ -1385,7 +1384,7 @@ private:
         std::unordered_map<uint32_t, uint32_t> eclassToPhys;
         for (uint32_t eclassId : topo)
         {
-            eclassToPhys[eclassId] = nextPhysId++;
+            eclassToPhys[eclassId] = GlobalNextPhysId.fetch_add(1);
         }
 
         std::unordered_map<uint32_t, uint32_t> lastPhysIdForLogical;

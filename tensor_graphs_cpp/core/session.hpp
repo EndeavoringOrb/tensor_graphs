@@ -814,6 +814,7 @@ public:
                     invalidCacheReason = "Invalid Kernel ID";
                     break;
                 }
+                cg.remapPhysIds();
                 tempGraphs[key] = std::move(cg);
             }
             else if (type == 2) // Constants
