@@ -27,6 +27,7 @@ CORE_DEPENDENCIES = [
 
 USE_CUDA = False
 DEBUG_MODE = False
+NO_LINT = False
 
 # List of macros that register a kernel with a unique UID
 REGISTER_MACROS = [
@@ -186,7 +187,8 @@ def generate_kernel_uids(core_seed):
                         content = f_in.read()
 
                     # LINT: Check for redundant contiguity logic
-                    validate_kernel_contiguity_logic(rel_path, content)
+                    if not NO_LINT:
+                        validate_kernel_contiguity_logic(rel_path, content)
 
                     reg_count = 0
                     for macro in REGISTER_MACROS:
@@ -195,7 +197,7 @@ def generate_kernel_uids(core_seed):
                         matches = re.findall(rf"^\s*{macro}\b", content, re.MULTILINE)
                         reg_count += len(matches)
 
-                    if reg_count > 1:
+                    if reg_count > 1 and not NO_LINT:
                         console.print(
                             Panel(
                                 f"[bold red]FATAL ERROR:[/bold red] Found {reg_count} kernel registrations in [cyan]{rel_path}[/cyan].\n\n"
@@ -499,11 +501,15 @@ def main():
         action="store_true",
         help="Build with debug symbols and no optimization",
     )
+    parser.add_argument(
+        "--no-lint", action="store_true", help="Skip kernel validation checks"
+    )
     args = parser.parse_args()
 
-    global USE_CUDA, DEBUG_MODE
+    global USE_CUDA, DEBUG_MODE, NO_LINT
     USE_CUDA = args.cuda
     DEBUG_MODE = args.debug
+    NO_LINT = args.no_lint
 
     console.print(
         f"\n[bold cyan]Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...[/bold cyan]\n"

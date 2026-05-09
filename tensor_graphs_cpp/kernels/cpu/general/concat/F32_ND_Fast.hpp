@@ -53,5 +53,15 @@ inline void runConcatF32_Fast(const std::vector<const void *> &inputs, const std
         w.join();
 }
 
-REGISTER_KERNEL("Concat_F32_Fast", 2, matchConcatF32_Fast, runConcatF32_Fast, nullptr, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{1, 24, 1536, 128}, {1}}, {true, false}, {{Backend::CPU}, {Backend::CPU}});
+inline uint32_t refFactoryConcatF32_Fast(const std::vector<uint32_t> &inputs, Graph &graph)
+{
+    if (inputs.size() < 2)
+        Error::throw_err("Concat Fast requires at least 2 inputs");
+
+    std::vector<uint32_t> tensors(inputs.begin(), inputs.end() - 1);
+    uint32_t axis = inputs.back();
+    return graph.concat(tensors, axis);
+}
+
+REGISTER_KERNEL("Concat_F32_Fast", 2, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{1, 24, 1536, 128}, {1}}, {true, false}, {{Backend::CPU}, {Backend::CPU}});
 #endif

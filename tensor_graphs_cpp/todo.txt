@@ -26,3 +26,5 @@ something more robust for collision than 0x40000000 and 0x80000000
 make sure we don't have stale cache when needed region (push down from output needed) is smaller than dirty region (pulled up from input)
 
 DRY scatter add eclass with eclassToLogical
+
+linter

@@ -349,6 +349,32 @@ public:
                         const std::vector<std::vector<Backend>> &inputBackends)
     {
         bool isVariadic = (op == OpType::CONCAT);
+        if (op == OpType::FUSED && refFactory != nullptr && numInputs >= 2 &&
+            dummyShapes.size() == numInputs && dtypes.size() == numInputs)
+        {
+            Graph dummyGraph;
+            std::vector<uint32_t> dummyInp;
+            for (size_t i = 0; i < numInputs; ++i)
+            {
+                dummyInp.push_back(dummyGraph.input(dummyShapes[i], dtypes[i]));
+            }
+            uint32_t rootId = refFactory(dummyInp, dummyGraph);
+
+            Graph pureGraph;
+            std::vector<uint32_t> pureInp;
+            for (size_t i = 0; i < numInputs; ++i)
+            {
+                pureInp.push_back(pureGraph.input(dummyShapes[i], dtypes[i]));
+            }
+            std::vector<uint32_t> tensors(pureInp.begin(), pureInp.end() - 1);
+            uint32_t pureRootId = pureGraph.concat(tensors, pureInp.back());
+
+            if (isIsomorphic(dummyGraph, rootId, pureGraph, pureRootId))
+            {
+                isVariadic = true;
+            }
+        }
+
         if (!isVariadic && inputBackends.size() != numInputs)
         {
             Error::throw_err("[KernelRegistry.registerKernel] expected inputBackends.size() == " + std::to_string(numInputs) + " but got " + std::to_string(inputBackends.size()) + ". Info:\n" +
