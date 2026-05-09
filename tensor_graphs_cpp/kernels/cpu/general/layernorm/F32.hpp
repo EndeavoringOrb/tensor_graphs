@@ -26,10 +26,6 @@ static constexpr float LAYERNORM_DEFAULT_EPS = 1e-6f;
 
 inline bool matchLayerNormF32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
     // Layer norm operates on 3D tensors [Batch, Seq, Hidden]
     if (inputs[0].getShape().size() != 3)
         return false;

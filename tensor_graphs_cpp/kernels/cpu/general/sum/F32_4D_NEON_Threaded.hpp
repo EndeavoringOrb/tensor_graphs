@@ -10,7 +10,7 @@
 
 inline bool matchSumF32_4D_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs[0].dtype != DType::FLOAT32 || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
     const auto &shape = inputs[0].getShape();
     if (shape.size() != 4)

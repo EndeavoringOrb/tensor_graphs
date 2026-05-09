@@ -5,7 +5,7 @@
 
 inline bool matchArangeI32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() == 3 && output.dtype == DType::INT32 && isContiguous(output);
+    return isContiguous(output);
 }
 
 inline void runArangeI32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,

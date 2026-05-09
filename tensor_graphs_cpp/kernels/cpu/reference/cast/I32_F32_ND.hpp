@@ -11,12 +11,6 @@
 
 inline bool matchCastI32_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-
-    // Check Dtypes: Input must be INT32, Output must be FLOAT32
-    if (inputs[0].dtype != DType::INT32 || output.dtype != DType::FLOAT32)
-        return false;
 
     // Check Shape Identity
     if (inputs[0].getShape() != output.getShape())

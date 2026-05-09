@@ -18,12 +18,6 @@
  */
 inline bool matchCastBF16_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-
-    // Check Dtypes
-    if (inputs[0].dtype != DType::BF16 || output.dtype != DType::FLOAT32)
-        return false;
 
     // Check Shape Identity
     if (inputs[0].getShape() != output.getShape())

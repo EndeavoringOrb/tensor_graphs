@@ -9,8 +9,6 @@
 
 bool matchTanhF32_1D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
     if (inputs[0].getShape().size() != 1 || output.getShape().size() != 1)
         return false;
     if (inputs[0].getShape()[0] != output.getShape()[0])

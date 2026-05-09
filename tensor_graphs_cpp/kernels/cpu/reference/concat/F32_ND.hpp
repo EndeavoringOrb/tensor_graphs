@@ -8,8 +8,6 @@
 inline bool matchConcatF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // Axis tensor is the last input. We need at least one data tensor + axis.
-    if (inputs.size() < 2 || output.dtype != DType::FLOAT32)
-        return false;
     return true;
 }
 

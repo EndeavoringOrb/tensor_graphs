@@ -5,12 +5,6 @@
 
 inline bool matchGatherBF16(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-    if (inputs[0].dtype != DType::BF16 || inputs[1].dtype != DType::INT32)
-        return false;
-    if (output.dtype != DType::FLOAT32)
-        return false;
 
     if (inputs[0].getShape().empty())
         return false;

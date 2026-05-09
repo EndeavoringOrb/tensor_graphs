@@ -14,21 +14,6 @@
 
 inline bool matchPartialBF16TransposedGEMM(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    // Signature: [cache, A, W, sC, eC, tC, sA, eA, tA, sW, eW, tW] (12 inputs)
-    if (inputs.size() != 12)
-        return false;
-
-    // Check main tensor dtypes
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 ||
-        inputs[2].dtype != DType::BF16 || output.dtype != DType::FLOAT32)
-        return false;
-
-    // Check coordinate tensor dtypes
-    for (int i = 3; i < 12; ++i)
-    {
-        if (inputs[i].dtype != DType::INT32)
-            return false;
-    }
 
     const auto &shape_C = inputs[0].getShape();
     const auto &shape_A = inputs[1].getShape();

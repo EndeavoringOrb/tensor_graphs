@@ -19,10 +19,6 @@
 
 inline bool matchMulF32_ND_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
 
     // Shapes must match exactly for element-wise multiplication
     if (inputs[0].getShape() != inputs[1].getShape() || inputs[0].getShape() != output.getShape())

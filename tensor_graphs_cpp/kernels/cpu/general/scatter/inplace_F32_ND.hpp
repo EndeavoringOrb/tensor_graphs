@@ -5,8 +5,6 @@
 
 inline bool matchScatterF32_ND_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32) return false;
-    if (inputs[0].storageType == StorageType::PERSISTENT) return false;
     return true;
 }
 

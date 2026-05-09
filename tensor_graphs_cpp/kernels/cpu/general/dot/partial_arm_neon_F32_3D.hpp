@@ -22,23 +22,8 @@
 inline bool matchScatterDotF32_3D_Optimized_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // Signature: [cache, A, B, starts, ends, steps, startsA, endsA, stepsA, startsB, endsB, stepsB] (12 inputs)
-    if (inputs.size() != 12)
-        return false;
 
-    if (inputs[0].storageType == StorageType::PERSISTENT)
-        return false;
 
-    // Check main tensor dtypes
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 ||
-        inputs[2].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
-
-    // Check coordinate tensor dtypes
-    for (int i = 3; i < 12; ++i)
-    {
-        if (inputs[i].dtype != DType::INT32)
-            return false;
-    }
 
     const auto &shape_A = inputs[1].getShape();
     const auto &shape_B = inputs[2].getShape();

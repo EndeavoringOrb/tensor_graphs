@@ -6,8 +6,6 @@
 
 inline bool matchGeluF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
     if (inputs[0].getShape() != output.getShape())
         return false;
     if (!isContiguous(output))
