@@ -2380,16 +2380,16 @@ struct EliminateCopyTo : public Rule
         for (size_t i = 0; i < enode.children.size(); ++i)
         {
             uint32_t c_id = egraph.findConst(enode.children[i]);
-            const EClass &c_class = egraph.getEClass(c_id);
+            const EClass c_class = egraph.getEClass(c_id);
 
             for (uint32_t c_enode_idx : c_class.enodes)
             {
-                const ENode &c_enode = egraph.getENodes()[c_enode_idx];
+                const ENode c_enode = egraph.getENodes()[c_enode_idx];
                 if (c_enode.opType != OpType::COPY_TO || c_enode.children.empty())
                     continue;
 
                 uint32_t gc_id = egraph.findConst(c_enode.children[0]);
-                const EClass &gc_class = egraph.getEClass(gc_id);
+                const EClass gc_class = egraph.getEClass(gc_id);
 
                 for (uint32_t gc_enode_idx : gc_class.enodes)
                 {
