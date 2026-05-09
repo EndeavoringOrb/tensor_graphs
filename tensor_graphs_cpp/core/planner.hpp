@@ -563,9 +563,9 @@ private:
                     std::unique_ptr<Graph> pGraph;
                     std::vector<uint32_t> pInputs;
 
+                    const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
                     if (enode.opType == OpType::FUSED)
                     {
-                        const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
                         refEntry = ReferenceGraphRegistry::get().getFactory(kernel.opName);
                         if (refEntry)
                         {
@@ -629,10 +629,24 @@ private:
                                         if (isConstantNeeded(n.opType, p_idx, n.parentIds.size()))
                                         {
                                             int inputIdx = traceToInputIdx(n.parentIds[p_idx]);
-                                            if (inputIdx == (int)j)
+                                            if (kernel.isVariadic)
+                                            {
+                                                // Last child of fused node maps to last input of pattern (the axis)
+                                                // All other children map to the first input of the pattern (the tensors)
+                                                if (j == enode.children.size() - 1)
+                                                {
+                                                    if (inputIdx == (int)pInputs.size() - 1)
+                                                        needed = true;
+                                                }
+                                                else
+                                                {
+                                                    if (inputIdx == 0)
+                                                        needed = true;
+                                                }
+                                            }
+                                            else if (inputIdx == (int)j)
                                             {
                                                 needed = true;
-                                                break;
                                             }
                                         }
                                     }
