@@ -351,6 +351,10 @@ struct FusionRule : public Rule
     {
         const Pattern *pattern;
         std::unordered_map<uint32_t, uint32_t> binding;
+        // For variadic CONCAT matches: the e-class IDs of the tensor inputs
+        // (all e-node children except the last, which is the axis).
+        // Empty for non-CONCAT matches.
+        std::vector<uint32_t> variadicConcatTensorEClasses;
     };
 
     std::unordered_map<OpType, std::vector<Pattern>> patternsByOp;
@@ -393,7 +397,21 @@ struct FusionRule : public Rule
             std::unordered_map<uint32_t, uint32_t> binding;
             if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern, binding, protectedEClasses))
             {
-                activeMatches.push_back({&pattern, std::move(binding)});
+                MatchResult mr;
+                mr.pattern = &pattern;
+                mr.binding = std::move(binding);
+
+                // For variadic CONCAT matches, collect the tensor e-class IDs
+                // (all children except the last, which is the axis).
+                if (eNode.opType == OpType::CONCAT && eNode.children.size() > 2)
+                {
+                    for (size_t i = 0; i < eNode.children.size() - 1; ++i)
+                    {
+                        mr.variadicConcatTensorEClasses.push_back(egraph.findConst(eNode.children[i]));
+                    }
+                }
+
+                activeMatches.push_back(std::move(mr));
             }
         }
         return !activeMatches.empty();
@@ -408,23 +426,59 @@ struct FusionRule : public Rule
 
             std::vector<uint32_t> inputs;
             std::vector<TensorNode> inputNodes;
-            inputs.reserve(pattern.variables.size());
-            inputNodes.reserve(pattern.variables.size());
 
-            for (uint32_t var : pattern.variables)
+            if (!match.variadicConcatTensorEClasses.empty())
             {
-                uint32_t parentEClassId = binding.at(var);
-                const EClass parent = egraph.getEClass(parentEClassId);
-                inputs.push_back(parentEClassId);
+                // Variadic CONCAT: inputs = [tensor0_eclass, tensor1_eclass, ..., axis_eclass]
+                // The tensor e-classes were collected during match.
+                for (uint32_t tensorEClass : match.variadicConcatTensorEClasses)
+                {
+                    inputs.push_back(tensorEClass);
+                    const EClass parent = egraph.getEClass(tensorEClass);
+                    TensorNode inputNode;
+                    inputNode.opType = OpType::INPUT;
+                    inputNode.dtype = parent.dtype;
+                    inputNode.setShape(parent.shape);
+                    inputNode.strides = parent.strides;
+                    inputNode.viewOffset = parent.viewOffset;
+                    inputNode.backend = parent.backend;
+                    inputNodes.push_back(std::move(inputNode));
+                }
+                // The axis e-class is the last pattern variable's binding
+                uint32_t axisVar = pattern.variables.back();
+                uint32_t axisEClass = binding.at(axisVar);
+                inputs.push_back(axisEClass);
+                const EClass axisParent = egraph.getEClass(axisEClass);
+                TensorNode axisInputNode;
+                axisInputNode.opType = OpType::INPUT;
+                axisInputNode.dtype = axisParent.dtype;
+                axisInputNode.setShape(axisParent.shape);
+                axisInputNode.strides = axisParent.strides;
+                axisInputNode.viewOffset = axisParent.viewOffset;
+                axisInputNode.backend = axisParent.backend;
+                inputNodes.push_back(std::move(axisInputNode));
+            }
+            else
+            {
+                // Standard (non-variadic) path
+                inputs.reserve(pattern.variables.size());
+                inputNodes.reserve(pattern.variables.size());
 
-                TensorNode inputNode;
-                inputNode.opType = OpType::INPUT;
-                inputNode.dtype = parent.dtype;
-                inputNode.setShape(parent.shape);
-                inputNode.strides = parent.strides;
-                inputNode.viewOffset = parent.viewOffset;
-                inputNode.backend = parent.backend;
-                inputNodes.push_back(std::move(inputNode));
+                for (uint32_t var : pattern.variables)
+                {
+                    uint32_t parentEClassId = binding.at(var);
+                    const EClass parent = egraph.getEClass(parentEClassId);
+                    inputs.push_back(parentEClassId);
+
+                    TensorNode inputNode;
+                    inputNode.opType = OpType::INPUT;
+                    inputNode.dtype = parent.dtype;
+                    inputNode.setShape(parent.shape);
+                    inputNode.strides = parent.strides;
+                    inputNode.viewOffset = parent.viewOffset;
+                    inputNode.backend = parent.backend;
+                    inputNodes.push_back(std::move(inputNode));
+                }
             }
 
             const EClass matchedClass = egraph.getEClass(egraph.getENodeEClass(eNodeIdx));
@@ -465,11 +519,16 @@ struct FusionRule : public Rule
     void addFusedNode(EGraph &egraph, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &parentIds, uint32_t eNodeIdx) const
     {
         std::vector<uint32_t> adaptedParents;
-        if (parentIds.size() != kernel.numInputs)
+        if (!kernel.isVariadic && parentIds.size() != kernel.numInputs)
         {
             Error::throw_err("[addFusedNode] parentIds.size() != kernel.numInputs. Info:\n  Kernel: " + kernel.opName + "\n" +
                              "  Parent IDs: " + std::to_string(parentIds.size()) + "\n" +
                              "  Kernel Num Inputs: " + std::to_string(kernel.numInputs) + "\n");
+        }
+        if (kernel.isVariadic && parentIds.size() < 2)
+        {
+            Error::throw_err("[addFusedNode] variadic kernel requires at least 2 parentIds. Info:\n  Kernel: " + kernel.opName + "\n" +
+                             "  Parent IDs: " + std::to_string(parentIds.size()) + "\n");
         }
 
         for (size_t i = 0; i < parentIds.size(); ++i)
@@ -477,9 +536,14 @@ struct FusionRule : public Rule
             uint32_t pid = parentIds[i];
             const EClass parent = egraph.getEClass(pid);
 
-            Backend expectedBackend = kernel.inputBackends[i][0];
+            // For variadic kernels, use the same indexing rule as matches():
+            //   indices [0..N-2] → rule 0 (tensor inputs)
+            //   index  [N-1]    → rule 1 (axis constant)
+            size_t ruleIdx = kernel.isVariadic ? (i == parentIds.size() - 1 ? 1 : 0) : i;
+
+            Backend expectedBackend = kernel.inputBackends[ruleIdx][0];
             bool foundBackend = false;
-            for (Backend b : kernel.inputBackends[i])
+            for (Backend b : kernel.inputBackends[ruleIdx])
             {
                 if (parent.backend == b)
                 {
@@ -490,7 +554,7 @@ struct FusionRule : public Rule
             }
 
             bool needCopy = !foundBackend;
-            bool needContig = kernel.requiresContiguous[i] && !isContiguous(parent);
+            bool needContig = kernel.requiresContiguous[ruleIdx] && !isContiguous(parent);
 
             if (!needCopy && !needContig)
             {
@@ -608,6 +672,52 @@ struct FusionRule : public Rule
             return false;
         if (eNode.opType == OpType::FUSED && eNode.opName != pNode.opName)
             return false;
+
+        // Variadic CONCAT: the pattern has [tensorVar, axisVar] (2 parents),
+        // but the e-graph CONCAT can have N+1 children (N tensors + 1 axis).
+        // We match all tensor children against the first pattern parent and
+        // the last child (axis) against the last pattern parent.
+        if (eNode.opType == OpType::CONCAT && eNode.children.size() != pNode.parentIds.size())
+        {
+            // Pattern must have at least 2 parents: [tensorVar, axisVar]
+            if (pNode.parentIds.size() < 2)
+                return false;
+            // E-node must have at least 2 children: [tensor, axis]
+            if (eNode.children.size() < 2)
+                return false;
+
+            // Match the axis: last e-node child <-> last pattern parent
+            if (!matchPatternClass(eNode.children.back(), egraph,
+                                   pNode.parentIds.back(), pattern, binding, protectedEClasses))
+                return false;
+
+            // Match all tensor children against the first pattern parent (tensorVar).
+            // The first successful binding establishes the variable; subsequent
+            // children only need to be valid e-classes (they'll be collected
+            // separately since the binding can only hold one e-class per variable).
+            bool firstTensor = true;
+            for (size_t i = 0; i < eNode.children.size() - 1; ++i)
+            {
+                if (firstTensor)
+                {
+                    if (!matchPatternClass(eNode.children[i], egraph,
+                                           pNode.parentIds[0], pattern, binding, protectedEClasses))
+                        return false;
+                    firstTensor = false;
+                }
+                else
+                {
+                    // For subsequent tensors, just verify the e-class exists and
+                    // has a compatible dtype. We don't re-bind the pattern variable.
+                    uint32_t canonChild = egraph.findConst(eNode.children[i]);
+                    const EClass &childCls = egraph.getEClass(canonChild);
+                    if (childCls.dtype != pattern.dtypes[0])
+                        return false;
+                }
+            }
+            return true;
+        }
+
         if (eNode.children.size() != pNode.parentIds.size())
             return false;
 
