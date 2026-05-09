@@ -149,35 +149,6 @@ private:
         return atomicTopo;
     }
 
-    void materializePersistentInputsForPlan(const CompiledGraph &compiled)
-    {
-        for (const auto &nodePair : compiled.nodesMap)
-        {
-            const TensorNode &node = nodePair.second;
-            uint32_t logicalId = compiled.getLogicalId(node.id);
-            if (node.opType != OpType::INPUT || node.storageType != StorageType::PERSISTENT)
-                continue;
-            if (memManager.has(node.backend, logicalId))
-                continue;
-
-            uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
-            memManager.allocate(node.backend, logicalId, sizeBytes, StorageType::PERSISTENT);
-
-            if (graph.constantStaging.count(node.id))
-            {
-                memManager.write(node.backend, logicalId, graph.constantStaging.at(node.id)->data(), sizeBytes);
-            }
-            else if (graph.weightSources.count(node.id))
-            {
-                const auto &source = graph.weightSources.at(node.id);
-                auto &loader = graph.loaders.at(source.first);
-                std::vector<uint8_t> temp(sizeBytes);
-                loader->loadTensor(source.second, temp.data(), sizeBytes);
-                memManager.write(node.backend, logicalId, temp.data(), sizeBytes);
-            }
-        }
-    }
-
     void persistCache() const
     {
         if (cachePath.empty())
