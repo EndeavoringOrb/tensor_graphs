@@ -234,7 +234,14 @@ struct KernelEntry
                 return false;
         }
 
-        // 7. Call custom match function
+        // 7. Inplace safety check: prevent mutating persistent memory (weights)
+        if (inplace && !inputs.empty())
+        {
+            if (inputs[0].storageType == StorageType::PERSISTENT)
+                return false;
+        }
+
+        // 8. Call custom match function
         if (match)
         {
             return match(inputs, output);

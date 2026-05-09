@@ -40,52 +40,62 @@ REGISTER_MACROS = [
 ]
 
 
-def validate_kernel_contiguity_logic(rel_path, content):
+def validate_kernel_match_logic(rel_path, content):
     """
-    Checks for the 'Rule of Thumb': Match functions should not manually check
-    input contiguity if the registration macro already specifies it.
-
-    Manually checking 'isContiguous(inputs[i])' inside a match function
-    breaks the Planner's ability to 'repair' the graph by inserting
-    CONTIGUOUS nodes, because the Planner bypasses registration-level
-    contiguity checks but cannot bypass hardcoded ones in the match function.
+    Enforces the 'Clean Match Function' rule. 
+    Match functions should only contain logic that cannot be expressed 
+    in the registration macro.
     """
-
-    # 1. Find all registration macros in the file
-    # Pattern captures: Macro Type, Match Function Name, and the arguments list
+    # Find all registration macros
     reg_pattern = r"(REGISTER_[\w_]+)\s*\(\s*.*?\s*,\s*.*?\s*,\s*([\w_]+)\s*,.*?\)\s*;"
     registrations = re.findall(reg_pattern, content, re.DOTALL)
 
     for macro_type, match_func_name in registrations:
-        # 2. Extract the body of the match function
-        # Simple regex to find the function body. Note: might be fragile for complex nesting,
-        # but kernel match functions are typically flat and simple.
-        func_body_pattern = rf"inline\s+bool\s+{match_func_name}\s*\([^{{]+\{{(.*?)\}}"
+        # Extract function body
+        func_body_pattern = rf"bool\s+{match_func_name}\s*\([^{{]+\{{(.*?)\}}"
         func_body_match = re.search(func_body_pattern, content, re.DOTALL)
 
         if func_body_match:
             body = func_body_match.group(1)
 
-            # 3. Look for forbidden manual contiguity checks on inputs or inViews
-            # We allow isContiguous(output) as that is often required by kernels.
-            forbidden_pattern = r"isContiguous\s*\(\s*(inputs|inViews)\s*\["
+            # Map of regex patterns to (Error Name, Reason)
+            redundancies = {
+                r"inputs\.size\(\)": 
+                    ("Input Count Check", "The engine already validates input count based on the macro arguments."),
+                
+                r"inputs\s*\[\d+\]\.backend": 
+                    ("Input Backend Check", "Input backends are validated via the backend list in the registration macro."),
+                
+                r"output\.backend": 
+                    ("Output Backend Check", "The output backend is validated by the registry before calling match()."),
+                
+                r"isContiguous\s*\(\s*(inputs|inViews)\s*\[": 
+                    ("Input Contiguity Check", "The Planner handles 'Contiguity Repair'. Use the boolean list in the macro instead."),
+                
+                r"inputs\s*\[\d+\]\.dtype": 
+                    ("Input DType Check", "DTypes are already validated against the DType list in the registration macro."),
+                
+                r"inputs\s*\[0\]\.storageType\s*==\s*StorageType::PERSISTENT": 
+                    ("Persistent Storage Check", "The engine's inplace safety logic now handles this automatically."),
+                
+                r"inputs\s*\[0\]\.backend\s*!=\s*output\.backend":
+                    ("Backend Mismatch Check", "Inplace/View kernels are automatically checked for backend consistency by the core.")
+            }
 
-            if re.search(forbidden_pattern, body):
-                console.print(
-                    Panel(
-                        f"[bold red]CONTIGUITY LOGIC ERROR:[/bold red] in [cyan]{rel_path}[/cyan]\n\n"
-                        f"The match function [yellow]{match_func_name}[/yellow] contains a manual "
-                        f"contiguity check on an input tensor.\n\n"
-                        f"[white]Reason:[/white] Hardcoding 'isContiguous(inputs[i])' in the match function "
-                        f"prevents the Planner from performing 'Contiguity Repair'.\n\n"
-                        f"[white]Fix:[/white] Remove the manual check from the C++ function and ensure "
-                        f"the corresponding index in the registration macro's contiguity "
-                        f"list is set to [green]true[/green].",
-                        title="Architecture Violation",
-                        border_style="red",
+            for pattern, (name, reason) in redundancies.items():
+                if re.search(pattern, body):
+                    console.print(
+                        Panel(
+                            f"[bold red]REDUNDANT LOGIC DETECTED:[/bold red] in [cyan]{rel_path}[/cyan]\n\n"
+                            f"The match function [yellow]{match_func_name}[/yellow] contains a manual [bold]{name}[/bold].\n\n"
+                            f"[white]Reason:[/white] {reason}\n\n"
+                            f"[white]Fix:[/white] Remove the check from the C++ body. Use the registration macro "
+                            f"parameters to define these constraints.",
+                            title="Linter Violation",
+                            border_style="red",
+                        )
                     )
-                )
-                sys.exit(1)
+                    sys.exit(1)
 
 
 def get_compiler_cmd(fname: str):
@@ -186,9 +196,9 @@ def generate_kernel_uids(core_seed):
                     with open(path, "r", encoding="utf-8", errors="ignore") as f_in:
                         content = f_in.read()
 
-                    # LINT: Check for redundant contiguity logic
+                    # LINT: Check for redundant match logic
                     if not NO_LINT:
-                        validate_kernel_contiguity_logic(rel_path, content)
+                        validate_kernel_match_logic(rel_path, content)
 
                     reg_count = 0
                     for macro in REGISTER_MACROS:
