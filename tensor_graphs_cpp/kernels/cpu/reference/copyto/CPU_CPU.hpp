@@ -76,9 +76,9 @@ REGISTER_REF_KERNEL(
     1,
     matchCopyTo_CPU_CPU,
     runCopyTo_CPU_CPU,
-    {Backend::CPU},   // Output backend
-    {DType::FLOAT32}, // Supported DTypes (generic)
-    {{8, 32}},        // Dummy shape for registration
-    {false},          // Input does not strictly require contiguity
-    {{Backend::CPU}}  // Input backends
+    {Backend::CPU},  // Output backend
+    {},              // Supported DTypes (generic)
+    {{8, 32}},       // Dummy shape for registration
+    {false},         // Input does not strictly require contiguity
+    {{Backend::CPU}} // Input backends
 );

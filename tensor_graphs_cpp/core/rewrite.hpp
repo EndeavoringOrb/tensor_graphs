@@ -122,6 +122,13 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
     if (pRoot != UINT32_MAX)
     {
         auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, backend, inNodes, outNode, false);
+        if (matches.empty())
+        {
+            std::string inTypes;
+            for (const auto &in : inNodes)
+                inTypes += toString(in.dtype) + " ";
+            Error::throw_err("[addOpToEGraph] No matching kernel found for OpType: " + toString(op) + " Backend: " + toString(backend) + " Inputs: " + inTypes);
+        }
         for (uint64_t uid : matches)
         {
             const auto &kernel = KernelRegistry::get().getKernel(uid);
