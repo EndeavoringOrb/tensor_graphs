@@ -351,7 +351,15 @@ public:
                         const std::vector<std::vector<Backend>> &inputBackends)
     {
         bool isVariadic = (op == OpType::CONCAT);
-        if (op == OpType::FUSED && refFactory != nullptr && numInputs >= 2 &&
+        bool concatCheck = true;
+        for (int i = 1; i < dtypes.size() - 1; i++)
+        {
+            if (dtypes[i] != dtypes[i - 1])
+            {
+                concatCheck = false;
+            }
+        }
+        if (concatCheck && op == OpType::FUSED && refFactory != nullptr && numInputs >= 2 &&
             dummyShapes.size() == numInputs && dtypes.size() == numInputs && dtypes.back() == DType::INT32)
         {
             try
