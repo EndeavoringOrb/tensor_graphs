@@ -2248,14 +2248,14 @@ struct BatchFlattenDot : public Rule
     {
         visited_enodes.insert(eNodeIdx);
 
-        const ENode &enode = egraph.getENodes()[eNodeIdx];
+        const ENode enode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
 
         uint32_t aClass = enode.children[0];
         uint32_t bClass = enode.children[1];
 
-        const EClass &aEClass = egraph.getEClass(egraph.findConst(aClass));
-        const EClass &bEClass = egraph.getEClass(egraph.findConst(bClass));
+        const EClass aEClass = egraph.getEClass(egraph.findConst(aClass));
+        const EClass bEClass = egraph.getEClass(egraph.findConst(bClass));
 
         uint32_t rankA = aEClass.shape.size();
         uint32_t rankB = bEClass.shape.size();
