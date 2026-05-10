@@ -31,7 +31,6 @@ inline void runDivF32_ND_Fast(const std::vector<const void *> &inputs, const std
             uint64_t end = std::min(start + chunk, n);
             uint64_t i = start;
             for (; i + 4 <= end; i += 4) {
-                // Note: vdivq_f32 is standard NEON
                 vst1q_f32(out + i, vdivq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
             }
             for (; i < end; ++i) out[i] = a[i] / b[i]; });
@@ -40,5 +39,13 @@ inline void runDivF32_ND_Fast(const std::vector<const void *> &inputs, const std
         w.join();
 }
 
-REGISTER_KERNEL("Div_ND_NEON_Threaded", 2, matchDivF32_ND_Fast, runDivF32_ND_Fast, nullptr, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 24, 1536, 1536}, {1, 24, 1536, 1536}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+inline uint32_t refFactoryDivND_Fast(const std::vector<uint32_t> &inputs, Graph &graph)
+{
+    if (inputs.size() != 2)
+        Error::throw_err("Div ND Fast requires exactly 2 inputs");
+
+    return graph.div(inputs[0], inputs[1]);
+}
+
+REGISTER_KERNEL("Div_ND_NEON_Threaded", 2, matchDivF32_ND_Fast, runDivF32_ND_Fast, refFactoryDivND_Fast, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 24, 1536, 1536}, {1, 24, 1536, 1536}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
 #endif
