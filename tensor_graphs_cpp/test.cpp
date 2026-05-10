@@ -640,7 +640,7 @@ std::vector<float> executeFusedKernel(
         outputData.resize(outBufElements * getDTypeSize(outDType), 0);
     }
 
-    if (kernel.inplace && kernel.numInputs > 0 && kernel.inferView)
+    if (kernel.isView && kernel.numInputs > 0 && kernel.inferView)
     {
         std::vector<TensorNode> dummyInputs(kernel.numInputs);
         for (size_t i = 0; i < kernel.numInputs; ++i)
