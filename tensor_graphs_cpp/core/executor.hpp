@@ -131,10 +131,33 @@ public:
                 Error::throw_err("[Executor.run] Backend buffer not initialized for " + toString(node.backend));
             }
             uint32_t targetId = memManager.resolveAlias(outputMemId);
-            uint64_t arenaOffset = it->second.getOffset(targetId);
+            Backend actualBackend = node.backend;
+            if (memManager.buffers.count(actualBackend) == 0 ||
+                memManager.buffers.at(actualBackend).allocationMap.count(targetId) == 0)
+            {
+                bool found = false;
+                for (auto const &pair : memManager.buffers)
+                {
+                    if (pair.second.allocationMap.count(targetId))
+                    {
+                        actualBackend = pair.first;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    Error::throw_err("[Executor.run] Physical allocation " + std::to_string(targetId) + " not found in any backend buffer.");
+                }
+            }
+
+            auto &actualBuf = memManager.buffers.at(actualBackend);
+            uint64_t arenaOffset = actualBuf.getOffset(targetId);
+
+            // Create views and pointers relative to the actual physical buffer
             TensorView outView = TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype));
             std::vector<TensorView> kernelOutViews = {outView};
-            std::vector<void *> kernelOutputs = {outBuf.arena_ptr + outView.baseOffset};
+            std::vector<void *> kernelOutputs = {actualBuf.arena_ptr + outView.baseOffset};
 
             if (inst.viewInputIndex < 0)
             {

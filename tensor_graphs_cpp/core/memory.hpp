@@ -687,14 +687,29 @@ struct MemoryManager
 
     bool has(Backend backend, uint32_t nodeId) const
     {
-        auto aliasIt = aliasMap.find(nodeId);
-        if (aliasIt != aliasMap.end())
+        uint32_t targetId = nodeId;
+        auto aliasIt = aliasMap.find(targetId);
+        while (aliasIt != aliasMap.end())
         {
-            return has(backend, aliasIt->second);
+            targetId = aliasIt->second;
+            aliasIt = aliasMap.find(targetId);
         }
 
-        const DeviceBuffer &buf = buffers.at(backend);
-        return (buf.allocationMap.find(nodeId) != buf.allocationMap.end());
+        // 1. Try the expected backend buffer first
+        auto it = buffers.find(backend);
+        if (it != buffers.end() && it->second.allocationMap.count(targetId))
+        {
+            return true;
+        }
+
+        // 2. Check other backends (required for Unified Memory views spanning backends)
+        for (const auto &pair : buffers)
+        {
+            if (pair.second.allocationMap.count(targetId))
+                return true;
+        }
+
+        return false;
     }
 
     uint64_t getCapacity(Backend backend) const
