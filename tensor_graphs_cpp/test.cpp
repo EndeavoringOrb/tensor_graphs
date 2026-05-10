@@ -974,7 +974,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
     for (size_t i = 0; i < kernel.numInputs; ++i)
     {
         uint32_t id = UINT32_MAX;
-        DType dtype = kernel.dtypes[i];
+        DType dtype = kernel.dtypes[i] == DType::ANY ? DType::FLOAT32 : kernel.dtypes[i];
         uint64_t elements = countElements(kernel.dummyShapes[i]);
         uint64_t sizeBytes = elements * getDTypeSize(dtype);
 
@@ -1355,7 +1355,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 // ============================================================
 int main(int argc, char *argv[])
 {
-    std::string targetKernel = "";
+    std::string targetKernel = "Dot_Transposed_BF16";
     bool useRecords = true;
 
     // Parse arguments
