@@ -631,22 +631,21 @@ private:
                                             int inputIdx = traceToInputIdx(n.parentIds[p_idx]);
                                             if (kernel.isVariadic)
                                             {
-                                                // Last child of fused node maps to last input of pattern (the axis)
-                                                // All other children map to the first input of the pattern (the tensors)
-                                                if (j == enode.children.size() - 1)
+                                                if (inputIdx == (int)kernel.numInputs - 1 && j == enode.children.size() - 1)
                                                 {
-                                                    if (inputIdx == (int)pInputs.size() - 1)
-                                                        needed = true;
+                                                    needed = true;
+                                                    break;
                                                 }
-                                                else
+                                                else if (inputIdx >= 0 && inputIdx < (int)kernel.numInputs - 1 && j < enode.children.size() - 1)
                                                 {
-                                                    if (inputIdx == 0)
-                                                        needed = true;
+                                                    needed = true;
+                                                    break;
                                                 }
                                             }
                                             else if (inputIdx == (int)j)
                                             {
                                                 needed = true;
+                                                break;
                                             }
                                         }
                                     }

@@ -1088,6 +1088,32 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             else
             {
                 fillRandom(contiguousData.data(), elements, rec.inputDTypes[i]);
+                if (rec.inputDTypes[i] == DType::INT32)
+                {
+                    int32_t *iptr = reinterpret_cast<int32_t *>(contiguousData.data());
+                    if (kernel.opType == OpType::CONCAT || kernel.opName.find("Concat") != std::string::npos)
+                    {
+                        if (i == rec.inputShapes.size() - 1)
+                        {
+                            int32_t concat_axis = -1;
+                            if (!rec.inputShapes.empty() && !rec.outputShapes.empty())
+                            {
+                                for (size_t d = 0; d < rec.outputShapes[0].size(); ++d)
+                                {
+                                    if (rec.outputShapes[0][d] != rec.inputShapes[0][d])
+                                    {
+                                        concat_axis = (int32_t)d;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (concat_axis == -1)
+                                concat_axis = 0;
+                            for (size_t k = 0; k < elements; ++k)
+                                iptr[k] = concat_axis;
+                        }
+                    }
+                }
             }
 
             // Scatter contiguousData physically into rawData[i] using strides
@@ -1106,6 +1132,10 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             else
             {
                 inputIds[i] = graph.input(rec.inputShapes[i], rec.inputDTypes[i], {}, StorageType::PERSISTENT);
+                if (rec.inputDTypes[i] == DType::INT32)
+                {
+                    graph.constantStaging[inputIds[i]] = std::make_shared<std::vector<uint8_t>>(contiguousData);
+                }
             }
 
             graph.getNode(inputIds[i]).strides = rec.inputStrides[i];

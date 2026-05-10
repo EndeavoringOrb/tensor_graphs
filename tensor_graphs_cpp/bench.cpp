@@ -66,7 +66,7 @@ int main()
     {
         Record r;
         br.read(r);
-        
+
         r.runTime = 0.0f;
         r.buildContextId = BUILD_CONTEXT_ID;
         std::string key = serializeToString(r);
@@ -305,6 +305,33 @@ int main()
                             {
                                 for (size_t k = 0; k < elements; ++k)
                                     iptr[k] = k;
+                            }
+                        }
+                        else if (kernel.opType == OpType::CONCAT || kernel.opName.find("Concat") != std::string::npos)
+                        {
+                            if (idx == r.inputShapes.size() - 1)
+                            {
+                                int32_t concat_axis = -1;
+                                if (!r.inputShapes.empty() && !r.outputShapes.empty())
+                                {
+                                    for (size_t d = 0; d < r.outputShapes[0].size(); ++d)
+                                    {
+                                        if (r.outputShapes[0][d] != r.inputShapes[0][d])
+                                        {
+                                            concat_axis = (int32_t)d;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (concat_axis == -1)
+                                    concat_axis = 0;
+                                for (size_t k = 0; k < elements; ++k)
+                                    iptr[k] = concat_axis;
+                            }
+                            else
+                            {
+                                for (size_t k = 0; k < elements; ++k)
+                                    iptr[k] = 1;
                             }
                         }
                         else
