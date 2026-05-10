@@ -675,11 +675,11 @@ struct MemoryManager
 
         // Cross-backend lookup for Unified Memory
         Backend actualBackend = node.backend;
-        if (buffers.at(Backend::CUDA).allocationMap.count(targetId))
+        if (buffers.find(Backend::CUDA) != buffers.end() && buffers.at(Backend::CUDA).allocationMap.count(targetId))
         {
             actualBackend = Backend::CUDA;
         }
-        else if (buffers.at(Backend::CPU).allocationMap.count(targetId))
+        else if (buffers.find(Backend::CPU) != buffers.end() && buffers.at(Backend::CPU).allocationMap.count(targetId))
         {
             actualBackend = Backend::CPU;
         }

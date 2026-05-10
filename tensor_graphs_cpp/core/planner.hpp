@@ -1322,6 +1322,10 @@ private:
                     break;
                 }
             }
+            else
+            {
+                std::cout << "invalid: " << reason << std::endl;
+            }
 
             if (to_process_enode.empty())
                 break;
