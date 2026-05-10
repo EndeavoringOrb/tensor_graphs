@@ -1355,7 +1355,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 // ============================================================
 int main(int argc, char *argv[])
 {
-    std::string targetKernel = "Dot_Transposed_BF16";
+    std::string targetKernel = "";
     bool useRecords = true;
 
     // Parse arguments
