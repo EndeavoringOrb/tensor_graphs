@@ -21,7 +21,7 @@ inline void inferViewPermute(TensorNode &node, const std::vector<TensorNode> &in
     node.strides.resize(dims.size());
     for (size_t i = 0; i < dims.size(); ++i)
     {
-        node.strides[dims[i]] = inputs[0].strides[dims[i]];
+        node.strides[i] = inputs[0].strides[dims[i]];
     }
     node.viewOffset = inputs[0].viewOffset;
 }
