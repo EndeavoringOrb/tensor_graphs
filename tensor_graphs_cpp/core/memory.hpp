@@ -390,7 +390,7 @@ struct DeviceBuffer
         // 3. If no space, allocation failed.
         if (slotIt == blocks.end())
         {
-            Error::throw_err<MemoryAllocationError>("Cannot allocate: Not enough space.", _sizeBytes);
+            Error::throw_err<MemoryAllocationError>("Cannot allocate: Not enough space on " + toString(backend), _sizeBytes);
         }
 
         // 4. Claim the free slot
