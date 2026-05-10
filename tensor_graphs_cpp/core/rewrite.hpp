@@ -763,7 +763,7 @@ struct CopyToOfContiguous : public Rule
 
     void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical) override
     {
-        const ENode &copyToNode = egraph.getENodes()[eNodeIdx];
+        const ENode copyToNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
 
         for (uint32_t contigNodeIdx : matched_contigs)
@@ -771,11 +771,11 @@ struct CopyToOfContiguous : public Rule
             uint64_t pair_id = (static_cast<uint64_t>(eNodeIdx) << 32) | contigNodeIdx;
             visited.insert(pair_id);
 
-            const ENode &contigNode = egraph.getENodes()[contigNodeIdx];
+            const ENode contigNode = egraph.getENodes()[contigNodeIdx];
             if (contigNode.children.empty())
                 continue;
             uint32_t xClassId = egraph.find(contigNode.children[0]);
-            const EClass &xClass = egraph.getEClass(xClassId);
+            const EClass xClass = egraph.getEClass(xClassId);
 
             TensorNode copyInNode;
             copyInNode.opType = OpType::INPUT;
@@ -889,7 +889,7 @@ struct ContiguousOfCopyTo : public Rule
 
     void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical) override
     {
-        const ENode &contigNode = egraph.getENodes()[eNodeIdx];
+        const ENode contigNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
 
         for (uint32_t copyToNodeIdx : matched_copyTos)
@@ -897,11 +897,11 @@ struct ContiguousOfCopyTo : public Rule
             uint64_t pair_id = (static_cast<uint64_t>(eNodeIdx) << 32) | copyToNodeIdx;
             visited.insert(pair_id);
 
-            const ENode &copyToNode = egraph.getENodes()[copyToNodeIdx];
+            const ENode copyToNode = egraph.getENodes()[copyToNodeIdx];
             if (copyToNode.children.empty())
                 continue;
             uint32_t xClassId = egraph.find(copyToNode.children[0]);
-            const EClass &xClass = egraph.getEClass(xClassId);
+            const EClass xClass = egraph.getEClass(xClassId);
 
             TensorNode contigInNode;
             contigInNode.opType = OpType::INPUT;
