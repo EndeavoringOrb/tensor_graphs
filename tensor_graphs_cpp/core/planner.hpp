@@ -192,6 +192,7 @@ private:
         bool inplace;
         int32_t inplace_idx;
         bool isScatter;
+        bool isView;
     };
 
     struct ExtractChoice
@@ -355,12 +356,23 @@ private:
         const std::vector<ENodeInfo> &enodeInfos,
         uint32_t root,
         const std::unordered_map<uint32_t, Backend> &cachedNodes,
-        const std::unordered_map<uint32_t, uint32_t> &eclassToLogical) const
+        const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
+        const Graph &graph) const
     {
         auto ref = build_ref_counts(egraph, selection_map, root);
         std::unordered_map<Backend, uint64_t> live_mem;
         std::unordered_map<Backend, uint64_t> peak_mem;
         std::unordered_set<uint32_t> visited;
+
+        auto isPersistent = [&](uint32_t eclass_id) -> bool
+        {
+            uint32_t logicalId = eclassToLogical.count(eclass_id) ? eclassToLogical.at(eclass_id) : UINT32_MAX;
+            if (logicalId != UINT32_MAX && graph.hasNode(logicalId) && graph.getNode(logicalId).storageType == StorageType::PERSISTENT)
+                return true;
+            if (egraph.constantStaging.count(eclass_id))
+                return true;
+            return false;
+        };
 
         std::function<void(uint32_t)> visit = [&](uint32_t eclass)
         {
@@ -381,8 +393,9 @@ private:
 
             uint32_t logicalId = eclassToLogical.count(eclass) ? eclassToLogical.at(eclass) : UINT32_MAX;
             bool isCached = (logicalId != UINT32_MAX && cachedNodes.count(logicalId));
+            bool persistent = isPersistent(eclass);
 
-            if (!info.inplace && !isCached)
+            if (!info.inplace && !info.isView && !isCached)
             {
                 for (const auto &kv : info.memSizes)
                 {
@@ -402,13 +415,17 @@ private:
                     const ENodeInfo &child_info = enodeInfos[child_enode_id];
                     uint32_t child_logicalId = eclassToLogical.count(c) ? eclassToLogical.at(c) : UINT32_MAX;
                     bool childIsCached = (child_logicalId != UINT32_MAX && cachedNodes.count(child_logicalId));
+                    bool childPersistent = isPersistent(c);
 
                     if (info.inplace && (int)i == info.inplace_idx)
                     {
                         continue;
                     }
 
-                    if (!child_info.inplace && !childIsCached)
+                    // A view safely defers the deallocation of its children to runtime.
+                    // For the pessimistic peak-memory model, we just hold the child's memory overhead
+                    // until the end of the graph to guarantee we don't underestimate live allocations.
+                    if (!child_info.inplace && !child_info.isView && !childIsCached && !childPersistent && !info.isView)
                     {
                         for (const auto &kv : child_info.memSizes)
                         {
@@ -473,11 +490,13 @@ private:
             info.inplace = false;
             info.inplace_idx = -1;
             info.isScatter = false;
+            info.isView = false;
 
             if (enode.kernelUid != 0)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
                 info.inplace = kernel.inplace;
+                info.isView = kernel.isView;
                 if (info.inplace && kernel.numInputs > 0)
                 {
                     info.inplace_idx = 0;
@@ -1276,7 +1295,7 @@ private:
             if (valid)
             {
                 std::unordered_map<Backend, uint64_t> peak = computePeakMemory(
-                    egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical);
+                    egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical, graph);
 
                 for (const auto &kv : maxMemoryByBackend)
                 {

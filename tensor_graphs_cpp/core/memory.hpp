@@ -527,6 +527,7 @@ struct MemoryManager
 
     void release(Backend backend, uint32_t nodeId)
     {
+        // Check if this is an alias
         auto aliasIt = aliasMap.find(nodeId);
         if (aliasIt != aliasMap.end())
         {
@@ -534,18 +535,21 @@ struct MemoryManager
             if (refIt != aliasRefCounts.end() && refIt->second > 0)
             {
                 refIt->second--;
+                // Only deallocate if the reference count is actually zero
                 if (refIt->second == 0)
                 {
                     auto storageIt = aliasStorageTypes.find(nodeId);
+                    // Ensure we only recurse if the alias is TRANSIENT
                     if (storageIt == aliasStorageTypes.end() || storageIt->second == StorageType::TRANSIENT)
                     {
                         uint32_t targetId = aliasIt->second;
-                        aliasMap.erase(aliasIt);
-                        aliasRefCounts.erase(refIt);
+
+                        // Clean up the alias metadata before recursing to the underlying ID
+                        aliasRefCounts.erase(nodeId);
                         if (storageIt != aliasStorageTypes.end())
-                        {
-                            aliasStorageTypes.erase(storageIt);
-                        }
+                            aliasStorageTypes.erase(nodeId);
+                        aliasMap.erase(nodeId);
+
                         release(backend, targetId);
                     }
                 }
