@@ -812,7 +812,8 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         std::vector<uint32_t> tempInputs;
         for (size_t i = 0; i < kernel.numInputs; ++i)
         {
-            tempInputs.push_back(tempGraph.input(kernel.dummyShapes[i], kernel.dtypes[i]));
+            DType d = kernel.dtypes[i] == DType::ANY ? DType::FLOAT32 : kernel.dtypes[i];
+            tempInputs.push_back(tempGraph.input(kernel.dummyShapes[i], d));
         }
 
         kernel.refFactory(tempInputs, tempGraph);
