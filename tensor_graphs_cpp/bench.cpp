@@ -154,8 +154,14 @@ int main()
                 dummyInputs[idx].dtype = r.inputDTypes[idx];
 
                 Backend b = Backend::CPU;
-                if (!r.inputBackends.empty() && idx < r.inputBackends.size() && !r.inputBackends[idx].empty())
-                    b = r.inputBackends[idx][0];
+                size_t ruleIdx = idx;
+                if (kernel.isVariadic)
+                {
+                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+                }
+
+                if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
+                    b = r.inputBackends[ruleIdx][0];
                 dummyInputs[idx].backend = b;
             }
 
@@ -197,7 +203,7 @@ int main()
                 size_t ruleIdx = idx;
                 if (kernel.isVariadic)
                 {
-                    ruleIdx = (idx == r.inputShapes.size() - 1) ? kernel.inputBackends.size() - 1 : 0;
+                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
                 }
 
                 if (ruleIdx < kernel.inputBackends.size())

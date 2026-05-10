@@ -696,7 +696,7 @@ std::vector<float> executeFusedKernel(
             size_t ruleIdx = i;
             if (kernel.isVariadic)
             {
-                ruleIdx = (i == inputData.size() - 1) ? kernel.inputBackends.size() - 1 : 0;
+                ruleIdx = (i == inputData.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
             }
 
             if (ruleIdx < kernel.inputBackends.size())
@@ -1024,8 +1024,14 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             dummyInputs[idx].dtype = rec.inputDTypes[idx];
 
             Backend b = Backend::CPU;
-            if (!rec.inputBackends.empty() && idx < rec.inputBackends.size() && !rec.inputBackends[idx].empty())
-                b = rec.inputBackends[idx][0];
+            size_t ruleIdx = idx;
+            if (kernel.isVariadic)
+            {
+                ruleIdx = (idx == rec.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+            }
+
+            if (!rec.inputBackends.empty() && ruleIdx < rec.inputBackends.size() && !rec.inputBackends[ruleIdx].empty())
+                b = rec.inputBackends[ruleIdx][0];
             dummyInputs[idx].backend = b;
         }
 
