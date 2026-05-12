@@ -27,6 +27,9 @@ tensor_graphs_cpp/test.exe
 hwinfo-*.txt
 *.png
 **/*.png
+node_modules
+package.json
+package-lock.json
 
 # Profiling artifacts
 profile_output*
