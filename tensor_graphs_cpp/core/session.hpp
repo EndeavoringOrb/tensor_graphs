@@ -227,9 +227,8 @@ public:
         return x + 1;
     }
 
-    void compile(const std::unordered_map<uint32_t, const void *> &sampleInputs)
+    void compile()
     {
-        (void)sampleInputs;
         ensureOutputDirectories();
         costModel.load(recordsPath);
         if (isPlanned)
@@ -422,7 +421,7 @@ public:
     {
         if (!isCompiled)
         {
-            compile(inputs);
+            compile();
         }
 
         std::unordered_map<uint32_t, std::vector<Region>> inputDiffs;
