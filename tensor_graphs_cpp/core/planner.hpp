@@ -363,6 +363,7 @@ private:
         std::unordered_map<Backend, uint64_t> live_mem;
         std::unordered_map<Backend, uint64_t> peak_mem;
         std::unordered_set<uint32_t> visited;
+        std::unordered_map<uint32_t, uint32_t> sim_aliasMap;
 
         auto isPersistent = [&](uint32_t eclass_id) -> bool
         {
@@ -372,6 +373,53 @@ private:
             if (egraph.constantStaging.count(eclass_id))
                 return true;
             return false;
+        };
+
+        auto release = [&](auto &self, uint32_t id) -> void
+        {
+            // 1. If this is an alias, unwrap it and recursively release the target
+            auto aliasIt = sim_aliasMap.find(id);
+            if (aliasIt != sim_aliasMap.end())
+            {
+                uint32_t targetId = aliasIt->second;
+                sim_aliasMap.erase(aliasIt);
+
+                // The parent instruction left the target's refcount artificially high.
+                // We must decrement it here, and cascade if it hits 0.
+                if (ref.find(targetId) != ref.end())
+                {
+                    ref[targetId]--;
+                    if (ref[targetId] == 0)
+                    {
+                        self(self, targetId);
+                    }
+                }
+                return;
+            }
+
+            // 2. Base case: This was an actual physical allocation. Evaluate memory release.
+            uint32_t logicalId = eclassToLogical.count(id) ? eclassToLogical.at(id) : UINT32_MAX;
+            bool childIsCached = (logicalId != UINT32_MAX && cachedNodes.count(logicalId));
+            bool childPersistent = isPersistent(id);
+
+            if (!childIsCached && !childPersistent)
+            {
+                auto selIt = selection_map.find(id);
+                if (selIt != selection_map.end())
+                {
+                    uint32_t sel = selIt->second;
+                    uint32_t enode_id = egraph.getEClass(id).enodes[sel];
+                    const ENodeInfo &info = enodeInfos[enode_id];
+
+                    if (!info.inplace && !info.isView)
+                    {
+                        for (const auto &kv : info.memSizes)
+                        {
+                            live_mem[kv.first] -= kv.second;
+                        }
+                    }
+                }
+            }
         };
 
         std::function<void(uint32_t)> visit = [&](uint32_t eclass)
@@ -393,7 +441,6 @@ private:
 
             uint32_t logicalId = eclassToLogical.count(eclass) ? eclassToLogical.at(eclass) : UINT32_MAX;
             bool isCached = (logicalId != UINT32_MAX && cachedNodes.count(logicalId));
-            bool persistent = isPersistent(eclass);
 
             if (!info.inplace && !info.isView && !isCached)
             {
@@ -407,31 +454,24 @@ private:
             for (size_t i = 0; i < node.children.size(); ++i)
             {
                 uint32_t c = egraph.findConst(node.children[i]);
+
+                if (info.inplace && (int)i == info.inplace_idx)
+                {
+                    sim_aliasMap[eclass] = c;
+                    continue;
+                }
+
+                // Views always target child 0 in the Executor mapping
+                if (info.isView && i == 0)
+                {
+                    sim_aliasMap[eclass] = c;
+                    continue;
+                }
+
                 ref[c]--;
                 if (ref[c] == 0)
                 {
-                    uint32_t child_sel = selection_map.at(c);
-                    uint32_t child_enode_id = egraph.getEClass(c).enodes[child_sel];
-                    const ENodeInfo &child_info = enodeInfos[child_enode_id];
-                    uint32_t child_logicalId = eclassToLogical.count(c) ? eclassToLogical.at(c) : UINT32_MAX;
-                    bool childIsCached = (child_logicalId != UINT32_MAX && cachedNodes.count(child_logicalId));
-                    bool childPersistent = isPersistent(c);
-
-                    if (info.inplace && (int)i == info.inplace_idx)
-                    {
-                        continue;
-                    }
-
-                    // A view safely defers the deallocation of its children to runtime.
-                    // For the pessimistic peak-memory model, we just hold the child's memory overhead
-                    // until the end of the graph to guarantee we don't underestimate live allocations.
-                    if (!child_info.inplace && !child_info.isView && !childIsCached && !childPersistent && !info.isView)
-                    {
-                        for (const auto &kv : child_info.memSizes)
-                        {
-                            live_mem[kv.first] -= kv.second;
-                        }
-                    }
+                    release(release, c);
                 }
             }
         };
@@ -1292,9 +1332,10 @@ private:
                 }
             }
 
+            std::unordered_map<Backend, uint64_t> peak;
             if (valid)
             {
-                std::unordered_map<Backend, uint64_t> peak = computePeakMemory(
+                peak = computePeakMemory(
                     egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical, graph);
 
                 for (const auto &kv : maxMemoryByBackend)
@@ -1315,6 +1356,7 @@ private:
                     best_cost = current_cost;
                     best_selection_map = selection_map;
                     std::cout << "new best cost: " << std::to_string(best_cost) << std::endl;
+                    std::cout << "peak mem: " << toString(peak) << std::endl;
                 }
 
                 if (stopOnFirstValid)

@@ -370,3 +370,17 @@ inline std::vector<Region> intersectRegionLists(const std::vector<Region> &list1
     // Clean up overlapping results
     return mergeRegions(intersections);
 }
+
+inline std::string toString(const std::unordered_map<Backend, uint64_t> &map)
+{
+    std::stringstream ss;
+    ss << "{";
+    for (auto it = map.begin(); it != map.end(); ++it)
+    {
+        ss << toString(it->first) << ": " << it->second << " bytes";
+        if (std::next(it) != map.end())
+            ss << ", ";
+    }
+    ss << "}";
+    return ss.str();
+}
