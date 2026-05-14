@@ -285,7 +285,6 @@ struct CostModel
 
         features.push_back(outElements);
         features.push_back(inElements);
-        features.push_back(inElements * outElements); // Interaction helps models representing Matrix Math scale properly
 
         // Expand per input details
         for (size_t i = 0; i < inShapes.size(); ++i)

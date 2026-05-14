@@ -228,7 +228,7 @@ void run_flux()
     FluxTextEncoder text_encoder(cfg, g_text, mem, "flux-klein-4b/text_encoder");
     uint32_t in_ids = g_text.input({1, txt_seq}, DType::INT32, {}, StorageType::PERSISTENT);
     Session sess_text(g_text, mem, text_encoder.build_graph(in_ids), "dirty_region_caches/flux-text.bin");
-    sess_text.compile();
+    sess_text.plan();
 
     std::cout << "Building FLUX Transformer..." << std::endl;
     Graph g_trans;
@@ -240,7 +240,7 @@ void run_flux()
     uint32_t in_cos = g_trans.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32, {}, StorageType::PERSISTENT);
     uint32_t in_sin = g_trans.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32, {}, StorageType::PERSISTENT);
     Session sess_trans(g_trans, mem, trans.build_graph(in_latent, in_txt_emb, in_t, in_cos, in_sin), "dirty_region_caches/flux-trans.bin");
-    sess_trans.compile();
+    sess_trans.plan();
 
     std::cout << "Building FLUX VAE..." << std::endl;
     Graph g_vae;
@@ -248,7 +248,7 @@ void run_flux()
     FluxVAEDecoder vae(cfg, g_vae, mem, "flux-klein-4b/vae", latent_h, latent_w);
     uint32_t in_vae_latent = g_vae.input({1, cfg.vae_channels, latent_h, latent_w}, DType::FLOAT32, {}, StorageType::PERSISTENT);
     Session sess_vae(g_vae, mem, vae.build_graph(in_vae_latent), "dirty_region_caches/flux-vae.bin");
-    sess_vae.compile();
+    sess_vae.plan();
 
     std::cout << "Executing Text Encoder..." << std::endl;
     std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);

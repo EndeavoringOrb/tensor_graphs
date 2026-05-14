@@ -227,7 +227,7 @@ public:
         return x + 1;
     }
 
-    void compile()
+    void plan()
     {
         ensureOutputDirectories();
         costModel.load(recordsPath);
@@ -239,8 +239,14 @@ public:
         {
             std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
             ensureCacheCoverage(collectInputNodeIds());
+            persistCache();
             isPlanned = true;
         }
+    }
+
+    void compile()
+    {
+        plan();
 
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
         memManager.init();
@@ -324,7 +330,6 @@ public:
 
         executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
-        persistCache();
     }
 
     std::unordered_map<uint32_t, std::vector<Region>> canonicalizeInputDiffs(
