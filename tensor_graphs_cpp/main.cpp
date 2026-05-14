@@ -176,6 +176,36 @@ void compute_rope_cpu(int txt_seq, int img_h, int img_w, int head_dim, float the
     }
 }
 
+std::vector<int32_t> load_tokens_from_file(const std::string& filename, size_t txt_seq) {
+    // 1. Initialize vector with the padding value 151643
+    std::vector<int32_t> input_ids(txt_seq, 151643);
+
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << std::endl;
+        return input_ids;
+    }
+
+    std::string part;
+    size_t count = 0;
+
+    // 2. Read from file using ',' as the delimiter
+    // Note: This also stops if we reach the txt_seq limit
+    while (std::getline(file, part, ',') && count < txt_seq) {
+        try {
+            // Trim potential whitespace/newlines and convert to integer
+            if (!part.empty()) {
+                input_ids[count++] = static_cast<int32_t>(std::stoi(part));
+            }
+        } catch (const std::invalid_argument& e) {
+            // Handle non-numeric segments if necessary
+            continue;
+        }
+    }
+
+    return input_ids;
+}
+
 void run_flux()
 {
     FluxConfig cfg;
@@ -221,17 +251,7 @@ void run_flux()
     sess_vae.compile();
 
     std::cout << "Executing Text Encoder..." << std::endl;
-    std::vector<int32_t> input_ids(txt_seq, 151643);
-    // "cat"
-    input_ids[0] = 151644;
-    input_ids[1] = 872;
-    input_ids[2] = 198;
-    input_ids[3] = 4616;
-    input_ids[4] = 151645;
-    input_ids[5] = 198;
-    input_ids[6] = 151644;
-    input_ids[7] = 77091;
-    input_ids[8] = 198;
+    std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);
     std::unordered_map<uint32_t, const void *> text_inputs = {{in_ids, input_ids.data()}};
     const float *text_emb_ptr = static_cast<const float *>(sess_text.run(text_inputs));
 #ifdef USE_CUDA

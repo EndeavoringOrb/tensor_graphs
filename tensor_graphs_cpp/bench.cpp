@@ -25,8 +25,18 @@
 
 using json = nlohmann::json;
 
-int main()
+int main(int argc, char* argv[])
 {
+    int skipCount = 0;
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string arg = argv[i];
+        if ((arg == "-s" || arg == "--skip") && i + 1 < argc)
+        {
+            skipCount = std::atoi(argv[++i]);
+        }
+    }
+
     std::filesystem::create_directories("benchmarks");
 
     std::string callsPath = "benchmarks/calls.bin";
@@ -134,9 +144,14 @@ int main()
 
     std::ofstream outFile(recordsPath, std::ios::app | std::ios::binary);
     BinaryWriter bw(outFile);
-    std::cout << "Benchmarking " << toBenchmark.size() << " configurations..." << std::endl;
+    size_t startIdx = (skipCount > (int)toBenchmark.size()) ? toBenchmark.size() : (size_t)std::max(0, skipCount);
+    if (startIdx > 0)
+    {
+        std::cout << "Skipping the first " << startIdx << " kernels..." << std::endl;
+    }
+    std::cout << "Benchmarking " << toBenchmark.size() - startIdx << " configurations..." << std::endl;
 
-    for (size_t i = 0; i < toBenchmark.size(); ++i)
+    for (size_t i = startIdx; i < toBenchmark.size(); ++i)
     {
         Record &r = toBenchmark[i];
         uint64_t kernelUid = r.kernelUid;

@@ -18,22 +18,26 @@ private:
         return g.dot(x, g.reshape(w_t, g.constant({3}, sh3, DType::INT32)));
     }
 
+    /*
+    t_in (1) F32
+    dim 256
+    */
     uint32_t timestep_embedding(uint32_t t_in, uint32_t dim)
     {
-        int32_t half = dim / 2;
+        int32_t half = dim / 2; // 128
         int32_t start = 0, step = 1;
         uint32_t freqs = g.cast(g.arange(g.constant({1}, &start, DType::INT32),
                                          g.constant({1}, &half, DType::INT32),
                                          g.constant({1}, &step, DType::INT32)),
-                                DType::FLOAT32);
+                                DType::FLOAT32); // (128) F32
 
         float factor = -std::log(10000.0f) / half;
-        freqs = g.mul(freqs, expand_scalar_to_1d(factor, half));
-        freqs = g.pow(expand_scalar_to_1d(2.7182818f, half), freqs);
+        freqs = g.mul(freqs, expand_scalar_to_1d(factor, half)); // (128) F32
+        freqs = g.pow(expand_scalar_to_1d(2.7182818f, half), freqs); // (128) F32
 
-        uint32_t args = g.mul(repeat_ax(t_in, half, 0), freqs);
+        uint32_t args = g.mul(repeat_ax(t_in, half, 0), freqs); // (128) F32
         int32_t ax = 0;
-        return g.concat({g.cos(args), g.sin(args)}, g.constant({1}, &ax, DType::INT32));
+        return g.concat({g.cos(args), g.sin(args)}, g.constant({1}, &ax, DType::INT32)); // (256) F32
     }
 
     uint32_t layer_norm_atomic(uint32_t x, uint32_t seq)
@@ -124,22 +128,31 @@ public:
         total_seq_len = cfg.text_max_seq + img_seq_len;
     }
 
+    /*
+    latent_h = image height / 16 # 512/16=32
+    latent_w = image width / 16 # 512/16=32
+    img_latent (1, cfg.latent_channels, latent_h, latent_w) F32
+    txt_emb (1, cfg.text_max_seq, cfg.text_dim) F32
+    timestep (1) F32
+    rope_cos (1, 1, cfg.text_max_seq + latent_h * latent_w, cfg.head_dim) F32
+    rope_sin (1, 1, cfg.text_max_seq + latent_h * latent_w, cfg.head_dim) F32
+    */
     uint32_t build_graph(uint32_t img_latent, uint32_t txt_emb, uint32_t timestep, uint32_t rope_cos, uint32_t rope_sin)
     {
-        uint32_t ts_mul = g.mul(timestep, expand_scalar_to_1d(1000.0f, 1));
+        uint32_t ts_mul = g.mul(timestep, expand_scalar_to_1d(1000.0f, 1)); // (1) F32
         uint32_t t_sincos = timestep_embedding(ts_mul, 256);
         int32_t sh3_t[] = {1, 1, 256};
         uint32_t t_emb_raw = linear(g.reshape(t_sincos, g.constant({3}, sh3_t, DType::INT32)),
-                                    "time_guidance_embed.timestep_embedder.linear_1.weight", 256, cfg.hidden_size);
-        uint32_t t_emb_mid = silu_atomic(t_emb_raw, 1, 1, cfg.hidden_size);
+                                    "time_guidance_embed.timestep_embedder.linear_1.weight", 256, cfg.hidden_size); // (1, 1, 256) @ (256, 3072) -> (1, 1, 3072) F32
+        uint32_t t_emb_mid = silu_atomic(t_emb_raw, 1, 1, cfg.hidden_size); // (1, 1, 3072) F32
         uint32_t t_emb_out = linear(t_emb_mid,
-                                    "time_guidance_embed.timestep_embedder.linear_2.weight", cfg.hidden_size, cfg.hidden_size);
-        uint32_t t_emb_silu = silu_atomic(t_emb_out, 1, 1, cfg.hidden_size);
+                                    "time_guidance_embed.timestep_embedder.linear_2.weight", cfg.hidden_size, cfg.hidden_size); // (1, 1, 3072) @ (3072, 3072) -> (1, 1, 3072) F32
+        uint32_t t_emb_silu = silu_atomic(t_emb_out, 1, 1, cfg.hidden_size); // (1, 1, 3072) F32
 
         // NLC
         int32_t p_img[] = {0, 2, 3, 1};
-        uint32_t img_perm = g.permute(img_latent, g.constant({4}, p_img, DType::INT32));
-        img_perm = g.contiguous(img_perm);
+        uint32_t img_perm = g.permute(img_latent, g.constant({4}, p_img, DType::INT32)); // (1, latent_h, latent_w, cfg.latent_channels) F32
+        img_perm = g.contiguous(img_perm); // (1, latent_h, latent_w, cfg.latent_channels) F32
         int32_t sh_img[] = {1, (int32_t)img_seq_len, (int32_t)cfg.latent_channels};
         uint32_t img_hidden = linear(g.reshape(img_perm, g.constant({3}, sh_img, DType::INT32)), "x_embedder.weight", cfg.latent_channels, cfg.hidden_size);
         uint32_t txt_hidden = linear(txt_emb, "context_embedder.weight", cfg.text_dim, cfg.hidden_size);

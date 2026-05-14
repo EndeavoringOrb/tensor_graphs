@@ -489,7 +489,18 @@ inline bool isIsomorphic(const Graph &g1, uint32_t root1, const Graph &g2, uint3
         return false;
 
     if (n1.opType == OpType::INPUT)
+    {
+        // If both nodes have contentHash (i.e., both are constants created via
+        // graph.constant()), they must have the same hash to be considered
+        // isomorphic.  This prevents, for example, a SiLU pattern that uses
+        // e_val = 2.7182818f from matching a subgraph that uses a different
+        // constant for the exponential base.
+        bool n1_has_hash = !n1.contentHash.empty();
+        bool n2_has_hash = !n2.contentHash.empty();
+        if (n1_has_hash && n2_has_hash)
+            return n1.contentHash == n2.contentHash;
         return true;
+    }
 
     if (n1.parentIds.size() != n2.parentIds.size())
         return false;

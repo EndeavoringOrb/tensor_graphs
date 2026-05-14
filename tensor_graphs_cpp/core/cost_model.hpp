@@ -144,14 +144,7 @@ struct CostModel
         {
             timer.tick();
             Record r;
-            try
-            {
-                br.read(r);
-            }
-            catch (...)
-            {
-                break;
-            }
+            br.read(r);
             total++;
             if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID || !KernelRegistry::get().hasKernel(r.kernelUid))
                 continue;
@@ -163,6 +156,7 @@ struct CostModel
 
     float interpolate(const std::vector<Record> &kernelRecords, uint64_t targetElements)
     {
+        return std::numeric_limits<float>::infinity();
         if (targetElements == 0)
             return 0.0f;
 

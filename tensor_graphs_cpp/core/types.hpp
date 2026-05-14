@@ -87,6 +87,18 @@ enum class DType : uint32_t
     _COUNT
 };
 
+inline bool operator==(DType a, DType b)
+{
+    return static_cast<uint32_t>(a) == static_cast<uint32_t>(b) ||
+           static_cast<uint32_t>(a) == static_cast<uint32_t>(DType::ANY) ||
+           static_cast<uint32_t>(b) == static_cast<uint32_t>(DType::ANY);
+}
+
+inline bool operator!=(DType a, DType b)
+{
+    return !(a == b);
+}
+
 inline uint64_t getDTypeSize(DType dtype)
 {
     switch (dtype)

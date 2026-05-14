@@ -812,7 +812,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         std::vector<uint32_t> tempInputs;
         for (size_t i = 0; i < kernel.numInputs; ++i)
         {
-            DType d = kernel.dtypes[i] == DType::ANY ? DType::FLOAT32 : kernel.dtypes[i];
+            DType d = static_cast<uint32_t>(kernel.dtypes[i]) == static_cast<uint32_t>(DType::ANY) ? DType::FLOAT32 : kernel.dtypes[i];
             tempInputs.push_back(tempGraph.input(kernel.dummyShapes[i], d));
         }
 
@@ -974,7 +974,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
     for (size_t i = 0; i < kernel.numInputs; ++i)
     {
         uint32_t id = UINT32_MAX;
-        DType dtype = kernel.dtypes[i] == DType::ANY ? DType::FLOAT32 : kernel.dtypes[i];
+        DType dtype = static_cast<uint32_t>(kernel.dtypes[i]) == static_cast<uint32_t>(DType::ANY) ? DType::FLOAT32 : kernel.dtypes[i];
         uint64_t elements = countElements(kernel.dummyShapes[i]);
         uint64_t sizeBytes = elements * getDTypeSize(dtype);
 

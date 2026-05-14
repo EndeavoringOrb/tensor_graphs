@@ -10,6 +10,7 @@
 #include <queue>
 #include <string>
 #include <algorithm>
+#include <cstring>
 
 inline bool isEClassProtected(uint32_t eclassId, const std::unordered_set<uint32_t> &protectedEClasses, const EGraph &egraph)
 {
@@ -672,6 +673,36 @@ struct FusionRule : public Rule
             return false;
         if (eNode.opType == OpType::FUSED && eNode.opName != pNode.opName)
             return false;
+
+        // Constant-value check: if the pattern node is a constant (INPUT with
+        // a non-empty contentHash, created via graph.constant()), the e-graph
+        // eclass must carry the same constant data.  This prevents, for
+        // example, a SiLU pattern that uses e_val = 2.7182818f from matching
+        // a subgraph that uses a different constant for the exponential base.
+        if (eNode.opType == OpType::INPUT && !pNode.contentHash.empty())
+        {
+            uint32_t eNodeEClass = egraph.getENodeEClass(eNodeIdx);
+            uint32_t canonEClass = egraph.findConst(eNodeEClass);
+
+            // The pattern requires a constant; the e-graph must have one too.
+            auto egraphIt = egraph.constantStaging.find(canonEClass);
+            if (egraphIt == egraph.constantStaging.end())
+                return false;
+
+            // Retrieve the pattern's constant data.
+            auto patternIt = pattern.graph.constantStaging.find(patternId);
+            if (patternIt == pattern.graph.constantStaging.end())
+                return false;
+
+            // Compare the raw bytes.  For small scalars (e.g. a single F32)
+            // this is very cheap.
+            const auto &egraphData = *egraphIt->second;
+            const auto &patternData = *patternIt->second;
+            if (egraphData.size() != patternData.size())
+                return false;
+            if (std::memcmp(egraphData.data(), patternData.data(), egraphData.size()) != 0)
+                return false;
+        }
 
         // Variadic CONCAT: the pattern has [tensorVar, axisVar] (2 parents),
         // but the e-graph CONCAT can have N+1 children (N tensors + 1 axis).

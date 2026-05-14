@@ -30,6 +30,8 @@ hwinfo-*.txt
 node_modules
 package.json
 package-lock.json
+toks.txt
+tokenize.py
 
 # Profiling artifacts
 profile_output*
