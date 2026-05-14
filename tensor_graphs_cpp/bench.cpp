@@ -8,6 +8,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <regex>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -25,16 +26,18 @@
 
 using json = nlohmann::json;
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
     int skipCount = 0;
+    std::string filterRegex;
+
     for (int i = 1; i < argc; ++i)
     {
         std::string arg = argv[i];
-        if ((arg == "-s" || arg == "--skip") && i + 1 < argc)
-        {
+        if ((arg == "-s" || "--skip") && i + 1 < argc)
             skipCount = std::atoi(argv[++i]);
-        }
+        if ((arg == "-f" || "--filter") && i + 1 < argc)
+            filterRegex = argv[++i];
     }
 
     std::filesystem::create_directories("benchmarks");
@@ -88,6 +91,30 @@ int main(int argc, char* argv[])
             {
                 toBenchmark.push_back(std::move(r));
             }
+        }
+    }
+
+    if (!filterRegex.empty())
+    {
+        std::regex re(filterRegex, std::regex::icase);
+        std::vector<Record> filtered;
+        for (const auto &r : toBenchmark)
+        {
+            // Get the name from the registry using the UID
+            const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
+            std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
+            std::string hexUid = "0x" + toHexString(r.kernelUid);
+
+            if (std::regex_search(name, re) || std::regex_search(hexUid, re))
+            {
+                filtered.push_back(r);
+            }
+        }
+        toBenchmark = std::move(filtered);
+        if (toBenchmark.empty())
+        {
+            std::cout << "No kernels match the filter." << std::endl;
+            return 0;
         }
     }
 

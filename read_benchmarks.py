@@ -11,27 +11,27 @@ class BinaryReader:
 
     def read_u8(self):
         buf = self.f.read(1)
-        if not buf: return None
+        assert buf
         return struct.unpack("<B", buf)[0]
 
     def read_u32(self):
         buf = self.f.read(4)
-        if not buf: return None
+        assert buf
         return struct.unpack("<I", buf)[0]
 
     def read_u64(self):
         buf = self.f.read(8)
-        if not buf: return None
+        assert buf
         return struct.unpack("<Q", buf)[0]
 
     def read_i32(self):
         buf = self.f.read(4)
-        if not buf: return None
+        assert buf
         return struct.unpack("<i", buf)[0]
 
     def read_float(self):
         buf = self.f.read(4)
-        if not buf: return None
+        assert buf
         return struct.unpack("<f", buf)[0]
 
     def read_string(self):
@@ -50,7 +50,7 @@ class BinaryReader:
 
     def read_map(self, read_key, read_val):
         size = self.read_u32()
-        if size is None: return None
+        assert size
         return {read_key(): read_val() for _ in range(size)}
 
     def read_record(self):

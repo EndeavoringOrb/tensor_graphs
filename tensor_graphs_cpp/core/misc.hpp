@@ -384,3 +384,10 @@ inline std::string toString(const std::unordered_map<Backend, uint64_t> &map)
     ss << "}";
     return ss.str();
 }
+
+std::string toHexString(uint64_t val)
+{
+    std::stringstream ss;
+    ss << std::hex << val;
+    return ss.str();
+}

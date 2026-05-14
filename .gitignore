@@ -31,7 +31,7 @@ node_modules
 package.json
 package-lock.json
 toks.txt
-tokenize.py
+tokenize_flux.py
 
 # Profiling artifacts
 profile_output*
