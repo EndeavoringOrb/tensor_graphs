@@ -14,6 +14,7 @@
 #include <limits>
 #include <filesystem>
 #include <mutex>
+#include <algorithm>
 
 // TODO: make hardware detection better
 #if defined(USE_CUDA)
@@ -99,8 +100,141 @@ inline void tg_deserialize(BinaryReader &br, Record &val)
 
 struct CostModel
 {
+    struct ModelKey
+    {
+        uint64_t kernelUid;
+        size_t numInputs;
+        bool operator==(const ModelKey &o) const
+        {
+            return kernelUid == o.kernelUid && numInputs == o.numInputs;
+        }
+    };
+
+    struct ModelKeyHash
+    {
+        size_t operator()(const ModelKey &k) const
+        {
+            return std::hash<uint64_t>()(k.kernelUid) ^ (std::hash<size_t>()(k.numInputs) << 1);
+        }
+    };
+
+    struct Matrix
+    {
+        int rows, cols;
+        std::vector<double> data;
+        Matrix(int r, int c) : rows(r), cols(c), data(r * c, 0.0) {}
+        double &operator()(int r, int c) { return data[r * cols + c]; }
+        double operator()(int r, int c) const { return data[r * cols + c]; }
+    };
+
+    static Matrix transpose(const Matrix &A)
+    {
+        Matrix B(A.cols, A.rows);
+        for (int i = 0; i < A.rows; ++i)
+            for (int j = 0; j < A.cols; ++j)
+                B(j, i) = A(i, j);
+        return B;
+    }
+
+    static Matrix multiply(const Matrix &A, const Matrix &B)
+    {
+        Matrix C(A.rows, B.cols);
+        for (int i = 0; i < A.rows; ++i)
+            for (int k = 0; k < A.cols; ++k)
+                for (int j = 0; j < B.cols; ++j)
+                    C(i, j) += A(i, k) * B(k, j);
+        return C;
+    }
+
+    static bool invert(Matrix &A)
+    {
+        if (A.rows != A.cols)
+            return false;
+        int n = A.rows;
+        Matrix I(n, n);
+        for (int i = 0; i < n; ++i)
+            I(i, i) = 1.0;
+
+        // Gauss-Jordan elimination
+        for (int i = 0; i < n; ++i)
+        {
+            double maxEl = std::abs(A(i, i));
+            int pivot = i;
+            for (int j = i + 1; j < n; ++j)
+            {
+                if (std::abs(A(j, i)) > maxEl)
+                {
+                    maxEl = std::abs(A(j, i));
+                    pivot = j;
+                }
+            }
+            if (maxEl < 1e-12)
+                return false;
+
+            if (pivot != i)
+            {
+                for (int j = 0; j < n; ++j)
+                {
+                    std::swap(A(i, j), A(pivot, j));
+                    std::swap(I(i, j), I(pivot, j));
+                }
+            }
+
+            double pivotVal = A(i, i);
+            for (int j = 0; j < n; ++j)
+            {
+                A(i, j) /= pivotVal;
+                I(i, j) /= pivotVal;
+            }
+
+            for (int k = 0; k < n; ++k)
+            {
+                if (k == i)
+                    continue;
+                double factor = A(k, i);
+                for (int j = 0; j < n; ++j)
+                {
+                    A(k, j) -= factor * A(i, j);
+                    I(k, j) -= factor * I(i, j);
+                }
+            }
+        }
+        A = I;
+        return true;
+    }
+
+    struct LinearModel
+    {
+        std::vector<double> weights;
+        std::vector<double> scale;
+        bool valid = false;
+        double fallbackTime = 0.0;
+        double fallbackElements = 1.0;
+
+        float predict(const std::vector<double> &features, uint64_t targetElements) const
+        {
+            if (valid && weights.size() == features.size())
+            {
+                double y = 0.0;
+                for (size_t i = 0; i < weights.size(); ++i)
+                {
+                    double val = features[i];
+                    if (scale[i] > 0)
+                        val /= scale[i];
+                    y += weights[i] * val;
+                }
+                return static_cast<float>(std::max(0.0, y));
+            }
+            // Linear Fallback
+            if (fallbackElements > 0)
+                return static_cast<float>(fallbackTime * (static_cast<double>(targetElements) / fallbackElements));
+            return 0.0f;
+        }
+    };
+
     std::unordered_map<uint64_t, std::vector<Record>> records;
-    std::unordered_set<size_t> loggedCalls; // <-- CHANGE TO size_t
+    std::unordered_map<ModelKey, LinearModel, ModelKeyHash> models;
+    std::unordered_set<size_t> loggedCalls;
     std::ofstream callFile;
     std::mutex logMtx;
     bool doneWarning = false;
@@ -130,9 +264,136 @@ struct CostModel
 #endif
     }
 
+    std::vector<double> extractFeatures(
+        const std::vector<std::vector<uint32_t>> &inShapes,
+        const std::vector<std::vector<uint64_t>> &inStrides,
+        const std::vector<DType> &inDTypes,
+        const std::vector<std::vector<uint32_t>> &outShapes,
+        const std::vector<std::vector<uint64_t>> &outStrides,
+        const std::vector<DType> &outDTypes) const
+    {
+        std::vector<double> features;
+        features.push_back(1.0); // Bias
+
+        double outElements = 0.0;
+        for (const auto &s : outShapes)
+            outElements += static_cast<double>(countElements(s));
+
+        double inElements = 0.0;
+        for (const auto &s : inShapes)
+            inElements += static_cast<double>(countElements(s));
+
+        features.push_back(outElements);
+        features.push_back(inElements);
+        features.push_back(inElements * outElements); // Interaction helps models representing Matrix Math scale properly
+
+        // Expand per input details
+        for (size_t i = 0; i < inShapes.size(); ++i)
+        {
+            double elements = static_cast<double>(countElements(inShapes[i]));
+            double bytes = elements * getDTypeSize(inDTypes[i]);
+            bool contig = isContiguous(inStrides[i], inShapes[i]);
+            features.push_back(bytes);
+            features.push_back(contig ? 1.0 : 0.0);
+        }
+
+        // Expand per output details
+        for (size_t i = 0; i < outShapes.size(); ++i)
+        {
+            double elements = static_cast<double>(countElements(outShapes[i]));
+            double bytes = elements * getDTypeSize(outDTypes[i]);
+            bool contig = isContiguous(outStrides[i], outShapes[i]);
+            features.push_back(bytes);
+            features.push_back(contig ? 1.0 : 0.0);
+        }
+
+        return features;
+    }
+
+    void fitModel(const ModelKey &mk, const std::vector<Record> &recs)
+    {
+        LinearModel model;
+
+        if (!recs.empty())
+        {
+            model.fallbackTime = recs[0].runTime;
+            uint64_t e = 0;
+            for (const auto &s : recs[0].outputShapes)
+                e += countElements(s);
+            model.fallbackElements = e > 0 ? static_cast<double>(e) : 1.0;
+        }
+
+        if (recs.size() < 2)
+        {
+            models[mk] = model;
+            return;
+        }
+
+        int K = static_cast<int>(recs.size());
+        auto sample_feat = extractFeatures(
+            recs[0].inputShapes, recs[0].inputStrides, recs[0].inputDTypes,
+            recs[0].outputShapes, recs[0].outputStrides, recs[0].outputDTypes);
+        int D = static_cast<int>(sample_feat.size());
+
+        Matrix X(K, D);
+        Matrix Y(K, 1);
+
+        model.scale.assign(D, 1.0);
+
+        for (int i = 0; i < K; ++i)
+        {
+            auto feat = extractFeatures(
+                recs[i].inputShapes, recs[i].inputStrides, recs[i].inputDTypes,
+                recs[i].outputShapes, recs[i].outputStrides, recs[i].outputDTypes);
+            for (int j = 0; j < D && j < static_cast<int>(feat.size()); ++j)
+            {
+                X(i, j) = feat[j];
+                model.scale[j] = std::max(model.scale[j], std::abs(feat[j]));
+            }
+            Y(i, 0) = recs[i].runTime;
+        }
+
+        // Apply Scaling to prevent double precision loss inside the square matrices
+        for (int i = 0; i < K; ++i)
+        {
+            for (int j = 0; j < D; ++j)
+            {
+                if (model.scale[j] > 0)
+                {
+                    X(i, j) /= model.scale[j];
+                }
+            }
+        }
+
+        Matrix Xt = transpose(X);
+        Matrix XtX = multiply(Xt, X);
+        Matrix XtY = multiply(Xt, Y);
+
+        // Standard Ridge regularization
+        double lambda = 1e-2;
+        for (int i = 0; i < D; ++i)
+        {
+            XtX(i, i) += lambda;
+        }
+
+        if (invert(XtX))
+        {
+            Matrix W = multiply(XtX, XtY);
+            model.weights.resize(D);
+            for (int i = 0; i < D; ++i)
+            {
+                model.weights[i] = W(i, 0);
+            }
+            model.valid = true;
+        }
+
+        models[mk] = model;
+    }
+
     void load(std::string benchmarkPath)
     {
         records.clear();
+        models.clear();
         std::ifstream file(benchmarkPath, std::ios::binary);
         if (!file.is_open())
             return;
@@ -140,6 +401,8 @@ struct CostModel
         BinaryReader br(file);
         uint32_t total = 0, valid = 0;
         ProgressTimer timer(0, "loading records ");
+        std::unordered_map<ModelKey, std::vector<Record>, ModelKeyHash> recordsByKey;
+
         while (file.peek() != EOF)
         {
             timer.tick();
@@ -149,36 +412,20 @@ struct CostModel
             if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID || !KernelRegistry::get().hasKernel(r.kernelUid))
                 continue;
             valid++;
-            records[r.kernelUid].push_back(std::move(r));
+            records[r.kernelUid].push_back(r);
+
+            ModelKey mk = {r.kernelUid, r.inputShapes.size()};
+            recordsByKey[mk].push_back(std::move(r));
         }
+
         std::cout << "Loaded " << valid << " valid records from " << benchmarkPath << std::endl;
-    }
 
-    float interpolate(const std::vector<Record> &kernelRecords, uint64_t targetElements)
-    {
-        return std::numeric_limits<float>::infinity();
-        if (targetElements == 0)
-            return 0.0f;
-
-        float bestDist = std::numeric_limits<float>::infinity();
-        float estimatedTime = 0.0f;
-
-        for (const auto &r : kernelRecords)
+        ProgressTimer timer2(recordsByKey.size(), "fitting interpolation models ");
+        for (const auto &kv : recordsByKey)
         {
-            uint64_t recElements = 0;
-            for (const auto &s : r.outputShapes)
-                recElements += countElements(s);
-            if (recElements == 0)
-                recElements = 1;
-
-            float dist = std::abs(static_cast<float>(targetElements) - static_cast<float>(recElements));
-            if (dist < bestDist)
-            {
-                bestDist = dist;
-                estimatedTime = r.runTime * (static_cast<float>(targetElements) / static_cast<float>(recElements));
-            }
+            timer2.tick();
+            fitModel(kv.first, kv.second);
         }
-        return (bestDist == std::numeric_limits<float>::infinity()) ? bestDist : estimatedTime;
     }
 
     float estimateCost(
@@ -240,6 +487,7 @@ struct CostModel
             return std::numeric_limits<float>::infinity();
         }
 
+        // Exact match short-circuit
         for (const auto &r : it->second)
         {
             if (r.inputShapes == inShapes && r.outputShapes == outShapes &&
@@ -285,7 +533,16 @@ struct CostModel
             }
         }
 #endif
-        uint64_t targetElements = countElements(outShape);
-        return interpolate(it->second, targetElements);
+
+        ModelKey mk = {kernelUid, inShapes.size()};
+        auto modelIt = models.find(mk);
+        if (modelIt != models.end())
+        {
+            auto features = extractFeatures(inShapes, inStrides, inDTypes, outShapes, outStrides, outDTypes);
+            uint64_t targetElements = countElements(outShape);
+            return modelIt->second.predict(features, targetElements);
+        }
+
+        return std::numeric_limits<float>::infinity();
     }
 };

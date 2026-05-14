@@ -453,7 +453,8 @@ int main(int argc, char* argv[])
                 std::cout << toString(kernel.backends[bidx]);
             }
             std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                      << " (0x" << std::hex << kernelUid << std::dec << ")\n";
+                      << " (0x" << std::hex << kernelUid << std::dec << ")"
+                      << " est " << std::to_string(r.runTime) << " ms\n";
 
             // Print All Inputs
             for (size_t idx = 0; idx < inViews.size(); ++idx)
