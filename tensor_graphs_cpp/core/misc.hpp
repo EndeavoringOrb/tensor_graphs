@@ -385,7 +385,7 @@ inline std::string toString(const std::unordered_map<Backend, uint64_t> &map)
     return ss.str();
 }
 
-std::string toStringHex(uint64_t val)
+inline std::string toStringHex(uint64_t val)
 {
     std::stringstream ss;
     ss << std::hex << val;
