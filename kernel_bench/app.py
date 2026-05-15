@@ -79,7 +79,8 @@ def get_job(job_id):
 
 @app.get("/api/history")
 def get_history():
-    return jsonify(load_job_history())
+    history = load_job_history()
+    return jsonify({"history": history, "message": f"{len(history)} item(s) in history"})
 
 
 @app.get("/api/hwinfo")
