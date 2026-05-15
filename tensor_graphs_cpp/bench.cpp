@@ -95,7 +95,7 @@ int main(int argc, char *argv[])
                 // Apply Filter logic
                 const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
                 std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
-                std::string hexUid = "0x" + toHexString(r.kernelUid);
+                std::string hexUid = "0x" + toStringHex(r.kernelUid);
                 std::string target = name + " " + hexUid;
 
                 if (!includeRegexStr.empty())
