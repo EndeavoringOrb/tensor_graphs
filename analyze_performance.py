@@ -237,18 +237,32 @@ def format_ms(ms):
     return f"{ms:.4f} ms"
 
 
+def get_record_identity(r):
+    """
+    Creates a unique hashable signature for a kernel configuration.
+    Matches the logic used in C++ CostModel::estimateCost.
+    """
+    return (
+        r["kernelUid"],
+        tuple(tuple(s) for s in r["inputShapes"]),
+        tuple(tuple(s) for s in r["inputStrides"]),
+        tuple(r["inputDTypes"]),
+        tuple(tuple(s) for s in r["outputShapes"]),
+        tuple(tuple(s) for s in r["outputStrides"]),
+        tuple(r["outputDTypes"]),
+        tuple(r["inputConstants"]),
+    )
+
+
 def analyze(cache_file, records_file, top_n=20, chain_len=1):
     print(f"Loading benchmark records from: {records_file}")
     records = load_records_file(records_file)
 
+    # Use the full structural identity as the key
     bench_map = {}
     for r in records:
-        key = (
-            hex(r["kernelUid"]),
-            tuple(r["outputShapes"][0]),
-            tuple(r["outputStrides"][0]),
-        )
-        bench_map[key] = r["runTime"]
+        identity = get_record_identity(r)
+        bench_map[identity] = r["runTime"]
 
     print(f"Loading compiled buckets from: {cache_file}")
     cache_entries = load_cache_file(cache_file)
@@ -268,31 +282,67 @@ def analyze(cache_file, records_file, top_n=20, chain_len=1):
         nodes = graph["nodesMap"]
         instructions = graph["instructions"]
 
+        # Create a quick lookup for constants in this graph
+        const_lookup = {
+            node_id: data for node_id, data in graph.get("constStaging", [])
+        }
+
         bucket_sequence = []
         for inst in instructions:
             node_id = str(inst["nodeId"])
             node = nodes[node_id]
 
+            # Reconstruct the identity that matches the benchmark record
+            input_shapes = []
+            input_strides = []
+            input_dtypes = []
+            input_consts = []
+
+            for pid in inst["inputNodeIds"]:
+                p_node = nodes[str(pid)]
+                input_shapes.append(p_node["shape"])
+                input_strides.append(p_node["strides"])
+                input_dtypes.append(p_node["dtype"])
+                # Pull constant bytes if this parent is a constant
+                input_consts.append(const_lookup.get(pid, b""))
+
+            # Current implementation assumes single output per instruction
+            output_shapes = [node["shape"]]
+            output_strides = [node["strides"]]
+            output_dtypes = [node["dtype"]]
+
+            dummy_r = {
+                "kernelUid": inst["fullKernelId"],
+                "inputShapes": input_shapes,
+                "inputStrides": input_strides,
+                "inputDTypes": input_dtypes,
+                "outputShapes": output_shapes,
+                "outputStrides": output_strides,
+                "outputDTypes": output_dtypes,
+                "inputConstants": input_consts,
+            }
+
+            identity = get_record_identity(dummy_r)
+            runtime = bench_map.get(identity, 0.0)
+
             op_name = node["opType"]
             if op_name == "FUSED":
                 op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
 
-            input_shapes = [
-                nodes[str(pid)]["shape"] if str(pid) in nodes else []
-                for pid in node["parentIds"]
-            ]
-            shape = tuple(node["shape"])
-            strides = tuple(node["strides"])
-            uid = hex(inst["fullKernelId"])
+            if identity not in bench_map:
+                uid_hex = hex(inst["fullKernelId"])
+                missing_benchmarks.add(
+                    f"{op_name} (UID: {uid_hex}, Shape: {node['shape']})"
+                )
 
-            bench_key = (uid, shape, strides)
-            runtime = bench_map.get(bench_key, 0.0)
-
-            if bench_key not in bench_map:
-                missing_benchmarks.add(f"{op_name} (UID: {uid}, Shape: {shape})")
-
-            identity = (op_name, uid, shape, json.dumps(input_shapes))
-            bucket_sequence.append({"identity": identity, "runtime": runtime})
+            # Identity for display purposes in the report
+            display_identity = (
+                op_name,
+                hex(inst["fullKernelId"]),
+                tuple(node["shape"]),
+                json.dumps(input_shapes),
+            )
+            bucket_sequence.append({"identity": display_identity, "runtime": runtime})
 
             op_type_stats[op_name] += runtime
             total_estimated_time += runtime

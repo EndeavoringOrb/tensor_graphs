@@ -1154,7 +1154,7 @@ private:
         }
 
         std::cout << "[Planner.extractBest] Optimistic root cost: "
-                  << std::to_string(eclassMinCost[rootEClassId]) << std::endl;
+                  << std::to_string(optimisticEnodeDagCost[egraph.getEClass(rootEClassId).enodes[0]]) << std::endl;
 
         std::unordered_map<uint32_t, uint32_t> selection_map;
         std::vector<uint32_t> path;
