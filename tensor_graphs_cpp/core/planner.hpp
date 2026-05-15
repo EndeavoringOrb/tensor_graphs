@@ -1353,6 +1353,17 @@ private:
             {
                 if (current_cost < best_cost)
                 {
+                    float actual_current_cost = 0.0f;
+
+                    for (const auto &kv : selection_map)
+                    {
+                        uint32_t eclass = kv.first;
+                        uint32_t sel = kv.second;
+                        actual_current_cost += enodeInfos[egraph.getEClass(eclass).enodes[sel]].cost;
+                    }
+                    if (actual_current_cost != current_cost) {
+                        std::cout << "WARNING actual cost (" + std::to_string(actual_current_cost) + ") != current cost (" + std::to_string(current_cost) + ")" << std::endl;
+                    }
                     best_cost = current_cost;
                     best_selection_map = selection_map;
                     std::cout << "new best cost: " << std::to_string(best_cost) << std::endl;
