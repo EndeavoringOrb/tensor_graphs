@@ -3,9 +3,9 @@ import json
 import time
 import requests
 
-LLM_API_URL = "http://localhost:55554/v1/chat/completions"
+LLM_API_URL = "http://localhost:11434/v1/chat/completions"
 BENCH_API_URL = "http://127.0.0.1:8080"
-MODEL = "my-model-id"
+MODEL = "qwen3.6:35b"
 
 # Set the optimization target!
 TARGET_MODEL = "flux-klein-4b"  # "flux-klein-4b" or "gemma-3-270m"
@@ -92,6 +92,14 @@ tools = [
     {
         "type": "function",
         "function": {
+            "name": "read_target_model_source",
+            "description": "Read the C++ source code of the current target model to understand its graph structure.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_kernel_source",
             "description": "Read the source code of an existing kernel file.",
             "parameters": {
@@ -131,6 +139,8 @@ def handle_tool_call(tool_call):
         return call_bench_api("/api/analyze", json_data={"target_model": TARGET_MODEL})
     elif name == "read_benchmarks":
         return call_bench_api("/api/read_benchmarks", json_data=args)
+    elif name == "read_target_model_source":
+        return call_bench_api("/api/kernels/read_model", json_data={"target_model": TARGET_MODEL})
     elif name == "list_kernel_files":
         return call_bench_api("/api/kernels/list")
     elif name == "read_kernel_source":

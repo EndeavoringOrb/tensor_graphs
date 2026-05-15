@@ -1440,6 +1440,35 @@ int main(int argc, char *argv[])
         Graph refGraph;
         TestInputs refInputs = createTestInputs(refGraph, kernel);
         uint32_t rootId = kernel.refFactory(refInputs.inputIds, refGraph);
+
+        // Synchronize physical rawData with any stride changes made by refFactory
+        for (size_t i = 0; i < kernel.numInputs; ++i)
+        {
+            uint32_t id = refInputs.inputIds[i];
+            const TensorNode &node = refGraph.getNode(id);
+            if (!node.strides.empty() && node.strides != calcContiguousStrides(node.getShape()))
+            {
+                TensorView view;
+                view.setShape(node.getShape());
+                view.strides = node.strides;
+                uint64_t elements = countElements(view.getShape());
+                uint64_t bufElements = getRequiredBufferSize(view);
+                uint64_t dtypeSize = getDTypeSize(node.dtype);
+
+                std::vector<uint8_t> newRawData(bufElements * dtypeSize, 0);
+                std::vector<uint8_t> &logicalData = refInputs.rawInputData[id];
+
+                for (size_t k = 0; k < elements; ++k)
+                {
+                    uint64_t idx = getStridedIndex(k, view.getShape(), view.strides);
+                    std::memcpy(newRawData.data() + idx * dtypeSize,
+                                logicalData.data() + k * dtypeSize,
+                                dtypeSize);
+                }
+                refInputs.rawData[i] = newRawData;
+            }
+        }
+
         std::vector<float> refOutput = executeReferenceGraph(rootId, refGraph, refInputs.rawInputData, false);
         size_t elements = refOutput.size();
 

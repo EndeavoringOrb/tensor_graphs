@@ -30,7 +30,7 @@
 #include "generated/kernels_all.gen.hpp"
 #include "generated/build_context.gen.hpp"
 
-void run_gemma()
+void run_gemma(bool only_plan)
 {
     std::vector<uint32_t> tokens = {2, 9259};
     uint32_t maxSeqLen = 8;
@@ -66,6 +66,12 @@ void run_gemma()
         Region outputNeeded;
         outputNeeded.region = {{0, 1}, {i, i + 1}, {0, cfg.vocab_size}};
         session.addManualBucket(inputDirty, {outputNeeded});
+    }
+
+    if (only_plan)
+    {
+        session.plan();
+        return;
     }
 
     std::vector<int32_t> input_data(maxSeqLen, 0);
@@ -176,12 +182,14 @@ void compute_rope_cpu(int txt_seq, int img_h, int img_w, int head_dim, float the
     }
 }
 
-std::vector<int32_t> load_tokens_from_file(const std::string& filename, size_t txt_seq) {
+std::vector<int32_t> load_tokens_from_file(const std::string &filename, size_t txt_seq)
+{
     // 1. Initialize vector with the padding value 151643
     std::vector<int32_t> input_ids(txt_seq, 151643);
 
     std::ifstream file(filename);
-    if (!file.is_open()) {
+    if (!file.is_open())
+    {
         std::cerr << "Error: Could not open file " << filename << std::endl;
         return input_ids;
     }
@@ -191,13 +199,18 @@ std::vector<int32_t> load_tokens_from_file(const std::string& filename, size_t t
 
     // 2. Read from file using ',' as the delimiter
     // Note: This also stops if we reach the txt_seq limit
-    while (std::getline(file, part, ',') && count < txt_seq) {
-        try {
+    while (std::getline(file, part, ',') && count < txt_seq)
+    {
+        try
+        {
             // Trim potential whitespace/newlines and convert to integer
-            if (!part.empty()) {
+            if (!part.empty())
+            {
                 input_ids[count++] = static_cast<int32_t>(std::stoi(part));
             }
-        } catch (const std::invalid_argument& e) {
+        }
+        catch (const std::invalid_argument &e)
+        {
             // Handle non-numeric segments if necessary
             continue;
         }
@@ -206,7 +219,7 @@ std::vector<int32_t> load_tokens_from_file(const std::string& filename, size_t t
     return input_ids;
 }
 
-void run_flux()
+void run_flux(bool only_plan)
 {
     FluxConfig cfg;
 #if USE_CUDA
@@ -249,6 +262,11 @@ void run_flux()
     uint32_t in_vae_latent = g_vae.input({1, cfg.vae_channels, latent_h, latent_w}, DType::FLOAT32, {}, StorageType::PERSISTENT);
     Session sess_vae(g_vae, mem, vae.build_graph(in_vae_latent), "dirty_region_caches/flux-vae.bin");
     sess_vae.plan();
+
+    if (only_plan)
+    {
+        return;
+    }
 
     std::cout << "Executing Text Encoder..." << std::endl;
     std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);
@@ -341,13 +359,28 @@ int main(int argc, char *argv[])
 #endif
 
     std::string model = "flux-klein-4b";
+    bool only_plan = false;
+
     if (argc > 1)
-        model = argv[1];
+    {
+        for (int i = 1; i < argc; ++i)
+        {
+            std::string arg = argv[i];
+            if (arg == "--only-plan")
+            {
+                only_plan = true;
+            }
+            else
+            {
+                model = arg;
+            }
+        }
+    }
 
     if (model == "gemma-3-270m")
-        run_gemma();
+        run_gemma(only_plan);
     else if (model == "flux-klein-4b")
-        run_flux();
+        run_flux(only_plan);
     else
         std::cout << "Model not implemented yet: " << model << std::endl;
 

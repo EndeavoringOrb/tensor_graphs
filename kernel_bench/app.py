@@ -257,6 +257,34 @@ def list_kernel_files():
         return jsonify({"error": str(e)}), 500
 
 
+@app.get("/api/kernels/read_model")
+def read_model_source():
+    target_model = request.args.get("target_model", "gemma-3-270m")
+    model_files = {
+        "gemma-3-270m": ["gemma-3-270m.hpp"],
+        "flux-klein-4b": [
+            "flux-klein-4b.hpp", 
+            "flux-klein-4b-text_encoder.hpp", 
+            "flux-klein-4b-transformer.hpp", 
+            "flux-klein-4b-vae.hpp"
+        ]
+    }
+    
+    files_to_read = model_files.get(target_model, [])
+    if not files_to_read:
+        return jsonify({"error": f"No source files mapped for {target_model}"}), 404
+    
+    content = ""
+    for fname in files_to_read:
+        path = PROJECT_ROOT / "tensor_graphs_cpp" / "models" / fname
+        if path.exists():
+            content += f"// --- {fname} ---\n{path.read_text()}\n\n"
+        else:
+            content += f"// --- {fname} (NOT FOUND) ---\n\n"
+            
+    return jsonify({"content": content, "target_model": target_model})
+
+
 @app.get("/api/kernels/read_source")
 def read_kernel_source():
     """Reads the content of a specific kernel file."""
