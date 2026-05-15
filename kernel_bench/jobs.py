@@ -244,6 +244,13 @@ def run_worker():
             with open(kernel_path, "w") as f:
                 f.write(job["source"])
             job["kernel_file"] = kernel_path
+            job["agent_file_path"] = (
+                Path(kernel_path).relative_to(KERNELS_DIR).as_posix()
+            )
+
+            # Remove source from dict so it isn't stored in history files (lightweight)
+            del job["source"]
+
             rel_path = (
                 Path(kernel_path)
                 .relative_to(PROJECT_ROOT / "tensor_graphs_cpp")
@@ -269,7 +276,9 @@ def run_worker():
             )
             job["steps"]["compile"] = build_res
             if build_res["exit_code"] != 0:
-                raise Exception("Compilation failed")
+                raise Exception(
+                    f"Compilation failed.\nSTDOUT:\n{build_res['stdout']}\nSTDERR:\n{build_res['stderr']}"
+                )
 
             uid_str = get_uid_for_file("kernels/" + rel_path)
             job["assigned_uid"] = uid_str
@@ -289,7 +298,9 @@ def run_worker():
                 test_no_rec_res["exit_code"] != 0
                 or "FAILED" in test_no_rec_res["stdout"]
             ):
-                raise Exception("Test without records failed")
+                raise Exception(
+                    f"Test without records failed.\nSTDOUT:\n{test_no_rec_res['stdout']}\nSTDERR:\n{test_no_rec_res['stderr']}"
+                )
 
             # 4. Main to build calls.bin
             print(f"[JOB {job_id}] Step 3/7: Running inference to build calls.bin...")
@@ -316,6 +327,10 @@ def run_worker():
                             break
             print(f"[JOB {job_id}] UID Match Result: {matched}")
             job["steps"]["matched"] = matched
+            if not matched:
+                raise Exception(
+                    "Kernel UID not matched in inference plan (calls.bin). The kernel might not be utilized or the operation signature/shapes are incorrect."
+                )
 
             # 5. Test with Records
             print(f"[JOB {job_id}] Step 4/7: Testing with records...")
@@ -325,7 +340,9 @@ def run_worker():
             )
             job["steps"]["test_records"] = test_rec_res
             if test_rec_res["exit_code"] != 0 or "FAILED" in test_rec_res["stdout"]:
-                raise Exception("Test with records failed")
+                raise Exception(
+                    f"Test with records failed.\nSTDOUT:\n{test_rec_res['stdout']}\nSTDERR:\n{test_rec_res['stderr']}"
+                )
 
             # 6. Benchmark
             print(f"[JOB {job_id}] Step 5/7: Benchmarking kernel...")
@@ -334,6 +351,10 @@ def run_worker():
                 TIMEOUTS["bench"],
             )
             job["steps"]["bench"] = bench_res
+            if bench_res["exit_code"] != 0:
+                raise Exception(
+                    f"Benchmark failed.\nSTDOUT:\n{bench_res['stdout']}\nSTDERR:\n{bench_res['stderr']}"
+                )
 
             # 7. Main again to construct cache with optimized routes
             print(
@@ -350,15 +371,25 @@ def run_worker():
 
             print(f"[JOB {job_id}] Step 7/7: Final time analysis...")
             total_time, extracted_uids, message = analyze_total_time(target_model)
+
+            is_extracted = False
             if uid_str:
-                job["steps"]["extracted"]["message"] = message
-                job["steps"]["extracted"]["content"] = (
+                is_extracted = (
                     uid_str in extracted_uids
                     or f"0x{int(uid_str, 16):x}" in extracted_uids
                 )
+
+            job["steps"]["extracted"] = is_extracted
+
+            if not is_extracted:
+                raise Exception(
+                    "Kernel was not extracted in the final optimized graph. It may be functionally valid but benchmarks slower than existing alternatives or unoptimized defaults."
+                )
+
             job["total_estimated_time_ms"] = total_time
             job["benchmark_scores"] = get_benchmark_scores(uid_str)
 
+            # If the process successfully completes every step above without exception, it is a success.
             job["status"] = "completed"
             print(f"[SUCCESS] Job {job_id} completed successfully.")
 
@@ -373,6 +404,8 @@ def run_worker():
                 try:
                     os.rename(job["kernel_file"], failed_path)
                     job["kernel_file"] = failed_path
+                    if "agent_file_path" in job:
+                        job["agent_file_path"] += ".failed"
                     print(f"[INFO] Renamed failed kernel to {failed_path}")
                 except Exception as rename_err:
                     print(f"[WARN] Failed to rename {job['kernel_file']}: {rename_err}")

@@ -3,9 +3,9 @@ import json
 import time
 import requests
 
-LLM_API_URL = "http://localhost:11434/v1/chat/completions"
+LLM_API_URL = "http://arc-ai-04.wpi.edu:11434/v1/chat/completions"
 BENCH_API_URL = "http://127.0.0.1:8080"
-MODEL = "qwen3.6:35b"
+MODEL = "gemma4:e4b" # "qwen3.6:27b" "qwen3.6:35b" "gemma4:e4b"
 
 # Set the optimization target!
 TARGET_MODEL = "flux-klein-4b"  # "flux-klein-4b" or "gemma-3-270m"
@@ -107,7 +107,7 @@ tools = [
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The relative path of the file (e.g., 'cpu/general/matmul.hpp').",
+                        "description": "The relative path of the file (e.g., 'cpu/general/matmul.hpp' or 'cpu/general/generated/00010.hpp.failed').",
                     },
                 },
                 "required": ["path"],
@@ -140,7 +140,9 @@ def handle_tool_call(tool_call):
     elif name == "read_benchmarks":
         return call_bench_api("/api/read_benchmarks", json_data=args)
     elif name == "read_target_model_source":
-        return call_bench_api("/api/kernels/read_model", json_data={"target_model": TARGET_MODEL})
+        return call_bench_api(
+            "/api/kernels/read_model", json_data={"target_model": TARGET_MODEL}
+        )
     elif name == "list_kernel_files":
         return call_bench_api("/api/kernels/list")
     elif name == "read_kernel_source":
@@ -157,7 +159,7 @@ def handle_tool_call(tool_call):
             time.sleep(5)
             status = call_bench_api(f"/api/jobs/{job_id}")
             if status.get("status") in ["completed", "failed"]:
-                print(f"  finished with status '{status.get("status")}'")
+                print(f"  finished with status '{status.get('status')}'")
                 return status
             print("  ...still running...")
 
@@ -175,12 +177,17 @@ def get_initial_messages():
                 "You work in a loop: analyze current performance, generate an optimized kernel, submit it, "
                 "and learn from the test results and benchmarks. "
                 "The test pipeline steps are: Compile -> Test(No Rec) -> Matched in Graph -> Test(Records) -> Benchmark -> Extracted in final graph. "
-                "Iterate infinitely. Use the provided tools."
+                "Iterate infinitely. Use the provided tools.\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. Your conversation history is reset after EVERY kernel submission to keep the prompt context small. You MUST call `get_performance_history` in your first step to remember past tests!\n"
+                "2. To avoid repeating previous mistakes, locate failed jobs in the history and strictly read their error messages (which contain full compiler/test output).\n"
+                "3. If you want to read a failed kernel's code, use `read_kernel_source` and pass the `agent_file_path` provided for it in the history.\n"
+                "4. A kernel is only considered successful if it passes ALL stages (including being extracted in the final graph which means it was faster than previous options). Failures at any stage will mark it as failed."
             ),
         },
         {
             "role": "user",
-            "content": "Begin optimizing the kernels. First get hardware info and performance analysis.",
+            "content": "Begin optimizing. Step 1: Call `get_performance_history` and `get_analysis` to understand the current state and review detailed failure logs. Step 2: Either choose a specific existing kernel to optimize and read benchmarks to find a target, or read_model to look for new sequences that can be fused (bypassing the need for certain kernels). Step 3: Get hardware info. Step 4: Write and submit your kernel.",
         },
     ]
 
@@ -210,13 +217,9 @@ def run_agentic_loop():
                 for tool_call in message["tool_calls"]:
                     result = handle_tool_call(tool_call)
 
-                    # Watch for a successful kernel job run
+                    # Reset context invariably after every attempt (whether succeeded or failed)
                     if tool_call["function"]["name"] == "submit_and_test_kernel":
-                        if (
-                            isinstance(result, dict)
-                            and result.get("status") == "completed"
-                        ):
-                            reset_context = True
+                        reset_context = True
 
                     content = json.dumps(result, indent=2)
                     if len(content) > 10000:
@@ -232,10 +235,10 @@ def run_agentic_loop():
                         }
                     )
 
-                # Reset to start fresh and use real codebase/benchmarks as state
+                # Reset to start fresh and use real codebase/benchmarks/history as state
                 if reset_context:
                     print(
-                        "\n[Agent] Job completed successfully! Resetting context to start fresh...\n"
+                        "\n[Agent] Submission complete! Resetting context to start fresh...\n"
                     )
                     messages = get_initial_messages()
 
