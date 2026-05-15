@@ -11,27 +11,27 @@ class BinaryReader:
 
     def read_u8(self):
         buf = self.f.read(1)
-        assert buf
+        if not buf: return None
         return struct.unpack("<B", buf)[0]
 
     def read_u32(self):
         buf = self.f.read(4)
-        assert buf
+        if not buf: return None
         return struct.unpack("<I", buf)[0]
 
     def read_u64(self):
         buf = self.f.read(8)
-        assert buf
+        if not buf: return None
         return struct.unpack("<Q", buf)[0]
 
     def read_i32(self):
         buf = self.f.read(4)
-        assert buf
+        if not buf: return None
         return struct.unpack("<i", buf)[0]
 
     def read_float(self):
         buf = self.f.read(4)
-        assert buf
+        if not buf: return None
         return struct.unpack("<f", buf)[0]
 
     def read_string(self):

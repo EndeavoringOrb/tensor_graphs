@@ -617,10 +617,38 @@ struct FusionRule : public Rule
         }
     }
 
+    static bool isStructuralConstant(OpType op, size_t inputIdx, size_t numInputs)
+    {
+        if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
+            return true;
+        if (op == OpType::RESHAPE && inputIdx == 1)
+            return true;
+        if (op == OpType::PERMUTE && inputIdx == 1)
+            return true;
+        if (op == OpType::SLICE && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
+            return true;
+        if (op == OpType::SCATTER && (inputIdx == 2 || inputIdx == 3 || inputIdx == 4))
+            return true;
+        if ((op == OpType::SUM || op == OpType::MAX) && inputIdx == 1)
+            return true;
+        if (op == OpType::CONCAT && inputIdx == numInputs - 1)
+            return true;
+        if (op == OpType::TRIU && inputIdx == 1)
+            return true;
+        if (op == OpType::FILL && inputIdx == 1)
+            return true;
+        if (op == OpType::IM2COL && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
+            return true;
+        if (op == OpType::ARANGE && (inputIdx == 0 || inputIdx == 1 || inputIdx == 2))
+            return true;
+        return false;
+    }
+
     static bool matchPatternClass(uint32_t eClassIdx, const EGraph &egraph,
                                   uint32_t patternId, const Pattern &pattern,
                                   std::unordered_map<uint32_t, uint32_t> &binding,
-                                  const std::unordered_set<uint32_t> &protectedEClasses)
+                                  const std::unordered_set<uint32_t> &protectedEClasses,
+                                  bool ignoreConstantData = false)
     {
         uint32_t canonicalClassIdx = egraph.findConst(eClassIdx);
 
@@ -652,7 +680,7 @@ struct FusionRule : public Rule
         for (uint32_t enodeId : eclass.enodes)
         {
             std::unordered_map<uint32_t, uint32_t> localBinding = binding;
-            if (matchPatternNode(enodeId, egraph, patternId, pattern, localBinding, protectedEClasses))
+            if (matchPatternNode(enodeId, egraph, patternId, pattern, localBinding, protectedEClasses, ignoreConstantData))
             {
                 binding = std::move(localBinding);
                 return true;
@@ -664,7 +692,8 @@ struct FusionRule : public Rule
     static bool matchPatternNode(uint32_t eNodeIdx, const EGraph &egraph,
                                  uint32_t patternId, const Pattern &pattern,
                                  std::unordered_map<uint32_t, uint32_t> &binding,
-                                 const std::unordered_set<uint32_t> &protectedEClasses)
+                                 const std::unordered_set<uint32_t> &protectedEClasses,
+                                 bool ignoreConstantData = false)
     {
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
         const auto &pNode = pattern.graph.getNode(patternId);
@@ -681,27 +710,30 @@ struct FusionRule : public Rule
         // a subgraph that uses a different constant for the exponential base.
         if (eNode.opType == OpType::INPUT && !pNode.contentHash.empty())
         {
-            uint32_t eNodeEClass = egraph.getENodeEClass(eNodeIdx);
-            uint32_t canonEClass = egraph.findConst(eNodeEClass);
+            if (!ignoreConstantData)
+            {
+                uint32_t eNodeEClass = egraph.getENodeEClass(eNodeIdx);
+                uint32_t canonEClass = egraph.findConst(eNodeEClass);
 
-            // The pattern requires a constant; the e-graph must have one too.
-            auto egraphIt = egraph.constantStaging.find(canonEClass);
-            if (egraphIt == egraph.constantStaging.end())
-                return false;
+                // The pattern requires a constant; the e-graph must have one too.
+                auto egraphIt = egraph.constantStaging.find(canonEClass);
+                if (egraphIt == egraph.constantStaging.end())
+                    return false;
 
-            // Retrieve the pattern's constant data.
-            auto patternIt = pattern.graph.constantStaging.find(patternId);
-            if (patternIt == pattern.graph.constantStaging.end())
-                return false;
+                // Retrieve the pattern's constant data.
+                auto patternIt = pattern.graph.constantStaging.find(patternId);
+                if (patternIt == pattern.graph.constantStaging.end())
+                    return false;
 
-            // Compare the raw bytes.  For small scalars (e.g. a single F32)
-            // this is very cheap.
-            const auto &egraphData = *egraphIt->second;
-            const auto &patternData = *patternIt->second;
-            if (egraphData.size() != patternData.size())
-                return false;
-            if (std::memcmp(egraphData.data(), patternData.data(), egraphData.size()) != 0)
-                return false;
+                // Compare the raw bytes.  For small scalars (e.g. a single F32)
+                // this is very cheap.
+                const auto &egraphData = *egraphIt->second;
+                const auto &patternData = *patternIt->second;
+                if (egraphData.size() != patternData.size())
+                    return false;
+                if (std::memcmp(egraphData.data(), patternData.data(), egraphData.size()) != 0)
+                    return false;
+            }
         }
 
         // Variadic CONCAT: the pattern has [tensorVar, axisVar] (2 parents),
@@ -719,7 +751,7 @@ struct FusionRule : public Rule
 
             // Match the axis: last e-node child <-> last pattern parent
             if (!matchPatternClass(eNode.children.back(), egraph,
-                                   pNode.parentIds.back(), pattern, binding, protectedEClasses))
+                                   pNode.parentIds.back(), pattern, binding, protectedEClasses, true))
                 return false;
 
             // Match all tensor children against the first pattern parent (tensorVar).
@@ -732,7 +764,7 @@ struct FusionRule : public Rule
                 if (firstTensor)
                 {
                     if (!matchPatternClass(eNode.children[i], egraph,
-                                           pNode.parentIds[0], pattern, binding, protectedEClasses))
+                                           pNode.parentIds[0], pattern, binding, protectedEClasses, false))
                         return false;
                     firstTensor = false;
                 }
@@ -754,7 +786,8 @@ struct FusionRule : public Rule
 
         for (size_t i = 0; i < eNode.children.size(); ++i)
         {
-            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], pattern, binding, protectedEClasses))
+            bool childIgnoreConst = isStructuralConstant(eNode.opType, i, eNode.children.size());
+            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], pattern, binding, protectedEClasses, childIgnoreConst))
             {
                 return false;
             }

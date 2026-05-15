@@ -29,15 +29,18 @@ using json = nlohmann::json;
 int main(int argc, char *argv[])
 {
     int skipCount = 0;
-    std::string filterRegex;
+    std::string includeRegexStr;
+    std::string excludeRegexStr;
 
     for (int i = 1; i < argc; ++i)
     {
         std::string arg = argv[i];
         if ((arg == "-s" || "--skip") && i + 1 < argc)
             skipCount = std::atoi(argv[++i]);
-        if ((arg == "-f" || "--filter") && i + 1 < argc)
-            filterRegex = argv[++i];
+        if ((arg == "-f" || arg == "--include") && i + 1 < argc)
+            includeRegexStr = argv[++i];
+        if (arg == "--exclude" && i + 1 < argc)
+            excludeRegexStr = argv[++i];
     }
 
     std::filesystem::create_directories("benchmarks");
@@ -89,38 +92,31 @@ int main(int argc, char *argv[])
             seenCalls.insert(key);
             if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
             {
+                // Apply Filter logic
+                const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
+                std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
+                std::string hexUid = "0x" + toHexString(r.kernelUid);
+                std::string target = name + " " + hexUid;
+
+                if (!includeRegexStr.empty())
+                {
+                    if (!std::regex_search(target, std::regex(includeRegexStr, std::regex::icase)))
+                        continue;
+                }
+                if (!excludeRegexStr.empty())
+                {
+                    if (std::regex_search(target, std::regex(excludeRegexStr, std::regex::icase)))
+                        continue;
+                }
+
                 toBenchmark.push_back(std::move(r));
             }
         }
     }
 
-    if (!filterRegex.empty())
-    {
-        std::regex re(filterRegex, std::regex::icase);
-        std::vector<Record> filtered;
-        for (const auto &r : toBenchmark)
-        {
-            // Get the name from the registry using the UID
-            const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
-            std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
-            std::string hexUid = "0x" + toHexString(r.kernelUid);
-
-            if (std::regex_search(name, re) || std::regex_search(hexUid, re))
-            {
-                filtered.push_back(r);
-            }
-        }
-        toBenchmark = std::move(filtered);
-        if (toBenchmark.empty())
-        {
-            std::cout << "No kernels match the filter." << std::endl;
-            return 0;
-        }
-    }
-
     if (toBenchmark.empty())
     {
-        std::cout << "All calls already benchmarked or no new kernels to test." << std::endl;
+        std::cout << "No kernels match the filters or all already benchmarked." << std::endl;
         return 0;
     }
 
@@ -143,13 +139,13 @@ int main(int argc, char *argv[])
     // Fallback to element count for kernels with no previous data (inf cost).
     std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb)
                      {
-                          float costA = ra.runTime;
-                          float costB = rb.runTime;
+        float costA = ra.runTime;
+        float costB = rb.runTime;
 
-                          if (std::abs(costA - costB) < 1e-7) {
+        if (std::abs(costA - costB) < 1e-7) {
                              // Tie-break: Prioritize optimized kernels over reference kernels
-                             bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
-                             bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
+            bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
+            bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
                              if (isRefA != isRefB) return !isRefA;
                              uint64_t sizeA = 1;
                              for (size_t i = 0; i < ra.outputShapes.size(); i++) {
@@ -165,9 +161,9 @@ int main(int argc, char *argv[])
                              }
                              
                              return sizeA < sizeB;
-                          }
+        }
 
-                          return costA < costB; });
+        return costA < costB; });
 
     std::ofstream outFile(recordsPath, std::ios::app | std::ios::binary);
     BinaryWriter bw(outFile);
