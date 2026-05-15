@@ -8,7 +8,6 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
-#include <regex>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -29,26 +28,32 @@ using json = nlohmann::json;
 int main(int argc, char *argv[])
 {
     int skipCount = 0;
-    std::string includeRegexStr;
-    std::string excludeRegexStr;
+    std::string targetKernel = "";
 
+    // 1. Parse Arguments
     for (int i = 1; i < argc; ++i)
     {
         std::string arg = argv[i];
-        if ((arg == "-s" || "--skip") && i + 1 < argc)
+        if ((arg == "-s" || arg == "--skip") && i + 1 < argc)
+        {
             skipCount = std::atoi(argv[++i]);
-        if ((arg == "-f" || arg == "--include") && i + 1 < argc)
-            includeRegexStr = argv[++i];
-        if (arg == "--exclude" && i + 1 < argc)
-            excludeRegexStr = argv[++i];
+        }
+        else if (targetKernel.empty() && arg[0] != '-')
+        {
+            targetKernel = arg;
+        }
     }
 
     std::filesystem::create_directories("benchmarks");
-
     std::string callsPath = "benchmarks/calls.bin";
     std::string recordsPath = "benchmarks/records.bin";
 
-    // 1. Initialize CostModel and load existing records to provide estimates for sorting
+    if (!targetKernel.empty())
+    {
+        std::cout << "Filtering benchmarks for kernel containing: " << targetKernel << std::endl;
+    }
+
+    // 2. Initialize CostModel and load existing records
     CostModel costModel;
     costModel.load(recordsPath);
 
@@ -74,6 +79,7 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // 3. Filter and Collect unique calls
     std::vector<Record> toBenchmark;
     std::unordered_set<std::string> seenCalls;
 
@@ -92,22 +98,12 @@ int main(int argc, char *argv[])
             seenCalls.insert(key);
             if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
             {
-                // Apply Filter logic
                 const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
                 std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
-                std::string hexUid = "0x" + toStringHex(r.kernelUid);
-                std::string target = name + " " + hexUid;
 
-                if (!includeRegexStr.empty())
-                {
-                    if (!std::regex_search(target, std::regex(includeRegexStr, std::regex::icase)))
-                        continue;
-                }
-                if (!excludeRegexStr.empty())
-                {
-                    if (std::regex_search(target, std::regex(excludeRegexStr, std::regex::icase)))
-                        continue;
-                }
+                // Simple string match filtering
+                if (!targetKernel.empty() && name.find(targetKernel) == std::string::npos)
+                    continue;
 
                 toBenchmark.push_back(std::move(r));
             }
@@ -120,22 +116,17 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // 4. Estimate costs for sorting
     for (uint32_t i = 0; i < toBenchmark.size(); i++)
     {
         Record &r = toBenchmark[i];
         float cost = costModel.estimateCost(
-            r.kernelUid,
-            r.outputShapes[0],
-            r.outputStrides[0],
-            r.outputDTypes[0],
-            r.inputShapes,
-            r.inputStrides,
-            r.inputDTypes,
-            r.inputConstants);
+            r.kernelUid, r.outputShapes[0], r.outputStrides[0], r.outputDTypes[0],
+            r.inputShapes, r.inputStrides, r.inputDTypes, r.inputConstants);
         r.runTime = std::isinf(cost) ? -1.0f : cost;
     }
 
-    // 2. Sort kernels by cost (cheapest first).
+    // 5. Sort kernels by cost (cheapest first)
     // Fallback to element count for kernels with no previous data (inf cost).
     std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb)
                      {
@@ -143,31 +134,25 @@ int main(int argc, char *argv[])
         float costB = rb.runTime;
 
         if (std::abs(costA - costB) < 1e-7) {
-                             // Tie-break: Prioritize optimized kernels over reference kernels
             bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
             bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
-                             if (isRefA != isRefB) return !isRefA;
-                             uint64_t sizeA = 1;
-                             for (size_t i = 0; i < ra.outputShapes.size(); i++) {
-                                 for (uint32_t dim : ra.outputShapes[i]) {
-                                     sizeA *= dim;
-                                 }
-                             }
-                             uint64_t sizeB = 1;
-                             for (size_t i = 0; i < rb.outputShapes.size(); i++) {
-                                 for (uint32_t dim : rb.outputShapes[i]) {
-                                     sizeB *= dim;
-                                 }
-                             }
-                             
-                             return sizeA < sizeB;
-        }
+            if (isRefA != isRefB) return !isRefA;
 
+            auto getVolume = [](const Record& r) {
+                uint64_t v = 1;
+                for (const auto& shape : r.outputShapes)
+                    for (uint32_t d : shape) v *= d;
+                return v;
+            };
+            return getVolume(ra) < getVolume(rb);
+        }
         return costA < costB; });
 
+    // 6. Benchmark Loop
     std::ofstream outFile(recordsPath, std::ios::app | std::ios::binary);
     BinaryWriter bw(outFile);
     size_t startIdx = (skipCount > (int)toBenchmark.size()) ? toBenchmark.size() : (size_t)std::max(0, skipCount);
+
     if (startIdx > 0)
     {
         std::cout << "Skipping the first " << startIdx << " kernels..." << std::endl;
