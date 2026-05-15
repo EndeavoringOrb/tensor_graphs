@@ -72,13 +72,14 @@ inline uint32_t refFactorySoftmax4D(const std::vector<uint32_t> &inputs, Graph &
     uint32_t max_s = g.repeat(g.max(x, axis_node), m_rep, ax_rep);
     uint32_t shifted = g.add(x, g.neg(max_s));
 
-    float e_v = 2.718281828f;
+    float e_v = 2.7182818f;
     uint32_t e_n = g.constant({1}, &e_v, DType::FLOAT32);
     int32_t sh4[] = {1, 1, 1, 1};
     uint32_t e_b = g.reshape(e_n, g.constant({4}, sh4, DType::INT32));
     for (int i = 0; i < 4; ++i)
     {
         int32_t r = (int32_t)s[i];
+        if (r <= 1) continue;
         int32_t a = i;
         e_b = g.repeat(e_b, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
     }
