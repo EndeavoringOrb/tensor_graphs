@@ -118,7 +118,7 @@ def get_compiler_cmd(fname: str):
 
         # Fix for ARM64 NEON errors when using nvcc (pass flag to host compiler)
         if is_arm64:
-            cmd.extend(["-Xcompiler", "-march=armv8-a"])
+            cmd.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
         if DEBUG_MODE:
             cmd.extend(["-g", "-G", "-O0", "-DDEBUG"])
@@ -149,7 +149,7 @@ def get_compiler_cmd(fname: str):
             return cmd
         else:
             cmd = [
-                "clang++",
+                "g++",
                 "-std=c++17",
                 f"-I{ROOT_DIR}",
             ]
@@ -374,7 +374,7 @@ def compile_project():
         cxx = r'"C:\Program Files\LLVM\bin\clang++.exe"'
         nvcc = "nvcc"
     else:
-        cxx = "clang++"
+        cxx = "g++"
         nvcc = "nvcc"
 
     cxx_flags = [f"-I{ROOT_DIR}"]
@@ -416,7 +416,7 @@ def compile_project():
             cxx_flags.append(f"-I{cuda_path}/include")  # Add CUDA include for clang
             nvcc_flags.append("-DUSE_CUDA")
             if is_arm64:
-                nvcc_flags.extend(["-Xcompiler", "-march=armv8-a"])
+                nvcc_flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
     mains = ["main.cpp", "bench.cpp", "test.cpp"]
 
