@@ -141,7 +141,6 @@ def get_uid_for_file(rel_path: str):
 
 def analyze_total_time(target_model: str):
     print(f"[INFO] Analyzing total time for model: {target_model}")
-    records_path = BENCHMARKS_DIR / "records.bin"
 
     if target_model == "gemma-3-270m":
         cache_paths = ["gemma-3-270m-cpp.bin"]
@@ -152,66 +151,31 @@ def analyze_total_time(target_model: str):
 
     cache_paths = [CACHE_DIR / cache_path for cache_path in cache_paths]
 
-    for check_path in [records_path, *cache_paths]:
+    for check_path in cache_paths:
         if not check_path.exists():
             message = f"[WARN] {check_path} file missing, skipping analysis."
             print(message)
             return 0.0, set(), message
 
-    records = load_records_file(records_path)
-    bench_map = {}
-    for r in records:
-        identity = get_record_identity(r)
-        bench_map[identity] = r["runTime"]
-
     total_time = 0.0
     extracted_uids = set()
+
     for cache_path in cache_paths:
         cache_entries = load_cache_file(cache_path)
         for entry in cache_entries:
             if entry.get("type") == "compiled_bucket":
                 graph = entry["graph"]
-
-                const_lookup = {
-                    node_id: data for node_id, data in graph.get("constStaging", [])
-                }
-                nodes = graph["nodesMap"]
+                node_costs = graph.get("nodeCosts", {})
 
                 for inst in graph["instructions"]:
                     uid = inst["fullKernelId"]
-                    node_id = str(inst["nodeId"])
-                    node = nodes[node_id]
+                    node_id = inst["nodeId"]
                     extracted_uids.add(uid)
 
-                    input_shapes = []
-                    input_strides = []
-                    input_dtypes = []
-                    input_consts = []
-
-                    for pid in inst["inputNodeIds"]:
-                        p_node = nodes[str(pid)]
-                        input_shapes.append(p_node["shape"])
-                        input_strides.append(p_node["strides"])
-                        input_dtypes.append(p_node["dtype"])
-                        input_consts.append(const_lookup.get(pid, b""))
-
-                    output_shapes = [node["shape"]]
-                    output_strides = [node["strides"]]
-                    output_dtypes = [node["dtype"]]
-
-                    dummy_r = {
-                        "kernelUid": uid,
-                        "inputShapes": input_shapes,
-                        "inputStrides": input_strides,
-                        "inputDTypes": input_dtypes,
-                        "outputShapes": output_shapes,
-                        "outputStrides": output_strides,
-                        "outputDTypes": output_dtypes,
-                        "inputConstants": input_consts,
-                    }
-
-                    identity = get_record_identity(dummy_r)
-                    total_time += bench_map.get(identity, 0.0)
+                    runtime = node_costs.get(node_id, 0.0)
+                    if runtime == float("inf"):
+                        runtime = 0.0
+                    total_time += runtime
 
     message = f"[INFO] Analysis complete. Total time: {total_time:.4f}ms, Unique UIDs: {len(extracted_uids)}"
     print(message)

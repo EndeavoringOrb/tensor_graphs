@@ -2,30 +2,20 @@
 import argparse
 import json
 from collections import defaultdict
-from binary import load_records_file, load_cache_file, get_record_identity
+from binary import load_cache_file
 
 
 def format_ms(ms):
     return f"{ms:.4f} ms"
 
 
-def analyze(cache_file, records_file, top_n=20, chain_len=1):
-    print(f"Loading benchmark records from: {records_file}")
-    records = load_records_file(records_file)
-
-    # Use the full structural identity as the key
-    bench_map = {}
-    for r in records:
-        identity = get_record_identity(r)
-        bench_map[identity] = r["runTime"]
-
+def analyze(cache_file, top_n=20, chain_len=1):
     print(f"Loading compiled buckets from: {cache_file}")
     cache_entries = load_cache_file(cache_file)
 
     chain_stats = defaultdict(lambda: {"time": 0.0, "count": 0})
     op_type_stats = defaultdict(float)
     total_estimated_time = 0.0
-    missing_benchmarks = set()
 
     bucket_count = 0
     for entry in cache_entries:
@@ -36,65 +26,33 @@ def analyze(cache_file, records_file, top_n=20, chain_len=1):
         graph = entry["graph"]
         nodes = graph["nodesMap"]
         instructions = graph["instructions"]
-
-        # Create a quick lookup for constants in this graph
-        const_lookup = {
-            node_id: data for node_id, data in graph.get("constStaging", [])
-        }
+        node_costs = graph.get("nodeCosts", {})
 
         bucket_sequence = []
         for inst in instructions:
-            node_id = str(inst["nodeId"])
-            node = nodes[node_id]
+            node_id = inst["nodeId"]
+            node = nodes[str(node_id)]
 
-            # Reconstruct the identity that matches the benchmark record
-            input_shapes = []
-            input_strides = []
-            input_dtypes = []
-            input_consts = []
+            # Fetch the runtime exactly as the C++ planner saw it
+            runtime = node_costs[node_id] # I want this to error if node_id isn't present
 
-            for pid in inst["inputNodeIds"]:
-                p_node = nodes[str(pid)]
-                input_shapes.append(p_node["shape"])
-                input_strides.append(p_node["strides"])
-                input_dtypes.append(p_node["dtype"])
-                # Pull constant bytes if this parent is a constant
-                input_consts.append(const_lookup.get(pid, b""))
-
-            # Current implementation assumes single output per instruction
-            output_shapes = [node["shape"]]
-            output_strides = [node["strides"]]
-            output_dtypes = [node["dtype"]]
-
-            dummy_r = {
-                "kernelUid": inst["fullKernelId"],
-                "inputShapes": input_shapes,
-                "inputStrides": input_strides,
-                "inputDTypes": input_dtypes,
-                "outputShapes": output_shapes,
-                "outputStrides": output_strides,
-                "outputDTypes": output_dtypes,
-                "inputConstants": input_consts,
-            }
-
-            identity = get_record_identity(dummy_r)
-            runtime = bench_map.get(identity, 0.0)
 
             op_name = node["opType"]
             if op_name == "FUSED":
                 op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
 
-            if identity not in bench_map:
-                uid_hex = hex(inst["fullKernelId"])
-                missing_benchmarks.add(
-                    f"{op_name} (UID: {uid_hex}, Shape: {node['shape']})"
-                )
+            input_shapes = []
+            for pid in inst["inputNodeIds"]:
+                p_node = nodes[str(pid)]
+                input_shapes.append(p_node["shape"])
+
+            shape = node["shape"]
 
             # Identity for display purposes in the report
             display_identity = (
                 op_name,
                 hex(inst["fullKernelId"]),
-                tuple(node["shape"]),
+                tuple(shape),
                 json.dumps(input_shapes),
             )
             bucket_sequence.append({"identity": display_identity, "runtime": runtime})
@@ -128,15 +86,15 @@ def analyze(cache_file, records_file, top_n=20, chain_len=1):
     label_len = 0
     for identities, stats in sorted_chains[:top_n]:
         parts = []
-        for op_name, uid, shape, input_shapes in identities:
-            parts.append(f"{op_name}({input_shapes}->{list(shape)})")
+        for op_name, uid, shape, in_shapes in identities:
+            parts.append(f"{op_name}({json.loads(in_shapes)}->{list(shape)})")
         label = " -> ".join(parts)
         label_len = max(len(label), label_len)
 
     for identities, stats in sorted_chains[:top_n]:
         parts = []
-        for op_name, uid, shape, input_shapes in identities:
-            parts.append(f"{op_name}({input_shapes}->{list(shape)})")
+        for op_name, uid, shape, in_shapes in identities:
+            parts.append(f"{op_name}({json.loads(in_shapes)}->{list(shape)})")
         label = " -> ".join(parts)
         avg = stats["time"] / stats["count"]
         print(
@@ -150,19 +108,12 @@ def analyze(cache_file, records_file, top_n=20, chain_len=1):
     for op, time in sorted_ops:
         print(f"{op:<25} | {format_ms(time)}")
 
-    if missing_benchmarks:
-        print(
-            f"\n[Warning] {len(missing_benchmarks)} kernel configurations were missing from records.bin."
-        )
-        print("Run bench.cpp to gather timing data for these kernels.")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze TensorGraph performance.")
     parser.add_argument("--graph", default="dirty_region_caches/flux-trans.bin")
-    parser.add_argument("--records", default="benchmarks/records.bin")
     parser.add_argument("--top_n", "-n", type=int, default=20)
     parser.add_argument("--chain_len", "-c", type=int, default=1)
     args = parser.parse_args()
 
-    analyze(args.graph, args.records, args.top_n, args.chain_len)
+    analyze(args.graph, args.top_n, args.chain_len)

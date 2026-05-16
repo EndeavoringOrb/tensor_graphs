@@ -191,7 +191,6 @@ def get_read_benchmarks():
 @app.get("/api/analyze")
 def get_analyze():
     target_model = request.args.get("target_model", "gemma-3-270m")
-    records_path = PROJECT_ROOT / "benchmarks" / "records.bin"
     if target_model == "gemma-3-270m":
         cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.bin"]
     elif target_model == "flux-klein-4b":
@@ -203,24 +202,8 @@ def get_analyze():
     else:
         return jsonify({"error": f'Unrecognized target model "{target_model}"'}), 404
 
-    if not records_path.exists() or any(
-        not cache_path.exists() for cache_path in cache_paths
-    ):
-        return jsonify({"error": "No benchmark or cache data available yet."}), 404
-
-    bench_map = {}
-    with open(records_path, "rb") as f:
-        br = BinaryReader(f)
-        while True:
-            r = br.read_record()
-            if r is None:
-                break
-            key = (
-                r["kernelUid"],
-                tuple(r["outputShapes"][0]),
-                tuple(r["outputStrides"][0]),
-            )
-            bench_map[key] = r["runTime"]
+    if any(not cache_path.exists() for cache_path in cache_paths):
+        return jsonify({"error": "No cache data available yet."}), 404
 
     total_estimated_time = 0.0
     extracted_uids = set()
@@ -238,25 +221,27 @@ def get_analyze():
                     br.read_string()  # key
                     graph = br.read_compiled_graph()
                     nodes = graph["nodesMap"]
+                    node_costs = graph.get("nodeCosts", {})
                     for inst in graph["instructions"]:
-                        node_id = str(inst["nodeId"])
-                        node = nodes[node_id]
+                        node_id = inst["nodeId"]
+                        node = nodes[str(node_id)]
                         uid = inst["fullKernelId"]
                         extracted_uids.add(uid)
                         op_name = node["opType"]
                         if op_name == "FUSED":
                             op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
-                        shape = tuple(node["shape"])
-                        strides = tuple(node["strides"])
-                        bench_key = (uid, shape, strides)
-                        runtime = bench_map.get(bench_key, 0.0)
+
+                        runtime = node_costs.get(node_id, 0.0)
+                        if runtime == float("inf"):
+                            runtime = 0.0
+
                         total_estimated_time += runtime
                         op_type_stats[op_name] += runtime
                         input_shapes = [
                             nodes[str(pid)]["shape"] if str(pid) in nodes else []
                             for pid in node["parentIds"]
                         ]
-                        identity = f"{op_name}({input_shapes}->{list(shape)})"
+                        identity = f"{op_name}({input_shapes}->{list(node['shape'])})"
                         chain_stats[identity]["time"] += runtime
                         chain_stats[identity]["count"] += 1
                 elif t == 0:  # Metadata
