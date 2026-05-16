@@ -1,4 +1,3 @@
-# File: build.py
 import argparse
 import os
 import sys
@@ -42,8 +41,8 @@ REGISTER_MACROS = [
 
 def validate_kernel_match_logic(rel_path, content):
     """
-    Enforces the 'Clean Match Function' rule. 
-    Match functions should only contain logic that cannot be expressed 
+    Enforces the 'Clean Match Function' rule.
+    Match functions should only contain logic that cannot be expressed
     in the registration macro.
     """
     # Find all registration macros
@@ -60,23 +59,30 @@ def validate_kernel_match_logic(rel_path, content):
 
             # Map of regex patterns to (Error Name, Reason)
             redundancies = {
-                r"inputs\.size\(\)": 
-                    ("Input Count Check", "The engine already validates input count based on the macro arguments."),
-                
-                r"inputs\s*\[\d+\]\.backend": 
-                    ("Input Backend Check", "Input backends are validated via the backend list in the registration macro."),
-                
-                r"output\.backend": 
-                    ("Output Backend Check", "The output backend is validated by the registry before calling match()."),
-                
-                r"isContiguous\s*\(\s*(inputs|inViews)\s*\[": 
-                    ("Input Contiguity Check", "The Planner handles 'Contiguity Repair'. Use the boolean list in the macro instead."),
-                
-                r"inputs\s*\[\d+\]\.dtype != DType::": 
-                    ("Input DType Check", "DTypes are already validated against the DType list in the registration macro."),
-                
-                r"inputs\s*\[0\]\.storageType\s*==\s*StorageType::PERSISTENT": 
-                    ("Persistent Storage Check", "The engine's inplace safety logic now handles this automatically.")
+                r"inputs\.size\(\)": (
+                    "Input Count Check",
+                    "The engine already validates input count based on the macro arguments.",
+                ),
+                r"inputs\s*\[\d+\]\.backend": (
+                    "Input Backend Check",
+                    "Input backends are validated via the backend list in the registration macro.",
+                ),
+                r"output\.backend": (
+                    "Output Backend Check",
+                    "The output backend is validated by the registry before calling match().",
+                ),
+                r"isContiguous\s*\(\s*(inputs|inViews)\s*\[": (
+                    "Input Contiguity Check",
+                    "The Planner handles 'Contiguity Repair'. Use the boolean list in the macro instead.",
+                ),
+                r"inputs\s*\[\d+\]\.dtype != DType::": (
+                    "Input DType Check",
+                    "DTypes are already validated against the DType list in the registration macro.",
+                ),
+                r"inputs\s*\[0\]\.storageType\s*==\s*StorageType::PERSISTENT": (
+                    "Persistent Storage Check",
+                    "The engine's inplace safety logic now handles this automatically.",
+                ),
             }
 
             for pattern, (name, reason) in redundancies.items():
@@ -125,23 +131,25 @@ def get_compiler_cmd(fname: str):
     else:
         if os.name == "nt":
             cmd = [
-                "cl.exe",
-                "/std:c++17",
-                "/EHsc",
-                f"/I{ROOT_DIR}",
+                r'"C:\Program Files\LLVM\bin\clang++.exe"',
+                "-target",
+                "aarch64-windows",
+                "-march=armv8.6-a+bf16+i8mm",
+                "-std=c++17",
+                f"-I{ROOT_DIR}",
             ]
 
             if DEBUG_MODE:
-                cmd.extend(["/Zi", "/Od", "/DDEBUG"])
+                cmd.extend(["-g", "-O0", "-DDEBUG"])
             else:
-                cmd.extend(["/O2"])
+                cmd.extend(["-O3"])
 
             cmd.append(str(ROOT_DIR / fname))
-            cmd.extend([f"/Fe:{out_name}"])
+            cmd.extend(["-o", out_name])
             return cmd
         else:
             cmd = [
-                "g++",
+                "clang++",
                 "-std=c++17",
                 f"-I{ROOT_DIR}",
             ]
@@ -361,23 +369,28 @@ def compile_project():
     out_ext = ".exe" if os.name == "nt" else ""
     is_arm64 = platform.machine().lower() in ("aarch64", "arm64")
 
+    # Use clang++ instead of cl.exe/g++
     if os.name == "nt":
-        cxx = "cl.exe"
+        cxx = r'"C:\Program Files\LLVM\bin\clang++.exe"'
         nvcc = "nvcc"
     else:
-        cxx = "g++"
+        cxx = "clang++"
         nvcc = "nvcc"
 
     cxx_flags = [f"-I{ROOT_DIR}"]
     nvcc_flags = [f"-I{ROOT_DIR}", "-std=c++17", "-x", "cu"]
 
     if os.name == "nt":
-        cxx_flags.extend(["/std:c++17", "/EHsc"])
+        if not USE_CUDA:
+            cxx_flags.extend(
+                ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
+            )
+        cxx_flags.extend(["-std=c++17"])
         if DEBUG_MODE:
-            cxx_flags.extend(["/Zi", "/Od", "/DDEBUG"])
+            cxx_flags.extend(["-g", "-O0", "-DDEBUG"])
             nvcc_flags.extend(["-g", "-G", "-O0", "-DDEBUG"])
         else:
-            cxx_flags.extend(["/O2"])
+            cxx_flags.extend(["-O3"])
             nvcc_flags.extend(["-O3"])
     else:
         cxx_flags.extend(["-std=c++17"])
@@ -393,12 +406,12 @@ def compile_project():
         cuda_path = os.environ.get("CUDA_PATH", "/usr/local/cuda")
 
         if os.name == "nt":
-            cxx_flags.append("/DUSE_CUDA")
-            cxx_flags.append(f'/I"{cuda_path}\\include"')  # Add CUDA include for MSVC
+            cxx_flags.append("-DUSE_CUDA")
+            cxx_flags.append(f'-I"{cuda_path}\\include"')  # Add CUDA include for clang
             nvcc_flags.append("-DUSE_CUDA")
         else:
             cxx_flags.append("-DUSE_CUDA")
-            cxx_flags.append(f"-I{cuda_path}/include")  # Add CUDA include for G++
+            cxx_flags.append(f"-I{cuda_path}/include")  # Add CUDA include for clang
             nvcc_flags.append("-DUSE_CUDA")
             if is_arm64:
                 nvcc_flags.extend(["-Xcompiler", "-march=armv8-a"])
@@ -412,6 +425,7 @@ def compile_project():
         cmd_str = " ".join(cmd)
         if os.name == "nt":
             arch = "amd64" if USE_CUDA else "arm64"
+            # Setting environment headers logic continues to be applied nicely before invocation
             full_command = f'"{VCVARS_PATH}" {arch} && {cmd_str}'
         else:
             full_command = cmd_str
@@ -434,10 +448,7 @@ def compile_project():
     if USE_CUDA:
         console.print(f"\n[bold blue]Compiling CUDA Kernels...[/bold blue]")
         cuda_src = str(GENERATED_DIR / "cuda_kernels.gen.cu")
-        if os.name == "nt":
-            cmd = [nvcc] + nvcc_flags + ["-c", cuda_src, "-o", cuda_obj]
-        else:
-            cmd = [nvcc] + nvcc_flags + ["-c", cuda_src, "-o", cuda_obj]
+        cmd = [nvcc] + nvcc_flags + ["-c", cuda_src, "-o", cuda_obj]
 
         result = run_cmd(cmd)
         if result.stdout.strip():
@@ -465,10 +476,7 @@ def compile_project():
         if USE_CUDA:
             main_obj = str(GENERATED_DIR / f"{main_file.split('.')[0]}{obj_ext}")
 
-            if os.name == "nt":
-                cmd = [cxx] + cxx_flags + ["/c", main_src, f"/Fo:{main_obj}"]
-            else:
-                cmd = [cxx] + cxx_flags + ["-c", main_src, "-o", main_obj]
+            cmd = [cxx] + cxx_flags + ["-c", main_src, "-o", main_obj]
             run_cmd(cmd)
 
             cmd = [nvcc] + [main_obj, cuda_obj, "-o", out_name]
@@ -476,10 +484,7 @@ def compile_project():
                 cmd.append("-g")
             result = run_cmd(cmd)
         else:
-            if os.name == "nt":
-                cmd = [cxx] + cxx_flags + [main_src, f"/Fe:{out_name}"]
-            else:
-                cmd = [cxx] + cxx_flags + [main_src, "-o", out_name]
+            cmd = [cxx] + cxx_flags + [main_src, "-o", out_name]
             result = run_cmd(cmd)
 
         if result.stdout.strip():

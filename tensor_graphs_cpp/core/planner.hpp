@@ -271,6 +271,7 @@ private:
         rules.emplace_back(std::make_unique<ConstantFolding>());
         rules.emplace_back(std::make_unique<BatchFlattenDot>());
         rules.emplace_back(std::make_unique<EliminateCopyTo>());
+        rules.emplace_back(std::make_unique<CastPushDown>());
         if (injected)
         {
             rules.emplace_back(std::make_unique<InfinityDomination>());
