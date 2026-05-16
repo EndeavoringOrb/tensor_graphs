@@ -1,14 +1,26 @@
 # File: kernel_bench/agent.py
 import json
 import time
+import threading
 import requests
 
-LLM_API_URL = "http://arc-ai-04.wpi.edu:11434/v1/chat/completions"
 BENCH_API_URL = "http://127.0.0.1:8080"
-MODEL = "gemma4:e4b" # "qwen3.6:27b" "qwen3.6:35b" "gemma4:e4b"
 
-# Set the optimization target!
-TARGET_MODEL = "flux-klein-4b"  # "flux-klein-4b" or "gemma-3-270m"
+# Configure multiple agents and URLs here!
+AGENT_CONFIGS = [
+    {
+        "url": "http://localhost:11434/v1/chat/completions",
+        "model": "qwen3.6:35b",
+        "target_model": "flux-klein-4b",
+        "instances": 1,
+    },
+    {
+        "url": "http://localhost:11435/v1/chat/completions",
+        "model": "qwen3.6:35b",
+        "target_model": "flux-klein-4b",
+        "instances": 1,
+    }
+]
 
 tools = [
     {
@@ -114,147 +126,214 @@ tools = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_issue",
+            "description": "Report an issue with the testing harness, codebase, or environment. Use this if a failure seems completely anomalous or outside your control.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "issue_description": {
+                        "type": "string",
+                        "description": "Detailed explanation of the issue encountered.",
+                    }
+                },
+                "required": ["issue_description"],
+            },
+        },
+    },
 ]
 
-
-def call_bench_api(path, method="GET", json_data=None):
-    url = f"{BENCH_API_URL}{path}"
-    if method == "GET":
-        res = requests.get(url, params=json_data)
-    else:
-        res = requests.post(url, json=json_data)
-    return res.json()
+print_lock = threading.Lock()
 
 
-def handle_tool_call(tool_call):
-    name = tool_call["function"]["name"]
-    args = json.loads(tool_call["function"]["arguments"])
-    print(f"\n[Agent executing tool: {name}]")
-
-    if name == "get_hw_info":
-        return call_bench_api("/api/hwinfo")
-    elif name == "get_performance_history":
-        return call_bench_api("/api/history")
-    elif name == "get_analysis":
-        return call_bench_api("/api/analyze", json_data={"target_model": TARGET_MODEL})
-    elif name == "read_benchmarks":
-        return call_bench_api("/api/read_benchmarks", json_data=args)
-    elif name == "read_target_model_source":
-        return call_bench_api(
-            "/api/kernels/read_model", json_data={"target_model": TARGET_MODEL}
-        )
-    elif name == "list_kernel_files":
-        return call_bench_api("/api/kernels/list")
-    elif name == "read_kernel_source":
-        return call_bench_api("/api/kernels/read_source", json_data=args)
-    elif name == "submit_and_test_kernel":
-        args["target_model"] = TARGET_MODEL
-        res = call_bench_api("/api/kernels/test", method="POST", json_data=args)
-        job_id = res.get("job_id")
-        if not job_id:
-            return {"error": "Submission failed", "details": res}
-
-        print(f"  -> Job {job_id} queued for {TARGET_MODEL}. Polling for completion...")
-        while True:
-            time.sleep(5)
-            status = call_bench_api(f"/api/jobs/{job_id}")
-            if status.get("status") in ["completed", "failed"]:
-                print(f"  finished with status '{status.get('status')}'")
-                return status
-            print("  ...still running...")
-
-    return {"error": f"Unknown tool {name}"}
+def safe_print(*args, **kwargs):
+    with print_lock:
+        print(*args, **kwargs)
 
 
-def get_initial_messages():
-    return [
-        {
-            "role": "system",
-            "content": (
-                f"You are an elite C++ and CUDA/NEON performance optimization AI agent. "
-                f"Your target model for optimization is {TARGET_MODEL}. "
-                "Your goal is to optimize tensor operations to reduce 'Total Estimated Execution Time'. "
-                "You work in a loop: analyze current performance, generate an optimized kernel, submit it, "
-                "and learn from the test results and benchmarks. "
-                "The test pipeline steps are: Compile -> Test(No Rec) -> Matched in Graph -> Test(Records) -> Benchmark -> Extracted in final graph. "
-                "Iterate infinitely. Use the provided tools.\n\n"
-                "CRITICAL INSTRUCTIONS:\n"
-                "1. Your conversation history is reset after EVERY kernel submission to keep the prompt context small. You MUST call `get_performance_history` in your first step to remember past tests!\n"
-                "2. To avoid repeating previous mistakes, locate failed jobs in the history and strictly read their error messages (which contain full compiler/test output).\n"
-                "3. If you want to read a failed kernel's code, use `read_kernel_source` and pass the `agent_file_path` provided for it in the history.\n"
-                "4. A kernel is only considered successful if it passes ALL stages (including being extracted in the final graph which means it was faster than previous options). Failures at any stage will mark it as failed."
-            ),
-        },
-        {
-            "role": "user",
-            "content": "Begin optimizing. Step 1: Call `get_performance_history` and `get_analysis` to understand the current state and review detailed failure logs. Step 2: Either choose a specific existing kernel to optimize and read benchmarks to find a target, or read_model to look for new sequences that can be fused (bypassing the need for certain kernels). Step 3: Get hardware info. Step 4: Write and submit your kernel.",
-        },
-    ]
+class WorkerAgent(threading.Thread):
+    def __init__(self, agent_id, config):
+        super().__init__(daemon=True)
+        self.agent_id = agent_id
+        self.api_url = config["url"]
+        self.model = config["model"]
+        self.target_model = config["target_model"]
 
-
-def run_agentic_loop():
-    messages = get_initial_messages()
-
-    print("Starting Autonomous Optimization Loop...")
-
-    while True:
+    def call_bench_api(self, path, method="GET", json_data=None):
+        url = f"{BENCH_API_URL}{path}"
         try:
-            payload = {
-                "model": MODEL,
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto",
-            }
+            if method == "GET":
+                res = requests.get(url, params=json_data)
+            else:
+                res = requests.post(url, json=json_data)
+            return res.json()
+        except Exception as e:
+            return {"error": f"Failed to reach Benchmark API: {str(e)}"}
 
-            response = requests.post(LLM_API_URL, json=payload)
-            response.raise_for_status()
-            response_data = response.json()
-            message = response_data["choices"][0]["message"]
-            messages.append(message)
+    def handle_tool_call(self, tool_call):
+        name = tool_call["function"]["name"]
 
-            if message.get("tool_calls"):
-                reset_context = False
-                for tool_call in message["tool_calls"]:
-                    result = handle_tool_call(tool_call)
+        try:
+            args = json.loads(tool_call["function"]["arguments"])
+        except json.JSONDecodeError:
+            return {"error": "Invalid JSON arguments generated"}
 
-                    # Reset context invariably after every attempt (whether succeeded or failed)
-                    if tool_call["function"]["name"] == "submit_and_test_kernel":
-                        reset_context = True
+        safe_print(f"\n[Agent {self.agent_id} executing tool: {name}]")
 
-                    content = json.dumps(result, indent=2)
-                    if len(content) > 10000:
-                        content = (
-                            "Content exceeded maximum length. Please narrow parameters."
+        if name == "get_hw_info":
+            return self.call_bench_api("/api/hwinfo")
+        elif name == "get_performance_history":
+            return self.call_bench_api("/api/history")
+        elif name == "get_analysis":
+            return self.call_bench_api(
+                "/api/analyze", json_data={"target_model": self.target_model}
+            )
+        elif name == "read_benchmarks":
+            # Pass the target model context
+            args["target_model"] = self.target_model
+            return self.call_bench_api("/api/read_benchmarks", json_data=args)
+        elif name == "read_target_model_source":
+            return self.call_bench_api(
+                "/api/kernels/read_model", json_data={"target_model": self.target_model}
+            )
+        elif name == "list_kernel_files":
+            return self.call_bench_api("/api/kernels/list")
+        elif name == "read_kernel_source":
+            return self.call_bench_api("/api/kernels/read_source", json_data=args)
+        elif name == "report_issue":
+            args["agent_id"] = self.agent_id
+            res = self.call_bench_api("/api/reports", method="POST", json_data=args)
+            return {"status": "Issue reported successfully.", "details": res}
+        elif name == "submit_and_test_kernel":
+            args["target_model"] = self.target_model
+            res = self.call_bench_api(
+                "/api/kernels/test", method="POST", json_data=args
+            )
+            job_id = res.get("job_id")
+            if not job_id:
+                return {"error": "Submission failed", "details": res}
+
+            safe_print(
+                f"  -> [Agent {self.agent_id}] Job {job_id} queued for {self.target_model}. Polling..."
+            )
+            while True:
+                time.sleep(5)
+                status = self.call_bench_api(f"/api/jobs/{job_id}")
+                if status.get("status") in ["completed", "failed"]:
+                    safe_print(
+                        f"  -> [Agent {self.agent_id}] Job finished with status '{status.get('status')}'"
+                    )
+                    return status
+
+        return {"error": f"Unknown tool {name}"}
+
+    def get_initial_messages(self):
+        return [
+            {
+                "role": "system",
+                "content": (
+                    f"You are an elite C++ and CUDA/NEON performance optimization AI agent. "
+                    f"Your target model for optimization is {self.target_model}. "
+                    "Your goal is to optimize tensor operations to reduce 'Total Estimated Execution Time'. "
+                    "You work in a loop: analyze current performance, generate an optimized kernel, submit it, "
+                    "and learn from the test results and benchmarks. "
+                    "The test pipeline steps are: Compile -> Test(No Rec) -> Matched in Graph -> Test(Records) -> Benchmark -> Extracted in final graph. "
+                    "Iterate infinitely. Use the provided tools.\n\n"
+                    "CRITICAL INSTRUCTIONS:\n"
+                    "1. Your conversation history is reset after EVERY kernel submission to keep the prompt context small. You MUST call `get_performance_history` in your first step to remember past tests!\n"
+                    "2. To avoid repeating previous mistakes, locate failed jobs in the history and strictly read their error messages (which contain full compiler/test output).\n"
+                    "3. If you want to read a failed kernel's code, use `read_kernel_source` and pass the `agent_file_path` provided for it in the history.\n"
+                    "4. A kernel is only considered successful if it passes ALL stages (including being extracted in the final graph which means it was faster than previous options). Failures at any stage will mark it as failed.\n"
+                    "5. If you encounter persistent bugs or environment problems outside your control, use the `report_issue` tool."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "Begin optimizing. Step 1: Call `get_performance_history` and `get_analysis`. Step 2: Either read_model to look for new sequences that can be fused (bypassing the need for certain kernels), or choose a specific existing kernel to optimize and read benchmarks to find a target. Step 3: Get hardware info. Step 4: Write and submit your kernel.",
+            },
+        ]
+
+    def run(self):
+        messages = self.get_initial_messages()
+        safe_print(
+            f"[Agent {self.agent_id}] Started Autonomous Optimization Loop on {self.api_url}..."
+        )
+
+        while True:
+            try:
+                payload = {
+                    "model": self.model,
+                    "messages": messages,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                }
+
+                response = requests.post(self.api_url, json=payload)
+                response.raise_for_status()
+                response_data = response.json()
+                message = response_data["choices"][0]["message"]
+                messages.append(message)
+
+                if message.get("tool_calls"):
+                    reset_context = False
+                    for tool_call in message["tool_calls"]:
+                        result = self.handle_tool_call(tool_call)
+
+                        if tool_call["function"]["name"] == "submit_and_test_kernel":
+                            reset_context = True
+
+                        content = json.dumps(result, indent=2)
+                        if len(content) > 10000:
+                            content = "Content exceeded maximum length. Please narrow parameters."
+
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "name": tool_call["function"]["name"],
+                                "content": content,
+                            }
                         )
+
+                    if reset_context:
+                        safe_print(
+                            f"\n[Agent {self.agent_id}] Submission complete! Resetting context...\n"
+                        )
+                        messages = self.get_initial_messages()
+
+                else:
+                    safe_print(
+                        f"\n[Agent {self.agent_id} says]:\n{message.get('content')}\n"
+                    )
                     messages.append(
                         {
-                            "role": "tool",
-                            "tool_call_id": tool_call["id"],
-                            "name": tool_call["function"]["name"],
-                            "content": content,
+                            "role": "user",
+                            "content": "Please continue optimizing. Generate and submit your next kernel.",
                         }
                     )
 
-                # Reset to start fresh and use real codebase/benchmarks/history as state
-                if reset_context:
-                    print(
-                        "\n[Agent] Submission complete! Resetting context to start fresh...\n"
-                    )
-                    messages = get_initial_messages()
-
-            else:
-                print(f"\n[Agent says]:\n{message.get('content')}\n")
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "Please continue optimizing. Generate and submit your next kernel.",
-                    }
+            except Exception as e:
+                safe_print(
+                    f"[Agent {self.agent_id}] Error communicating with LLM server: {e}"
                 )
-
-        except Exception as e:
-            print(f"Error communicating with LLM server: {e}")
-            time.sleep(10)
+                time.sleep(10)
 
 
 if __name__ == "__main__":
-    run_agentic_loop()
+    threads = []
+    agent_counter = 1
+
+    for config in AGENT_CONFIGS:
+        num_instances = config.get("instances", 1)
+        for _ in range(num_instances):
+            agent_id = f"Agent-{agent_counter}"
+            t = WorkerAgent(agent_id, config)
+            t.start()
+            threads.append(t)
+            agent_counter += 1
+
+    # Keep main thread alive
+    for t in threads:
+        t.join()

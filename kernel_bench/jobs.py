@@ -15,6 +15,7 @@ KERNELS_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "kernels"
 BENCHMARKS_DIR = PROJECT_ROOT / "benchmarks"
 CACHE_DIR = PROJECT_ROOT / "dirty_region_caches"
 HISTORY_FILE = PROJECT_ROOT / "kernel_bench" / "jobs_history.jsonl"
+REPORTS_FILE = PROJECT_ROOT / "kernel_bench" / "reports.jsonl"
 GENERATED_DIR = PROJECT_ROOT / "tensor_graphs_cpp" / "generated"
 
 if str(PROJECT_ROOT) not in sys.path:
@@ -35,6 +36,25 @@ TIMEOUTS = {
 
 jobs: dict = {}
 worker_lock = threading.Lock()
+report_lock = threading.Lock()
+
+
+def save_report(report_data):
+    with report_lock:
+        with open(REPORTS_FILE, "a") as f:
+            f.write(json.dumps(report_data) + "\n")
+
+
+def load_reports():
+    reports = []
+    if REPORTS_FILE.exists():
+        with report_lock:
+            with open(REPORTS_FILE, "r") as f:
+                for line in f:
+                    if line.strip():
+                        reports.append(json.loads(line))
+    # Return newest first
+    return list(reversed(reports))
 
 
 def get_hw_info():
@@ -389,7 +409,6 @@ def run_worker():
             job["total_estimated_time_ms"] = total_time
             job["benchmark_scores"] = get_benchmark_scores(uid_str)
 
-            # If the process successfully completes every step above without exception, it is a success.
             job["status"] = "completed"
             print(f"[SUCCESS] Job {job_id} completed successfully.")
 
@@ -398,7 +417,6 @@ def run_worker():
             job["error"] = str(e)
             print(f"[ERROR] Job {job_id} failed: {e}")
 
-            # Rename the faulty file to prevent it from breaking subsequent compilations
             if job.get("kernel_file") and os.path.exists(job["kernel_file"]):
                 failed_path = job["kernel_file"] + ".failed"
                 try:

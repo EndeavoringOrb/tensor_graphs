@@ -4,6 +4,7 @@ import os
 import json
 import re
 import struct
+from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict
 from .jobs import (
@@ -14,7 +15,9 @@ from .jobs import (
     start_worker,
     PROJECT_ROOT,
     KERNELS_DIR,
-    BinaryReader
+    BinaryReader,
+    save_report,
+    load_reports,
 )
 
 app = Flask(__name__)
@@ -22,9 +25,12 @@ start_worker()
 
 
 def format_constants(raw_bytes, dtype):
-    if not raw_bytes: return ""
+    if not raw_bytes:
+        return ""
     dtypes = ["FLOAT32", "INT32", "BF16", "UINT8"]
-    dt_str = dtypes[dtype] if isinstance(dtype, int) and dtype < len(dtypes) else str(dtype)
+    dt_str = (
+        dtypes[dtype] if isinstance(dtype, int) and dtype < len(dtypes) else str(dtype)
+    )
     if dt_str == "FLOAT32":
         count = len(raw_bytes) // 4
         return list(struct.unpack(f"<{count}f", raw_bytes))
@@ -80,7 +86,9 @@ def get_job(job_id):
 @app.get("/api/history")
 def get_history():
     history = load_job_history()
-    return jsonify({"history": history, "message": f"{len(history)} item(s) in history"})
+    return jsonify(
+        {"history": history, "message": f"{len(history)} item(s) in history"}
+    )
 
 
 @app.get("/api/hwinfo")
@@ -96,7 +104,9 @@ def get_read_benchmarks():
 
     records_path = PROJECT_ROOT / "benchmarks" / "records.bin"
     cache_path = PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.bin"
-    header_path = PROJECT_ROOT / "tensor_graphs_cpp" / "generated" / "kernel_uids.gen.hpp"
+    header_path = (
+        PROJECT_ROOT / "tensor_graphs_cpp" / "generated" / "kernel_uids.gen.hpp"
+    )
 
     if not records_path.exists():
         return jsonify({"records": []})
@@ -107,9 +117,10 @@ def get_read_benchmarks():
             br = BinaryReader(f)
             while True:
                 t = br.read_u8()
-                if t is None: break
-                if t == 1: # Compiled Bucket
-                    br.read_string() # key
+                if t is None:
+                    break
+                if t == 1:  # Compiled Bucket
+                    br.read_string()  # key
                     graph = br.read_compiled_graph()
                     nodes = graph["nodesMap"]
                     for inst in graph["instructions"]:
@@ -119,12 +130,17 @@ def get_read_benchmarks():
                         if op_name == "FUSED":
                             op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
                         uid_map[uid] = op_name
-                elif t == 0: # Metadata
-                    br.read_u32(); br.read_u32(); br.read_map(br.read_u32, br.read_backend)
-                elif t == 2: # Constants
+                elif t == 0:  # Metadata
+                    br.read_u32()
+                    br.read_u32()
+                    br.read_map(br.read_u32, br.read_backend)
+                elif t == 2:  # Constants
                     count = br.read_u32()
-                    for _ in range(count): br.read_u32(); f.read(br.read_u32())
-                else: break
+                    for _ in range(count):
+                        br.read_u32()
+                        f.read(br.read_u32())
+                else:
+                    break
 
     if header_path.exists():
         pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
@@ -139,16 +155,21 @@ def get_read_benchmarks():
         br = BinaryReader(f)
         while True:
             r = br.read_record()
-            if r is None: break
-            
+            if r is None:
+                break
+
             uid = str(r.get("kernelUid", ""))
-            opname = uid_map.get(uid, uid_map.get(hex(r.get("kernelUid", 0)), r.get("opName", "UNKNOWN")))
+            opname = uid_map.get(
+                uid, uid_map.get(hex(r.get("kernelUid", 0)), r.get("opName", "UNKNOWN"))
+            )
             r["opName"] = opname
-            r["kernelUid"] = hex(r["kernelUid"]) # Keep it as hex string for agent compatibility if needed
-            
+            r["kernelUid"] = hex(r["kernelUid"])
+
             shapes = str(r.get("outputShapes", [])) + str(r.get("inputShapes", []))
             if op_filter:
-                if not re.search(op_filter, opname, re.IGNORECASE) and not re.search(op_filter, uid, re.IGNORECASE):
+                if not re.search(op_filter, opname, re.IGNORECASE) and not re.search(
+                    op_filter, uid, re.IGNORECASE
+                ):
                     continue
             if shape_filter:
                 if not re.search(shape_filter, shapes):
@@ -174,13 +195,17 @@ def get_analyze():
     if target_model == "gemma-3-270m":
         cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.bin"]
     elif target_model == "flux-klein-4b":
-        cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"flux-text.bin",
-                       PROJECT_ROOT / "dirty_region_caches" / f"flux-trans.bin",
-                       PROJECT_ROOT / "dirty_region_caches" / f"flux-vae.bin"]
+        cache_paths = [
+            PROJECT_ROOT / "dirty_region_caches" / f"flux-text.bin",
+            PROJECT_ROOT / "dirty_region_caches" / f"flux-trans.bin",
+            PROJECT_ROOT / "dirty_region_caches" / f"flux-vae.bin",
+        ]
     else:
-        return jsonify({"error": f"Unrecognized target model \"{target_model}\""}), 404
+        return jsonify({"error": f'Unrecognized target model "{target_model}"'}), 404
 
-    if not records_path.exists() or any(not cache_path.exists() for cache_path in cache_paths):
+    if not records_path.exists() or any(
+        not cache_path.exists() for cache_path in cache_paths
+    ):
         return jsonify({"error": "No benchmark or cache data available yet."}), 404
 
     bench_map = {}
@@ -188,8 +213,13 @@ def get_analyze():
         br = BinaryReader(f)
         while True:
             r = br.read_record()
-            if r is None: break
-            key = (r["kernelUid"], tuple(r["outputShapes"][0]), tuple(r["outputStrides"][0]))
+            if r is None:
+                break
+            key = (
+                r["kernelUid"],
+                tuple(r["outputShapes"][0]),
+                tuple(r["outputStrides"][0]),
+            )
             bench_map[key] = r["runTime"]
 
     total_estimated_time = 0.0
@@ -202,9 +232,10 @@ def get_analyze():
             br = BinaryReader(f)
             while True:
                 t = br.read_u8()
-                if t is None: break
-                if t == 1: # Compiled Bucket
-                    br.read_string() # key
+                if t is None:
+                    break
+                if t == 1:  # Compiled Bucket
+                    br.read_string()  # key
                     graph = br.read_compiled_graph()
                     nodes = graph["nodesMap"]
                     for inst in graph["instructions"]:
@@ -221,26 +252,47 @@ def get_analyze():
                         runtime = bench_map.get(bench_key, 0.0)
                         total_estimated_time += runtime
                         op_type_stats[op_name] += runtime
-                        input_shapes = [nodes[str(pid)]["shape"] if str(pid) in nodes else [] for pid in node["parentIds"]]
+                        input_shapes = [
+                            nodes[str(pid)]["shape"] if str(pid) in nodes else []
+                            for pid in node["parentIds"]
+                        ]
                         identity = f"{op_name}({input_shapes}->{list(shape)})"
                         chain_stats[identity]["time"] += runtime
                         chain_stats[identity]["count"] += 1
-                elif t == 0: # Metadata
-                    br.read_u32(); br.read_u32(); br.read_map(br.read_u32, br.read_backend)
-                elif t == 2: # Constants
+                elif t == 0:  # Metadata
+                    br.read_u32()
+                    br.read_u32()
+                    br.read_map(br.read_u32, br.read_backend)
+                elif t == 2:  # Constants
                     count = br.read_u32()
-                    for _ in range(count): br.read_u32(); f.read(br.read_u32())
-                else: break
+                    for _ in range(count):
+                        br.read_u32()
+                        f.read(br.read_u32())
+                else:
+                    break
 
-    top_chains = sorted([{"chain": k, "time": v["time"], "count": v["count"]} for k, v in chain_stats.items()], key=lambda x: x["time"], reverse=True)[:20]
-    top_ops = sorted([{"op": k, "time": v} for k, v in op_type_stats.items()], key=lambda x: x["time"], reverse=True)
+    top_chains = sorted(
+        [
+            {"chain": k, "time": v["time"], "count": v["count"]}
+            for k, v in chain_stats.items()
+        ],
+        key=lambda x: x["time"],
+        reverse=True,
+    )[:20]
+    top_ops = sorted(
+        [{"op": k, "time": v} for k, v in op_type_stats.items()],
+        key=lambda x: x["time"],
+        reverse=True,
+    )
 
-    return jsonify({
-        "total_estimated_time_ms": total_estimated_time,
-        "extracted_uids": [hex(u) for u in extracted_uids],
-        "top_chains": top_chains,
-        "top_ops": top_ops,
-    })
+    return jsonify(
+        {
+            "total_estimated_time_ms": total_estimated_time,
+            "extracted_uids": [hex(u) for u in extracted_uids],
+            "top_chains": top_chains,
+            "top_ops": top_ops,
+        }
+    )
 
 
 @app.get("/api/kernels/list")
@@ -248,10 +300,8 @@ def list_kernel_files():
     """Recursively lists all kernel files in the kernels directory."""
     try:
         files = []
-        # rglob("*") finds all files and directories recursively
         for path in KERNELS_DIR.rglob("*"):
             if path.is_file():
-                # Get path relative to the kernels directory for the agent
                 files.append(str(path.relative_to(KERNELS_DIR)))
         return jsonify({"files": sorted(files)})
     except Exception as e:
@@ -264,17 +314,17 @@ def read_model_source():
     model_files = {
         "gemma-3-270m": ["gemma-3-270m.hpp"],
         "flux-klein-4b": [
-            "flux-klein-4b.hpp", 
-            "flux-klein-4b-text_encoder.hpp", 
-            "flux-klein-4b-transformer.hpp", 
-            "flux-klein-4b-vae.hpp"
-        ]
+            "flux-klein-4b.hpp",
+            "flux-klein-4b-text_encoder.hpp",
+            "flux-klein-4b-transformer.hpp",
+            "flux-klein-4b-vae.hpp",
+        ],
     }
-    
+
     files_to_read = model_files.get(target_model, [])
     if not files_to_read:
         return jsonify({"error": f"No source files mapped for {target_model}"}), 404
-    
+
     content = ""
     for fname in files_to_read:
         path = PROJECT_ROOT / "tensor_graphs_cpp" / "models" / fname
@@ -282,7 +332,7 @@ def read_model_source():
             content += f"// --- {fname} ---\n{path.read_text()}\n\n"
         else:
             content += f"// --- {fname} (NOT FOUND) ---\n\n"
-            
+
     return jsonify({"content": content, "target_model": target_model})
 
 
@@ -294,7 +344,6 @@ def read_kernel_source():
         return jsonify({"error": "Missing 'path' parameter"}), 400
 
     try:
-        # Security check: Ensure the path is inside KERNELS_DIR
         safe_path = (KERNELS_DIR / rel_path).resolve()
         if not str(safe_path).startswith(str(KERNELS_DIR.resolve())):
             return (
@@ -311,5 +360,21 @@ def read_kernel_source():
         return jsonify({"error": str(e)}), 500
 
 
+@app.post("/api/reports")
+def add_report():
+    data = request.get_json(force=True, silent=True)
+    if not data or not data.get("issue_description"):
+        return jsonify({"error": "Missing 'issue_description'"}), 400
+
+    data["timestamp"] = datetime.now(timezone.utc).isoformat()
+    save_report(data)
+    return jsonify({"status": "success", "message": "Issue recorded"})
+
+
+@app.get("/api/reports")
+def get_reports_api():
+    return jsonify({"reports": load_reports()})
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8080, threaded=True)
