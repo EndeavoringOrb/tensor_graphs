@@ -394,6 +394,8 @@ def compile_project():
             nvcc_flags.extend(["-O3"])
     else:
         cxx_flags.extend(["-std=c++17"])
+        if is_arm64:
+            cxx_flags.append("-march=armv8.6-a+bf16+i8mm")
         if DEBUG_MODE:
             cxx_flags.extend(["-g", "-O0", "-DDEBUG", "-fno-omit-frame-pointer"])
             nvcc_flags.extend(["-g", "-G", "-O0", "-DDEBUG"])
