@@ -231,6 +231,35 @@ public:
     {
         ensureOutputDirectories();
         costModel.load(recordsPath);
+
+        buildAtomicTopoAndInferShapes();
+
+        std::vector<uint32_t> inputNodeIds = collectInputNodeIds();
+        std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
+        for (uint32_t nodeId : inputNodeIds)
+        {
+            fullInputRegions[nodeId] = {makeFull(graph.getNode(nodeId).getShape())};
+        }
+
+        bool hasFullBucket = false;
+        std::string fullKey = encodeCacheKey(fullInputRegions);
+        for (const auto &mb : manualBuckets)
+        {
+            if (mb.key() == fullKey)
+            {
+                hasFullBucket = true;
+                break;
+            }
+        }
+
+        if (!hasFullBucket)
+        {
+            ManualBucket bucket;
+            bucket.inputDirtyRegions = fullInputRegions;
+            bucket.outputNeededRegion = {makeFull(graph.getNode(rootId).getShape())};
+            manualBuckets.push_back(bucket);
+        }
+
         if (isPlanned)
         {
             std::cout << "[Session.compile] Using cached compilation." << std::endl;
@@ -238,7 +267,7 @@ public:
         else
         {
             std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
-            ensureCacheCoverage(collectInputNodeIds());
+            ensureCacheCoverage();
             persistCache();
             isPlanned = true;
         }
@@ -491,6 +520,11 @@ public:
         std::string key = encodeCacheKey(canonicalDiffs);
         const CompiledGraph *compiled = lookupCache(canonicalDiffs);
 
+        if (!compiled)
+        {
+            Error::throw_err("[Session.run] Cache miss for input regions. The required graph was not planned. Key: " + key);
+        }
+
         incrementBucketCount(key);
         saveBucketCounts();
         ProgressTimer runTimer(0, "", true);
@@ -612,22 +646,8 @@ public:
         return slices;
     }
 
-    void ensureCacheCoverage(const std::vector<uint32_t> &inputNodeIds)
+    void ensureCacheCoverage()
     {
-        std::vector<uint32_t> atomicTopo = buildAtomicTopoAndInferShapes();
-        {
-            std::unordered_map<uint32_t, std::vector<Region>> fullInputRegions;
-            for (uint32_t nodeId : inputNodeIds)
-            {
-                fullInputRegions[nodeId] = {makeFull(graph.getNode(nodeId).getShape())};
-            }
-
-            ManualBucket bucket;
-            bucket.inputDirtyRegions = fullInputRegions;
-            bucket.outputNeededRegion = {makeFull(graph.getNode(rootId).getShape())};
-            manualBuckets.push_back(bucket);
-        }
-
         cachedGraphs.clear();
         selectedCachedNodes.clear();
 
