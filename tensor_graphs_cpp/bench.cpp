@@ -23,8 +23,6 @@
 #include "generated/kernels_all.gen.hpp"
 #include "generated/build_context.gen.hpp"
 
-using json = nlohmann::json;
-
 int main(int argc, char *argv[])
 {
     int skipCount = 0;
