@@ -596,16 +596,22 @@ std::vector<float> executeFusedKernel(
     DType outDType,
     const Graph &graph)
 {
-    if (inputData.size() != kernel.numInputs)
+    if (!kernel.isVariadic && inputData.size() != kernel.numInputs)
     {
         Error::throw_err("Fused kernel " + kernel.opName + " expects " +
+                         std::to_string(kernel.numInputs) + " inputs, got " +
+                         std::to_string(inputData.size()));
+    }
+    if (kernel.isVariadic && inputData.size() < kernel.numInputs)
+    {
+        Error::throw_err("Fused variadic kernel " + kernel.opName + " expects at least " +
                          std::to_string(kernel.numInputs) + " inputs, got " +
                          std::to_string(inputData.size()));
     }
 
     std::vector<const void *> inputPtrs;
     std::vector<TensorView> inputViews;
-    for (size_t i = 0; i < kernel.numInputs; ++i)
+    for (size_t i = 0; i < inputData.size(); ++i)
     {
         inputPtrs.push_back(inputData[i].data());
         TensorView view;
@@ -627,7 +633,7 @@ std::vector<float> executeFusedKernel(
     size_t outBufElements = getRequiredBufferSize(outView);
     std::vector<uint8_t> outputData;
 
-    if (kernel.inplace && kernel.numInputs > 0 && !kernel.inferView)
+    if (kernel.inplace && inputData.size() > 0 && !kernel.inferView)
     {
         outputData = inputData[0];
         if (outputData.size() < outBufElements * getDTypeSize(outDType))
@@ -640,10 +646,10 @@ std::vector<float> executeFusedKernel(
         outputData.resize(outBufElements * getDTypeSize(outDType), 0);
     }
 
-    if (kernel.isView && kernel.numInputs > 0 && kernel.inferView)
+    if (kernel.isView && inputData.size() > 0 && kernel.inferView)
     {
-        std::vector<TensorNode> dummyInputs(kernel.numInputs);
-        for (size_t i = 0; i < kernel.numInputs; ++i)
+        std::vector<TensorNode> dummyInputs(inputData.size());
+        for (size_t i = 0; i < inputData.size(); ++i)
         {
             dummyInputs[i].id = inputIds[i];
             dummyInputs[i].setShape(inputViews[i].getShape());
@@ -689,7 +695,7 @@ std::vector<float> executeFusedKernel(
 
         std::vector<void *> d_inputs;
         std::vector<void *> d_outputs;
-        std::vector<bool> inputOnDevice(kernel.numInputs, false);
+        std::vector<bool> inputOnDevice(inputData.size(), false);
         for (size_t i = 0; i < inputData.size(); ++i)
         {
             bool inputNeedsCuda = false;
