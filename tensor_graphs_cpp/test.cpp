@@ -1365,10 +1365,110 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 // ============================================================
 // Main Test Loop
 // ============================================================
+std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
+{
+    std::unordered_map<uint64_t, std::vector<Record>> recordsByUid;
+    std::unordered_set<std::string> seen;
+
+    std::ifstream file(cachePath, std::ios::binary);
+    if (!file.is_open())
+    {
+        std::cerr << "Warning: Could not open cache file: " << cachePath << std::endl;
+        return recordsByUid;
+    }
+
+    BinaryReader br(file);
+    while (file.peek() != EOF)
+    {
+        uint8_t type;
+        br.read(type);
+
+        if (type == 0) // Metadata
+        {
+            uint32_t version, cachedRootId;
+            std::unordered_map<uint32_t, Backend> tempSelected;
+            br.read(version);
+            br.read(cachedRootId);
+            br.read(tempSelected);
+        }
+        else if (type == 1) // Compiled Bucket
+        {
+            std::string key;
+            CompiledGraph cg;
+            br.read(key);
+            br.read(cg);
+            for (const auto &inst : cg.instructions)
+            {
+                if (inst.fullKernelId == 0)
+                    continue;
+
+                Record r;
+                r.kernelUid = inst.fullKernelId;
+                r.buildContextId = BUILD_CONTEXT_ID;
+                r.hwTag = HW_TAG;
+                r.runTime = 0.0f;
+
+                const TensorNode &outNode = cg.nodesMap.at(inst.nodeId);
+                r.outputShapes.push_back(outNode.getShape());
+                r.outputStrides.push_back(outNode.strides);
+                r.outputDTypes.push_back(outNode.dtype);
+                r.backends.push_back(outNode.backend);
+
+                for (uint32_t inId : inst.inputNodeIds)
+                {
+                    const TensorNode &inNode = cg.nodesMap.at(inId);
+                    r.inputShapes.push_back(inNode.getShape());
+                    r.inputStrides.push_back(inNode.strides);
+                    r.inputDTypes.push_back(inNode.dtype);
+                    r.inputBackends.push_back({inNode.backend});
+
+                    uint32_t logicalId = cg.getLogicalId(inId);
+                    if (cg.constantStaging.count(logicalId))
+                    {
+                        r.inputConstants.push_back(*cg.constantStaging.at(logicalId));
+                    }
+                    else if (cg.constantStaging.count(inId))
+                    {
+                        r.inputConstants.push_back(*cg.constantStaging.at(inId));
+                    }
+                    else
+                    {
+                        r.inputConstants.push_back({});
+                    }
+                }
+
+                std::string sig = serializeToString(r);
+                if (seen.insert(sig).second)
+                {
+                    recordsByUid[r.kernelUid].push_back(r);
+                }
+            }
+        }
+        else if (type == 2) // Constants
+        {
+            uint32_t count;
+            br.read(count);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                uint32_t n;
+                std::vector<uint8_t> d;
+                br.read(n);
+                br.read(d);
+            }
+        }
+        else
+        {
+            break;
+        }
+    }
+    return recordsByUid;
+}
+
 int main(int argc, char *argv[])
 {
     std::string targetKernel = "";
     bool useRecords = true;
+    std::string cachePath = "";
 
     // Parse arguments
     for (int i = 1; i < argc; ++i)
@@ -1378,7 +1478,11 @@ int main(int argc, char *argv[])
         {
             useRecords = false;
         }
-        else if (targetKernel.empty())
+        else if (arg == "--cache" && i + 1 < argc)
+        {
+            cachePath = argv[++i];
+        }
+        else if (targetKernel.empty() && arg[0] != '-')
         {
             targetKernel = arg;
         }
@@ -1389,26 +1493,30 @@ int main(int argc, char *argv[])
         std::cout << "Filtering tests for kernel containing: " << targetKernel << std::endl;
     }
 
+    if (!cachePath.empty())
+    {
+        std::cout << "Filtering tests for kernels strictly present in cache: " << cachePath << std::endl;
+    }
+
     if (!useRecords)
     {
         std::cout << "Record-based testing disabled (--no-records flag detected)." << std::endl;
     }
 
-    if (targetKernel.empty())
+    if (targetKernel.empty() && cachePath.empty())
     {
         runRegionMergeTests();
         runShapePropagationTests();
         runPythonTests();
     }
 
-    std::cout << "Running Non-Reference Kernel Tests..." << std::endl;
-    int passed = 0;
-    int total = 0;
-    int skipped = 0;
-
-    // Load benchmark records if enabled
     std::unordered_map<uint64_t, std::vector<Record>> recordsByUid;
-    if (useRecords)
+    if (!cachePath.empty())
+    {
+        recordsByUid = getRecordsFromCache(cachePath);
+        std::cout << "Loaded kernel configurations strictly from cache." << std::endl;
+    }
+    else if (useRecords)
     {
         recordsByUid = loadCallRecords("benchmarks/calls.bin");
         if (recordsByUid.empty())
@@ -1417,6 +1525,11 @@ int main(int argc, char *argv[])
         }
     }
 
+    std::cout << "Running Non-Reference Kernel Tests..." << std::endl;
+    int passed = 0;
+    int total = 0;
+    int skipped = 0;
+
     const auto &kernels = KernelRegistry::get().getAllKernels();
     for (const auto &kernel : kernels)
     {
@@ -1424,6 +1537,9 @@ int main(int argc, char *argv[])
             continue;
 
         if (!targetKernel.empty() && kernel.opName.find(targetKernel) == std::string::npos)
+            continue;
+
+        if (!cachePath.empty() && recordsByUid.find(kernel.uid) == recordsByUid.end())
             continue;
 
         if (!kernel.refFactory)
@@ -1442,53 +1558,57 @@ int main(int argc, char *argv[])
         total++;
         std::cout << "Testing " << kernel.opName << " ... " << std::flush;
 
-        // 1. Dummy Shapes Test
-        Graph refGraph;
-        TestInputs refInputs = createTestInputs(refGraph, kernel);
-        uint32_t rootId = kernel.refFactory(refInputs.inputIds, refGraph);
-
-        // Synchronize physical rawData with any stride changes made by refFactory
-        for (size_t i = 0; i < kernel.numInputs; ++i)
+        bool dummyOk = true;
+        if (cachePath.empty())
         {
-            uint32_t id = refInputs.inputIds[i];
-            const TensorNode &node = refGraph.getNode(id);
-            if (!node.strides.empty() && node.strides != calcContiguousStrides(node.getShape()))
+            // 1. Dummy Shapes Test
+            Graph refGraph;
+            TestInputs refInputs = createTestInputs(refGraph, kernel);
+            uint32_t rootId = kernel.refFactory(refInputs.inputIds, refGraph);
+
+            // Synchronize physical rawData with any stride changes made by refFactory
+            for (size_t i = 0; i < kernel.numInputs; ++i)
             {
-                TensorView view;
-                view.setShape(node.getShape());
-                view.strides = node.strides;
-                uint64_t elements = countElements(view.getShape());
-                uint64_t bufElements = getRequiredBufferSize(view);
-                uint64_t dtypeSize = getDTypeSize(node.dtype);
-
-                std::vector<uint8_t> newRawData(bufElements * dtypeSize, 0);
-                std::vector<uint8_t> &logicalData = refInputs.rawInputData[id];
-
-                for (size_t k = 0; k < elements; ++k)
+                uint32_t id = refInputs.inputIds[i];
+                const TensorNode &node = refGraph.getNode(id);
+                if (!node.strides.empty() && node.strides != calcContiguousStrides(node.getShape()))
                 {
-                    uint64_t idx = getStridedIndex(k, view.getShape(), view.strides);
-                    std::memcpy(newRawData.data() + idx * dtypeSize,
-                                logicalData.data() + k * dtypeSize,
-                                dtypeSize);
+                    TensorView view;
+                    view.setShape(node.getShape());
+                    view.strides = node.strides;
+                    uint64_t elements = countElements(view.getShape());
+                    uint64_t bufElements = getRequiredBufferSize(view);
+                    uint64_t dtypeSize = getDTypeSize(node.dtype);
+
+                    std::vector<uint8_t> newRawData(bufElements * dtypeSize, 0);
+                    std::vector<uint8_t> &logicalData = refInputs.rawInputData[id];
+
+                    for (size_t k = 0; k < elements; ++k)
+                    {
+                        uint64_t idx = getStridedIndex(k, view.getShape(), view.strides);
+                        std::memcpy(newRawData.data() + idx * dtypeSize,
+                                    logicalData.data() + k * dtypeSize,
+                                    dtypeSize);
+                    }
+                    refInputs.rawData[i] = newRawData;
                 }
-                refInputs.rawData[i] = newRawData;
             }
+
+            std::vector<float> refOutput = executeReferenceGraph(rootId, refGraph, refInputs.rawInputData, false);
+            size_t elements = refOutput.size();
+
+            const TensorNode &rootNode = refGraph.getNode(rootId);
+            std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refInputs.inputIds, rootNode.getShape(), rootNode.strides, rootNode.dtype, refGraph);
+
+            dummyOk = false;
+            if (fusedOutput.size() == elements)
+                dummyOk = compareOutputs(refOutput.data(), fusedOutput.data(), elements);
         }
-
-        std::vector<float> refOutput = executeReferenceGraph(rootId, refGraph, refInputs.rawInputData, false);
-        size_t elements = refOutput.size();
-
-        const TensorNode &rootNode = refGraph.getNode(rootId);
-        std::vector<float> fusedOutput = executeFusedKernel(kernel, refInputs.rawData, refInputs.inputIds, rootNode.getShape(), rootNode.strides, rootNode.dtype, refGraph);
-
-        bool dummyOk = false;
-        if (fusedOutput.size() == elements)
-            dummyOk = compareOutputs(refOutput.data(), fusedOutput.data(), elements);
 
         // 2. Record-Based Tests
         bool recordOk = true;
         auto it = recordsByUid.find(kernel.uid);
-        if (useRecords && it != recordsByUid.end())
+        if ((useRecords || !cachePath.empty()) && it != recordsByUid.end())
         {
             std::cout << "\n  [Records] Testing " << it->second.size() << " configurations... " << std::flush;
             {
