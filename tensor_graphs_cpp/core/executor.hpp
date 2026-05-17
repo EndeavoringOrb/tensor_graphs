@@ -11,6 +11,7 @@
 #include <vector>
 #include <cstring>
 #include <stdexcept>
+#include <functional>
 
 class Executor
 {
@@ -19,11 +20,14 @@ private:
     std::unordered_map<uint32_t, float> nodeCosts;
 
 public:
+    using DebugCallback = std::function<void(uint32_t logicalId, const TensorView &view, const void *data)>;
+
     Executor(MemoryManager &mm)
         : memManager(mm) {}
 
     void run(const std::unordered_map<uint32_t, const void *> &inputs,
-             const CompiledGraph &compiled)
+             const CompiledGraph &compiled,
+             const DebugCallback &debugCallback = nullptr)
     {
         std::cout << "running..." << std::endl;
 
@@ -180,6 +184,34 @@ public:
             if (!kernel.isView)
             {
                 kernel.run(kernelInputs, kernelOutputs, kernelInViews, kernelOutViews);
+            }
+
+            if (debugCallback && logicalId != UINT32_MAX && isEndOfLogicalChain)
+            {
+                const uint8_t *basePtr = actualBuf.arena_ptr + outView.baseOffset;
+                uint64_t maxOffset = 0;
+                for (size_t d = 0; d < outView.getShape().size(); ++d)
+                {
+                    if (outView.getShape()[d] > 0)
+                    {
+                        maxOffset += (outView.getShape()[d] - 1) * outView.strides[d];
+                    }
+                }
+                uint64_t bytesToCopy = (outView.getShape().empty() ? 1 : (maxOffset + 1)) * getDTypeSize(outView.dtype);
+
+#ifdef USE_CUDA
+                if (actualBackend == Backend::CUDA)
+                {
+                    cudaDeviceSynchronize();
+                    std::vector<uint8_t> hostData(bytesToCopy);
+                    cudaMemcpy(hostData.data(), basePtr, bytesToCopy, cudaMemcpyDeviceToHost);
+                    debugCallback(logicalId, outView, hostData.data());
+                }
+                else
+#endif
+                {
+                    debugCallback(logicalId, outView, basePtr);
+                }
             }
 
             TensorNode debugOutput = compiled.nodesMap.at(inst.nodeId);

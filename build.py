@@ -418,7 +418,7 @@ def compile_project():
             if is_arm64:
                 nvcc_flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
-    mains = ["main.cpp", "bench.cpp", "test.cpp"]
+    mains = ["main.cpp", "bench.cpp", "test.cpp", "test_model.cpp"]
 
     obj_ext = ".obj" if os.name == "nt" else ".o"
     cuda_obj = str(GENERATED_DIR / f"cuda_kernels{obj_ext}")

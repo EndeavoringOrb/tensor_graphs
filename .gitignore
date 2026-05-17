@@ -13,8 +13,6 @@ flux-klein-4b
 out.log
 images
 wsl_venv
-.claude
-CLAUDE.md
 diff.txt
 wsl_env
 egraph_viewer/egraphs
@@ -32,6 +30,7 @@ package.json
 package-lock.json
 toks.txt
 tokenize_flux.py
+**/*.bin
 
 # Profiling artifacts
 profile_output*

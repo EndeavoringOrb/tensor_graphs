@@ -227,7 +227,7 @@ public:
         return x + 1;
     }
 
-    void plan()
+    void plan(bool doSaturate = true)
     {
         ensureOutputDirectories();
         costModel.load(recordsPath);
@@ -267,15 +267,15 @@ public:
         else
         {
             std::cout << "[Session.compile] Planning new execution graph..." << std::endl;
-            ensureCacheCoverage();
+            ensureCacheCoverage(doSaturate);
             persistCache();
             isPlanned = true;
         }
     }
 
-    void compile()
+    void compile(bool doSaturate = true)
     {
-        plan();
+        plan(doSaturate);
 
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
         memManager.init();
@@ -451,11 +451,13 @@ public:
         return canonicalRegions;
     }
 
-    const void *run(const std::unordered_map<uint32_t, const void *> &inputs)
+    const void *run(const std::unordered_map<uint32_t, const void *> &inputs,
+                    std::function<void(uint32_t, const TensorView &, const void *)> debugCallback = nullptr,
+                    bool doSaturate = true)
     {
         if (!isCompiled)
         {
-            compile();
+            compile(doSaturate);
         }
 
         std::unordered_map<uint32_t, std::vector<Region>> inputDiffs;
@@ -528,7 +530,7 @@ public:
         incrementBucketCount(key);
         saveBucketCounts();
         ProgressTimer runTimer(0, "", true);
-        executor->run(inputs, *compiled);
+        executor->run(inputs, *compiled, debugCallback);
         double elapsed = runTimer.getElapsed();
         std::cout << "[Session.run] execution finished in " << std::to_string(elapsed) << "s" << std::endl;
 
@@ -646,7 +648,7 @@ public:
         return slices;
     }
 
-    void ensureCacheCoverage()
+    void ensureCacheCoverage(bool doSaturate)
     {
         cachedGraphs.clear();
         selectedCachedNodes.clear();
@@ -666,8 +668,8 @@ public:
                 bucket.inputDirtyRegions,
                 protectedCachedNodes,
                 bucket.outputNeededRegion,
-                true, // doSaturate
-                false // cheapInputCopy
+                doSaturate, // doSaturate
+                false       // cheapInputCopy
             );
 
             // Find all eclasses that need to be cached. Look for target buffers in chosen scatters.
@@ -714,7 +716,7 @@ public:
                 bucket.inputDirtyRegions,
                 protectedCachedNodes,
                 bucket.outputNeededRegion,
-                true,
+                doSaturate,
                 false,
                 true);
             cachedGraphs[bucket.key()] = std::move(plan);

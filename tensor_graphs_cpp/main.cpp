@@ -201,18 +201,11 @@ std::vector<int32_t> load_tokens_from_file(const std::string &filename, size_t t
     // Note: This also stops if we reach the txt_seq limit
     while (std::getline(file, part, ',') && count < txt_seq)
     {
-        try
+
+        // Trim potential whitespace/newlines and convert to integer
+        if (!part.empty())
         {
-            // Trim potential whitespace/newlines and convert to integer
-            if (!part.empty())
-            {
-                input_ids[count++] = static_cast<int32_t>(std::stoi(part));
-            }
-        }
-        catch (const std::invalid_argument &e)
-        {
-            // Handle non-numeric segments if necessary
-            continue;
+            input_ids[count++] = static_cast<int32_t>(std::stoi(part));
         }
     }
 
