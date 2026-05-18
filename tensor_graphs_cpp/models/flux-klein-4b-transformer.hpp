@@ -201,7 +201,7 @@ public:
             auto attn = [&](uint32_t q, uint32_t k, uint32_t v, int L_q)
             {
                 int32_t p_k[] = {0, 1, 3, 2};
-                uint32_t scores = g.mul(g.dot(q, g.permute(k, g.constant({4}, p_k, DType::INT32))), expand_scalar_to_4d(1.0f / std::sqrt((float)cfg.head_dim), 1, cfg.num_heads, L_q, total_seq_len));
+                uint32_t scores = g.mul(g.dot(q, g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)))), expand_scalar_to_4d(1.0f / std::sqrt((float)cfg.head_dim), 1, cfg.num_heads, L_q, total_seq_len));
                 int32_t ax = -1;
                 uint32_t shifted = g.add(scores, g.neg(repeat_ax(g.max(scores, g.constant({1}, &ax, DType::INT32)), total_seq_len, 3)));
                 uint32_t exps = g.pow(expand_scalar_to_4d(2.7182818f, 1, cfg.num_heads, L_q, total_seq_len), shifted);
@@ -263,7 +263,7 @@ public:
             {
                 int32_t sh4[] = {1, (int32_t)total_seq_len, (int32_t)cfg.num_heads, (int32_t)cfg.head_dim};
                 int32_t p_[] = {0, 2, 1, 3};
-                return g.permute(g.reshape(g.contiguous(x), g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_, DType::INT32));
+                return g.contiguous(g.permute(g.reshape(g.contiguous(x), g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_, DType::INT32)));
             };
 
             uint32_t q = apply_rope_2d_consecutive(rms_norm_atomic(reshape_for_attn(slice_feat(0, cfg.hidden_size)), p + ".attn.norm_q.weight", total_seq_len, cfg.num_heads, cfg.head_dim), rope_cos, rope_sin, total_seq_len);
@@ -273,7 +273,7 @@ public:
             uint32_t mlp_up = slice_feat(cfg.hidden_size * 3 + cfg.mlp_hidden, cfg.hidden_size * 3 + cfg.mlp_hidden * 2);
 
             int32_t p_k[] = {0, 1, 3, 2};
-            uint32_t scores = g.mul(g.dot(q, g.permute(k, g.constant({4}, p_k, DType::INT32))), expand_scalar_to_4d(1.0f / std::sqrt((float)cfg.head_dim), 1, cfg.num_heads, total_seq_len, total_seq_len));
+            uint32_t scores = g.mul(g.dot(q, g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)))), expand_scalar_to_4d(1.0f / std::sqrt((float)cfg.head_dim), 1, cfg.num_heads, total_seq_len, total_seq_len));
             int32_t ax_ = -1;
             uint32_t shifted = g.add(scores, g.neg(repeat_ax(g.max(scores, g.constant({1}, &ax_, DType::INT32)), total_seq_len, 3)));
             uint32_t exps = g.pow(expand_scalar_to_4d(2.7182818f, 1, cfg.num_heads, total_seq_len, total_seq_len), shifted);

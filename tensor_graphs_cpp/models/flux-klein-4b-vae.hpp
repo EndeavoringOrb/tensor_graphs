@@ -183,7 +183,7 @@ private:
         };
 
         int32_t p_k[] = {0, 2, 1};
-        uint32_t scores = g.mul(g.dot(flat(q), g.permute(flat(k), g.constant({3}, p_k, DType::INT32))), expand_scalar_to_3d(1.0f / std::sqrt((float)C), 1, H * W, H * W));
+        uint32_t scores = g.mul(g.dot(flat(q), g.contiguous(g.permute(flat(k), g.constant({3}, p_k, DType::INT32)))), expand_scalar_to_3d(1.0f / std::sqrt((float)C), 1, H * W, H * W));
 
         int32_t ax = -1;
         uint32_t max_s = repeat_ax(g.max(scores, g.constant({1}, &ax, DType::INT32)), H * W, 2);
@@ -193,7 +193,7 @@ private:
         uint32_t out = g.dot(probs, flat(v));
         int32_t sh4[] = {1, (int32_t)H, (int32_t)W, (int32_t)C};
         int32_t p_out[] = {0, 3, 1, 2};
-        out = conv2d_atomic(g.permute(g.reshape(out, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_out, DType::INT32)), pfx + ".to_out.0.weight", pfx + ".to_out.0.bias", 1, 1, 0, H, W);
+        out = conv2d_atomic(g.contiguous(g.permute(g.reshape(out, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_out, DType::INT32))), pfx + ".to_out.0.weight", pfx + ".to_out.0.bias", 1, 1, 0, H, W);
         return g.add(out, x);
     }
 

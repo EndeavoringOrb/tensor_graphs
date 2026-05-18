@@ -317,7 +317,7 @@ public:
             float scale_val = 1.0f / std::sqrt((float)cfg.text_head_dim);
             q = g.mul(q, expand_scalar_to_4d(scale_val, 1, cfg.text_num_heads, cfg.text_max_seq, cfg.text_head_dim));
             int32_t p_k[] = {0, 1, 3, 2};
-            uint32_t scores = g.add(g.dot(q, g.permute(k, g.constant({4}, p_k, DType::INT32))), repeat_ax(mask, cfg.text_num_heads, 1));
+            uint32_t scores = g.add(g.dot(q, g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)))), g.contiguous(repeat_ax(mask, cfg.text_num_heads, 1)));
 
             int32_t ax = -1;
             uint32_t max_s = repeat_ax(g.max(scores, g.constant({1}, &ax, DType::INT32)), cfg.text_max_seq, 3);

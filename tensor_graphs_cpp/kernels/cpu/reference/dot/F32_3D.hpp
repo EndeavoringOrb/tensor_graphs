@@ -4,15 +4,15 @@
 
 inline bool matchDotF32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    const auto &s0 = inputs[0].getShape();
-    const auto &s1 = inputs[1].getShape();
-    const auto &so = output.getShape();
-    if (s0.size() != 3 || s1.size() != 3 || so.size() != 3)
+    const auto &sA = inputs[0].getShape();
+    const auto &sB = inputs[1].getShape();
+    const auto &sC = output.getShape();
+    if (sA.size() != 3 || sB.size() != 3 || sC.size() != 3)
         return false;
-    // A: [B, M, K], B: [B, K, N], Out: [B, M, N]
-    if (s0[0] != s1[0] || s0[2] != s1[1])
+    // A: [B, M, K], B: [B, K, N], C: [B, M, N]
+    if (sA[0] != sB[0] || sA[2] != sB[1])
         return false;
-    if (so[0] != s0[0] || so[1] != s0[1] || so[2] != s1[2])
+    if (sC[0] != sA[0] || sC[1] != sA[1] || sC[2] != sB[2])
         return false;
     return true;
 }
@@ -22,11 +22,11 @@ inline void runDotF32_3D(const std::vector<const void *> &inputs, const std::vec
 {
     const float *A = static_cast<const float *>(inputs[0]);
     const float *B = static_cast<const float *>(inputs[1]);
-    float *Out = static_cast<float *>(outputs[0]);
+    float *C = static_cast<float *>(outputs[0]);
 
     const auto &viewA = inViews[0];
     const auto &viewB = inViews[1];
-    const auto &viewOut = outViews[0];
+    const auto &viewC = outViews[0];
 
     uint32_t B_count = viewA.getShape()[0];
     uint32_t M = viewA.getShape()[1];
@@ -35,27 +35,27 @@ inline void runDotF32_3D(const std::vector<const void *> &inputs, const std::vec
 
     // Strides for the reduction dimension K
     // In A [B, M, K], K is index 2
-    int64_t strideA_K = viewA.strides[2];
+    uint64_t strideA_K = viewA.strides[2];
     // In B [B, K, N], K is index 1
-    int64_t strideB_K = viewB.strides[1];
+    uint64_t strideB_K = viewB.strides[1];
 
     for (uint32_t b = 0; b < B_count; ++b)
     {
         // Batch offsets
-        size_t offset_A_batch = b * viewA.strides[0];
-        size_t offset_B_batch = b * viewB.strides[0];
-        size_t offset_O_batch = b * viewOut.strides[0];
+        uint64_t offset_A_batch = b * viewA.strides[0];
+        uint64_t offset_B_batch = b * viewB.strides[0];
+        uint64_t offset_C_batch = b * viewC.strides[0];
 
         for (uint32_t m = 0; m < M; ++m)
         {
             // Row offset for A
-            size_t offset_A_row = m * viewA.strides[1];
+            uint64_t offset_A_row = m * viewA.strides[1];
 
             for (uint32_t n = 0; n < N; ++n)
             {
-                // Col offset for B and Out
-                size_t offset_B_col = n * viewB.strides[2];
-                size_t offset_O_col = n * viewOut.strides[2];
+                // Col offset for B and C
+                uint64_t offset_B_col = n * viewB.strides[2];
+                uint64_t offset_C_col = n * viewC.strides[2];
 
                 // Compute start pointers for this specific dot product
                 const float *ptr_A = A + offset_A_batch + offset_A_row;
@@ -71,10 +71,10 @@ inline void runDotF32_3D(const std::vector<const void *> &inputs, const std::vec
                     ptr_B += strideB_K;
                 }
 
-                *(Out + offset_O_batch + m * viewOut.strides[1] + offset_O_col) = sum;
+                *(C + offset_C_batch + m * viewC.strides[1] + offset_C_col) = sum;
             }
         }
     }
 }
 
-REGISTER_REF_KERNEL(OpType::DOT, 2, matchDotF32_3D, runDotF32_3D, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::DOT, 2, matchDotF32_3D, runDotF32_3D, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
