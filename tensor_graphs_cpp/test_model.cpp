@@ -21,6 +21,7 @@
 #include "core/graph.hpp"
 #include "core/session.hpp"
 #include "core/kernels.hpp"
+#include "core/misc.hpp"
 
 // Model Definitions
 #include "models/gemma-3-270m.hpp"
@@ -103,7 +104,7 @@ struct RefIndexEntry
 
 // === Gemma Integration ===
 
-void runGemma(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalId, const std::string &opName, const std::vector<float> &data)> callback)
+void runGemma(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalId, const std::string &opName, const TensorView &view, const std::vector<float> &data)> callback)
 {
     KernelRegistry::get().setReferenceOnly(refOnly);
 
@@ -151,7 +152,7 @@ void runGemma(bool refOnly, bool doSaturate, std::function<void(uint32_t logical
             }
         }
 
-        callback(logicalId, opName, extracted);
+        callback(logicalId, opName, view, extracted);
     };
 
     sess.compile(doSaturate);
@@ -244,7 +245,7 @@ std::vector<int32_t> load_tokens_from_file(const std::string &filename, size_t t
     return input_ids;
 }
 
-void runFlux(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalId, const std::string &opName, const std::vector<float> &data)> callback)
+void runFlux(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalId, const std::string &opName, const TensorView &view, const std::vector<float> &data)> callback)
 {
     KernelRegistry::get().setReferenceOnly(refOnly);
 
@@ -310,7 +311,7 @@ void runFlux(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalI
                     opName = "FUSED_" + node.opName;
                 }
             }
-            callback(logicalId, opName, extracted);
+            callback(logicalId, opName, view, extracted);
         };
     };
 
@@ -445,7 +446,7 @@ int main(int argc, char *argv[])
         }
 
         std::unordered_map<uint32_t, int> saveCounts;
-        auto saveCallback = [&](uint32_t logicalId, const std::string &opName, const std::vector<float> &data)
+        auto saveCallback = [&](uint32_t logicalId, const std::string &opName, const TensorView &view, const std::vector<float> &data)
         {
             uint32_t nameLen = opName.size();
             uint64_t numElems = data.size();
@@ -490,8 +491,8 @@ int main(int argc, char *argv[])
               << std::setw(15) << "Min Diff"
               << std::setw(15) << "Max Diff"
               << std::setw(15) << "Avg Diff"
-              << "\n";
-    std::cout << std::string(85, '-') << "\n";
+              << "Details\n";
+    std::cout << std::string(120, '-') << "\n";
 
     std::ifstream inFile(REF_FILE, std::ios::binary);
     if (!inFile.is_open())
@@ -503,7 +504,7 @@ int main(int argc, char *argv[])
     int mismatchCount = 0;
     std::unordered_map<uint32_t, int> compareCounts;
 
-    auto compareCallback = [&](uint32_t logicalId, const std::string &opName, const std::vector<float> &optData)
+    auto compareCallback = [&](uint32_t logicalId, const std::string &opName, const TensorView &view, const std::vector<float> &optData)
     {
         int iter = compareCounts[logicalId]++;
         std::string key = std::to_string(logicalId) + "_" + std::to_string(iter);
@@ -570,6 +571,9 @@ int main(int argc, char *argv[])
                   << std::setw(15) << minDiff
                   << std::setw(15) << maxDiff
                   << std::setw(15) << avgDiff
+                  << "dtype=" << toString(view.dtype)
+                  << ", shape=" << toString(view.getShape())
+                  << ", strides=" << toString(view.strides)
                   << "\n";
 
         if (maxDiff > 1e-2f || hasNan)
