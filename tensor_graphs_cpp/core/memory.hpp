@@ -475,12 +475,6 @@ struct MemoryManager
     {
         if (srcId == dstId)
             return;
-        // Resolve srcId to the final underlying allocation so that dstId never
-        // holds a link to an intermediate alias that may be erased by release().
-        while (aliasMap.find(srcId) != aliasMap.end())
-        {
-            srcId = aliasMap.at(srcId);
-        }
         aliasMap[dstId] = srcId;
         aliasRefCounts[dstId] = additionalRefs;
         aliasStorageTypes[dstId] = storageType;
@@ -598,12 +592,7 @@ struct MemoryManager
         auto aliasIt = aliasMap.find(srcId);
         if (aliasIt != aliasMap.end())
         {
-            uint32_t resolvedTarget = aliasIt->second;
-            while (aliasMap.find(resolvedTarget) != aliasMap.end())
-            {
-                resolvedTarget = aliasMap.at(resolvedTarget);
-            }
-            aliasMap[dstId] = resolvedTarget;
+            aliasMap[dstId] = aliasIt->second;
             aliasRefCounts[dstId] = aliasRefCounts[srcId];
             aliasStorageTypes[dstId] = aliasStorageTypes[srcId];
             aliasMap.erase(aliasIt);
