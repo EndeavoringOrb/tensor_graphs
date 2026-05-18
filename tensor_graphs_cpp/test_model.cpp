@@ -113,7 +113,6 @@ void runGemma(bool refOnly, bool doSaturate, std::function<void(uint32_t logical
     Graph g;
 
     Gemma3ModelConfig cfg;
-    cfg.n_layers = 1; // 1 layer provides a comprehensive view across all logic blocks rapidly
     uint32_t maxSeqLen = 8;
 
     uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32, {}, StorageType::PERSISTENT);
@@ -130,7 +129,7 @@ void runGemma(bool refOnly, bool doSaturate, std::function<void(uint32_t logical
     std::unordered_map<uint32_t, const void *> inputs = {{inputIdsId, input_ids.data()}};
 
     // Use an empty string for the cache to prevent collisions between sequential runs
-    Session sess(g, mem, rootId, "test_model_cache/00000.bin");
+    Session sess(g, mem, rootId, getNextAvailableBinPath("test_model_cache"));
 
     auto debugCb = [&](uint32_t logicalId, const TensorView &view, const void *data)
     {
