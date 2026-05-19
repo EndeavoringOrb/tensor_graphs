@@ -267,7 +267,7 @@ private:
         rules.emplace_back(std::make_unique<FusionRule>());
         rules.emplace_back(std::make_unique<CopyToOfContiguous>());
         rules.emplace_back(std::make_unique<ContiguousOfCopyTo>());
-        rules.emplace_back(std::make_unique<ContiguousElimination>());
+        // rules.emplace_back(std::make_unique<ContiguousElimination>());
         rules.emplace_back(std::make_unique<ConstantFolding>());
         rules.emplace_back(std::make_unique<BatchFlattenDot>());
         rules.emplace_back(std::make_unique<EliminateCopyTo>());
@@ -1361,7 +1361,8 @@ private:
                         uint32_t sel = kv.second;
                         actual_current_cost += enodeInfos[egraph.getEClass(eclass).enodes[sel]].cost;
                     }
-                    if (actual_current_cost != current_cost) {
+                    if (actual_current_cost != current_cost)
+                    {
                         std::cout << "WARNING actual cost (" + std::to_string(actual_current_cost) + ") != current cost (" + std::to_string(current_cost) + ")" << std::endl;
                     }
                     best_cost = current_cost;
@@ -2295,6 +2296,7 @@ public:
         }
         eclassToLogical = std::move(updatedEClassToLogical);
 
+        std::cout << "[Planner.plan] initializing immutable classes" << std::endl;
         std::unordered_set<uint32_t> immutable_eclasses;
         for (const auto &kv : eclassToLogical)
         {
@@ -2307,8 +2309,39 @@ public:
             }
         }
 
-        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, true, cheapInputCopy, strictCache);
+        // Propagate immutability through views to prevent inplace corruption
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (const auto &cls : egraph.getClasses())
+            {
+                uint32_t eclassId = egraph.find(cls.id);
+                if (immutable_eclasses.count(eclassId))
+                    continue;
 
+                for (uint32_t enodeId : cls.enodes)
+                {
+                    const ENode &enode = egraph.getENodes()[enodeId];
+                    if (enode.kernelUid != 0)
+                    {
+                        const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
+                        if (kernel.isView && !enode.children.empty())
+                        {
+                            uint32_t parentEclass = egraph.find(enode.children[0]);
+                            if (immutable_eclasses.count(parentEclass))
+                            {
+                                immutable_eclasses.insert(eclassId);
+                                changed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, true, cheapInputCopy, strictCache);
         return buildCompiledGraph(
             rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes, eclassToLogical);
     }
