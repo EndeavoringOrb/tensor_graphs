@@ -235,7 +235,7 @@ def generate_kernel_uids(core_seed):
                 combined = core_seed + file_content_hash
                 full_hash = hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
-                uid_val_raw = int(full_hash[:16], 16)
+                uid_val_raw = int(full_hash[:16], 16) # TODO: use full hash instead of first 16 chars
                 uid_val = f"0x{uid_val_raw:016x}ULL"
 
                 if uid_val in uid_to_path:
