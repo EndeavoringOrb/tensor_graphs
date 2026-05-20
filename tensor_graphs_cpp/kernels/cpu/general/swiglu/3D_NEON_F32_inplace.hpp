@@ -1,4 +1,4 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/swiglu/3D_NEON_F32.hpp
+// File: tensor_graphs_cpp/kernels/cpu/general/swiglu/3D_NEON_F32_inplace.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/kernels.hpp"
@@ -10,7 +10,7 @@
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 
-inline bool matchSwiGLU_3D_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchSwiGLU_3D_NEON_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs[0].getShape() != inputs[1].getShape())
         return false;
@@ -21,12 +21,11 @@ inline bool matchSwiGLU_3D_NEON(const std::vector<TensorNode> &inputs, const Ten
     return inputs[0].getShape().size() == 3;
 }
 
-inline void runSwiGLU_3D_NEON(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runSwiGLU_3D_NEON_Inplace(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
+                                      const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
 {
-    const float *gate = static_cast<const float *>(inputs[0]);
+    float *gate_out = static_cast<float *>(outputs[0]);
     const float *up = static_cast<const float *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
 
     uint64_t n = countElements(inViews[0].getShape());
 
@@ -46,18 +45,12 @@ inline void runSwiGLU_3D_NEON(const std::vector<const void *> &inputs, const std
             
             for (; i + 4 <= end; i += 4)
             {
-                float32x4_t v_gate = vld1q_f32(gate + i);
+                float32x4_t v_gate = vld1q_f32(gate_out + i);
                 float32x4_t v_up = vld1q_f32(up + i);
-                
-                // Stable SiLU Logic:
-                // e = exp(-abs(x))
-                // If x >= 0:  silu(x) = x / (1 + e)
-                // If x < 0:   silu(x) = (x * e) / (1 + e)
                 
                 float32x4_t v_abs_gate = vabsq_f32(v_gate);
                 float32x4_t v_neg_abs = vnegq_f32(v_abs_gate);
 
-                // Extract and compute exact std::exp (no lossy approximation)
                 float e0 = std::exp(vgetq_lane_f32(v_neg_abs, 0));
                 float e1 = std::exp(vgetq_lane_f32(v_neg_abs, 1));
                 float e2 = std::exp(vgetq_lane_f32(v_neg_abs, 2));
@@ -66,35 +59,30 @@ inline void runSwiGLU_3D_NEON(const std::vector<const void *> &inputs, const std
                 float e_arr[4] = {e0, e1, e2, e3};
                 float32x4_t v_e = vld1q_f32(e_arr);
                 
-                // Mask for x >= 0
                 uint32x4_t v_mask = vcgeq_f32(v_gate, vdupq_n_f32(0.0f));
-                
-                // Numerator: (x >= 0) ? x : x * e
                 float32x4_t v_gate_times_e = vmulq_f32(v_gate, v_e);
-                float32x4_t v_num = vbslq_f32(v_mask, v_gate, v_gate_times_e);
                 
-                // Denominator: 1 + e
+                float32x4_t v_num = vbslq_f32(v_mask, v_gate, v_gate_times_e);
                 float32x4_t v_den = vaddq_f32(vdupq_n_f32(1.0f), v_e);
                 
-                // SiLU * up
                 float32x4_t v_silu = vdivq_f32(v_num, v_den);
                 float32x4_t v_res = vmulq_f32(v_silu, v_up);
                 
-                vst1q_f32(out + i, v_res);
+                vst1q_f32(gate_out + i, v_res);
             }
 
             for (; i < end; ++i)
             {
-                float x = gate[i];
+                float x = gate_out[i];
                 float y = up[i];
                 if (x >= 0.0f)
                 {
-                    out[i] = (x / (1.0f + std::exp(-x))) * y;
+                    gate_out[i] = (x / (1.0f + std::exp(-x))) * y;
                 }
                 else
                 {
                     float exp_x = std::exp(x);
-                    out[i] = (x * exp_x / (1.0f + exp_x)) * y;
+                    gate_out[i] = (x * exp_x / (1.0f + exp_x)) * y;
                 }
             } });
     }
@@ -103,7 +91,7 @@ inline void runSwiGLU_3D_NEON(const std::vector<const void *> &inputs, const std
         w.join();
 }
 
-inline uint32_t ref_swiglu_broadcast_scalar(Graph &g, uint32_t scalar_id, const std::vector<uint32_t> &target_shape)
+inline uint32_t ref_swiglu_broadcast_scalar_Inplace(Graph &g, uint32_t scalar_id, const std::vector<uint32_t> &target_shape)
 {
     std::vector<int32_t> ones(target_shape.size(), 1);
     uint32_t out = g.reshape(scalar_id, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
@@ -119,7 +107,7 @@ inline uint32_t ref_swiglu_broadcast_scalar(Graph &g, uint32_t scalar_id, const 
     return out;
 }
 
-inline uint32_t refFactorySwiGLU_3D_NEON(const std::vector<uint32_t> &inputs, Graph &graph)
+inline uint32_t refFactorySwiGLU_3D_NEON_Inplace(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     uint32_t gate = inputs[0];
     uint32_t up = inputs[1];
@@ -130,12 +118,12 @@ inline uint32_t refFactorySwiGLU_3D_NEON(const std::vector<uint32_t> &inputs, Gr
 
     // 2. exp_neg = pow(e, -x)
     float e_val = 2.7182818f;
-    uint32_t e_node = ref_swiglu_broadcast_scalar(graph, graph.constant({1}, &e_val, DType::FLOAT32), target_shape);
+    uint32_t e_node = ref_swiglu_broadcast_scalar_Inplace(graph, graph.constant({1}, &e_val, DType::FLOAT32), target_shape);
     uint32_t exp_neg = graph.pow(e_node, neg_x);
 
     // 3. den = 1 + exp(-x)
     float one_val = 1.0f;
-    uint32_t one_node = ref_swiglu_broadcast_scalar(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
+    uint32_t one_node = ref_swiglu_broadcast_scalar_Inplace(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
     uint32_t den = graph.add(one_node, exp_neg);
 
     // 4. sig = 1 / den
@@ -148,6 +136,6 @@ inline uint32_t refFactorySwiGLU_3D_NEON(const std::vector<uint32_t> &inputs, Gr
     return graph.mul(silu_gate, up);
 }
 
-REGISTER_KERNEL("SwiGLU_3D_NEON_F32", 2, matchSwiGLU_3D_NEON, runSwiGLU_3D_NEON, refFactorySwiGLU_3D_NEON, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1536, 9216}, {1, 1536, 9216}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL_INPLACE("SwiGLU_3D_NEON_F32_Inplace", 2, matchSwiGLU_3D_NEON_Inplace, runSwiGLU_3D_NEON_Inplace, refFactorySwiGLU_3D_NEON_Inplace, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1536, 9216}, {1, 1536, 9216}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
 
 #endif // TG_HAS_NEON
