@@ -365,7 +365,7 @@ def generate_build_context():
     console.print(f"[dim]Build Context ID: 0x{ctx_hash[:16]} ({mode})[/dim]")
 
 
-def compile_project():
+def compile_project(targets=None):
     out_ext = ".exe" if os.name == "nt" else ""
     is_arm64 = platform.machine().lower() in ("aarch64", "arm64")
 
@@ -418,7 +418,14 @@ def compile_project():
             if is_arm64:
                 nvcc_flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
-    mains = ["main.cpp", "bench.cpp", "test.cpp", "test_model.cpp"]
+    if targets is None:
+        mains = ["main.cpp", "bench.cpp", "test.cpp", "test_model.cpp"]
+    else:
+        mains = []
+        for t in targets:
+            if not t.endswith(".cpp"):
+                t = t + ".cpp"
+            mains.append(t)
 
     obj_ext = ".obj" if os.name == "nt" else ".o"
     cuda_obj = str(GENERATED_DIR / f"cuda_kernels{obj_ext}")
@@ -518,6 +525,11 @@ def main():
     parser.add_argument(
         "--no-lint", action="store_true", help="Skip kernel validation checks"
     )
+    parser.add_argument(
+        "--targets",
+        nargs="+",
+        help="Specify which target C++ files to build (e.g. main, bench, test, test_model)"
+    )
     args = parser.parse_args()
 
     global USE_CUDA, DEBUG_MODE, NO_LINT
@@ -533,7 +545,7 @@ def main():
     generate_kernel_includes(core_seed)
     generate_build_context()
 
-    compile_project()
+    compile_project(targets=args.targets)
 
 
 if __name__ == "__main__":
