@@ -63,5 +63,5 @@ inline uint32_t refFactoryConcatF32_Fast(const std::vector<uint32_t> &inputs, Gr
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Concat_F32_Fast", 2, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{1, 24, 1536, 128}, {1}}, {true, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Concat_F32_Fast", 2, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{1, 24, 1536, 128}, {1}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
 #endif
