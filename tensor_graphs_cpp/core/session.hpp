@@ -684,11 +684,6 @@ public:
                     isScatter = true;
                     targetIdx = 0;
                 }
-                else if (inst.inplaceInputIndex >= 0)
-                {
-                    isScatter = true;
-                    targetIdx = inst.inplaceInputIndex;
-                }
 
                 if (isScatter)
                 {
