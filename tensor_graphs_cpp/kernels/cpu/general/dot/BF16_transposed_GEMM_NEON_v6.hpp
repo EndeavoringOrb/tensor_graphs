@@ -2,7 +2,7 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
-#if defined(TG_HAS_NEON)
+#if defined(TG_HAS_NEON_TODOREMOVETHISCHECK)
 #include <arm_neon.h>
 #include <thread>
 #include <vector>

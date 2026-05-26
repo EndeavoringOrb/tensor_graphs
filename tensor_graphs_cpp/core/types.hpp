@@ -14,6 +14,7 @@
 #include <map>
 #include <iomanip>
 #include <json.hpp>
+#include <source_location>
 #include "core/serialization.hpp"
 using json = nlohmann::json;
 
@@ -148,6 +149,8 @@ enum class OpType : uint32_t
     IM2COL,
     CONTIGUOUS,
     SCATTER,
+    LOG,
+    ARGMAX,
 
     FUSED
 };
@@ -341,11 +344,12 @@ public:
     Backend backend = Backend::CPU;
     StorageType storageType = StorageType::TRANSIENT;
     std::string contentHash;
+    std::string debugOrigin;
 
     TensorNode() {}
 
-    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "")
-        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), backend(_backend), storageType(_storageType), contentHash(_contentHash)
+    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "", std::string _debugOrigin = "")
+        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), backend(_backend), storageType(_storageType), contentHash(_contentHash), debugOrigin(_debugOrigin)
     {
         if (strides.empty())
         {
@@ -512,6 +516,10 @@ inline std::string toString(OpType op)
         return "CONTIGUOUS";
     case OpType::SCATTER:
         return "SCATTER";
+    case OpType::LOG:
+        return "LOG";
+    case OpType::ARGMAX:
+        return "ARGMAX";
     case OpType::FUSED:
         return "FUSED";
     default:

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <random>
+#include <algorithm>
 
 #if defined(_WIN32)
 #include <float.h>
@@ -17,6 +18,10 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+// Define stb_image implementation for loading images
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include "core/types.hpp"
 #include "core/memory.hpp"
 #include "core/graph.hpp"
@@ -26,37 +31,88 @@
 // Model Definitions
 #include "models/gemma-3-270m.hpp"
 #include "models/flux-klein-4b.hpp"
+#include "models/qwen-3.6-35b-a3b.hpp"
 
 #include "generated/kernels_all.gen.hpp"
 #include "generated/build_context.gen.hpp"
 
-void run_gemma(bool only_plan)
-{
-    std::vector<uint32_t> tokens = {2, 9259};
-    uint32_t maxSeqLen = 8;
-    uint32_t numTokensToGenerate = 6;
-    std::string modelPath = "resources/model.safetensors";
+// =============================================================================
+// Generic Utility Helpers
+// =============================================================================
 
-    Gemma3ModelConfig cfg;
-#if USE_CUDA
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 16ULL * 1024 * 1024 * 1024}, {Backend::CUDA, 6ULL * 1024 * 1024 * 1024}};
-#else
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 16ULL * 1024 * 1024 * 1024}};
+// Common helper to get memory size defaults
+std::unordered_map<Backend, uint64_t> get_default_buffer_sizes()
+{
+    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 24ULL * 1024 * 1024 * 1024}};
+#ifdef USE_CUDA
+    bufferSizes[Backend::CUDA] = 24ULL * 1024 * 1024 * 1024;
 #endif
+    return bufferSizes;
+}
+
+// Common helper to copy GPU memory to host buffer if CUDA is enabled
+const float *sync_output_to_host(const float *device_ptr, size_t num_elements, std::vector<float> &host_buffer)
+{
+    const float *output_ptr = device_ptr;
+#ifdef USE_CUDA
+    cudaPointerAttributes attrs;
+    if (cudaPointerGetAttributes(&attrs, device_ptr) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
+    {
+        host_buffer.resize(num_elements);
+        cudaMemcpy(host_buffer.data(), device_ptr, num_elements * sizeof(float), cudaMemcpyDeviceToHost);
+        output_ptr = host_buffer.data();
+    }
+#endif
+    return output_ptr;
+}
+
+// Common argmax logic
+int32_t perform_argmax(const float *logits, uint32_t vocab_size)
+{
+    float max_val = -1e9f;
+    int32_t argmax_idx = 0;
+    for (uint32_t i = 0; i < vocab_size; ++i)
+    {
+        if (logits[i] > max_val)
+        {
+            max_val = logits[i];
+            argmax_idx = i;
+        }
+    }
+    return argmax_idx;
+}
+
+// =============================================================================
+// Generic Autoregressive Language Model Runner
+// =============================================================================
+template <typename ModelClass, typename ConfigClass>
+void run_autoregressive_llm(
+    const std::string &model_name,
+    const std::string &model_path,
+    const std::string &cache_file,
+    const std::vector<uint32_t> &initial_tokens,
+    uint32_t vocab_size,
+    uint32_t max_seq_len,
+    uint32_t num_tokens_to_generate,
+    bool only_plan,
+    ConfigClass cfg = ConfigClass())
+{
+    std::vector<uint32_t> tokens = initial_tokens;
+    auto bufferSizes = get_default_buffer_sizes();
     MemoryManager mem(bufferSizes);
     Graph g;
 
-    uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32, {}, StorageType::PERSISTENT);
-    uint64_t sizeBytes = maxSeqLen * getDTypeSize(DType::INT32);
+    uint32_t inputIdsId = g.input({1, max_seq_len}, DType::INT32, {}, StorageType::PERSISTENT);
+    uint64_t sizeBytes = max_seq_len * getDTypeSize(DType::INT32);
     mem.allocate(Backend::CPU, inputIdsId, sizeBytes, StorageType::PERSISTENT);
 
-    std::cout << "Building Gemma-3 Graph..." << std::endl;
-    Gemma3Model gemma(cfg, maxSeqLen, g, mem, modelPath);
-    uint32_t logits_id = gemma.build_graph(inputIdsId);
+    std::cout << "Building " << model_name << " Graph..." << std::endl;
+    ModelClass model(cfg, max_seq_len, g, mem, model_path);
+    uint32_t logits_id = model.build_graph(inputIdsId);
 
-    Session session(g, mem, logits_id, "dirty_region_caches/gemma-3-270m-cpp.bin");
+    Session session(g, mem, logits_id, cache_file);
 
-    for (uint32_t i = tokens.size(); i < maxSeqLen; ++i)
+    for (uint32_t i = tokens.size(); i < max_seq_len; ++i)
     {
         std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
         Region inputRegion;
@@ -64,7 +120,7 @@ void run_gemma(bool only_plan)
         inputDirty[inputIdsId] = {inputRegion};
 
         Region outputNeeded;
-        outputNeeded.region = {{0, 1}, {i, i + 1}, {0, cfg.vocab_size}};
+        outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
         session.addManualBucket(inputDirty, {outputNeeded});
     }
 
@@ -74,11 +130,12 @@ void run_gemma(bool only_plan)
         return;
     }
 
-    std::vector<int32_t> input_data(maxSeqLen, 0);
+    std::vector<int32_t> input_data(max_seq_len, 0);
+    std::vector<float> host_output;
 
-    for (uint32_t step = 0; step < numTokensToGenerate; ++step)
+    for (uint32_t step = 0; step < num_tokens_to_generate; ++step)
     {
-        if (tokens.size() >= maxSeqLen)
+        if (tokens.size() >= max_seq_len)
             break;
 
         std::fill(input_data.begin(), input_data.end(), 0);
@@ -93,34 +150,47 @@ void run_gemma(bool only_plan)
         auto end = std::chrono::high_resolution_clock::now();
         float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
 
-        const float *output_ptr = device_output_ptr;
-#ifdef USE_CUDA
-        std::vector<float> host_output;
-        cudaPointerAttributes attrs;
-        if (cudaPointerGetAttributes(&attrs, device_output_ptr) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
-        {
-            host_output.resize(1 * maxSeqLen * cfg.vocab_size);
-            cudaMemcpy(host_output.data(), device_output_ptr, host_output.size() * sizeof(float), cudaMemcpyDeviceToHost);
-            output_ptr = host_output.data();
-        }
-#endif
+        size_t num_output_elements = 1 * max_seq_len * vocab_size;
+        const float *output_ptr = sync_output_to_host(device_output_ptr, num_output_elements, host_output);
+
         uint32_t last_token_pos = (uint32_t)tokens.size() - 1;
-        uint64_t offset = (uint64_t)last_token_pos * cfg.vocab_size;
+        uint64_t offset = (uint64_t)last_token_pos * vocab_size;
         const float *logits_vec = output_ptr + offset;
 
-        float max_val = -1e9f;
-        int32_t argmax_idx = 0;
-        for (uint32_t i = 0; i < cfg.vocab_size; ++i)
-        {
-            if (logits_vec[i] > max_val)
-            {
-                max_val = logits_vec[i];
-                argmax_idx = i;
-            }
-        }
+        int32_t argmax_idx = perform_argmax(logits_vec, vocab_size);
         tokens.push_back((uint32_t)argmax_idx);
         std::cout << "Step " << step + 1 << " | Token: " << argmax_idx << " | Latency: " << runtimeMs << "ms\n";
     }
+}
+
+// =============================================================================
+// Concrete Model Implementations
+// =============================================================================
+
+void run_gemma(bool only_plan)
+{
+    run_autoregressive_llm<Gemma3Model, Gemma3ModelConfig>(
+        "Gemma-3-270M",
+        "resources/model.safetensors",
+        "dirty_region_caches/gemma-3-270m-cpp.bin",
+        {2, 9259},
+        Gemma3ModelConfig().vocab_size,
+        8,
+        6,
+        only_plan);
+}
+
+void run_qwen_35b(bool only_plan)
+{
+    run_autoregressive_llm<Qwen3_6_35B_A3B_Model, Qwen3_6_35B_A3B_Config>(
+        "Qwen-3.6-35B-A3B",
+        "models/Qwen/Qwen3.6-35B-A3B",
+        "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin",
+        {151644, 8948},
+        Qwen3_6_35B_A3B_Config().vocab_size,
+        8,
+        6,
+        only_plan);
 }
 
 std::vector<float> get_flux_schedule(int num_steps, int image_seq_len)
@@ -212,14 +282,13 @@ std::vector<int32_t> load_tokens_from_file(const std::string &filename, size_t t
     return input_ids;
 }
 
+// =============================================================================
+// FLUX Diffusion Model Execution
+// =============================================================================
 void run_flux(bool only_plan)
 {
     FluxConfig cfg;
-#if USE_CUDA
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 24ULL * 1024 * 1024 * 1024}, {Backend::CUDA, 24ULL * 1024 * 1024 * 1024}};
-#else
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 24ULL * 1024 * 1024 * 1024}};
-#endif
+    auto bufferSizes = get_default_buffer_sizes();
     MemoryManager mem(bufferSizes);
 
     uint32_t width = 512, height = 512;
@@ -265,12 +334,10 @@ void run_flux(bool only_plan)
     std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);
     std::unordered_map<uint32_t, const void *> text_inputs = {{in_ids, input_ids.data()}};
     const float *text_emb_ptr = static_cast<const float *>(sess_text.run(text_inputs));
-#ifdef USE_CUDA
-    std::vector<float> text_emb(1 * txt_seq * cfg.text_dim);
-    cudaMemcpy(text_emb.data(), text_emb_ptr, text_emb.size() * sizeof(float), cudaMemcpyDeviceToHost);
-#else
-    std::vector<float> text_emb(text_emb_ptr, text_emb_ptr + 1 * txt_seq * cfg.text_dim);
-#endif
+
+    std::vector<float> text_emb_buf;
+    const float *text_emb_host = sync_output_to_host(text_emb_ptr, 1 * txt_seq * cfg.text_dim, text_emb_buf);
+    std::vector<float> text_emb(text_emb_host, text_emb_host + 1 * txt_seq * cfg.text_dim);
 
     std::cout << "Sampling..." << std::endl;
     std::vector<float> rope_cos, rope_sin;
@@ -292,11 +359,11 @@ void run_flux(bool only_plan)
         std::unordered_map<uint32_t, const void *> trans_inputs = {{in_latent, z.data()}, {in_txt_emb, text_emb.data()}, {in_t, &t_curr}, {in_cos, rope_cos.data()}, {in_sin, rope_sin.data()}};
 
         const float *v_ptr = static_cast<const float *>(sess_trans.run(trans_inputs));
-#ifdef USE_CUDA
-        std::vector<float> v_host(z.size());
-        cudaMemcpy(v_host.data(), v_ptr, v_host.size() * sizeof(float), cudaMemcpyDeviceToHost);
-        v_ptr = v_host.data();
-#endif
+
+        std::vector<float> v_buf;
+        const float *v_host_ptr = sync_output_to_host(v_ptr, z.size(), v_buf);
+        v_ptr = v_host_ptr;
+
         for (size_t j = 0; j < z.size(); ++j)
             z[j] += v_ptr[j] * dt;
         std::cout << "Step " << i + 1 << "/" << num_steps << " complete." << std::endl;
@@ -305,11 +372,9 @@ void run_flux(bool only_plan)
     std::cout << "Executing VAE Decoder..." << std::endl;
     std::unordered_map<uint32_t, const void *> vae_inputs = {{in_vae_latent, z.data()}};
     const float *img_ptr = static_cast<const float *>(sess_vae.run(vae_inputs));
-#ifdef USE_CUDA
-    std::vector<float> img_host(3 * height * width);
-    cudaMemcpy(img_host.data(), img_ptr, img_host.size() * sizeof(float), cudaMemcpyDeviceToHost);
-    img_ptr = img_host.data();
-#endif
+
+    std::vector<float> img_buf;
+    img_ptr = sync_output_to_host(img_ptr, 3 * height * width, img_buf);
 
     std::vector<uint8_t> image_data(height * width * 3);
     for (uint32_t y = 0; y < height; ++y)
@@ -337,6 +402,9 @@ void run_flux(bool only_plan)
     std::cout << "Saved flux_output.png successfully!" << std::endl;
 }
 
+// =============================================================================
+// Main Entrypoint
+// =============================================================================
 int main(int argc, char *argv[])
 {
     auto &caps = HardwareCaps::get();
@@ -374,6 +442,8 @@ int main(int argc, char *argv[])
         run_gemma(only_plan);
     else if (model == "flux-klein-4b")
         run_flux(only_plan);
+    else if (model == "qwen-3.6-35b-a3b")
+        run_qwen_35b(only_plan);
     else
         std::cout << "Model not implemented yet: " << model << std::endl;
 

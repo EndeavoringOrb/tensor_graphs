@@ -11,6 +11,14 @@ rewrite rules:
 
 PERFORMANCE:
 -rewrite rules
+--contiguous elimination: op(contiguous(x)) -> op(x) iff there is a kernel that matches x
+--distributive property: a*(b+c) -> (a*b)+(a*c)
+--cast elim: F32->cast->F32, the cast isn't needed
+--copyto elim: cpu->gpu->cpu, remove
+--scatter->slice remove
+--slice pull up elementwise: op(slice(x)) -> slice(op(x))
+--batch flatten dot: dot4d B,H,M,N -> dot3d B*H,M,N
+--add pytorch ref tests for log,argmax,im2col
 -specialized kernels
 -parallel graph execution
 -constant folding?

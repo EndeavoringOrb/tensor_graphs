@@ -153,6 +153,11 @@ public:
     uint32_t addENode(uint32_t eclassId, ENode node)
     {
         uint32_t canonical = find(eclassId);
+        if (canonical == 134483 ||
+            eclassId == 134483)
+        {
+            int a = 5; // TODO: remove this debug statement
+        }
 
         for (uint32_t &child : node.children)
         {

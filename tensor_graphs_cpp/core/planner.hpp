@@ -265,21 +265,13 @@ private:
     {
         std::vector<std::unique_ptr<Rule>> rules;
         rules.emplace_back(std::make_unique<FusionRule>());
-        rules.emplace_back(std::make_unique<CopyToOfContiguous>());
-        rules.emplace_back(std::make_unique<ContiguousOfCopyTo>());
-        // rules.emplace_back(std::make_unique<ContiguousElimination>());
-        rules.emplace_back(std::make_unique<ConstantFolding>());
-        rules.emplace_back(std::make_unique<BatchFlattenDot>());
-        rules.emplace_back(std::make_unique<EliminateCopyTo>());
+        // rules.emplace_back(std::make_unique<ConstantFolding>());
         if (injected)
         {
             rules.emplace_back(std::make_unique<InfinityDomination>());
             rules.emplace_back(std::make_unique<SlicePushDownElementwise>(allowPushDownOnProtected));
             rules.emplace_back(std::make_unique<SlicePushDownDot>(allowPushDownOnProtected));
-            rules.emplace_back(std::make_unique<SlicePullUpDot>(allowPushDownOnProtected));
-            rules.emplace_back(std::make_unique<ScatterSliceCancellation>(allowPushDownOnProtected));
         }
-        // rules.emplace_back(std::make_unique<DistributiveProperty>());
 
         std::map<std::string, uint32_t> ruleMatchCounts;
         size_t iterations = 0;
@@ -516,6 +508,8 @@ private:
             if (op == OpType::IM2COL && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
                 return true;
             if (op == OpType::ARANGE && (inputIdx == 0 || inputIdx == 1 || inputIdx == 2))
+                return true;
+            if (op == OpType::ARGMAX && (inputIdx == 1 || inputIdx == 2))
                 return true;
             return false;
         };
@@ -783,11 +777,19 @@ private:
 
             if (validEnodes.empty())
             {
-                std::cout << "[Planner.extractBest] Warning: EClass " << eclassId << " has NO valid enodes (out of " + std::to_string(cls.enodes.size()) + ")\n";
-                std::cout << cls << std::endl;
+                bool allInput = true;
                 for (uint32_t enodeId : cls.enodes)
                 {
-                    std::cout << toString(egraph.getENodes()[enodeId], egraph) << std::endl;
+                    allInput = allInput && egraph.getENodes()[enodeId].opType == OpType::INPUT;
+                }
+                if (!allInput)
+                {
+                    std::cout << "[Planner.extractBest] Warning: EClass " << eclassId << " has NO valid enodes (out of " + std::to_string(cls.enodes.size()) + ")\n";
+                    std::cout << cls << std::endl;
+                    for (uint32_t enodeId : cls.enodes)
+                    {
+                        std::cout << toString(egraph.getENodes()[enodeId], egraph) << std::endl;
+                    }
                 }
             }
 

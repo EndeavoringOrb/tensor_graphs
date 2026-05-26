@@ -85,6 +85,7 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
 {
     std::stringstream ss;
     ss << prefix << "Node " << node.id << " [" << toString(node.opType) << "]\n"
+       << prefix << "  Origin:     " << node.debugOrigin << "\n"
        << prefix << "  DType:      " << toString(node.dtype) << "\n"
        << prefix << "  Shape:      " << toString(node.getShape()) << "\n"
        << prefix << "  Strides:    " << toString(node.strides) << "\n"

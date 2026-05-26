@@ -453,7 +453,7 @@ struct ShapePropagator
                 std::stringstream ss;
                 ss << "[ShapePropagator.inferShape] Atomic " << toString(graph.getNode(nodeId).opType)
                    << " requires exact shape match. Got " << toString(s0)
-                   << " and " << toString(s1) << ". Use explicit repeat/reshape. (Node " << graph.getNode(nodeId).id << ")";
+                   << " and " << toString(s1) << ". Use explicit repeat/reshape. (Node " << graph.getNode(nodeId).id << "). " + graph.getNode(nodeId).debugOrigin;
                 Error::throw_err(ss.str());
             }
             graph.getNode(nodeId).setShape(s0);
@@ -507,6 +507,7 @@ struct ShapePropagator
         case OpType::TRIU:
         case OpType::CONTIGUOUS:
         case OpType::SCATTER:
+        case OpType::LOG:
         {
             graph.getNode(nodeId).setShape(graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape());
             break;
@@ -710,6 +711,28 @@ struct ShapePropagator
             int32_t stop = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph)[0];
             int32_t step = getConstantInt32(graph.getNode(nodeId).parentIds[2], graph)[0];
             graph.getNode(nodeId).setShape({(uint32_t)std::max(0, (stop - start + step - 1) / step)});
+            break;
+        }
+        case OpType::ARGMAX:
+        {
+            auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape();
+            auto axis_vec = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph);
+            int32_t axis = axis_vec[0];
+            if (axis < 0)
+                axis += s0.size();
+
+            auto k_vec = getConstantInt32(graph.getNode(nodeId).parentIds[2], graph);
+            int32_t k = k_vec[0];
+
+            std::vector<uint32_t> new_shape;
+            for (size_t i = 0; i < s0.size(); ++i)
+            {
+                if (i == (size_t)axis)
+                    new_shape.push_back((uint32_t)k);
+                else
+                    new_shape.push_back(s0[i]);
+            }
+            graph.getNode(nodeId).setShape(new_shape);
             break;
         }
         case OpType::FUSED:
@@ -1558,6 +1581,7 @@ struct ShapePropagator
         case OpType::CAST:
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
+        case OpType::LOG:
             return forwardElementwise(node, graph, parentRegions);
         case OpType::TRIU:
         {
@@ -1576,6 +1600,45 @@ struct ShapePropagator
         case OpType::SUM:
         case OpType::MAX:
             return forwardReduce(node, graph, parentRegions);
+        case OpType::ARGMAX:
+        {
+            const auto &rA = parentRegions[0];
+            if (rA.empty())
+                return {};
+
+            const auto &sA = graph.getNode(node.parentIds[0]).getShape();
+            int32_t axis = getConstantInt32(node.parentIds[1], graph)[0];
+            if (axis < 0)
+                axis += sA.size();
+
+            int32_t k = getConstantInt32(node.parentIds[2], graph)[0];
+
+            std::vector<Region> outBoxes;
+            for (const auto &inReg : rA)
+            {
+                Region outBox;
+                for (size_t d = 0; d < sA.size(); ++d)
+                {
+                    if ((int32_t)d == axis)
+                    {
+                        if (inReg.region[d].start < inReg.region[d].stop)
+                        {
+                            outBox.region.push_back({0, (uint32_t)k});
+                        }
+                        else
+                        {
+                            outBox.region.push_back({0, 0});
+                        }
+                    }
+                    else
+                    {
+                        outBox.region.push_back(inReg.region[d]);
+                    }
+                }
+                outBoxes.push_back(outBox);
+            }
+            return mergeRegions(outBoxes);
+        }
         case OpType::RESHAPE:
             return forwardReshape(node, graph, parentRegions);
         case OpType::PERMUTE:
@@ -1613,6 +1676,7 @@ struct ShapePropagator
         case OpType::CAST:
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
+        case OpType::LOG:
             return backwardElementwise(node, outputRegions);
         case OpType::TRIU:
             return {mergeRegions(outputRegions), makeFull(graph.getNode(node.parentIds[1]).getShape())};
@@ -1623,6 +1687,46 @@ struct ShapePropagator
         case OpType::SUM:
         case OpType::MAX:
             return backwardReduce(node, graph, outputRegions);
+        case OpType::ARGMAX:
+        {
+            std::vector<std::vector<Region>> res(3);
+            if (outputRegions.empty())
+                return res;
+
+            const auto &sA = graph.getNode(node.parentIds[0]).getShape();
+            int32_t axis = getConstantInt32(node.parentIds[1], graph)[0];
+            if (axis < 0)
+                axis += sA.size();
+
+            std::vector<Region> inBoxes;
+            for (const auto &outReg : outputRegions)
+            {
+                Region inBox;
+                for (size_t d = 0; d < sA.size(); ++d)
+                {
+                    if ((int32_t)d == axis)
+                    {
+                        if (outReg.region[d].start < outReg.region[d].stop)
+                        {
+                            inBox.region.push_back({0, sA[d]});
+                        }
+                        else
+                        {
+                            inBox.region.push_back({0, 0});
+                        }
+                    }
+                    else
+                    {
+                        inBox.region.push_back(outReg.region[d]);
+                    }
+                }
+                inBoxes.push_back(inBox);
+            }
+            res[0] = mergeRegions(inBoxes);
+            res[1] = makeFull(graph.getNode(node.parentIds[1]).getShape());
+            res[2] = makeFull(graph.getNode(node.parentIds[2]).getShape());
+            return res;
+        }
         case OpType::RESHAPE:
             return backwardReshape(node, graph, outputRegions);
         case OpType::PERMUTE:

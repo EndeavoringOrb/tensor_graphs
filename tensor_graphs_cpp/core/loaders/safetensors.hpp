@@ -1,11 +1,16 @@
 #pragma once
+#include "core/loaders/base_loader.hpp"
 #include "core/types.hpp"
 #include <filesystem>
 #include <vector>
+#include <fstream>
+#include <unordered_map>
+#include <string>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
-struct TensorMetadata
+struct SafetensorsTensorMetadata
 {
     DType dtype;
     std::vector<uint32_t> shape;
@@ -19,7 +24,7 @@ struct TensorMetadata
     }
 };
 
-class SafetensorsLoader
+class SafetensorsLoader : public ModelLoader
 {
 public:
     SafetensorsLoader(const std::string &path)
@@ -56,24 +61,30 @@ public:
         }
     }
 
-    const TensorMetadata &getMetadata(const std::string &name) const
+    TensorMetadata getMetadata(const std::string &name) const override
     {
         auto it = metadata.find(name);
         if (it == metadata.end())
         {
             Error::throw_err("[SafetensorsLoader.getMetadata] Tensor not found: " + name);
         }
-        return it->second;
+        const auto &meta = it->second;
+        return TensorMetadata{meta.dtype, meta.shape, meta.sizeBytes()};
     }
 
-    bool hasTensor(const std::string &name) const
+    bool hasTensor(const std::string &name) const override
     {
         return metadata.find(name) != metadata.end();
     }
 
-    void loadTensor(const std::string &name, void *dest, uint64_t destSize) const
+    void loadTensor(const std::string &name, void *dest, uint64_t destSize) const override
     {
-        const auto &meta = getMetadata(name);
+        auto it = metadata.find(name);
+        if (it == metadata.end())
+        {
+            Error::throw_err("[SafetensorsLoader.loadTensor] Tensor not found: " + name);
+        }
+        const auto &meta = it->second;
         if (meta.sizeBytes() > destSize)
         {
             Error::throw_err("[SafetensorsLoader.loadTensor] Destination buffer too small for tensor '" + name + "' (dst=" + std::to_string(destSize) + "), (tensor_size=" + std::to_string(meta.sizeBytes()) + ")");
@@ -98,7 +109,7 @@ private:
     };
 
     std::vector<FileInfo> files;
-    std::unordered_map<std::string, TensorMetadata> metadata;
+    std::unordered_map<std::string, SafetensorsTensorMetadata> metadata;
 
     void loadFile(const std::string &filepath, size_t fileIdx)
     {
@@ -131,7 +142,7 @@ private:
             if (key == "__metadata__" || !val.is_object())
                 continue;
 
-            TensorMetadata meta;
+            SafetensorsTensorMetadata meta;
             meta.fileIndex = fileIdx;
 
             // 1. DType

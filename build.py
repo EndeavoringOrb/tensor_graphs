@@ -109,7 +109,7 @@ def get_compiler_cmd(fname: str):
     if USE_CUDA:
         cmd = [
             "nvcc",
-            "-std=c++17",
+            "-std=c++20",
             f"-I{ROOT_DIR}",
             "-DUSE_CUDA",
             "-x",
@@ -135,7 +135,7 @@ def get_compiler_cmd(fname: str):
                 "-target",
                 "aarch64-windows",
                 "-march=armv8.6-a+bf16+i8mm",
-                "-std=c++17",
+                "-std=c++20",
                 f"-I{ROOT_DIR}",
             ]
 
@@ -150,7 +150,7 @@ def get_compiler_cmd(fname: str):
         else:
             cmd = [
                 "g++",
-                "-std=c++17",
+                "-std=c++20",
                 f"-I{ROOT_DIR}",
             ]
 
@@ -378,14 +378,14 @@ def compile_project(targets=None):
         nvcc = "nvcc"
 
     cxx_flags = [f"-I{ROOT_DIR}"]
-    nvcc_flags = [f"-I{ROOT_DIR}", "-std=c++17", "-x", "cu"]
+    nvcc_flags = [f"-I{ROOT_DIR}", "-std=c++20", "-x", "cu"]
 
     if os.name == "nt":
         if not USE_CUDA:
             cxx_flags.extend(
                 ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
             )
-        cxx_flags.extend(["-std=c++17"])
+        cxx_flags.extend(["-std=c++20"])
         if DEBUG_MODE:
             cxx_flags.extend(["-g", "-O0", "-DDEBUG"])
             nvcc_flags.extend(["-g", "-G", "-O0", "-DDEBUG"])
@@ -393,7 +393,7 @@ def compile_project(targets=None):
             cxx_flags.extend(["-O3"])
             nvcc_flags.extend(["-O3"])
     else:
-        cxx_flags.extend(["-std=c++17"])
+        cxx_flags.extend(["-std=c++20"])
         if is_arm64:
             cxx_flags.append("-march=armv8.6-a+bf16+i8mm")
         if DEBUG_MODE:
@@ -419,7 +419,7 @@ def compile_project(targets=None):
                 nvcc_flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
     if targets is None:
-        mains = ["main.cpp", "bench.cpp", "test.cpp", "test_model.cpp"]
+        mains = ["main.cpp", "bench.cpp", "test.cpp", "test_model.cpp", "embed.cpp"]
     else:
         mains = []
         for t in targets:

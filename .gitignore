@@ -31,6 +31,10 @@ package-lock.json
 toks.txt
 tokenize_flux.py
 **/*.bin
+**/*.gguf
+**/*.safetensors
+.env
+models/*
 
 # Profiling artifacts
 profile_output*

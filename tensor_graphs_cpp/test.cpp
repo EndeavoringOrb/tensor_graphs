@@ -974,6 +974,11 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 checkParam(1, {1});
                 checkParam(2, {1});
             }
+            else if (n.opType == OpType::ARGMAX)
+            {
+                checkParam(1, {-1});
+                checkParam(2, {1});
+            }
         }
     }
 

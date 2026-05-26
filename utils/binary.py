@@ -120,7 +120,7 @@ class BinaryReader:
             "INPUT", "ADD", "MUL", "DIVIDE", "DOT", "SIN", "COS", "NEGATE", 
             "POWER", "SUM", "MAX", "RESHAPE", "PERMUTE", "SLICE", "CONCAT", 
             "CAST", "REPEAT", "ARANGE", "TRIU", "GATHER", "FILL", "COPY_TO", 
-            "IM2COL", "CONTIGUOUS", "SCATTER", "FUSED",
+            "IM2COL", "CONTIGUOUS", "SCATTER", "LOG", "ARGMAX", "FUSED",
         ]
 
         return {

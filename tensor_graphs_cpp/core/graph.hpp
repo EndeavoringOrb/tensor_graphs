@@ -1,11 +1,14 @@
 #pragma once
 #include "core/types.hpp"
+#include "core/loaders/base_loader.hpp"
 #include "core/loaders/safetensors.hpp"
 #include "core/memory.hpp"
 #include <vector>
 #include <stdexcept>
 #include <sstream>
 #include <deque>
+#include <filesystem>
+#include <source_location>
 
 struct MemoryManager;
 
@@ -15,11 +18,45 @@ struct IdAllocator
     uint32_t allocate() { return nextId++; }
 };
 
+inline std::shared_ptr<ModelLoader> createLoader(const std::string &path)
+{
+    namespace fs = std::filesystem;
+    if (fs::is_directory(path))
+    {
+        bool has_safetensors = false;
+        for (const auto &entry : fs::directory_iterator(path))
+        {
+            if (entry.path().extension() == ".safetensors")
+                has_safetensors = true;
+        }
+        if (has_safetensors)
+        {
+            return std::make_shared<SafetensorsLoader>(path);
+        }
+        else
+        {
+            Error::throw_err("[LoaderFactory] No model files found in directory: " + path);
+        }
+    }
+    else
+    {
+        fs::path p(path);
+        if (p.extension() == ".safetensors")
+        {
+            return std::make_shared<SafetensorsLoader>(path);
+        }
+        else
+        {
+            return std::make_shared<SafetensorsLoader>(path);
+        }
+    }
+}
+
 struct Graph
 {
     std::unordered_map<uint32_t, TensorNode> nodes;
     std::shared_ptr<IdAllocator> allocator;
-    std::unordered_map<std::string, std::shared_ptr<SafetensorsLoader>> loaders;     // Mapping of path -> Loader instance
+    std::unordered_map<std::string, std::shared_ptr<ModelLoader>> loaders;           // Mapping of path -> polymorphic Loader instance
     std::unordered_map<uint32_t, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
 
     std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
@@ -41,10 +78,11 @@ struct Graph
         return nodes.at(id);
     }
 
-    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {}, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::TRANSIENT, std::string _contentHash = "")
+    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {}, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::TRANSIENT, std::string _contentHash = "", std::source_location loc = std::source_location::current())
     {
         uint32_t id = allocator->allocate();
-        nodes[id] = TensorNode(id, _opType, _opName, _dtype, _parentIds, _shape, _strides, _backend, _storageType, _contentHash);
+        std::string origin = std::string(loc.file_name()) + ":" + std::to_string(loc.line());
+        nodes[id] = TensorNode(id, _opType, _opName, _dtype, _parentIds, _shape, _strides, _backend, _storageType, _contentHash, origin);
         return nodes[id];
     }
 
@@ -52,18 +90,18 @@ struct Graph
     {
         if (loaders.find(path) == loaders.end())
         {
-            loaders[path] = std::make_shared<SafetensorsLoader>(path);
+            loaders[path] = createLoader(path);
         }
     }
 
-    uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype)
+    uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype, std::source_location loc = std::source_location::current())
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
 
         SHA256 sha;
         sha.update(static_cast<const uint8_t *>(dataPtr), sizeBytes);
 
-        TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, {}, Backend::CPU, StorageType::PERSISTENT, sha.digest());
+        TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, {}, Backend::CPU, StorageType::PERSISTENT, sha.digest(), loc);
         uint32_t id = node.id;
 
         auto buffer = std::make_shared<std::vector<uint8_t>>(sizeBytes);
@@ -73,7 +111,7 @@ struct Graph
         return id;
     }
 
-    uint32_t weight(const std::string &path, const std::string &name)
+    uint32_t weight(const std::string &path, const std::string &name, std::source_location loc = std::source_location::current())
     {
         registerLoader(path);
         auto &loader = loaders.at(path);
@@ -86,27 +124,27 @@ struct Graph
         sha.update(path + "::" + name);
 
         const auto &meta = loader->getMetadata(name);
-        TensorNode &node = allocateNode(OpType::INPUT, "", meta.dtype, {}, meta.shape, {}, Backend::CPU, StorageType::PERSISTENT, sha.digest());
+        TensorNode &node = allocateNode(OpType::INPUT, "", meta.dtype, {}, meta.shape, {}, Backend::CPU, StorageType::PERSISTENT, sha.digest(), loc);
         uint32_t id = node.id;
         weightSources[id] = {path, name};
 
         return id;
     }
 
-    uint32_t input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {}, StorageType storageType = StorageType::PERSISTENT)
+    uint32_t input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {}, StorageType storageType = StorageType::PERSISTENT, std::source_location loc = std::source_location::current())
     {
-        TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, Backend::CPU, storageType);
+        TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, Backend::CPU, storageType, "", loc);
         return node.id;
     }
 
-    uint32_t contiguous(uint32_t id0)
+    uint32_t contiguous(uint32_t id0, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::CONTIGUOUS, "", dtype, {id0});
+        TensorNode &node = allocateNode(OpType::CONTIGUOUS, "", dtype, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t add(uint32_t id0, uint32_t id1)
+    uint32_t add(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -115,11 +153,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::ADD, "", dtype, {id0, id1});
+        TensorNode &node = allocateNode(OpType::ADD, "", dtype, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t mul(uint32_t id0, uint32_t id1)
+    uint32_t mul(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -128,11 +166,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::MUL, "", dtype, {id0, id1});
+        TensorNode &node = allocateNode(OpType::MUL, "", dtype, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t div(uint32_t id0, uint32_t id1)
+    uint32_t div(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -141,11 +179,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::DIVIDE, "", dtype, {id0, id1});
+        TensorNode &node = allocateNode(OpType::DIVIDE, "", dtype, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t dot(uint32_t id0, uint32_t id1)
+    uint32_t dot(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -154,32 +192,32 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::DOT, "", dtype, {id0, id1});
+        TensorNode &node = allocateNode(OpType::DOT, "", dtype, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t sin(uint32_t id0)
+    uint32_t sin(uint32_t id0, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::SIN, "", dtype, {id0});
+        TensorNode &node = allocateNode(OpType::SIN, "", dtype, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t cos(uint32_t id0)
+    uint32_t cos(uint32_t id0, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::COS, "", dtype, {id0});
+        TensorNode &node = allocateNode(OpType::COS, "", dtype, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t neg(uint32_t id0)
+    uint32_t neg(uint32_t id0, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::NEGATE, "", dtype, {id0});
+        TensorNode &node = allocateNode(OpType::NEGATE, "", dtype, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t pow(uint32_t id0, uint32_t id1)
+    uint32_t pow(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -188,11 +226,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::POWER, "", dtype, {id0, id1});
+        TensorNode &node = allocateNode(OpType::POWER, "", dtype, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t sum(uint32_t id0, uint32_t id1)
+    uint32_t sum(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -201,11 +239,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::SUM, "", dtype, {id0, id1});
+        TensorNode &node = allocateNode(OpType::SUM, "", dtype, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t max(uint32_t id0, uint32_t id1)
+    uint32_t max(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -214,11 +252,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::MAX, "", dtype, {id0, id1});
+        TensorNode &node = allocateNode(OpType::MAX, "", dtype, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t reshape(uint32_t id0, uint32_t id1)
+    uint32_t reshape(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -227,11 +265,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::RESHAPE, "", dtype, {id0, id1});
+        TensorNode &node = allocateNode(OpType::RESHAPE, "", dtype, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t permute(uint32_t id0, uint32_t id1)
+    uint32_t permute(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -240,11 +278,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::PERMUTE, "", dtype, {id0, id1});
+        TensorNode &node = allocateNode(OpType::PERMUTE, "", dtype, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t slice(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3)
+    uint32_t slice(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -265,11 +303,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::SLICE, "", dtype, {id0, id1, id2, id3});
+        TensorNode &node = allocateNode(OpType::SLICE, "", dtype, {id0, id1, id2, id3}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t scatter(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3, uint32_t id4)
+    uint32_t scatter(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3, uint32_t id4, std::source_location loc = std::source_location::current())
     {
         if (getNode(id2).dtype != DType::INT32)
         {
@@ -296,11 +334,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::SCATTER, "", dtype, {id0, id1, id2, id3, id4});
+        TensorNode &node = allocateNode(OpType::SCATTER, "", dtype, {id0, id1, id2, id3, id4}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t concat(std::vector<uint32_t> ids, uint32_t id1)
+    uint32_t concat(std::vector<uint32_t> ids, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (ids.size() == 0)
         {
@@ -324,17 +362,17 @@ struct Graph
         }
         DType dtype = getNode(ids[0]).dtype;
         ids.push_back(id1);
-        TensorNode &node = allocateNode(OpType::CONCAT, "", dtype, ids);
+        TensorNode &node = allocateNode(OpType::CONCAT, "", dtype, ids, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t cast(uint32_t id0, DType dtype)
+    uint32_t cast(uint32_t id0, DType dtype, std::source_location loc = std::source_location::current())
     {
-        TensorNode &node = allocateNode(OpType::CAST, "", dtype, {id0});
+        TensorNode &node = allocateNode(OpType::CAST, "", dtype, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t repeat(uint32_t id0, uint32_t repeats_id, uint32_t axis_id)
+    uint32_t repeat(uint32_t id0, uint32_t repeats_id, uint32_t axis_id, std::source_location loc = std::source_location::current())
     {
         if (getNode(repeats_id).dtype != DType::INT32)
         {
@@ -349,11 +387,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::REPEAT, "", dtype, {id0, repeats_id, axis_id});
+        TensorNode &node = allocateNode(OpType::REPEAT, "", dtype, {id0, repeats_id, axis_id}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t arange(uint32_t id1, uint32_t id2, uint32_t id3)
+    uint32_t arange(uint32_t id1, uint32_t id2, uint32_t id3, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -373,11 +411,11 @@ struct Graph
             ss << "[Graph.arange] Expected " << DType::INT32 << " for input 3, got: " << getNode(id3).dtype;
             Error::throw_err(ss.str());
         }
-        TensorNode &node = allocateNode(OpType::ARANGE, "", DType::INT32, {id1, id2, id3});
+        TensorNode &node = allocateNode(OpType::ARANGE, "", DType::INT32, {id1, id2, id3}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t triu(uint32_t id0, uint32_t k_id)
+    uint32_t triu(uint32_t id0, uint32_t k_id, std::source_location loc = std::source_location::current())
     {
         if (getNode(k_id).dtype != DType::INT32)
         {
@@ -386,11 +424,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::TRIU, "", dtype, {id0, k_id});
+        TensorNode &node = allocateNode(OpType::TRIU, "", dtype, {id0, k_id}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t gather(uint32_t id0, uint32_t indices_id)
+    uint32_t gather(uint32_t id0, uint32_t indices_id, std::source_location loc = std::source_location::current())
     {
         if (getNode(indices_id).dtype != DType::INT32)
         {
@@ -399,11 +437,11 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::GATHER, "", dtype, {id0, indices_id});
+        TensorNode &node = allocateNode(OpType::GATHER, "", dtype, {id0, indices_id}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t fill(uint32_t value_id, uint32_t shape_id)
+    uint32_t fill(uint32_t value_id, uint32_t shape_id, std::source_location loc = std::source_location::current())
     {
         if (getNode(shape_id).dtype != DType::INT32)
         {
@@ -412,18 +450,18 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(value_id).dtype;
-        TensorNode &node = allocateNode(OpType::FILL, "", dtype, {value_id, shape_id});
+        TensorNode &node = allocateNode(OpType::FILL, "", dtype, {value_id, shape_id}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t copyto(uint32_t id0, Backend backend)
+    uint32_t copyto(uint32_t id0, Backend backend, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::COPY_TO, "", dtype, {id0}, {}, {}, backend);
+        TensorNode &node = allocateNode(OpType::COPY_TO, "", dtype, {id0}, {}, {}, backend, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t im2col(uint32_t input_id, uint32_t kernel_size_id, uint32_t stride_id, uint32_t padding_id)
+    uint32_t im2col(uint32_t input_id, uint32_t kernel_size_id, uint32_t stride_id, uint32_t padding_id, std::source_location loc = std::source_location::current())
     {
         if (getNode(kernel_size_id).dtype != DType::INT32)
         {
@@ -444,16 +482,34 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(input_id).dtype;
-        TensorNode &node = allocateNode(OpType::IM2COL, "", dtype, {input_id, kernel_size_id, stride_id, padding_id});
+        TensorNode &node = allocateNode(OpType::IM2COL, "", dtype, {input_id, kernel_size_id, stride_id, padding_id}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
-};
 
-struct LogicalGraph
-{
-    Graph graph;
-    std::unordered_map<std::string, std::vector<uint32_t>> fusionMap;
-    std::unordered_map<uint32_t, uint32_t> estimatedRefCounts;
+    uint32_t log(uint32_t id0, std::source_location loc = std::source_location::current())
+    {
+        DType dtype = getNode(id0).dtype;
+        TensorNode &node = allocateNode(OpType::LOG, "", dtype, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
+        return node.id;
+    }
+
+    uint32_t argmax(uint32_t id0, uint32_t dim_id, uint32_t k_id, std::source_location loc = std::source_location::current())
+    {
+        if (getNode(dim_id).dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.argmax] Expected " << DType::INT32 << " for input 1, got: " << getNode(dim_id).dtype;
+            Error::throw_err(ss.str());
+        }
+        if (getNode(k_id).dtype != DType::INT32)
+        {
+            std::stringstream ss;
+            ss << "[Graph.argmax] Expected " << DType::INT32 << " for input 2, got: " << getNode(k_id).dtype;
+            Error::throw_err(ss.str());
+        }
+        TensorNode &node = allocateNode(OpType::ARGMAX, "", DType::INT32, {id0, dim_id, k_id}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
+        return node.id;
+    }
 };
 
 inline std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)
@@ -490,11 +546,6 @@ inline bool isIsomorphic(const Graph &g1, uint32_t root1, const Graph &g2, uint3
 
     if (n1.opType == OpType::INPUT)
     {
-        // If both nodes have contentHash (i.e., both are constants created via
-        // graph.constant()), they must have the same hash to be considered
-        // isomorphic.  This prevents, for example, a SiLU pattern that uses
-        // e_val = 2.7182818f from matching a subgraph that uses a different
-        // constant for the exponential base.
         bool n1_has_hash = !n1.contentHash.empty();
         bool n2_has_hash = !n2.contentHash.empty();
         if (n1_has_hash && n2_has_hash)
