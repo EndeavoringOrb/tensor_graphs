@@ -33,16 +33,15 @@ inline bool matchDotF32_3D_Optimized(const std::vector<TensorNode> &inputs, cons
     return true;
 }
 
-inline void runDotF32_3D_Optimized(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                   const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runDotF32_3D_Optimized(const KernelContext &ctx)
 {
-    const float *A_ptr = static_cast<const float *>(inputs[0]);
-    const float *B_ptr = static_cast<const float *>(inputs[1]);
-    float *Out_ptr = static_cast<float *>(outputs[0]);
+    const float *A_ptr = static_cast<const float *>(ctx.inputs[0]);
+    const float *B_ptr = static_cast<const float *>(ctx.inputs[1]);
+    float *Out_ptr = static_cast<float *>(ctx.outputs[0]);
 
-    const auto &viewA = inViews[0];
-    const auto &viewB = inViews[1];
-    const auto &viewOut = outViews[0];
+    const auto &viewA = ctx.inViews[0];
+    const auto &viewB = ctx.inViews[1];
+    const auto &viewOut = ctx.outViews[0];
 
     const uint32_t B_count = viewA.getShape()[0];
     const uint32_t M = viewA.getShape()[1];

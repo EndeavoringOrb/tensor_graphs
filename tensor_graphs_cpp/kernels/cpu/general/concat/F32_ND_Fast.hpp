@@ -13,12 +13,11 @@ inline bool matchConcatF32_Fast(const std::vector<TensorNode> &inputs, const Ten
     return true;
 }
 
-inline void runConcatF32_Fast(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runConcatF32_Fast(const KernelContext &ctx)
 {
-    float *out_ptr = static_cast<float *>(outputs[0]);
-    int32_t axis = *static_cast<const int32_t *>(inputs.back());
-    const auto &out_shape = outViews[0].getShape();
+    float *out_ptr = static_cast<float *>(ctx.outputs[0]);
+    int32_t axis = *static_cast<const int32_t *>(ctx.inputs.back());
+    const auto &out_shape = ctx.outViews[0].getShape();
     if (axis < 0)
         axis += out_shape.size();
 
@@ -40,9 +39,9 @@ inline void runConcatF32_Fast(const std::vector<const void *> &inputs, const std
             uint32_t o_end = std::min(o_start + chunk, (uint32_t)outer);
             for (uint32_t o = o_start; o < o_end; ++o) {
                 uint64_t out_axis_offset = 0;
-                for (size_t n = 0; n < inputs.size() - 1; ++n) {
-                    uint32_t axis_dim = inViews[n].getShape()[axis];
-                    const float *src = static_cast<const float *>(inputs[n]) + (o * axis_dim * inner);
+                for (size_t n = 0; n < ctx.inputs.size() - 1; ++n) {
+                    uint32_t axis_dim = ctx.inViews[n].getShape()[axis];
+                    const float *src = static_cast<const float *>(ctx.inputs[n]) + (o * axis_dim * inner);
                     float *dst = out_ptr + (o * out_shape[axis] * inner) + (out_axis_offset * inner);
                     std::memcpy(dst, src, axis_dim * inner * sizeof(float));
                     out_axis_offset += axis_dim;

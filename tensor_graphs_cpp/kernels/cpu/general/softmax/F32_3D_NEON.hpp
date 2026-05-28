@@ -14,13 +14,12 @@ inline bool matchSoftmaxF32_NEON(const std::vector<TensorNode> &inputs, const Te
     return true;
 }
 
-inline void runSoftmaxF32_NEON(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                               const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runSoftmaxF32_NEON(const KernelContext &ctx)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *in = static_cast<const float *>(ctx.inputs[0]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    const auto &shape = inViews[0].getShape();
+    const auto &shape = ctx.inViews[0].getShape();
     uint32_t outer_size = shape[0] * shape[1];
     uint32_t dim_size = shape[2];
 

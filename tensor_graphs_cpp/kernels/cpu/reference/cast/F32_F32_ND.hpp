@@ -15,13 +15,12 @@ inline bool matchCastF32_F32_ND(const std::vector<TensorNode> &inputs, const Ten
     return true;
 }
 
-inline void runCastF32_F32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runCastF32_F32_ND(const KernelContext &ctx)
 {
-    const float *src = static_cast<const float *>(inputs[0]);
-    float *dst = static_cast<float *>(outputs[0]);
+    const float *src = static_cast<const float *>(ctx.inputs[0]);
+    float *dst = static_cast<float *>(ctx.outputs[0]);
 
-    uint64_t numElements = countElements(inViews[0].getShape());
+    uint64_t numElements = countElements(ctx.inViews[0].getShape());
 
     // F32 to F32 is an identity copy, so a direct memcpy is sufficient.
     std::memcpy(dst, src, numElements * sizeof(float));

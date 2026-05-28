@@ -25,8 +25,7 @@ public:
     Executor(MemoryManager &mm)
         : memManager(mm) {}
 
-    void run(const std::unordered_map<uint32_t, const void *> &inputs,
-             const CompiledGraph &compiled,
+    void run(const CompiledGraph &compiled,
              const DebugCallback &debugCallback = nullptr)
     {
         std::cout << "running..." << std::endl;
@@ -53,6 +52,10 @@ public:
             const uint32_t nodeId = inst.nodeId;
             uint32_t logicalId = compiled.getLogicalId(nodeId);
             const TensorNode &node = compiled.nodesMap.at(nodeId);
+            if (node.backend == Backend::STORAGE)
+            {
+                Error::throw_err("[Executor.run] should not be executing anything on Backend::STORAGE");
+            }
             auto &outBuf = memManager.buffers.at(node.backend);
 
             const bool isEndOfLogicalChain = (idx + 1 == compiled.instructions.size()) ||
@@ -68,40 +71,58 @@ public:
                 memManager.allocate(inst.backend, outputMemId, sizeBytes, inst.outputStorageType, compiled.refCounts.at(inst.nodeId), cost, &parentMap, &compiled.nodeCosts);
             }
 
-            std::vector<const void *> kernelInputs;
-            std::vector<TensorView> kernelInViews;
+            KernelContext ctx;
             for (uint32_t inId : inst.inputNodeIds)
             {
                 const TensorNode &inNode = compiled.nodesMap.at(inId);
 
-                uint32_t activeInId = inId;
-                uint32_t inLogicalId = compiled.getLogicalId(inId);
-                if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
+                if (inNode.backend == Backend::STORAGE)
                 {
-                    activeInId = inLogicalId;
+                    uint32_t logicalInId = compiled.getLogicalId(inId);
+                    TensorMetadata meta = FileRegistry::get().getNodeMeta(logicalInId);
+                    TensorView view;
+                    view.baseOffset = meta.dataOffsetStart;
+                    view.dtype = meta.dtype;
+                    view.setShape(meta.shape);
+                    ctx.inViews.push_back(view);
+                    ctx.inputs.push_back(nullptr);
+                    ctx.fd.push_back(FileRegistry::get().getNodeFd(logicalInId));
                 }
+                else
+                {
+                    uint32_t activeInId = inId;
+                    uint32_t inLogicalId = compiled.getLogicalId(inId);
+                    if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
+                    {
+                        activeInId = inLogicalId;
+                    }
 
-                TensorNode activeNode = inNode;
-                activeNode.id = activeInId;
+                    TensorNode activeNode = inNode;
+                    activeNode.id = activeInId;
 
-                TensorView view = memManager.getView(activeNode);
-                kernelInViews.push_back(view);
-                kernelInputs.push_back(memManager.buffers.at(inNode.backend).arena_ptr + view.baseOffset);
+                    TensorView view = memManager.getView(activeNode);
+                    ctx.inViews.push_back(view);
+                    ctx.inputs.push_back(memManager.buffers.at(inNode.backend).arena_ptr + view.baseOffset);
+                    ctx.fd.push_back(-1);
+                }
             }
 
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {
                 const uint32_t inId = inst.inputNodeIds[i];
                 const TensorNode &inNode = compiled.nodesMap.at(inId);
-                uint32_t activeInId = inId;
-                uint32_t inLogicalId = compiled.getLogicalId(inId);
-                if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
+                if (inNode.backend != Backend::STORAGE)
                 {
-                    activeInId = inLogicalId;
+                    uint32_t activeInId = inId;
+                    uint32_t inLogicalId = compiled.getLogicalId(inId);
+                    if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
+                    {
+                        activeInId = inLogicalId;
+                    }
+                    TensorNode debugInput = inNode;
+                    debugInput.id = activeInId;
+                    Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId));
                 }
-                TensorNode debugInput = inNode;
-                debugInput.id = activeInId;
-                Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId));
             }
 
             if (inst.inplaceInputIndex >= 0)
@@ -159,9 +180,8 @@ public:
             uint64_t arenaOffset = actualBuf.getOffset(targetId);
 
             // Create views and pointers relative to the actual physical buffer
-            TensorView outView = TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype));
-            std::vector<TensorView> kernelOutViews = {outView};
-            std::vector<void *> kernelOutputs = {actualBuf.arena_ptr + outView.baseOffset};
+            ctx.outViews = {TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype))};
+            ctx.outputs = {actualBuf.arena_ptr + ctx.outViews[0].baseOffset};
 
             if (inst.viewInputIndex < 0)
             {
@@ -183,21 +203,21 @@ public:
 
             if (!kernel.isView)
             {
-                kernel.run(kernelInputs, kernelOutputs, kernelInViews, kernelOutViews);
+                kernel.run(ctx);
             }
 
             if (debugCallback && logicalId != UINT32_MAX && isEndOfLogicalChain)
             {
-                const uint8_t *basePtr = actualBuf.arena_ptr + outView.baseOffset;
+                const uint8_t *basePtr = actualBuf.arena_ptr + ctx.outViews[0].baseOffset;
                 uint64_t maxOffset = 0;
-                for (size_t d = 0; d < outView.getShape().size(); ++d)
+                for (size_t d = 0; d < ctx.outViews[0].getShape().size(); ++d)
                 {
-                    if (outView.getShape()[d] > 0)
+                    if (ctx.outViews[0].getShape()[d] > 0)
                     {
-                        maxOffset += (outView.getShape()[d] - 1) * outView.strides[d];
+                        maxOffset += (ctx.outViews[0].getShape()[d] - 1) * ctx.outViews[0].strides[d];
                     }
                 }
-                uint64_t bytesToCopy = (outView.getShape().empty() ? 1 : (maxOffset + 1)) * getDTypeSize(outView.dtype);
+                uint64_t bytesToCopy = (ctx.outViews[0].getShape().empty() ? 1 : (maxOffset + 1)) * getDTypeSize(ctx.outViews[0].dtype);
 
 #ifdef USE_CUDA
                 if (actualBackend == Backend::CUDA)
@@ -205,12 +225,12 @@ public:
                     cudaDeviceSynchronize();
                     std::vector<uint8_t> hostData(bytesToCopy);
                     cudaMemcpy(hostData.data(), basePtr, bytesToCopy, cudaMemcpyDeviceToHost);
-                    debugCallback(logicalId, outView, hostData.data());
+                    debugCallback(logicalId, ctx.outViews[0], hostData.data());
                 }
                 else
 #endif
                 {
-                    debugCallback(logicalId, outView, basePtr);
+                    debugCallback(logicalId, ctx.outViews[0], basePtr);
                 }
             }
 
@@ -227,6 +247,8 @@ public:
 
                 uint32_t inId = inst.inputNodeIds[i];
                 const TensorNode &inNode = compiled.nodesMap.at(inId);
+                if (inNode.backend == Backend::STORAGE)
+                    continue;
                 uint32_t activeInId = inId;
                 uint32_t inLogicalId = compiled.getLogicalId(inId);
                 if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))

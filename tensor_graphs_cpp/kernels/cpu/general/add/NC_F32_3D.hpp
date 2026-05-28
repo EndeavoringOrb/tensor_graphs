@@ -15,28 +15,27 @@ inline bool matchAddNC_F32_3D(const std::vector<TensorNode> &inputs, const Tenso
     return true;
 }
 
-inline void runAddNC_F32_3D(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                            const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runAddNC_F32_3D(const KernelContext &ctx)
 {
-    const float *a = static_cast<const float *>(inputs[0]);
-    const float *b = static_cast<const float *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *a = static_cast<const float *>(ctx.inputs[0]);
+    const float *b = static_cast<const float *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    uint32_t B = inViews[0].getShape()[0];
-    uint32_t M = inViews[0].getShape()[1];
-    uint32_t N = inViews[0].getShape()[2];
+    uint32_t B = ctx.inViews[0].getShape()[0];
+    uint32_t M = ctx.inViews[0].getShape()[1];
+    uint32_t N = ctx.inViews[0].getShape()[2];
 
-    uint64_t a_str0 = inViews[0].strides[0];
-    uint64_t a_str1 = inViews[0].strides[1];
-    uint64_t a_str2 = inViews[0].strides[2];
+    uint64_t a_str0 = ctx.inViews[0].strides[0];
+    uint64_t a_str1 = ctx.inViews[0].strides[1];
+    uint64_t a_str2 = ctx.inViews[0].strides[2];
 
-    uint64_t b_str0 = inViews[1].strides[0];
-    uint64_t b_str1 = inViews[1].strides[1];
-    uint64_t b_str2 = inViews[1].strides[2];
+    uint64_t b_str0 = ctx.inViews[1].strides[0];
+    uint64_t b_str1 = ctx.inViews[1].strides[1];
+    uint64_t b_str2 = ctx.inViews[1].strides[2];
 
-    uint64_t out_str0 = outViews[0].strides[0];
-    uint64_t out_str1 = outViews[0].strides[1];
-    uint64_t out_str2 = outViews[0].strides[2];
+    uint64_t out_str0 = ctx.outViews[0].strides[0];
+    uint64_t out_str1 = ctx.outViews[0].strides[1];
+    uint64_t out_str2 = ctx.outViews[0].strides[2];
 
     uint32_t num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0)

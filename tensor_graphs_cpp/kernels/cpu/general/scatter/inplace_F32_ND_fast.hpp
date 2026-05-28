@@ -130,20 +130,19 @@ inline bool matchScatterF32_ND_Inplace_Fast(const std::vector<TensorNode> &input
     return true;
 }
 
-inline void runInplaceScatterF32_ND_Fast(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                         const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runInplaceScatterF32_ND_Fast(const KernelContext &ctx)
 {
-    const float *target = static_cast<const float *>(inputs[0]);
-    const float *updates = static_cast<const float *>(inputs[1]);
-    const int32_t *starts = static_cast<const int32_t *>(inputs[2]);
-    const int32_t *steps = static_cast<const int32_t *>(inputs[4]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *target = static_cast<const float *>(ctx.inputs[0]);
+    const float *updates = static_cast<const float *>(ctx.inputs[1]);
+    const int32_t *starts = static_cast<const int32_t *>(ctx.inputs[2]);
+    const int32_t *steps = static_cast<const int32_t *>(ctx.inputs[4]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    const auto &out_shape = outViews[0].getShape();
-    const auto &upd_shape = inViews[1].getShape();
-    const auto &upd_strides = inViews[1].strides;
-    const auto &out_strides = outViews[0].strides;
-    const auto &tgt_strides = inViews[0].strides;
+    const auto &out_shape = ctx.outViews[0].getShape();
+    const auto &upd_shape = ctx.inViews[1].getShape();
+    const auto &upd_strides = ctx.inViews[1].strides;
+    const auto &out_strides = ctx.outViews[0].strides;
+    const auto &tgt_strides = ctx.inViews[0].strides;
 
     uint64_t n_target = countElements(out_shape);
     uint64_t n_updates = countElements(upd_shape);
@@ -187,7 +186,7 @@ inline void runInplaceScatterF32_ND_Fast(const std::vector<const void *> &inputs
     // Scalar case
     if (ndim == 0)
     {
-        int32_t s = inViews[2].getShape().empty() ? 0 : starts[0];
+        int32_t s = ctx.inViews[2].getShape().empty() ? 0 : starts[0];
         if (s < 0)
             s += out_shape.empty() ? 1 : out_shape[0];
         out[s * out_strides[0]] = updates[0];
@@ -196,8 +195,8 @@ inline void runInplaceScatterF32_ND_Fast(const std::vector<const void *> &inputs
 
     // Pre-compute adjusted starts, steps, and stride multipliers
     // out_idx = base_offset + sum(coords[d] * stride_multipliers[d])
-    uint32_t starts_size = inViews[2].getShape().empty() ? 0 : inViews[2].getShape()[0];
-    uint32_t steps_size = inViews[4].getShape().empty() ? 0 : inViews[4].getShape()[0];
+    uint32_t starts_size = ctx.inViews[2].getShape().empty() ? 0 : ctx.inViews[2].getShape()[0];
+    uint32_t steps_size = ctx.inViews[4].getShape().empty() ? 0 : ctx.inViews[4].getShape()[0];
 
     uint64_t stride_multipliers[8];
     uint64_t base_offset = 0;

@@ -27,15 +27,14 @@ inline bool matchAddF32_3D_Broadcast0_Inplace(const std::vector<TensorNode> &inp
     return true;
 }
 
-inline void runAddF32_3D_Broadcast0_Inplace(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                            const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runAddF32_3D_Broadcast0_Inplace(const KernelContext &ctx)
 {
-    float *out = static_cast<float *>(outputs[0]);
-    const float *b = static_cast<const float *>(inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
+    const float *b = static_cast<const float *>(ctx.inputs[1]);
 
-    uint32_t B = inViews[0].getShape()[0];
-    uint32_t M = inViews[0].getShape()[1];
-    uint32_t N = inViews[0].getShape()[2];
+    uint32_t B = ctx.inViews[0].getShape()[0];
+    uint32_t M = ctx.inViews[0].getShape()[1];
+    uint32_t N = ctx.inViews[0].getShape()[2];
 
     uint64_t mn_size = M * N;
     uint32_t num_threads = std::thread::hardware_concurrency();

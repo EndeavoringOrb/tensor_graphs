@@ -485,24 +485,23 @@ inline std::string toString(const ENode &node)
     return ss.str();
 }
 
-inline std::string toString(const EClass &cls)
+inline std::string toString(const EClass &cls, const std::string &prefix = "")
 {
     std::stringstream ss;
-    ss << "EClass {\n"
-       << "  ID:         " << cls.id << "\n"
-       << "  Shape:      " << ::toString(cls.shape) << "\n"
-       << "  Strides:    " << ::toString(cls.strides) << "\n"
-       << "  ViewOffset: " << cls.viewOffset << "\n"
-       << "  DType:      " << ::toString(cls.dtype) << "\n"
-       << "  Backend:    " << ::toString(cls.backend) << "\n"
-       << "  ENodes:     [";
+    ss << prefix << "EClass\n"
+       << prefix << "  ID:         " << cls.id << "\n"
+       << prefix << "  Shape:      " << ::toString(cls.shape) << "\n"
+       << prefix << "  Strides:    " << ::toString(cls.strides) << "\n"
+       << prefix << "  ViewOffset: " << cls.viewOffset << "\n"
+       << prefix << "  DType:      " << ::toString(cls.dtype) << "\n"
+       << prefix << "  Backend:    " << ::toString(cls.backend) << "\n"
+       << prefix << "  ENodes:     [";
 
     for (size_t i = 0; i < cls.enodes.size(); ++i)
     {
         ss << cls.enodes[i] << (i == cls.enodes.size() - 1 ? "" : ", ");
     }
-    ss << "]\n"
-       << "}";
+    ss << "]";
     return ss.str();
 }
 
@@ -558,10 +557,7 @@ inline std::string toString(const ENode &node, const EGraph &egraph, const std::
                 ss << " -> (Canonical: " << canonicalId << ")";
             }
 
-            ss << "\n"
-               << prefix << "      Shape:   " << toString(childCls.shape) << "\n"
-               << prefix << "      DType:   " << toString(childCls.dtype) << "\n"
-               << prefix << "      ENodes:  " << childCls.enodes.size();
+            ss << "\n" << toString(childCls);
         }
     }
     return ss.str();

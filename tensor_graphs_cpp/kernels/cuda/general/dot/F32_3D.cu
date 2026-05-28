@@ -60,17 +60,16 @@ inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const Ten
 /**
  * Run function: Sets up the grid/block dimensions and launches the CUDA kernel.
  */
-void runDotF32_3D_CUDA(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                       const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+void runDotF32_3D_CUDA(const KernelContext &ctx)
 {
-    const float *A = static_cast<const float *>(inputs[0]);
-    const float *B = static_cast<const float *>(inputs[1]);
-    float *Out = static_cast<float *>(outputs[0]);
+    const float *A = static_cast<const float *>(ctx.inputs[0]);
+    const float *B = static_cast<const float *>(ctx.inputs[1]);
+    float *Out = static_cast<float *>(ctx.outputs[0]);
 
-    uint64_t B_count = inViews[0].getShape()[0];
-    uint64_t M = inViews[0].getShape()[1];
-    uint64_t K = inViews[0].getShape()[2];
-    uint64_t N = inViews[1].getShape()[2];
+    uint64_t B_count = ctx.inViews[0].getShape()[0];
+    uint64_t M = ctx.inViews[0].getShape()[1];
+    uint64_t K = ctx.inViews[0].getShape()[2];
+    uint64_t N = ctx.inViews[1].getShape()[2];
 
     dim3 threads(16, 16);
     dim3 blocks((uint32_t)((N + threads.x - 1) / threads.x),

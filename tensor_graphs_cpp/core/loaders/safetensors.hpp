@@ -69,7 +69,12 @@ public:
             Error::throw_err("[SafetensorsLoader.getMetadata] Tensor not found: " + name);
         }
         const auto &meta = it->second;
-        return TensorMetadata{meta.dtype, meta.shape, meta.sizeBytes()};
+
+        // Calculate the absolute offset within the safetensors file
+        uint64_t absoluteStart = files[meta.fileIndex].dataStartOffset + meta.dataOffsetStart;
+        uint64_t absoluteEnd = files[meta.fileIndex].dataStartOffset + meta.dataOffsetEnd;
+
+        return TensorMetadata{meta.dtype, meta.shape, absoluteStart, absoluteEnd};
     }
 
     bool hasTensor(const std::string &name) const override

@@ -23,6 +23,15 @@
 #include "generated/kernels_all.gen.hpp"
 #include "generated/build_context.gen.hpp"
 
+#ifdef TG_OS_WINDOWS
+#include <io.h>
+#include <fcntl.h>
+#include <share.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#endif
+
 int main(int argc, char *argv[])
 {
     int skipCount = 0;
@@ -114,7 +123,91 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    // 4. Estimate costs for sorting
+    // 4. Pre-scan for Backend::STORAGE inputs
+    size_t maxStorageInputs = 0;
+    uint64_t maxStorageSize = 0;
+
+    for (const auto &r : toBenchmark)
+    {
+        const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
+        size_t currentStorageInputs = 0;
+        for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+        {
+            size_t ruleIdx = idx;
+            if (kernel.isVariadic)
+            {
+                ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+            }
+            Backend b = Backend::CPU;
+            if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
+                b = r.inputBackends[ruleIdx][0];
+
+            if (b == Backend::STORAGE)
+            {
+                currentStorageInputs++;
+                uint64_t elements = countElements(r.inputShapes[idx]);
+                uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
+                if (bytes > maxStorageSize)
+                {
+                    maxStorageSize = bytes;
+                }
+            }
+        }
+        if (currentStorageInputs > maxStorageInputs)
+        {
+            maxStorageInputs = currentStorageInputs;
+        }
+    }
+
+    if (maxStorageInputs > 0 && maxStorageSize == 0)
+    {
+        maxStorageSize = 4096; // Fallback minimum size
+    }
+
+    std::vector<std::string> dummyPaths;
+    std::vector<int> dummyFds;
+
+    if (maxStorageInputs > 0)
+    {
+        std::cout << "[Bench Init] Creating " << maxStorageInputs << " dummy files of size "
+                  << maxStorageSize << " bytes for Backend::STORAGE inputs." << std::endl;
+
+        std::vector<char> dummyBuf(1024 * 1024, 0); // 1MB zero buffer to chunk write
+        for (size_t i = 0; i < maxStorageInputs; ++i)
+        {
+            std::string path = "benchmarks/dummy_storage_" + std::to_string(i) + ".bin";
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out.is_open())
+            {
+                std::cerr << "Failed to create dummy storage file: " << path << std::endl;
+                continue;
+            }
+
+            uint64_t written = 0;
+            while (written < maxStorageSize)
+            {
+                uint64_t toWrite = std::min<uint64_t>(dummyBuf.size(), maxStorageSize - written);
+                out.write(dummyBuf.data(), toWrite);
+                written += toWrite;
+            }
+            out.close();
+            dummyPaths.push_back(path);
+
+            int fd = -1;
+#ifdef TG_OS_WINDOWS
+            _wsopen_s(&fd, std::filesystem::path(path).c_str(), _O_RDONLY | _O_BINARY, _SH_DENYNO, 0);
+#else
+            fd = open(path.c_str(), O_RDONLY);
+#endif
+            if (fd < 0)
+            {
+                std::cerr << "Failed to open dummy storage file for reading: " << path << std::endl;
+            }
+            dummyFds.push_back(fd);
+        }
+    }
+
+    // 5. Estimate costs for sorting
     for (uint32_t i = 0; i < toBenchmark.size(); i++)
     {
         Record &r = toBenchmark[i];
@@ -124,7 +217,7 @@ int main(int argc, char *argv[])
         r.runTime = std::isinf(cost) ? -1.0f : cost;
     }
 
-    // 5. Sort kernels by cost (cheapest first)
+    // 6. Sort kernels by cost (cheapest first)
     // Fallback to element count for kernels with no previous data (inf cost).
     std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb)
                      {
@@ -146,7 +239,7 @@ int main(int argc, char *argv[])
         }
         return costA < costB; });
 
-    // 6. Benchmark Loop
+    // 7. Benchmark Loop
     std::ofstream outFile(recordsPath, std::ios::app | std::ios::binary);
     BinaryWriter bw(outFile);
     size_t startIdx = (skipCount > (int)toBenchmark.size()) ? toBenchmark.size() : (size_t)std::max(0, skipCount);
@@ -479,10 +572,39 @@ int main(int argc, char *argv[])
             }
             std::cout << "  Benchmarking..." << std::flush;
 
+            // Map dummy files to Backend::STORAGE inputs
+            KernelContext ctx;
+            ctx.inputs = inPtrs;
+            ctx.outputs = outPtrs;
+            ctx.inViews = inViews;
+            ctx.outViews = outViews;
+            ctx.fd.assign(inPtrs.size(), -1);
+
+            size_t storageInIdx = 0;
+            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+            {
+                size_t ruleIdx = idx;
+                if (kernel.isVariadic)
+                {
+                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+                }
+                Backend b = Backend::CPU;
+                if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
+                    b = r.inputBackends[ruleIdx][0];
+
+                if (b == Backend::STORAGE)
+                {
+                    if (storageInIdx < dummyFds.size())
+                    {
+                        ctx.fd[idx] = dummyFds[storageInIdx++];
+                    }
+                }
+            }
+
             // Warmup
             if (!kernel.isView)
             {
-                kernel.run(inPtrs, outPtrs, inViews, outViews);
+                kernel.run(ctx);
 #ifdef USE_CUDA
                 cudaDeviceSynchronize();
 #endif
@@ -496,7 +618,7 @@ int main(int argc, char *argv[])
                 auto iterStart = std::chrono::high_resolution_clock::now();
                 if (!kernel.isView)
                 {
-                    kernel.run(inPtrs, outPtrs, inViews, outViews);
+                    kernel.run(ctx);
                 }
 #ifdef USE_CUDA
                 bool anyInputCuda = std::any_of(inIsCuda.begin(), inIsCuda.end(), [](bool b)
@@ -541,6 +663,24 @@ int main(int argc, char *argv[])
         {
             std::cerr << "Failed to benchmark kernel " << kernelUid << ": " << e.what() << std::endl;
         }
+    }
+
+    // Cleanup resources
+    for (int fd : dummyFds)
+    {
+        if (fd >= 0)
+        {
+#ifdef TG_OS_WINDOWS
+            _close(fd);
+#else
+            close(fd);
+#endif
+        }
+    }
+    for (const auto &path : dummyPaths)
+    {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
     }
 
     std::cout << "Benchmarking complete." << std::endl;

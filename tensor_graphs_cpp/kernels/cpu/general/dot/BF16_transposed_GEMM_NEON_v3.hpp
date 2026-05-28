@@ -22,16 +22,15 @@ inline bool matchBF16TransposedGEMM_v3(const std::vector<TensorNode> &inputs, co
     return isContiguous(output);
 }
 
-inline void runBF16TransposedGEMM_v3(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                     const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runBF16TransposedGEMM_v3(const KernelContext &ctx)
 {
-    const float *X = static_cast<const float *>(inputs[0]);
-    const uint16_t *W = static_cast<const uint16_t *>(inputs[1]);
-    float *Out = static_cast<float *>(outputs[0]);
-    uint32_t B = inViews[0].getShape()[0];
-    uint32_t S = inViews[0].getShape()[1];
-    uint32_t K = inViews[0].getShape()[2];
-    uint32_t N = inViews[1].getShape()[0];
+    const float *X = static_cast<const float *>(ctx.inputs[0]);
+    const uint16_t *W = static_cast<const uint16_t *>(ctx.inputs[1]);
+    float *Out = static_cast<float *>(ctx.outputs[0]);
+    uint32_t B = ctx.inViews[0].getShape()[0];
+    uint32_t S = ctx.inViews[0].getShape()[1];
+    uint32_t K = ctx.inViews[0].getShape()[2];
+    uint32_t N = ctx.inViews[1].getShape()[0];
 
     uint32_t num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0)

@@ -11,13 +11,12 @@ inline bool matchDivF32_ND_Fast(const std::vector<TensorNode> &inputs, const Ten
     return inputs[0].getShape() == inputs[1].getShape() && isContiguous(output);
 }
 
-inline void runDivF32_ND_Fast(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runDivF32_ND_Fast(const KernelContext &ctx)
 {
-    const float *a = static_cast<const float *>(inputs[0]);
-    const float *b = static_cast<const float *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
-    uint64_t n = countElements(inViews[0].getShape());
+    const float *a = static_cast<const float *>(ctx.inputs[0]);
+    const float *b = static_cast<const float *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
+    uint64_t n = countElements(ctx.inViews[0].getShape());
 
     uint32_t num_threads = std::thread::hardware_concurrency();
     uint64_t chunk = (n + num_threads - 1) / num_threads;

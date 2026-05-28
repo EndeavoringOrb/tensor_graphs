@@ -23,12 +23,11 @@ inline bool matchConcatF32_CUDA_ND(const std::vector<TensorNode> &inputs, const 
     return true;
 }
 
-inline void runConcatF32_CUDA_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                 const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews) {
-    float *Out = static_cast<float *>(outputs[0]);
-    int32_t axis = *static_cast<const int32_t *>(inputs.back());
+inline void runConcatF32_CUDA_ND(const KernelContext &ctx) {
+    float *Out = static_cast<float *>(ctx.outputs[0]);
+    int32_t axis = *static_cast<const int32_t *>(ctx.inputs.back());
     
-    auto outShape = outViews[0].getShape();
+    auto outShape = ctx.outViews[0].getShape();
     if (axis < 0) axis += outShape.size();
 
     uint64_t O = 1, C_out = outShape[axis], I = 1;
@@ -40,9 +39,9 @@ inline void runConcatF32_CUDA_ND(const std::vector<const void *> &inputs, const 
     uint64_t c_offset = 0;
     int blockSize = 256;
 
-    for (size_t n = 0; n < inputs.size() - 1; ++n) {
-        const float *A = static_cast<const float *>(inputs[n]);
-        uint64_t C_in = inViews[n].getShape()[axis];
+    for (size_t n = 0; n < ctx.inputs.size() - 1; ++n) {
+        const float *A = static_cast<const float *>(ctx.inputs[n]);
+        uint64_t C_in = ctx.inViews[n].getShape()[axis];
         uint64_t total = O * C_in * I;
         if (total > 0) {
             int numBlocks = (total + blockSize - 1) / blockSize;

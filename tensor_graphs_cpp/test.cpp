@@ -396,7 +396,7 @@ std::vector<float> executeReferenceGraph(
         const TensorNode &node = graph.getNode(nodeId);
         uint64_t elemSize = getDTypeSize(node.dtype);
 
-        if (node.opType == OpType::INPUT)
+        if (node.opType == OpType::INPUT || node.opType == OpType::CACHE)
         {
             TensorView view = makeView(node);
             if (forceNonContiguous)
@@ -507,7 +507,7 @@ std::vector<float> executeReferenceGraph(
 
         if (kernel.run)
         {
-            kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+            kernel.run(KernelContext(inputPtrs, outputPtrs, inputViews, outputViews)); // TODO: construct inputPtrs, outputPtrs, inputViews, outputViews on ctx.inputs, ... instead of creating at last moment
         }
     }
 
@@ -782,12 +782,12 @@ std::vector<float> executeFusedKernel(
     {
         std::vector<void *> outputPtrs = {outputData.data()};
         if (kernel.run)
-            kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+            kernel.run(KernelContext(inputPtrs, outputPtrs, inputViews, outputViews)); // TODO: construct inputPtrs, outputPtrs, inputViews, outputViews on ctx.inputs, ... instead of creating at last moment
     }
 #else
     std::vector<void *> outputPtrs = {outputData.data()};
     if (kernel.run)
-        kernel.run(inputPtrs, outputPtrs, inputViews, outputViews);
+        kernel.run(KernelContext(inputPtrs, outputPtrs, inputViews, outputViews)); // TODO: construct inputPtrs, outputPtrs, inputViews, outputViews on ctx.inputs, ... instead of creating at last moment
 #endif
 
     return flattenOutput(outputData.data() + outView.baseOffset, outView.getShape(), outView.strides, outView.dtype);
@@ -1335,7 +1335,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         }
         else if (kernel.run)
         {
-            kernel.run(inPtrs, outPtrs, inViews, outViews);
+            kernel.run(KernelContext(inPtrs, outPtrs, inViews, outViews)); // TODO: construct inPtrs, outPtrs, inViews, outViews on ctx.inputs, ... instead of creating at last moment
         }
 
         bool ok = false;

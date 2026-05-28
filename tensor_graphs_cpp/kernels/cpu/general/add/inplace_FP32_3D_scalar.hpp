@@ -15,12 +15,11 @@ inline bool matchAddFP32_3D_Scalar_Inplace(const std::vector<TensorNode> &inputs
     return true;
 }
 
-inline void runAddFP32_3D_Scalar_Inplace(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                         const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runAddFP32_3D_Scalar_Inplace(const KernelContext &ctx)
 {
-    float *data3D = static_cast<float *>(outputs[0]);
-    float scalarVal = *static_cast<const float *>(inputs[1]);
-    uint64_t totalElements = countElements(outViews[0].getShape());
+    float *data3D = static_cast<float *>(ctx.outputs[0]);
+    float scalarVal = *static_cast<const float *>(ctx.inputs[1]);
+    uint64_t totalElements = countElements(ctx.outViews[0].getShape());
     for (uint64_t i = 0; i < totalElements; ++i)
         data3D[i] += scalarVal;
 }

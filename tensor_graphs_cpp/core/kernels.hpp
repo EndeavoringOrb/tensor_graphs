@@ -8,11 +8,29 @@
 #include <string>
 #include <unordered_map>
 
+struct KernelContext
+{
+    std::vector<const void *> inputs;
+    std::vector<void *> outputs;
+    std::vector<TensorView> inViews;
+    std::vector<TensorView> outViews;
+    std::vector<int> fd; // same number of elements as inputs/inViews, has -1 if not a file, positive number file descriptor if is a file. COPY_TO kernels that start from STORAGE should use fd + inViews baseOffset to read from file
+
+    KernelContext() : inputs({}), outputs({}), inViews({}), outViews({}), fd({}) {}
+    KernelContext(const std::vector<const void *> &_inputs,
+                  const std::vector<void *> &_outputs,
+                  const std::vector<TensorView> &_inViews,
+                  const std::vector<TensorView> &_outViews) : inputs(_inputs), outputs(_outputs), inViews(_inViews), outViews(_outViews)
+    {
+        for (int i = 0; i < inputs.size(); i++)
+        {
+            fd.push_back(-1);
+        }
+    }
+};
+
 using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
-using KernelFunc = void (*)(const std::vector<const void *> &inputs,
-                            const std::vector<void *> &outputs,
-                            const std::vector<TensorView> &inViews,
-                            const std::vector<TensorView> &outViews);
+using KernelFunc = void (*)(const KernelContext &ctx);
 using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph);
 using InferViewFunc = void (*)(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph);
 

@@ -7,15 +7,14 @@ inline bool matchSumF32_ND(const std::vector<TensorNode> &inputs, const TensorNo
     return output.dtype == DType::FLOAT32;
 }
 
-inline void runSumF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                         const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runSumF32_ND(const KernelContext &ctx)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
-    int32_t axis = *static_cast<const int32_t *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *in = static_cast<const float *>(ctx.inputs[0]);
+    int32_t axis = *static_cast<const int32_t *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    const auto &inShape = inViews[0].getShape();
-    const auto &outShape = outViews[0].getShape();
+    const auto &inShape = ctx.inViews[0].getShape();
+    const auto &outShape = ctx.outViews[0].getShape();
     int ndim = static_cast<int>(inShape.size());
     if (axis < 0)
         axis += ndim;
@@ -24,7 +23,7 @@ inline void runSumF32_ND(const std::vector<const void *> &inputs, const std::vec
     uint64_t out_count = countElements(outShape);
     for (uint64_t i = 0; i < out_count; ++i)
     {
-        out[getStridedIndex(i, outShape, outViews[0].strides)] = 0.0f;
+        out[getStridedIndex(i, outShape, ctx.outViews[0].strides)] = 0.0f;
     }
 
     uint64_t in_count = countElements(inShape);
@@ -40,10 +39,10 @@ inline void runSumF32_ND(const std::vector<const void *> &inputs, const std::vec
             temp /= inShape[d];
             // If d is the reduction axis, it contributes to output coord 0 (since dim is 1)
             uint32_t out_coord = (d == axis) ? 0 : coord;
-            out_phys_idx += (uint64_t)out_coord * outViews[0].strides[d];
+            out_phys_idx += (uint64_t)out_coord * ctx.outViews[0].strides[d];
         }
 
-        out[out_phys_idx] += in[getStridedIndex(i, inShape, inViews[0].strides)];
+        out[out_phys_idx] += in[getStridedIndex(i, inShape, ctx.inViews[0].strides)];
     }
 }
 

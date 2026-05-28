@@ -11,15 +11,14 @@ inline bool matchArgmaxI32_ND(const std::vector<TensorNode> &inputs, const Tenso
     return isContiguous(output);
 }
 
-inline void runArgmaxI32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                            const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runArgmaxI32_ND(const KernelContext &ctx)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
-    int32_t axis = *static_cast<const int32_t *>(inputs[1]);
-    int32_t k = *static_cast<const int32_t *>(inputs[2]);
-    int32_t *out = static_cast<int32_t *>(outputs[0]);
+    const float *in = static_cast<const float *>(ctx.inputs[0]);
+    int32_t axis = *static_cast<const int32_t *>(ctx.inputs[1]);
+    int32_t k = *static_cast<const int32_t *>(ctx.inputs[2]);
+    int32_t *out = static_cast<int32_t *>(ctx.outputs[0]);
 
-    const auto &inShape = inViews[0].getShape();
+    const auto &inShape = ctx.inViews[0].getShape();
     int ndim = static_cast<int>(inShape.size());
     if (axis < 0)
         axis += ndim;

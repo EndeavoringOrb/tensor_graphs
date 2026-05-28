@@ -285,22 +285,6 @@ struct DeviceBuffer
         }
     }
 
-    const uint8_t *read(uint32_t nodeId) const
-    {
-        auto it = allocationMap.find(nodeId);
-        if (it != allocationMap.end())
-        {
-#ifdef USE_CUDA
-            if (backend == Backend::CUDA)
-            {
-                cudaDeviceSynchronize();
-            }
-#endif
-            return arena_ptr + it->second->offset;
-        }
-        return nullptr;
-    }
-
     void defrag()
     {
         uint64_t offset = 0;
@@ -502,21 +486,6 @@ struct MemoryManager
         }
 
         buffers.at(backend).write(targetId, data, size);
-    }
-
-    const uint8_t *read(Backend backend, uint32_t nodeId) const
-    {
-        auto it = buffers.find(backend);
-        if (it == buffers.end())
-            Error::throw_err("[MemoryManager.read] DeviceBuffer not initialized for backend " + toString(backend));
-
-        uint32_t targetId = nodeId;
-        while (aliasMap.find(targetId) != aliasMap.end())
-        {
-            targetId = aliasMap.at(targetId);
-        }
-
-        return buffers.at(backend).read(targetId);
     }
 
     void release(Backend backend, uint32_t nodeId)

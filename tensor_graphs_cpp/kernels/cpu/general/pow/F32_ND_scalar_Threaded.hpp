@@ -15,14 +15,13 @@ inline bool matchPowF32_ND_Scalar_Threaded(const std::vector<TensorNode> &inputs
     return isContiguous(output);
 }
 
-inline void runPowF32_ND_Scalar_Threaded(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                         const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runPowF32_ND_Scalar_Threaded(const KernelContext &ctx)
 {
-    const float *dataND = static_cast<const float *>(inputs[0]);
-    float scalarValue = *static_cast<const float *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *dataND = static_cast<const float *>(ctx.inputs[0]);
+    float scalarValue = *static_cast<const float *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    uint64_t totalElements = countElements(inViews[0].getShape());
+    uint64_t totalElements = countElements(ctx.inViews[0].getShape());
     uint32_t num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0)
         num_threads = 1;

@@ -7,7 +7,8 @@ struct TensorMetadata
 {
     DType dtype;
     std::vector<uint32_t> shape;
-    uint64_t sizeBytes;
+    uint64_t dataOffsetStart;
+    uint64_t dataOffsetEnd;
 };
 
 class ModelLoader

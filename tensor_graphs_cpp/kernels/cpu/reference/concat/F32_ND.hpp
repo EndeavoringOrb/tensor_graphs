@@ -11,27 +11,26 @@ inline bool matchConcatF32_ND(const std::vector<TensorNode> &inputs, const Tenso
     return true;
 }
 
-inline void runConcatF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                            const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runConcatF32_ND(const KernelContext &ctx)
 {
-    float *out = static_cast<float *>(outputs[0]);
-    const std::vector<uint32_t> &outShape = outViews[0].getShape();
-    const std::vector<uint64_t> &outStrides = outViews[0].strides;
+    float *out = static_cast<float *>(ctx.outputs[0]);
+    const std::vector<uint32_t> &outShape = ctx.outViews[0].getShape();
+    const std::vector<uint64_t> &outStrides = ctx.outViews[0].strides;
     uint32_t rank = static_cast<uint32_t>(outShape.size());
 
     // The axis is stored in the last input tensor
-    int32_t axis = *static_cast<const int32_t *>(inputs.back());
+    int32_t axis = *static_cast<const int32_t *>(ctx.inputs.back());
     if (axis < 0)
         axis += static_cast<int32_t>(rank);
 
     // Calculate the starting offset along the 'axis' for each input tensor
-    std::vector<uint32_t> axis_offsets(inputs.size(), 0);
-    for (size_t n = 0; n < inputs.size() - 1; ++n)
+    std::vector<uint32_t> axis_offsets(ctx.inputs.size(), 0);
+    for (size_t n = 0; n < ctx.inputs.size() - 1; ++n)
     {
-        axis_offsets[n + 1] = axis_offsets[n] + inViews[n].getShape()[axis];
+        axis_offsets[n + 1] = axis_offsets[n] + ctx.inViews[n].getShape()[axis];
     }
 
-    uint64_t totalElements = countElements(outViews[0]);
+    uint64_t totalElements = countElements(ctx.outViews[0]);
 
     for (uint64_t i = 0; i < totalElements; ++i)
     {
@@ -43,7 +42,7 @@ inline void runConcatF32_ND(const std::vector<const void *> &inputs, const std::
         size_t n = 0;
         // Search for n such that axis_offsets[n] <= axis_coord < axis_offsets[n+1]
         // data tensors are in indices 0 to inputs.size() - 2
-        while (n < inputs.size() - 2 && axis_coord >= axis_offsets[n + 1])
+        while (n < ctx.inputs.size() - 2 && axis_coord >= axis_offsets[n + 1])
         {
             n++;
         }
@@ -53,13 +52,13 @@ inline void runConcatF32_ND(const std::vector<const void *> &inputs, const std::
         local_coords[axis] = axis_coord - axis_offsets[n];
 
         // 4. Calculate flat index within the local input tensor
-        uint64_t local_flat_idx = flatIndexFromCoords(local_coords, inViews[n].getShape());
+        uint64_t local_flat_idx = flatIndexFromCoords(local_coords, ctx.inViews[n].getShape());
 
         // 5. Use strides to find actual physical memory locations
         uint64_t out_phys_idx = getStridedIndex(i, outShape, outStrides);
-        uint64_t in_phys_idx = getStridedIndex(local_flat_idx, inViews[n].getShape(), inViews[n].strides);
+        uint64_t in_phys_idx = getStridedIndex(local_flat_idx, ctx.inViews[n].getShape(), ctx.inViews[n].strides);
 
-        const float *in_ptr = static_cast<const float *>(inputs[n]);
+        const float *in_ptr = static_cast<const float *>(ctx.inputs[n]);
         out[out_phys_idx] = in_ptr[in_phys_idx];
     }
 }

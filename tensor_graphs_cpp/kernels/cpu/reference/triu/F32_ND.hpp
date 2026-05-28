@@ -8,13 +8,12 @@ inline bool matchTriuF32_ND(const std::vector<TensorNode> &inputs, const TensorN
     return output.dtype == DType::FLOAT32 && isContiguous(output);
 }
 
-inline void runTriuF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                          const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runTriuF32_ND(const KernelContext &ctx)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
-    int32_t k = *static_cast<const int32_t *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
-    const auto &shape = outViews[0].getShape();
+    const float *in = static_cast<const float *>(ctx.inputs[0]);
+    int32_t k = *static_cast<const int32_t *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
+    const auto &shape = ctx.outViews[0].getShape();
     uint32_t cols = shape.back();
     uint32_t rows = shape[shape.size() - 2];
     uint64_t batch = countElements(shape) / (rows * cols);

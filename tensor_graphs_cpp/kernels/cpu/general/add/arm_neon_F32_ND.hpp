@@ -28,14 +28,13 @@ inline bool matchAddF32_ND_NEON(const std::vector<TensorNode> &inputs, const Ten
     return isContiguous(output);
 }
 
-inline void runAddF32_ND_NEON(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runAddF32_ND_NEON(const KernelContext& ctx)
 {
-    const float *a_base = static_cast<const float *>(inputs[0]);
-    const float *b_base = static_cast<const float *>(inputs[1]);
-    float *out_base = static_cast<float *>(outputs[0]);
+    const float *a_base = static_cast<const float *>(ctx.inputs[0]);
+    const float *b_base = static_cast<const float *>(ctx.inputs[1]);
+    float *out_base = static_cast<float *>(ctx.outputs[0]);
 
-    const uint64_t n = countElements(inViews[0].getShape());
+    const uint64_t n = countElements(ctx.inViews[0].getShape());
     if (n == 0)
         return;
 

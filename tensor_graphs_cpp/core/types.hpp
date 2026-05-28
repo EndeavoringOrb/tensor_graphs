@@ -124,6 +124,7 @@ inline uint64_t getDTypeSize(DType dtype)
 enum class OpType : uint32_t
 {
     INPUT,
+    CACHE,
 
     ADD,
     MUL,
@@ -162,6 +163,7 @@ inline constexpr bool isAtomic(OpType type)
 
 enum class Backend : uint32_t
 {
+    STORAGE,
     CPU,
     CUDA
 };
@@ -170,7 +172,7 @@ enum class StorageType : uint32_t
 {
     TRANSIENT,
     PERSISTENT,
-    PINNED
+    PINNED // TODO: change to CACHE? or merge with PERSISTENT if OpType::CACHE is enough to differentiate?
 };
 
 struct TensorGraphError : public std::runtime_error
@@ -237,6 +239,41 @@ struct Region
         return region.empty();
     }
 };
+
+inline bool operator==(const Region &a, const Region &b)
+{
+    if (a.region.size() != b.region.size())
+    {
+        return false;
+    }
+    for (int i = 0; i < a.region.size(); i++)
+    {
+        if (a.region[i].start != b.region[i].start)
+        {
+            return false;
+        }
+        if (a.region[i].stop != b.region[i].stop)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool operator<=(const Region &a, const Region &b)
+{
+    // Does b completely cover a?
+    if (a.region.size() != b.region.size())
+    {
+        Error::throw_err("[Region<Region] cannot compare regions with sizes " + std::to_string(a.region.size()) + " and " + std::to_string(b.region.size()));
+    }
+    bool covers = true;
+    for (int i = 0; i < a.region.size(); i++)
+    {
+        covers = covers && (a.region[i].start >= b.region[i].start) && (a.region[i].stop <= b.region[i].stop);
+    }
+    return covers;
+}
 
 inline bool regionsMatch(const Region &r1, const Region &r2);
 
@@ -462,12 +499,14 @@ inline DType fromString(const std::string &str)
     Error::throw_err("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for that instead of generic runtime_error
 }
 
-inline std::string toString(OpType op)
+inline std::string toString(OpType op) // TODO: make build.py check that each op has a case here
 {
     switch (op)
     {
     case OpType::INPUT:
         return "INPUT";
+    case OpType::CACHE:
+        return "CACHE";
     case OpType::ADD:
         return "ADD";
     case OpType::MUL:
@@ -527,10 +566,12 @@ inline std::string toString(OpType op)
     }
 }
 
-inline std::string toString(Backend backend)
+inline std::string toString(Backend backend) // TODO: make build.py check that each backend has a case here
 {
     switch (backend)
     {
+    case Backend::STORAGE:
+        return "STORAGE";
     case Backend::CPU:
         return "CPU";
     case Backend::CUDA:
@@ -706,8 +747,108 @@ struct OpInstruction
     StorageType outputStorageType = StorageType::TRANSIENT;
 };
 
+struct Bucket
+{
+    std::unordered_map<uint32_t, std::vector<Region>> inputDirtyRegions;
+    std::vector<Region> outputNeededRegion;
+};
+
+inline void tg_serialize(BinaryWriter &bw, const Bucket &val)
+{
+    uint32_t constSize = static_cast<uint32_t>(val.inputDirtyRegions.size());
+    bw.write(constSize);
+    for (const auto &pair : val.inputDirtyRegions)
+    {
+        bw.write(pair.first);
+        // TODO: make a tg_serialize that handles any vector as long as it can handle the type in the vector
+        uint32_t regionsSize = static_cast<uint32_t>(pair.second.size());
+        bw.write(regionsSize);
+        for (const Region &r : pair.second)
+        {
+            bw.write(r);
+        }
+    }
+
+    uint32_t outputSize = static_cast<uint32_t>(val.outputNeededRegion.size());
+    bw.write(outputSize);
+    for (const Region &r : val.outputNeededRegion)
+    {
+        bw.write(r);
+    }
+}
+inline void tg_deserialize(BinaryReader &br, Bucket &val)
+{
+    uint32_t constSize;
+    br.read(constSize);
+    for (int i = 0; i < constSize; i++)
+    {
+        uint32_t first;
+        br.read(first);
+        uint32_t size;
+        br.read(size);
+        std::vector<Region> regs;
+        for (int j = 0; j < size; j++)
+        {
+            Region r;
+            br.read(r);
+            regs.push_back(r);
+        }
+        val.inputDirtyRegions[first] = regs;
+    }
+    uint32_t outSize;
+    br.read(outSize);
+    std::vector<Region> outRegs;
+    for (int j = 0; j < outSize; j++)
+    {
+        Region r;
+        br.read(r);
+        outRegs.push_back(r);
+    }
+    val.outputNeededRegion = outRegs;
+}
+
+inline bool operator==(const Bucket &a, const Bucket &b)
+{
+    bool equal = true;
+    if (a.inputDirtyRegions.size() != b.inputDirtyRegions.size())
+    {
+        return false;
+    }
+    for (const auto &pair : a.inputDirtyRegions)
+    {
+        if (b.inputDirtyRegions.count(pair.first) == 0)
+        {
+            return false;
+        }
+        if (pair.second.size() != b.inputDirtyRegions.at(pair.first).size())
+        {
+            return false;
+        }
+        for (int i = 0; i < pair.second.size(); i++)
+        {
+            if (pair.second[i] != b.inputDirtyRegions.at(pair.first)[i])
+            {
+                return false;
+            }
+        }
+    }
+    if (a.outputNeededRegion.size() != b.outputNeededRegion.size())
+    {
+        return false;
+    }
+    for (int i = 0; i < a.outputNeededRegion.size(); i++)
+    {
+        if (a.outputNeededRegion[i] != b.outputNeededRegion[i])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 struct CompiledGraph
 {
+    Bucket bucket;
     std::vector<OpInstruction> instructions;
     std::unordered_map<uint32_t, uint32_t> refCounts;
     std::unordered_map<uint32_t, TensorNode> nodesMap;
@@ -716,6 +857,16 @@ struct CompiledGraph
     // compiled physical node id -> original logical node id.
     std::unordered_map<uint32_t, uint32_t> physicalToLogicalNodeMap;
     std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
+
+    float cost() const
+    {
+        float sum = 0.0f;
+        for (const auto &pair : nodeCosts)
+        {
+            sum += pair.second;
+        }
+        return sum;
+    }
 
     const uint32_t getLogicalId(uint32_t id) const
     {
@@ -870,6 +1021,7 @@ inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
 
 inline void tg_serialize(BinaryWriter &bw, const CompiledGraph &val)
 {
+    bw.write(val.bucket);
     bw.write(val.instructions);
     bw.write(val.refCounts);
     bw.write(val.nodesMap);
@@ -886,6 +1038,7 @@ inline void tg_serialize(BinaryWriter &bw, const CompiledGraph &val)
 }
 inline void tg_deserialize(BinaryReader &br, CompiledGraph &val)
 {
+    br.read(val.bucket);
     br.read(val.instructions);
     br.read(val.refCounts);
     br.read(val.nodesMap);

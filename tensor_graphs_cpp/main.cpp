@@ -121,7 +121,7 @@ void run_autoregressive_llm(
 
         Region outputNeeded;
         outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
-        session.addManualBucket(inputDirty, {outputNeeded});
+        session.addBucket(inputDirty, {outputNeeded});
     }
 
     if (only_plan)
@@ -129,6 +129,7 @@ void run_autoregressive_llm(
         session.plan();
         return;
     }
+    session.compile();
 
     std::vector<int32_t> input_data(max_seq_len, 0);
     std::vector<float> host_output;
@@ -142,11 +143,20 @@ void run_autoregressive_llm(
         for (size_t i = 0; i < tokens.size(); ++i)
             input_data[i] = (int32_t)tokens[i];
 
-        std::unordered_map<uint32_t, const void *> inputs;
-        inputs[inputIdsId] = input_data.data();
+        session.memManager.write(Backend::CPU, inputIdsId, input_data.data(), input_data.size() * sizeof(int32_t));
+
+        Bucket b;
+        if (step != 0)
+        {
+            uint32_t nToks = tokens.size();
+            Region inputRegion = {{{0, 1}, {nToks, nToks + 1}}};
+            Region outputRegion = {{{0, 1}, {nToks, nToks + 1}, {0, vocab_size}}};
+            b.inputDirtyRegions = {{inputIdsId, {inputRegion}}};
+            b.outputNeededRegion = {outputRegion};
+        }
 
         auto start = std::chrono::high_resolution_clock::now();
-        const float *device_output_ptr = static_cast<const float *>(session.run(inputs));
+        const float *device_output_ptr = static_cast<const float *>(session.run(b)); // TODO: on steps after the first, pass a bucket
         auto end = std::chrono::high_resolution_clock::now();
         float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
 
@@ -332,8 +342,8 @@ void run_flux(bool only_plan)
 
     std::cout << "Executing Text Encoder..." << std::endl;
     std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);
-    std::unordered_map<uint32_t, const void *> text_inputs = {{in_ids, input_ids.data()}};
-    const float *text_emb_ptr = static_cast<const float *>(sess_text.run(text_inputs));
+    sess_text.memManager.write(Backend::CPU, in_ids, input_ids.data(), input_ids.size() * sizeof(int32_t));
+    const float *text_emb_ptr = static_cast<const float *>(sess_text.run());
 
     std::vector<float> text_emb_buf;
     const float *text_emb_host = sync_output_to_host(text_emb_ptr, 1 * txt_seq * cfg.text_dim, text_emb_buf);
@@ -358,7 +368,7 @@ void run_flux(bool only_plan)
         float t_curr = schedule[i], dt = schedule[i + 1] - t_curr;
         std::unordered_map<uint32_t, const void *> trans_inputs = {{in_latent, z.data()}, {in_txt_emb, text_emb.data()}, {in_t, &t_curr}, {in_cos, rope_cos.data()}, {in_sin, rope_sin.data()}};
 
-        const float *v_ptr = static_cast<const float *>(sess_trans.run(trans_inputs));
+        const float *v_ptr = static_cast<const float *>(sess_trans.run()); // TODO: write trans_inputs to mem manager
 
         std::vector<float> v_buf;
         const float *v_host_ptr = sync_output_to_host(v_ptr, z.size(), v_buf);
@@ -371,7 +381,7 @@ void run_flux(bool only_plan)
 
     std::cout << "Executing VAE Decoder..." << std::endl;
     std::unordered_map<uint32_t, const void *> vae_inputs = {{in_vae_latent, z.data()}};
-    const float *img_ptr = static_cast<const float *>(sess_vae.run(vae_inputs));
+    const float *img_ptr = static_cast<const float *>(sess_vae.run()); // TODO: write vae_inputs to memManager
 
     std::vector<float> img_buf;
     img_ptr = sync_output_to_host(img_ptr, 3 * height * width, img_buf);

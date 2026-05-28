@@ -12,12 +12,11 @@ inline bool matchGeluF32_3D_Threaded(const std::vector<TensorNode> &inputs, cons
     return inputs[0].getShape().size() == 3 && isContiguous(output);
 }
 
-inline void runGeluF32_3D_Threaded(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                   const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runGeluF32_3D_Threaded(const KernelContext &ctx)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
-    float *out = static_cast<float *>(outputs[0]);
-    uint64_t n = countElements(inViews[0].getShape());
+    const float *in = static_cast<const float *>(ctx.inputs[0]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
+    uint64_t n = countElements(ctx.inViews[0].getShape());
 
     uint32_t num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0)

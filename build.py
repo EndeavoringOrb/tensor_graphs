@@ -235,7 +235,9 @@ def generate_kernel_uids(core_seed):
                 combined = core_seed + file_content_hash
                 full_hash = hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
-                uid_val_raw = int(full_hash[:16], 16) # TODO: use full hash instead of first 16 chars
+                uid_val_raw = int(
+                    full_hash[:16], 16
+                )  # TODO: use full hash instead of first 16 chars
                 uid_val = f"0x{uid_val_raw:016x}ULL"
 
                 if uid_val in uid_to_path:
@@ -434,7 +436,6 @@ def compile_project(targets=None):
         cmd_str = " ".join(cmd)
         if os.name == "nt":
             arch = "amd64" if USE_CUDA else "arm64"
-            # Setting environment headers logic continues to be applied nicely before invocation
             full_command = f'"{VCVARS_PATH}" {arch} && {cmd_str}'
         else:
             full_command = cmd_str
@@ -446,12 +447,22 @@ def compile_project(targets=None):
         if result.returncode != 0:
             console.print(
                 Panel(
-                    f"[red]{result.stdout}[/red]\n\n[red]{result.stderr}[/red]",
+                    f"{result.stdout}\n\n[red]{result.stderr}[/red]",
                     title="[bold red]COMPILER ERROR[/bold red]",
                     border_style="red",
                 )
             )
             sys.exit(1)
+        else:
+            # Display non-fatal warning messages (e.g. deprecations) in a yellow block
+            if result.stderr.strip():
+                console.print(
+                    Panel(
+                        f"{result.stdout}[yellow]{result.stderr}[/yellow]",
+                        title="[bold yellow]BUILD WARNINGS[/bold yellow]",
+                        border_style="yellow",
+                    )
+                )
         return result
 
     if USE_CUDA:
@@ -528,7 +539,7 @@ def main():
     parser.add_argument(
         "--targets",
         nargs="+",
-        help="Specify which target C++ files to build (e.g. main, bench, test, test_model)"
+        help="Specify which target C++ files to build (e.g. main, bench, test, test_model)",
     )
     args = parser.parse_args()
 

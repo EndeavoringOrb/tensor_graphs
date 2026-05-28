@@ -12,15 +12,14 @@ inline bool matchGatherBF16(const std::vector<TensorNode> &inputs, const TensorN
     return true;
 }
 
-inline void runGatherBF16(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                          const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runGatherBF16(const KernelContext &ctx)
 {
-    const uint16_t *data = static_cast<const uint16_t *>(inputs[0]);
-    const int32_t *indices = static_cast<const int32_t *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
+    const uint16_t *data = static_cast<const uint16_t *>(ctx.inputs[0]);
+    const int32_t *indices = static_cast<const int32_t *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    const auto &dataShape = inViews[0].getShape();
-    const auto &idxShape = inViews[1].getShape();
+    const auto &dataShape = ctx.inViews[0].getShape();
+    const auto &idxShape = ctx.inViews[1].getShape();
 
     uint32_t vocabSize = dataShape[0];
     uint64_t rowSize = 1;

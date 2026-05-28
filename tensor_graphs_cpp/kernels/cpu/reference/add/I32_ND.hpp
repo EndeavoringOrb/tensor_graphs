@@ -9,19 +9,18 @@ inline bool matchAddI32_ND(const std::vector<TensorNode> &inputs, const TensorNo
     return true;
 }
 
-inline void runAddI32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                         const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runAddI32_ND(const KernelContext &ctx)
 {
-    const int32_t *a = static_cast<const int32_t *>(inputs[0]);
-    const int32_t *b = static_cast<const int32_t *>(inputs[1]);
-    int32_t *out = static_cast<int32_t *>(outputs[0]);
-    uint64_t numElements = countElements(inViews[0].getShape());
+    const int32_t *a = static_cast<const int32_t *>(ctx.inputs[0]);
+    const int32_t *b = static_cast<const int32_t *>(ctx.inputs[1]);
+    int32_t *out = static_cast<int32_t *>(ctx.outputs[0]);
+    uint64_t numElements = countElements(ctx.inViews[0].getShape());
 
     for (uint64_t i = 0; i < numElements; ++i)
     {
-        out[getStridedIndex(i, outViews[0].getShape(), outViews[0].strides)] =
-            a[getStridedIndex(i, inViews[0].getShape(), inViews[0].strides)] +
-            b[getStridedIndex(i, inViews[1].getShape(), inViews[1].strides)];
+        out[getStridedIndex(i, ctx.outViews[0].getShape(), ctx.outViews[0].strides)] =
+            a[getStridedIndex(i, ctx.inViews[0].getShape(), ctx.inViews[0].strides)] +
+            b[getStridedIndex(i, ctx.inViews[1].getShape(), ctx.inViews[1].strides)];
     }
 }
 

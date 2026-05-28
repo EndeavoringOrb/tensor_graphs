@@ -11,11 +11,10 @@ inline bool matchGeluF32_3D_Inplace_Threaded(const std::vector<TensorNode> &inpu
     return inputs[0].getShape().size() == 3 && isContiguous(output) && inputs[0].storageType != StorageType::PERSISTENT;
 }
 
-inline void runGeluF32_3D_Inplace_Threaded(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                               const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runGeluF32_3D_Inplace_Threaded(const KernelContext &ctx)
 {
-    float *out = static_cast<float *>(outputs[0]);
-    uint64_t n = countElements(inViews[0].getShape());
+    float *out = static_cast<float *>(ctx.outputs[0]);
+    uint64_t n = countElements(ctx.inViews[0].getShape());
 
     uint32_t num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0) num_threads = 1;

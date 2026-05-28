@@ -17,15 +17,14 @@ inline bool matchMulFP32_3D_1D_Inplace(const std::vector<TensorNode> &inputs, co
     return true;
 }
 
-inline void runMulFP32_3D_1D_Inplace(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                     const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runMulFP32_3D_1D_Inplace(const KernelContext &ctx)
 {
-    float *data3D = static_cast<float *>(outputs[0]);
-    const float *data1D = static_cast<const float *>(inputs[1]);
+    float *data3D = static_cast<float *>(ctx.outputs[0]);
+    const float *data1D = static_cast<const float *>(ctx.inputs[1]);
 
-    uint32_t B = outViews[0].getShape()[0];
-    uint32_t S = outViews[0].getShape()[1];
-    uint32_t D = outViews[0].getShape()[2];
+    uint32_t B = ctx.outViews[0].getShape()[0];
+    uint32_t S = ctx.outViews[0].getShape()[1];
+    uint32_t D = ctx.outViews[0].getShape()[2];
     uint64_t totalElements = (uint64_t)B * S * D;
 
     for (uint64_t i = 0; i < totalElements; ++i)

@@ -1,7 +1,6 @@
 #pragma once
 #include "core/types.hpp"
-#include "core/loaders/base_loader.hpp"
-#include "core/loaders/safetensors.hpp"
+#include "core/loaders/loader.hpp"
 #include "core/memory.hpp"
 #include <vector>
 #include <stdexcept>
@@ -18,46 +17,10 @@ struct IdAllocator
     uint32_t allocate() { return nextId++; }
 };
 
-inline std::shared_ptr<ModelLoader> createLoader(const std::string &path)
-{
-    namespace fs = std::filesystem;
-    if (fs::is_directory(path))
-    {
-        bool has_safetensors = false;
-        for (const auto &entry : fs::directory_iterator(path))
-        {
-            if (entry.path().extension() == ".safetensors")
-                has_safetensors = true;
-        }
-        if (has_safetensors)
-        {
-            return std::make_shared<SafetensorsLoader>(path);
-        }
-        else
-        {
-            Error::throw_err("[LoaderFactory] No model files found in directory: " + path);
-        }
-    }
-    else
-    {
-        fs::path p(path);
-        if (p.extension() == ".safetensors")
-        {
-            return std::make_shared<SafetensorsLoader>(path);
-        }
-        else
-        {
-            return std::make_shared<SafetensorsLoader>(path);
-        }
-    }
-}
-
 struct Graph
 {
     std::unordered_map<uint32_t, TensorNode> nodes;
     std::shared_ptr<IdAllocator> allocator;
-    std::unordered_map<std::string, std::shared_ptr<ModelLoader>> loaders;           // Mapping of path -> polymorphic Loader instance
-    std::unordered_map<uint32_t, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
 
     std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
@@ -86,14 +49,6 @@ struct Graph
         return nodes[id];
     }
 
-    void registerLoader(const std::string &path)
-    {
-        if (loaders.find(path) == loaders.end())
-        {
-            loaders[path] = createLoader(path);
-        }
-    }
-
     uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype, std::source_location loc = std::source_location::current())
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
@@ -113,9 +68,7 @@ struct Graph
 
     uint32_t weight(const std::string &path, const std::string &name, std::source_location loc = std::source_location::current())
     {
-        registerLoader(path);
-        auto &loader = loaders.at(path);
-        if (!loader->hasTensor(name))
+        if (!FileRegistry::get().hasTensor(path, name))
         {
             Error::throw_err("Tensor '" + name + "' not found in: " + path);
         }
@@ -123,12 +76,12 @@ struct Graph
         SHA256 sha;
         sha.update(path + "::" + name);
 
-        const auto &meta = loader->getMetadata(name);
-        TensorNode &node = allocateNode(OpType::INPUT, "", meta.dtype, {}, meta.shape, {}, Backend::CPU, StorageType::PERSISTENT, sha.digest(), loc);
-        uint32_t id = node.id;
-        weightSources[id] = {path, name};
+        const auto &meta = FileRegistry::get().getMetadata(path, name);
+        TensorNode &node = allocateNode(OpType::INPUT, name, meta.dtype, {}, meta.shape, {}, Backend::STORAGE, StorageType::PERSISTENT, sha.digest(), loc);
+        FileRegistry::get().registerNode(node.id, path, name);
+        TensorNode &copyNode = allocateNode(OpType::COPY_TO, "", meta.dtype, {node.id}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
 
-        return id;
+        return copyNode.id;
     }
 
     uint32_t input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {}, StorageType storageType = StorageType::PERSISTENT, std::source_location loc = std::source_location::current())

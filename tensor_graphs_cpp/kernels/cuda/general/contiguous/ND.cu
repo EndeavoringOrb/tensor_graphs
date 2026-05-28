@@ -81,14 +81,13 @@ inline bool matchContiguous_CUDA_ND(const std::vector<TensorNode> &inputs, const
  * Run Function:
  * Prepares the stride and shape metadata and launches the GPU kernel.
  */
-inline void runContiguous_CUDA_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                  const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runContiguous_CUDA_ND(const KernelContext &ctx)
 {
-    const uint8_t *src = static_cast<const uint8_t *>(inputs[0]);
-    uint8_t *dst = static_cast<uint8_t *>(outputs[0]);
+    const uint8_t *src = static_cast<const uint8_t *>(ctx.inputs[0]);
+    uint8_t *dst = static_cast<uint8_t *>(ctx.outputs[0]);
 
-    uint64_t numElements = countElements(outViews[0].getShape());
-    uint64_t elemSize = getDTypeSize(inViews[0].dtype);
+    uint64_t numElements = countElements(ctx.outViews[0].getShape());
+    uint64_t elemSize = getDTypeSize(ctx.inViews[0].dtype);
     if (numElements == 0)
         return;
 
@@ -97,8 +96,8 @@ inline void runContiguous_CUDA_ND(const std::vector<const void *> &inputs, const
 
     for (uint32_t i = 0; i < p.rank; ++i)
     {
-        p.shape[i] = outViews[0].getShape()[i];
-        p.in_strides[i] = inViews[0].strides[i];
+        p.shape[i] = ctx.outViews[0].getShape()[i];
+        p.in_strides[i] = ctx.inViews[0].strides[i];
     }
 
     int blockSize = 256;

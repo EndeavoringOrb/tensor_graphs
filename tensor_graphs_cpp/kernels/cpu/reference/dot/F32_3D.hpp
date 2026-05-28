@@ -17,16 +17,15 @@ inline bool matchDotF32_3D(const std::vector<TensorNode> &inputs, const TensorNo
     return true;
 }
 
-inline void runDotF32_3D(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                         const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runDotF32_3D(const KernelContext &ctx)
 {
-    const float *A = static_cast<const float *>(inputs[0]);
-    const float *B = static_cast<const float *>(inputs[1]);
-    float *C = static_cast<float *>(outputs[0]);
+    const float *A = static_cast<const float *>(ctx.inputs[0]);
+    const float *B = static_cast<const float *>(ctx.inputs[1]);
+    float *C = static_cast<float *>(ctx.outputs[0]);
 
-    const auto &viewA = inViews[0];
-    const auto &viewB = inViews[1];
-    const auto &viewC = outViews[0];
+    const auto &viewA = ctx.inViews[0];
+    const auto &viewB = ctx.inViews[1];
+    const auto &viewC = ctx.outViews[0];
 
     uint32_t B_count = viewA.getShape()[0];
     uint32_t M = viewA.getShape()[1];

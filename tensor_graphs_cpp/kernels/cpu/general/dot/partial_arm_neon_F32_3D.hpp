@@ -34,29 +34,26 @@ inline bool matchScatterDotF32_3D_Optimized_Inplace(const std::vector<TensorNode
     return true;
 }
 
-inline void runScatterDotF32_3D_Optimized_Inplace(const std::vector<const void *> &inputs,
-                                                  const std::vector<void *> &outputs,
-                                                  const std::vector<TensorView> &inViews,
-                                                  const std::vector<TensorView> &outViews)
+inline void runScatterDotF32_3D_Optimized_Inplace(const KernelContext &ctx)
 {
-    const float *A_ptr = static_cast<const float *>(inputs[1]);
-    const float *B_ptr = static_cast<const float *>(inputs[2]);
+    const float *A_ptr = static_cast<const float *>(ctx.inputs[1]);
+    const float *B_ptr = static_cast<const float *>(ctx.inputs[2]);
 
-    const int32_t *starts_raw = static_cast<const int32_t *>(inputs[3]);
-    const int32_t *ends_raw = static_cast<const int32_t *>(inputs[4]);
-    const int32_t *steps_raw = static_cast<const int32_t *>(inputs[5]);
-    const int32_t *startsA_raw = static_cast<const int32_t *>(inputs[6]);
-    const int32_t *endsA_raw = static_cast<const int32_t *>(inputs[7]);
-    const int32_t *stepsA_raw = static_cast<const int32_t *>(inputs[8]);
-    const int32_t *startsB_raw = static_cast<const int32_t *>(inputs[9]);
-    const int32_t *endsB_raw = static_cast<const int32_t *>(inputs[10]);
-    const int32_t *stepsB_raw = static_cast<const int32_t *>(inputs[11]);
+    const int32_t *starts_raw = static_cast<const int32_t *>(ctx.inputs[3]);
+    const int32_t *ends_raw = static_cast<const int32_t *>(ctx.inputs[4]);
+    const int32_t *steps_raw = static_cast<const int32_t *>(ctx.inputs[5]);
+    const int32_t *startsA_raw = static_cast<const int32_t *>(ctx.inputs[6]);
+    const int32_t *endsA_raw = static_cast<const int32_t *>(ctx.inputs[7]);
+    const int32_t *stepsA_raw = static_cast<const int32_t *>(ctx.inputs[8]);
+    const int32_t *startsB_raw = static_cast<const int32_t *>(ctx.inputs[9]);
+    const int32_t *endsB_raw = static_cast<const int32_t *>(ctx.inputs[10]);
+    const int32_t *stepsB_raw = static_cast<const int32_t *>(ctx.inputs[11]);
 
-    float *out_cache_ptr = static_cast<float *>(outputs[0]);
+    float *out_cache_ptr = static_cast<float *>(ctx.outputs[0]);
 
-    const TensorView &view_cache = outViews[0];
-    const TensorView &view_A = inViews[1];
-    const TensorView &view_B = inViews[2];
+    const TensorView &view_cache = ctx.outViews[0];
+    const TensorView &view_A = ctx.inViews[1];
+    const TensorView &view_B = ctx.inViews[2];
 
     int32_t starts[3], ends[3], steps[3];
     int32_t startsA[3], endsA[3], stepsA[3];
@@ -64,17 +61,17 @@ inline void runScatterDotF32_3D_Optimized_Inplace(const std::vector<const void *
 
     for (int i = 0; i < 3; ++i)
     {
-        starts[i] = (inViews[3].getShape().empty() || i >= (int)inViews[3].getShape()[0]) ? 0 : starts_raw[i];
-        ends[i] = (inViews[4].getShape().empty() || i >= (int)inViews[4].getShape()[0]) ? view_cache.getShape()[i] : ends_raw[i];
-        steps[i] = (inViews[5].getShape().empty() || i >= (int)inViews[5].getShape()[0]) ? 1 : steps_raw[i];
+        starts[i] = (ctx.inViews[3].getShape().empty() || i >= (int)ctx.inViews[3].getShape()[0]) ? 0 : starts_raw[i];
+        ends[i] = (ctx.inViews[4].getShape().empty() || i >= (int)ctx.inViews[4].getShape()[0]) ? view_cache.getShape()[i] : ends_raw[i];
+        steps[i] = (ctx.inViews[5].getShape().empty() || i >= (int)ctx.inViews[5].getShape()[0]) ? 1 : steps_raw[i];
 
-        startsA[i] = (inViews[6].getShape().empty() || i >= (int)inViews[6].getShape()[0]) ? 0 : startsA_raw[i];
-        endsA[i] = (inViews[7].getShape().empty() || i >= (int)inViews[7].getShape()[0]) ? view_A.getShape()[i] : endsA_raw[i];
-        stepsA[i] = (inViews[8].getShape().empty() || i >= (int)inViews[8].getShape()[0]) ? 1 : stepsA_raw[i];
+        startsA[i] = (ctx.inViews[6].getShape().empty() || i >= (int)ctx.inViews[6].getShape()[0]) ? 0 : startsA_raw[i];
+        endsA[i] = (ctx.inViews[7].getShape().empty() || i >= (int)ctx.inViews[7].getShape()[0]) ? view_A.getShape()[i] : endsA_raw[i];
+        stepsA[i] = (ctx.inViews[8].getShape().empty() || i >= (int)ctx.inViews[8].getShape()[0]) ? 1 : stepsA_raw[i];
 
-        startsB[i] = (inViews[9].getShape().empty() || i >= (int)inViews[9].getShape()[0]) ? 0 : startsB_raw[i];
-        endsB[i] = (inViews[10].getShape().empty() || i >= (int)inViews[10].getShape()[0]) ? view_B.getShape()[i] : endsB_raw[i];
-        stepsB[i] = (inViews[11].getShape().empty() || i >= (int)inViews[11].getShape()[0]) ? 1 : stepsB_raw[i];
+        startsB[i] = (ctx.inViews[9].getShape().empty() || i >= (int)ctx.inViews[9].getShape()[0]) ? 0 : startsB_raw[i];
+        endsB[i] = (ctx.inViews[10].getShape().empty() || i >= (int)ctx.inViews[10].getShape()[0]) ? view_B.getShape()[i] : endsB_raw[i];
+        stepsB[i] = (ctx.inViews[11].getShape().empty() || i >= (int)ctx.inViews[11].getShape()[0]) ? 1 : stepsB_raw[i];
     }
 
     auto get_dim = [](int32_t s, int32_t e, int32_t st, uint32_t dim_len) -> uint32_t

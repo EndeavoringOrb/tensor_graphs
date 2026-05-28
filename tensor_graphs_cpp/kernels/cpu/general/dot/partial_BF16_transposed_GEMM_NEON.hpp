@@ -26,32 +26,29 @@ inline bool matchPartialBF16TransposedGEMM(const std::vector<TensorNode> &inputs
     return true;
 }
 
-inline void runPartialBF16TransposedGEMM(const std::vector<const void *> &inputs,
-                                         const std::vector<void *> &outputs,
-                                         const std::vector<TensorView> &inViews,
-                                         const std::vector<TensorView> &outViews)
+inline void runPartialBF16TransposedGEMM(const KernelContext &ctx)
 {
-    const float *target_ptr = static_cast<const float *>(inputs[0]);
-    const float *A_ptr = static_cast<const float *>(inputs[1]);
-    const uint16_t *W_ptr = static_cast<const uint16_t *>(inputs[2]);
+    const float *target_ptr = static_cast<const float *>(ctx.inputs[0]);
+    const float *A_ptr = static_cast<const float *>(ctx.inputs[1]);
+    const uint16_t *W_ptr = static_cast<const uint16_t *>(ctx.inputs[2]);
 
-    const int32_t *startsC_raw = static_cast<const int32_t *>(inputs[3]);
-    const int32_t *endsC_raw = static_cast<const int32_t *>(inputs[4]);
-    const int32_t *stepsC_raw = static_cast<const int32_t *>(inputs[5]);
+    const int32_t *startsC_raw = static_cast<const int32_t *>(ctx.inputs[3]);
+    const int32_t *endsC_raw = static_cast<const int32_t *>(ctx.inputs[4]);
+    const int32_t *stepsC_raw = static_cast<const int32_t *>(ctx.inputs[5]);
 
-    const int32_t *startsA_raw = static_cast<const int32_t *>(inputs[6]);
-    const int32_t *endsA_raw = static_cast<const int32_t *>(inputs[7]);
-    const int32_t *stepsA_raw = static_cast<const int32_t *>(inputs[8]);
+    const int32_t *startsA_raw = static_cast<const int32_t *>(ctx.inputs[6]);
+    const int32_t *endsA_raw = static_cast<const int32_t *>(ctx.inputs[7]);
+    const int32_t *stepsA_raw = static_cast<const int32_t *>(ctx.inputs[8]);
 
-    const int32_t *startsW_raw = static_cast<const int32_t *>(inputs[9]);
-    const int32_t *endsW_raw = static_cast<const int32_t *>(inputs[10]);
-    const int32_t *stepsW_raw = static_cast<const int32_t *>(inputs[11]);
+    const int32_t *startsW_raw = static_cast<const int32_t *>(ctx.inputs[9]);
+    const int32_t *endsW_raw = static_cast<const int32_t *>(ctx.inputs[10]);
+    const int32_t *stepsW_raw = static_cast<const int32_t *>(ctx.inputs[11]);
 
-    float *out_cache_ptr = static_cast<float *>(outputs[0]);
+    float *out_cache_ptr = static_cast<float *>(ctx.outputs[0]);
 
-    const TensorView &view_cache = inViews[0];
-    const TensorView &view_A = inViews[1];
-    const TensorView &view_W = inViews[2];
+    const TensorView &view_cache = ctx.inViews[0];
+    const TensorView &view_A = ctx.inViews[1];
+    const TensorView &view_W = ctx.inViews[2];
 
     int32_t startsC[3], endsC[3], stepsC[3];
     int32_t startsA[3], endsA[3], stepsA[3];
@@ -59,20 +56,20 @@ inline void runPartialBF16TransposedGEMM(const std::vector<const void *> &inputs
 
     for (int i = 0; i < 3; ++i)
     {
-        startsC[i] = (inViews[3].getShape().empty() || i >= inViews[3].getShape()[0]) ? 0 : startsC_raw[i];
-        endsC[i] = (inViews[4].getShape().empty() || i >= inViews[4].getShape()[0]) ? view_cache.getShape()[i] : endsC_raw[i];
-        stepsC[i] = (inViews[5].getShape().empty() || i >= inViews[5].getShape()[0]) ? 1 : stepsC_raw[i];
+        startsC[i] = (ctx.inViews[3].getShape().empty() || i >= ctx.inViews[3].getShape()[0]) ? 0 : startsC_raw[i];
+        endsC[i] = (ctx.inViews[4].getShape().empty() || i >= ctx.inViews[4].getShape()[0]) ? view_cache.getShape()[i] : endsC_raw[i];
+        stepsC[i] = (ctx.inViews[5].getShape().empty() || i >= ctx.inViews[5].getShape()[0]) ? 1 : stepsC_raw[i];
 
-        startsA[i] = (inViews[6].getShape().empty() || i >= inViews[6].getShape()[0]) ? 0 : startsA_raw[i];
-        endsA[i] = (inViews[7].getShape().empty() || i >= inViews[7].getShape()[0]) ? view_A.getShape()[i] : endsA_raw[i];
-        stepsA[i] = (inViews[8].getShape().empty() || i >= inViews[8].getShape()[0]) ? 1 : stepsA_raw[i];
+        startsA[i] = (ctx.inViews[6].getShape().empty() || i >= ctx.inViews[6].getShape()[0]) ? 0 : startsA_raw[i];
+        endsA[i] = (ctx.inViews[7].getShape().empty() || i >= ctx.inViews[7].getShape()[0]) ? view_A.getShape()[i] : endsA_raw[i];
+        stepsA[i] = (ctx.inViews[8].getShape().empty() || i >= ctx.inViews[8].getShape()[0]) ? 1 : stepsA_raw[i];
     }
 
     for (int i = 0; i < 3; ++i)
     {
-        startsW[i] = (inViews[9].getShape().empty() || i >= inViews[9].getShape()[0]) ? 0 : startsW_raw[i];
-        endsW[i] = (inViews[10].getShape().empty() || i >= inViews[10].getShape()[0]) ? (i == 0 ? 1 : (i == 1 ? view_W.getShape()[1] : view_W.getShape()[0])) : endsW_raw[i];
-        stepsW[i] = (inViews[11].getShape().empty() || i >= inViews[11].getShape()[0]) ? 1 : stepsW_raw[i];
+        startsW[i] = (ctx.inViews[9].getShape().empty() || i >= ctx.inViews[9].getShape()[0]) ? 0 : startsW_raw[i];
+        endsW[i] = (ctx.inViews[10].getShape().empty() || i >= ctx.inViews[10].getShape()[0]) ? (i == 0 ? 1 : (i == 1 ? view_W.getShape()[1] : view_W.getShape()[0])) : endsW_raw[i];
+        stepsW[i] = (ctx.inViews[11].getShape().empty() || i >= ctx.inViews[11].getShape()[0]) ? 1 : stepsW_raw[i];
     }
 
     auto get_dim = [](int32_t s, int32_t e, int32_t st, uint32_t dim_len) -> uint32_t

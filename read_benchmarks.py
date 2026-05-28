@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# TODO: move this to utils/read_benchmarks.py and import utils/binary.py
 import struct
 import os
 import argparse
@@ -231,7 +232,7 @@ def main():
 
     total = len(filtered)
     dtypes = ["FLOAT32", "INT32", "BF16", "UINT8"]
-    backends_map = ["CPU", "CUDA", "NEON", "METAL"]
+    backends_map = ["STORAGE", "CPU", "CUDA"] # TODO: make build.py construct this from enum in tensor_graphs_cpp
 
     for i, (name, r) in enumerate(filtered):
         uid = hex(r["kernelUid"])

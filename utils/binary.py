@@ -2,6 +2,7 @@
 import struct
 import os
 
+
 class BinaryReader:
     def __init__(self, f):
         self.f = f
@@ -100,6 +101,23 @@ class BinaryReader:
             "buildContextId": buildContextId,
         }
 
+    def read_dim(self):
+        return {"start": self.read_u32(), "stop": self.read_u32()}
+
+    def read_region(self):
+        return {"region": self.read_vector(self.read_dim)}
+    
+    def read_region_list(self):
+        return self.read_vector(self.read_region)
+
+    def read_bucket(self):
+        return {
+            "inputDirtyRegions": self.read_map(
+                self.read_u32, self.read_region_list
+            ),
+            "outputNeededRegion": self.read_vector(self.read_region),
+        }
+
     def read_op_instruction(self):
         return {
             "nodeId": self.read_u32(),
@@ -117,11 +135,36 @@ class BinaryReader:
         _id = self.read_u32()
         opType = self.read_u32()
         opTypes = [
-            "INPUT", "ADD", "MUL", "DIVIDE", "DOT", "SIN", "COS", "NEGATE", 
-            "POWER", "SUM", "MAX", "RESHAPE", "PERMUTE", "SLICE", "CONCAT", 
-            "CAST", "REPEAT", "ARANGE", "TRIU", "GATHER", "FILL", "COPY_TO", 
-            "IM2COL", "CONTIGUOUS", "SCATTER", "LOG", "ARGMAX", "FUSED",
-        ]
+            "INPUT",
+            "CACHE",
+            "ADD",
+            "MUL",
+            "DIVIDE",
+            "DOT",
+            "SIN",
+            "COS",
+            "NEGATE",
+            "POWER",
+            "SUM",
+            "MAX",
+            "RESHAPE",
+            "PERMUTE",
+            "SLICE",
+            "CONCAT",
+            "CAST",
+            "REPEAT",
+            "ARANGE",
+            "TRIU",
+            "GATHER",
+            "FILL",
+            "COPY_TO",
+            "IM2COL",
+            "CONTIGUOUS",
+            "SCATTER",
+            "LOG",
+            "ARGMAX",
+            "FUSED",
+        ]  # TODO: make build.py construct this from enum in tensor_graphs_cpp
 
         return {
             "id": _id,
@@ -139,6 +182,7 @@ class BinaryReader:
 
     def read_compiled_graph(self):
         return {
+            "bucket": self.read_bucket(),
             "instructions": self.read_vector(self.read_op_instruction),
             "refCounts": self.read_map(self.read_u32, self.read_u32),
             "nodesMap": {
@@ -152,6 +196,7 @@ class BinaryReader:
             ),
         }
 
+
 def load_records_file(path):
     records = []
     if os.path.exists(path):
@@ -163,6 +208,7 @@ def load_records_file(path):
                     break
                 records.append(r)
     return records
+
 
 def load_cache_file(path):
     entries = []
@@ -186,11 +232,8 @@ def load_cache_file(path):
                         }
                     )
                 elif t == 1:  # Compiled Bucket
-                    key = br.read_string()
                     graph = br.read_compiled_graph()
-                    entries.append(
-                        {"type": "compiled_bucket", "key": key, "graph": graph}
-                    )
+                    entries.append({"type": "compiled_bucket", "graph": graph})
                 elif t == 2:  # Constants
                     constants = {}
                     count = br.read_u32()
@@ -202,6 +245,7 @@ def load_cache_file(path):
                 else:
                     break
     return entries
+
 
 def get_record_identity(r):
     """

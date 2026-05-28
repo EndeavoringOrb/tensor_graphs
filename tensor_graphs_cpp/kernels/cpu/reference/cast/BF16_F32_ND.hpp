@@ -34,14 +34,13 @@ inline bool matchCastBF16_F32_ND(const std::vector<TensorNode> &inputs, const Te
  * Run Function:
  * Iterates through all elements, performing bit-shifting for conversion.
  */
-inline void runCastBF16_F32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                               const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runCastBF16_F32_ND(const KernelContext &ctx)
 {
     // BF16 is stored as uint16_t raw bits
-    const uint16_t *src = static_cast<const uint16_t *>(inputs[0]);
-    float *dst = static_cast<float *>(outputs[0]);
+    const uint16_t *src = static_cast<const uint16_t *>(ctx.inputs[0]);
+    float *dst = static_cast<float *>(ctx.outputs[0]);
 
-    uint64_t numElements = countElements(inViews[0].getShape());
+    uint64_t numElements = countElements(ctx.inViews[0].getShape());
 
     for (uint64_t i = 0; i < numElements; ++i)
     {

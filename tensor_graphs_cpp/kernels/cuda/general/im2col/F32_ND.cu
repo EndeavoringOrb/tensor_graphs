@@ -49,15 +49,14 @@ inline bool matchIm2ColF32_CUDA_ND(const std::vector<TensorNode> &inputs, const 
     return true;
 }
 
-inline void runIm2ColF32_CUDA_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                 const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews) {
-    const float *img = static_cast<const float *>(inputs[0]);
-    int32_t kernel_size = *static_cast<const int32_t *>(inputs[1]);
-    int32_t stride = *static_cast<const int32_t *>(inputs[2]);
-    int32_t padding = *static_cast<const int32_t *>(inputs[3]);
-    float *col = static_cast<float *>(outputs[0]);
+inline void runIm2ColF32_CUDA_ND(const KernelContext &ctx) {
+    const float *img = static_cast<const float *>(ctx.inputs[0]);
+    int32_t kernel_size = *static_cast<const int32_t *>(ctx.inputs[1]);
+    int32_t stride = *static_cast<const int32_t *>(ctx.inputs[2]);
+    int32_t padding = *static_cast<const int32_t *>(ctx.inputs[3]);
+    float *col = static_cast<float *>(ctx.outputs[0]);
 
-    auto inShape = inViews[0].getShape();
+    auto inShape = ctx.inViews[0].getShape();
     int N = inShape[0];
     int C = inShape[1];
     int H = inShape[2];

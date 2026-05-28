@@ -32,13 +32,12 @@ inline bool matchFastContiguous_ND(const std::vector<TensorNode> &inputs, const 
     return true;
 }
 
-inline void runFastContiguous_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                 const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runFastContiguous_ND(const KernelContext &ctx)
 {
-    const uint8_t *src_base = static_cast<const uint8_t *>(inputs[0]);
-    uint8_t *dst = static_cast<uint8_t *>(outputs[0]);
+    const uint8_t *src_base = static_cast<const uint8_t *>(ctx.inputs[0]);
+    uint8_t *dst = static_cast<uint8_t *>(ctx.outputs[0]);
 
-    const auto &view = inViews[0];
+    const auto &view = ctx.inViews[0];
     const auto &shape = view.getShape();
     const auto &strides = view.strides;
     const uint64_t elementSize = getDTypeSize(view.dtype);

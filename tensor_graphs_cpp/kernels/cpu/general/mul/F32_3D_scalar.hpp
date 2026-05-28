@@ -15,14 +15,13 @@ inline bool matchMulFP32_3D_Scalar(const std::vector<TensorNode> &inputs, const 
     return true;
 }
 
-inline void runMulFP32_3D_Scalar(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                 const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runMulFP32_3D_Scalar(const KernelContext &ctx)
 {
-    const float *data3D = static_cast<const float *>(inputs[0]);
-    float scalarValue = *static_cast<const float *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *data3D = static_cast<const float *>(ctx.inputs[0]);
+    float scalarValue = *static_cast<const float *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    uint64_t totalElements = countElements(inViews[0].getShape());
+    uint64_t totalElements = countElements(ctx.inViews[0].getShape());
     for (uint64_t i = 0; i < totalElements; ++i)
         out[i] = data3D[i] * scalarValue;
 }

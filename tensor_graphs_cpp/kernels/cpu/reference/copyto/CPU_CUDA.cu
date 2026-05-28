@@ -10,12 +10,12 @@ inline bool matchCopyTo_CPU_CUDA(const std::vector<TensorNode> &inputs, const Te
     return (in.dtype == output.dtype && in.getShape() == output.getShape() && in.strides == output.strides && isContiguous(output));
 }
 
-inline void runCopyTo_CPU_CUDA(const std::vector<const void *> &inputs, const std::vector<void *> &outputs, const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runCopyTo_CPU_CUDA(const KernelContext &ctx)
 {
-    const uint8_t *src = static_cast<const uint8_t *>(inputs[0]);
-    uint8_t *dst = static_cast<uint8_t *>(outputs[0]);
-    uint64_t numElements = countElements(inViews[0].getShape());
-    uint64_t elemSize = getDTypeSize(inViews[0].dtype);
+    const uint8_t *src = static_cast<const uint8_t *>(ctx.inputs[0]);
+    uint8_t *dst = static_cast<uint8_t *>(ctx.outputs[0]);
+    uint64_t numElements = countElements(ctx.inViews[0].getShape());
+    uint64_t elemSize = getDTypeSize(ctx.inViews[0].dtype);
     size_t bytes = numElements * elemSize;
 
     cudaError_t err = cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice);

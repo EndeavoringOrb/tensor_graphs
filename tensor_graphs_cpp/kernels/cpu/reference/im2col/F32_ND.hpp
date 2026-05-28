@@ -17,16 +17,15 @@ inline bool matchIm2ColF32_ND(const std::vector<TensorNode> &inputs, const Tenso
     return true;
 }
 
-inline void runIm2ColF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                            const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runIm2ColF32_ND(const KernelContext &ctx)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
-    int32_t kernel_size = *static_cast<const int32_t *>(inputs[1]);
-    int32_t stride = *static_cast<const int32_t *>(inputs[2]);
-    int32_t padding = *static_cast<const int32_t *>(inputs[3]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *in = static_cast<const float *>(ctx.inputs[0]);
+    int32_t kernel_size = *static_cast<const int32_t *>(ctx.inputs[1]);
+    int32_t stride = *static_cast<const int32_t *>(ctx.inputs[2]);
+    int32_t padding = *static_cast<const int32_t *>(ctx.inputs[3]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    const auto &inShape = inViews[0].getShape();
+    const auto &inShape = ctx.inViews[0].getShape();
     uint32_t N = inShape[0];
     uint32_t C = inShape[1];
     uint32_t H = inShape[2];
@@ -35,7 +34,7 @@ inline void runIm2ColF32_ND(const std::vector<const void *> &inputs, const std::
     uint32_t H_out = (H + 2 * padding - kernel_size) / stride + 1;
     uint32_t W_out = (W + 2 * padding - kernel_size) / stride + 1;
 
-    const auto &inStrides = inViews[0].strides;
+    const auto &inStrides = ctx.inViews[0].strides;
     uint64_t out_idx = 0;
 
     for (uint32_t n = 0; n < N; ++n)

@@ -18,13 +18,12 @@ inline bool matchAddF32_CUDA_ND(const std::vector<TensorNode> &inputs, const Ten
     return true;
 }
 
-inline void runAddF32_CUDA_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                              const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews) {
-    const float *A = static_cast<const float *>(inputs[0]);
-    const float *B = static_cast<const float *>(inputs[1]);
-    float *Out = static_cast<float *>(outputs[0]);
+inline void runAddF32_CUDA_ND(const KernelContext &ctx) {
+    const float *A = static_cast<const float *>(ctx.inputs[0]);
+    const float *B = static_cast<const float *>(ctx.inputs[1]);
+    float *Out = static_cast<float *>(ctx.outputs[0]);
 
-    uint64_t n = countElements(outViews[0].getShape());
+    uint64_t n = countElements(ctx.outViews[0].getShape());
     if (n == 0) return;
 
     int blockSize = 256;

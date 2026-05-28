@@ -24,17 +24,16 @@ inline bool matchBF16GEMM_NEON_v4(const std::vector<TensorNode> &inputs, const T
     return isContiguous(output);
 }
 
-inline void runBF16GEMM_NEON_v4(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runBF16GEMM_NEON_v4(const KernelContext &ctx)
 {
-    const float *X = static_cast<const float *>(inputs[0]);
-    const uint16_t *W = static_cast<const uint16_t *>(inputs[1]);
-    float *Out = static_cast<float *>(outputs[0]);
+    const float *X = static_cast<const float *>(ctx.inputs[0]);
+    const uint16_t *W = static_cast<const uint16_t *>(ctx.inputs[1]);
+    float *Out = static_cast<float *>(ctx.outputs[0]);
 
-    const uint32_t B = inViews[0].getShape()[0];
-    const uint32_t M_in = inViews[0].getShape()[1];
-    const uint32_t K = inViews[0].getShape()[2];
-    const uint32_t N = inViews[1].getShape()[2];
+    const uint32_t B = ctx.inViews[0].getShape()[0];
+    const uint32_t M_in = ctx.inViews[0].getShape()[1];
+    const uint32_t K = ctx.inViews[0].getShape()[2];
+    const uint32_t N = ctx.inViews[1].getShape()[2];
     const uint32_t M = B * M_in;
 
     constexpr uint32_t MR = 8;

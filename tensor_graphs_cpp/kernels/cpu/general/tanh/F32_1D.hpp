@@ -18,13 +18,12 @@ bool matchTanhF32_1D(const std::vector<TensorNode> &inputs, const TensorNode &ou
     return true;
 }
 
-void runTanhF32_1D(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                   const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+void runTanhF32_1D(const KernelContext &ctx)
 {
-    const float *x = static_cast<const float *>(inputs[0]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *x = static_cast<const float *>(ctx.inputs[0]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    uint32_t size = inViews[0].getShape()[0];
+    uint32_t size = ctx.inViews[0].getShape()[0];
 
     for (uint32_t i = 0; i < size; ++i)
     {
