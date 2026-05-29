@@ -350,9 +350,7 @@ struct DeviceBuffer
         return blocks.end();
     }
 
-    uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost,
-                      const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr,
-                      const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
+    uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost)
     {
         // Align allocated size to 64 bytes to maintain alignment of all internal blocks
         _sizeBytes = (_sizeBytes + 63) & ~63ULL;
@@ -464,13 +462,13 @@ struct MemoryManager
         aliasStorageTypes[dstId] = storageType;
     }
 
-    uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f, const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr, const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
+    uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f)
     {
         auto it = buffers.find(backend);
         if (it == buffers.end())
             Error::throw_err("[MemoryManager.allocate] DeviceBuffer not initialized for backend " + toString(backend));
 
-        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost, parentMap, nodeCosts);
+        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost);
     }
 
     void write(Backend backend, uint32_t nodeId, const void *data, uint64_t size)

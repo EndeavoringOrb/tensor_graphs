@@ -635,6 +635,10 @@ int main(int argc, char *argv[])
                 auto iterEnd = std::chrono::high_resolution_clock::now();
                 float iterMs = std::chrono::duration<float, std::milli>(iterEnd - iterStart).count();
                 latencies.push_back(iterMs);
+                if (it != 0) {
+                    std::cout << ",";
+                }
+                std::cout << " " << iterMs;
             }
             // Calculate Median
             std::sort(latencies.begin(), latencies.end());
@@ -657,7 +661,7 @@ int main(int argc, char *argv[])
             bw.write(r);
             outFile.flush();
 
-            std::cout << " -> " << runtimeMs << " ms" << std::endl;
+            std::cout << "\r  Benchmarked -> " << runtimeMs << " ms" << std::endl;
         }
         catch (const std::exception &e)
         {

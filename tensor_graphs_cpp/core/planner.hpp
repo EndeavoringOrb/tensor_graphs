@@ -561,7 +561,7 @@ private:
             if (enode.opType == OpType::INPUT || enode.opType == OpType::CACHE)
             {
                 info.cost = 0.0f;
-                if (strictCache && (enode.leafId & 0x80000000)) // TODO: what does this do???
+                if (strictCache && (enode.leafId & 0x80000000)) // This ensures that any cache nodes are valid given cachedNodes. TODO: make the check stronger than `(enode.leafId & 0x80000000)`
                 {
                     uint32_t eclassId = egraph.getENodeEClass(i);
                     uint32_t canonId = egraph.findConst(eclassId);

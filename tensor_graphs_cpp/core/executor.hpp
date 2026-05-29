@@ -30,12 +30,6 @@ public:
     {
         std::cout << "running..." << std::endl;
 
-        std::unordered_map<uint32_t, std::vector<uint32_t>> parentMap;
-        for (const auto &pair : compiled.nodesMap)
-        {
-            parentMap[pair.first] = pair.second.parentIds;
-        }
-
         uint32_t instIdx = 0;
         for (size_t idx = 0; idx < compiled.instructions.size(); ++idx)
         {
@@ -56,7 +50,6 @@ public:
             {
                 Error::throw_err("[Executor.run] should not be executing anything on Backend::STORAGE");
             }
-            auto &outBuf = memManager.buffers.at(node.backend);
 
             const bool isEndOfLogicalChain = (idx + 1 == compiled.instructions.size()) ||
                                              (compiled.instructions[idx + 1].logicalNodeId != logicalId);
@@ -68,7 +61,7 @@ public:
             {
                 uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
                 float cost = compiled.nodeCosts.at(inst.nodeId);
-                memManager.allocate(inst.backend, outputMemId, sizeBytes, inst.outputStorageType, compiled.refCounts.at(inst.nodeId), cost, &parentMap, &compiled.nodeCosts);
+                memManager.allocate(inst.backend, outputMemId, sizeBytes, inst.outputStorageType, compiled.refCounts.at(inst.nodeId), cost);
             }
 
             KernelContext ctx;
