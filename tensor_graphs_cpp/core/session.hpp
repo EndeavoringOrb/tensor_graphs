@@ -358,33 +358,6 @@ struct Session
                     protectedCachedNodes[plan.physicalToLogicalNodeMap.at(pair.first)] = pair.second.backend;
                 }
             }
-            // for (const auto &inst : plan.instructions)
-            // {
-            //     bool isScatter = false;
-            //     uint32_t targetIdx = 0;
-
-            //     const TensorNode &node = plan.nodesMap.at(inst.nodeId);
-            //     if (node.opType == OpType::SCATTER)
-            //     {
-            //         isScatter = true;
-            //         targetIdx = 0;
-            //     }
-
-            //     if (isScatter)
-            //     {
-            //         uint32_t targetPhysId = inst.inputNodeIds[targetIdx];
-            //         const TensorNode &targetNode = plan.nodesMap.at(targetPhysId);
-
-            //         if (targetNode.opType == OpType::INPUT || targetNode.opType == OpType::CACHE)
-            //         {
-            //             uint32_t targetLogicalId = plan.physicalToLogicalNodeMap.at(targetPhysId);
-            //             if (targetLogicalId != UINT32_MAX)
-            //             {
-            //                 protectedCachedNodes[targetLogicalId] = targetNode.backend;
-            //             }
-            //         }
-            //     }
-            // }
         }
 
         std::cout << "protectedCachedNodes" << std::endl;

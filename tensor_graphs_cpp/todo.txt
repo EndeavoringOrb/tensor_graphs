@@ -8,6 +8,8 @@ Backend::STORAGE
 
 does serialization work across changes like inserting an OpType? Or does the numbering get out of sync?
 
+analyze_performance separate by compiled graph
+
 add constants (like e, pi) so they are consistent
 
 examples/gemma-3-270m-cpp.py

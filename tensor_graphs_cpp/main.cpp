@@ -148,9 +148,9 @@ void run_autoregressive_llm(
         Bucket b;
         if (step != 0)
         {
-            uint32_t nToks = tokens.size();
-            Region inputRegion = {{{0, 1}, {nToks, nToks + 1}}};
-            Region outputRegion = {{{0, 1}, {nToks, nToks + 1}, {0, vocab_size}}};
+            uint32_t tokIdx = tokens.size() - 1;
+            Region inputRegion = {{{0, 1}, {tokIdx, tokIdx + 1}}};
+            Region outputRegion = {{{0, 1}, {tokIdx, tokIdx + 1}, {0, vocab_size}}};
             b.inputDirtyRegions = {{inputIdsId, {inputRegion}}};
             b.outputNeededRegion = {outputRegion};
         }

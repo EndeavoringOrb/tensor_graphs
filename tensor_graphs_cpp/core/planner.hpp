@@ -568,10 +568,12 @@ private:
                     uint32_t logicalId = eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : UINT32_MAX;
                     if (logicalId == UINT32_MAX || cachedNodes.find(logicalId) == cachedNodes.end())
                     {
+                        std::cout << "[Planner.extractBest] strictCache hit (canonId=" << canonId << ", logicalId=" << logicalId << ") " << toString(enode) << std::endl;
                         info.cost = INF;
                     }
                     else if (enode.backend != cachedNodes.at(logicalId))
                     {
+                        std::cout << "[Planner.extractBest] strictCache hit (canonId=" << canonId << ", logicalId=" << logicalId << ") " << toString(enode) << std::endl;
                         info.cost = INF;
                     }
                 }
@@ -1737,7 +1739,8 @@ private:
         const std::vector<Region> &regions,
         const std::unordered_map<uint32_t, Backend> &cachedNodes,
         const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-        std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
+        std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
+        bool strictCache = false)
     {
         bool injected = false;
         uint32_t E_L = egraph.find(nodeToEClass.at(logicalId));
@@ -1777,6 +1780,10 @@ private:
         if (it != cachedNodes.end())
         {
             targetBackend = it->second;
+        }
+        else if (strictCache)
+        {
+            return injected; // Can't add cache node to unprotected logical id
         }
 
         const EClass lClass = egraph.getEClass(E_L);
@@ -2274,6 +2281,21 @@ public:
             uint32_t canonId = egraph.find(cls.id);
             if (canonId != cls.id)
                 continue; // only canonical eclasses
+            if (strictCache)
+            {
+                // If we are re-planning, only protected nodes should have the option of using cache
+                if (eclassToLogical.count(canonId) == 0)
+                    continue;
+                if (cachedNodes.count(eclassToLogical.at(canonId)) == 0)
+                    continue;
+            }
+            for (int i = 0; i < cls.enodes.size(); i++)
+            {
+                if (egraph.getENodes()[cls.enodes[i]].opType == OpType::CACHE) // TODO: maybe rebuild already takes care of this?
+                {
+                    continue;
+                }
+            }
 
             // Map canonical eclass to logicalId
             uint32_t logicalId = UINT32_MAX;
@@ -2285,7 +2307,6 @@ public:
 
             if (logicalId != UINT32_MAX && !logicalDirty[logicalId])
             {
-                // TODO: Don't add duplicates? maybe rebuild will take care of that, but might want to do it anyway to reduce # enodes
                 ENode cacheNode;
                 cacheNode.kernelUid = 0;
                 cacheNode.opType = OpType::CACHE;

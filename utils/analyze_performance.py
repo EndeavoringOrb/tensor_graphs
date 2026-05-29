@@ -1,6 +1,7 @@
 # File: analyze_performance.py
 import argparse
 import json
+import os
 from collections import defaultdict
 from binary import load_cache_file
 
@@ -9,19 +10,38 @@ def format_ms(ms):
     return f"{ms:.4f} ms"
 
 
-def analyze(cache_file, top_n=20, chain_len=1):
+def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
     print(f"Loading compiled buckets from: {cache_file}")
     cache_entries = load_cache_file(cache_file)
+
+    compiled_buckets = [
+        entry for entry in cache_entries if entry.get("type") == "compiled_bucket"
+    ]
+    num_buckets = len(compiled_buckets)
+
+    if bucket_idx is not None:
+        if bucket_idx < 0 or bucket_idx >= num_buckets:
+            if num_buckets == 0:
+                print(f"Error: No compiled buckets found in {cache_file}.")
+            elif num_buckets == 1:
+                print(
+                    f"Error: Bucket index {bucket_idx} is out of range. Available index: 0"
+                )
+            else:
+                print(
+                    f"Error: Bucket index {bucket_idx} is out of range. Available range: 0 to {num_buckets - 1}"
+                )
+            return
+        buckets_to_analyze = [compiled_buckets[bucket_idx]]
+    else:
+        buckets_to_analyze = compiled_buckets
 
     chain_stats = defaultdict(lambda: {"time": 0.0, "count": 0})
     op_type_stats = defaultdict(float)
     total_estimated_time = 0.0
 
     bucket_count = 0
-    for entry in cache_entries:
-        if entry.get("type") != "compiled_bucket":
-            continue
-
+    for entry in buckets_to_analyze:
         bucket_count += 1
         graph = entry["graph"]
         nodes = graph["nodesMap"]
@@ -34,8 +54,9 @@ def analyze(cache_file, top_n=20, chain_len=1):
             node = nodes[str(node_id)]
 
             # Fetch the runtime exactly as the C++ planner saw it
-            runtime = node_costs[node_id] # I want this to error if node_id isn't present
-
+            runtime = node_costs[
+                node_id
+            ]  # I want this to error if node_id isn't present
 
             op_name = node["opType"]
             if op_name == "FUSED":
@@ -69,7 +90,14 @@ def analyze(cache_file, top_n=20, chain_len=1):
                 chain_stats[chain_key]["count"] += 1
 
     chain_label = "Kernels" if chain_len == 1 else f"Chain of {chain_len} Kernels"
-    print(f"\nAnalyzed {bucket_count} compiled buckets with chain length {chain_len}.")
+    if bucket_idx is not None:
+        print(
+            f"\nAnalyzed compiled bucket index {bucket_idx} with chain length {chain_len}."
+        )
+    else:
+        print(
+            f"\nAnalyzed {bucket_count} compiled buckets with chain length {chain_len}."
+        )
     print(f"Total Estimated Execution Time: {format_ms(total_estimated_time)}")
 
     top_n = min(len(chain_stats), top_n)
@@ -114,6 +142,36 @@ if __name__ == "__main__":
     parser.add_argument("--graph", default="dirty_region_caches/flux-trans.bin")
     parser.add_argument("--top_n", "-n", type=int, default=20)
     parser.add_argument("--chain_len", "-c", type=int, default=1)
+    parser.add_argument("--bucket", nargs="?", const="show_range", default=None)
     args = parser.parse_args()
 
-    analyze(args.graph, args.top_n, args.chain_len)
+    if args.bucket == "show_range":
+        if not os.path.exists(args.graph):
+            print(f"Error: Cache file '{args.graph}' does not exist.")
+        else:
+            cache_entries = load_cache_file(args.graph)
+            compiled_buckets = [
+                entry
+                for entry in cache_entries
+                if entry.get("type") == "compiled_bucket"
+            ]
+            num_buckets = len(compiled_buckets)
+            if num_buckets == 0:
+                print(f"No compiled buckets found in {args.graph}.")
+            elif num_buckets == 1:
+                print(f"Available bucket index: 0 (total 1 bucket)")
+            else:
+                print(
+                    f"Available bucket range: 0 to {num_buckets - 1} (total {num_buckets} buckets)"
+                )
+    else:
+        bucket_idx = None
+        if args.bucket is not None:
+            try:
+                bucket_idx = int(args.bucket)
+            except ValueError:
+                print(
+                    f"Error: Invalid bucket index '{args.bucket}'. Please specify an integer."
+                )
+                exit(1)
+        analyze(args.graph, args.top_n, args.chain_len, bucket_idx)
