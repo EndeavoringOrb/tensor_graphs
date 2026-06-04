@@ -311,7 +311,7 @@ struct Session
         ProgressTimer runTimer(0, "", true);
         executor->run(cachedGraphs[graphIdx], debugCallback);
         double elapsed = runTimer.getElapsed();
-        std::cout << "[Session.run] execution finished in " << std::to_string(elapsed) << "s" << std::endl;
+        std::cout << "[Session.run] execution finished in " << std::to_string(elapsed * 1000) << "ms" << std::endl;
 
         const OpInstruction &lastInst = cachedGraphs[graphIdx].instructions[cachedGraphs[graphIdx].instructions.size() - 1];
         Backend backend = lastInst.backend;

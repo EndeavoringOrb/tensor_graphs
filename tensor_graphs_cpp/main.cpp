@@ -169,7 +169,7 @@ void run_autoregressive_llm(
 
         int32_t argmax_idx = perform_argmax(logits_vec, vocab_size);
         tokens.push_back((uint32_t)argmax_idx);
-        std::cout << "Step " << step + 1 << " | Token: " << argmax_idx << " | Latency: " << runtimeMs << "ms\n";
+        std::cout << "Step " << step + 1 << " | Token: " << argmax_idx << " | End-To-End Latency: " << runtimeMs << "ms\n";
     }
 }
 

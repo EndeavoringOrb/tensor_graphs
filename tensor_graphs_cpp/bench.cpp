@@ -661,7 +661,7 @@ int main(int argc, char *argv[])
             bw.write(r);
             outFile.flush();
 
-            std::cout << "\r  Benchmarked -> " << runtimeMs << " ms" << std::endl;
+            std::cout << "\n  Benchmarked -> " << runtimeMs << " ms" << std::endl;
         }
         catch (const std::exception &e)
         {

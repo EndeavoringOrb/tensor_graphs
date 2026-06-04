@@ -29,6 +29,7 @@ public:
              const DebugCallback &debugCallback = nullptr)
     {
         std::cout << "running..." << std::endl;
+        double totalKernelTime = 0.0f;
 
         uint32_t instIdx = 0;
         for (size_t idx = 0; idx < compiled.instructions.size(); ++idx)
@@ -196,7 +197,9 @@ public:
 
             if (!kernel.isView)
             {
+                ProgressTimer kernelTimer;
                 kernel.run(ctx);
+                totalKernelTime += kernelTimer.getElapsed();
             }
 
             if (debugCallback && logicalId != UINT32_MAX && isEndOfLogicalChain)
@@ -262,5 +265,6 @@ public:
             instIdx++;
             std::cout << instIdx << "/" << compiled.instructions.size() << "\r" << std::flush;
         }
+        std::cout << "\nTotal Kernel Time: " << std::to_string(totalKernelTime) << std::endl;
     }
 };
