@@ -197,7 +197,7 @@ public:
 
             if (!kernel.isView)
             {
-                ProgressTimer kernelTimer;
+                ProgressTimer kernelTimer(0, "", true);
                 kernel.run(ctx);
                 totalKernelTime += kernelTimer.getElapsed();
             }
@@ -265,6 +265,6 @@ public:
             instIdx++;
             std::cout << instIdx << "/" << compiled.instructions.size() << "\r" << std::flush;
         }
-        std::cout << "\nTotal Kernel Time: " << std::to_string(totalKernelTime) << std::endl;
+        std::cout << "\nTotal Kernel Time: " << std::to_string(totalKernelTime * 1000) << "ms" << std::endl;
     }
 };

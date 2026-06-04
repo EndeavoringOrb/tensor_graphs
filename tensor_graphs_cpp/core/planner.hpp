@@ -471,6 +471,36 @@ private:
         return peak_mem;
     }
 
+    /*
+    selectionMap (eclass -> sel)
+    enode = egraph.getEClass(eclass).enodes[sel]
+    TODO: there are multiple valid topo orders, we want one that puts inplace enodes as late as possible
+    */
+    std::vector<uint32_t> getEClassTopoOrder(const EGraph &egraph, const std::unordered_map<uint32_t, uint32_t> &selectionMap, uint32_t rootEClassId)
+    {
+        std::vector<uint32_t> topo;
+        std::unordered_set<uint32_t> visited_classes;
+        std::function<void(uint32_t)> visit = [&](uint32_t eclassId)
+        {
+            eclassId = egraph.findConst(eclassId);
+            if (visited_classes.count(eclassId))
+                return;
+            visited_classes.insert(eclassId);
+
+            auto choiceIt = selectionMap.find(eclassId);
+            if (choiceIt == selectionMap.end())
+                return;
+
+            const ENode &enode = egraph.getENodes()[egraph.getEClass(eclassId).enodes[choiceIt->second]];
+            for (uint32_t child : enode.children)
+                visit(child);
+            topo.push_back(eclassId);
+        };
+
+        visit(rootEClassId);
+        return topo;
+    }
+
     ExtractionResult extractBest(const uint32_t rootId, const Graph &graph, EGraph &egraph,
                                  const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
                                  const std::unordered_map<Backend, uint64_t> &maxMemoryByBackend,
@@ -1144,8 +1174,6 @@ private:
         std::vector<uint32_t> path;
         std::vector<uint32_t> to_process = {rootEClassId};
         std::vector<uint32_t> to_process_enode;
-        std::unordered_map<uint32_t, uint32_t> ref_counts;
-        std::unordered_map<uint32_t, uint32_t> need_single_ref;
         std::unordered_map<uint32_t, uint32_t> next_sel;
 
         float best_cost = INF;
@@ -1200,36 +1228,6 @@ private:
 
                 selection_map[current] = sel;
                 current_cost += info.cost;
-
-                if (info.inplace && info.inplace_idx >= 0)
-                {
-                    uint32_t inplace_child = egraph.find(node.children[info.inplace_idx]);
-                    if (need_single_ref.find(inplace_child) != need_single_ref.end())
-                    {
-                        valid = false;
-                        reason = "inplace";
-                    }
-                    else if (immutable_eclasses.count(inplace_child) && !info.isScatter)
-                    {
-                        valid = false;
-                        reason = "inplace_immutable";
-                    }
-                    else
-                    {
-                        need_single_ref[inplace_child] = current;
-                    }
-                }
-
-                for (uint32_t child : node.children)
-                {
-                    uint32_t canonChild = egraph.find(child);
-                    ref_counts[canonChild]++;
-                    if (need_single_ref.find(canonChild) != need_single_ref.end() && ref_counts[canonChild] > 1)
-                    {
-                        valid = false;
-                        reason = "inplace_ref";
-                    }
-                }
 
                 if (info.cost == INF)
                 {
@@ -1335,6 +1333,40 @@ private:
 
             if (valid)
             {
+                std::vector<uint32_t> topo = getEClassTopoOrder(egraph, selection_map, rootEClassId);
+                // if node C has node A as input, and is after node B in topo, where node B is an inplace node with A as input, then the graph is invalid
+                // can be thought of as if node C has node A as input, and any previous inplace node had node A as input, node C is invalid and therefore the graph is invalid
+                std::unordered_set<uint32_t> overwritten;
+                bool valid = true;
+                for (int i = 0; i < topo.size(); i++)
+                {
+                    auto choiceIt = selection_map.find(topo[i]);
+                    if (choiceIt == selection_map.end())
+                        Error::throw_err("[Planner.extractBest] this should not happen");
+
+                    const uint32_t enodeId = egraph.getEClass(topo[i]).enodes[choiceIt->second];
+                    const ENode &enode = egraph.getENodes()[enodeId];
+                    const ENodeInfo &info = enodeInfos[enodeId];
+                    for (int j = 0; j < enode.children.size(); j++)
+                    {
+                        if (overwritten.count(enode.children[j]))
+                        {
+                            valid = false;
+                            reason = "inplace";
+                            break;
+                        }
+                    }
+                    if (!valid)
+                        break;
+                    if (info.inplace)
+                    {
+                        overwritten.insert(enode.children[info.inplace_idx]);
+                    }
+                }
+            }
+
+            if (valid)
+            {
                 if (current_cost < best_cost)
                 {
                     float actual_current_cost = 0.0f;
@@ -1381,24 +1413,6 @@ private:
                 uint32_t enode_id = enodes[sel];
                 const ENode &node = egraph.getENodes()[enode_id];
                 const ENodeInfo &info = enodeInfos[enode_id];
-
-                for (uint32_t child : node.children)
-                {
-                    uint32_t canonChild = egraph.find(child);
-                    ref_counts[canonChild]--;
-                    if (ref_counts[canonChild] == 0)
-                        ref_counts.erase(canonChild);
-                }
-
-                if (info.inplace && info.inplace_idx >= 0)
-                {
-                    uint32_t inplace_child = egraph.find(node.children[info.inplace_idx]);
-                    auto it = need_single_ref.find(inplace_child);
-                    if (it != need_single_ref.end() && it->second == current)
-                    {
-                        need_single_ref.erase(it);
-                    }
-                }
 
                 if (sel + 1 < enodes.size())
                 {
