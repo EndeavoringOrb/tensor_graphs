@@ -280,7 +280,7 @@ public:
     mutable std::unordered_map<PatternCacheKey, std::vector<uint64_t>, PatternCacheKeyHash> patternCache;
 
     void setReferenceOnly(bool refOnly) { referenceOnlyMode = refOnly; }
-    const std::vector<KernelEntry> &getAllKernels() const { return entries; }
+    const std::unordered_map<uint64_t, KernelEntry> &getAllKernels() const { return entries; }
 
     std::vector<uint64_t> _findMatchingKernelsByPattern(
         const Graph &patternGraph, uint32_t patternRootId, Backend backend,
@@ -288,7 +288,7 @@ public:
         bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
     {
         std::vector<uint64_t> matches;
-        for (const auto &entry : entries)
+        for (const auto &[uid, entry] : entries)
         {
             if ((referenceOnlyMode || referenceOnly) && !entry.isReference)
                 continue;
@@ -451,7 +451,7 @@ public:
                              "  # Dummy Shapes: " + std::to_string(dummyShapes.size()) + "\n" +
                              "  # Contiguous: " + std::to_string(contiguous.size()) + "\n");
         }
-        entries.push_back({uid, op, opName, numInputs, isVariadic, backends, inputBackends, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous});
+        entries.emplace(uid, KernelEntry{uid, op, opName, numInputs, isVariadic, backends, inputBackends, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory, dtypes, dummyShapes);
@@ -464,7 +464,7 @@ public:
         bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
     {
         std::vector<uint64_t> matches;
-        for (const auto &entry : entries)
+        for (const auto &[uid, entry] : entries)
         {
             if ((referenceOnlyMode || referenceOnly) && !entry.isReference)
                 continue;
@@ -483,26 +483,19 @@ public:
 
     const KernelEntry &getKernel(uint64_t uid) const
     {
-        for (const auto &entry : entries)
-        {
-            if (entry.uid == uid)
-                return entry;
-        }
+        auto it = entries.find(uid);
+        if (it != entries.end())
+            return it->second;
         Error::throw_err("Invalid kernel UID " + std::to_string(uid));
     }
 
     bool hasKernel(uint64_t uid) const
     {
-        for (const auto &entry : entries)
-        {
-            if (entry.uid == uid)
-                return true;
-        }
-        return false;
+        return entries.find(uid) != entries.end();
     }
 
 private:
-    std::vector<KernelEntry> entries;
+    std::unordered_map<uint64_t, KernelEntry> entries;
     bool referenceOnlyMode = false;
 };
 

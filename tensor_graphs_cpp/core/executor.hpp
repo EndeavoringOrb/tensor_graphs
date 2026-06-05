@@ -32,7 +32,11 @@ public:
 
         uint32_t instIdx = 0;
         uint32_t nInst = compiled.instructions.size();
-        ProgressTimer timer(nInst, "running ");
+        bool disableTimer = true;
+#ifdef DEBUG
+        disableTimer = false;
+#endif
+        ProgressTimer timer(nInst, "running ", disableTimer);
         for (size_t idx = 0; idx < nInst; ++idx)
         {
             const OpInstruction &inst = compiled.instructions[idx];
@@ -197,9 +201,9 @@ public:
 
             if (!kernel.isView)
             {
-                ProgressTimer kernelTimer(0, "", true);
+                // ProgressTimer kernelTimer(0, "", true);
                 kernel.run(ctx);
-                totalKernelTime += kernelTimer.getElapsed();
+                // totalKernelTime += kernelTimer.getElapsed();
             }
 
             if (debugCallback && logicalId != UINT32_MAX && isEndOfLogicalChain)
@@ -265,6 +269,6 @@ public:
             instIdx++;
             timer.tick();
         }
-        std::cout << "\nTotal Kernel Time: " << std::to_string(totalKernelTime * 1000) << "ms" << std::endl;
+        // std::cout << "\nTotal Kernel Time: " << std::to_string(totalKernelTime * 1000) << "ms" << std::endl;
     }
 };

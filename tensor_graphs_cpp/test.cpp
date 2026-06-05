@@ -1536,7 +1536,7 @@ int main(int argc, char *argv[])
     int skipped = 0;
 
     const auto &kernels = KernelRegistry::get().getAllKernels();
-    for (const auto &kernel : kernels)
+    for (const auto &[uid, kernel] : kernels)
     {
         if (kernel.isReference)
             continue;

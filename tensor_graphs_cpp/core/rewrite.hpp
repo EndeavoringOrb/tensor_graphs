@@ -147,7 +147,7 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
 
             ss << "  Available Registered Kernels for " << toString(op) << ":\n";
             bool foundAny = false;
-            for (const auto &k : KernelRegistry::get().getAllKernels())
+            for (const auto &[uid, k] : KernelRegistry::get().getAllKernels())
             {
                 if (k.opType == op || (op == OpType::FUSED && k.opType == OpType::FUSED))
                 {
