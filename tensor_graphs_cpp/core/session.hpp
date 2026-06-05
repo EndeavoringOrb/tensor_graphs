@@ -70,6 +70,8 @@ struct Session
     std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
     std::string recordsPath = "benchmarks/records.bin";
 
+    uint32_t fullBucketIdx;
+
     void ensureOutputDirectories() const
     {
         std::filesystem::create_directories("benchmarks");
@@ -170,17 +172,20 @@ struct Session
         }
 
         bool hasFullBucket = false;
-        for (const auto &mb : manualBuckets)
+        for (int i = 0; i < manualBuckets.size(); i++)
         {
+            const auto &mb = manualBuckets[i];
             if (mb == bucket)
             {
                 hasFullBucket = true;
+                fullBucketIdx = i;
                 break;
             }
         }
 
         if (!hasFullBucket)
         {
+            fullBucketIdx = manualBuckets.size();
             manualBuckets.push_back(bucket);
         }
     }
@@ -345,7 +350,7 @@ struct Session
                 rootId, graph,
                 bucket,
                 protectedCachedNodes,
-                doSaturate // doSaturate
+                i == fullBucketIdx ? false : doSaturate // doSaturate
             );
 
             // Find all eclasses that need to be cached. Look for target buffers in chosen scatters.

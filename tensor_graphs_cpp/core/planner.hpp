@@ -2344,17 +2344,11 @@ public:
         // 2. inject input dirty slices
         bool dirtyInjected = injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions, cachedNodes, baseState.nodeToEClass, eclassToLogical);
 
-        // 3. saturate
-        if (doSaturate && dirtyInjected)
-        {
-            saturate(egraph, protectedEClasses, eclassToLogical, true, false);
-        }
-
-        // 4. inject output needed regions
+        // 3. inject output needed regions
         bool neededInjected = injectOutputPartialPaths(egraph, graph, rootId, bucket.outputNeededRegion, cachedNodes, baseState.nodeToEClass, eclassToLogical);
 
-        // 5. saturate again, but this time don't allow slice push down/pull up if the eclass is protected
-        if (doSaturate && neededInjected)
+        // 4. saturate
+        if (doSaturate)
         {
             saturate(egraph, protectedEClasses, eclassToLogical, true, false);
         }
