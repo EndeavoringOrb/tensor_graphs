@@ -28,11 +28,12 @@ public:
     void run(const CompiledGraph &compiled,
              const DebugCallback &debugCallback = nullptr)
     {
-        std::cout << "running..." << std::endl;
         double totalKernelTime = 0.0f;
 
         uint32_t instIdx = 0;
-        for (size_t idx = 0; idx < compiled.instructions.size(); ++idx)
+        uint32_t nInst = compiled.instructions.size();
+        ProgressTimer timer(nInst, "running ");
+        for (size_t idx = 0; idx < nInst; ++idx)
         {
             const OpInstruction &inst = compiled.instructions[idx];
 
@@ -52,7 +53,7 @@ public:
                 Error::throw_err("[Executor.run] should not be executing anything on Backend::STORAGE");
             }
 
-            const bool isEndOfLogicalChain = (idx + 1 == compiled.instructions.size()) ||
+            const bool isEndOfLogicalChain = (idx + 1 == nInst) ||
                                              (compiled.instructions[idx + 1].logicalNodeId != logicalId);
             const uint32_t outputMemId = (logicalId != UINT32_MAX && (logicalId == nodeId || isEndOfLogicalChain))
                                              ? logicalId
@@ -91,16 +92,14 @@ public:
                         activeInId = inLogicalId;
                     }
 
-                    TensorNode activeNode = inNode;
-                    activeNode.id = activeInId;
-
-                    TensorView view = memManager.getView(activeNode);
+                    TensorView view = memManager.getView(inNode, activeInId);
                     ctx.inViews.push_back(view);
                     ctx.inputs.push_back(memManager.buffers.at(inNode.backend).arena_ptr + view.baseOffset);
                     ctx.fd.push_back(-1);
                 }
             }
 
+#ifdef DEBUG_CHECKNAN
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
             {
                 const uint32_t inId = inst.inputNodeIds[i];
@@ -118,6 +117,7 @@ public:
                     Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId));
                 }
             }
+#endif
 
             if (inst.inplaceInputIndex >= 0)
             {
@@ -263,7 +263,7 @@ public:
             }
 
             instIdx++;
-            std::cout << instIdx << "/" << compiled.instructions.size() << "\r" << std::flush;
+            timer.tick();
         }
         std::cout << "\nTotal Kernel Time: " << std::to_string(totalKernelTime * 1000) << "ms" << std::endl;
     }

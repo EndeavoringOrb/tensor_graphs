@@ -76,7 +76,8 @@ struct ProgressTimer
         std::cout << "\r" << std::flush;
     }
 
-    double getElapsed() {
+    double getElapsed()
+    {
         auto end = clock::now();
         double elapsed = std::chrono::duration<double>(end - start).count();
         return elapsed;

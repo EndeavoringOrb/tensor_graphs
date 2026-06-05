@@ -35,6 +35,7 @@ tokenize_flux.py
 **/*.safetensors
 .env
 models/*
+.vs
 
 # Profiling artifacts
 profile_output*

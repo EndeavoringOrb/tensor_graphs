@@ -621,9 +621,9 @@ struct MemoryManager
         return id;
     }
 
-    TensorView getView(const TensorNode &node) const
+    TensorView getView(const TensorNode &node, const uint32_t overrideId) const
     {
-        uint32_t targetId = node.id;
+        uint32_t targetId = overrideId;
         while (aliasMap.find(targetId) != aliasMap.end())
         {
             targetId = aliasMap.at(targetId);
@@ -665,6 +665,8 @@ struct MemoryManager
         // 2. Check other backends (required for Unified Memory views spanning backends)
         for (const auto &pair : buffers)
         {
+            if (pair.first == backend)
+                continue;
             if (pair.second.allocationMap.count(targetId))
                 return true;
         }

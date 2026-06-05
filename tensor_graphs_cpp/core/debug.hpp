@@ -26,7 +26,7 @@ namespace Debug
             return;
         }
 
-        TensorView view = mem.getView(node);
+        TensorView view = mem.getView(node, node.id);
 
         auto it = mem.buffers.find(node.backend);
         if (it == mem.buffers.end())

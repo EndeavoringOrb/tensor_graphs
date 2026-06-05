@@ -27,6 +27,7 @@ CORE_DEPENDENCIES = [
 USE_CUDA = False
 DEBUG_MODE = False
 NO_LINT = False
+PROFILE_MODE = False
 
 # List of macros that register a kernel with a unique UID
 REGISTER_MACROS = [
@@ -394,6 +395,8 @@ def compile_project(targets=None):
         else:
             cxx_flags.extend(["-O3"])
             nvcc_flags.extend(["-O3"])
+            if PROFILE_MODE:  # <--- Added
+                cxx_flags.extend(["-g", "-gcodeview", "-Wl,-debug"])
     else:
         cxx_flags.extend(["-std=c++20"])
         if is_arm64:
@@ -534,6 +537,11 @@ def main():
         help="Build with debug symbols and no optimization",
     )
     parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Build with profiling symbols (-g, -gcodeview, -Wl,-debug) while keeping optimizations",
+    )
+    parser.add_argument(
         "--no-lint", action="store_true", help="Skip kernel validation checks"
     )
     parser.add_argument(
@@ -543,10 +551,11 @@ def main():
     )
     args = parser.parse_args()
 
-    global USE_CUDA, DEBUG_MODE, NO_LINT
+    global USE_CUDA, DEBUG_MODE, NO_LINT, PROFILE_MODE
     USE_CUDA = args.cuda
     DEBUG_MODE = args.debug
     NO_LINT = args.no_lint
+    PROFILE_MODE = args.profile
 
     console.print(
         f"\n[bold cyan]Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...[/bold cyan]\n"

@@ -66,7 +66,7 @@ inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> 
     return stridedIndex;
 }
 
-inline uint64_t countElements(std::vector<uint32_t> shape)
+inline uint64_t countElements(const std::vector<uint32_t> &shape)
 {
     uint64_t count = 1;
     for (uint32_t val : shape)

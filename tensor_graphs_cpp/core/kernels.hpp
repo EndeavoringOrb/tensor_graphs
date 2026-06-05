@@ -16,7 +16,7 @@ struct KernelContext
     std::vector<TensorView> outViews;
     std::vector<int> fd; // same number of elements as inputs/inViews, has -1 if not a file, positive number file descriptor if is a file. COPY_TO kernels that start from STORAGE should use fd + inViews baseOffset to read from file
 
-    KernelContext() : inputs({}), outputs({}), inViews({}), outViews({}), fd({}) {}
+    KernelContext() {}
     KernelContext(const std::vector<const void *> &_inputs,
                   const std::vector<void *> &_outputs,
                   const std::vector<TensorView> &_inViews,

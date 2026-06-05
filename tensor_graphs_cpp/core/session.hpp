@@ -320,9 +320,7 @@ struct Session
         {
             Error::throw_err("[Session.run] execution output nodeId " + std::to_string(outLogicalId) + " not found in memory");
         }
-        TensorNode outNode = cachedGraphs[graphIdx].nodesMap.at(lastInst.nodeId);
-        outNode.id = outLogicalId;
-        TensorView view = memManager.getView(outNode);
+        TensorView view = memManager.getView(cachedGraphs[graphIdx].nodesMap.at(lastInst.nodeId), outLogicalId);
         std::cout << "final output view: " << toString(view) << "\n"
                   << std::flush;
         return memManager.buffers.at(backend).arena_ptr + view.baseOffset;
