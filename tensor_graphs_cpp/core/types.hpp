@@ -14,25 +14,29 @@
 #include <map>
 #include <iomanip>
 #include <json.hpp>
+#include <source_location>
+#include "core/serialization.hpp"
 using json = nlohmann::json;
+
+inline uint32_t GlobalNextPhysId = 0x80000000;
 
 // --- OS Detection ---
 #if defined(_WIN32) || defined(_WIN64)
-    #define TG_OS_WINDOWS
+#define TG_OS_WINDOWS
 #elif defined(__APPLE__)
-    #define TG_OS_MACOS
+#define TG_OS_MACOS
 #elif defined(__linux__)
-    #define TG_OS_LINUX
+#define TG_OS_LINUX
 #endif
 
 // --- Architecture Detection ---
 #if defined(__aarch64__) || defined(_M_ARM64)
-    #define TG_ARCH_ARM64
-    #if defined(__ARM_NEON) || defined(TG_OS_WINDOWS) // Windows ARM64 always has NEON
-        #define TG_HAS_NEON
-    #endif
+#define TG_ARCH_ARM64
+#if defined(__ARM_NEON) || defined(TG_OS_WINDOWS) // Windows ARM64 always has NEON
+#define TG_HAS_NEON
+#endif
 #elif defined(__x86_64__) || defined(_M_X64)
-    #define TG_ARCH_X64
+#define TG_ARCH_X64
 #endif
 
 namespace Error
@@ -62,7 +66,7 @@ inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> 
     return stridedIndex;
 }
 
-uint64_t countElements(std::vector<uint32_t> shape)
+inline uint64_t countElements(const std::vector<uint32_t> &shape)
 {
     uint64_t count = 1;
     for (uint32_t val : shape)
@@ -77,10 +81,24 @@ enum class DType : uint32_t
 {
     FLOAT32,
     INT32,
+    INT64,
     BF16,
     BOOL,
+    ANY,
     _COUNT
 };
+
+inline bool operator==(DType a, DType b)
+{
+    return static_cast<uint32_t>(a) == static_cast<uint32_t>(b) ||
+           static_cast<uint32_t>(a) == static_cast<uint32_t>(DType::ANY) ||
+           static_cast<uint32_t>(b) == static_cast<uint32_t>(DType::ANY);
+}
+
+inline bool operator!=(DType a, DType b)
+{
+    return !(a == b);
+}
 
 inline uint64_t getDTypeSize(DType dtype)
 {
@@ -90,10 +108,14 @@ inline uint64_t getDTypeSize(DType dtype)
         return 4;
     case DType::INT32:
         return 4;
+    case DType::INT64:
+        return 8;
     case DType::BF16:
         return 2;
     case DType::BOOL:
         return 1;
+    case DType::ANY:
+        return 0;
     default:
         Error::throw_err("Unknown DType size");
     }
@@ -102,6 +124,7 @@ inline uint64_t getDTypeSize(DType dtype)
 enum class OpType : uint32_t
 {
     INPUT,
+    CACHE,
 
     ADD,
     MUL,
@@ -127,6 +150,8 @@ enum class OpType : uint32_t
     IM2COL,
     CONTIGUOUS,
     SCATTER,
+    LOG,
+    ARGMAX,
 
     FUSED
 };
@@ -138,6 +163,7 @@ inline constexpr bool isAtomic(OpType type)
 
 enum class Backend : uint32_t
 {
+    STORAGE,
     CPU,
     CUDA
 };
@@ -146,7 +172,7 @@ enum class StorageType : uint32_t
 {
     TRANSIENT,
     PERSISTENT,
-    PINNED
+    PINNED // TODO: change to CACHE? or merge with PERSISTENT if OpType::CACHE is enough to differentiate?
 };
 
 struct TensorGraphError : public std::runtime_error
@@ -214,22 +240,61 @@ struct Region
     }
 };
 
-inline bool regionsMatch(const Region &r1, const Region &r2);
-
-inline void to_json(json &j, const Region &r)
+inline bool operator==(const Region &a, const Region &b)
 {
-    j = json::array();
-    for (const auto &dim : r.region)
-        j.push_back(json::array({dim.start, dim.stop}));
+    if (a.region.size() != b.region.size())
+    {
+        return false;
+    }
+    for (int i = 0; i < a.region.size(); i++)
+    {
+        if (a.region[i].start != b.region[i].start)
+        {
+            return false;
+        }
+        if (a.region[i].stop != b.region[i].stop)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
-inline void from_json(const json &j, Region &r)
+inline bool operator<=(const Region &a, const Region &b)
 {
-    r.region.clear();
-    for (const auto &dimJson : j)
+    // Does b completely cover a?
+    if (a.region.size() != b.region.size())
     {
-        r.region.push_back({dimJson[0].get<uint32_t>(), dimJson[1].get<uint32_t>()});
+        Error::throw_err("[Region<Region] cannot compare regions with sizes " + std::to_string(a.region.size()) + " and " + std::to_string(b.region.size()));
     }
+    bool covers = true;
+    for (int i = 0; i < a.region.size(); i++)
+    {
+        covers = covers && (a.region[i].start >= b.region[i].start) && (a.region[i].stop <= b.region[i].stop);
+    }
+    return covers;
+}
+
+inline bool regionsMatch(const Region &r1, const Region &r2);
+
+inline void tg_serialize(BinaryWriter &bw, const Dim &val)
+{
+    bw.write(val.start);
+    bw.write(val.stop);
+}
+inline void tg_deserialize(BinaryReader &br, Dim &val)
+{
+    br.read(val.start);
+    br.read(val.stop);
+}
+
+inline void tg_serialize(BinaryWriter &bw, const Region &val)
+{
+    bw.write(val.region);
+}
+inline void tg_deserialize(BinaryReader &br, Region &val)
+{
+    br.read(val.region);
 }
 
 inline std::string encodeRegion(const Region &r)
@@ -244,18 +309,6 @@ inline std::string encodeRegion(const Region &r)
     }
     ss << ")";
     return ss.str();
-}
-
-inline bool isFullRegion(const Region &r, const std::vector<uint32_t> &shape)
-{
-    if (r.region.size() != shape.size())
-        return false;
-    for (size_t i = 0; i < shape.size(); ++i)
-    {
-        if (r.region[i].start != 0 || r.region[i].stop != shape[i])
-            return false;
-    }
-    return true;
 }
 
 inline std::vector<Region> normalizeRegions(std::vector<Region> regions)
@@ -288,7 +341,7 @@ inline std::string encodeRegionList(const std::vector<Region> &regions)
     return ss.str();
 }
 
-bool isContiguous(const std::vector<uint64_t> &strides, const std::vector<uint32_t> &shape)
+inline bool isContiguous(const std::vector<uint64_t> &strides, const std::vector<uint32_t> &shape)
 {
     int64_t expectedStride = 1;
     for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
@@ -328,11 +381,12 @@ public:
     Backend backend = Backend::CPU;
     StorageType storageType = StorageType::TRANSIENT;
     std::string contentHash;
+    std::string debugOrigin;
 
     TensorNode() {}
 
-    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "")
-        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), backend(_backend), storageType(_storageType), contentHash(_contentHash)
+    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "", std::string _debugOrigin = "")
+        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), backend(_backend), storageType(_storageType), contentHash(_contentHash), debugOrigin(_debugOrigin)
     {
         if (strides.empty())
         {
@@ -362,12 +416,12 @@ public:
     }
 };
 
-bool isContiguous(const TensorNode &node)
+inline bool isContiguous(const TensorNode &node)
 {
     return isContiguous(node.strides, node.getShape());
 }
 
-uint64_t countElements(const TensorNode &node)
+inline uint64_t countElements(const TensorNode &node)
 {
     return countElements(node.getShape());
 }
@@ -378,7 +432,7 @@ private:
     std::vector<uint32_t> shape;
 
 public:
-    uint64_t baseOffset = 0;      // Offset into the MemoryManager's DeviceBuffer
+    uint64_t baseOffset = 0;       // Offset into the MemoryManager's DeviceBuffer
     std::vector<uint64_t> strides; // Strides in terms of elements, not bytes
     DType dtype;
 
@@ -398,12 +452,12 @@ public:
     }
 };
 
-bool isContiguous(const TensorView &view)
+inline bool isContiguous(const TensorView &view)
 {
     return isContiguous(view.strides, view.getShape());
 }
 
-uint64_t countElements(const TensorView &view)
+inline uint64_t countElements(const TensorView &view)
 {
     return countElements(view.getShape());
 }
@@ -421,10 +475,14 @@ inline std::string toString(DType dtype)
         return "F32";
     case DType::INT32:
         return "I32";
+    case DType::INT64:
+        return "I64";
     case DType::BF16:
         return "BF16";
     case DType::BOOL:
         return "BOOL";
+    case DType::ANY:
+        return "ANY";
     default:
         return "UNKNOWN_DTYPE";
     }
@@ -441,12 +499,14 @@ inline DType fromString(const std::string &str)
     Error::throw_err("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for that instead of generic runtime_error
 }
 
-inline std::string toString(OpType op)
+inline std::string toString(OpType op) // TODO: make build.py check that each op has a case here
 {
     switch (op)
     {
     case OpType::INPUT:
         return "INPUT";
+    case OpType::CACHE:
+        return "CACHE";
     case OpType::ADD:
         return "ADD";
     case OpType::MUL:
@@ -495,6 +555,10 @@ inline std::string toString(OpType op)
         return "CONTIGUOUS";
     case OpType::SCATTER:
         return "SCATTER";
+    case OpType::LOG:
+        return "LOG";
+    case OpType::ARGMAX:
+        return "ARGMAX";
     case OpType::FUSED:
         return "FUSED";
     default:
@@ -502,10 +566,12 @@ inline std::string toString(OpType op)
     }
 }
 
-inline std::string toString(Backend backend)
+inline std::string toString(Backend backend) // TODO: make build.py check that each backend has a case here
 {
     switch (backend)
     {
+    case Backend::STORAGE:
+        return "STORAGE";
     case Backend::CPU:
         return "CPU";
     case Backend::CUDA:
@@ -534,16 +600,6 @@ inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << to
 inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toString(op); }
 inline std::ostream &operator<<(std::ostream &os, Backend backend) { return os << toString(backend); }
 inline std::ostream &operator<<(std::ostream &os, StorageType storage) { return os << toString(storage); }
-
-struct DirtyBucket
-{
-    // Canonical meaning:
-    // - regions[nodeId] is the logical output region list for nodeId.
-    // - inputSlices[nodeId][parentIndex][regionIndex] is the corresponding
-    //   parent slice needed to compute regions[nodeId][regionIndex].
-    std::unordered_map<uint32_t, std::vector<Region>> regions;
-    std::unordered_map<uint32_t, std::vector<std::vector<Region>>> inputSlices;
-};
 
 class SHA256
 {
@@ -678,53 +734,6 @@ public:
     }
 };
 
-NLOHMANN_JSON_SERIALIZE_ENUM(DType, {
-                                        {DType::FLOAT32, "FLOAT32"},
-                                        {DType::INT32, "INT32"},
-                                        {DType::BF16, "BF16"},
-                                        {DType::BOOL, "BOOL"},
-                                    })
-
-NLOHMANN_JSON_SERIALIZE_ENUM(OpType, {
-                                         {OpType::INPUT, "INPUT"},
-                                         {OpType::ADD, "ADD"},
-                                         {OpType::MUL, "MUL"},
-                                         {OpType::DIVIDE, "DIVIDE"},
-                                         {OpType::DOT, "DOT"},
-                                         {OpType::SIN, "SIN"},
-                                         {OpType::COS, "COS"},
-                                         {OpType::NEGATE, "NEGATE"},
-                                         {OpType::POWER, "POWER"},
-                                         {OpType::SUM, "SUM"},
-                                         {OpType::MAX, "MAX"},
-                                         {OpType::RESHAPE, "RESHAPE"},
-                                         {OpType::PERMUTE, "PERMUTE"},
-                                         {OpType::SLICE, "SLICE"},
-                                         {OpType::CONCAT, "CONCAT"},
-                                         {OpType::CAST, "CAST"},
-                                         {OpType::REPEAT, "REPEAT"},
-                                         {OpType::ARANGE, "ARANGE"},
-                                         {OpType::TRIU, "TRIU"},
-                                         {OpType::GATHER, "GATHER"},
-                                         {OpType::FILL, "FILL"},
-                                         {OpType::COPY_TO, "COPY_TO"},
-                                         {OpType::IM2COL, "IM2COL"},
-                                         {OpType::CONTIGUOUS, "CONTIGUOUS"},
-                                         {OpType::SCATTER, "SCATTER"},
-                                         {OpType::FUSED, "FUSED"},
-                                     })
-
-NLOHMANN_JSON_SERIALIZE_ENUM(Backend, {
-                                          {Backend::CPU, "CPU"},
-                                          {Backend::CUDA, "CUDA"},
-                                      })
-
-NLOHMANN_JSON_SERIALIZE_ENUM(StorageType, {
-                                              {StorageType::TRANSIENT, "TRANSIENT"},
-                                              {StorageType::PERSISTENT, "PERSISTENT"},
-                                              {StorageType::PINNED, "PINNED"},
-                                          })
-
 struct OpInstruction
 {
     uint32_t nodeId;
@@ -738,8 +747,108 @@ struct OpInstruction
     StorageType outputStorageType = StorageType::TRANSIENT;
 };
 
+struct Bucket
+{
+    std::unordered_map<uint32_t, std::vector<Region>> inputDirtyRegions;
+    std::vector<Region> outputNeededRegion;
+};
+
+inline void tg_serialize(BinaryWriter &bw, const Bucket &val)
+{
+    uint32_t constSize = static_cast<uint32_t>(val.inputDirtyRegions.size());
+    bw.write(constSize);
+    for (const auto &pair : val.inputDirtyRegions)
+    {
+        bw.write(pair.first);
+        // TODO: make a tg_serialize that handles any vector as long as it can handle the type in the vector
+        uint32_t regionsSize = static_cast<uint32_t>(pair.second.size());
+        bw.write(regionsSize);
+        for (const Region &r : pair.second)
+        {
+            bw.write(r);
+        }
+    }
+
+    uint32_t outputSize = static_cast<uint32_t>(val.outputNeededRegion.size());
+    bw.write(outputSize);
+    for (const Region &r : val.outputNeededRegion)
+    {
+        bw.write(r);
+    }
+}
+inline void tg_deserialize(BinaryReader &br, Bucket &val)
+{
+    uint32_t constSize;
+    br.read(constSize);
+    for (int i = 0; i < constSize; i++)
+    {
+        uint32_t first;
+        br.read(first);
+        uint32_t size;
+        br.read(size);
+        std::vector<Region> regs;
+        for (int j = 0; j < size; j++)
+        {
+            Region r;
+            br.read(r);
+            regs.push_back(r);
+        }
+        val.inputDirtyRegions[first] = regs;
+    }
+    uint32_t outSize;
+    br.read(outSize);
+    std::vector<Region> outRegs;
+    for (int j = 0; j < outSize; j++)
+    {
+        Region r;
+        br.read(r);
+        outRegs.push_back(r);
+    }
+    val.outputNeededRegion = outRegs;
+}
+
+inline bool operator==(const Bucket &a, const Bucket &b)
+{
+    bool equal = true;
+    if (a.inputDirtyRegions.size() != b.inputDirtyRegions.size())
+    {
+        return false;
+    }
+    for (const auto &pair : a.inputDirtyRegions)
+    {
+        if (b.inputDirtyRegions.count(pair.first) == 0)
+        {
+            return false;
+        }
+        if (pair.second.size() != b.inputDirtyRegions.at(pair.first).size())
+        {
+            return false;
+        }
+        for (int i = 0; i < pair.second.size(); i++)
+        {
+            if (pair.second[i] != b.inputDirtyRegions.at(pair.first)[i])
+            {
+                return false;
+            }
+        }
+    }
+    if (a.outputNeededRegion.size() != b.outputNeededRegion.size())
+    {
+        return false;
+    }
+    for (int i = 0; i < a.outputNeededRegion.size(); i++)
+    {
+        if (a.outputNeededRegion[i] != b.outputNeededRegion[i])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 struct CompiledGraph
 {
+    Bucket bucket;
     std::vector<OpInstruction> instructions;
     std::unordered_map<uint32_t, uint32_t> refCounts;
     std::unordered_map<uint32_t, TensorNode> nodesMap;
@@ -747,174 +856,204 @@ struct CompiledGraph
     // Canonical direction:
     // compiled physical node id -> original logical node id.
     std::unordered_map<uint32_t, uint32_t> physicalToLogicalNodeMap;
-    std::unordered_map<uint32_t, std::vector<uint8_t>> constantStaging;
+    std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
+
+    float cost() const
+    {
+        float sum = 0.0f;
+        for (const auto &pair : nodeCosts)
+        {
+            sum += pair.second;
+        }
+        return sum;
+    }
 
     const uint32_t getLogicalId(uint32_t id) const
     {
         auto it = physicalToLogicalNodeMap.find(id);
         return it != physicalToLogicalNodeMap.end() ? it->second : id;
     }
+
+    void remapPhysIds()
+    {
+        std::unordered_map<uint32_t, uint32_t> oldToNew;
+        for (const auto &pair : nodesMap)
+        {
+            if (pair.first >= 0x80000000)
+            {
+                oldToNew[pair.first] = GlobalNextPhysId++;
+            }
+        }
+
+        if (oldToNew.empty())
+            return;
+
+        auto mapId = [&](uint32_t id)
+        {
+            auto it = oldToNew.find(id);
+            return it != oldToNew.end() ? it->second : id;
+        };
+
+        for (auto &inst : instructions)
+        {
+            inst.nodeId = mapId(inst.nodeId);
+            for (auto &inId : inst.inputNodeIds)
+            {
+                inId = mapId(inId);
+            }
+        }
+
+        std::unordered_map<uint32_t, uint32_t> newRefCounts;
+        for (const auto &pair : refCounts)
+        {
+            newRefCounts[mapId(pair.first)] = pair.second;
+        }
+        refCounts = std::move(newRefCounts);
+
+        std::unordered_map<uint32_t, TensorNode> newNodesMap;
+        for (auto &pair : nodesMap)
+        {
+            TensorNode &node = pair.second;
+            node.id = mapId(node.id);
+            for (auto &pId : node.parentIds)
+            {
+                pId = mapId(pId);
+            }
+            newNodesMap[node.id] = std::move(node);
+        }
+        nodesMap = std::move(newNodesMap);
+
+        std::unordered_map<uint32_t, float> newNodeCosts;
+        for (const auto &pair : nodeCosts)
+        {
+            newNodeCosts[mapId(pair.first)] = pair.second;
+        }
+        nodeCosts = std::move(newNodeCosts);
+
+        std::unordered_map<uint32_t, uint32_t> newPhysToLog;
+        for (const auto &pair : physicalToLogicalNodeMap)
+        {
+            newPhysToLog[mapId(pair.first)] = pair.second;
+        }
+        physicalToLogicalNodeMap = std::move(newPhysToLog);
+
+        std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> newConst;
+        for (auto &pair : constantStaging)
+        {
+            newConst[mapId(pair.first)] = std::move(pair.second);
+        }
+        constantStaging = std::move(newConst);
+    }
 };
 
-inline void to_json(json &j, const Dim &d) { j = json{d.start, d.stop}; }
-inline void from_json(const json &j, Dim &d)
+inline void tg_serialize(BinaryWriter &bw, const TensorView &val)
 {
-    d.start = j[0];
-    d.stop = j[1];
+    bw.write(val.baseOffset);
+    bw.write(val.getShape());
+    bw.write(val.strides);
+    bw.write(val.dtype);
+}
+inline void tg_deserialize(BinaryReader &br, TensorView &val)
+{
+    br.read(val.baseOffset);
+    std::vector<uint32_t> shape;
+    br.read(shape);
+    val.setShape(shape);
+    br.read(val.strides);
+    br.read(val.dtype);
 }
 
-inline void to_json(json &j, const TensorView &v)
+inline void tg_serialize(BinaryWriter &bw, const TensorNode &val)
 {
-    j = json{
-        {"baseOffset", v.baseOffset},
-        {"shape", v.getShape()},
-        {"strides", v.strides},
-        {"dtype", v.dtype}};
+    bw.write(val.id);
+    bw.write(val.opType);
+    bw.write(val.opName);
+    bw.write(val.dtype);
+    bw.write(val.parentIds);
+    bw.write(val.getShape());
+    bw.write(val.strides);
+    bw.write(val.viewOffset);
+    bw.write(val.backend);
+    bw.write(val.storageType);
+    bw.write(val.contentHash);
 }
-inline void from_json(const json &j, TensorView &v)
+inline void tg_deserialize(BinaryReader &br, TensorNode &val)
 {
-    v.baseOffset = j.at("baseOffset").get<uint64_t>();
-    v.setShape(j.at("shape").get<std::vector<uint32_t>>());
-    v.strides = j.at("strides").get<std::vector<uint64_t>>();
-    v.dtype = j.at("dtype").get<DType>();
-}
-
-inline void to_json(json &j, const TensorNode &n)
-{
-    j = json{
-        {"id", n.id},
-        {"opType", n.opType},
-        {"opName", n.opName},
-        {"dtype", n.dtype},
-        {"parentIds", n.parentIds},
-        {"shape", n.getShape()},
-        {"strides", n.strides},
-        {"viewOffset", n.viewOffset},
-        {"backend", n.backend},
-        {"storageType", n.storageType},
-        {"contentHash", n.contentHash}};
-}
-inline void from_json(const json &j, TensorNode &n)
-{
-    n.id = j.at("id").get<uint32_t>();
-    n.opType = j.at("opType").get<OpType>();
-    n.opName = j.at("opName").get<std::string>();
-    n.dtype = j.at("dtype").get<DType>();
-    n.parentIds = j.at("parentIds").get<std::vector<uint32_t>>();
-    n.setShape(j.at("shape").get<std::vector<uint32_t>>());
-    n.strides = j.at("strides").get<std::vector<uint64_t>>();
-    n.viewOffset = j.contains("viewOffset") ? j.at("viewOffset").get<uint64_t>() : 0;
-    n.backend = j.at("backend").get<Backend>();
-    n.storageType = j.at("storageType").get<StorageType>();
-    n.contentHash = j.at("contentHash").get<std::string>();
+    br.read(val.id);
+    br.read(val.opType);
+    br.read(val.opName);
+    br.read(val.dtype);
+    br.read(val.parentIds);
+    std::vector<uint32_t> shape;
+    br.read(shape);
+    val.setShape(shape);
+    br.read(val.strides);
+    br.read(val.viewOffset);
+    br.read(val.backend);
+    br.read(val.storageType);
+    br.read(val.contentHash);
 }
 
-inline void to_json(json &j, const OpInstruction &i)
+inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
 {
-    json fullId;
+    bw.write(val.nodeId);
+    bw.write(val.logicalNodeId);
+    bw.write(val.fullKernelId);
+    bw.write(val.cachedKernelIds);
+    bw.write(val.inputNodeIds);
+    bw.write(val.inplaceInputIndex);
+    bw.write(val.viewInputIndex);
+    bw.write(val.backend);
+    bw.write(val.outputStorageType);
+}
+inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
+{
+    br.read(val.nodeId);
+    br.read(val.logicalNodeId);
+    br.read(val.fullKernelId);
+    br.read(val.cachedKernelIds);
+    br.read(val.inputNodeIds);
+    br.read(val.inplaceInputIndex);
+    br.read(val.viewInputIndex);
+    br.read(val.backend);
+    br.read(val.outputStorageType);
+}
+
+inline void tg_serialize(BinaryWriter &bw, const CompiledGraph &val)
+{
+    bw.write(val.bucket);
+    bw.write(val.instructions);
+    bw.write(val.refCounts);
+    bw.write(val.nodesMap);
+    bw.write(val.nodeCosts);
+    bw.write(val.physicalToLogicalNodeMap);
+
+    uint32_t constSize = static_cast<uint32_t>(val.constantStaging.size());
+    bw.write(constSize);
+    for (const auto &pair : val.constantStaging)
     {
-        std::stringstream pss;
-        pss << "0x" << std::hex << i.fullKernelId;
-        fullId = pss.str();
+        bw.write(pair.first);
+        bw.write(*pair.second);
     }
-
-    json cachedIds = json::array();
-    for (uint64_t k : i.cachedKernelIds)
-    {
-        std::stringstream pss;
-        pss << "0x" << std::hex << k;
-        cachedIds.push_back(pss.str());
-    }
-
-    j = json{
-        {"nodeId", i.nodeId},
-        {"logicalNodeId", i.logicalNodeId},
-        {"fullKernelId", fullId},
-        {"cachedKernelIds", cachedIds},
-        {"inputNodeIds", i.inputNodeIds},
-        {"inplaceInputIndex", i.inplaceInputIndex},
-        {"viewInputIndex", i.viewInputIndex},
-        {"backend", i.backend},
-        {"outputStorageType", i.outputStorageType}};
 }
-inline void from_json(const json &j, OpInstruction &i)
+inline void tg_deserialize(BinaryReader &br, CompiledGraph &val)
 {
-    i.nodeId = j.at("nodeId").get<uint32_t>();
-    i.logicalNodeId = j.contains("logicalNodeId") ? j.at("logicalNodeId").get<uint32_t>() : UINT32_MAX;
-    i.fullKernelId = std::stoull(j.at("fullKernelId").get<std::string>(), nullptr, 16);
-    i.cachedKernelIds.clear();
-    for (const auto &pkStr : j.at("cachedKernelIds"))
+    br.read(val.bucket);
+    br.read(val.instructions);
+    br.read(val.refCounts);
+    br.read(val.nodesMap);
+    br.read(val.nodeCosts);
+    br.read(val.physicalToLogicalNodeMap);
+
+    uint32_t constSize;
+    br.read(constSize);
+    val.constantStaging.clear();
+    for (uint32_t i = 0; i < constSize; ++i)
     {
-        i.cachedKernelIds.push_back(std::stoull(pkStr.get<std::string>(), nullptr, 16));
+        uint32_t k;
+        br.read(k);
+        std::vector<uint8_t> v;
+        br.read(v);
+        val.constantStaging[k] = std::make_shared<std::vector<uint8_t>>(std::move(v));
     }
-
-    i.inputNodeIds = j.at("inputNodeIds").get<std::vector<uint32_t>>();
-    i.inplaceInputIndex = j.at("inplaceInputIndex").get<int32_t>();
-    i.viewInputIndex = j.at("viewInputIndex").get<int32_t>();
-    i.backend = j.at("backend").get<Backend>();
-    i.outputStorageType = j.contains("outputStorageType") ? j.at("outputStorageType").get<StorageType>() : StorageType::TRANSIENT;
-}
-inline void to_json(json &j, const CompiledGraph &cg)
-{
-    json refCounts = json::object();
-    for (const auto &kv : cg.refCounts)
-        refCounts[std::to_string(kv.first)] = kv.second;
-
-    json nodesMap = json::object();
-    for (const auto &kv : cg.nodesMap)
-        nodesMap[std::to_string(kv.first)] = kv.second;
-
-    json nodeCosts = json::object();
-    for (const auto &kv : cg.nodeCosts)
-        nodeCosts[std::to_string(kv.first)] = kv.second;
-
-    json logicalMap = json::object();
-    for (const auto &kv : cg.physicalToLogicalNodeMap)
-        logicalMap[std::to_string(kv.first)] = kv.second;
-
-    json constStaging = json::object();
-    for (const auto &kv : cg.constantStaging)
-        constStaging[std::to_string(kv.first)] = kv.second;
-
-    j = json{
-        {"instructions", cg.instructions},
-        {"refCounts", refCounts},
-        {"nodesMap", nodesMap},
-        {"nodeCosts", nodeCosts},
-        {"physicalToLogicalNodeMap", logicalMap},
-        {"constantStaging", constStaging}};
-}
-
-inline void from_json(const json &j, CompiledGraph &cg)
-{
-    cg.instructions = j.at("instructions").get<std::vector<OpInstruction>>();
-
-    cg.refCounts.clear();
-    for (const auto &item : j.at("refCounts").items())
-        cg.refCounts[std::stoul(item.key())] = item.value().get<uint32_t>();
-
-    cg.nodesMap.clear();
-    for (const auto &item : j.at("nodesMap").items())
-        cg.nodesMap[std::stoul(item.key())] = item.value().get<TensorNode>();
-
-    cg.nodeCosts.clear();
-    for (const auto &item : j.at("nodeCosts").items())
-    {
-        if (item.value().is_null())
-        {
-            cg.nodeCosts[std::stoul(item.key())] = std::numeric_limits<float>::infinity();
-        }
-        else
-        {
-            cg.nodeCosts[std::stoul(item.key())] = item.value().get<float>();
-        }
-    }
-
-    cg.physicalToLogicalNodeMap.clear();
-    for (const auto &item : j.at("physicalToLogicalNodeMap").items())
-        cg.physicalToLogicalNodeMap[std::stoul(item.key())] = item.value().get<uint32_t>();
-
-    cg.constantStaging.clear();
-    for (const auto &item : j.at("constantStaging").items())
-        cg.constantStaging[std::stoul(item.key())] = item.value().get<std::vector<uint8_t>>();
 }

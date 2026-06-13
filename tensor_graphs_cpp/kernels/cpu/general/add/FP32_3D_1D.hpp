@@ -3,33 +3,28 @@
 #include "core/kernels.hpp"
 #include <vector>
 
-inline bool matchAddFP32_3D_1D(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchAddFP32_3D_1D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
     if (inputs[0].getShape().size() != 3 || inputs[1].getShape().size() != 1 || output.getShape().size() != 3)
         return false;
     if (inputs[0].getShape()[2] != inputs[1].getShape()[0] || output.getShape()[2] != inputs[1].getShape()[0])
         return false;
     if (inputs[0].getShape() != output.getShape())
         return false;
-    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
     return true;
 }
 
-inline void runAddFP32_3D_1D(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                             const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runAddFP32_3D_1D(const KernelContext& ctx)
 {
-    const float *data3D = static_cast<const float *>(inputs[0]);
-    const float *data1D = static_cast<const float *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *data3D = static_cast<const float *>(ctx.inputs[0]);
+    const float *data1D = static_cast<const float *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    uint32_t B = inViews[0].getShape()[0];
-    uint32_t S = inViews[0].getShape()[1];
-    uint32_t D = inViews[0].getShape()[2];
+    uint32_t B = ctx.inViews[0].getShape()[0];
+    uint32_t S = ctx.inViews[0].getShape()[1];
+    uint32_t D = ctx.inViews[0].getShape()[2];
     uint64_t totalElements = (uint64_t)B * S * D;
 
     for (uint64_t i = 0; i < totalElements; ++i)

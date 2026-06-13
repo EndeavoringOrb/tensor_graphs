@@ -7,28 +7,23 @@
 // Formula: tanh(x) = (e^x - e^-x) / (e^x + e^-x)
 // ---------------------------------------------------------
 
-bool matchTanhF32_1D(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+bool matchTanhF32_1D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
     if (inputs[0].getShape().size() != 1 || output.getShape().size() != 1)
         return false;
     if (inputs[0].getShape()[0] != output.getShape()[0])
         return false;
-    if (!isContiguous(inputs[0]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
     return true;
 }
 
-void runTanhF32_1D(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                   const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+void runTanhF32_1D(const KernelContext &ctx)
 {
-    const float *x = static_cast<const float *>(inputs[0]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *x = static_cast<const float *>(ctx.inputs[0]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    uint32_t size = inViews[0].getShape()[0];
+    uint32_t size = ctx.inViews[0].getShape()[0];
 
     for (uint32_t i = 0; i < size; ++i)
     {

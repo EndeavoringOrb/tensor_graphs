@@ -7,15 +7,8 @@
  * Performs element-wise negation: out = -x
  */
 
-inline bool matchNegF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchNegF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-
-    // Check Dtypes
-    if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
-
     // Check Shapes (Must match)
     if (inputs[0].getShape() != output.getShape())
         return false;
@@ -23,17 +16,16 @@ inline bool matchNegF32_ND(const std::vector<TensorNode> &inputs, const TensorNo
     return true;
 }
 
-inline void runNegF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                         const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runNegF32_ND(const KernelContext &ctx)
 {
-    const float *x = static_cast<const float *>(inputs[0]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *x = static_cast<const float *>(ctx.inputs[0]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    uint64_t numElements = countElements(inViews[0].getShape());
+    uint64_t numElements = countElements(ctx.inViews[0].getShape());
 
     for (uint64_t i = 0; i < numElements; ++i)
     {
-        out[getStridedIndex(i, outViews[0].getShape(), outViews[0].strides)] = -x[getStridedIndex(i, inViews[0].getShape(), inViews[0].strides)];
+        out[getStridedIndex(i, ctx.outViews[0].getShape(), ctx.outViews[0].strides)] = -x[getStridedIndex(i, ctx.inViews[0].getShape(), ctx.inViews[0].strides)];
     }
 }
 

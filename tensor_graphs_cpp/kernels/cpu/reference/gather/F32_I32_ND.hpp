@@ -9,35 +9,29 @@
  * Logic: For each index in the indices tensor, copy a 'row' from the data tensor.
  */
 
-inline bool matchGatherF32_I32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchGatherF32_I32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-
     // inputs[0] = data, inputs[1] = indices
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::INT32 || output.dtype != DType::FLOAT32)
-        return false;
 
     // Simple check: data must be at least 1D
     if (inputs[0].getShape().empty())
         return false;
 
     // Reference implementation requires contiguity
-    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
 
     return true;
 }
 
-inline void runGatherF32_I32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runGatherF32_I32_ND(const KernelContext &ctx)
 {
-    const float *data = static_cast<const float *>(inputs[0]);
-    const int32_t *indices = static_cast<const int32_t *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *data = static_cast<const float *>(ctx.inputs[0]);
+    const int32_t *indices = static_cast<const int32_t *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    const std::vector<uint32_t> &dataShape = inViews[0].getShape();
-    const std::vector<uint32_t> &idxShape = inViews[1].getShape();
+    const std::vector<uint32_t> &dataShape = ctx.inViews[0].getShape();
+    const std::vector<uint32_t> &idxShape = ctx.inViews[1].getShape();
 
     uint32_t vocabSize = dataShape[0];
     uint64_t rowSize = 1;
@@ -63,4 +57,4 @@ inline void runGatherF32_I32_ND(const std::vector<const void *> &inputs, const s
     }
 }
 
-REGISTER_REF_KERNEL(OpType::GATHER, 2, matchGatherF32_I32_ND, runGatherF32_I32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {8}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::GATHER, 2, matchGatherF32_I32_ND, runGatherF32_I32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {8}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});

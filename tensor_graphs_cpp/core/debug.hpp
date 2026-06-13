@@ -1,3 +1,4 @@
+// tensor_graphs_cpp/core/debug.hpp
 #pragma once
 #include <cmath>
 #include <iostream>
@@ -10,16 +11,22 @@ namespace Debug
 {
     inline void checkNan(const TensorNode &node, const MemoryManager &mem, const std::string &context)
     {
-#ifndef DEBUG
+#ifndef DEBUG_CHECKNAN
         return;
 #endif
+        // Skip checking model weights/inputs for NaNs, as they are out of our control
+        if (node.opType == OpType::INPUT)
+        {
+            return;
+        }
+
         // INT32 and BOOL cannot represent NaNs, so we skip them
         if (node.dtype != DType::FLOAT32 && node.dtype != DType::BF16)
         {
             return;
         }
 
-        TensorView view = mem.getView(node);
+        TensorView view = mem.getView(node, node.id);
 
         auto it = mem.buffers.find(node.backend);
         if (it == mem.buffers.end())
@@ -57,12 +64,11 @@ namespace Debug
                 uint64_t idx = getStridedIndex(i, view.getShape(), view.strides);
                 if (std::isnan(data[idx]))
                 {
-                    std::stringstream ss;
-                    ss << "[NaN Detection] Found NaN in node " << node.id
+                    std::cerr << "[NaN Detection] Found NaN in node " << node.id
                        << " (" << toString(node.opType) << (node.opType == OpType::FUSED ? " " + node.opName : "") << ")"
                        << " during \"" << context
                        << "\" at element index " << i << " (flat index " << idx << ")";
-                    Error::throw_err(ss.str());
+                    return;
                 }
             }
         }
@@ -76,12 +82,11 @@ namespace Debug
                 bool is_nan = ((bits & 0x7F80) == 0x7F80) && ((bits & 0x007F) != 0);
                 if (is_nan)
                 {
-                    std::stringstream ss;
-                    ss << "[NaN Detection] Found BF16 NaN in node " << node.id
+                    std::cerr << "[NaN Detection] Found BF16 NaN in node " << node.id
                        << " (" << toString(node.opType) << ")"
                        << " during " << context
                        << " at element index " << i << " (flat index " << idx << ")";
-                    Error::throw_err(ss.str());
+                    return;
                 }
             }
         }

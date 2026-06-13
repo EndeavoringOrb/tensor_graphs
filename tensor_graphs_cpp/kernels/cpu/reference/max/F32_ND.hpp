@@ -3,20 +3,19 @@
 #include "core/kernels.hpp"
 #include <cfloat>
 
-inline bool matchMaxF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchMaxF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() == 2 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32;
+    return true;
 }
 
-inline void runMaxF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                         const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runMaxF32_ND(const KernelContext &ctx)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
-    int32_t axis = *static_cast<const int32_t *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *in = static_cast<const float *>(ctx.inputs[0]);
+    int32_t axis = *static_cast<const int32_t *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    const auto &inShape = inViews[0].getShape();
-    const auto &outShape = outViews[0].getShape();
+    const auto &inShape = ctx.inViews[0].getShape();
+    const auto &outShape = ctx.outViews[0].getShape();
     int32_t ndim = static_cast<int32_t>(inShape.size());
 
     // Normalize axis
@@ -29,7 +28,7 @@ inline void runMaxF32_ND(const std::vector<const void *> &inputs, const std::vec
     uint64_t out_count = countElements(outShape);
     for (uint64_t i = 0; i < out_count; ++i)
     {
-        out[getStridedIndex(i, outShape, outViews[0].strides)] = -FLT_MAX;
+        out[getStridedIndex(i, outShape, ctx.outViews[0].strides)] = -FLT_MAX;
     }
 
     // 2. Iterate through all elements of the input
@@ -49,11 +48,11 @@ inline void runMaxF32_ND(const std::vector<const void *> &inputs, const std::vec
             // In a reduction, the coordinate of the reduced axis in the output is 0
             // (since the dimension size is 1). All other coordinates match.
             uint32_t out_coord = (d == axis) ? 0 : coord;
-            out_phys_idx += (uint64_t)out_coord * outViews[0].strides[d];
+            out_phys_idx += (uint64_t)out_coord * ctx.outViews[0].strides[d];
         }
 
         // Access input using system strides and perform the Max reduction
-        float val = in[getStridedIndex(i, inShape, inViews[0].strides)];
+        float val = in[getStridedIndex(i, inShape, ctx.inViews[0].strides)];
         if (val > out[out_phys_idx])
         {
             out[out_phys_idx] = val;

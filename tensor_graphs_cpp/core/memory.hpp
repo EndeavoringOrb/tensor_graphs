@@ -1,6 +1,7 @@
 // tensor_graphs_cpp/core/memory.hpp
 #pragma once
 #include "core/types.hpp"
+#include "core/hardware.hpp"
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -70,53 +71,6 @@ struct InterruptManager
         }
     }
 };
-
-inline float calculateSavedCost(
-    const std::unordered_set<uint32_t> &cacheState,
-    const std::unordered_map<uint32_t, std::vector<uint32_t>> &parentMap,
-    const std::unordered_map<uint32_t, float> &nodeCosts)
-{
-    std::unordered_set<uint32_t> savedNodes;
-    std::vector<uint32_t> stack;
-
-    // A node in the cache saves itself AND all of its recursive ancestors.
-    for (uint32_t node : cacheState)
-    {
-        if (savedNodes.insert(node).second)
-        {
-            stack.push_back(node);
-        }
-    }
-
-    while (!stack.empty())
-    {
-        uint32_t curr = stack.back();
-        stack.pop_back();
-
-        auto it = parentMap.find(curr);
-        if (it != parentMap.end())
-        {
-            for (uint32_t p : it->second)
-            {
-                if (savedNodes.insert(p).second)
-                {
-                    stack.push_back(p);
-                }
-            }
-        }
-    }
-
-    float totalCost = 0.0f;
-    for (uint32_t node : savedNodes)
-    {
-        auto it = nodeCosts.find(node);
-        if (it != nodeCosts.end())
-        {
-            totalCost += it->second;
-        }
-    }
-    return totalCost;
-}
 
 struct MemBlock
 {
@@ -255,20 +209,34 @@ struct DeviceBuffer
     {
         if (initialized)
             return;
+        auto &caps = HardwareCaps::get();
 
 #ifdef USE_CUDA
         if (backend == Backend::CUDA)
         {
-            cudaError_t err = cudaMalloc(&arena_ptr, sizeBytes);
-            if (err != cudaSuccess)
+            if (caps.has_unified_memory)
             {
-                Error::throw_err("CUDA malloc failed: " + std::string(cudaGetErrorString(err)));
+                // Physically shared memory
+                cudaError_t err = cudaMallocManaged(&arena_ptr, sizeBytes);
+                if (err != cudaSuccess)
+                {
+                    Error::throw_err("[DeviceBuffer] cudaMallocManaged failed: " + std::string(cudaGetErrorString(err)));
+                }
+            }
+            else
+            {
+                cudaError_t err = cudaMalloc(&arena_ptr, sizeBytes);
+                if (err != cudaSuccess)
+                {
+                    Error::throw_err("[DeviceBuffer] cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
+                }
             }
         }
         else if (backend == Backend::CPU)
         {
-            cpu_arena.resize(sizeBytes);
-            arena_ptr = cpu_arena.data();
+            cpu_arena.resize(sizeBytes + 64);
+            uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
+            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
         }
         else
         {
@@ -277,8 +245,9 @@ struct DeviceBuffer
 #else
         if (backend == Backend::CPU)
         {
-            cpu_arena.resize(sizeBytes);
-            arena_ptr = cpu_arena.data();
+            cpu_arena.resize(sizeBytes + 64);
+            uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
+            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
         }
         else if (backend == Backend::CUDA)
         {
@@ -312,24 +281,8 @@ struct DeviceBuffer
         }
         else
         {
-            Error::throw_err("Cannot write to unallocated node");
+            Error::throw_err("Cannot write to unallocated node (nodeId=" + std::to_string(nodeId) + ",size=" + std::to_string(size) + ")");
         }
-    }
-
-    const uint8_t *read(uint32_t nodeId) const
-    {
-        auto it = allocationMap.find(nodeId);
-        if (it != allocationMap.end())
-        {
-#ifdef USE_CUDA
-            if (backend == Backend::CUDA)
-            {
-                cudaDeviceSynchronize();
-            }
-#endif
-            return arena_ptr + it->second->offset;
-        }
-        return nullptr;
     }
 
     void defrag()
@@ -397,10 +350,11 @@ struct DeviceBuffer
         return blocks.end();
     }
 
-    uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost,
-                      const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr,
-                      const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
+    uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost)
     {
+        // Align allocated size to 64 bytes to maintain alignment of all internal blocks
+        _sizeBytes = (_sizeBytes + 63) & ~63ULL;
+
         // 1. If it's already cached, lock it and update
         auto mapIt = allocationMap.find(nodeId);
         if (mapIt != allocationMap.end())
@@ -418,7 +372,7 @@ struct DeviceBuffer
         // 3. If no space, allocation failed.
         if (slotIt == blocks.end())
         {
-            Error::throw_err<MemoryAllocationError>("Cannot allocate: Not enough space.", _sizeBytes);
+            Error::throw_err<MemoryAllocationError>("Cannot allocate: Not enough space on " + toString(backend), _sizeBytes);
         }
 
         // 4. Claim the free slot
@@ -488,6 +442,15 @@ struct MemoryManager
         {
             buf.second.init();
         }
+        // Clear stale alias entries left over from any previous execution cycle.
+        // Multiple sessions sharing a MemoryManager have overlapping node-ID spaces
+        // (each graph numbers its nodes independently from 0). A transient alias
+        // created during session N's execution and not fully cleaned up will
+        // silently redirect writes for session N+1's newly-allocated persistent
+        // nodes — whose IDs coincidentally collide — to already-freed addresses.
+        aliasMap.clear();
+        aliasRefCounts.clear();
+        aliasStorageTypes.clear();
     }
 
     void addAlias(Backend backend, uint32_t srcId, uint32_t dstId, uint32_t additionalRefs, StorageType storageType = StorageType::TRANSIENT)
@@ -499,13 +462,13 @@ struct MemoryManager
         aliasStorageTypes[dstId] = storageType;
     }
 
-    uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f, const std::unordered_map<uint32_t, std::vector<uint32_t>> *parentMap = nullptr, const std::unordered_map<uint32_t, float> *nodeCosts = nullptr)
+    uint64_t allocate(Backend backend, uint32_t nodeId, uint64_t sizeBytes, StorageType storageType, int32_t refCount = 0, float cost = 0.0f)
     {
         auto it = buffers.find(backend);
         if (it == buffers.end())
             Error::throw_err("[MemoryManager.allocate] DeviceBuffer not initialized for backend " + toString(backend));
 
-        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost, parentMap, nodeCosts);
+        return it->second.allocate(nodeId, sizeBytes, storageType, refCount, cost);
     }
 
     void write(Backend backend, uint32_t nodeId, const void *data, uint64_t size)
@@ -523,23 +486,9 @@ struct MemoryManager
         buffers.at(backend).write(targetId, data, size);
     }
 
-    const uint8_t *read(Backend backend, uint32_t nodeId) const
-    {
-        auto it = buffers.find(backend);
-        if (it == buffers.end())
-            Error::throw_err("[MemoryManager.read] DeviceBuffer not initialized for backend " + toString(backend));
-
-        uint32_t targetId = nodeId;
-        while (aliasMap.find(targetId) != aliasMap.end())
-        {
-            targetId = aliasMap.at(targetId);
-        }
-
-        return buffers.at(backend).read(targetId);
-    }
-
     void release(Backend backend, uint32_t nodeId)
     {
+        // Check if this is an alias
         auto aliasIt = aliasMap.find(nodeId);
         if (aliasIt != aliasMap.end())
         {
@@ -547,18 +496,21 @@ struct MemoryManager
             if (refIt != aliasRefCounts.end() && refIt->second > 0)
             {
                 refIt->second--;
+                // Only deallocate if the reference count is actually zero
                 if (refIt->second == 0)
                 {
                     auto storageIt = aliasStorageTypes.find(nodeId);
+                    // Ensure we only recurse if the alias is TRANSIENT
                     if (storageIt == aliasStorageTypes.end() || storageIt->second == StorageType::TRANSIENT)
                     {
                         uint32_t targetId = aliasIt->second;
-                        aliasMap.erase(aliasIt);
-                        aliasRefCounts.erase(refIt);
+
+                        // Clean up the alias metadata before recursing to the underlying ID
+                        aliasRefCounts.erase(nodeId);
                         if (storageIt != aliasStorageTypes.end())
-                        {
-                            aliasStorageTypes.erase(storageIt);
-                        }
+                            aliasStorageTypes.erase(nodeId);
+                        aliasMap.erase(nodeId);
+
                         release(backend, targetId);
                     }
                 }
@@ -628,21 +580,31 @@ struct MemoryManager
         auto srcIt = buf.allocationMap.find(srcId);
         if (srcIt != buf.allocationMap.end())
         {
-            auto dstIt = buf.allocationMap.find(dstId);
-            if (dstIt != buf.allocationMap.end())
-            {
-                dstIt->second->nodeId = UINT32_MAX;
-                dstIt->second->isLocked = false;
-                buf.allocationMap.erase(dstIt);
-                buf.mergeFreeBlocks();
-            }
-
             auto blockIt = srcIt->second;
-            buf.allocationMap.erase(srcIt);
 
-            // Update node identity
-            blockIt->nodeId = dstId;
-            buf.allocationMap[dstId] = blockIt;
+            if (blockIt->storageType == StorageType::PERSISTENT || blockIt->storageType == StorageType::PINNED)
+            {
+                // Cannot transfer ownership of a persistent/pinned block (it must survive!)
+                // Create an alias to share the inplace memory safely instead.
+                addAlias(backend, srcId, dstId, 0, StorageType::TRANSIENT);
+            }
+            else
+            {
+                auto dstIt = buf.allocationMap.find(dstId);
+                if (dstIt != buf.allocationMap.end())
+                {
+                    dstIt->second->nodeId = UINT32_MAX;
+                    dstIt->second->isLocked = false;
+                    buf.allocationMap.erase(dstIt);
+                    buf.mergeFreeBlocks();
+                }
+
+                buf.allocationMap.erase(srcIt);
+
+                // Update node identity
+                blockIt->nodeId = dstId;
+                buf.allocationMap[dstId] = blockIt;
+            }
         }
         else
         {
@@ -659,38 +621,57 @@ struct MemoryManager
         return id;
     }
 
-    TensorView getView(const TensorNode &node) const
+    TensorView getView(const TensorNode &node, const uint32_t overrideId) const
     {
-        auto it = buffers.find(node.backend);
-        if (it == buffers.end())
-        {
-            Error::throw_err("[MemoryManager.getView] Backend buffer not initialized");
-        }
-
-        const DeviceBuffer &buf = it->second;
-        uint32_t targetId = node.id;
+        uint32_t targetId = overrideId;
         while (aliasMap.find(targetId) != aliasMap.end())
         {
             targetId = aliasMap.at(targetId);
         }
 
+        // Cross-backend lookup for Unified Memory
+        Backend actualBackend = node.backend;
+        if (buffers.find(Backend::CUDA) != buffers.end() && buffers.at(Backend::CUDA).allocationMap.count(targetId))
+        {
+            actualBackend = Backend::CUDA;
+        }
+        else if (buffers.find(Backend::CPU) != buffers.end() && buffers.at(Backend::CPU).allocationMap.count(targetId))
+        {
+            actualBackend = Backend::CPU;
+        }
+
+        const DeviceBuffer &buf = buffers.at(actualBackend);
         uint64_t arenaOffset = buf.getOffset(targetId);
-
-        TensorView view = TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype));
-
-        return view;
+        return TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype));
     }
 
     bool has(Backend backend, uint32_t nodeId) const
     {
-        auto aliasIt = aliasMap.find(nodeId);
-        if (aliasIt != aliasMap.end())
+        uint32_t targetId = nodeId;
+        auto aliasIt = aliasMap.find(targetId);
+        while (aliasIt != aliasMap.end())
         {
-            return has(backend, aliasIt->second);
+            targetId = aliasIt->second;
+            aliasIt = aliasMap.find(targetId);
         }
 
-        const DeviceBuffer &buf = buffers.at(backend);
-        return (buf.allocationMap.find(nodeId) != buf.allocationMap.end());
+        // 1. Try the expected backend buffer first
+        auto it = buffers.find(backend);
+        if (it != buffers.end() && it->second.allocationMap.count(targetId))
+        {
+            return true;
+        }
+
+        // 2. Check other backends (required for Unified Memory views spanning backends)
+        for (const auto &pair : buffers)
+        {
+            if (pair.first == backend)
+                continue;
+            if (pair.second.allocationMap.count(targetId))
+                return true;
+        }
+
+        return false;
     }
 
     uint64_t getCapacity(Backend backend) const

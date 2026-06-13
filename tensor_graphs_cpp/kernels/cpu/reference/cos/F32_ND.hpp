@@ -3,21 +3,18 @@
 #include "core/kernels.hpp"
 #include <cmath>
 
-inline bool matchCosF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchCosF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-    return inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && isContiguous(inputs[0]) && isContiguous(output);
+    return isContiguous(output);
 }
 
-inline void runCosF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                         const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runCosF32_ND(const KernelContext &ctx)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
-    float *out = static_cast<float *>(outputs[0]);
-    uint64_t n = countElements(outViews[0].getShape());
+    const float *in = static_cast<const float *>(ctx.inputs[0]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
+    uint64_t n = countElements(ctx.outViews[0].getShape());
     for (uint64_t i = 0; i < n; ++i)
         out[i] = std::cos(in[i]);
 }
 
-REGISTER_REF_KERNEL(OpType::COS, 1, matchCosF32_ND, runCosF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {false}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::COS, 1, matchCosF32_ND, runCosF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {true}, {{Backend::CPU}});

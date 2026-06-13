@@ -8,7 +8,7 @@
  * CUDA KERNEL: CONTIGUOUS ND (FLOAT32)
  * ---------------------------------------------------------
  * This kernel ensures a tensor is contiguous in memory.
- * It reads from a potentially strided source and writes to a 
+ * It reads from a potentially strided source and writes to a
  * linear (contiguous) destination.
  */
 
@@ -23,7 +23,7 @@ namespace ContiguousCUDA
         int64_t in_strides[MAX_RANK];
     };
 
-    __global__ void contiguous_kernel(const float *__restrict__ src, float *__restrict__ dst, uint64_t numElements, ContiguousParams p)
+    __global__ void contiguous_kernel(const uint8_t *__restrict__ src, uint8_t *__restrict__ dst, uint64_t numElements, uint64_t elemSize, ContiguousParams p)
     {
         uint64_t idx = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
         if (idx >= numElements)
@@ -39,13 +39,16 @@ namespace ContiguousCUDA
         {
             if (i >= (int)p.rank)
                 continue;
-            
+
             uint32_t coord = temp % p.shape[i];
             temp /= p.shape[i];
             src_idx += (uint64_t)coord * p.in_strides[i];
         }
 
-        dst[idx] = src[src_idx];
+        for (uint64_t b = 0; b < elemSize; ++b)
+        {
+            dst[idx * elemSize + b] = src[src_idx * elemSize + b];
+        }
     }
 }
 
@@ -53,16 +56,11 @@ namespace ContiguousCUDA
  * Match Function:
  * Requires Rank <= 8, Input backend CUDA, Output backend CUDA, and Output must be contiguous.
  */
-inline bool matchContiguous_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchContiguous_CUDA_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-
     const auto &in = inputs[0];
 
-    if (in.backend != Backend::CUDA || output.backend != Backend::CUDA)
-        return false;
-    if (in.dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
+    if (in.dtype != output.dtype)
         return false;
 
     // Check rank limits
@@ -83,13 +81,13 @@ inline bool matchContiguous_CUDA_ND(const std::vector<TensorNode> &inputs, const
  * Run Function:
  * Prepares the stride and shape metadata and launches the GPU kernel.
  */
-inline void runContiguous_CUDA_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                 const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runContiguous_CUDA_ND(const KernelContext &ctx)
 {
-    const float *src = static_cast<const float *>(inputs[0]);
-    float *dst = static_cast<float *>(outputs[0]);
+    const uint8_t *src = static_cast<const uint8_t *>(ctx.inputs[0]);
+    uint8_t *dst = static_cast<uint8_t *>(ctx.outputs[0]);
 
-    uint64_t numElements = countElements(outViews[0].getShape());
+    uint64_t numElements = countElements(ctx.outViews[0].getShape());
+    uint64_t elemSize = getDTypeSize(ctx.inViews[0].dtype);
     if (numElements == 0)
         return;
 
@@ -98,15 +96,15 @@ inline void runContiguous_CUDA_ND(const std::vector<const void *> &inputs, const
 
     for (uint32_t i = 0; i < p.rank; ++i)
     {
-        p.shape[i] = outViews[0].getShape()[i];
-        p.in_strides[i] = inViews[0].strides[i];
+        p.shape[i] = ctx.outViews[0].getShape()[i];
+        p.in_strides[i] = ctx.inViews[0].strides[i];
     }
 
     int blockSize = 256;
     uint32_t gridSize = (uint32_t)((numElements + blockSize - 1) / blockSize);
 
-    ContiguousCUDA::contiguous_kernel<<<gridSize, blockSize>>>(src, dst, numElements, p);
-    
+    ContiguousCUDA::contiguous_kernel<<<gridSize, blockSize>>>(src, dst, numElements, elemSize, p);
+
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
     {
@@ -125,10 +123,10 @@ inline uint32_t refFactoryContiguous_CUDA_ND(const std::vector<uint32_t> &inputs
 
 // Register as a named general kernel for CUDA
 REGISTER_KERNEL("Contiguous_CUDA_ND", 1, matchContiguous_CUDA_ND, runContiguous_CUDA_ND, refFactoryContiguous_CUDA_ND, {Backend::CUDA},
-    {DType::FLOAT32},      // Input DType
-    {{1024, 640}},         // Dummy shape
-    {false},               // Input does NOT require contiguity (that's the point of this kernel)
-    {{Backend::CUDA}}      // Input backends
+                {DType::ANY},     // Input DType
+                {{1024, 640}},    // Dummy shape
+                {false},          // Input does NOT require contiguity (that's the point of this kernel)
+                {{Backend::CUDA}} // Input backends
 );
 
 #endif

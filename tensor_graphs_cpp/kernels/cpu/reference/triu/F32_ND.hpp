@@ -3,18 +3,17 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
-inline bool matchTriuF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchTriuF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() == 2 && inputs[0].dtype == DType::FLOAT32 && output.dtype == DType::FLOAT32 && isContiguous(inputs[0]) && isContiguous(output);
+    return output.dtype == DType::FLOAT32 && isContiguous(output);
 }
 
-inline void runTriuF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                          const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runTriuF32_ND(const KernelContext &ctx)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
-    int32_t k = *static_cast<const int32_t *>(inputs[1]);
-    float *out = static_cast<float *>(outputs[0]);
-    const auto &shape = outViews[0].getShape();
+    const float *in = static_cast<const float *>(ctx.inputs[0]);
+    int32_t k = *static_cast<const int32_t *>(ctx.inputs[1]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
+    const auto &shape = ctx.outViews[0].getShape();
     uint32_t cols = shape.back();
     uint32_t rows = shape[shape.size() - 2];
     uint64_t batch = countElements(shape) / (rows * cols);
@@ -32,4 +31,4 @@ inline void runTriuF32_ND(const std::vector<const void *> &inputs, const std::ve
     }
 }
 
-REGISTER_REF_KERNEL(OpType::TRIU, 2, matchTriuF32_ND, runTriuF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::TRIU, 2, matchTriuF32_ND, runTriuF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {true, false}, {{Backend::CPU}, {Backend::CPU}});

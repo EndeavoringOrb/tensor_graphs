@@ -66,11 +66,8 @@ namespace detail
     }
 }
 
-inline bool matchRecursiveContiguous_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchRecursiveContiguous_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-
     const auto &in = inputs[0];
 
     if (in.dtype != output.dtype)
@@ -85,15 +82,14 @@ inline bool matchRecursiveContiguous_ND(const std::vector<TensorNode> &inputs, c
     return true;
 }
 
-inline void runRecursiveContiguous_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                 const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runRecursiveContiguous_ND(const KernelContext &ctx)
 {
-    const auto &view = inViews[0];
+    const auto &view = ctx.inViews[0];
     const auto &shape = view.getShape();
     const auto &strides = view.strides;
 
-    const uint8_t *src_base = static_cast<const uint8_t *>(inputs[0]);
-    uint8_t *dst_base = static_cast<uint8_t *>(outputs[0]);
+    const uint8_t *src_base = static_cast<const uint8_t *>(ctx.inputs[0]);
+    uint8_t *dst_base = static_cast<uint8_t *>(ctx.outputs[0]);
     const uint64_t elementSize = getDTypeSize(view.dtype);
 
     if (shape.empty())
@@ -146,31 +142,97 @@ inline void runRecursiveContiguous_ND(const std::vector<const void *> &inputs, c
     int outer_rank = contig_dim_start;
     uint64_t block_size = (outer_rank == rank) ? 1 : contig_elements;
 
-    // Cast to float* as the REGISTER_KERNEL specifies FLOAT32.
-    float *dst_ptr = reinterpret_cast<float *>(dst_base);
-    const float *src_ptr = reinterpret_cast<const float *>(src_base);
-
-    // Parallelize the outermost dimension.
-    if (outer_rank > 0 && shape[0] > 1)
+    if (elementSize == 4)
     {
-        const uint32_t dim0_size = shape[0];
-        const uint64_t dim0_stride = strides[0];
-        const uint64_t total_elements = countElements(shape);
-        const uint64_t inner_elements_per_dim0 = total_elements / dim0_size;
-
-#pragma omp parallel for schedule(static)
-        for (int i = 0; i < (int)dim0_size; ++i)
+        uint32_t *dst_ptr = reinterpret_cast<uint32_t *>(dst_base);
+        const uint32_t *src_ptr = reinterpret_cast<const uint32_t *>(src_base);
+        if (outer_rank > 0 && shape[0] > 1)
         {
-            float *local_dst = dst_ptr + (i * inner_elements_per_dim0);
-            const float *local_src = src_ptr + (i * dim0_stride);
-
-            detail::copy_recursive_fast<float>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+            const uint32_t dim0_size = shape[0];
+            const uint64_t dim0_stride = strides[0];
+            const uint64_t inner_elements = countElements(shape) / dim0_size;
+#pragma omp parallel for schedule(static)
+            for (int i = 0; i < (int)dim0_size; ++i)
+            {
+                uint32_t *local_dst = dst_ptr + (i * inner_elements);
+                const uint32_t *local_src = src_ptr + (i * dim0_stride);
+                detail::copy_recursive_fast<uint32_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+            }
+        }
+        else
+        {
+            uint32_t *temp_dst = dst_ptr;
+            detail::copy_recursive_fast<uint32_t>(0, src_ptr, temp_dst, shape, strides, outer_rank, block_size);
+        }
+    }
+    else if (elementSize == 2)
+    {
+        uint16_t *dst_ptr = reinterpret_cast<uint16_t *>(dst_base);
+        const uint16_t *src_ptr = reinterpret_cast<const uint16_t *>(src_base);
+        if (outer_rank > 0 && shape[0] > 1)
+        {
+            const uint32_t dim0_size = shape[0];
+            const uint64_t dim0_stride = strides[0];
+            const uint64_t inner_elements = countElements(shape) / dim0_size;
+#pragma omp parallel for schedule(static)
+            for (int i = 0; i < (int)dim0_size; ++i)
+            {
+                uint16_t *local_dst = dst_ptr + (i * inner_elements);
+                const uint16_t *local_src = src_ptr + (i * dim0_stride);
+                detail::copy_recursive_fast<uint16_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+            }
+        }
+        else
+        {
+            uint16_t *temp_dst = dst_ptr;
+            detail::copy_recursive_fast<uint16_t>(0, src_ptr, temp_dst, shape, strides, outer_rank, block_size);
+        }
+    }
+    else if (elementSize == 8)
+    {
+        uint64_t *dst_ptr = reinterpret_cast<uint64_t *>(dst_base);
+        const uint64_t *src_ptr = reinterpret_cast<const uint64_t *>(src_base);
+        if (outer_rank > 0 && shape[0] > 1)
+        {
+            const uint32_t dim0_size = shape[0];
+            const uint64_t dim0_stride = strides[0];
+            const uint64_t inner_elements = countElements(shape) / dim0_size;
+#pragma omp parallel for schedule(static)
+            for (int i = 0; i < (int)dim0_size; ++i)
+            {
+                uint64_t *local_dst = dst_ptr + (i * inner_elements);
+                const uint64_t *local_src = src_ptr + (i * dim0_stride);
+                detail::copy_recursive_fast<uint64_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+            }
+        }
+        else
+        {
+            uint64_t *temp_dst = dst_ptr;
+            detail::copy_recursive_fast<uint64_t>(0, src_ptr, temp_dst, shape, strides, outer_rank, block_size);
         }
     }
     else
     {
-        float *temp_dst = dst_ptr;
-        detail::copy_recursive_fast<float>(0, src_ptr, temp_dst, shape, strides, outer_rank, block_size);
+        uint8_t *dst_ptr = reinterpret_cast<uint8_t *>(dst_base);
+        const uint8_t *src_ptr = reinterpret_cast<const uint8_t *>(src_base);
+        if (outer_rank > 0 && shape[0] > 1)
+        {
+            const uint32_t dim0_size = shape[0];
+            const uint64_t dim0_stride = strides[0];
+            const uint64_t inner_elements = countElements(shape) / dim0_size;
+#pragma omp parallel for schedule(static)
+            for (int i = 0; i < (int)dim0_size; ++i)
+            {
+                uint8_t *local_dst = dst_ptr + (i * inner_elements);
+                const uint8_t *local_src = src_ptr + (i * dim0_stride);
+                detail::copy_recursive_fast<uint8_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+            }
+        }
+        else
+        {
+            uint8_t *temp_dst = dst_ptr;
+            detail::copy_recursive_fast<uint8_t>(0, src_ptr, temp_dst, shape, strides, outer_rank, block_size);
+        }
     }
 }
 
@@ -189,7 +251,7 @@ REGISTER_KERNEL(
     runRecursiveContiguous_ND,
     refFactoryRecursiveContiguous_ND,
     {Backend::CPU},
-    {DType::FLOAT32},
+    {DType::ANY},
     {{8, 32}},
     {false},
     {{Backend::CPU}});

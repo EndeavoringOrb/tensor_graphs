@@ -18,6 +18,8 @@
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
+#include <fstream>
+#include <filesystem>
 
 void propagateDirtyRegionsAtomic(
     const std::vector<uint32_t> &topo,
@@ -72,433 +74,125 @@ void propagateDirtyRegionsAtomic(
     }
 }
 
-inline bool updateRegionListIfChanged(std::vector<Region> &dst, const std::vector<Region> &src)
-{
-    std::vector<Region> merged = mergeRegions(dst, src);
-    if (encodeRegionList(merged) == encodeRegionList(dst))
-        return false;
-    dst = std::move(merged);
-    return true;
-}
-
-struct PlanningRegionState
-{
-    bool initialized = false;
-    std::unordered_map<uint32_t, std::vector<Region>> recompute;
-    std::unordered_map<uint32_t, std::vector<Region>> recomputeCached;
-    std::unordered_map<uint32_t, std::vector<Region>> needed;
-
-    const std::vector<Region> *getRecompute(
-        const std::unordered_set<uint32_t> &cachedNodes,
-        uint32_t nodeId) const
-    {
-        if (cachedNodes.count(nodeId) != 0)
-        {
-            auto it = recomputeCached.find(nodeId);
-            if (it != recomputeCached.end())
-            {
-                return &it->second;
-            }
-        }
-
-        auto it = recompute.find(nodeId);
-        if (it != recompute.end())
-        {
-            return &it->second;
-        }
-
-        return nullptr;
-    }
-};
-
-// Worklist backward pass to compute needed regions from the root.
-static void updateNeeded(
-    uint32_t rootId,
-    const Graph &graph,
-    ShapePropagator &prop,
-    std::unordered_map<uint32_t, std::vector<Region>> &needed)
-{
-    if (!graph.hasNode(rootId))
-        return;
-
-    std::vector<uint32_t> worklist = {rootId};
-    std::unordered_set<uint32_t> queued = {rootId};
-
-    while (!worklist.empty())
-    {
-        uint32_t nodeId = worklist.back();
-        worklist.pop_back();
-        queued.erase(nodeId);
-
-        if (!graph.hasNode(nodeId))
-            continue;
-
-        const TensorNode &node = graph.getNode(nodeId);
-        if (node.opType == OpType::INPUT)
-            continue;
-
-        auto neededIt = needed.find(nodeId);
-        if (neededIt == needed.end() || neededIt->second.empty())
-            continue;
-
-        // These operations rely on global coordinates or full context to compute correct values, so they cannot be partially evaluated.
-        bool forceFull = (node.opType == OpType::ARANGE ||
-                          node.opType == OpType::TRIU ||
-                          node.opType == OpType::IM2COL ||
-                          node.opType == OpType::RESHAPE ||
-                          node.opType == OpType::PERMUTE ||
-                          node.opType == OpType::REPEAT ||
-                          node.opType == OpType::FILL);
-
-        std::vector<Region> currentNeeded = neededIt->second;
-        if (forceFull)
-        {
-            currentNeeded = {node.fullRegion()};
-            needed[nodeId] = currentNeeded;
-        }
-
-        std::vector<std::vector<Region>> parentNeeded = prop.backward(node, graph, neededIt->second);
-        for (size_t i = 0; i < node.parentIds.size(); ++i)
-        {
-            if (i >= parentNeeded.size() || parentNeeded[i].empty())
-                continue;
-
-            uint32_t parentId = node.parentIds[i];
-            if (!graph.hasNode(parentId))
-                continue;
-
-            const TensorNode &parentNode = graph.getNode(parentId);
-            if (parentNode.opType == OpType::INPUT)
-                continue;
-
-            if (updateRegionListIfChanged(needed[parentId], parentNeeded[i]) && !queued.count(parentId))
-            {
-                worklist.push_back(parentId);
-                queued.insert(parentId);
-            }
-        }
-    }
-}
-
-static PlanningRegionState derivePlanningRegions(
-    uint32_t rootId,
-    const Graph &graph,
-    const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions)
-{
-    PlanningRegionState state;
-    ShapePropagator prop;
-
-    auto rootIt = dirtyOutputRegions.find(rootId);
-    if (rootIt == dirtyOutputRegions.end())
-    {
-        Error::throw_err("[derivePlanningRegions] Cannot find dirty region for output");
-    }
-    state.needed[rootId] = mergeRegions(rootIt->second);
-
-    updateNeeded(rootId, graph, prop, state.needed);
-
-    for (const auto &pair : state.needed)
-    {
-        uint32_t nodeId = pair.first;
-        const std::vector<Region> &neededRegions = pair.second;
-        if (neededRegions.empty())
-            continue;
-        const TensorNode &node = graph.nodes.at(nodeId);
-        bool forceFull = (node.opType == OpType::ARANGE ||
-                          node.opType == OpType::TRIU ||
-                          node.opType == OpType::IM2COL ||
-                          node.opType == OpType::RESHAPE ||
-                          node.opType == OpType::PERMUTE ||
-                          node.opType == OpType::REPEAT ||
-                          node.opType == OpType::FILL);
-
-        auto dirtyIt = dirtyOutputRegions.find(nodeId);
-        state.recompute[nodeId] = normalizeRegions(mergeRegions(neededRegions));
-        if (dirtyIt != dirtyOutputRegions.end() && !dirtyIt->second.empty() && !forceFull)
-            state.recomputeCached[nodeId] = normalizeRegions(intersectRegionLists(dirtyIt->second, neededRegions));
-    }
-
-    state.initialized = true;
-    return state;
-}
-
-struct CacheAwarePlanningGraph
-{
-    Graph graph;
-    uint32_t physicalRootId = 0;
-    std::unordered_map<uint32_t, uint32_t> logicalToPhysicalNodeMap;
-    std::unordered_map<uint32_t, uint32_t> physicalToLogicalNodeMap;
-    std::unordered_map<uint32_t, std::vector<std::vector<Region>>> physicalInputSlices;
-};
-
-inline std::vector<uint32_t> getRegionShape(const Region &region)
-{
-    std::vector<uint32_t> shape;
-    shape.reserve(region.region.size());
-    for (const Dim &dim : region.region)
-        shape.push_back(dim.stop - dim.start);
-    return shape;
-}
-
-class CacheAwarePlanningGraphBuilder
-{
-public:
-    CacheAwarePlanningGraphBuilder(
-        const Graph &sourceGraph,
-        const PlanningRegionState &regionState,
-        const std::unordered_set<uint32_t> &cachedNodes)
-        : sourceGraph(sourceGraph), regionState(regionState), cachedNodes(cachedNodes)
-    {
-        result.graph = sourceGraph;
-    }
-
-    CacheAwarePlanningGraph build(uint32_t rootId)
-    {
-        result.physicalRootId = buildLogicalNode(rootId);
-        return result;
-    }
-
-private:
-    struct PartialCloneResult
-    {
-        uint32_t nodeId = 0;
-        std::vector<std::vector<Region>> parentRegions;
-    };
-
-    const Graph &sourceGraph;
-    const PlanningRegionState &regionState;
-    const std::unordered_set<uint32_t> &cachedNodes;
-    ShapePropagator prop;
-    CacheAwarePlanningGraph result;
-    std::unordered_map<uint32_t, uint32_t> memoizedPhysicalIds;
-
-    static std::vector<int32_t> toInt32Shape(const std::vector<uint32_t> &shape)
-    {
-        std::vector<int32_t> out;
-        out.reserve(shape.size());
-        for (uint32_t dim : shape)
-            out.push_back(static_cast<int32_t>(dim));
-        return out;
-    }
-
-    uint32_t addInt32Constant(const std::vector<int32_t> &values)
-    {
-        return result.graph.constant({static_cast<uint32_t>(values.size())}, values.data(), DType::INT32);
-    }
-
-    uint32_t addRegionStarts(const Region &region)
-    {
-        std::vector<int32_t> starts;
-        starts.reserve(region.region.size());
-        for (const Dim &dim : region.region)
-            starts.push_back(static_cast<int32_t>(dim.start));
-        return addInt32Constant(starts);
-    }
-
-    uint32_t addRegionEnds(const Region &region)
-    {
-        std::vector<int32_t> ends;
-        ends.reserve(region.region.size());
-        for (const Dim &dim : region.region)
-            ends.push_back(static_cast<int32_t>(dim.stop));
-        return addInt32Constant(ends);
-    }
-
-    uint32_t addRegionSteps(const Region &region)
-    {
-        std::vector<int32_t> steps(region.region.size(), 1);
-        return addInt32Constant(steps);
-    }
-
-    bool shouldSliceParentInput(const TensorNode &node, size_t parentIdx) const
-    {
-        switch (node.opType)
-        {
-        case OpType::SUM:
-        case OpType::MAX:
-        case OpType::PERMUTE:
-        case OpType::TRIU:
-        case OpType::RESHAPE:
-        case OpType::FILL:
-            return parentIdx == 0;
-        case OpType::REPEAT:
-            return parentIdx == 0;
-        case OpType::CONCAT:
-            return parentIdx + 1 < node.parentIds.size();
-        case OpType::SLICE:
-            return parentIdx == 0;
-        case OpType::SCATTER:
-            return parentIdx < 2;
-        case OpType::GATHER:
-            return parentIdx == 1;
-        default:
-            return true;
-        }
-    }
-
-    void convertLogicalNodeToPlaceholder(uint32_t logicalId)
-    {
-        TensorNode &placeholder = result.graph.getNode(logicalId);
-        placeholder.opType = OpType::INPUT;
-        placeholder.storageType = StorageType::PINNED;
-        placeholder.parentIds.clear();
-        result.physicalToLogicalNodeMap[logicalId] = logicalId;
-    }
-
-    uint32_t cloneNode(const TensorNode &sourceNode, const std::vector<uint32_t> &parentIds)
-    {
-        TensorNode &cloned = result.graph.allocateNode(sourceNode.opType, sourceNode.opName, sourceNode.dtype, parentIds, sourceNode.getShape(), sourceNode.strides, sourceNode.backend, sourceNode.storageType, sourceNode.contentHash);
-        return cloned.id;
-    }
-
-    uint32_t buildParentInputSlice(
-        const TensorNode &sourceNode,
-        size_t parentIdx,
-        uint32_t physicalParentId,
-        const std::vector<Region> &parentRegions)
-    {
-        if (!shouldSliceParentInput(sourceNode, parentIdx))
-            return physicalParentId;
-        if (parentRegions.empty())
-            return physicalParentId;
-        if (parentRegions.size() != 1) // TODO: handle multiple parent regions, or change std::vector<Region> -> Region if none of the backwards give multiple regions
-            Error::throw_err("[CacheAwarePlanningGraphBuilder.buildParentInputSlice] expected parentRegions.size() == 1 but got " + std::to_string(parentRegions.size()));
-
-        const Region &inputRegion = parentRegions.front();
-        if (inputRegion.empty())
-            Error::throw_err("[CacheAwarePlanningGraphBuilder.buildParentInputSlice] parent input region is empty");
-
-        const TensorNode &sourceParent = sourceGraph.getNode(sourceNode.parentIds[parentIdx]);
-        uint32_t safeParentId = result.graph.contiguous(physicalParentId);
-
-        uint32_t startsId = addRegionStarts(inputRegion);
-        uint32_t endsId = addRegionEnds(inputRegion);
-        uint32_t stepsId = addRegionSteps(inputRegion);
-        uint32_t sliceId = result.graph.slice(safeParentId, startsId, endsId, stepsId);
-        return result.graph.contiguous(sliceId);
-    }
-
-    PartialCloneResult buildPartialClone(uint32_t logicalId, const Region &outRegion)
-    {
-        const TensorNode &sourceNode = sourceGraph.getNode(logicalId);
-        std::vector<std::vector<Region>> parentRegions = prop.backward(sourceNode, sourceGraph, {outRegion});
-
-        std::vector<uint32_t> partialParents;
-        partialParents.reserve(sourceNode.parentIds.size());
-        for (size_t parentIdx = 0; parentIdx < sourceNode.parentIds.size(); ++parentIdx)
-        {
-            uint32_t physicalParentId = buildLogicalNode(sourceNode.parentIds[parentIdx]);
-            const std::vector<Region> emptyRegions;
-            const std::vector<Region> &regionsForParent = parentRegions[parentIdx];
-            partialParents.push_back(buildParentInputSlice(sourceNode, parentIdx, physicalParentId, regionsForParent));
-        }
-
-        uint32_t partialId = cloneNode(sourceNode, partialParents);
-        TensorNode &partialNode = result.graph.getNode(partialId);
-        partialNode.setShape(getRegionShape(outRegion));
-        result.physicalToLogicalNodeMap[partialId] = logicalId;
-        result.physicalInputSlices[partialId] = parentRegions;
-        return {partialId, parentRegions};
-    }
-
-    uint32_t buildLogicalNode(uint32_t logicalId)
-    {
-        auto memoIt = memoizedPhysicalIds.find(logicalId);
-        if (memoIt != memoizedPhysicalIds.end())
-            return memoIt->second;
-
-        if (!sourceGraph.hasNode(logicalId))
-        {
-            Error::throw_err("[CacheAwarePlanningGraphBuilder.buildLogicalNode] sourceGraph doesn't have node for logicalId");
-        }
-
-        const TensorNode &sourceNode = sourceGraph.getNode(logicalId);
-        if (sourceNode.opType == OpType::INPUT)
-        {
-            result.logicalToPhysicalNodeMap[logicalId] = logicalId;
-            result.physicalToLogicalNodeMap[logicalId] = logicalId;
-            memoizedPhysicalIds[logicalId] = logicalId;
-            return logicalId;
-        }
-
-        const std::vector<Region> *recomputePtr = regionState.getRecompute(cachedNodes, logicalId);
-        if (!recomputePtr || recomputePtr->empty())
-        {
-            convertLogicalNodeToPlaceholder(logicalId);
-            result.logicalToPhysicalNodeMap[logicalId] = logicalId;
-            result.physicalToLogicalNodeMap[logicalId] = logicalId;
-            memoizedPhysicalIds[logicalId] = logicalId;
-            return logicalId;
-        }
-        const std::vector<Region> &recomputeRegions = *recomputePtr;
-
-        if (cachedNodes.count(logicalId))
-        {
-            convertLogicalNodeToPlaceholder(logicalId);
-            uint32_t currentId = logicalId;
-
-            for (const Region &recomputeRegion : recomputeRegions)
-            {
-                PartialCloneResult partial = buildPartialClone(logicalId, recomputeRegion);
-
-                uint32_t startsId = addRegionStarts(recomputeRegion);
-                uint32_t endsId = addRegionEnds(recomputeRegion);
-                uint32_t stepsId = addRegionSteps(recomputeRegion);
-                uint32_t scatterId = result.graph.scatter(currentId, partial.nodeId, startsId, endsId, stepsId);
-
-                result.physicalToLogicalNodeMap[scatterId] = logicalId;
-
-                currentId = scatterId;
-            }
-
-            for (auto &pair : result.graph.nodes)
-            {
-                if (pair.second.opType == OpType::SCATTER)
-                {
-                    continue;
-                }
-                for (uint32_t &pid : pair.second.parentIds)
-                {
-                    if (pid == logicalId)
-                    {
-                        pid = currentId;
-                    }
-                }
-            }
-
-            result.logicalToPhysicalNodeMap[logicalId] = currentId;
-            memoizedPhysicalIds[logicalId] = currentId;
-            return currentId;
-        }
-        else
-        {
-            result.logicalToPhysicalNodeMap[logicalId] = logicalId;
-            result.physicalToLogicalNodeMap[logicalId] = logicalId;
-            memoizedPhysicalIds[logicalId] = logicalId;
-            return logicalId;
-        }
-    }
-};
-
-static CacheAwarePlanningGraph buildCacheAwarePlanningGraph(
-    uint32_t rootId,
-    const Graph &graph,
-    const PlanningRegionState &regionState,
-    const std::unordered_set<uint32_t> &cachedNodes)
-{
-    CacheAwarePlanningGraphBuilder builder(graph, regionState, cachedNodes);
-    return builder.build(rootId);
-}
-
 class Planner
 {
 private:
+    uint32_t egraph_dump_counter_ = 0;
+
+    void dumpEGraphBinary(const EGraph &egraph, uint32_t rootEClassId)
+    {
+        const std::string dir = "egraph_viewer/egraphs";
+        std::filesystem::create_directories(dir);
+
+        std::string path;
+        while (true)
+        {
+            path = dir + "/" + std::to_string(egraph_dump_counter_) + ".bin";
+            egraph_dump_counter_++;
+            if (!std::filesystem::exists(path))
+                break;
+        }
+
+        std::ofstream out(path, std::ios::binary);
+        if (!out)
+        {
+            std::cerr << "[Planner] Failed to open " << path << " for writing." << std::endl;
+            return;
+        }
+
+        const auto &classes = egraph.getClasses();
+        const auto &enodes = egraph.getENodes();
+
+        uint32_t num_classes = static_cast<uint32_t>(classes.size());
+        uint32_t num_enodes = static_cast<uint32_t>(enodes.size());
+
+        out.write(reinterpret_cast<const char *>(&num_classes), 4);
+        out.write(reinterpret_cast<const char *>(&num_enodes), 4);
+        out.write(reinterpret_cast<const char *>(&rootEClassId), 4);
+
+        // Write EClasses
+        for (const auto &cls : classes)
+        {
+            out.write(reinterpret_cast<const char *>(&cls.id), 4);
+            uint32_t s_size = static_cast<uint32_t>(cls.shape.size());
+            out.write(reinterpret_cast<const char *>(&s_size), 4);
+            if (s_size > 0)
+                out.write(reinterpret_cast<const char *>(cls.shape.data()), s_size * 4);
+
+            uint32_t st_size = static_cast<uint32_t>(cls.strides.size());
+            out.write(reinterpret_cast<const char *>(&st_size), 4);
+            if (st_size > 0)
+                out.write(reinterpret_cast<const char *>(cls.strides.data()), st_size * 8);
+
+            out.write(reinterpret_cast<const char *>(&cls.viewOffset), 8);
+            out.write(reinterpret_cast<const char *>(&cls.dtype), 4);
+            out.write(reinterpret_cast<const char *>(&cls.backend), 4);
+
+            uint32_t e_size = static_cast<uint32_t>(cls.enodes.size());
+            out.write(reinterpret_cast<const char *>(&e_size), 4);
+            if (e_size > 0)
+                out.write(reinterpret_cast<const char *>(cls.enodes.data()), e_size * 4);
+        }
+
+        // Write ENodes
+        for (const auto &enode : enodes)
+        {
+            out.write(reinterpret_cast<const char *>(&enode.kernelUid), 8);
+            uint32_t op_type = static_cast<uint32_t>(enode.opType);
+            out.write(reinterpret_cast<const char *>(&op_type), 4);
+            uint32_t n_len = static_cast<uint32_t>(enode.opName.length());
+            out.write(reinterpret_cast<const char *>(&n_len), 4);
+            if (n_len > 0)
+                out.write(enode.opName.c_str(), n_len);
+
+            uint32_t c_size = static_cast<uint32_t>(enode.children.size());
+            out.write(reinterpret_cast<const char *>(&c_size), 4);
+            if (c_size > 0)
+                out.write(reinterpret_cast<const char *>(enode.children.data()), c_size * 4);
+
+            out.write(reinterpret_cast<const char *>(&enode.leafId), 4);
+
+            uint32_t s_size = static_cast<uint32_t>(enode.shape.size());
+            out.write(reinterpret_cast<const char *>(&s_size), 4);
+            if (s_size > 0)
+                out.write(reinterpret_cast<const char *>(enode.shape.data()), s_size * 4);
+
+            uint32_t st_size = static_cast<uint32_t>(enode.strides.size());
+            out.write(reinterpret_cast<const char *>(&st_size), 4);
+            if (st_size > 0)
+                out.write(reinterpret_cast<const char *>(enode.strides.data()), st_size * 8);
+
+            out.write(reinterpret_cast<const char *>(&enode.viewOffset), 8);
+            out.write(reinterpret_cast<const char *>(&enode.dtype), 4);
+            out.write(reinterpret_cast<const char *>(&enode.backend), 4);
+            out.write(reinterpret_cast<const char *>(&enode.sig), 8);
+        }
+
+        // 3. Write Constants Section
+        uint32_t num_constants = static_cast<uint32_t>(egraph.constantStaging.size());
+        out.write(reinterpret_cast<const char *>(&num_constants), 4);
+        for (const auto &[eclassId, data_ptr] : egraph.constantStaging)
+        {
+            uint32_t canonId = eclassId; // Parser will use this to map to the canonical class
+            out.write(reinterpret_cast<const char *>(&canonId), 4);
+            const auto &data = *data_ptr;
+            uint64_t data_size = static_cast<uint64_t>(data.size());
+            out.write(reinterpret_cast<const char *>(&data_size), 8);
+            out.write(reinterpret_cast<const char *>(data.data()), data_size);
+        }
+
+        out.close();
+        std::cout << "[Planner] Dumped EGraph to " << path << std::endl;
+    }
+
     struct ENodeInfo
     {
         float cost;
         std::unordered_map<Backend, uint64_t> memSizes;
         bool inplace;
         int32_t inplace_idx;
+        bool isScatter;
+        bool isView;
     };
 
     struct ExtractChoice
@@ -512,15 +206,6 @@ private:
     {
         std::unordered_map<uint32_t, ExtractChoice> choiceByEClass;
         float totalCost = std::numeric_limits<float>::infinity();
-    };
-
-    struct EGraphSetupResult
-    {
-        CacheAwarePlanningGraph planningGraph;
-        EGraph egraph;
-        std::unordered_map<uint32_t, uint32_t> nodeToEClass;
-        std::unordered_map<uint32_t, uint32_t> eclassToLogical;
-        std::unordered_set<uint32_t> immutable_eclasses;
     };
 
     CostModel &costModel;
@@ -576,11 +261,18 @@ private:
         return order;
     }
 
-    void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses)
+    void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical, bool injected, bool allowPushDownOnProtected = false)
     {
         std::vector<std::unique_ptr<Rule>> rules;
         rules.emplace_back(std::make_unique<FusionRule>());
+        if (injected)
+        {
+            rules.emplace_back(std::make_unique<InfinityDomination>());
+            rules.emplace_back(std::make_unique<SlicePushDownElementwise>(allowPushDownOnProtected));
+            rules.emplace_back(std::make_unique<SlicePushDownDot>(allowPushDownOnProtected));
+        }
 
+        std::map<std::string, uint32_t> ruleMatchCounts;
         size_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
@@ -589,31 +281,47 @@ private:
 #endif
         while (changed)
         {
+            if (InterruptManager::isInterrupted())
+            {
+                InterruptManager::cleanup();
+                std::exit(SIGINT);
+            }
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
-            for (uint32_t eNodeIdx = 0; eNodeIdx < numENodes; eNodeIdx++)
+            // #ifdef DEBUG
+            ProgressTimer timer2(0, "saturation round " + std::to_string(iterations - 1) + " ");
+            // #endif
+            for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getENodes().size(); eNodeIdx++)
             {
                 for (const auto &rule : rules)
                 {
                     if (!rule->match(egraph, eNodeIdx, protectedEClasses))
                         continue;
 
-                    rule->apply(egraph, eNodeIdx, protectedEClasses);
+                    rule->apply(egraph, eNodeIdx, protectedEClasses, eclassToLogical);
                     changed = true;
+                    ruleMatchCounts[rule->name()]++;
                     nMatches++;
                 }
+                // #ifdef DEBUG
+                timer2.tick();
+                // #endif
             }
             egraph.rebuild();
             changed = egraph.getENodes().size() != numENodes;
+            std::cout << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
+            for (auto const &[name, count] : ruleMatchCounts)
+            {
+                std::cout << "  " << name << ": " << count << " matches" << std::endl;
+            }
+            std::cout << "Total Matches: " << nMatches << std::endl;
 #ifdef DEBUG
             timer.tick();
             std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << std::endl;
 #endif
         }
-#ifdef DEBUG
-        std::cout << "Finished saturation in " << iterations << " iterations with " + std::to_string(nMatches) + " matches\n"
+        std::cout << "Finished saturation in " << iterations << " iterations with " << nMatches << " matches\n"
                   << std::flush;
-#endif
     }
 
     std::unordered_map<uint32_t, uint32_t> build_ref_counts(const EGraph &egraph, const std::unordered_map<uint32_t, uint32_t> &selection_map, uint32_t root) const
@@ -638,16 +346,76 @@ private:
         const std::unordered_map<uint32_t, uint32_t> &selection_map,
         const std::vector<ENodeInfo> &enodeInfos,
         uint32_t root,
-        const std::unordered_set<uint32_t> &cachedNodes,
-        const std::unordered_map<uint32_t, uint32_t> &eclassToLogical) const
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
+        const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
+        const Graph &graph) const
     {
         auto ref = build_ref_counts(egraph, selection_map, root);
         std::unordered_map<Backend, uint64_t> live_mem;
         std::unordered_map<Backend, uint64_t> peak_mem;
         std::unordered_set<uint32_t> visited;
+        std::unordered_map<uint32_t, uint32_t> sim_aliasMap;
+
+        auto isPersistent = [&](uint32_t eclass_id) -> bool
+        {
+            uint32_t logicalId = eclassToLogical.count(eclass_id) ? eclassToLogical.at(eclass_id) : UINT32_MAX;
+            if (logicalId != UINT32_MAX && graph.hasNode(logicalId) && graph.getNode(logicalId).storageType == StorageType::PERSISTENT)
+                return true;
+            if (egraph.constantStaging.count(eclass_id))
+                return true;
+            return false;
+        };
+
+        auto release = [&](auto &self, uint32_t id) -> void
+        {
+            // 1. If this is an alias, unwrap it and recursively release the target
+            auto aliasIt = sim_aliasMap.find(id);
+            if (aliasIt != sim_aliasMap.end())
+            {
+                uint32_t targetId = aliasIt->second;
+                sim_aliasMap.erase(aliasIt);
+
+                // The parent instruction left the target's refcount artificially high.
+                // We must decrement it here, and cascade if it hits 0.
+                if (ref.find(targetId) != ref.end())
+                {
+                    ref[targetId]--;
+                    if (ref[targetId] == 0)
+                    {
+                        self(self, targetId);
+                    }
+                }
+                return;
+            }
+
+            // 2. Base case: This was an actual physical allocation. Evaluate memory release.
+            uint32_t logicalId = eclassToLogical.count(id) ? eclassToLogical.at(id) : UINT32_MAX;
+            bool childIsCached = (logicalId != UINT32_MAX && cachedNodes.count(logicalId));
+            bool childPersistent = isPersistent(id);
+
+            if (!childIsCached && !childPersistent)
+            {
+                auto selIt = selection_map.find(id);
+                if (selIt != selection_map.end())
+                {
+                    uint32_t sel = selIt->second;
+                    uint32_t enode_id = egraph.getEClass(id).enodes[sel];
+                    const ENodeInfo &info = enodeInfos[enode_id];
+
+                    if (!info.inplace && !info.isView)
+                    {
+                        for (const auto &kv : info.memSizes)
+                        {
+                            live_mem[kv.first] -= kv.second;
+                        }
+                    }
+                }
+            }
+        };
 
         std::function<void(uint32_t)> visit = [&](uint32_t eclass)
         {
+            eclass = egraph.findConst(eclass);
             if (visited.count(eclass))
                 return;
             visited.insert(eclass);
@@ -665,7 +433,7 @@ private:
             uint32_t logicalId = eclassToLogical.count(eclass) ? eclassToLogical.at(eclass) : UINT32_MAX;
             bool isCached = (logicalId != UINT32_MAX && cachedNodes.count(logicalId));
 
-            if (!info.inplace && !isCached)
+            if (!info.inplace && !info.isView && !isCached)
             {
                 for (const auto &kv : info.memSizes)
                 {
@@ -676,28 +444,25 @@ private:
 
             for (size_t i = 0; i < node.children.size(); ++i)
             {
-                uint32_t c = node.children[i];
+                uint32_t c = egraph.findConst(node.children[i]);
+
+                if (info.inplace && (int)i == info.inplace_idx)
+                {
+                    sim_aliasMap[eclass] = c;
+                    continue;
+                }
+
+                // Views always target child 0 in the Executor mapping
+                if (info.isView && i == 0)
+                {
+                    sim_aliasMap[eclass] = c;
+                    continue;
+                }
+
                 ref[c]--;
                 if (ref[c] == 0)
                 {
-                    uint32_t child_sel = selection_map.at(c);
-                    uint32_t child_enode_id = egraph.getEClass(c).enodes[child_sel];
-                    const ENodeInfo &child_info = enodeInfos[child_enode_id];
-                    uint32_t child_logicalId = eclassToLogical.count(c) ? eclassToLogical.at(c) : UINT32_MAX;
-                    bool childIsCached = (child_logicalId != UINT32_MAX && cachedNodes.count(child_logicalId));
-
-                    if (info.inplace && (int)i == info.inplace_idx)
-                    {
-                        continue;
-                    }
-
-                    if (!child_info.inplace && !childIsCached)
-                    {
-                        for (const auto &kv : child_info.memSizes)
-                        {
-                            live_mem[kv.first] -= kv.second;
-                        }
-                    }
+                    release(release, c);
                 }
             }
         };
@@ -706,173 +471,78 @@ private:
         return peak_mem;
     }
 
-    EGraphSetupResult setupEGraph(
-        uint32_t rootId,
-        Graph &graph,
-        const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
-        const std::unordered_set<uint32_t> &cachedNodes,
-        bool doSaturate,
-        PlanningRegionState &regionState)
+    /*
+    selectionMap (eclass -> sel)
+    enode = egraph.getEClass(eclass).enodes[sel]
+    TODO: there are multiple valid topo orders, we want one that puts inplace enodes as late as possible
+    */
+    std::vector<uint32_t> getEClassTopoOrder(const EGraph &egraph, const std::unordered_map<uint32_t, uint32_t> &selectionMap, uint32_t rootEClassId)
     {
-        if (InterruptManager::isInterrupted())
+        std::vector<uint32_t> topo;
+        std::unordered_set<uint32_t> visited_classes;
+        std::function<void(uint32_t)> visit = [&](uint32_t eclassId)
         {
-            std::cerr << "\n[Executor] Interrupt detected, aborting execution..." << std::endl;
-            InterruptManager::cleanup();
-            std::exit(SIGINT);
-        }
-        if (!regionState.initialized)
-        {
-            regionState = derivePlanningRegions(rootId, graph, dirtyOutputRegions);
-        }
-        EGraphSetupResult result;
-        result.planningGraph = buildCacheAwarePlanningGraph(rootId, graph, regionState, cachedNodes);
+            eclassId = egraph.findConst(eclassId);
+            if (visited_classes.count(eclassId))
+                return;
+            visited_classes.insert(eclassId);
 
-        std::vector<uint32_t> topo = topologicalSort(result.planningGraph.physicalRootId, result.planningGraph.graph);
-        inferShapes(topo, result.planningGraph.graph);
+            auto choiceIt = selectionMap.find(eclassId);
+            if (choiceIt == selectionMap.end())
+                return;
 
-        auto refCounts = computeRefCounts(topo, result.planningGraph.physicalRootId, result.planningGraph.graph);
+            const ENode &enode = egraph.getENodes()[egraph.getEClass(eclassId).enodes[choiceIt->second]];
+            for (uint32_t child : enode.children)
+                visit(child);
+            topo.push_back(eclassId);
+        };
 
-        result.nodeToEClass.reserve(result.planningGraph.graph.nodes.size());
-
-        for (uint32_t nodeId : topo)
-        {
-            TensorNode &node = result.planningGraph.graph.getNode(nodeId);
-            uint32_t refCount = 0;
-            auto rcIt = refCounts.find(nodeId);
-            if (rcIt == refCounts.end())
-            {
-                Error::throw_err("Node " + std::to_string(nodeId) + " not found in refCounts");
-            }
-            refCount = rcIt->second;
-            uint32_t eclassId = result.egraph.addEClass(node.getShape(), node.strides, node.viewOffset, node.dtype, node.backend);
-            result.nodeToEClass[nodeId] = eclassId;
-
-            // Map constants directly to EGraph EClass
-            if (result.planningGraph.graph.constantStaging.count(nodeId))
-            {
-                result.egraph.constantStaging[eclassId] = result.planningGraph.graph.constantStaging.at(nodeId);
-            }
-        }
-
-        // Seed with reference kernels only
-        for (uint32_t nodeId : topo)
-        {
-            const TensorNode &node = result.planningGraph.graph.getNode(nodeId);
-            uint32_t eclassId = result.nodeToEClass[nodeId];
-            uint32_t refCount = 0;
-            auto rcIt = refCounts.find(nodeId);
-            if (rcIt == refCounts.end())
-            {
-                Error::throw_err("Node " + std::to_string(nodeId) + " not found in refCounts");
-            }
-            refCount = rcIt->second;
-
-            if (node.opType == OpType::INPUT)
-            {
-                ENode enode;
-                enode.kernelUid = 0;
-                enode.opType = node.opType;
-                enode.opName = node.opName;
-                for (uint32_t pid : node.parentIds)
-                    enode.children.push_back(result.nodeToEClass[pid]);
-                enode.shape = node.getShape();
-                enode.strides = node.strides;
-                enode.viewOffset = node.viewOffset;
-                enode.dtype = node.dtype;
-                enode.backend = node.backend;
-                result.egraph.addENode(eclassId, enode);
-
-                continue;
-            }
-
-            std::vector<TensorNode> inputs;
-            for (uint32_t pid : node.parentIds)
-                inputs.push_back(result.planningGraph.graph.getNode(pid));
-
-            std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, node.backend, inputs, node, refCounts, true);
-            if (refs.empty())
-            {
-                Error::throw_err("No reference kernel found for node " + toString(node, result.planningGraph.graph, ""));
-            }
-
-            for (uint64_t uid : refs)
-            {
-                ENode enode;
-                enode.kernelUid = uid;
-                enode.opType = node.opType;
-                enode.opName = node.opName;
-                for (uint32_t pid : node.parentIds)
-                    enode.children.push_back(result.nodeToEClass[pid]);
-                enode.shape = node.getShape();
-                enode.strides = node.strides;
-                enode.viewOffset = node.viewOffset;
-                enode.dtype = node.dtype;
-                enode.backend = node.backend;
-                result.egraph.addENode(eclassId, enode);
-            }
-        }
-
-        std::unordered_set<uint32_t> protectedEClasses;
-        for (uint32_t logicalId : cachedNodes)
-        {
-            auto it = result.planningGraph.logicalToPhysicalNodeMap.find(logicalId);
-            if (it != result.planningGraph.logicalToPhysicalNodeMap.end())
-            {
-                uint32_t physId = it->second;
-                auto it2 = result.nodeToEClass.find(physId);
-                if (it2 != result.nodeToEClass.end())
-                {
-                    protectedEClasses.insert(result.egraph.find(it2->second));
-                }
-            }
-        }
-
-        if (doSaturate)
-        {
-            saturate(result.egraph, protectedEClasses);
-        }
-
-        for (const auto &kv : result.nodeToEClass)
-        {
-            uint32_t physId = kv.first;
-            uint32_t ecl = result.egraph.find(kv.second);
-            if (result.planningGraph.physicalToLogicalNodeMap.count(physId))
-            {
-                result.eclassToLogical[ecl] = result.planningGraph.physicalToLogicalNodeMap.at(physId);
-            }
-            else
-            {
-                result.eclassToLogical[ecl] = physId;
-            }
-
-            const TensorNode &node = result.planningGraph.graph.getNode(physId);
-            if (node.storageType != StorageType::TRANSIENT)
-            {
-                result.immutable_eclasses.insert(ecl);
-            }
-            auto logIt = result.planningGraph.physicalToLogicalNodeMap.find(physId);
-            if (logIt != result.planningGraph.physicalToLogicalNodeMap.end())
-            {
-                uint32_t logicalId = logIt->second;
-                if (cachedNodes.count(logicalId))
-                {
-                    result.immutable_eclasses.insert(ecl);
-                }
-            }
-        }
-
-        return result;
+        visit(rootEClassId);
+        return topo;
     }
 
-    ExtractionResult extractBest(const uint32_t rootId, EGraph &egraph,
+    ExtractionResult extractBest(const uint32_t rootId, const Graph &graph, EGraph &egraph,
                                  const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
                                  const std::unordered_map<Backend, uint64_t> &maxMemoryByBackend,
-                                 const std::unordered_set<uint32_t> &cachedNodes,
+                                 const std::unordered_map<uint32_t, Backend> &cachedNodes,
                                  const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
                                  const std::unordered_set<uint32_t> &immutable_eclasses,
-                                 bool stopOnFirstValid = false)
+                                 bool stopOnFirstValid = true,
+                                 bool strictCache = false)
     {
+        constexpr float INF = std::numeric_limits<float>::infinity();
+        constexpr float EPS = 1e-6f;
+
+        auto isConstantNeeded = [](OpType op, size_t inputIdx, size_t numInputs) -> bool
+        {
+            if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
+                return true;
+            if (op == OpType::RESHAPE && inputIdx == 1)
+                return true;
+            if (op == OpType::PERMUTE && inputIdx == 1)
+                return true;
+            if (op == OpType::SLICE && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
+                return true;
+            if (op == OpType::SCATTER && (inputIdx == 2 || inputIdx == 3 || inputIdx == 4))
+                return true;
+            if ((op == OpType::SUM || op == OpType::MAX) && inputIdx == 1)
+                return true;
+            if (op == OpType::CONCAT && inputIdx == numInputs - 1)
+                return true;
+            if (op == OpType::TRIU && inputIdx == 1)
+                return true;
+            if (op == OpType::FILL && inputIdx == 1)
+                return true;
+            if (op == OpType::IM2COL && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
+                return true;
+            if (op == OpType::ARANGE && (inputIdx == 0 || inputIdx == 1 || inputIdx == 2))
+                return true;
+            if (op == OpType::ARGMAX && (inputIdx == 1 || inputIdx == 2))
+                return true;
+            return false;
+        };
+
+        ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info ");
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
         for (size_t i = 0; i < egraph.getENodes().size(); ++i)
         {
@@ -881,43 +551,183 @@ private:
             info.memSizes[enode.backend] = getSizeBytes(enode.shape, enode.dtype);
             info.inplace = false;
             info.inplace_idx = -1;
+            info.isScatter = false;
+            info.isView = false;
 
             if (enode.kernelUid != 0)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
                 info.inplace = kernel.inplace;
+                info.isView = kernel.isView;
                 if (info.inplace && kernel.numInputs > 0)
                 {
                     info.inplace_idx = 0;
                 }
+
+                if (enode.opType == OpType::SCATTER)
+                {
+                    info.isScatter = true;
+                }
+                else if (enode.opType == OpType::FUSED)
+                {
+                    const auto *refEntry = ReferenceGraphRegistry::get().getFactory(kernel.opName);
+                    if (refEntry)
+                    {
+                        Graph pGraph;
+                        std::vector<uint32_t> pInputs;
+                        for (size_t k = 0; k < kernel.numInputs; ++k)
+                        {
+                            pInputs.push_back(pGraph.input(kernel.dummyShapes[k], kernel.dtypes[k]));
+                        }
+                        uint32_t pRoot = refEntry->factory(pInputs, pGraph);
+                        if (pGraph.getNode(pRoot).opType == OpType::SCATTER)
+                        {
+                            info.isScatter = true;
+                        }
+                    }
+                }
             }
 
-            if (enode.opType == OpType::INPUT)
+            if (enode.opType == OpType::INPUT || enode.opType == OpType::CACHE)
             {
                 info.cost = 0.0f;
+                if (strictCache && (enode.leafId & 0x80000000)) // This ensures that any cache nodes are valid given cachedNodes. TODO: make the check stronger than `(enode.leafId & 0x80000000)`
+                {
+                    uint32_t eclassId = egraph.getENodeEClass(i);
+                    uint32_t canonId = egraph.findConst(eclassId);
+                    uint32_t logicalId = eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : UINT32_MAX;
+                    if (logicalId == UINT32_MAX || cachedNodes.find(logicalId) == cachedNodes.end())
+                    {
+                        std::cout << "[Planner.extractBest] strictCache hit (canonId=" << canonId << ", logicalId=" << logicalId << ") " << toString(enode) << std::endl;
+                        info.cost = INF;
+                    }
+                    else if (enode.backend != cachedNodes.at(logicalId))
+                    {
+                        std::cout << "[Planner.extractBest] strictCache hit (canonId=" << canonId << ", logicalId=" << logicalId << ") " << toString(enode) << std::endl;
+                        info.cost = INF;
+                    }
+                }
             }
             else if (enode.kernelUid != 0)
             {
+
                 std::vector<std::vector<uint32_t>> inShapes;
                 std::vector<std::vector<uint64_t>> inStrides;
                 std::vector<DType> inDTypes;
                 std::vector<std::vector<uint8_t>> inConstants;
 
-                for (uint32_t childEClassId : enode.children)
+                inShapes.reserve(enode.children.size());
+                inStrides.reserve(enode.children.size());
+                inDTypes.reserve(enode.children.size());
+                inConstants.reserve(enode.children.size());
+
+                const ReferenceGraphEntry *refEntry = nullptr;
+                std::unique_ptr<Graph> pGraph;
+                std::vector<uint32_t> pInputs;
+
+                const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
+                if (enode.opType == OpType::FUSED)
                 {
-                    const EClass &childCls = egraph.getEClass(childEClassId);
+                    refEntry = ReferenceGraphRegistry::get().getFactory(kernel.opName);
+                    if (refEntry)
+                    {
+                        pGraph = std::make_unique<Graph>();
+                        for (size_t k = 0; k < kernel.numInputs; ++k)
+                        {
+                            pInputs.push_back(pGraph->input(kernel.dummyShapes[k], kernel.dtypes[k]));
+                        }
+                        refEntry->factory(pInputs, *pGraph);
+                    }
+                }
+
+                for (size_t j = 0; j < enode.children.size(); j++)
+                {
+                    uint32_t childEClassId = enode.children[j];
+                    const EClass &childCls = egraph.getEClass(egraph.find(childEClassId));
                     inShapes.push_back(childCls.shape);
 
                     std::vector<uint64_t> strides_cast;
+                    strides_cast.reserve(childCls.strides.size());
                     for (uint64_t s : childCls.strides)
                         strides_cast.push_back(s);
-                    inStrides.push_back(strides_cast);
+                    inStrides.push_back(std::move(strides_cast));
 
                     inDTypes.push_back(childCls.dtype);
 
-                    if (egraph.constantStaging.count(childEClassId))
+                    uint32_t canonChild = egraph.find(childEClassId);
+                    bool needed = false;
+
+                    if (enode.opType == OpType::FUSED)
                     {
-                        inConstants.push_back(egraph.constantStaging.at(childEClassId));
+                        if (refEntry && pGraph)
+                        {
+                            auto traceToInputIdx = [&](uint32_t pid) -> int
+                            {
+                                uint32_t curr = pid;
+                                while (pGraph->hasNode(curr) &&
+                                       (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
+                                        pGraph->getNode(curr).opType == OpType::CAST ||
+                                        pGraph->getNode(curr).opType == OpType::COPY_TO ||
+                                        pGraph->getNode(curr).opType == OpType::RESHAPE ||
+                                        pGraph->getNode(curr).opType == OpType::PERMUTE))
+                                {
+                                    if (pGraph->getNode(curr).parentIds.empty())
+                                        break;
+                                    curr = pGraph->getNode(curr).parentIds[0];
+                                }
+                                for (size_t k = 0; k < pInputs.size(); ++k)
+                                {
+                                    if (pInputs[k] == curr)
+                                        return (int)k;
+                                }
+                                return -1;
+                            };
+
+                            for (const auto &pair : pGraph->nodes)
+                            {
+                                const TensorNode &n = pair.second;
+                                for (size_t p_idx = 0; p_idx < n.parentIds.size(); ++p_idx)
+                                {
+                                    if (isConstantNeeded(n.opType, p_idx, n.parentIds.size()))
+                                    {
+                                        int inputIdx = traceToInputIdx(n.parentIds[p_idx]);
+                                        if (kernel.isVariadic)
+                                        {
+                                            if (inputIdx == (int)kernel.numInputs - 1 && j == enode.children.size() - 1)
+                                            {
+                                                needed = true;
+                                                break;
+                                            }
+                                            else if (inputIdx >= 0 && inputIdx < (int)kernel.numInputs - 1 && j < enode.children.size() - 1)
+                                            {
+                                                needed = true;
+                                                break;
+                                            }
+                                        }
+                                        else if (inputIdx == (int)j)
+                                        {
+                                            needed = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (needed)
+                                    break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        needed = isConstantNeeded(enode.opType, j, enode.children.size());
+                    }
+
+                    if (!needed)
+                    {
+                        inConstants.push_back({});
+                    }
+                    else if (egraph.constantStaging.count(canonChild))
+                    {
+                        inConstants.push_back(*egraph.constantStaging.at(canonChild));
                     }
                     else
                     {
@@ -935,20 +745,21 @@ private:
                 if (info.inplace && info.inplace_idx >= 0)
                 {
                     uint32_t mutated_eclass = egraph.find(enode.children[info.inplace_idx]);
-                    if (immutable_eclasses.count(mutated_eclass))
+                    if (immutable_eclasses.count(mutated_eclass) && !info.isScatter)
                     {
-                        info.cost = std::numeric_limits<float>::infinity();
+                        info.cost = INF;
                     }
                 }
             }
             else
             {
-                info.cost = std::numeric_limits<float>::infinity();
+                Error::throw_err("[Planner.extractBest] enode.kernelUid != 0, but isn't OpType::INPUT or OpType::CACHE. this shouldn't happen");
             }
-            enodeInfos[i] = info;
+
+            enodeInfos[i] = std::move(info);
+            timer3.tick();
         }
 
-        // 1. Filter out infinite cost nodes early
         bool droppedInf = false;
         for (size_t i = 0; i < egraph.getClasses().size(); ++i)
         {
@@ -958,9 +769,11 @@ private:
 
             EClass &cls = egraph.getEClass(eclassId);
             std::vector<uint32_t> validEnodes;
+            validEnodes.reserve(cls.enodes.size());
+
             for (uint32_t enodeId : cls.enodes)
             {
-                if (enodeInfos[enodeId].cost == std::numeric_limits<float>::infinity())
+                if (enodeInfos[enodeId].cost == INF)
                 {
                     droppedInf = true;
                 }
@@ -969,7 +782,26 @@ private:
                     validEnodes.push_back(enodeId);
                 }
             }
-            cls.enodes = validEnodes;
+
+            if (validEnodes.empty())
+            {
+                bool allInput = true;
+                for (uint32_t enodeId : cls.enodes)
+                {
+                    allInput = allInput && (egraph.getENodes()[enodeId].opType == OpType::INPUT || egraph.getENodes()[enodeId].opType == OpType::CACHE);
+                }
+                if (!allInput)
+                {
+                    std::cout << "[Planner.extractBest] Warning: EClass " << eclassId << " has NO valid enodes (out of " + std::to_string(cls.enodes.size()) + ")\n";
+                    std::cout << cls << std::endl;
+                    for (uint32_t enodeId : cls.enodes)
+                    {
+                        std::cout << toString(egraph.getENodes()[enodeId], egraph) << std::endl;
+                    }
+                }
+            }
+
+            cls.enodes = std::move(validEnodes);
         }
 
         if (droppedInf)
@@ -978,89 +810,338 @@ private:
                       << "You may need to run 'bench' to gather missing kernel performance data." << std::endl;
         }
 
-        // 2. Compute Optimistic Subtree Costs via Dynamic Programming (Worklist Algorithm)
-        size_t numClasses = egraph.getClasses().size();
-        std::vector<float> eclassMinCost(numClasses, std::numeric_limits<float>::infinity());
+        auto rootIt = nodeToEClass.find(rootId);
+        if (rootIt == nodeToEClass.end())
+        {
+            Error::throw_err("[Planner.extractBest] Root node missing from nodeToEClass.");
+        }
+        uint32_t rootEClassId = egraph.find(rootIt->second);
 
-        std::vector<std::vector<uint32_t>> dependent_classes(numClasses);
+        const size_t numClasses = egraph.getClasses().size();
+
+        std::vector<uint32_t> canonicalClasses;
+        std::vector<uint32_t> classToBitIdx(numClasses, UINT32_MAX);
+        for (size_t i = 0; i < numClasses; ++i)
+        {
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId == i)
+            {
+                classToBitIdx[i] = static_cast<uint32_t>(canonicalClasses.size());
+                canonicalClasses.push_back(i);
+            }
+        }
+
+        const size_t numCanonical = canonicalClasses.size();
+        const size_t bitWords = numCanonical == 0 ? 0 : (numCanonical + 63) >> 6;
+        std::cout << "numCanonical=" << std::to_string(numCanonical) << std::endl;
+        std::cout << "bitWords=" << std::to_string(bitWords) << std::endl;
+
+        auto bitTest = [&](const std::vector<uint64_t> &bits, uint32_t eclassId) -> bool
+        {
+            uint32_t idx = classToBitIdx[eclassId];
+            if (idx == UINT32_MAX || bits.empty())
+                return false;
+            return (bits[idx >> 6] >> (idx & 63)) & 1ULL;
+        };
+
+        auto bitSet = [&](std::vector<uint64_t> &bits, uint32_t eclassId)
+        {
+            uint32_t idx = classToBitIdx[eclassId];
+            if (idx != UINT32_MAX && !bits.empty())
+            {
+                bits[idx >> 6] |= (1ULL << (idx & 63));
+            }
+        };
+
+        struct OptSummary
+        {
+            float cost = INF;
+            float intrinsic = INF;
+            uint32_t chosenEnode = UINT32_MAX;
+            std::vector<uint64_t> coveredBits;
+            bool valid = false;
+        };
+
+        std::vector<OptSummary> opt(numClasses);
+        for (uint32_t canonId : canonicalClasses)
+        {
+            // Only allocate and size vectors for canonical classes
+            opt[canonId].coveredBits.assign(bitWords, 0);
+        }
+        std::cout << "finished allocating opt" << std::endl;
+
+        std::vector<std::vector<uint32_t>> parentMap(numClasses);
         for (size_t i = 0; i < numClasses; ++i)
         {
             uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
             if (eclassId != i)
                 continue;
 
-            for (uint32_t enodeId : egraph.getEClass(eclassId).enodes)
+            const EClass &cls = egraph.getEClass(eclassId);
+            for (uint32_t enodeId : cls.enodes)
             {
                 const ENode &enode = egraph.getENodes()[enodeId];
                 for (uint32_t child : enode.children)
                 {
                     uint32_t childEClass = egraph.find(child);
-                    dependent_classes[childEClass].push_back(eclassId);
+                    parentMap[childEClass].push_back(eclassId);
                 }
             }
         }
 
-        for (auto &deps : dependent_classes)
+        for (auto &parents : parentMap)
         {
-            std::sort(deps.begin(), deps.end());
-            deps.erase(std::unique(deps.begin(), deps.end()), deps.end());
+            std::sort(parents.begin(), parents.end());
+            parents.erase(std::unique(parents.begin(), parents.end()), parents.end());
         }
 
         std::vector<uint32_t> worklist;
-        std::vector<bool> in_worklist(numClasses, false);
+        std::vector<uint32_t> next_worklist;
+        std::vector<bool> inQueue(numClasses, false);
+
+        worklist.reserve(numClasses);
+        next_worklist.reserve(numClasses);
+
         for (size_t i = 0; i < numClasses; ++i)
         {
             uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
             if (eclassId == i)
             {
                 worklist.push_back(eclassId);
-                in_worklist[eclassId] = true;
+                inQueue[eclassId] = true;
             }
         }
 
+        std::vector<uint64_t> candidateBits(bitWords, 0);
+        std::vector<float> optimisticEnodeDagCost(egraph.getENodes().size(), INF);
+
+        ProgressTimer optTimer(0, "calculating optimistic cost");
         while (!worklist.empty())
         {
-            uint32_t c = worklist.back();
-            worklist.pop_back();
-            in_worklist[c] = false;
-
-            float old_cost = eclassMinCost[c];
-            float new_cost = old_cost;
-
-            const EClass &cls = egraph.getEClass(c);
-            for (uint32_t enodeId : cls.enodes)
+            for (uint32_t eclassId : worklist)
             {
-                float cost = enodeInfos[enodeId].cost;
-                if (cost == std::numeric_limits<float>::infinity())
+                inQueue[eclassId] = false;
+
+                const EClass &cls = egraph.getEClass(eclassId);
+                OptSummary best;
+                best.coveredBits.assign(bitWords, 0);
+
+                for (uint32_t enodeId : cls.enodes)
+                {
+                    const ENodeInfo &info = enodeInfos[enodeId];
+                    if (info.cost == INF)
+                        continue;
+
+                    std::fill(candidateBits.begin(), candidateBits.end(), 0);
+                    float candidateCost = info.cost;
+                    bool candidateValid = true;
+
+                    bitSet(candidateBits, eclassId);
+
+                    const ENode &enode = egraph.getENodes()[enodeId];
+
+                    std::vector<uint32_t> childEClasses;
+                    childEClasses.reserve(enode.children.size());
+                    for (uint32_t child : enode.children)
+                    {
+                        childEClasses.push_back(egraph.find(child));
+                    }
+                    std::sort(childEClasses.begin(), childEClasses.end());
+                    childEClasses.erase(std::unique(childEClasses.begin(), childEClasses.end()), childEClasses.end());
+
+                    for (uint32_t childEClass : childEClasses)
+                    {
+                        if (childEClass == eclassId)
+                        {
+                            candidateValid = false;
+                            break;
+                        }
+
+                        const OptSummary &childOpt = opt[childEClass];
+                        if (!childOpt.valid)
+                        {
+                            candidateValid = false;
+                            break;
+                        }
+
+                        if (bitTest(childOpt.coveredBits, eclassId))
+                        {
+                            candidateValid = false;
+                            break;
+                        }
+
+                        for (size_t w = 0; w < bitWords; ++w)
+                        {
+                            uint64_t newBits = childOpt.coveredBits[w] & ~candidateBits[w];
+                            if (!newBits)
+                                continue;
+
+                            candidateBits[w] |= newBits;
+
+                            while (newBits)
+                            {
+#if defined(__GNUG__) || defined(__clang__)
+                                unsigned bit = static_cast<unsigned>(__builtin_ctzll(newBits));
+#else
+                                unsigned bit = 0;
+                                uint64_t tmp = newBits;
+                                while ((tmp & 1ULL) == 0)
+                                {
+                                    tmp >>= 1;
+                                    ++bit;
+                                }
+#endif
+                                uint32_t k_idx = static_cast<uint32_t>((w << 6) + bit);
+                                if (k_idx < numCanonical)
+                                {
+                                    uint32_t k_eclass = canonicalClasses[k_idx];
+                                    candidateCost += opt[k_eclass].intrinsic;
+                                }
+                                newBits &= (newBits - 1);
+                            }
+                        }
+                    }
+
+                    if (!candidateValid)
+                        continue;
+
+                    optimisticEnodeDagCost[enodeId] = candidateCost;
+
+                    if (!best.valid ||
+                        candidateCost < best.cost - EPS ||
+                        (std::abs(candidateCost - best.cost) <= EPS && enodeId < best.chosenEnode))
+                    {
+                        best.valid = true;
+                        best.cost = candidateCost;
+                        best.intrinsic = info.cost;
+                        best.chosenEnode = enodeId;
+                        best.coveredBits = candidateBits;
+                    }
+                }
+
+                if (!best.valid)
                     continue;
 
-                const ENode &enode = egraph.getENodes()[enodeId];
-                for (uint32_t child : enode.children)
+                if (!opt[eclassId].valid ||
+                    best.cost < opt[eclassId].cost - EPS ||
+                    (std::abs(best.cost - opt[eclassId].cost) <= EPS && best.chosenEnode < opt[eclassId].chosenEnode))
                 {
-                    cost += eclassMinCost[egraph.find(child)];
-                }
+                    opt[eclassId] = std::move(best);
 
-                if (cost < new_cost)
-                {
-                    new_cost = cost;
-                }
-            }
-
-            if (new_cost < old_cost && (old_cost == std::numeric_limits<float>::infinity() || (old_cost - new_cost) > 1e-6f))
-            {
-                eclassMinCost[c] = new_cost;
-                for (uint32_t dep : dependent_classes[c])
-                {
-                    if (!in_worklist[dep])
+                    for (uint32_t parentId : parentMap[eclassId])
                     {
-                        worklist.push_back(dep);
-                        in_worklist[dep] = true;
+                        if (!inQueue[parentId])
+                        {
+                            inQueue[parentId] = true;
+                            next_worklist.push_back(parentId);
+                        }
                     }
                 }
             }
+
+            worklist.clear();
+            std::swap(worklist, next_worklist);
+            optTimer.tick();
         }
 
-        // 3. Sort enodes in each eclass by optimistic subtree cost
+        std::vector<float> eclassMinCost(numClasses, INF);
+        for (size_t i = 0; i < numClasses; ++i)
+        {
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId == i && opt[eclassId].valid)
+            {
+                eclassMinCost[eclassId] = opt[eclassId].cost;
+            }
+        }
+
+        std::vector<uint64_t> tempBits(bitWords, 0);
+        for (size_t i = 0; i < numClasses; ++i)
+        {
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId != i)
+                continue;
+
+            const EClass &cls = egraph.getEClass(eclassId);
+            for (uint32_t enodeId : cls.enodes)
+            {
+                const ENodeInfo &info = enodeInfos[enodeId];
+                if (info.cost == INF)
+                {
+                    optimisticEnodeDagCost[enodeId] = INF;
+                    continue;
+                }
+
+                std::fill(tempBits.begin(), tempBits.end(), 0);
+                bitSet(tempBits, eclassId);
+
+                float total = info.cost;
+                bool valid = true;
+
+                const ENode &enode = egraph.getENodes()[enodeId];
+
+                std::vector<uint32_t> childEClasses;
+                childEClasses.reserve(enode.children.size());
+                for (uint32_t child : enode.children)
+                {
+                    childEClasses.push_back(egraph.find(child));
+                }
+                std::sort(childEClasses.begin(), childEClasses.end());
+                childEClasses.erase(std::unique(childEClasses.begin(), childEClasses.end()), childEClasses.end());
+
+                for (uint32_t childEClass : childEClasses)
+                {
+                    if (childEClass == eclassId)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    if (!opt[childEClass].valid)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    if (bitTest(opt[childEClass].coveredBits, eclassId))
+                    {
+                        valid = false;
+                        break;
+                    }
+
+                    for (size_t w = 0; w < bitWords; ++w)
+                    {
+                        uint64_t newBits = opt[childEClass].coveredBits[w] & ~tempBits[w];
+                        if (!newBits)
+                            continue;
+
+                        tempBits[w] |= newBits;
+
+                        while (newBits)
+                        {
+#if defined(__GNUG__) || defined(__clang__)
+                            unsigned bit = static_cast<unsigned>(__builtin_ctzll(newBits));
+#else
+                            unsigned bit = 0;
+                            uint64_t tmp = newBits;
+                            while ((tmp & 1ULL) == 0)
+                            {
+                                tmp >>= 1;
+                                ++bit;
+                            }
+#endif
+                            uint32_t k_idx = static_cast<uint32_t>((w << 6) + bit);
+                            if (k_idx < numCanonical)
+                            {
+                                uint32_t k_eclass = canonicalClasses[k_idx];
+                                total += opt[k_eclass].intrinsic;
+                            }
+                            newBits &= (newBits - 1);
+                        }
+                    }
+                }
+
+                optimisticEnodeDagCost[enodeId] = valid ? total : INF;
+            }
+        }
+
         for (size_t i = 0; i < numClasses; ++i)
         {
             uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
@@ -1071,41 +1152,36 @@ private:
             std::sort(cls.enodes.begin(), cls.enodes.end(),
                       [&](uint32_t a, uint32_t b)
                       {
-                          const ENode &enodeA = egraph.getENodes()[a];
-                          float costA = enodeInfos[a].cost;
-                          for (uint32_t c : enodeA.children)
-                              costA += eclassMinCost[egraph.find(c)];
+                          float costA = optimisticEnodeDagCost[a];
+                          float costB = optimisticEnodeDagCost[b];
 
-                          const ENode &enodeB = egraph.getENodes()[b];
-                          float costB = enodeInfos[b].cost;
-                          for (uint32_t c : enodeB.children)
-                              costB += eclassMinCost[egraph.find(c)];
-
-                          if (costA != costB)
-                              return costA < costB;
-                          return a < b; // stable tie-break
+                          if (costA < costB)
+                              return true;
+                          if (costA > costB)
+                              return false;
+                          return a < b;
                       });
         }
 
-        auto rootIt = nodeToEClass.find(rootId);
-        if (rootIt == nodeToEClass.end())
+        if (egraph.getEClass(rootEClassId).enodes.size() == 0)
         {
-            Error::throw_err("[Planner.extractBest] Root node missing from nodeToEClass.");
+            Error::throw_err("[Planner.extractBest] no valid extractions");
         }
-        uint32_t rootEClassId = egraph.find(rootIt->second);
+        std::cout << "[Planner.extractBest] Optimistic root cost: "
+                  << std::to_string(optimisticEnodeDagCost[egraph.getEClass(rootEClassId).enodes[0]]) << std::endl;
 
         std::unordered_map<uint32_t, uint32_t> selection_map;
         std::vector<uint32_t> path;
         std::vector<uint32_t> to_process = {rootEClassId};
         std::vector<uint32_t> to_process_enode;
-        std::unordered_map<uint32_t, uint32_t> local_ref_counts;
-        std::unordered_map<uint32_t, uint32_t> need_single_ref;
+        std::unordered_map<uint32_t, uint32_t> next_sel;
 
-        float best_cost = std::numeric_limits<float>::infinity();
+        float best_cost = INF;
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
 
-        int max_iters = 100;
-        ProgressTimer timer(max_iters, "extracting graphs ", stopOnFirstValid);
+        int max_iters = 100000;
+        ProgressTimer timer(max_iters, "extracting graphs ");
+
         while (max_iters-- > 0)
         {
             timer.tick();
@@ -1113,21 +1189,32 @@ private:
             std::string reason = "";
             float current_cost = 0.0f;
 
-            for (auto const &kv : selection_map)
+            for (const auto &kv : selection_map)
             {
-                current_cost += enodeInfos[egraph.getEClass(kv.first).enodes[kv.second]].cost;
+                uint32_t eclass = kv.first;
+                uint32_t sel = kv.second;
+                current_cost += enodeInfos[egraph.getEClass(eclass).enodes[sel]].cost;
             }
 
             while (!to_process.empty())
             {
                 uint32_t current = to_process.front();
                 to_process.erase(to_process.begin());
+
+                if (selection_map.find(current) != selection_map.end())
+                {
+                    continue;
+                }
+
                 path.push_back(current);
 
                 uint32_t sel = 0;
-                auto it = selection_map.find(current);
-                if (it != selection_map.end())
-                    sel = it->second;
+                auto nextIt = next_sel.find(current);
+                if (nextIt != next_sel.end())
+                {
+                    sel = nextIt->second;
+                    next_sel.erase(nextIt);
+                }
 
                 const auto &enodes = egraph.getEClass(current).enodes;
                 if (sel >= enodes.size())
@@ -1142,6 +1229,18 @@ private:
                 selection_map[current] = sel;
                 current_cost += info.cost;
 
+                if (info.cost == INF)
+                {
+                    valid = false;
+                    reason = "cost=inf";
+                }
+
+                if (best_cost != INF && current_cost >= best_cost)
+                {
+                    valid = false;
+                    reason = "cost=" + std::to_string(current_cost);
+                }
+
                 if (enodes.size() > sel + 1)
                 {
                     if (std::find(to_process_enode.begin(), to_process_enode.end(), current) == to_process_enode.end())
@@ -1150,55 +1249,17 @@ private:
                     }
                 }
 
-                if (info.inplace)
-                    need_single_ref[node.children[info.inplace_idx]]++;
-
-                for (uint32_t child : node.children)
-                    local_ref_counts[child]++;
-
-                if (info.cost == std::numeric_limits<float>::infinity())
-                {
-                    valid = false;
-                    reason = "cost=inf";
-                    break;
-                }
-
-                if (info.inplace)
-                {
-                    uint32_t inplace_child = node.children[info.inplace_idx];
-                    if (local_ref_counts[inplace_child] > 1 || immutable_eclasses.count(inplace_child))
-                    {
-                        valid = false;
-                        reason = "inplace";
-                        break;
-                    }
-                }
-
-                for (uint32_t child : node.children)
-                {
-                    if (need_single_ref.count(child) && need_single_ref[child] > 0 && local_ref_counts[child] > 1)
-                    {
-                        valid = false;
-                        reason = "inplace_ref";
-                        break;
-                    }
-                }
                 if (!valid)
                     break;
 
-                if (best_cost != std::numeric_limits<float>::infinity() && current_cost >= best_cost)
-                {
-                    valid = false;
-                    reason = "cost=" + std::to_string(current_cost);
-                    break;
-                }
-
                 std::vector<uint32_t> new_to_process;
+                new_to_process.reserve(node.children.size());
                 for (uint32_t child : node.children)
                 {
-                    if (selection_map.find(child) == selection_map.end())
+                    uint32_t childEClass = egraph.find(child);
+                    if (selection_map.find(childEClass) == selection_map.end())
                     {
-                        new_to_process.push_back(child);
+                        new_to_process.push_back(childEClass);
                     }
                 }
                 to_process.insert(to_process.begin(), new_to_process.begin(), new_to_process.end());
@@ -1206,7 +1267,59 @@ private:
 
             if (valid)
             {
-                std::unordered_map<Backend, uint64_t> peak = computePeakMemory(egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical);
+                std::vector<uint32_t> indegree(numClasses, 0);
+                for (const auto &kv : selection_map)
+                {
+                    uint32_t sel = kv.second;
+                    const ENode &enode = egraph.getENodes()[egraph.getEClass(kv.first).enodes[sel]];
+                    for (uint32_t child : enode.children)
+                    {
+                        indegree[egraph.find(child)]++;
+                    }
+                }
+
+                std::vector<uint32_t> zero_indegree;
+                for (const auto &kv : selection_map)
+                {
+                    if (indegree[kv.first] == 0)
+                    {
+                        zero_indegree.push_back(kv.first);
+                    }
+                }
+
+                uint32_t processed = 0;
+                while (!zero_indegree.empty())
+                {
+                    uint32_t curr = zero_indegree.back();
+                    zero_indegree.pop_back();
+                    processed++;
+
+                    uint32_t sel = selection_map[curr];
+                    const ENode &enode = egraph.getENodes()[egraph.getEClass(curr).enodes[sel]];
+                    for (uint32_t child : enode.children)
+                    {
+                        uint32_t canonChild = egraph.find(child);
+                        indegree[canonChild]--;
+                        if (indegree[canonChild] == 0)
+                        {
+                            zero_indegree.push_back(canonChild);
+                        }
+                    }
+                }
+
+                if (processed < selection_map.size())
+                {
+                    valid = false;
+                    reason = "cycle";
+                }
+            }
+
+            std::unordered_map<Backend, uint64_t> peak;
+            if (valid)
+            {
+                peak = computePeakMemory(
+                    egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical, graph);
+
                 for (const auto &kv : maxMemoryByBackend)
                 {
                     if (peak[kv.first] > kv.second)
@@ -1220,15 +1333,60 @@ private:
 
             if (valid)
             {
-                if (current_cost < best_cost)
+                std::vector<uint32_t> topo = getEClassTopoOrder(egraph, selection_map, rootEClassId);
+                // if node C has node A as input, and is after node B in topo, where node B is an inplace node with A as input, then the graph is invalid
+                // can be thought of as if node C has node A as input, and any previous inplace node had node A as input, node C is invalid and therefore the graph is invalid
+                std::unordered_set<uint32_t> overwritten;
+                bool valid = true;
+                for (int i = 0; i < topo.size(); i++)
                 {
-                    best_cost = current_cost;
-                    best_selection_map = selection_map;
-                    if (!stopOnFirstValid)
+                    auto choiceIt = selection_map.find(topo[i]);
+                    if (choiceIt == selection_map.end())
+                        Error::throw_err("[Planner.extractBest] this should not happen");
+
+                    const uint32_t enodeId = egraph.getEClass(topo[i]).enodes[choiceIt->second];
+                    const ENode &enode = egraph.getENodes()[enodeId];
+                    const ENodeInfo &info = enodeInfos[enodeId];
+                    for (int j = 0; j < enode.children.size(); j++)
                     {
-                        std::cout << "new best cost: " << std::to_string(best_cost) << std::endl;
+                        if (overwritten.count(enode.children[j]))
+                        {
+                            valid = false;
+                            reason = "inplace";
+                            break;
+                        }
+                    }
+                    if (!valid)
+                        break;
+                    if (info.inplace)
+                    {
+                        overwritten.insert(enode.children[info.inplace_idx]);
                     }
                 }
+            }
+
+            if (valid)
+            {
+                if (current_cost < best_cost)
+                {
+                    float actual_current_cost = 0.0f;
+
+                    for (const auto &kv : selection_map)
+                    {
+                        uint32_t eclass = kv.first;
+                        uint32_t sel = kv.second;
+                        actual_current_cost += enodeInfos[egraph.getEClass(eclass).enodes[sel]].cost;
+                    }
+                    if (actual_current_cost != current_cost)
+                    {
+                        std::cout << "WARNING actual cost (" + std::to_string(actual_current_cost) + ") != current cost (" + std::to_string(current_cost) + ")" << std::endl;
+                    }
+                    best_cost = current_cost;
+                    best_selection_map = selection_map;
+                    std::cout << "new best cost: " << std::to_string(best_cost) << std::endl;
+                    std::cout << "peak mem: " << toString(peak) << std::endl;
+                }
+
                 if (stopOnFirstValid)
                 {
                     break;
@@ -1236,15 +1394,12 @@ private:
             }
             else
             {
-#ifdef DEBUG
-                std::cout << "invalid graph (" << reason << ")" << std::endl;
-#endif
+                std::cout << "invalid: " << reason << "\r";
             }
 
             if (to_process_enode.empty())
                 break;
 
-            // backtrack
             while (!path.empty())
             {
                 uint32_t current = path.back();
@@ -1252,31 +1407,19 @@ private:
 
                 if (selection_map.find(current) == selection_map.end())
                     continue;
+
                 uint32_t sel = selection_map[current];
                 const auto &enodes = egraph.getEClass(current).enodes;
                 uint32_t enode_id = enodes[sel];
                 const ENode &node = egraph.getENodes()[enode_id];
                 const ENodeInfo &info = enodeInfos[enode_id];
 
-                for (uint32_t child : node.children)
-                {
-                    local_ref_counts[child]--;
-                    if (local_ref_counts[child] == 0)
-                        local_ref_counts.erase(child);
-                }
-
-                if (info.inplace)
-                {
-                    need_single_ref[node.children[info.inplace_idx]]--;
-                    if (need_single_ref[node.children[info.inplace_idx]] == 0)
-                        need_single_ref.erase(node.children[info.inplace_idx]);
-                }
-
                 if (sel + 1 < enodes.size())
                 {
-                    selection_map[current] = sel + 1;
+                    next_sel[current] = sel + 1;
 
                     std::vector<uint32_t> keys_to_delete;
+                    keys_to_delete.reserve(selection_map.size());
                     for (const auto &kv : selection_map)
                     {
                         if (std::find(path.begin(), path.end(), kv.first) == path.end() && kv.first != current)
@@ -1286,6 +1429,8 @@ private:
                     }
                     for (uint32_t k : keys_to_delete)
                         selection_map.erase(k);
+
+                    selection_map.erase(current);
 
                     auto it = std::remove(to_process_enode.begin(), to_process_enode.end(), current);
                     if (it != to_process_enode.end())
@@ -1302,11 +1447,13 @@ private:
                         uint32_t n_id = egraph.getEClass(eclass).enodes[selection_map[eclass]];
                         const ENode &n = egraph.getENodes()[n_id];
                         std::vector<uint32_t> new_to_process;
+                        new_to_process.reserve(n.children.size());
                         for (uint32_t child : n.children)
                         {
-                            if (selection_map.find(child) == selection_map.end())
+                            uint32_t childEClass = egraph.find(child);
+                            if (selection_map.find(childEClass) == selection_map.end())
                             {
-                                new_to_process.push_back(child);
+                                new_to_process.push_back(childEClass);
                             }
                         }
                         to_process.insert(to_process.begin(), new_to_process.begin(), new_to_process.end());
@@ -1324,17 +1471,14 @@ private:
             }
         }
 
-        if (best_cost == std::numeric_limits<float>::infinity())
+        if (best_cost == INF)
         {
             Error::throw_err("[Planner.extractBest] no valid extraction found under given constraints. try running bench");
         }
 
         ExtractionResult result;
         result.totalCost = best_cost;
-        if (stopOnFirstValid)
-        {
-            return result; // return early to speed up
-        }
+
         for (auto const &kv : best_selection_map)
         {
             ExtractChoice c;
@@ -1349,13 +1493,11 @@ private:
 
     CompiledGraph buildCompiledGraph(
         uint32_t rootId,
-        Graph &graph,
+        const Graph &graph,
         EGraph &egraph,
         const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
         const ExtractionResult &extraction,
-        const std::unordered_map<uint32_t, uint32_t> &logicalToPhysicalNodeMap,
-        const std::unordered_map<uint32_t, uint32_t> &physicalToLogicalNodeMap,
-        const std::unordered_set<uint32_t> &cachedNodes,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
         const std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
     {
         CompiledGraph compiled;
@@ -1382,15 +1524,29 @@ private:
         uint32_t rootEClassId = egraph.find(nodeToEClass.at(rootId));
         visit(rootEClassId);
 
+        std::unordered_map<uint32_t, uint32_t> eclassToPhys;
+        for (uint32_t eclassId : topo)
+        {
+            eclassToPhys[eclassId] = GlobalNextPhysId++;
+        }
+
+        std::unordered_map<uint32_t, uint32_t> lastPhysIdForLogical;
+        for (uint32_t eclassId : topo)
+        {
+            uint32_t logicalId = eclassToLogical.count(eclassId) ? eclassToLogical.at(eclassId) : UINT32_MAX;
+            if (logicalId != UINT32_MAX)
+            {
+                lastPhysIdForLogical[logicalId] = eclassToPhys[eclassId];
+            }
+        }
+
         for (uint32_t eclassId : topo)
         {
             const ExtractChoice &choice = extraction.choiceByEClass.at(eclassId);
             const ENode &enode = egraph.getENodes()[choice.enodeId];
-
             uint32_t logicalId = eclassToLogical.count(eclassId) ? eclassToLogical.at(eclassId) : UINT32_MAX;
 
-            // Offset physical IDs so they never collide with logical IDs from the original Graph
-            uint32_t physId = eclassId | 0x80000000;
+            uint32_t physId = eclassToPhys[eclassId];
 
             TensorNode tNode;
             tNode.id = physId;
@@ -1403,19 +1559,7 @@ private:
             tNode.backend = enode.backend;
             tNode.parentIds.reserve(enode.children.size());
             for (uint32_t c : enode.children)
-                tNode.parentIds.push_back(egraph.find(c) | 0x80000000);
-
-            tNode.storageType = StorageType::TRANSIENT;
-            if (logicalId != UINT32_MAX && graph.hasNode(logicalId))
-            {
-                tNode.storageType = graph.getNode(logicalId).storageType;
-            }
-
-            compiled.nodesMap[physId] = tNode;
-            if (egraph.constantStaging.count(eclassId))
-            {
-                compiled.constantStaging[physId] = egraph.constantStaging.at(eclassId);
-            }
+                tNode.parentIds.push_back(eclassToPhys[egraph.find(c)]);
 
             OpInstruction inst;
             inst.nodeId = physId;
@@ -1424,27 +1568,39 @@ private:
             inst.backend = enode.backend;
             inst.fullKernelId = enode.kernelUid;
 
-            const KernelEntry *kEntry = nullptr;
             if (enode.kernelUid != 0)
             {
-                kEntry = &KernelRegistry::get().getKernel(enode.kernelUid);
-                inst.inplaceInputIndex = kEntry->inplace ? 0 : -1;
-                inst.viewInputIndex = kEntry->isView ? 0 : -1;
+                const KernelEntry &kEntry = KernelRegistry::get().getKernel(enode.kernelUid);
+                inst.inplaceInputIndex = kEntry.inplace ? 0 : -1;
+                inst.viewInputIndex = kEntry.isView ? 0 : -1;
             }
-            else
+
+            tNode.storageType = StorageType::TRANSIENT;
+            if (logicalId != UINT32_MAX)
             {
-                inst.inplaceInputIndex = -1;
-                inst.viewInputIndex = -1;
+                if (graph.hasNode(logicalId))
+                {
+                    tNode.storageType = graph.getNode(logicalId).storageType;
+                }
+                if (cachedNodes.count(logicalId) && (physId == lastPhysIdForLogical[logicalId] || tNode.opType == OpType::INPUT || tNode.opType == OpType::CACHE))
+                {
+                    tNode.storageType = StorageType::PINNED;
+                }
             }
 
-            const bool nodeIsFinalLogicalOutput = logicalToPhysicalNodeMap.count(logicalId) && logicalToPhysicalNodeMap.at(logicalId) == rootId;
-            inst.outputStorageType = (cachedNodes.count(logicalId) && (logicalId != UINT32_MAX) && nodeIsFinalLogicalOutput) ? StorageType::PINNED : tNode.storageType;
+            if (egraph.constantStaging.count(eclassId))
+            {
+                tNode.storageType = StorageType::PERSISTENT;
+                compiled.constantStaging[physId] = egraph.constantStaging.at(eclassId);
+            }
 
-            if (enode.opType != OpType::INPUT)
+            inst.outputStorageType = tNode.storageType;
+            if (enode.opType != OpType::INPUT && enode.opType != OpType::CACHE)
             {
                 compiled.instructions.push_back(inst);
             }
 
+            compiled.nodesMap[physId] = tNode;
             compiled.nodeCosts[physId] = choice.cost;
             compiled.physicalToLogicalNodeMap[physId] = logicalId;
         }
@@ -1457,58 +1613,813 @@ private:
                 compiledRefCounts[pid]++;
             }
         }
-        compiledRefCounts[rootEClassId | 0x80000000] = std::max<uint32_t>(1, compiledRefCounts[rootEClassId | 0x80000000]);
+        uint32_t rootPhysId = eclassToPhys[rootEClassId];
+        compiledRefCounts[rootPhysId] = std::max<uint32_t>(1, compiledRefCounts[rootPhysId]);
         compiled.refCounts = compiledRefCounts;
 
+        // Validate all INPUT or CACHE nodes
+        for (const auto &pair : compiled.nodesMap)
+        {
+            const TensorNode &node = pair.second;
+            if ((node.opType == OpType::INPUT || node.opType == OpType::CACHE) && node.storageType == StorageType::TRANSIENT)
+            {
+                uint32_t logicalId = compiled.getLogicalId(node.id);
+                if (logicalId == UINT32_MAX)
+                {
+                    Error::throw_err("[buildCompiledGraph] Orphan cache INPUT/CACHE node " + std::to_string(node.id) + " has no logicalId mapping and is TRANSIENT. This will crash at runtime. Something forgot to register its cache node in eclassToLogical.");
+                }
+            }
+        }
+
         return compiled;
+    }
+
+    struct BaseEGraphState
+    {
+        EGraph egraph;
+        std::unordered_map<uint32_t, uint32_t> nodeToEClass;
+        std::unordered_map<uint32_t, uint32_t> eclassToLogical;
+    };
+
+    BaseEGraphState baseState;
+    bool baseStateInitialized = false;
+
+    void initBaseEGraph(uint32_t rootId, const Graph &graph, bool doSaturate)
+    {
+        if (baseStateInitialized)
+            return;
+
+        std::vector<uint32_t> topo = topologicalSort(rootId, graph);
+
+        Graph tempGraph = graph;
+        inferShapes(topo, tempGraph);
+
+        auto refCounts = computeRefCounts(topo, rootId, tempGraph);
+        baseState.nodeToEClass.reserve(tempGraph.nodes.size());
+
+        for (uint32_t nodeId : topo)
+        {
+            TensorNode &node = tempGraph.getNode(nodeId);
+            uint32_t eclassId = baseState.egraph.addEClass(node.getShape(), node.strides, node.viewOffset, node.dtype, node.backend);
+            baseState.nodeToEClass[nodeId] = eclassId;
+            if (tempGraph.constantStaging.count(nodeId))
+            {
+                baseState.egraph.constantStaging[eclassId] = tempGraph.constantStaging.at(nodeId);
+            }
+        }
+
+        for (uint32_t nodeId : topo)
+        {
+            const TensorNode &node = tempGraph.getNode(nodeId);
+            uint32_t eclassId = baseState.nodeToEClass[nodeId];
+
+            if (node.opType == OpType::INPUT)
+            {
+                ENode enode;
+                enode.kernelUid = 0;
+                enode.opType = node.opType;
+                enode.opName = node.opName;
+                for (uint32_t pid : node.parentIds)
+                    enode.children.push_back(baseState.nodeToEClass[pid]);
+                enode.shape = node.getShape();
+                enode.strides = node.strides;
+                enode.viewOffset = node.viewOffset;
+                enode.dtype = node.dtype;
+                enode.backend = node.backend;
+                enode.leafId = node.id;
+                baseState.egraph.addENode(eclassId, enode);
+                continue;
+            }
+
+            std::vector<TensorNode> inputs;
+            for (uint32_t pid : node.parentIds)
+                inputs.push_back(tempGraph.getNode(pid));
+
+            std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(
+                node.opType, node.opName, node.backend, inputs, node, true);
+
+            if (refs.size() == 0)
+            {
+                Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels to init EClass " + std::to_string(eclassId) + " " + toString(baseState.egraph.getEClass(eclassId)) + "\nNode " + toString(node, tempGraph));
+            }
+            for (uint64_t uid : refs)
+            {
+                const auto &kernel = KernelRegistry::get().getKernel(uid);
+                ENode enode;
+                enode.kernelUid = uid;
+                enode.opType = node.opType;
+                enode.opName = node.opName;
+                for (uint32_t pid : node.parentIds)
+                    enode.children.push_back(baseState.nodeToEClass[pid]);
+                enode.shape = node.getShape();
+                enode.dtype = node.dtype;
+                enode.backend = node.backend;
+
+                if (kernel.isView)
+                {
+                    enode.strides = node.strides;
+                    enode.viewOffset = node.viewOffset;
+                }
+                else
+                {
+                    enode.strides = calcContiguousStrides(node.getShape());
+                    enode.viewOffset = 0;
+                }
+
+                baseState.egraph.addENode(eclassId, enode);
+            }
+        }
+
+        for (const auto &kv : baseState.nodeToEClass)
+        {
+            uint32_t physId = kv.first; // Here physId == logicalId
+            uint32_t ecl = baseState.egraph.find(kv.second);
+            baseState.eclassToLogical[ecl] = physId;
+        }
+
+        if (doSaturate && false)
+        {
+            std::unordered_set<uint32_t> emptyProtected;
+            saturate(baseState.egraph, emptyProtected, baseState.eclassToLogical, false);
+        }
+
+        baseStateInitialized = true;
+    }
+
+    bool injectPartialPath(
+        EGraph &egraph,
+        const Graph &graph,
+        uint32_t logicalId,
+        const std::vector<Region> &regions,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
+        const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
+        std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
+        bool strictCache = false)
+    {
+        bool injected = false;
+        uint32_t E_L = egraph.find(nodeToEClass.at(logicalId));
+        const TensorNode &sourceNode = graph.getNode(logicalId);
+
+        if (sourceNode.opType == OpType::INPUT)
+        {
+            return injected;
+        }
+
+        bool isFullRegion = false;
+        if (regions.size() == 1)
+        {
+            const Region &reg = regions[0];
+            const auto &shape = sourceNode.getShape();
+            if (reg.region.size() == shape.size())
+            {
+                isFullRegion = true;
+                for (size_t d = 0; d < shape.size(); ++d)
+                {
+                    if (reg.region[d].start != 0 || reg.region[d].stop != shape[d])
+                    {
+                        isFullRegion = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (isFullRegion)
+        {
+            return injected;
+        }
+
+        Backend targetBackend = sourceNode.backend;
+        auto it = cachedNodes.find(logicalId);
+        if (it != cachedNodes.end())
+        {
+            targetBackend = it->second;
+        }
+        else if (strictCache)
+        {
+            return injected; // Can't add cache node to unprotected logical id
+        }
+
+        const EClass lClass = egraph.getEClass(E_L);
+
+        uint32_t E_Cache = egraph.addEClass(lClass.shape, lClass.strides, lClass.viewOffset, lClass.dtype, targetBackend);
+        ENode cacheNode;
+        cacheNode.opType = OpType::CACHE;
+        cacheNode.dtype = lClass.dtype;
+        cacheNode.shape = lClass.shape;
+        cacheNode.strides = lClass.strides;
+        cacheNode.viewOffset = lClass.viewOffset;
+        cacheNode.backend = targetBackend;
+        cacheNode.leafId = logicalId | 0x80000000;
+        egraph.addENode(E_Cache, cacheNode); // TODO: add to E_L instead of separate E_Cache?
+
+        eclassToLogical[E_Cache] = logicalId;
+        uint32_t current_E = E_Cache;
+
+        auto addConst = [&](const std::vector<int32_t> &vals)
+        {
+            return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, Backend::CPU, vals);
+        };
+
+        for (size_t r = 0; r < regions.size(); ++r)
+        {
+            const Region &recomputeRegion = regions[r];
+
+            std::vector<uint32_t> partialShape;
+            for (const Dim &d : recomputeRegion.region)
+                partialShape.push_back(d.stop - d.start);
+
+            ShapePropagator prop;
+            std::vector<std::vector<Region>> dirtyInputRegions = prop.backward(sourceNode, graph, {recomputeRegion});
+
+            std::vector<int32_t> starts, ends, steps;
+            for (const Dim &d : recomputeRegion.region)
+            {
+                starts.push_back(d.start);
+                ends.push_back(d.stop);
+                steps.push_back(1);
+            }
+
+            uint32_t startsId = addConst(starts);
+            uint32_t endsId = addConst(ends);
+            uint32_t stepsId = addConst(steps);
+
+            uint32_t slicedEClass = UINT32_MAX;
+
+            if (sourceNode.opType == OpType::INPUT)
+            {
+                const EClass &lClass = egraph.getEClass(E_L);
+                std::vector<uint64_t> sliceStrides = lClass.strides;
+                uint64_t sliceViewOffset = lClass.viewOffset;
+
+                for (size_t d = 0; d < starts.size(); ++d)
+                {
+                    int32_t start = starts[d];
+                    if (start < 0)
+                        start += lClass.shape[d];
+                    sliceViewOffset += start * sliceStrides[d];
+                    sliceStrides[d] *= steps[d];
+                }
+
+                slicedEClass = egraph.addEClass(partialShape, sliceStrides, sliceViewOffset, lClass.dtype, lClass.backend);
+                ENode sliceNode;
+                sliceNode.opType = OpType::SLICE;
+                sliceNode.children = {E_L, startsId, endsId, stepsId};
+                sliceNode.shape = partialShape;
+                sliceNode.strides = sliceStrides;
+                sliceNode.viewOffset = sliceViewOffset;
+                sliceNode.dtype = lClass.dtype;
+                sliceNode.backend = lClass.backend;
+
+                TensorNode dOut;
+                dOut.setShape(partialShape);
+                dOut.dtype = sliceNode.dtype;
+                dOut.backend = sliceNode.backend;
+                std::vector<TensorNode> dIns(4);
+                dIns[0].setShape(lClass.shape);
+                dIns[0].dtype = sliceNode.dtype;
+                dIns[0].backend = sliceNode.backend;
+                dIns[1].setShape({(uint32_t)starts.size()});
+                dIns[1].dtype = DType::INT32;
+                dIns[1].backend = Backend::CPU;
+                dIns[2].setShape({(uint32_t)ends.size()});
+                dIns[2].dtype = DType::INT32;
+                dIns[2].backend = Backend::CPU;
+                dIns[3].setShape({(uint32_t)steps.size()});
+                dIns[3].dtype = DType::INT32;
+                dIns[3].backend = Backend::CPU;
+
+                auto sliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", sliceNode.backend, dIns, dOut, true);
+                for (uint64_t uid : sliceRefs)
+                {
+                    const auto &kernel = KernelRegistry::get().getKernel(uid);
+                    ENode sn = sliceNode;
+                    sn.kernelUid = uid;
+                    if (kernel.isView)
+                    {
+                        sn.strides = sliceStrides;
+                        sn.viewOffset = sliceViewOffset;
+                    }
+                    else
+                    {
+                        sn.strides = calcContiguousStrides(partialShape);
+                        sn.viewOffset = 0;
+                    }
+                    egraph.addENode(slicedEClass, sn);
+                }
+            }
+            else
+            {
+                std::vector<uint32_t> slicedInputs;
+                std::vector<TensorNode> dummyInputNodes;
+
+                for (size_t p_idx = 0; p_idx < sourceNode.parentIds.size(); ++p_idx)
+                {
+                    uint32_t parentLogicalId = sourceNode.parentIds[p_idx];
+                    uint32_t E_parent = egraph.find(nodeToEClass.at(parentLogicalId));
+                    const EClass &pClass = egraph.getEClass(E_parent);
+
+                    std::vector<Region> inputSliceRegions = dirtyInputRegions[p_idx];
+                    if (inputSliceRegions.size() != 1)
+                    {
+                        Error::throw_err("[Planner.injectPartialPath] expected exactly 1 input slice region for parent " + std::to_string(p_idx) + " but got " + std::to_string(inputSliceRegions.size()));
+                    }
+                    Region inputSliceRegion = inputSliceRegions[0];
+
+                    std::vector<uint32_t> pPartialShape;
+                    for (const Dim &d : inputSliceRegion.region)
+                        pPartialShape.push_back(d.stop - d.start);
+
+                    std::vector<int32_t> pStarts, pEnds, pSteps;
+                    for (const Dim &d : inputSliceRegion.region)
+                    {
+                        pStarts.push_back(d.start);
+                        pEnds.push_back(d.stop);
+                        pSteps.push_back(1);
+                    }
+
+                    uint32_t pStartsId = addConst(pStarts);
+                    uint32_t pEndsId = addConst(pEnds);
+                    uint32_t pStepsId = addConst(pSteps);
+
+                    std::vector<uint64_t> pSliceStrides = pClass.strides;
+                    uint64_t pSliceViewOffset = pClass.viewOffset;
+
+                    for (size_t d = 0; d < pStarts.size(); ++d)
+                    {
+                        int32_t start = pStarts[d];
+                        if (start < 0)
+                            start += pClass.shape[d];
+                        pSliceViewOffset += start * pSliceStrides[d];
+                        pSliceStrides[d] *= pSteps[d];
+                    }
+
+                    uint32_t pSliceEClass = egraph.addEClass(pPartialShape, pSliceStrides, pSliceViewOffset, pClass.dtype, pClass.backend);
+                    ENode pSliceNode;
+                    pSliceNode.opType = OpType::SLICE;
+                    pSliceNode.children = {E_parent, pStartsId, pEndsId, pStepsId};
+                    pSliceNode.shape = pPartialShape;
+                    pSliceNode.strides = pSliceStrides;
+                    pSliceNode.viewOffset = pSliceViewOffset;
+                    pSliceNode.dtype = pClass.dtype;
+                    pSliceNode.backend = pClass.backend;
+
+                    TensorNode pOut;
+                    pOut.setShape(pPartialShape);
+                    pOut.dtype = pSliceNode.dtype;
+                    pOut.backend = pSliceNode.backend;
+                    std::vector<TensorNode> pIns(4);
+                    pIns[0].setShape(pClass.shape);
+                    pIns[0].dtype = pSliceNode.dtype;
+                    pIns[0].backend = pSliceNode.backend;
+                    pIns[1].setShape({(uint32_t)pStarts.size()});
+                    pIns[1].dtype = DType::INT32;
+                    pIns[1].backend = Backend::CPU;
+                    pIns[2].setShape({(uint32_t)pEnds.size()});
+                    pIns[2].dtype = DType::INT32;
+                    pIns[2].backend = Backend::CPU;
+                    pIns[3].setShape({(uint32_t)pSteps.size()});
+                    pIns[3].dtype = DType::INT32;
+                    pIns[3].backend = Backend::CPU;
+
+                    auto pSliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", pSliceNode.backend, pIns, pOut, true);
+                    for (uint64_t uid : pSliceRefs)
+                    {
+                        const auto &kernel = KernelRegistry::get().getKernel(uid);
+                        ENode sn = pSliceNode;
+                        sn.kernelUid = uid;
+                        if (kernel.isView)
+                        {
+                            sn.strides = pSliceStrides;
+                            sn.viewOffset = pSliceViewOffset;
+                        }
+                        else
+                        {
+                            sn.strides = calcContiguousStrides(pPartialShape);
+                            sn.viewOffset = 0;
+                        }
+                        egraph.addENode(pSliceEClass, sn);
+                    }
+
+                    uint32_t pContigEClass = egraph.addEClass(pPartialShape, calcContiguousStrides(pPartialShape), 0, pSliceNode.dtype, pSliceNode.backend);
+                    ENode pContigNode;
+                    pContigNode.opType = OpType::CONTIGUOUS;
+                    pContigNode.children = {pSliceEClass};
+                    pContigNode.shape = pPartialShape;
+                    pContigNode.strides = calcContiguousStrides(pPartialShape);
+                    pContigNode.dtype = pSliceNode.dtype;
+                    pContigNode.backend = pSliceNode.backend;
+
+                    TensorNode cOut;
+                    cOut.setShape(pPartialShape);
+                    cOut.dtype = pSliceNode.dtype;
+                    cOut.backend = pSliceNode.backend;
+                    cOut.strides = pContigNode.strides;
+                    TensorNode cIn;
+                    cIn.setShape(pPartialShape);
+                    cIn.dtype = pSliceNode.dtype;
+                    cIn.backend = pSliceNode.backend;
+                    cIn.strides = pSliceStrides;
+
+                    auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", pContigNode.backend, {cIn}, cOut, true);
+                    for (uint64_t uid : contigRefs)
+                    {
+                        const auto &kernel = KernelRegistry::get().getKernel(uid);
+                        ENode cn = pContigNode;
+                        cn.kernelUid = uid;
+                        if (kernel.isView)
+                        {
+                            cn.strides = pSliceStrides;
+                            cn.viewOffset = pSliceViewOffset;
+                        }
+                        else
+                        {
+                            cn.strides = calcContiguousStrides(pPartialShape);
+                            cn.viewOffset = 0;
+                        }
+                        egraph.addENode(pContigEClass, cn);
+                    }
+
+                    slicedInputs.push_back(pContigEClass);
+
+                    TensorNode dummyIn;
+                    dummyIn.opType = OpType::INPUT;
+                    dummyIn.setShape(pPartialShape);
+                    dummyIn.dtype = pSliceNode.dtype;
+                    dummyIn.backend = pSliceNode.backend;
+                    dummyIn.strides = pContigNode.strides;
+                    dummyIn.viewOffset = 0;
+                    dummyInputNodes.push_back(dummyIn);
+                }
+
+                ENode opSlicedNode;
+                opSlicedNode.opType = sourceNode.opType;
+                opSlicedNode.opName = sourceNode.opName;
+                opSlicedNode.children = slicedInputs;
+                opSlicedNode.shape = partialShape;
+                opSlicedNode.strides = calcContiguousStrides(partialShape);
+                opSlicedNode.viewOffset = 0;
+                opSlicedNode.dtype = sourceNode.dtype;
+                opSlicedNode.backend = sourceNode.backend;
+
+                TensorNode dummyOut;
+                dummyOut.opType = sourceNode.opType;
+                dummyOut.opName = sourceNode.opName;
+                dummyOut.setShape(partialShape);
+                dummyOut.dtype = sourceNode.dtype;
+                dummyOut.backend = sourceNode.backend;
+                dummyOut.strides = opSlicedNode.strides;
+                dummyOut.viewOffset = 0;
+
+                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName, sourceNode.backend, dummyInputNodes, dummyOut, true);
+                if (opRefs.size() == 0)
+                {
+                    Error::throw_err("[Planner.injectPartialPath] couldn't find any slice kernels");
+                }
+                slicedEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), 0, sourceNode.dtype, sourceNode.backend);
+                for (uint64_t uid : opRefs)
+                {
+                    ENode sn = opSlicedNode;
+                    sn.kernelUid = uid;
+                    egraph.addENode(slicedEClass, sn);
+                }
+            }
+
+            uint32_t contigEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), 0, sourceNode.dtype, targetBackend);
+            ENode contigNode;
+            contigNode.opType = OpType::CONTIGUOUS;
+            contigNode.children = {slicedEClass};
+            contigNode.shape = partialShape;
+            contigNode.strides = calcContiguousStrides(partialShape);
+            contigNode.dtype = sourceNode.dtype;
+            contigNode.backend = targetBackend;
+
+            TensorNode cOut;
+            cOut.setShape(partialShape);
+            cOut.dtype = sourceNode.dtype;
+            cOut.backend = targetBackend;
+            cOut.strides = contigNode.strides;
+            TensorNode cIn;
+            cIn.setShape(partialShape);
+            cIn.dtype = sourceNode.dtype;
+            cIn.backend = sourceNode.backend;
+            cIn.strides = calcContiguousStrides(partialShape);
+
+            auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", contigNode.backend, {cIn}, cOut, true);
+            for (uint64_t uid : contigRefs)
+            {
+                const auto &kernel = KernelRegistry::get().getKernel(uid);
+                ENode cn = contigNode;
+                cn.kernelUid = uid;
+                if (kernel.isView)
+                {
+                    cn.strides = cIn.strides;
+                    cn.viewOffset = 0;
+                }
+                else
+                {
+                    cn.strides = calcContiguousStrides(partialShape);
+                    cn.viewOffset = 0;
+                }
+                egraph.addENode(contigEClass, cn);
+            }
+
+            uint32_t scatterEClass = egraph.addEClass(lClass.shape, lClass.strides, lClass.viewOffset, lClass.dtype, targetBackend);
+            ENode scatterNode;
+            scatterNode.opType = OpType::SCATTER;
+            scatterNode.children = {current_E, contigEClass, startsId, endsId, stepsId};
+            scatterNode.shape = lClass.shape;
+            scatterNode.strides = lClass.strides;
+            scatterNode.viewOffset = lClass.viewOffset;
+            scatterNode.dtype = lClass.dtype;
+            scatterNode.backend = targetBackend;
+
+            TensorNode sOut;
+            sOut.setShape(scatterNode.shape);
+            sOut.dtype = scatterNode.dtype;
+            sOut.backend = scatterNode.backend;
+            std::vector<TensorNode> sIns(5);
+            sIns[0].setShape(egraph.getEClass(current_E).shape);
+            sIns[0].dtype = scatterNode.dtype;
+            sIns[0].backend = scatterNode.backend;
+            sIns[1].setShape(partialShape);
+            sIns[1].dtype = scatterNode.dtype;
+            sIns[1].backend = scatterNode.backend;
+            sIns[2].setShape({(uint32_t)starts.size()});
+            sIns[2].dtype = DType::INT32;
+            sIns[2].backend = Backend::CPU;
+            sIns[3].setShape({(uint32_t)ends.size()});
+            sIns[3].dtype = DType::INT32;
+            sIns[3].backend = Backend::CPU;
+            sIns[4].setShape({(uint32_t)steps.size()});
+            sIns[4].dtype = DType::INT32;
+            sIns[4].backend = Backend::CPU;
+
+            auto scatterRefs = KernelRegistry::get().findMatchingKernels(OpType::SCATTER, "", scatterNode.backend, sIns, sOut, true);
+            for (uint64_t uid : scatterRefs)
+            {
+                const auto &kernel = KernelRegistry::get().getKernel(uid);
+                ENode sn = scatterNode;
+                sn.kernelUid = uid;
+                if (kernel.isView || kernel.inplace)
+                {
+                    sn.strides = lClass.strides;
+                    sn.viewOffset = lClass.viewOffset;
+                }
+                else
+                {
+                    sn.strides = calcContiguousStrides(scatterNode.shape);
+                    sn.viewOffset = 0;
+                }
+                egraph.addENode(scatterEClass, sn);
+            }
+
+            current_E = scatterEClass;
+        }
+
+        egraph.merge(E_L, current_E);
+        eclassToLogical[egraph.find(E_L)] = logicalId;
+        return true;
+    }
+
+    bool injectInputPartialPaths(
+        EGraph &egraph,
+        const Graph &graph,
+        const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
+        const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
+        std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
+    {
+        bool injected = false;
+        for (const auto &kv : dirtyOutputRegions)
+        {
+            uint32_t nodeId = kv.first;
+            if (!graph.hasNode(nodeId))
+                continue;
+
+            const TensorNode &node = graph.getNode(nodeId);
+            if (node.opType == OpType::INPUT && graph.constantStaging.count(nodeId) == 0)
+            {
+                if (!kv.second.empty())
+                {
+                    injected = injected || injectPartialPath(egraph, graph, nodeId, kv.second, cachedNodes, nodeToEClass, eclassToLogical);
+                }
+            }
+        }
+        if (injected)
+        {
+            egraph.rebuild();
+        }
+        return injected;
+    }
+
+    bool injectOutputPartialPaths(
+        EGraph &egraph,
+        const Graph &graph,
+        uint32_t rootId,
+        const std::vector<Region> &outputNeeded,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
+        const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
+        std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
+    {
+        bool injected = false;
+        if (!outputNeeded.empty())
+        {
+            injected = injectPartialPath(egraph, graph, rootId, outputNeeded, cachedNodes, nodeToEClass, eclassToLogical);
+        }
+        if (injected)
+        {
+            egraph.rebuild();
+        }
+        return injected;
     }
 
 public:
     Planner(CostModel &costModel, std::unordered_map<Backend, uint64_t> maxMemoryByBackend = {})
         : costModel(costModel), maxMemoryByBackend(std::move(maxMemoryByBackend)) {}
 
-    float extractFirstValidCost(const uint32_t rootId, EGraph &egraph,
-                                const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                                const std::unordered_map<Backend, uint64_t> &maxMemoryByBackend,
-                                const std::unordered_set<uint32_t> &cachedNodes,
-                                const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
-                                const std::unordered_set<uint32_t> &immutable_eclasses)
-    {
-        return extractBest(rootId, egraph, nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, true).totalCost;
-    }
-
-    float estimateCostForCacheSet(
-        uint32_t rootId,
-        Graph &graph,
-        const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
-        const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
-        const std::unordered_set<uint32_t> &cachedNodes,
-        PlanningRegionState &regionState,
-        bool doSaturate = true)
-    {
-        auto setup = setupEGraph(rootId, graph, dirtyOutputRegions, cachedNodes, doSaturate, regionState);
-        return extractFirstValidCost(setup.planningGraph.physicalRootId, setup.egraph, setup.nodeToEClass, maxMemoryByBackend, cachedNodes, setup.eclassToLogical, setup.immutable_eclasses);
-    }
-
     CompiledGraph plan(
         uint32_t rootId,
-        Graph &graph,
-        const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
-        const std::unordered_map<uint32_t, std::vector<std::vector<Region>>> &dirtyInputRegions,
-        const std::unordered_set<uint32_t> &cachedNodes, PlanningRegionState &regionState, bool doSaturate = true)
+        const Graph &graph,
+        const Bucket &bucket,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes,
+        bool doSaturate = true,
+        bool strictCache = false)
     {
-        auto setup = setupEGraph(rootId, graph, dirtyOutputRegions, cachedNodes, doSaturate, regionState);
-        auto extraction = extractBest(setup.planningGraph.physicalRootId, setup.egraph, setup.nodeToEClass, maxMemoryByBackend, cachedNodes, setup.eclassToLogical, setup.immutable_eclasses);
+        // 1. saturate base egraph
+        initBaseEGraph(rootId, graph, doSaturate);
 
+        EGraph egraph = baseState.egraph;
+        auto eclassToLogical = baseState.eclassToLogical;
+
+        // Pre-canonicalize eclassToLogical to avoid nested loops during CACHE insertion
+        std::unordered_map<uint32_t, uint32_t> canonToLogical;
+        canonToLogical.reserve(eclassToLogical.size());
+        for (const auto &kv : eclassToLogical)
+        {
+            canonToLogical[egraph.find(kv.first)] = kv.second;
+        }
+        eclassToLogical = canonToLogical;
+
+        // Determine dirtyness for logical nodes
+        std::unordered_map<uint32_t, bool> logicalDirty;
+        std::vector<uint32_t> topo = topologicalSort(rootId, graph);
+        for (uint32_t nodeId : topo)
+        {
+            if (bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty())
+            {
+                logicalDirty[nodeId] = true;
+            }
+            else if (graph.getNode(nodeId).opType == OpType::INPUT)
+            {
+                logicalDirty[nodeId] = false;
+            }
+            else
+            {
+                bool isDirty = false;
+                for (uint32_t pid : graph.getNode(nodeId).parentIds)
+                {
+                    if (logicalDirty[pid])
+                    {
+                        isDirty = true;
+                        break;
+                    }
+                }
+                logicalDirty[nodeId] = isDirty;
+            }
+        }
+
+        // Add OpType::CACHE to all clean eclasses
+        for (const auto &cls : egraph.getClasses())
+        {
+            uint32_t canonId = egraph.find(cls.id);
+            if (canonId != cls.id)
+                continue; // only canonical eclasses
+            if (strictCache)
+            {
+                // If we are re-planning, only protected nodes should have the option of using cache
+                if (eclassToLogical.count(canonId) == 0)
+                    continue;
+                if (cachedNodes.count(eclassToLogical.at(canonId)) == 0)
+                    continue;
+            }
+            for (int i = 0; i < cls.enodes.size(); i++)
+            {
+                if (egraph.getENodes()[cls.enodes[i]].opType == OpType::CACHE) // TODO: maybe rebuild already takes care of this?
+                {
+                    continue;
+                }
+            }
+
+            // Map canonical eclass to logicalId
+            uint32_t logicalId = UINT32_MAX;
+            auto it = eclassToLogical.find(canonId);
+            if (it != eclassToLogical.end())
+            {
+                logicalId = it->second;
+            }
+
+            if (logicalId != UINT32_MAX && !logicalDirty[logicalId])
+            {
+                ENode cacheNode;
+                cacheNode.kernelUid = 0;
+                cacheNode.opType = OpType::CACHE;
+                cacheNode.shape = cls.shape;
+                cacheNode.strides = cls.strides;
+                cacheNode.viewOffset = cls.viewOffset;
+                cacheNode.dtype = cls.dtype;
+                cacheNode.backend = cls.backend;
+                cacheNode.leafId = logicalId | 0x80000000;
+                egraph.addENode(canonId, cacheNode);
+            }
+        }
+
+        std::unordered_set<uint32_t> protectedEClasses;
+        for (const auto &kv : cachedNodes)
+        {
+            uint32_t logicalId = kv.first;
+            protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
+        }
+
+        // 2. inject input dirty slices
+        bool dirtyInjected = injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions, cachedNodes, baseState.nodeToEClass, eclassToLogical);
+
+        // 3. inject output needed regions
+        bool neededInjected = injectOutputPartialPaths(egraph, graph, rootId, bucket.outputNeededRegion, cachedNodes, baseState.nodeToEClass, eclassToLogical);
+
+        // 4. saturate
+        if (doSaturate)
+        {
+            saturate(egraph, protectedEClasses, eclassToLogical, true, false);
+        }
+
+        bool injected = dirtyInjected || neededInjected;
+        std::cout << "Injected: " << injected << std::endl;
+
+#ifdef DEBUG
+        auto rootIt = baseState.nodeToEClass.find(rootId);
+        if (rootIt == baseState.nodeToEClass.end())
+        {
+            Error::throw_err("[Planner.plan] Root node missing from baseState.nodeToEClass.");
+        }
+        uint32_t rootEClassId = egraph.find(rootIt->second);
+        dumpEGraphBinary(egraph, rootEClassId);
+#endif
+
+        std::unordered_map<uint32_t, uint32_t> updatedEClassToLogical;
+        for (const auto &kv : eclassToLogical)
+        {
+            updatedEClassToLogical[egraph.find(kv.first)] = kv.second;
+        }
+        eclassToLogical = std::move(updatedEClassToLogical);
+
+        std::cout << "[Planner.plan] initializing immutable classes" << std::endl;
+        std::unordered_set<uint32_t> immutable_eclasses;
+        for (const auto &kv : eclassToLogical)
+        {
+            uint32_t logicalId = kv.second;
+            uint32_t ecl = egraph.find(kv.first);
+            const TensorNode &node = graph.getNode(logicalId);
+            if (node.storageType != StorageType::TRANSIENT || cachedNodes.count(logicalId))
+            {
+                immutable_eclasses.insert(ecl);
+            }
+        }
+
+        // Propagate immutability through views to prevent inplace corruption
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (const auto &cls : egraph.getClasses())
+            {
+                uint32_t eclassId = egraph.find(cls.id);
+                if (immutable_eclasses.count(eclassId))
+                    continue;
+
+                for (uint32_t enodeId : cls.enodes)
+                {
+                    const ENode &enode = egraph.getENodes()[enodeId];
+                    if (enode.kernelUid != 0)
+                    {
+                        const auto &kernel = KernelRegistry::get().getKernel(enode.kernelUid);
+                        if (kernel.isView && !enode.children.empty())
+                        {
+                            uint32_t parentEclass = egraph.find(enode.children[0]);
+                            if (immutable_eclasses.count(parentEclass))
+                            {
+                                immutable_eclasses.insert(eclassId);
+                                changed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, true, strictCache);
         return buildCompiledGraph(
-            setup.planningGraph.physicalRootId,
-            setup.planningGraph.graph,
-            setup.egraph,
-            setup.nodeToEClass,
-            extraction,
-            setup.planningGraph.logicalToPhysicalNodeMap,
-            setup.planningGraph.physicalToLogicalNodeMap,
-            cachedNodes,
-            setup.eclassToLogical);
+            rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes, eclassToLogical);
     }
 };

@@ -111,7 +111,7 @@ def extract_best(egraph: EGraph, root_id: int, max_mem_size: int):
     to_process_enode: List[int] = []
     ref_counts: Dict[int, int] = defaultdict(int)
     need_single_ref: Set[int] = set()
-    
+
     best = (None, {})
 
     while True:
@@ -167,7 +167,9 @@ def extract_best(egraph: EGraph, root_id: int, max_mem_size: int):
 
             # enqueue children (DFS)
             new_to_process = [
-                child for child in node.children if child not in selection_map
+                child
+                for child in node.children
+                if (child not in selection_map and child not in to_process)
             ]  # we don't need to descend into children we have already processed
             to_process = new_to_process + to_process
 
@@ -182,7 +184,10 @@ def extract_best(egraph: EGraph, root_id: int, max_mem_size: int):
             if best[0] is None or cost < best[0]:
                 best = (cost, selection_map.copy())
                 print(f"NEW BEST: {cost}")
-        print(f"{'FOUND' if valid else f'REJECT ({reason})'}, peak={peak}, cost={cost}:", selection_map)
+        print(
+            f"{'FOUND' if valid else f'REJECT ({reason})'}, peak={peak}, cost={cost}:",
+            selection_map,
+        )
 
         if len(to_process_enode) == 0:
             break
@@ -252,35 +257,39 @@ def extract_best(egraph: EGraph, root_id: int, max_mem_size: int):
 # ----------------------------
 # Build your example egraph
 # ----------------------------
+def test0():
+    eg = EGraph()
 
-eg = EGraph()
+    # inputs
+    eg.add_enode(0, "input(a)", [], 4, 0, False)
+    eg.add_enode(1, "input(b)", [], 4, 0, False)
+    eg.add_enode(2, "input(c)", [], 4, 0, False)
 
-# inputs
-eg.add_enode(0, "input(a)", [], 4, 0, False)
-eg.add_enode(1, "input(b)", [], 4, 0, False)
-eg.add_enode(2, "input(c)", [], 4, 0, False)
+    # b + c
+    eg.add_enode(3, "+", [1, 2], 4, 2, False)
 
-# b + c
-eg.add_enode(3, "+", [1, 2], 4, 2, False)
+    # eclass 4 has TWO enodes:
+    #   0: a*(b+c)
+    #   1: (a*b) + (a*c)
+    eg.add_enode(4, "+", [5, 6], 4, 2, False)  # index 1
+    eg.add_enode(4, "*", [0, 3], 4, 3, False)  # index 0
 
-# eclass 4 has TWO enodes:
-#   0: a*(b+c)
-#   1: (a*b) + (a*c)
-eg.add_enode(4, "*", [0, 3], 4, 3, False)  # index 0
-eg.add_enode(4, "+", [5, 6], 4, 2, False)  # index 1
+    # a*b
+    eg.add_enode(5, "*", [0, 1], 4, 1, True, 0)
+    eg.add_enode(5, "*", [0, 1], 4, 3, False)
 
-# a*b
-eg.add_enode(5, "*", [0, 1], 4, 1, True, 0)
-eg.add_enode(5, "*", [0, 1], 4, 3, False)
+    # a*c
+    eg.add_enode(6, "*", [0, 2], 4, 3, False)
 
-# a*c
-eg.add_enode(6, "*", [0, 2], 4, 3, False)
+    # ----------------------------
+    # Run extraction
+    # ----------------------------
+
+    best = extract_best(eg, root_id=4, max_mem_size=32)
+    assert best[0] == 5.0
+    assert best[1] == {4: 1, 0: 0, 3: 0, 1: 0, 2: 0}
+
+    print(f"\nBest selection map (cost={best[0]}):", best[1])
 
 
-# ----------------------------
-# Run extraction
-# ----------------------------
-
-best = extract_best(eg, root_id=4, max_mem_size=32)
-
-print(f"\nBest selection map (cost={best[0]}):", best[1])
+test0()

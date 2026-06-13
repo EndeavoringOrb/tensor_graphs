@@ -12,12 +12,8 @@
  * Implementation: IKJ loop order to maximize cache hits and SIMD throughput.
  * Parallelization: Distributed across Batch (B) and Row (M) dimensions.
  */
-inline bool matchDotF32_3D_Optimized(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchDotF32_3D_Optimized(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
 
     const auto &s0 = inputs[0].getShape();
     const auto &s1 = inputs[1].getShape();
@@ -37,16 +33,15 @@ inline bool matchDotF32_3D_Optimized(const std::vector<TensorNode> &inputs, cons
     return true;
 }
 
-inline void runDotF32_3D_Optimized(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                   const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runDotF32_3D_Optimized(const KernelContext &ctx)
 {
-    const float *A_ptr = static_cast<const float *>(inputs[0]);
-    const float *B_ptr = static_cast<const float *>(inputs[1]);
-    float *Out_ptr = static_cast<float *>(outputs[0]);
+    const float *A_ptr = static_cast<const float *>(ctx.inputs[0]);
+    const float *B_ptr = static_cast<const float *>(ctx.inputs[1]);
+    float *Out_ptr = static_cast<float *>(ctx.outputs[0]);
 
-    const auto &viewA = inViews[0];
-    const auto &viewB = inViews[1];
-    const auto &viewOut = outViews[0];
+    const auto &viewA = ctx.inViews[0];
+    const auto &viewB = ctx.inViews[1];
+    const auto &viewOut = ctx.outViews[0];
 
     const uint32_t B_count = viewA.getShape()[0];
     const uint32_t M = viewA.getShape()[1];
@@ -103,7 +98,7 @@ inline void runDotF32_3D_Optimized(const std::vector<const void *> &inputs, cons
                     uint32_t n = 0;
 
                     // SIMD loop: Process 4 columns of B at a time
-                    for (; n <= N - 4; n += 4) {
+                    for (; n + 4 <= N; n += 4) {
                         // Load 4 elements of B
                         // Note: Assuming strideB_N is 1 for maximum speed. 
                         // If B is not contiguous, this needs vld1q_f32 replacement.

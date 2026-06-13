@@ -4,25 +4,20 @@
 #include "core/kernels.hpp"
 #include <cmath>
 
-inline bool matchGeluF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchGeluF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
     if (inputs[0].getShape() != output.getShape())
         return false;
-    if (!isContiguous(inputs[0]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
     return true;
 }
 
-inline void runGeluF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                          const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runGeluF32_ND(const KernelContext &ctx)
 {
-    const float *in = static_cast<const float *>(inputs[0]);
-    float *out = static_cast<float *>(outputs[0]);
-    uint64_t n = countElements(inViews[0].getShape());
+    const float *in = static_cast<const float *>(ctx.inputs[0]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
+    uint64_t n = countElements(ctx.inViews[0].getShape());
     for (uint64_t i = 0; i < n; ++i)
     {
         float x = in[i];

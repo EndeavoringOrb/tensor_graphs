@@ -16,21 +16,15 @@
  * Match Function:
  * Validates that input is BF16, output is F32, shapes match, and both are contiguous.
  */
-inline bool matchCastBF16_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchCastBF16_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 1)
-        return false;
-
-    // Check Dtypes
-    if (inputs[0].dtype != DType::BF16 || output.dtype != DType::FLOAT32)
-        return false;
 
     // Check Shape Identity
     if (inputs[0].getShape() != output.getShape())
         return false;
 
     // Reference implementation requires contiguity for flat iteration
-    if (!isContiguous(inputs[0]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
 
     return true;
@@ -40,14 +34,13 @@ inline bool matchCastBF16_F32_ND(const std::vector<TensorNode> &inputs, const Te
  * Run Function:
  * Iterates through all elements, performing bit-shifting for conversion.
  */
-inline void runCastBF16_F32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                               const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runCastBF16_F32_ND(const KernelContext &ctx)
 {
     // BF16 is stored as uint16_t raw bits
-    const uint16_t *src = static_cast<const uint16_t *>(inputs[0]);
-    float *dst = static_cast<float *>(outputs[0]);
+    const uint16_t *src = static_cast<const uint16_t *>(ctx.inputs[0]);
+    float *dst = static_cast<float *>(ctx.outputs[0]);
 
-    uint64_t numElements = countElements(inViews[0].getShape());
+    uint64_t numElements = countElements(ctx.inViews[0].getShape());
 
     for (uint64_t i = 0; i < numElements; ++i)
     {
@@ -63,4 +56,4 @@ inline void runCastBF16_F32_ND(const std::vector<const void *> &inputs, const st
 }
 
 // Register as a CPU kernel for the CAST operation
-REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastBF16_F32_ND, runCastBF16_F32_ND, {Backend::CPU}, {DType::BF16}, {{8, 32}}, {false}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastBF16_F32_ND, runCastBF16_F32_ND, {Backend::CPU}, {DType::BF16}, {{8, 32}}, {true}, {{Backend::CPU}});

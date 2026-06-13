@@ -8,19 +8,30 @@
 #include <string>
 #include <unordered_map>
 
-// A matching function checks the context of the requested operation to determine
-// if the kernel supports the specific layout, rank, dimensions, or dtypes.
-using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts);
+struct KernelContext
+{
+    std::vector<const void *> inputs;
+    std::vector<void *> outputs;
+    std::vector<TensorView> inViews;
+    std::vector<TensorView> outViews;
+    std::vector<int> fd; // same number of elements as inputs/inViews, has -1 if not a file, positive number file descriptor if is a file. COPY_TO kernels that start from STORAGE should use fd + inViews baseOffset to read from file
 
-// The execution function receives raw pointers dynamically mapped to the device buffer,
-// alongside the TensorViews to access strides and shapes during execution.
-using KernelFunc = void (*)(const std::vector<const void *> &inputs,
-                            const std::vector<void *> &outputs,
-                            const std::vector<TensorView> &inViews,
-                            const std::vector<TensorView> &outViews);
+    KernelContext() {}
+    KernelContext(const std::vector<const void *> &_inputs,
+                  const std::vector<void *> &_outputs,
+                  const std::vector<TensorView> &_inViews,
+                  const std::vector<TensorView> &_outViews) : inputs(_inputs), outputs(_outputs), inViews(_inViews), outViews(_outViews)
+    {
+        for (int i = 0; i < inputs.size(); i++)
+        {
+            fd.push_back(-1);
+        }
+    }
+};
 
+using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
+using KernelFunc = void (*)(const KernelContext &ctx);
 using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph);
-
 using InferViewFunc = void (*)(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph);
 
 struct ReferenceGraphEntry
@@ -45,8 +56,8 @@ public:
         auto it = factories.find(name);
         if (it != factories.end())
         {
-            return; // TODO: somehow check that the reference graphs are the same
-            // Error::throw_err("A kernel with name \"" + name + "\" is already registered.");
+            // return; // TODO: somehow check that the reference graphs are the same
+            Error::throw_err("A kernel with name \"" + name + "\" is already registered.");
         }
         factories[name] = {numInputs, factory, dtypes, dummyShapes};
     }
@@ -59,13 +70,80 @@ public:
         return nullptr;
     }
 
-    const std::unordered_map<std::string, ReferenceGraphEntry> &getAll() const
-    {
-        return factories;
-    }
+    const std::unordered_map<std::string, ReferenceGraphEntry> &getAll() const { return factories; }
 
 private:
     std::unordered_map<std::string, ReferenceGraphEntry> factories;
+};
+
+struct PatternCacheKey
+{
+    OpType pOpType;
+    std::string pOpName;
+    Backend backend;
+    bool referenceOnly;
+    bool ignoreInputBackends;
+    bool ignoreInputContig;
+
+    std::vector<TensorNode> inputs;
+    TensorNode output;
+
+    bool operator==(const PatternCacheKey &o) const
+    {
+        if (pOpType != o.pOpType || pOpName != o.pOpName || backend != o.backend ||
+            referenceOnly != o.referenceOnly || ignoreInputBackends != o.ignoreInputBackends ||
+            ignoreInputContig != o.ignoreInputContig)
+            return false;
+        if (inputs.size() != o.inputs.size())
+            return false;
+        for (size_t i = 0; i < inputs.size(); ++i)
+        {
+            if (inputs[i].dtype != o.inputs[i].dtype || inputs[i].backend != o.inputs[i].backend ||
+                inputs[i].getShape() != o.inputs[i].getShape() || inputs[i].strides != o.inputs[i].strides ||
+                inputs[i].viewOffset != o.inputs[i].viewOffset)
+                return false;
+        }
+        if (output.dtype != o.output.dtype || output.backend != o.output.backend ||
+            output.getShape() != o.output.getShape() || output.strides != o.output.strides ||
+            output.viewOffset != o.output.viewOffset)
+            return false;
+        return true;
+    }
+};
+
+struct PatternCacheKeyHash
+{
+    size_t operator()(const PatternCacheKey &k) const
+    {
+        size_t h = 0;
+        auto combine = [&](size_t val)
+        { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
+        combine((size_t)k.pOpType);
+        if (!k.pOpName.empty())
+            combine(std::hash<std::string>()(k.pOpName));
+        combine((size_t)k.backend);
+        combine(k.referenceOnly);
+        combine(k.ignoreInputBackends);
+        combine(k.ignoreInputContig);
+        for (const auto &in : k.inputs)
+        {
+            combine((size_t)in.dtype);
+            combine((size_t)in.backend);
+            for (auto s : in.getShape())
+                combine(s);
+            for (auto s : in.strides)
+                combine(s);
+            combine((size_t)in.viewOffset);
+        }
+        combine((size_t)k.output.dtype);
+        combine((size_t)k.output.backend);
+        for (auto s : k.output.getShape())
+            combine(s);
+        for (auto s : k.output.strides)
+            combine(s);
+        combine((size_t)k.output.viewOffset);
+        return h;
+    }
 };
 
 struct KernelEntry
@@ -87,6 +165,107 @@ struct KernelEntry
     std::vector<DType> dtypes;
     std::vector<std::vector<uint32_t>> dummyShapes;
     std::vector<bool> requiresContiguous;
+
+    std::string getName() const
+    {
+        if (opName != "")
+        {
+            return opName;
+        }
+        return toString(opType);
+    }
+
+    // Abstracted validity check
+    bool matches(const std::vector<TensorNode> &inputs, const TensorNode &output,
+                 bool ignoreInputBackends = false, bool ignoreInputContig = false) const
+    {
+        // 1. Check number of inputs
+        if (isVariadic)
+        {
+            if (inputs.size() < 2)
+                return false;
+        }
+        else if (inputs.size() != numInputs)
+        {
+            return false;
+        }
+
+        // 2. Check input backends
+        if (!ignoreInputBackends)
+        {
+            for (size_t i = 0; i < inputs.size(); ++i)
+            {
+                size_t ruleIdx = isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                bool found = false;
+                for (Backend b : inputBackends[ruleIdx])
+                {
+                    if (inputs[i].backend == b)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    return false;
+            }
+        }
+
+        // 3. Check input contiguity
+        if (!ignoreInputContig)
+        {
+            for (size_t i = 0; i < inputs.size(); ++i)
+            {
+                size_t ruleIdx = isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                if (requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
+                    return false;
+            }
+        }
+
+        // 4. Check input dtypes if registered
+        if (!dtypes.empty())
+        {
+            for (size_t i = 0; i < inputs.size(); ++i)
+            {
+                size_t ruleIdx = isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                if (ruleIdx < dtypes.size() && inputs[i].dtype != dtypes[ruleIdx])
+                    return false;
+            }
+        }
+
+        // 5. Output backend check
+        bool backendFound = false;
+        for (Backend b : backends)
+        {
+            if (b == output.backend)
+            {
+                backendFound = true;
+                break;
+            }
+        }
+        if (!backendFound)
+            return false;
+
+        // 6. Inplace checks assume input and output are on the same backend
+        if (inplace && numInputs > 0 && !inputs.empty())
+        {
+            if (inputs[0].backend != output.backend)
+                return false;
+        }
+
+        // 7. Inplace safety check: prevent mutating persistent memory (weights)
+        if (inplace && !inputs.empty())
+        {
+            if (inputs[0].storageType == StorageType::PERSISTENT)
+                return false;
+        }
+
+        // 8. Call custom match function
+        if (match)
+        {
+            return match(inputs, output);
+        }
+        return true;
+    }
 };
 
 class KernelRegistry
@@ -98,9 +277,88 @@ public:
         return instance;
     }
 
-    void setReferenceOnly(bool refOnly) { referenceOnlyMode = refOnly; }
+    mutable std::unordered_map<PatternCacheKey, std::vector<uint64_t>, PatternCacheKeyHash> patternCache;
 
-    const std::vector<KernelEntry> &getAllKernels() const { return entries; }
+    void setReferenceOnly(bool refOnly) { referenceOnlyMode = refOnly; }
+    const std::unordered_map<uint64_t, KernelEntry> &getAllKernels() const { return entries; }
+
+    std::vector<uint64_t> _findMatchingKernelsByPattern(
+        const Graph &patternGraph, uint32_t patternRootId, Backend backend,
+        const std::vector<TensorNode> &inputs, const TensorNode &output,
+        bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
+    {
+        std::vector<uint64_t> matches;
+        for (const auto &[uid, entry] : entries)
+        {
+            if ((referenceOnlyMode || referenceOnly) && !entry.isReference)
+                continue;
+
+            bool patternMatches = false;
+            if (entry.opType == OpType::FUSED)
+            {
+                if (entry.refFactory)
+                {
+                    Graph kGraph;
+                    std::vector<uint32_t> kInputs;
+                    for (size_t i = 0; i < entry.numInputs; ++i)
+                        kInputs.push_back(kGraph.input(entry.dummyShapes[i], entry.dtypes[i]));
+                    uint32_t kRootId = entry.refFactory(kInputs, kGraph);
+                    patternMatches = isIsomorphic(patternGraph, patternRootId, kGraph, kRootId);
+                }
+            }
+            else
+            {
+                const TensorNode &pNode = patternGraph.getNode(patternRootId);
+                if (pNode.opType == entry.opType)
+                {
+                    patternMatches = true;
+                    for (uint32_t pid : pNode.parentIds)
+                    {
+                        if (patternGraph.getNode(pid).opType != OpType::INPUT &&
+                            patternGraph.getNode(pid).opType != OpType::ARANGE &&
+                            patternGraph.getNode(pid).opType != OpType::FILL)
+                        {
+                            patternMatches = false;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!patternMatches)
+                continue;
+
+            if (!entry.matches(inputs, output, ignoreInputBackends, ignoreInputContig))
+                continue;
+
+            matches.push_back(entry.uid);
+        }
+        return matches;
+    }
+
+    std::vector<uint64_t> findMatchingKernelsByPattern(
+        const Graph &patternGraph, uint32_t patternRootId, Backend backend,
+        const std::vector<TensorNode> &inputs, const TensorNode &output,
+        bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
+    {
+        const TensorNode &rootNode = patternGraph.getNode(patternRootId);
+        PatternCacheKey key{
+            rootNode.opType, rootNode.opName, backend,
+            referenceOnly, ignoreInputBackends, ignoreInputContig,
+            inputs, output};
+
+        auto it = patternCache.find(key);
+        if (it != patternCache.end())
+        {
+            return it->second;
+        }
+
+        std::vector<uint64_t> matches = _findMatchingKernelsByPattern(
+            patternGraph, patternRootId, backend, inputs, output, referenceOnly, ignoreInputBackends, ignoreInputContig);
+
+        patternCache[key] = matches;
+        return matches;
+    }
 
     void registerKernel(uint64_t uid, OpType op, const std::string &opName, uint32_t numInputs,
                         const std::vector<Backend> &backends, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
@@ -111,6 +369,47 @@ public:
                         const std::vector<std::vector<Backend>> &inputBackends)
     {
         bool isVariadic = (op == OpType::CONCAT);
+        bool concatCheck = true;
+        for (int i = 1; i < dtypes.size() - 1; i++)
+        {
+            if (dtypes[i] != dtypes[i - 1])
+            {
+                concatCheck = false;
+            }
+        }
+        if (concatCheck && op == OpType::FUSED && refFactory != nullptr && numInputs >= 2 &&
+            dummyShapes.size() == numInputs && dtypes.size() == numInputs && dtypes.back() == DType::INT32)
+        {
+            try
+            {
+                Graph dummyGraph;
+                std::vector<uint32_t> dummyInp;
+                for (size_t i = 0; i < numInputs; ++i)
+                {
+                    dummyInp.push_back(dummyGraph.input(dummyShapes[i], dtypes[i]));
+                }
+                uint32_t rootId = refFactory(dummyInp, dummyGraph);
+
+                Graph pureGraph;
+                std::vector<uint32_t> pureInp;
+                for (size_t i = 0; i < numInputs; ++i)
+                {
+                    pureInp.push_back(pureGraph.input(dummyShapes[i], dtypes[i]));
+                }
+                std::vector<uint32_t> tensors(pureInp.begin(), pureInp.end() - 1);
+                uint32_t pureRootId = pureGraph.concat(tensors, pureInp.back());
+
+                if (isIsomorphic(dummyGraph, rootId, pureGraph, pureRootId))
+                {
+                    isVariadic = true;
+                }
+            }
+            catch (const std::exception &e)
+            {
+                std::cerr << "[KernelRegistry.registerKernel] failed to ascertain if isVariadic. defaulting to isVariadic=false: " << e.what() << std::endl;
+            }
+        }
+
         if (!isVariadic && inputBackends.size() != numInputs)
         {
             Error::throw_err("[KernelRegistry.registerKernel] expected inputBackends.size() == " + std::to_string(numInputs) + " but got " + std::to_string(inputBackends.size()) + ". Info:\n" +
@@ -126,6 +425,15 @@ public:
                              "  # DTypes: " + std::to_string(dtypes.size()) + "\n" +
                              "  # Dummy Shapes: " + std::to_string(dummyShapes.size()) + "\n" +
                              "  # Contiguous: " + std::to_string(contiguous.size()) + "\n");
+        }
+        if (!isVariadic && dtypes.size() != numInputs)
+        {
+            Error::throw_err("[KernelRegistry.registerKernel] expected dtypes.size() == " + std::to_string(numInputs) + " but got " + std::to_string(dtypes.size()) + ". Info:\n" +
+                             "  UID: " + std::to_string(uid) + "\n" +
+                             "  OpType: " + toString(op) + "\n" +
+                             "  OpName: " + opName + "\n" +
+                             "  # Inputs: " + std::to_string(numInputs) + "\n" +
+                             "  # DTypes: " + std::to_string(dtypes.size()) + "\n");
         }
         if (!isVariadic && contiguous.size() != numInputs)
         {
@@ -143,7 +451,7 @@ public:
                              "  # Dummy Shapes: " + std::to_string(dummyShapes.size()) + "\n" +
                              "  # Contiguous: " + std::to_string(contiguous.size()) + "\n");
         }
-        entries.push_back({uid, op, opName, numInputs, isVariadic, backends, inputBackends, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous});
+        entries.emplace(uid, KernelEntry{uid, op, opName, numInputs, isVariadic, backends, inputBackends, match, run, refFactory, inplace, isView, isReference, inferView, dtypes, dummyShapes, contiguous});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, numInputs, refFactory, dtypes, dummyShapes);
@@ -151,123 +459,43 @@ public:
     }
 
     std::vector<uint64_t> findMatchingKernels(
-        OpType op,
-        const std::string &opName,
-        Backend backend,
-        const std::vector<TensorNode> &inputs,
-        const TensorNode &output,
-        const std::unordered_map<uint32_t, uint32_t> &refCounts = {},
-        bool referenceOnly = false) const
+        OpType op, const std::string &opName, Backend backend,
+        const std::vector<TensorNode> &inputs, const TensorNode &output,
+        bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
     {
         std::vector<uint64_t> matches;
-        for (const auto &entry : entries)
+        for (const auto &[uid, entry] : entries)
         {
             if ((referenceOnlyMode || referenceOnly) && !entry.isReference)
                 continue;
-
             if (entry.opType != op)
                 continue;
-
-            bool backendFound = false;
-            for (auto b : entry.backends)
-            {
-                if (b == backend)
-                {
-                    backendFound = true;
-                    break;
-                }
-            }
-            if (!backendFound)
-                continue;
-
             if (op == OpType::FUSED && entry.opName != opName)
                 continue;
 
-            if (entry.isVariadic)
-            {
-                if (inputs.size() < 2)
-                    continue; // Must have at least 1 tensor + 1 axis
-            }
-            else if (inputs.size() != entry.inputBackends.size())
-            {
-                Error::throw_err("[KernelRegistry.findMatchingKernels] expected # inputs to equal # input backends but got " + std::to_string(inputs.size()) + " inputs and " + std::to_string(entry.inputBackends.size()) + " input backends");
-            }
-            bool inputBackendsMatch = true;
-            for (uint32_t i = 0; i < inputs.size(); ++i)
-            {
-                // Map to the correct rule index for variadic inputs
-                size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
-
-                bool currentInputMatch = false;
-                for (uint32_t j = 0; j < entry.inputBackends[ruleIdx].size(); j++)
-                {
-                    if (inputs[i].backend == entry.inputBackends[ruleIdx][j])
-                    {
-                        currentInputMatch = true;
-                        break;
-                    }
-                }
-                inputBackendsMatch = inputBackendsMatch && currentInputMatch;
-                if (!inputBackendsMatch)
-                    break;
-            }
-            if (!inputBackendsMatch)
+            if (!entry.matches(inputs, output, ignoreInputBackends, ignoreInputContig))
                 continue;
 
-            if (entry.inplace && entry.numInputs > 0)
-            {
-                if (inputs[0].backend != backend)
-                    continue;
-            }
-            if (entry.isView && entry.numInputs > 0)
-            {
-                if (inputs[0].backend != backend)
-                    continue;
-            }
-
-            bool contigMatch = true;
-            for (size_t i = 0; i < inputs.size(); ++i)
-            {
-                size_t ruleIdx = entry.isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
-                if (entry.requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
-                {
-                    contigMatch = false;
-                    break;
-                }
-            }
-            if (!contigMatch)
-                continue;
-
-            if (entry.match(inputs, output, refCounts))
-            {
-                matches.push_back(entry.uid);
-            }
+            matches.push_back(entry.uid);
         }
         return matches;
     }
 
     const KernelEntry &getKernel(uint64_t uid) const
     {
-        for (const auto &entry : entries)
-        {
-            if (entry.uid == uid)
-                return entry;
-        }
+        auto it = entries.find(uid);
+        if (it != entries.end())
+            return it->second;
         Error::throw_err("Invalid kernel UID " + std::to_string(uid));
     }
 
     bool hasKernel(uint64_t uid) const
     {
-        for (const auto &entry : entries)
-        {
-            if (entry.uid == uid)
-                return true;
-        }
-        return false;
+        return entries.find(uid) != entries.end();
     }
 
 private:
-    std::vector<KernelEntry> entries;
+    std::unordered_map<uint64_t, KernelEntry> entries;
     bool referenceOnlyMode = false;
 };
 

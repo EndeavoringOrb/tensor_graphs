@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -22,121 +23,275 @@
 #include "generated/kernels_all.gen.hpp"
 #include "generated/build_context.gen.hpp"
 
-using json = nlohmann::json;
+#ifdef TG_OS_WINDOWS
+#include <io.h>
+#include <fcntl.h>
+#include <share.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#endif
 
-int main()
+int main(int argc, char *argv[])
 {
-    std::filesystem::create_directories("benchmarks");
+    int skipCount = 0;
+    std::string targetKernel = "";
 
-    std::string callsPath = "benchmarks/calls.jsonl";
-    std::string recordsPath = "benchmarks/records.jsonl";
-
-    // Build a registry of already benchmarked kernels to skip redundancy
-    std::unordered_set<std::string> recordedKeys;
-    std::ifstream recordsFile(recordsPath);
-    if (recordsFile.is_open())
+    // 1. Parse Arguments
+    for (int i = 1; i < argc; ++i)
     {
-        std::string line;
-        while (std::getline(recordsFile, line))
+        std::string arg = argv[i];
+        if ((arg == "-s" || arg == "--skip") && i + 1 < argc)
         {
-            if (line.empty())
-                continue;
-
-            auto j = json::parse(line);
-            Record r = j.get<Record>();
-            json keyObj;
-            std::stringstream uid_ss, build_ss;
-            uid_ss << "0x" << std::hex << r.kernelUid;
-            build_ss << "0x" << std::hex << r.buildContextId;
-            keyObj["buildContextId"] = build_ss.str();
-            keyObj["hwTag"] = r.hwTag;
-            keyObj["inputConstants"] = r.inputConstants;
-            keyObj["inputDTypes"] = r.inputDTypes;
-            keyObj["outputDTypes"] = r.outputDTypes;
-            keyObj["kernelUid"] = uid_ss.str();
-            keyObj["inputShapes"] = r.inputShapes;
-            keyObj["outputShapes"] = r.outputShapes;
-            keyObj["inputStrides"] = r.inputStrides;
-            keyObj["outputStrides"] = r.outputStrides;
-            keyObj["backends"] = r.backends;
-            keyObj["inputBackends"] = r.inputBackends;
-            std::string key = keyObj.dump();
-            recordedKeys.insert(key);
+            skipCount = std::atoi(argv[++i]);
+        }
+        else if (targetKernel.empty() && arg[0] != '-')
+        {
+            targetKernel = arg;
         }
     }
 
-    std::ifstream callsFile(callsPath);
+    std::filesystem::create_directories("benchmarks");
+    std::string callsPath = "benchmarks/calls.bin";
+    std::string recordsPath = "benchmarks/records.bin";
+
+    if (!targetKernel.empty())
+    {
+        std::cout << "Filtering benchmarks for kernel containing: " << targetKernel << std::endl;
+    }
+
+    // 2. Initialize CostModel and load existing records
+    CostModel costModel;
+    costModel.load(recordsPath);
+
+    // Build a registry of already benchmarked kernels to skip redundancy
+    std::unordered_set<std::string> recordedKeys;
+    std::ifstream recordsFile(recordsPath, std::ios::binary);
+    if (recordsFile.is_open())
+    {
+        BinaryReader br(recordsFile);
+        while (recordsFile.peek() != EOF)
+        {
+            Record r;
+            br.read(r);
+            r.runTime = 0.0f; // Normalize for skip comparison
+            recordedKeys.insert(serializeToString(r));
+        }
+    }
+
+    std::ifstream callsFile(callsPath, std::ios::binary);
     if (!callsFile.is_open())
     {
         std::cerr << "No calls file found at " << callsPath << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference pass first." << std::endl;
         return 0;
     }
 
-    std::vector<json> toBenchmark;
+    // 3. Filter and Collect unique calls
+    std::vector<Record> toBenchmark;
     std::unordered_set<std::string> seenCalls;
-    std::ostringstream ss;
-    ss << "0x" << std::hex << BUILD_CONTEXT_ID;
-    std::string BUILD_CONTEXT_ID_STRING = ss.str();
 
-    std::string line;
-    while (std::getline(callsFile, line))
+    BinaryReader br(callsFile);
+    while (callsFile.peek() != EOF)
     {
-        if (line.empty())
-            continue;
+        Record r;
+        br.read(r);
 
-        auto j = json::parse(line);
-        Record r = j.get<Record>();
-        json keyObj;
-        std::stringstream uid_ss;
-        uid_ss << "0x" << std::hex << r.kernelUid;
-        keyObj["buildContextId"] = BUILD_CONTEXT_ID_STRING;
-        keyObj["hwTag"] = r.hwTag;
-        keyObj["inputConstants"] = r.inputConstants;
-        keyObj["inputDTypes"] = r.inputDTypes;
-        keyObj["outputDTypes"] = r.outputDTypes;
-        keyObj["kernelUid"] = uid_ss.str();
-        keyObj["inputShapes"] = r.inputShapes;
-        keyObj["outputShapes"] = r.outputShapes;
-        keyObj["inputStrides"] = r.inputStrides;
-        keyObj["outputStrides"] = r.outputStrides;
-        keyObj["backends"] = r.backends;
-        keyObj["inputBackends"] = r.inputBackends;
-        std::string key = keyObj.dump();
+        r.runTime = 0.0f;
+        r.buildContextId = BUILD_CONTEXT_ID;
+        std::string key = serializeToString(r);
 
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
         {
             seenCalls.insert(key);
-            if (j["hwTag"].get<std::string>() == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
+            if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
             {
-                toBenchmark.push_back(j);
+                const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
+                std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
+
+                // Simple string match filtering
+                if (!targetKernel.empty() && name.find(targetKernel) == std::string::npos)
+                    continue;
+
+                toBenchmark.push_back(std::move(r));
             }
         }
     }
 
     if (toBenchmark.empty())
     {
-        std::cout << "All calls already benchmarked or no new kernels to test." << std::endl;
+        std::cout << "No kernels match the filters or all already benchmarked." << std::endl;
         return 0;
     }
 
-    std::ofstream outFile(recordsPath, std::ios::app);
-    std::cout << "Benchmarking " << toBenchmark.size() << " configurations..." << std::endl;
+    // 4. Pre-scan for Backend::STORAGE inputs
+    size_t maxStorageInputs = 0;
+    uint64_t maxStorageSize = 0;
 
-    for (size_t i = 0; i < toBenchmark.size(); ++i)
+    for (const auto &r : toBenchmark)
     {
-        auto &call = toBenchmark[i];
-        uint64_t kernelUid = std::stoull(call["kernelUid"].get<std::string>(), nullptr, 16);
+        const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
+        size_t currentStorageInputs = 0;
+        for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+        {
+            size_t ruleIdx = idx;
+            if (kernel.isVariadic)
+            {
+                ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+            }
+            Backend b = Backend::CPU;
+            if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
+                b = r.inputBackends[ruleIdx][0];
 
-        Record r = call.get<Record>();
+            if (b == Backend::STORAGE)
+            {
+                currentStorageInputs++;
+                uint64_t elements = countElements(r.inputShapes[idx]);
+                uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
+                if (bytes > maxStorageSize)
+                {
+                    maxStorageSize = bytes;
+                }
+            }
+        }
+        if (currentStorageInputs > maxStorageInputs)
+        {
+            maxStorageInputs = currentStorageInputs;
+        }
+    }
+
+    if (maxStorageInputs > 0 && maxStorageSize == 0)
+    {
+        maxStorageSize = 4096; // Fallback minimum size
+    }
+
+    std::vector<std::string> dummyPaths;
+    std::vector<int> dummyFds;
+
+    if (maxStorageInputs > 0)
+    {
+        std::cout << "[Bench Init] Creating " << maxStorageInputs << " dummy files of size "
+                  << maxStorageSize << " bytes for Backend::STORAGE inputs." << std::endl;
+
+        std::vector<char> dummyBuf(1024 * 1024, 0); // 1MB zero buffer to chunk write
+        for (size_t i = 0; i < maxStorageInputs; ++i)
+        {
+            std::string path = "benchmarks/dummy_storage_" + std::to_string(i) + ".bin";
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out.is_open())
+            {
+                std::cerr << "Failed to create dummy storage file: " << path << std::endl;
+                continue;
+            }
+
+            uint64_t written = 0;
+            while (written < maxStorageSize)
+            {
+                uint64_t toWrite = std::min<uint64_t>(dummyBuf.size(), maxStorageSize - written);
+                out.write(dummyBuf.data(), toWrite);
+                written += toWrite;
+            }
+            out.close();
+            dummyPaths.push_back(path);
+
+            int fd = -1;
+#ifdef TG_OS_WINDOWS
+            _wsopen_s(&fd, std::filesystem::path(path).c_str(), _O_RDONLY | _O_BINARY, _SH_DENYNO, 0);
+#else
+            fd = open(path.c_str(), O_RDONLY);
+#endif
+            if (fd < 0)
+            {
+                std::cerr << "Failed to open dummy storage file for reading: " << path << std::endl;
+            }
+            dummyFds.push_back(fd);
+        }
+    }
+
+    // 5. Estimate costs for sorting
+    for (uint32_t i = 0; i < toBenchmark.size(); i++)
+    {
+        Record &r = toBenchmark[i];
+        float cost = costModel.estimateCost(
+            r.kernelUid, r.outputShapes[0], r.outputStrides[0], r.outputDTypes[0],
+            r.inputShapes, r.inputStrides, r.inputDTypes, r.inputConstants);
+        r.runTime = std::isinf(cost) ? -1.0f : cost;
+    }
+
+    // 6. Sort kernels by cost (cheapest first)
+    // Fallback to element count for kernels with no previous data (inf cost).
+    std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb)
+                     {
+        float costA = ra.runTime;
+        float costB = rb.runTime;
+
+        if (std::abs(costA - costB) < 1e-7) {
+            bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
+            bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
+            if (isRefA != isRefB) return !isRefA;
+
+            auto getVolume = [](const Record& r) {
+                uint64_t v = 1;
+                for (const auto& shape : r.outputShapes)
+                    for (uint32_t d : shape) v *= d;
+                return v;
+            };
+            return getVolume(ra) < getVolume(rb);
+        }
+        return costA < costB; });
+
+    // 7. Benchmark Loop
+    std::ofstream outFile(recordsPath, std::ios::app | std::ios::binary);
+    BinaryWriter bw(outFile);
+    size_t startIdx = (skipCount > (int)toBenchmark.size()) ? toBenchmark.size() : (size_t)std::max(0, skipCount);
+
+    if (startIdx > 0)
+    {
+        std::cout << "Skipping the first " << startIdx << " kernels..." << std::endl;
+    }
+    std::cout << "Benchmarking " << toBenchmark.size() - startIdx << " configurations..." << std::endl;
+
+    for (size_t i = startIdx; i < toBenchmark.size(); ++i)
+    {
+        Record &r = toBenchmark[i];
+        uint64_t kernelUid = r.kernelUid;
 
         try
         {
             const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
-            // SAFETY CHECK: Ensure the Record from JSON matches the Kernel's expectations
-            if (r.inputShapes.size() < (kernel.inplace ? 1 : kernel.numInputs) && !kernel.isReference)
+
+            // Build dummy nodes for validation against centralized matching logic
+            std::vector<TensorNode> dummyInputs(r.inputShapes.size());
+            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
-                std::cerr << "Skipping kernel " << kernel.opName << ": Record has "
-                          << r.inputShapes.size() << " inputs, kernel requires " << kernel.numInputs << std::endl;
+                dummyInputs[idx].setShape(r.inputShapes[idx]);
+                dummyInputs[idx].strides = r.inputStrides[idx];
+                dummyInputs[idx].dtype = r.inputDTypes[idx];
+
+                Backend b = Backend::CPU;
+                size_t ruleIdx = idx;
+                if (kernel.isVariadic)
+                {
+                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+                }
+
+                if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
+                    b = r.inputBackends[ruleIdx][0];
+                dummyInputs[idx].backend = b;
+            }
+
+            TensorNode dummyOutput;
+            if (!r.outputShapes.empty())
+            {
+                dummyOutput.setShape(r.outputShapes[0]);
+                dummyOutput.strides = r.outputStrides[0];
+                dummyOutput.dtype = r.outputDTypes[0];
+                dummyOutput.backend = r.backends.empty() ? Backend::CPU : r.backends[0];
+            }
+
+            // Run central match that safely ignores OOB array evaluations
+            if (!kernel.matches(dummyInputs, dummyOutput))
+            {
+                std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelUid << "): record fails matches() validity check." << std::endl;
                 continue;
             }
 
@@ -162,7 +317,7 @@ int main()
                 size_t ruleIdx = idx;
                 if (kernel.isVariadic)
                 {
-                    ruleIdx = (idx == r.inputShapes.size() - 1) ? kernel.inputBackends.size() - 1 : 0;
+                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
                 }
 
                 if (ruleIdx < kernel.inputBackends.size())
@@ -181,20 +336,6 @@ int main()
                 }
             }
             bool isOutputCuda = runCuda;
-
-            if (kernel.opType == OpType::COPY_TO)
-            {
-                if (runCuda)
-                {
-                    inIsCuda.assign(inIsCuda.size(), false);
-                    isOutputCuda = true;
-                }
-                else
-                {
-                    inIsCuda.assign(inIsCuda.size(), true);
-                    isOutputCuda = false;
-                }
-            }
 #else
             std::vector<bool> inIsCuda(r.inputShapes.size(), false);
             bool isOutputCuda = false;
@@ -259,7 +400,7 @@ int main()
                     else if (r.inputDTypes[idx] == DType::INT32)
                     {
                         int32_t *iptr = reinterpret_cast<int32_t *>(inData[idx].data());
-                        if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos) // TODO: make the check based on reference graph instead of name
+                        if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos)
                         {
                             if (idx == 1 && r.inputShapes.size() > 0 && r.outputShapes.size() > 0 &&
                                 r.inputShapes[0].size() == r.outputShapes[0].size() && elements == r.inputShapes[0].size())
@@ -284,6 +425,33 @@ int main()
                             {
                                 for (size_t k = 0; k < elements; ++k)
                                     iptr[k] = k;
+                            }
+                        }
+                        else if (kernel.opType == OpType::CONCAT || kernel.opName.find("Concat") != std::string::npos)
+                        {
+                            if (idx == r.inputShapes.size() - 1)
+                            {
+                                int32_t concat_axis = -1;
+                                if (!r.inputShapes.empty() && !r.outputShapes.empty())
+                                {
+                                    for (size_t d = 0; d < r.outputShapes[0].size(); ++d)
+                                    {
+                                        if (r.outputShapes[0][d] != r.inputShapes[0][d])
+                                        {
+                                            concat_axis = (int32_t)d;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (concat_axis == -1)
+                                    concat_axis = 0;
+                                for (size_t k = 0; k < elements; ++k)
+                                    iptr[k] = concat_axis;
+                            }
+                            else
+                            {
+                                for (size_t k = 0; k < elements; ++k)
+                                    iptr[k] = 1;
                             }
                         }
                         else
@@ -384,7 +552,8 @@ int main()
                 std::cout << toString(kernel.backends[bidx]);
             }
             std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                      << " (0x" << std::hex << kernelUid << std::dec << ")\n";
+                      << " (0x" << std::hex << kernelUid << std::dec << ")"
+                      << " est " << std::to_string(r.runTime) << " ms\n";
 
             // Print All Inputs
             for (size_t idx = 0; idx < inViews.size(); ++idx)
@@ -403,10 +572,39 @@ int main()
             }
             std::cout << "  Benchmarking..." << std::flush;
 
+            // Map dummy files to Backend::STORAGE inputs
+            KernelContext ctx;
+            ctx.inputs = inPtrs;
+            ctx.outputs = outPtrs;
+            ctx.inViews = inViews;
+            ctx.outViews = outViews;
+            ctx.fd.assign(inPtrs.size(), -1);
+
+            size_t storageInIdx = 0;
+            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+            {
+                size_t ruleIdx = idx;
+                if (kernel.isVariadic)
+                {
+                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+                }
+                Backend b = Backend::CPU;
+                if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
+                    b = r.inputBackends[ruleIdx][0];
+
+                if (b == Backend::STORAGE)
+                {
+                    if (storageInIdx < dummyFds.size())
+                    {
+                        ctx.fd[idx] = dummyFds[storageInIdx++];
+                    }
+                }
+            }
+
             // Warmup
             if (!kernel.isView)
             {
-                kernel.run(inPtrs, outPtrs, inViews, outViews);
+                kernel.run(ctx);
 #ifdef USE_CUDA
                 cudaDeviceSynchronize();
 #endif
@@ -420,7 +618,7 @@ int main()
                 auto iterStart = std::chrono::high_resolution_clock::now();
                 if (!kernel.isView)
                 {
-                    kernel.run(inPtrs, outPtrs, inViews, outViews);
+                    kernel.run(ctx);
                 }
 #ifdef USE_CUDA
                 bool anyInputCuda = std::any_of(inIsCuda.begin(), inIsCuda.end(), [](bool b)
@@ -437,6 +635,10 @@ int main()
                 auto iterEnd = std::chrono::high_resolution_clock::now();
                 float iterMs = std::chrono::duration<float, std::milli>(iterEnd - iterStart).count();
                 latencies.push_back(iterMs);
+                if (it != 0) {
+                    std::cout << ",";
+                }
+                std::cout << " " << iterMs;
             }
             // Calculate Median
             std::sort(latencies.begin(), latencies.end());
@@ -454,17 +656,35 @@ int main()
                 }
             }
 
-            call["runTime"] = runtimeMs;
-            call["buildContextId"] = BUILD_CONTEXT_ID_STRING;
-            outFile << call.dump() << "\n";
+            r.runTime = runtimeMs;
+            r.buildContextId = BUILD_CONTEXT_ID;
+            bw.write(r);
             outFile.flush();
 
-            std::cout << " -> " << runtimeMs << " ms" << std::endl;
+            std::cout << "\n  Benchmarked -> " << runtimeMs << " ms" << std::endl;
         }
         catch (const std::exception &e)
         {
             std::cerr << "Failed to benchmark kernel " << kernelUid << ": " << e.what() << std::endl;
         }
+    }
+
+    // Cleanup resources
+    for (int fd : dummyFds)
+    {
+        if (fd >= 0)
+        {
+#ifdef TG_OS_WINDOWS
+            _close(fd);
+#else
+            close(fd);
+#endif
+        }
+    }
+    for (const auto &path : dummyPaths)
+    {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
     }
 
     std::cout << "Benchmarking complete." << std::endl;

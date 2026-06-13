@@ -30,13 +30,10 @@ __global__ void dot_f32_3d_kernel(const float *A, const float *B, float *Out,
 /**
  * Match function: Validates if the tensors are compatible with this specific 3D CUDA implementation.
  */
-inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-
     // Check Dtypes
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
+    if (output.dtype != DType::FLOAT32)
         return false;
 
     const auto &s0 = inputs[0].getShape();
@@ -54,7 +51,7 @@ inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const Ten
         return false;
 
     // Memory layout check
-    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
 
     return true;
@@ -63,17 +60,16 @@ inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const Ten
 /**
  * Run function: Sets up the grid/block dimensions and launches the CUDA kernel.
  */
-void runDotF32_3D_CUDA(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                       const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+void runDotF32_3D_CUDA(const KernelContext &ctx)
 {
-    const float *A = static_cast<const float *>(inputs[0]);
-    const float *B = static_cast<const float *>(inputs[1]);
-    float *Out = static_cast<float *>(outputs[0]);
+    const float *A = static_cast<const float *>(ctx.inputs[0]);
+    const float *B = static_cast<const float *>(ctx.inputs[1]);
+    float *Out = static_cast<float *>(ctx.outputs[0]);
 
-    uint64_t B_count = inViews[0].getShape()[0];
-    uint64_t M = inViews[0].getShape()[1];
-    uint64_t K = inViews[0].getShape()[2];
-    uint64_t N = inViews[1].getShape()[2];
+    uint64_t B_count = ctx.inViews[0].getShape()[0];
+    uint64_t M = ctx.inViews[0].getShape()[1];
+    uint64_t K = ctx.inViews[0].getShape()[2];
+    uint64_t N = ctx.inViews[1].getShape()[2];
 
     dim3 threads(16, 16);
     dim3 blocks((uint32_t)((N + threads.x - 1) / threads.x),
@@ -113,3 +109,4 @@ REGISTER_KERNEL("Dot_F32_3D_CUDA", 2, matchDotF32_3D_CUDA, runDotF32_3D_CUDA, re
     {{2, 8, 16}, {2, 16, 8}}, {true, true}, {{Backend::CUDA}, {Backend::CUDA}});
 
 #endif
+

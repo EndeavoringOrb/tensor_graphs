@@ -17,12 +17,12 @@ struct ProgressTimer
     size_t current = 0;
 
     double minInterval; // seconds
-    const char *label;
+    std::string label;
 
     bool has_total;
     bool disable;
 
-    ProgressTimer(size_t total_, const char *label_ = "", bool disable_ = false, double minInterval_ = 2)
+    ProgressTimer(size_t total_ = 0, std::string label_ = "", bool disable_ = false, double minInterval_ = 2)
         : start(clock::now()),
           last_print(start),
           total(total_),
@@ -74,6 +74,13 @@ struct ProgressTimer
         }
 
         std::cout << "\r" << std::flush;
+    }
+
+    double getElapsed()
+    {
+        auto end = clock::now();
+        double elapsed = std::chrono::duration<double>(end - start).count();
+        return elapsed;
     }
 
     ~ProgressTimer()

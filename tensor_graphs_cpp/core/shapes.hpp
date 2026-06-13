@@ -47,10 +47,10 @@ inline bool evaluateInt32TensorForPlanning(uint32_t nodeId, const Graph &graph, 
         if (it == graph.constantStaging.end())
             return false;
         const auto &data = it->second;
-        if (data.size() % sizeof(int32_t) != 0)
+        if (data->size() % sizeof(int32_t) != 0)
             return false;
-        outValues.resize(data.size() / sizeof(int32_t));
-        std::memcpy(outValues.data(), data.data(), data.size());
+        outValues.resize(data->size() / sizeof(int32_t));
+        std::memcpy(outValues.data(), data->data(), data->size());
         return true;
     }
     case OpType::COPY_TO:
@@ -327,14 +327,6 @@ inline int32_t normalizeAxisIndex(int32_t axis, uint32_t rank)
     return axis;
 }
 
-inline Region makeEmptyRegion(size_t rank)
-{
-    Region region;
-    for (size_t i = 0; i < rank; ++i)
-        region.region.push_back({0, 0});
-    return region;
-}
-
 inline bool isValidRegion(const Region &region)
 {
     for (const auto &dim : region.region)
@@ -343,29 +335,6 @@ inline bool isValidRegion(const Region &region)
             return false;
     }
     return true;
-}
-
-inline Region clampRegionToShape(Region region, const std::vector<uint32_t> &shape)
-{
-    for (size_t i = 0; i < region.region.size() && i < shape.size(); ++i)
-    {
-        region.region[i].start = std::min(region.region[i].start, shape[i]);
-        region.region[i].stop = std::min(region.region[i].stop, shape[i]);
-    }
-    return region;
-}
-
-inline Region shiftRegionAxis(const Region &region, size_t axis, int64_t delta)
-{
-    Region out = region;
-    if (axis < out.region.size())
-    {
-        int64_t start = static_cast<int64_t>(out.region[axis].start) + delta;
-        int64_t stop = static_cast<int64_t>(out.region[axis].stop) + delta;
-        out.region[axis].start = static_cast<uint32_t>(std::max<int64_t>(0, start));
-        out.region[axis].stop = static_cast<uint32_t>(std::max<int64_t>(0, stop));
-    }
-    return out;
 }
 
 inline Region mapSliceRegionForward(const Region &region, const std::vector<uint32_t> &shape,
@@ -484,7 +453,7 @@ struct ShapePropagator
                 std::stringstream ss;
                 ss << "[ShapePropagator.inferShape] Atomic " << toString(graph.getNode(nodeId).opType)
                    << " requires exact shape match. Got " << toString(s0)
-                   << " and " << toString(s1) << ". Use explicit repeat/reshape. (Node " << graph.getNode(nodeId).id << ")";
+                   << " and " << toString(s1) << ". Use explicit repeat/reshape. (Node " << graph.getNode(nodeId).id << "). " + graph.getNode(nodeId).debugOrigin;
                 Error::throw_err(ss.str());
             }
             graph.getNode(nodeId).setShape(s0);
@@ -500,8 +469,8 @@ struct ShapePropagator
             if (r0 != r1)
             {
                 std::stringstream ss;
-                ss << "[ShapePropagator.inferShape] DOT requires equal ranks. Got " << r0 << " and " << r1
-                   << ". Implicit broadcasting is disabled; use explicit reshape to align ranks.";
+                ss << "[ShapePropagator.inferShape] nodeId=" + std::to_string(nodeId) + " DOT requires equal ranks. Got " << r0 << " (" + toString(s0) + ") and " << r1
+                   << " (" + toString(s1) + "). Implicit broadcasting is disabled; use explicit reshape to align ranks.";
                 Error::throw_err(ss.str());
             }
 
@@ -514,12 +483,20 @@ struct ShapePropagator
             else if (r0 == 3)
             {
                 if (s0[2] != s1[1])
-                    Error::throw_err("DOT: K-dim mismatch[B,M,K] @ [B,K,N]");
+                    Error::throw_err("DOT: K-dim mismatch [B,M,K] @ [B,K,N], " + std::to_string(s0[2]) + " != " + std::to_string(s1[1]));
                 graph.getNode(nodeId).setShape({s0[0], s0[1], s1[2]});
+            }
+            else if (r0 == 4)
+            {
+                if (s0[0] != s1[0] || s0[1] != s1[1] || s0[3] != s1[2])
+                {
+                    Error::throw_err("DOT 4D: Dimension mismatch [B,H,M,K] @ [B,H,K,N], " + std::to_string(s0[2]) + " != " + std::to_string(s1[1]));
+                }
+                graph.getNode(nodeId).setShape({s0[0], s0[1], s0[2], s1[3]});
             }
             else
             {
-                Error::throw_err("DOT: Only Rank 2 and Rank 3 are currently supported in this framework.");
+                Error::throw_err("DOT: Only Rank 2 and Rank 3 are currently supported in this framework. Got r0=" + std::to_string(r0) + ", r1=" + std::to_string(r1));
             }
             break;
         }
@@ -528,11 +505,18 @@ struct ShapePropagator
         case OpType::NEGATE:
         case OpType::CAST:
         case OpType::TRIU:
-        case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
         case OpType::SCATTER:
+        case OpType::LOG:
         {
             graph.getNode(nodeId).setShape(graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape());
+            break;
+        }
+        case OpType::COPY_TO:
+        {
+            graph.getNode(nodeId).setShape(graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape());
+            graph.getNode(nodeId).strides = graph.getNode(graph.getNode(nodeId).parentIds[0]).strides;
+            graph.getNode(nodeId).viewOffset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
             break;
         }
         case OpType::SUM:
@@ -688,10 +672,16 @@ struct ShapePropagator
                 int32_t start = i < starts.size() ? starts[i] : 0;
                 int32_t end = i < ends.size() ? ends[i] : s0[i];
                 int32_t step = i < steps.size() ? steps[i] : 1;
+                if (step == 0)
+                {
+                    Error::throw_err("[ShapePropagator.inferShape] SLICE step cannot be zero.");
+                }
                 if (start < 0)
                     start += s0[i];
                 if (end < 0)
                     end += s0[i];
+                start = std::clamp<int32_t>(start, 0, s0[i]);
+                end = std::clamp<int32_t>(end, 0, s0[i]);
                 out_shape[i] = std::max(0, (end - start + step - 1) / step);
                 if (out_shape[i] == 0)
                 {
@@ -708,6 +698,7 @@ struct ShapePropagator
                 int32_t step = i < steps.size() ? steps[i] : 1;
                 if (start < 0)
                     start += s0[i];
+                start = std::clamp<int32_t>(start, 0, s0[i]);
                 offset += start * parentStrides[i];
                 graph.getNode(nodeId).strides[i] = parentStrides[i] * step;
             }
@@ -720,6 +711,28 @@ struct ShapePropagator
             int32_t stop = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph)[0];
             int32_t step = getConstantInt32(graph.getNode(nodeId).parentIds[2], graph)[0];
             graph.getNode(nodeId).setShape({(uint32_t)std::max(0, (stop - start + step - 1) / step)});
+            break;
+        }
+        case OpType::ARGMAX:
+        {
+            auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape();
+            auto axis_vec = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph);
+            int32_t axis = axis_vec[0];
+            if (axis < 0)
+                axis += s0.size();
+
+            auto k_vec = getConstantInt32(graph.getNode(nodeId).parentIds[2], graph);
+            int32_t k = k_vec[0];
+
+            std::vector<uint32_t> new_shape;
+            for (size_t i = 0; i < s0.size(); ++i)
+            {
+                if (i == (size_t)axis)
+                    new_shape.push_back((uint32_t)k);
+                else
+                    new_shape.push_back(s0[i]);
+            }
+            graph.getNode(nodeId).setShape(new_shape);
             break;
         }
         case OpType::FUSED:
@@ -810,7 +823,14 @@ struct ShapePropagator
         for (const auto &box : rA)
         {
             Region outBox;
-            if (sA.size() == 3)
+            if (sA.size() == 4)
+            {
+                outBox.region.push_back(box.region[0]);    // B
+                outBox.region.push_back(box.region[1]);    // H
+                outBox.region.push_back(box.region[2]);    // M
+                outBox.region.push_back({0, outShape[3]}); // N (Full row needed)
+            }
+            else if (sA.size() == 3)
             {
                 outBox.region.push_back(box.region[0]);    // B
                 outBox.region.push_back(box.region[1]);    // M
@@ -855,7 +875,12 @@ struct ShapePropagator
         for (const auto &outBox : outputRegions)
         {
             Region aBox, bBox;
-            if (sA.size() == 3)
+            if (sA.size() == 4)
+            {
+                aBox.region = {outBox.region[0], outBox.region[1], outBox.region[2], {0, sA[3]}}; // [B, H, M, K]
+                bBox.region = {outBox.region[0], outBox.region[1], {0, sB[2]}, outBox.region[3]}; // [B, H, K, N]
+            }
+            else if (sA.size() == 3)
             {
                 aBox.region.push_back(outBox.region[0]); // B
                 aBox.region.push_back(outBox.region[1]); // M
@@ -1556,6 +1581,7 @@ struct ShapePropagator
         case OpType::CAST:
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
+        case OpType::LOG:
             return forwardElementwise(node, graph, parentRegions);
         case OpType::TRIU:
         {
@@ -1574,6 +1600,45 @@ struct ShapePropagator
         case OpType::SUM:
         case OpType::MAX:
             return forwardReduce(node, graph, parentRegions);
+        case OpType::ARGMAX:
+        {
+            const auto &rA = parentRegions[0];
+            if (rA.empty())
+                return {};
+
+            const auto &sA = graph.getNode(node.parentIds[0]).getShape();
+            int32_t axis = getConstantInt32(node.parentIds[1], graph)[0];
+            if (axis < 0)
+                axis += sA.size();
+
+            int32_t k = getConstantInt32(node.parentIds[2], graph)[0];
+
+            std::vector<Region> outBoxes;
+            for (const auto &inReg : rA)
+            {
+                Region outBox;
+                for (size_t d = 0; d < sA.size(); ++d)
+                {
+                    if ((int32_t)d == axis)
+                    {
+                        if (inReg.region[d].start < inReg.region[d].stop)
+                        {
+                            outBox.region.push_back({0, (uint32_t)k});
+                        }
+                        else
+                        {
+                            outBox.region.push_back({0, 0});
+                        }
+                    }
+                    else
+                    {
+                        outBox.region.push_back(inReg.region[d]);
+                    }
+                }
+                outBoxes.push_back(outBox);
+            }
+            return mergeRegions(outBoxes);
+        }
         case OpType::RESHAPE:
             return forwardReshape(node, graph, parentRegions);
         case OpType::PERMUTE:
@@ -1611,6 +1676,7 @@ struct ShapePropagator
         case OpType::CAST:
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
+        case OpType::LOG:
             return backwardElementwise(node, outputRegions);
         case OpType::TRIU:
             return {mergeRegions(outputRegions), makeFull(graph.getNode(node.parentIds[1]).getShape())};
@@ -1621,6 +1687,46 @@ struct ShapePropagator
         case OpType::SUM:
         case OpType::MAX:
             return backwardReduce(node, graph, outputRegions);
+        case OpType::ARGMAX:
+        {
+            std::vector<std::vector<Region>> res(3);
+            if (outputRegions.empty())
+                return res;
+
+            const auto &sA = graph.getNode(node.parentIds[0]).getShape();
+            int32_t axis = getConstantInt32(node.parentIds[1], graph)[0];
+            if (axis < 0)
+                axis += sA.size();
+
+            std::vector<Region> inBoxes;
+            for (const auto &outReg : outputRegions)
+            {
+                Region inBox;
+                for (size_t d = 0; d < sA.size(); ++d)
+                {
+                    if ((int32_t)d == axis)
+                    {
+                        if (outReg.region[d].start < outReg.region[d].stop)
+                        {
+                            inBox.region.push_back({0, sA[d]});
+                        }
+                        else
+                        {
+                            inBox.region.push_back({0, 0});
+                        }
+                    }
+                    else
+                    {
+                        inBox.region.push_back(outReg.region[d]);
+                    }
+                }
+                inBoxes.push_back(inBox);
+            }
+            res[0] = mergeRegions(inBoxes);
+            res[1] = makeFull(graph.getNode(node.parentIds[1]).getShape());
+            res[2] = makeFull(graph.getNode(node.parentIds[2]).getShape());
+            return res;
+        }
         case OpType::RESHAPE:
             return backwardReshape(node, graph, outputRegions);
         case OpType::PERMUTE:

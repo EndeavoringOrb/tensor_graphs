@@ -1,0 +1,488 @@
+<!-- File: kernel_bench/templates/index.html -->
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Kernel Bench Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: sans-serif;
+            background: #f4f4f9;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1300px;
+            margin: auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid #ddd;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            background: #f8f9fa;
+            border: 1px solid transparent;
+            border-bottom: none;
+            margin-right: 5px;
+            border-radius: 5px 5px 0 0;
+            font-weight: bold;
+            color: #555;
+        }
+
+        .tab.active {
+            background: #007bff;
+            color: white;
+            border-color: #007bff;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        /* Dashboard Styles */
+        canvas {
+            max-width: 100%;
+            margin-bottom: 30px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            font-size: 0.9em;
+        }
+
+        th,
+        td {
+            padding: 8px;
+            border: 1px solid #ddd;
+            text-align: center;
+        }
+
+        th {
+            background: #007bff;
+            color: white;
+        }
+
+        .text-left {
+            text-align: left;
+        }
+
+        .status-completed {
+            color: green;
+            font-weight: bold;
+        }
+
+        .status-failed {
+            color: red;
+            font-weight: bold;
+        }
+
+        .check {
+            color: green;
+            font-weight: bold;
+        }
+
+        .cross {
+            color: red;
+            font-weight: bold;
+        }
+
+        .scores {
+            font-size: 0.8em;
+            color: #555;
+        }
+
+        textarea.source-input {
+            width: 100%;
+            height: 150px;
+            margin-bottom: 10px;
+            font-family: monospace;
+        }
+
+        /* General Controls */
+        input,
+        select {
+            margin-bottom: 10px;
+            padding: 6px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        button {
+            padding: 8px 15px;
+            background: #28a745;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        button:hover {
+            background: #218838;
+        }
+
+        .btn-blue {
+            background: #007bff;
+        }
+
+        .btn-blue:hover {
+            background: #0056b3;
+        }
+
+        /* Agent Tools Layout */
+        .tools-layout {
+            display: flex;
+            gap: 20px;
+        }
+
+        .tools-sidebar {
+            flex: 1;
+            max-width: 400px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .tool-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+
+        .tool-card h4 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .tools-output {
+            flex: 2;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .output-box {
+            flex-grow: 1;
+            background: #2d2d2d;
+            color: #a6e22e;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: monospace;
+            overflow-y: auto;
+            height: 600px;
+            white-space: pre-wrap;
+        }
+
+        /* Reports Table */
+        .report-desc {
+            text-align: left;
+            max-width: 600px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Kernel Bench Harness</h1>
+
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('dashboard')">Dashboard</div>
+            <div class="tab" onclick="switchTab('tools')">Agent Tools</div>
+            <div class="tab" onclick="switchTab('reports')">Issue Reports</div>
+        </div>
+
+        <!-- DASHBOARD TAB -->
+        <div id="dashboard" class="tab-content active">
+            <canvas id="progressChart"></canvas>
+
+            <h3>Submit Manual Kernel</h3>
+            <input type="text" id="opname" placeholder="OpName (e.g. Dot_F32_3D_Optimized)">
+            <select id="target_model">
+                <option value="gemma-3-270m">gemma-3-270m</option>
+                <option value="flux-klein-4b">flux-klein-4b</option>
+            </select>
+            <select id="backend">
+                <option value="cpu">CPU</option>
+                <option value="cuda">CUDA</option>
+            </select><br>
+            <textarea id="source" class="source-input"
+                placeholder="#pragma once\n// Write C++ Kernel here..."></textarea><br>
+            <button onclick="submitKernel()">Submit Kernel</button>
+            <span id="submitMsg" style="margin-left: 10px; font-weight: bold;"></span>
+
+            <h3>Job History</h3>
+            <table id="historyTable">
+                <thead>
+                    <tr>
+                        <th class="text-left">Time</th>
+                        <th class="text-left">OpName</th>
+                        <th>Model</th>
+                        <th>Status</th>
+                        <th>Compile</th>
+                        <th>Test (No Rec)</th>
+                        <th>Matched</th>
+                        <th>Test (Rec)</th>
+                        <th>Extracted</th>
+                        <th>Bench Scores (ms)</th>
+                        <th>Total Est. Time (ms)</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <!-- AGENT TOOLS TAB -->
+        <div id="tools" class="tab-content">
+            <div class="tools-layout">
+                <div class="tools-sidebar">
+                    <div class="tool-card">
+                        <h4>Hardware & Analysis</h4>
+                        <button class="btn-blue" onclick="callApi('/api/hwinfo')">Get HW Info</button>
+                        <br><br>
+                        <select id="analyze_model">
+                            <option value="gemma-3-270m">gemma-3-270m</option>
+                            <option value="flux-klein-4b">flux-klein-4b</option>
+                        </select>
+                        <button class="btn-blue" onclick="callAnalyze()">Get Analysis</button>
+                    </div>
+
+                    <div class="tool-card">
+                        <h4>Read Benchmarks</h4>
+                        <select id="bench_model">
+                            <option value="gemma-3-270m">gemma-3-270m</option>
+                            <option value="flux-klein-4b">flux-klein-4b</option>
+                        </select><br>
+                        <input type="text" id="bench_op" placeholder="Regex OpName (Optional)" style="width: 90%;">
+                        <input type="text" id="bench_shape" placeholder="Regex Shape (Optional)" style="width: 90%;">
+                        <button class="btn-blue" onclick="callBenchmarks()">Read Benchmarks</button>
+                    </div>
+
+                    <div class="tool-card">
+                        <h4>Source & Kernels</h4>
+                        <button class="btn-blue" onclick="callApi('/api/kernels/list')">List Kernel Files</button>
+                        <br><br>
+                        <select id="read_model_sel">
+                            <option value="gemma-3-270m">gemma-3-270m</option>
+                            <option value="flux-klein-4b">flux-klein-4b</option>
+                        </select>
+                        <button class="btn-blue" onclick="callReadModel()">Read Target Model</button>
+                        <br><br>
+                        <input type="text" id="read_path" placeholder="Kernel file path (e.g. cpu/general/00010.hpp)"
+                            style="width: 90%;">
+                        <button class="btn-blue" onclick="callReadSource()">Read Kernel Source</button>
+                    </div>
+                </div>
+
+                <div class="tools-output">
+                    <h4>Tool Output</h4>
+                    <pre id="toolOutputBox"
+                        class="output-box">Select a tool on the left to see the raw API output here...</pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- REPORTS TAB -->
+        <div id="reports" class="tab-content">
+            <h3>Agent Issue Reports</h3>
+            <button class="btn-blue" onclick="loadReports()">Refresh Reports</button>
+            <table id="reportsTable">
+                <thead>
+                    <tr>
+                        <th style="width: 15%;">Timestamp</th>
+                        <th style="width: 15%;">Agent ID</th>
+                        <th class="text-left">Issue Description</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+    </div>
+
+    <script>
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            event.currentTarget.classList.add('active');
+
+            if (tabId === 'reports') loadReports();
+        }
+
+        // ====== Dashboard Logic ======
+        async function loadHistory() {
+            if (!document.getElementById('dashboard').classList.contains('active')) return;
+
+            const res = await fetch('/api/history');
+            const data = await res.json();
+
+            const tbody = document.querySelector('#historyTable tbody');
+            tbody.innerHTML = '';
+
+            const chartLabels = [];
+            const chartData = [];
+
+            data.history.forEach(job => {
+                const timeStr = new Date(job.started_at || job.completed_at || Date.now()).toLocaleString();
+                if (job.status === 'completed' && job.total_estimated_time_ms) {
+                    chartLabels.push(timeStr);
+                    chartData.push(job.total_estimated_time_ms);
+                }
+
+                const tr = document.createElement('tr');
+                const getIcon = (cond) => cond ? '<span class="check">✔</span>' : '<span class="cross">✘</span>';
+                const s = job.steps || {};
+                const scores = (job.benchmark_scores || []).map(num => num.toFixed(3)).join(', ');
+
+                tr.innerHTML = `
+                <td class="text-left">${timeStr}</td>
+                <td class="text-left">${job.opname}</td>
+                <td>${job.target_model || '-'}</td>
+                <td class="status-${job.status}">${job.status}</td>
+                <td>${getIcon(s.compile && s.compile.exit_code === 0)}</td>
+                <td>${getIcon(s.test_no_records && s.test_no_records.exit_code === 0)}</td>
+                <td>${getIcon(s.matched)}</td>
+                <td>${getIcon(s.test_records && s.test_records.exit_code === 0)}</td>
+                <td>${getIcon(s.extracted)}</td>
+                <td class="scores">${scores || '-'}</td>
+                <td><strong>${job.total_estimated_time_ms ? job.total_estimated_time_ms.toFixed(2) : '-'}</strong></td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            const ctx = document.getElementById('progressChart').getContext('2d');
+            if (window.myChart) window.myChart.destroy();
+            window.myChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: chartLabels,
+                    datasets: [{
+                        label: 'Total Estimated Execution Time (ms)',
+                        data: chartData,
+                        borderColor: '#007bff',
+                        backgroundColor: 'rgba(0, 123, 255, 0.1)',
+                        tension: 0.1,
+                        fill: true
+                    }]
+                },
+                options: { scales: { y: { beginAtZero: false } } }
+            });
+        }
+
+        async function submitKernel() {
+            const source = document.getElementById('source').value;
+            const opname = document.getElementById('opname').value;
+            const backend = document.getElementById('backend').value;
+            const target_model = document.getElementById('target_model').value;
+
+            document.getElementById('submitMsg').innerText = "Submitting...";
+            document.getElementById('submitMsg').style.color = "orange";
+
+            const res = await fetch('/api/kernels/test', {
+                method: 'POST',
+                body: JSON.stringify({ source, opname, backend, target_model })
+            });
+            const data = await res.json();
+            document.getElementById('submitMsg').innerText = "Queued: " + data.job_id;
+            document.getElementById('submitMsg').style.color = "green";
+            setTimeout(loadHistory, 1000);
+        }
+
+        // ====== Agent Tools Logic ======
+        function displayOutput(data) {
+            document.getElementById('toolOutputBox').innerText = typeof data === 'object' ? JSON.stringify(data, null, 2) : data;
+        }
+
+        async function callApi(endpoint) {
+            document.getElementById('toolOutputBox').innerText = "Loading...";
+            try {
+                const res = await fetch(endpoint);
+                displayOutput(await res.json());
+            } catch (err) {
+                displayOutput("Error: " + err);
+            }
+        }
+
+        async function callAnalyze() {
+            const tm = document.getElementById('analyze_model').value;
+            callApi(`/api/analyze?target_model=${tm}`);
+        }
+
+        async function callBenchmarks() {
+            const tm = document.getElementById('bench_model').value;
+            const op = encodeURIComponent(document.getElementById('bench_op').value);
+            const shape = encodeURIComponent(document.getElementById('bench_shape').value);
+            callApi(`/api/read_benchmarks?target_model=${tm}&op=${op}&shape=${shape}`);
+        }
+
+        async function callReadModel() {
+            const tm = document.getElementById('read_model_sel').value;
+            callApi(`/api/kernels/read_model?target_model=${tm}`);
+        }
+
+        async function callReadSource() {
+            const path = encodeURIComponent(document.getElementById('read_path').value);
+            if (!path) return displayOutput("Please enter a path.");
+            callApi(`/api/kernels/read_source?path=${path}`);
+        }
+
+        // ====== Reports Logic ======
+        async function loadReports() {
+            const tbody = document.querySelector('#reportsTable tbody');
+            tbody.innerHTML = '<tr><td colspan="3">Loading...</td></tr>';
+            try {
+                const res = await fetch('/api/reports');
+                const data = await res.json();
+                tbody.innerHTML = '';
+                if (data.reports.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="3">No reports found.</td></tr>';
+                    return;
+                }
+                data.reports.forEach(r => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>${new Date(r.timestamp).toLocaleString()}</td>
+                        <td>${r.agent_id || 'N/A'}</td>
+                        <td class="report-desc">${r.issue_description || ''}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (e) {
+                tbody.innerHTML = `<tr><td colspan="3">Error loading reports: ${e}</td></tr>`;
+            }
+        }
+
+        // Init
+        loadHistory();
+        setInterval(loadHistory, 10000); 
+    </script>
+</body>
+
+</html>

@@ -4,32 +4,22 @@
 #include "core/kernels.hpp"
 #include <vector>
 
-inline bool matchAddFP32_3D_Scalar_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchAddFP32_3D_Scalar_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs.size() != 2)
-        return false;
-    if (inputs[0].dtype != DType::FLOAT32 || inputs[1].dtype != DType::FLOAT32 || output.dtype != DType::FLOAT32)
-        return false;
     if (inputs[0].getShape().size() != 3 || inputs[1].getShape().size() != 1 || inputs[1].getShape()[0] != 1)
         return false;
     if (inputs[0].getShape() != output.getShape())
         return false;
-    if (!isContiguous(inputs[0]) || !isContiguous(output))
-        return false;
-    if (inputs[0].storageType == StorageType::PERSISTENT)
-        return false;
-    auto it = refCounts.find(inputs[0].id);
-    if (it == refCounts.end() || it->second != 1)
+    if (!isContiguous(output))
         return false;
     return true;
 }
 
-inline void runAddFP32_3D_Scalar_Inplace(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                                         const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runAddFP32_3D_Scalar_Inplace(const KernelContext &ctx)
 {
-    float *data3D = static_cast<float *>(outputs[0]);
-    float scalarVal = *static_cast<const float *>(inputs[1]);
-    uint64_t totalElements = countElements(outViews[0].getShape());
+    float *data3D = static_cast<float *>(ctx.outputs[0]);
+    float scalarVal = *static_cast<const float *>(ctx.inputs[1]);
+    uint64_t totalElements = countElements(ctx.outViews[0].getShape());
     for (uint64_t i = 0; i < totalElements; ++i)
         data3D[i] += scalarVal;
 }

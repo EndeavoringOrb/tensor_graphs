@@ -13,8 +13,29 @@ flux-klein-4b
 out.log
 images
 wsl_venv
-.claude
-CLAUDE.md
+diff.txt
+wsl_env
+egraph_viewer/egraphs
+tensor_graphs_cpp/main
+tensor_graphs_cpp/bench
+tensor_graphs_cpp/test
+tensor_graphs_cpp/main.exe
+tensor_graphs_cpp/bench.exe
+tensor_graphs_cpp/test.exe
+hwinfo*.txt
+*.png
+**/*.png
+node_modules
+package.json
+package-lock.json
+toks.txt
+tokenize_flux.py
+**/*.bin
+**/*.gguf
+**/*.safetensors
+.env
+models/*
+.vs
 
 # Profiling artifacts
 profile_output*
@@ -24,6 +45,8 @@ benchmarks*
 dirty_region_caches
 kernel_launches
 tensor_graphs_cpp/tests
+tensor_graphs_cpp/kernels/**/general/generated/*.failed
+kernel_bench/jobs_history.jsonl
 
 # Compiled binaries
 *.exe

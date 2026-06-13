@@ -4,25 +4,21 @@
 #include "core/kernels.hpp"
 #include <cstring>
 
-inline bool matchScatterF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output, const std::unordered_map<uint32_t, uint32_t> &refCounts)
+inline bool matchScatterF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs.size() == 5 &&
-           inputs[0].dtype == DType::FLOAT32 &&
-           inputs[1].dtype == DType::FLOAT32 &&
-           output.dtype == DType::FLOAT32;
+    return true;
 }
 
-inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std::vector<void *> &outputs,
-                             const std::vector<TensorView> &inViews, const std::vector<TensorView> &outViews)
+inline void runScatterF32_ND(const KernelContext &ctx)
 {
-    const float *target = static_cast<const float *>(inputs[0]);
-    const float *updates = static_cast<const float *>(inputs[1]);
-    const int32_t *starts = static_cast<const int32_t *>(inputs[2]);
-    const int32_t *steps = static_cast<const int32_t *>(inputs[4]);
-    float *out = static_cast<float *>(outputs[0]);
+    const float *target = static_cast<const float *>(ctx.inputs[0]);
+    const float *updates = static_cast<const float *>(ctx.inputs[1]);
+    const int32_t *starts = static_cast<const int32_t *>(ctx.inputs[2]);
+    const int32_t *steps = static_cast<const int32_t *>(ctx.inputs[4]);
+    float *out = static_cast<float *>(ctx.outputs[0]);
 
-    const auto &out_shape = outViews[0].getShape();
-    const auto &upd_shape = inViews[1].getShape();
+    const auto &out_shape = ctx.outViews[0].getShape();
+    const auto &upd_shape = ctx.inViews[1].getShape();
     uint64_t n_target = countElements(out_shape);
 
     // If target and out are different buffers, copy target to out first.
@@ -31,8 +27,8 @@ inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std:
     {
         for (uint64_t i = 0; i < n_target; ++i)
         {
-            out[getStridedIndex(i, out_shape, outViews[0].strides)] =
-                target[getStridedIndex(i, out_shape, inViews[0].strides)];
+            out[getStridedIndex(i, out_shape, ctx.outViews[0].strides)] =
+                target[getStridedIndex(i, out_shape, ctx.inViews[0].strides)];
         }
     }
 
@@ -42,7 +38,7 @@ inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std:
     for (uint64_t i = 0; i < n_updates; ++i)
     {
         // 1. Get update value safely
-        float val = updates[getStridedIndex(i, upd_shape, inViews[1].strides)];
+        float val = updates[getStridedIndex(i, upd_shape, ctx.inViews[1].strides)];
 
         // 2. Unravel flat index 'i' into update coordinates, map to target, and calculate output offset
         uint64_t temp = i;
@@ -54,13 +50,13 @@ inline void runScatterF32_ND(const std::vector<const void *> &inputs, const std:
             uint32_t coord = temp % upd_shape[d];
             temp /= upd_shape[d];
 
-            int32_t s = (d < (int)inViews[2].getShape()[0]) ? starts[d] : 0;
+            int32_t s = (d < (int)ctx.inViews[2].getShape()[0]) ? starts[d] : 0;
             if (s < 0)
                 s += out_shape[d];
-            int32_t st = (d < (int)inViews[4].getShape()[0]) ? steps[d] : 1;
+            int32_t st = (d < (int)ctx.inViews[4].getShape()[0]) ? steps[d] : 1;
 
             uint32_t target_coord = s + coord * st;
-            out_phys_idx += (uint64_t)target_coord * outViews[0].strides[d];
+            out_phys_idx += (uint64_t)target_coord * ctx.outViews[0].strides[d];
         }
         out[out_phys_idx] = val;
     }
