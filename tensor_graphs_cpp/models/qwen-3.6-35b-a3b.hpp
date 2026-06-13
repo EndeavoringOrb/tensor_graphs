@@ -261,7 +261,7 @@ public:
         int32_t s_q[] = {0, 0, 0};
         int32_t e_q[] = {1, (int32_t)seq_len, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim)};
         int32_t steps[] = {1, 1, 1};
-        uint32_t q = g.slice(q_and_gate, g.constant({3}, s_q, DType::INT32), g.constant({3}, e_q, DType::INT32), g.constant({3}, steps, DType::INT32));
+        uint32_t q = g.contiguous(g.slice(q_and_gate, g.constant({3}, s_q, DType::INT32), g.constant({3}, e_q, DType::INT32), g.constant({3}, steps, DType::INT32)));
 
         int32_t s_g[] = {0, 0, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim)};
         int32_t e_g[] = {1, (int32_t)seq_len, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim * 2)};
