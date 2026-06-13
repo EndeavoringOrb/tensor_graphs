@@ -1,4 +1,4 @@
-# File: kernel_bench/jobs.py
+# kernel_bench/jobs.py
 import json
 import os
 import subprocess
@@ -53,7 +53,6 @@ def load_reports():
                 for line in f:
                     if line.strip():
                         reports.append(json.loads(line))
-    # Return newest first
     return list(reversed(reports))
 
 
@@ -222,7 +221,6 @@ def run_worker():
         print(f"\n[JOB {job_id}] Processing op: {opname} for model: {target_model}")
 
         try:
-            # 1. Write kernel
             kernel_path = find_next_slot(job["backend"])
             print(f"[JOB {job_id}] Writing kernel source to {kernel_path}")
             with open(kernel_path, "w") as f:
@@ -232,7 +230,6 @@ def run_worker():
                 Path(kernel_path).relative_to(KERNELS_DIR).as_posix()
             )
 
-            # Remove source from dict so it isn't stored in history files (lightweight)
             del job["source"]
 
             rel_path = (
@@ -241,14 +238,12 @@ def run_worker():
                 .as_posix()
             )
 
-            # Clear specific cache
             cache_file = CACHE_DIR / f"{target_model}-cpp.bin"
             if cache_file.exists():
                 print(f"[JOB {job_id}] Clearing existing cache: {cache_file}")
                 cache_file.unlink()
 
-            # 2. Compile
-            python_path = ".venv/Scripts/python.exe"
+            python_path = ".venv/Scripts/python.exe" if os.name == "nt" else "python"
             print(f"[JOB {job_id}] Step 1/7: Compiling...")
             build_res = run_cmd(
                 (
@@ -267,7 +262,6 @@ def run_worker():
             uid_str = get_uid_for_file("kernels/" + rel_path)
             job["assigned_uid"] = uid_str
 
-            # 3. Test No Records
             print(f"[JOB {job_id}] Step 2/7: Testing without records...")
             test_no_rec_res = run_cmd(
                 [
@@ -286,8 +280,14 @@ def run_worker():
                     f"Test without records failed.\nSTDOUT:\n{test_no_rec_res['stdout']}\nSTDERR:\n{test_no_rec_res['stderr']}"
                 )
 
-            # 4. Main to build calls.bin
             print(f"[JOB {job_id}] Step 3/7: Running inference to build calls.bin...")
+            run_cmd(
+                [
+                    str(PROJECT_ROOT / "tensor_graphs_cpp" / "write_ref_tensors"),
+                    target_model,
+                ],
+                TIMEOUTS["infer"],
+            )
             run_cmd(
                 [
                     str(PROJECT_ROOT / "tensor_graphs_cpp" / "main"),
@@ -316,7 +316,6 @@ def run_worker():
                     "Kernel UID not matched in inference plan (calls.bin). The kernel might not be utilized or the operation signature/shapes are incorrect."
                 )
 
-            # 5. Test with Records
             print(f"[JOB {job_id}] Step 4/7: Testing with records...")
             test_rec_res = run_cmd(
                 [str(PROJECT_ROOT / "tensor_graphs_cpp" / "test"), opname],
@@ -328,7 +327,6 @@ def run_worker():
                     f"Test with records failed.\nSTDOUT:\n{test_rec_res['stdout']}\nSTDERR:\n{test_rec_res['stderr']}"
                 )
 
-            # 6. Benchmark
             print(f"[JOB {job_id}] Step 5/7: Benchmarking kernel...")
             bench_res = run_cmd(
                 [str(PROJECT_ROOT / "tensor_graphs_cpp" / "bench"), opname],
@@ -340,7 +338,6 @@ def run_worker():
                     f"Benchmark failed.\nSTDOUT:\n{bench_res['stdout']}\nSTDERR:\n{bench_res['stderr']}"
                 )
 
-            # 7. Main again to construct cache with optimized routes
             print(
                 f"[JOB {job_id}] Step 6/7: Regenerating cache with optimized routes..."
             )

@@ -1,7 +1,9 @@
+// tensor_graphs_cpp/core/misc.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
 #include "core/timer.hpp"
+#include <unordered_set>
 
 inline std::string toString(const std::vector<uint32_t> &shape)
 {
@@ -392,4 +394,110 @@ inline std::string toStringHex(uint64_t val)
     std::stringstream ss;
     ss << std::hex << val;
     return ss.str();
+}
+
+// Topological sort of graph nodes from given roots
+inline std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph)
+{
+    std::vector<uint32_t> order;
+    std::unordered_set<uint32_t> visited;
+    auto visit = [&](auto &self, uint32_t node) -> void
+    {
+        if (visited.count(node))
+            return;
+        visited.insert(node);
+        if (graph.hasNode(node))
+        {
+            for (uint32_t pid : graph.getNode(node).parentIds)
+            {
+                self(self, pid);
+            }
+        }
+        order.push_back(node);
+    };
+    for (uint32_t root : roots)
+    {
+        visit(visit, root);
+    }
+    return order;
+}
+
+// Create a TensorView for a node
+inline TensorView makeView(const TensorNode &node)
+{
+    TensorView view;
+    view.setShape(node.getShape());
+    view.baseOffset = 0;
+    view.dtype = node.dtype;
+    if (!node.strides.empty())
+        view.strides = node.strides;
+    else
+        view.strides = calcContiguousStrides(node.getShape());
+    return view;
+}
+
+inline size_t getRequiredBufferSize(const TensorView &view)
+{
+    if (view.getShape().empty())
+        return 1;
+    size_t maxOffset = 0;
+    for (size_t i = 0; i < view.getShape().size(); ++i)
+    {
+        if (view.getShape()[i] > 0)
+        {
+            maxOffset += (view.getShape()[i] - 1) * view.strides[i];
+        }
+    }
+    return maxOffset + 1;
+}
+
+inline std::vector<float> flattenOutput(const void *ptr, const std::vector<uint32_t> &shape,
+                                        const std::vector<uint64_t> &strides, DType dtype)
+{
+    std::vector<float> result;
+    uint64_t elems = countElements(shape);
+    result.reserve(elems);
+    if (dtype == DType::FLOAT32)
+    {
+        const float *src = static_cast<const float *>(ptr);
+        for (uint64_t i = 0; i < elems; ++i)
+            result.push_back(src[getStridedIndex(i, shape, strides)]);
+    }
+    else if (dtype == DType::INT32)
+    {
+        const int32_t *src = static_cast<const int32_t *>(ptr);
+        for (uint64_t i = 0; i < elems; ++i)
+            result.push_back(static_cast<float>(src[getStridedIndex(i, shape, strides)]));
+    }
+    else if (dtype == DType::BF16)
+    {
+        const uint16_t *src = static_cast<const uint16_t *>(ptr);
+        for (uint64_t i = 0; i < elems; ++i)
+        {
+            uint32_t bits = static_cast<uint32_t>(src[getStridedIndex(i, shape, strides)]) << 16;
+            float val;
+            std::memcpy(&val, &bits, 4);
+            result.push_back(val);
+        }
+    }
+    else
+    {
+        result.resize(elems, 0.0f);
+    }
+    return result;
+}
+
+inline std::vector<uint8_t> flattenBytes(const void *ptr, const std::vector<uint32_t> &shape,
+                                         const std::vector<uint64_t> &strides, DType dtype)
+{
+    uint64_t elems = countElements(shape);
+    uint64_t elemSize = getDTypeSize(dtype);
+    std::vector<uint8_t> result(elems * elemSize);
+
+    for (uint64_t i = 0; i < elems; ++i)
+    {
+        uint64_t idx = getStridedIndex(i, shape, strides);
+        std::memcpy(result.data() + i * elemSize, static_cast<const uint8_t *>(ptr) + idx * elemSize, elemSize);
+    }
+    return result;
 }

@@ -6,6 +6,7 @@
 #include "core/planner.hpp"
 #include "core/executor.hpp"
 #include "core/shapes.hpp"
+#include "core/repo.hpp"
 #include <unordered_map>
 #include <memory>
 #include <string>
@@ -14,8 +15,6 @@
 #include <set>
 #include <queue>
 #include <filesystem>
-
-// dirty_cache_json removal
 
 static std::string encodeCacheKey(
     const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)
@@ -71,6 +70,7 @@ struct Session
     std::string recordsPath = "benchmarks/records.bin";
 
     uint32_t fullBucketIdx;
+    Repo *repo;
 
     void ensureOutputDirectories() const
     {
@@ -154,8 +154,8 @@ struct Session
         manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
     }
 
-    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0)
-        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes)
+    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0, Repo *_repo = nullptr)
+        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes), repo(_repo)
     {
         ensureOutputDirectories();
         loadCache();
@@ -295,7 +295,6 @@ struct Session
 
         if (bucket.inputDirtyRegions.empty())
         {
-            // If input diffs is empty, treat everything as dirty
             for (const auto &pair : graph.nodes)
             {
                 const TensorNode &node = pair.second;
@@ -341,7 +340,6 @@ struct Session
 
         std::unordered_map<uint32_t, Backend> protectedCachedNodes;
 
-        // Iterate updating caching nodes based on chosen scatters pointing into inputs.
         for (size_t i = 0; i < manualBuckets.size(); ++i)
         {
             const Bucket &bucket = manualBuckets[i];
@@ -350,10 +348,10 @@ struct Session
                 rootId, graph,
                 bucket,
                 protectedCachedNodes,
-                i == fullBucketIdx ? false : doSaturate // doSaturate
-            );
+                i == fullBucketIdx ? false : doSaturate,
+                false,
+                repo);
 
-            // Find all eclasses that need to be cached. Look for target buffers in chosen scatters.
             for (const auto &pair : plan.nodesMap)
             {
                 if (pair.second.opType == OpType::CACHE)
@@ -378,9 +376,10 @@ struct Session
                 bucket,
                 protectedCachedNodes,
                 doSaturate,
-                true);
+                true,
+                repo);
             plan.bucket = bucket;
-            cachedGraphs.push_back(plan); // TODO: use std::move?
+            cachedGraphs.push_back(plan);
         }
 
         selectedCachedNodes = std::move(protectedCachedNodes);
@@ -470,7 +469,7 @@ struct Session
             uint8_t type;
             br.read(type);
 
-            if (type == 0) // Metadata
+            if (type == 0)
             {
                 uint32_t version;
                 uint32_t cachedRootId;
@@ -485,7 +484,7 @@ struct Session
                     break;
                 }
             }
-            else if (type == 1) // Compiled Bucket
+            else if (type == 1)
             {
                 CompiledGraph cg;
                 br.read(cg);
@@ -514,9 +513,9 @@ struct Session
                     break;
                 }
                 cg.remapPhysIds();
-                tempGraphs.push_back(cg); // TODO: maybe use std::move
+                tempGraphs.push_back(cg);
             }
-            else if (type == 2) // Constants
+            else if (type == 2)
             {
                 uint32_t count;
                 br.read(count);

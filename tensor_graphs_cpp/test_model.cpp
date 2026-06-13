@@ -1,4 +1,3 @@
-// --- tensor_graphs_cpp/test_model.cpp ---
 #include <iostream>
 #include <vector>
 #include <string>
@@ -22,11 +21,9 @@
 #include "core/session.hpp"
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
+#include "core/repo.hpp"
 
-// Model Definitions
-#include "models/gemma-3-270m.hpp"
-#include "models/flux-klein-4b.hpp"
-
+#include "models/run_models.hpp"
 #include "generated/kernels_all.gen.hpp"
 #include "generated/build_context.gen.hpp"
 
@@ -34,7 +31,6 @@ namespace fs = std::filesystem;
 
 std::string getNextAvailableBinPath(const std::string &folderPath = "sessions")
 {
-    // Ensure the directory exists
     if (!fs::exists(folderPath))
     {
         fs::create_directories(folderPath);
@@ -45,14 +41,11 @@ std::string getNextAvailableBinPath(const std::string &folderPath = "sessions")
     {
         std::ostringstream oss;
         oss << std::setw(5) << std::setfill('0') << counter << ".bin";
-
         fs::path fullPath = fs::path(folderPath) / oss.str();
-
         if (!fs::exists(fullPath))
         {
             return fullPath.string();
         }
-
         counter++;
     }
     return "";
@@ -60,39 +53,7 @@ std::string getNextAvailableBinPath(const std::string &folderPath = "sessions")
 
 std::vector<float> extractTensorData(const TensorView &view, const void *data)
 {
-    std::vector<float> result;
-    uint64_t elems = countElements(view);
-    result.reserve(elems);
-    if (view.dtype == DType::FLOAT32)
-    {
-        const float *src = static_cast<const float *>(data);
-        for (uint64_t i = 0; i < elems; ++i)
-            result.push_back(src[getStridedIndex(i, view.getShape(), view.strides)]);
-    }
-    else if (view.dtype == DType::INT32)
-    {
-        const int32_t *src = static_cast<const int32_t *>(data);
-        for (uint64_t i = 0; i < elems; ++i)
-            result.push_back(static_cast<float>(src[getStridedIndex(i, view.getShape(), view.strides)]));
-    }
-    else if (view.dtype == DType::BF16)
-    {
-        const uint16_t *src = static_cast<const uint16_t *>(data);
-        for (uint64_t i = 0; i < elems; ++i)
-        {
-            uint32_t bits = static_cast<uint32_t>(src[getStridedIndex(i, view.getShape(), view.strides)]) << 16;
-            float val;
-            std::memcpy(&val, &bits, 4);
-            result.push_back(val);
-        }
-    }
-    else if (view.dtype == DType::BOOL)
-    {
-        const uint8_t *src = static_cast<const uint8_t *>(data);
-        for (uint64_t i = 0; i < elems; ++i)
-            result.push_back(static_cast<float>(src[getStridedIndex(i, view.getShape(), view.strides)]));
-    }
-    return result;
+    return flattenOutput(data, view.getShape(), view.strides, view.dtype);
 }
 
 struct RefIndexEntry
@@ -101,8 +62,6 @@ struct RefIndexEntry
     uint64_t numElements;
     std::string opName;
 };
-
-// === Gemma Integration ===
 
 void runGemma(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalId, const std::string &opName, const TensorView &view, const std::vector<float> &data)> callback)
 {
@@ -115,24 +74,21 @@ void runGemma(bool refOnly, bool doSaturate, std::function<void(uint32_t logical
     MemoryManager mem(bufferSizes);
     Graph g;
 
-    Gemma3ModelConfig cfg;
-    uint32_t maxSeqLen = 8;
+    auto roots = build_gemma_graph(g, mem);
+    uint32_t inputIdsId = roots.inputs[0];
+    uint32_t rootId = roots.roots[0];
 
-    uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32, {}, StorageType::PERSISTENT);
-
-    Gemma3Model gemma(cfg, maxSeqLen, g, mem, "resources/model.safetensors");
-    uint32_t rootId = gemma.build_graph(inputIdsId);
+    std::string gHash = computeGraphHash(g, roots.roots);
+    Repo repo("benchmarks/repo_gemma-3-270m", gHash, true);
 
     std::vector<int32_t> input_ids = {2, 9259, 0, 0, 0, 0, 0, 0};
 
-    // Allocate the input in persistent memory and feed into model mapping
-    uint64_t sizeBytes = maxSeqLen * getDTypeSize(DType::INT32);
+    uint64_t sizeBytes = 8 * getDTypeSize(DType::INT32);
     mem.allocate(Backend::CPU, inputIdsId, sizeBytes, StorageType::PERSISTENT);
 
     std::unordered_map<uint32_t, const void *> inputs = {{inputIdsId, input_ids.data()}};
 
-    // Use an empty string for the cache to prevent collisions between sequential runs
-    Session sess(g, mem, rootId, getNextAvailableBinPath("test_model_cache_gemma"));
+    Session sess(g, mem, rootId, getNextAvailableBinPath("test_model_cache_gemma"), 0, &repo);
 
     auto debugCb = [&](uint32_t logicalId, const TensorView &view, const void *data)
     {
@@ -156,99 +112,13 @@ void runGemma(bool refOnly, bool doSaturate, std::function<void(uint32_t logical
     };
 
     sess.compile(doSaturate);
-    sess.run(inputs, debugCb, doSaturate);
-}
-
-// === Flux Integration ===
-
-std::vector<float> get_flux_schedule(int num_steps, int image_seq_len)
-{
-    std::vector<float> schedule(num_steps + 1, 0.0f);
-    double a1 = 8.73809524e-05, b1 = 1.89833333;
-    double a2 = 0.00016927, b2 = 0.45666666;
-    double mu = (image_seq_len > 4300) ? (a2 * image_seq_len + b2) : (((a2 * image_seq_len + b2) - (a1 * image_seq_len + b1)) / 190.0 * num_steps + (a2 * image_seq_len + b2) - 200.0 * ((a2 * image_seq_len + b2) - (a1 * image_seq_len + b1)) / 190.0);
-
-    for (int i = 0; i <= num_steps; ++i)
-    {
-        double t = 1.0 - (double)i / num_steps;
-        if (t <= 0.0)
-            schedule[i] = 0.0f;
-        else if (t >= 1.0)
-            schedule[i] = 1.0f;
-        else
-            schedule[i] = (float)(exp(mu) / (exp(mu) + (1.0 / t - 1.0)));
-    }
-    return schedule;
-}
-
-void compute_rope_cpu(int txt_seq, int img_h, int img_w, int head_dim, float theta, std::vector<float> &cos_out, std::vector<float> &sin_out)
-{
-    int img_seq = img_h * img_w, total_seq = txt_seq + img_seq, axis_dim = head_dim / 4;
-    cos_out.assign(total_seq * head_dim, 1.0f);
-    sin_out.assign(total_seq * head_dim, 0.0f);
-    std::vector<float> freqs(axis_dim / 2);
-    for (int i = 0; i < axis_dim / 2; ++i)
-        freqs[i] = 1.0f / pow(theta, (2.0f * i) / axis_dim);
-
-    for (int pos = 0; pos < txt_seq; ++pos)
-    {
-        for (int i = 0; i < axis_dim / 2; ++i)
-        {
-            float arg = pos * freqs[i];
-            int ax3 = axis_dim * 3;
-            cos_out[pos * head_dim + ax3 + 2 * i] = cos_out[pos * head_dim + ax3 + 2 * i + 1] = cos(arg);
-            sin_out[pos * head_dim + ax3 + 2 * i] = sin_out[pos * head_dim + ax3 + 2 * i + 1] = sin(arg);
-        }
-    }
-
-    for (int y = 0; y < img_h; ++y)
-    {
-        for (int x = 0; x < img_w; ++x)
-        {
-            int pos = txt_seq + y * img_w + x;
-            for (int i = 0; i < axis_dim / 2; ++i)
-            {
-                float c_h = cos(y * freqs[i]), s_h = sin(y * freqs[i]);
-                float c_w = cos(x * freqs[i]), s_w = sin(x * freqs[i]);
-                int ax1 = axis_dim * 1, ax2 = axis_dim * 2;
-                cos_out[pos * head_dim + ax1 + 2 * i] = cos_out[pos * head_dim + ax1 + 2 * i + 1] = c_h;
-                sin_out[pos * head_dim + ax1 + 2 * i] = sin_out[pos * head_dim + ax1 + 2 * i + 1] = s_h;
-                cos_out[pos * head_dim + ax2 + 2 * i] = cos_out[pos * head_dim + ax2 + 2 * i + 1] = c_w;
-                sin_out[pos * head_dim + ax2 + 2 * i] = sin_out[pos * head_dim + ax2 + 2 * i + 1] = s_w;
-            }
-        }
-    }
-}
-
-std::vector<int32_t> load_tokens_from_file(const std::string &filename, size_t txt_seq)
-{
-    std::vector<int32_t> input_ids(txt_seq, 151643);
-
-    std::ifstream file(filename);
-    if (!file.is_open())
-    {
-        std::cerr << "Error: Could not open file " << filename << std::endl;
-        return input_ids;
-    }
-
-    std::string part;
-    size_t count = 0;
-
-    while (std::getline(file, part, ',') && count < txt_seq)
-    {
-        if (!part.empty())
-        {
-            input_ids[count++] = static_cast<int32_t>(std::stoi(part));
-        }
-    }
-
-    return input_ids;
+    sess.memManager.write(Backend::CPU, inputIdsId, input_ids.data(), sizeBytes);
+    sess.run({}, debugCb, doSaturate);
 }
 
 void runFlux(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalId, const std::string &opName, const TensorView &view, const std::vector<float> &data)> callback)
 {
     KernelRegistry::get().setReferenceOnly(refOnly);
-
     FluxConfig cfg;
 #if USE_CUDA
     std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 24ULL * 1024 * 1024 * 1024}, {Backend::CUDA, 24ULL * 1024 * 1024 * 1024}};
@@ -256,45 +126,26 @@ void runFlux(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalI
     std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 24ULL * 1024 * 1024 * 1024}};
 #endif
     MemoryManager mem(bufferSizes);
+    Graph g;
 
-    uint32_t width = 512, height = 512;
-    uint32_t latent_w = width / 16, latent_h = height / 16;
-    uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
+    auto roots = build_flux_graph(g, mem);
 
-    auto shared_alloc = std::make_shared<IdAllocator>();
+    std::string gHash = computeGraphHash(g, roots.roots);
+    Repo repo("benchmarks/repo_flux-klein-4b", gHash, true);
 
-    // 1. Build Text Encoder
-    Graph g_text;
-    g_text.allocator = shared_alloc;
-    FluxTextEncoder text_encoder(cfg, g_text, mem, "flux-klein-4b/text_encoder");
-    uint32_t in_ids = g_text.input({1, txt_seq}, DType::INT32, {}, StorageType::PERSISTENT);
-    Session sess_text(g_text, mem, text_encoder.build_graph(in_ids), getNextAvailableBinPath("test_model_cache_flux_text"));
+    uint32_t txt_seq = cfg.text_max_seq;
+    uint32_t latent_h = 32, latent_w = 32;
+    uint32_t img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
 
-    // 2. Build Transformer
-    Graph g_trans;
-    g_trans.allocator = shared_alloc;
-    FluxTransformer trans(cfg, g_trans, mem, "flux-klein-4b/transformer", latent_h, latent_w);
-    uint32_t in_latent = g_trans.input({1, cfg.latent_channels, latent_h, latent_w}, DType::FLOAT32, {}, StorageType::PERSISTENT);
-    uint32_t in_txt_emb = g_trans.input({1, txt_seq, cfg.text_dim}, DType::FLOAT32, {}, StorageType::PERSISTENT);
-    uint32_t in_t = g_trans.input({1}, DType::FLOAT32, {}, StorageType::PERSISTENT);
-    uint32_t in_cos = g_trans.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32, {}, StorageType::PERSISTENT);
-    uint32_t in_sin = g_trans.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32, {}, StorageType::PERSISTENT);
-    Session sess_trans(g_trans, mem, trans.build_graph(in_latent, in_txt_emb, in_t, in_cos, in_sin), getNextAvailableBinPath("test_model_cache_flux_trans"));
+    Session sess_text(g, mem, roots.roots[0], getNextAvailableBinPath("test_model_cache_flux_text"), 0, &repo);
+    Session sess_trans(g, mem, roots.roots[1], getNextAvailableBinPath("test_model_cache_flux_trans"), 0, &repo);
+    Session sess_vae(g, mem, roots.roots[2], getNextAvailableBinPath("test_model_cache_flux_vae"), 0, &repo);
 
-    // 3. Build VAE Decoder
-    Graph g_vae;
-    g_vae.allocator = shared_alloc;
-    FluxVAEDecoder vae(cfg, g_vae, mem, "flux-klein-4b/vae", latent_h, latent_w);
-    uint32_t in_vae_latent = g_vae.input({1, cfg.vae_channels, latent_h, latent_w}, DType::FLOAT32, {}, StorageType::PERSISTENT);
-    Session sess_vae(g_vae, mem, vae.build_graph(in_vae_latent), getNextAvailableBinPath("test_model_cache_flux_vae"));
-
-    // Compile explicitly
     sess_text.compile(doSaturate);
     sess_trans.compile(doSaturate);
     sess_vae.compile(doSaturate);
 
-    // Setup debug callback generic helper
-    auto makeDebugCb = [&](Graph &g)
+    auto makeDebugCb = [&](Graph &graph)
     {
         return [&](uint32_t logicalId, const TensorView &view, const void *data)
         {
@@ -302,9 +153,9 @@ void runFlux(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalI
                 return;
             std::vector<float> extracted = extractTensorData(view, data);
             std::string opName = "UNKNOWN";
-            if (g.hasNode(logicalId))
+            if (graph.hasNode(logicalId))
             {
-                auto node = g.getNode(logicalId);
+                auto node = graph.getNode(logicalId);
                 opName = toString(node.opType);
                 if (node.opType == OpType::FUSED)
                 {
@@ -315,11 +166,9 @@ void runFlux(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalI
         };
     };
 
-    // --- Run Text Encoder ---
     std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);
-    std::unordered_map<uint32_t, const void *> text_inputs = {{in_ids, input_ids.data()}};
-
-    const float *text_emb_ptr = static_cast<const float *>(sess_text.run(text_inputs, makeDebugCb(g_text), doSaturate));
+    sess_text.memManager.write(Backend::CPU, roots.inputs[0], input_ids.data(), input_ids.size() * sizeof(int32_t));
+    const float *text_emb_ptr = static_cast<const float *>(sess_text.run({}, makeDebugCb(g), doSaturate));
 
     std::vector<float> text_emb(1 * txt_seq * cfg.text_dim);
 #ifdef USE_CUDA
@@ -328,7 +177,6 @@ void runFlux(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalI
     std::memcpy(text_emb.data(), text_emb_ptr, text_emb.size() * sizeof(float));
 #endif
 
-    // --- Run Transformer (4 Steps) ---
     std::vector<float> rope_cos, rope_sin;
     compute_rope_cpu(txt_seq, latent_h, latent_w, cfg.head_dim, cfg.rope_theta, rope_cos, rope_sin);
 
@@ -345,14 +193,14 @@ void runFlux(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalI
     for (int i = 0; i < num_steps; ++i)
     {
         float t_curr = schedule[i], dt = schedule[i + 1] - t_curr;
-        std::unordered_map<uint32_t, const void *> trans_inputs = {
-            {in_latent, z.data()},
-            {in_txt_emb, text_emb.data()},
-            {in_t, &t_curr},
-            {in_cos, rope_cos.data()},
-            {in_sin, rope_sin.data()}};
 
-        const float *v_ptr = static_cast<const float *>(sess_trans.run(trans_inputs, makeDebugCb(g_trans), doSaturate));
+        sess_trans.memManager.write(Backend::CPU, roots.inputs[1], z.data(), z.size() * sizeof(float));
+        sess_trans.memManager.write(Backend::CPU, roots.inputs[2], text_emb.data(), text_emb.size() * sizeof(float));
+        sess_trans.memManager.write(Backend::CPU, roots.inputs[3], &t_curr, sizeof(float));
+        sess_trans.memManager.write(Backend::CPU, roots.inputs[4], rope_cos.data(), rope_cos.size() * sizeof(float));
+        sess_trans.memManager.write(Backend::CPU, roots.inputs[5], rope_sin.data(), rope_sin.size() * sizeof(float));
+
+        const float *v_ptr = static_cast<const float *>(sess_trans.run({}, makeDebugCb(g), doSaturate));
 
 #ifdef USE_CUDA
         std::vector<float> v_host(z.size());
@@ -366,18 +214,13 @@ void runFlux(bool refOnly, bool doSaturate, std::function<void(uint32_t logicalI
         }
     }
 
-    // --- Run VAE Decoder ---
-    std::unordered_map<uint32_t, const void *> vae_inputs = {{in_vae_latent, z.data()}};
-    sess_vae.run(vae_inputs, makeDebugCb(g_vae), doSaturate);
+    sess_vae.memManager.write(Backend::CPU, roots.inputs[6], z.data(), z.size() * sizeof(float));
+    sess_vae.run({}, makeDebugCb(g), doSaturate);
 }
-
-// === Main Execution Loop ===
 
 int main(int argc, char *argv[])
 {
-    std::string model = "gemma-3-270m"; // Default model
-
-    // Simple arg parsing
+    std::string model = "gemma-3-270m";
     for (int i = 1; i < argc; ++i)
     {
         std::string arg = argv[i];
@@ -396,7 +239,6 @@ int main(int argc, char *argv[])
     std::unordered_map<std::string, RefIndexEntry> refIndex;
     bool loaded = false;
 
-    // Try to load an existing reference tensor file to save compute
     std::ifstream testFile(REF_FILE, std::ios::binary);
     std::unordered_map<uint32_t, int> readCounts;
     if (testFile.is_open())
@@ -425,7 +267,6 @@ int main(int argc, char *argv[])
             std::string key = std::to_string(logicalId) + "_" + std::to_string(iter);
             refIndex[key] = entry;
 
-            // Skip ahead past the data so we only index metadata
             testFile.seekg(numElements * sizeof(float), std::ios::cur);
         }
         loaded = true;
@@ -511,7 +352,7 @@ int main(int argc, char *argv[])
 
         auto it = refIndex.find(key);
         if (it == refIndex.end())
-            return; // implicitly evaluated or dropped node
+            return;
 
         const auto &entry = it->second;
         if (entry.numElements != optData.size())
@@ -525,7 +366,6 @@ int main(int argc, char *argv[])
         if (optData.empty())
             return;
 
-        // Stream from the binary file only when actively performing this callback
         std::vector<float> refData(entry.numElements);
         inFile.seekg(entry.fileOffset, std::ios::beg);
         inFile.read(reinterpret_cast<char *>(refData.data()), entry.numElements * sizeof(float));
@@ -561,7 +401,7 @@ int main(int argc, char *argv[])
 
         if (maxDiff > 1e-2f || hasNan)
         {
-            std::cout << "\033[1;31m"; // Console Red
+            std::cout << "\033[1;31m";
             mismatchCount++;
         }
 
@@ -578,7 +418,7 @@ int main(int argc, char *argv[])
 
         if (maxDiff > 1e-2f || hasNan)
         {
-            std::cout << "\033[0m"; // Console Reset
+            std::cout << "\033[0m";
         }
     };
 

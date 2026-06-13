@@ -110,7 +110,6 @@ private:
         out.write(reinterpret_cast<const char *>(&num_enodes), 4);
         out.write(reinterpret_cast<const char *>(&rootEClassId), 4);
 
-        // Write EClasses
         for (const auto &cls : classes)
         {
             out.write(reinterpret_cast<const char *>(&cls.id), 4);
@@ -134,7 +133,6 @@ private:
                 out.write(reinterpret_cast<const char *>(cls.enodes.data()), e_size * 4);
         }
 
-        // Write ENodes
         for (const auto &enode : enodes)
         {
             out.write(reinterpret_cast<const char *>(&enode.kernelUid), 8);
@@ -168,12 +166,11 @@ private:
             out.write(reinterpret_cast<const char *>(&enode.sig), 8);
         }
 
-        // 3. Write Constants Section
         uint32_t num_constants = static_cast<uint32_t>(egraph.constantStaging.size());
         out.write(reinterpret_cast<const char *>(&num_constants), 4);
         for (const auto &[eclassId, data_ptr] : egraph.constantStaging)
         {
-            uint32_t canonId = eclassId; // Parser will use this to map to the canonical class
+            uint32_t canonId = eclassId;
             out.write(reinterpret_cast<const char *>(&canonId), 4);
             const auto &data = *data_ptr;
             uint64_t data_size = static_cast<uint64_t>(data.size());
@@ -242,27 +239,9 @@ private:
         return refCounts;
     }
 
-    std::vector<uint32_t> topologicalSort(const uint32_t rootId, const Graph &graph) const
+    void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical, bool injected, bool allowPushDownOnProtected = false, Repo *repo = nullptr)
     {
-        std::vector<uint32_t> order;
-        std::unordered_set<uint32_t> visited;
-        auto visit = [&](auto &self, uint32_t node) -> void
-        {
-            if (visited.count(node))
-                return;
-            visited.insert(node);
-            for (uint32_t pid : graph.getNode(node).parentIds)
-            {
-                self(self, pid);
-            }
-            order.push_back(node);
-        };
-        visit(visit, rootId);
-        return order;
-    }
-
-    void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical, bool injected, bool allowPushDownOnProtected = false)
-    {
+        RuleCtx ctx{egraph, protectedEClasses, eclassToLogical, repo};
         std::vector<std::unique_ptr<Rule>> rules;
         rules.emplace_back(std::make_unique<FusionRule>());
         if (injected)
@@ -283,29 +262,26 @@ private:
         {
             if (InterruptManager::isInterrupted())
             {
+                std::cerr << "\n[Planner] Interrupt detected, aborting execution..." << std::endl;
                 InterruptManager::cleanup();
                 std::exit(SIGINT);
             }
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
-            // #ifdef DEBUG
             ProgressTimer timer2(0, "saturation round " + std::to_string(iterations - 1) + " ");
-            // #endif
             for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getENodes().size(); eNodeIdx++)
             {
                 for (const auto &rule : rules)
                 {
-                    if (!rule->match(egraph, eNodeIdx, protectedEClasses))
+                    if (!rule->match(eNodeIdx, ctx))
                         continue;
 
-                    rule->apply(egraph, eNodeIdx, protectedEClasses, eclassToLogical);
+                    rule->apply(eNodeIdx, ctx);
                     changed = true;
                     ruleMatchCounts[rule->name()]++;
                     nMatches++;
                 }
-                // #ifdef DEBUG
                 timer2.tick();
-                // #endif
             }
             egraph.rebuild();
             changed = egraph.getENodes().size() != numENodes;
@@ -368,15 +344,12 @@ private:
 
         auto release = [&](auto &self, uint32_t id) -> void
         {
-            // 1. If this is an alias, unwrap it and recursively release the target
             auto aliasIt = sim_aliasMap.find(id);
             if (aliasIt != sim_aliasMap.end())
             {
                 uint32_t targetId = aliasIt->second;
                 sim_aliasMap.erase(aliasIt);
 
-                // The parent instruction left the target's refcount artificially high.
-                // We must decrement it here, and cascade if it hits 0.
                 if (ref.find(targetId) != ref.end())
                 {
                     ref[targetId]--;
@@ -388,7 +361,6 @@ private:
                 return;
             }
 
-            // 2. Base case: This was an actual physical allocation. Evaluate memory release.
             uint32_t logicalId = eclassToLogical.count(id) ? eclassToLogical.at(id) : UINT32_MAX;
             bool childIsCached = (logicalId != UINT32_MAX && cachedNodes.count(logicalId));
             bool childPersistent = isPersistent(id);
@@ -452,7 +424,6 @@ private:
                     continue;
                 }
 
-                // Views always target child 0 in the Executor mapping
                 if (info.isView && i == 0)
                 {
                     sim_aliasMap[eclass] = c;
@@ -471,11 +442,6 @@ private:
         return peak_mem;
     }
 
-    /*
-    selectionMap (eclass -> sel)
-    enode = egraph.getEClass(eclass).enodes[sel]
-    TODO: there are multiple valid topo orders, we want one that puts inplace enodes as late as possible
-    */
     std::vector<uint32_t> getEClassTopoOrder(const EGraph &egraph, const std::unordered_map<uint32_t, uint32_t> &selectionMap, uint32_t rootEClassId)
     {
         std::vector<uint32_t> topo;
@@ -591,19 +557,17 @@ private:
             if (enode.opType == OpType::INPUT || enode.opType == OpType::CACHE)
             {
                 info.cost = 0.0f;
-                if (strictCache && (enode.leafId & 0x80000000)) // This ensures that any cache nodes are valid given cachedNodes. TODO: make the check stronger than `(enode.leafId & 0x80000000)`
+                if (strictCache && (enode.leafId & 0x80000000))
                 {
                     uint32_t eclassId = egraph.getENodeEClass(i);
                     uint32_t canonId = egraph.findConst(eclassId);
                     uint32_t logicalId = eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : UINT32_MAX;
                     if (logicalId == UINT32_MAX || cachedNodes.find(logicalId) == cachedNodes.end())
                     {
-                        std::cout << "[Planner.extractBest] strictCache hit (canonId=" << canonId << ", logicalId=" << logicalId << ") " << toString(enode) << std::endl;
                         info.cost = INF;
                     }
                     else if (enode.backend != cachedNodes.at(logicalId))
                     {
-                        std::cout << "[Planner.extractBest] strictCache hit (canonId=" << canonId << ", logicalId=" << logicalId << ") " << toString(enode) << std::endl;
                         info.cost = INF;
                     }
                 }
@@ -783,24 +747,6 @@ private:
                 }
             }
 
-            if (validEnodes.empty())
-            {
-                bool allInput = true;
-                for (uint32_t enodeId : cls.enodes)
-                {
-                    allInput = allInput && (egraph.getENodes()[enodeId].opType == OpType::INPUT || egraph.getENodes()[enodeId].opType == OpType::CACHE);
-                }
-                if (!allInput)
-                {
-                    std::cout << "[Planner.extractBest] Warning: EClass " << eclassId << " has NO valid enodes (out of " + std::to_string(cls.enodes.size()) + ")\n";
-                    std::cout << cls << std::endl;
-                    for (uint32_t enodeId : cls.enodes)
-                    {
-                        std::cout << toString(egraph.getENodes()[enodeId], egraph) << std::endl;
-                    }
-                }
-            }
-
             cls.enodes = std::move(validEnodes);
         }
 
@@ -833,8 +779,6 @@ private:
 
         const size_t numCanonical = canonicalClasses.size();
         const size_t bitWords = numCanonical == 0 ? 0 : (numCanonical + 63) >> 6;
-        std::cout << "numCanonical=" << std::to_string(numCanonical) << std::endl;
-        std::cout << "bitWords=" << std::to_string(bitWords) << std::endl;
 
         auto bitTest = [&](const std::vector<uint64_t> &bits, uint32_t eclassId) -> bool
         {
@@ -865,10 +809,8 @@ private:
         std::vector<OptSummary> opt(numClasses);
         for (uint32_t canonId : canonicalClasses)
         {
-            // Only allocate and size vectors for canonical classes
             opt[canonId].coveredBits.assign(bitWords, 0);
         }
-        std::cout << "finished allocating opt" << std::endl;
 
         std::vector<std::vector<uint32_t>> parentMap(numClasses);
         for (size_t i = 0; i < numClasses; ++i)
@@ -1334,8 +1276,6 @@ private:
             if (valid)
             {
                 std::vector<uint32_t> topo = getEClassTopoOrder(egraph, selection_map, rootEClassId);
-                // if node C has node A as input, and is after node B in topo, where node B is an inplace node with A as input, then the graph is invalid
-                // can be thought of as if node C has node A as input, and any previous inplace node had node A as input, node C is invalid and therefore the graph is invalid
                 std::unordered_set<uint32_t> overwritten;
                 bool valid = true;
                 for (int i = 0; i < topo.size(); i++)
@@ -1391,10 +1331,6 @@ private:
                 {
                     break;
                 }
-            }
-            else
-            {
-                std::cout << "invalid: " << reason << "\r";
             }
 
             if (to_process_enode.empty())
@@ -1617,7 +1553,6 @@ private:
         compiledRefCounts[rootPhysId] = std::max<uint32_t>(1, compiledRefCounts[rootPhysId]);
         compiled.refCounts = compiledRefCounts;
 
-        // Validate all INPUT or CACHE nodes
         for (const auto &pair : compiled.nodesMap)
         {
             const TensorNode &node = pair.second;
@@ -1626,7 +1561,7 @@ private:
                 uint32_t logicalId = compiled.getLogicalId(node.id);
                 if (logicalId == UINT32_MAX)
                 {
-                    Error::throw_err("[buildCompiledGraph] Orphan cache INPUT/CACHE node " + std::to_string(node.id) + " has no logicalId mapping and is TRANSIENT. This will crash at runtime. Something forgot to register its cache node in eclassToLogical.");
+                    Error::throw_err("[buildCompiledGraph] Orphan cache INPUT/CACHE node " + std::to_string(node.id) + " has no logicalId mapping and is TRANSIENT. This will crash at runtime.");
                 }
             }
         }
@@ -1644,12 +1579,12 @@ private:
     BaseEGraphState baseState;
     bool baseStateInitialized = false;
 
-    void initBaseEGraph(uint32_t rootId, const Graph &graph, bool doSaturate)
+    void initBaseEGraph(uint32_t rootId, const Graph &graph, bool doSaturate, Repo *repo = nullptr)
     {
         if (baseStateInitialized)
             return;
 
-        std::vector<uint32_t> topo = topologicalSort(rootId, graph);
+        std::vector<uint32_t> topo = topologicalSort({rootId}, graph);
 
         Graph tempGraph = graph;
         inferShapes(topo, tempGraph);
@@ -1732,7 +1667,7 @@ private:
 
         for (const auto &kv : baseState.nodeToEClass)
         {
-            uint32_t physId = kv.first; // Here physId == logicalId
+            uint32_t physId = kv.first;
             uint32_t ecl = baseState.egraph.find(kv.second);
             baseState.eclassToLogical[ecl] = physId;
         }
@@ -1740,7 +1675,7 @@ private:
         if (doSaturate && false)
         {
             std::unordered_set<uint32_t> emptyProtected;
-            saturate(baseState.egraph, emptyProtected, baseState.eclassToLogical, false);
+            saturate(baseState.egraph, emptyProtected, baseState.eclassToLogical, false, false, repo);
         }
 
         baseStateInitialized = true;
@@ -1797,7 +1732,7 @@ private:
         }
         else if (strictCache)
         {
-            return injected; // Can't add cache node to unprotected logical id
+            return injected;
         }
 
         const EClass lClass = egraph.getEClass(E_L);
@@ -1811,7 +1746,7 @@ private:
         cacheNode.viewOffset = lClass.viewOffset;
         cacheNode.backend = targetBackend;
         cacheNode.leafId = logicalId | 0x80000000;
-        egraph.addENode(E_Cache, cacheNode); // TODO: add to E_L instead of separate E_Cache?
+        egraph.addENode(E_Cache, cacheNode);
 
         eclassToLogical[E_Cache] = logicalId;
         uint32_t current_E = E_Cache;
@@ -2244,15 +2179,14 @@ public:
         const Bucket &bucket,
         const std::unordered_map<uint32_t, Backend> &cachedNodes,
         bool doSaturate = true,
-        bool strictCache = false)
+        bool strictCache = false,
+        Repo *repo = nullptr)
     {
-        // 1. saturate base egraph
-        initBaseEGraph(rootId, graph, doSaturate);
+        initBaseEGraph(rootId, graph, doSaturate, repo);
 
         EGraph egraph = baseState.egraph;
         auto eclassToLogical = baseState.eclassToLogical;
 
-        // Pre-canonicalize eclassToLogical to avoid nested loops during CACHE insertion
         std::unordered_map<uint32_t, uint32_t> canonToLogical;
         canonToLogical.reserve(eclassToLogical.size());
         for (const auto &kv : eclassToLogical)
@@ -2261,9 +2195,8 @@ public:
         }
         eclassToLogical = canonToLogical;
 
-        // Determine dirtyness for logical nodes
         std::unordered_map<uint32_t, bool> logicalDirty;
-        std::vector<uint32_t> topo = topologicalSort(rootId, graph);
+        std::vector<uint32_t> topo = topologicalSort({rootId}, graph);
         for (uint32_t nodeId : topo)
         {
             if (bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty())
@@ -2289,15 +2222,13 @@ public:
             }
         }
 
-        // Add OpType::CACHE to all clean eclasses
         for (const auto &cls : egraph.getClasses())
         {
             uint32_t canonId = egraph.find(cls.id);
             if (canonId != cls.id)
-                continue; // only canonical eclasses
+                continue;
             if (strictCache)
             {
-                // If we are re-planning, only protected nodes should have the option of using cache
                 if (eclassToLogical.count(canonId) == 0)
                     continue;
                 if (cachedNodes.count(eclassToLogical.at(canonId)) == 0)
@@ -2305,13 +2236,12 @@ public:
             }
             for (int i = 0; i < cls.enodes.size(); i++)
             {
-                if (egraph.getENodes()[cls.enodes[i]].opType == OpType::CACHE) // TODO: maybe rebuild already takes care of this?
+                if (egraph.getENodes()[cls.enodes[i]].opType == OpType::CACHE)
                 {
                     continue;
                 }
             }
 
-            // Map canonical eclass to logicalId
             uint32_t logicalId = UINT32_MAX;
             auto it = eclassToLogical.find(canonId);
             if (it != eclassToLogical.end())
@@ -2341,16 +2271,13 @@ public:
             protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
         }
 
-        // 2. inject input dirty slices
         bool dirtyInjected = injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions, cachedNodes, baseState.nodeToEClass, eclassToLogical);
 
-        // 3. inject output needed regions
         bool neededInjected = injectOutputPartialPaths(egraph, graph, rootId, bucket.outputNeededRegion, cachedNodes, baseState.nodeToEClass, eclassToLogical);
 
-        // 4. saturate
         if (doSaturate)
         {
-            saturate(egraph, protectedEClasses, eclassToLogical, true, false);
+            saturate(egraph, protectedEClasses, eclassToLogical, true, false, repo);
         }
 
         bool injected = dirtyInjected || neededInjected;
@@ -2386,7 +2313,6 @@ public:
             }
         }
 
-        // Propagate immutability through views to prevent inplace corruption
         bool changed = true;
         while (changed)
         {

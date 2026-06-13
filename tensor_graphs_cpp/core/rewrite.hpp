@@ -1,9 +1,9 @@
-// tensor_graphs_cpp/core/rewrite.hpp
 #pragma once
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/shapes.hpp"
 #include "core/egraph.hpp"
+#include "core/repo.hpp"
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
@@ -25,12 +25,20 @@ inline bool isEClassProtected(uint32_t eclassId, const std::unordered_set<uint32
     return false;
 }
 
+struct RuleCtx
+{
+    EGraph &egraph;
+    const std::unordered_set<uint32_t> &protectedEClasses;
+    std::unordered_map<uint32_t, uint32_t> &eclassToLogical;
+    Repo *repo;
+};
+
 struct Rule
 {
     virtual ~Rule() = default;
     virtual std::string name() const = 0;
-    virtual bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) = 0;
-    virtual void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical) = 0;
+    virtual bool match(uint32_t eNodeIdx, RuleCtx &ctx) = 0;
+    virtual void apply(uint32_t eNodeIdx, RuleCtx &ctx) = 0;
 };
 
 inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint32_t> &children, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &st, uint64_t viewOffset, DType dtype, Backend backend, uint32_t targetEClass = UINT32_MAX, uint32_t leafId = UINT32_MAX)
@@ -232,7 +240,6 @@ inline uint32_t createCacheInputNode(EGraph &egraph, const ENode &sourceNode, ui
     }
     else
     {
-        // Robust fallback checking underlying merged unions.
         for (const auto &kv : eclassToLogical)
         {
             if (egraph.find(kv.first) == canonSrcClass)
@@ -286,16 +293,13 @@ struct FusionRule : public Rule
     {
         const Pattern *pattern;
         std::unordered_map<uint32_t, uint32_t> binding;
-        // For variadic CONCAT matches: the e-class IDs of the tensor inputs
-        // (all e-node children except the last, which is the axis).
-        // Empty for non-CONCAT matches.
         std::vector<uint32_t> variadicConcatTensorEClasses;
     };
 
     std::unordered_map<OpType, std::vector<Pattern>> patternsByOp;
     std::vector<MatchResult> activeMatches;
 
-    FusionRule()
+    FusionRule(bool disableFusion = false)
     {
         const auto &refGraphs = ReferenceGraphRegistry::get().getAll();
         for (const auto &pair : refGraphs)
@@ -310,6 +314,12 @@ struct FusionRule : public Rule
                 pattern.variables.push_back(inId);
             }
             pattern.rootId = entry.factory(pattern.variables, pattern.graph);
+
+            if (disableFusion && pattern.graph.nodes.size() > entry.numInputs + 1)
+            {
+                continue;
+            }
+
             pattern.rootOpType = pattern.graph.getNode(pattern.rootId).opType;
             pattern.dtypes = entry.dtypes;
             pattern.dummyShapes = entry.dummyShapes;
@@ -318,9 +328,10 @@ struct FusionRule : public Rule
         }
     }
 
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         activeMatches.clear();
+        const EGraph &egraph = ctx.egraph;
         const ENode &eNode = egraph.getENodes()[eNodeIdx];
 
         auto it = patternsByOp.find(eNode.opType);
@@ -330,14 +341,12 @@ struct FusionRule : public Rule
         for (const auto &pattern : it->second)
         {
             std::unordered_map<uint32_t, uint32_t> binding;
-            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern, binding, protectedEClasses))
+            if (matchPatternNode(eNodeIdx, egraph, pattern.rootId, pattern, binding, ctx.protectedEClasses))
             {
                 MatchResult mr;
                 mr.pattern = &pattern;
                 mr.binding = std::move(binding);
 
-                // For variadic CONCAT matches, collect the tensor e-class IDs
-                // (all children except the last, which is the axis).
                 if (eNode.opType == OpType::CONCAT && eNode.children.size() > 2)
                 {
                     for (size_t i = 0; i < eNode.children.size() - 1; ++i)
@@ -352,8 +361,9 @@ struct FusionRule : public Rule
         return !activeMatches.empty();
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical) override
+    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        EGraph &egraph = ctx.egraph;
         for (const auto &match : activeMatches)
         {
             const Pattern &pattern = *match.pattern;
@@ -364,8 +374,6 @@ struct FusionRule : public Rule
 
             if (!match.variadicConcatTensorEClasses.empty())
             {
-                // Variadic CONCAT: inputs = [tensor0_eclass, tensor1_eclass, ..., axis_eclass]
-                // The tensor e-classes were collected during match.
                 for (uint32_t tensorEClass : match.variadicConcatTensorEClasses)
                 {
                     inputs.push_back(tensorEClass);
@@ -379,7 +387,6 @@ struct FusionRule : public Rule
                     inputNode.backend = parent.backend;
                     inputNodes.push_back(std::move(inputNode));
                 }
-                // The axis e-class is the last pattern variable's binding
                 uint32_t axisVar = pattern.variables.back();
                 uint32_t axisEClass = binding.at(axisVar);
                 inputs.push_back(axisEClass);
@@ -395,7 +402,6 @@ struct FusionRule : public Rule
             }
             else
             {
-                // Standard (non-variadic) path
                 inputs.reserve(pattern.variables.size());
                 inputNodes.reserve(pattern.variables.size());
 
@@ -471,9 +477,6 @@ struct FusionRule : public Rule
             uint32_t pid = parentIds[i];
             const EClass parent = egraph.getEClass(pid);
 
-            // For variadic kernels, use the same indexing rule as matches():
-            //   indices [0..N-2] → rule 0 (tensor inputs)
-            //   index  [N-1]    → rule 1 (axis constant)
             size_t ruleIdx = kernel.isVariadic ? (i == parentIds.size() - 1 ? 1 : 0) : i;
 
             Backend expectedBackend = kernel.inputBackends[ruleIdx][0];
@@ -575,6 +578,8 @@ struct FusionRule : public Rule
             return true;
         if (op == OpType::ARANGE && (inputIdx == 0 || inputIdx == 1 || inputIdx == 2))
             return true;
+        if (op == OpType::ARGMAX && (inputIdx == 1 || inputIdx == 2))
+            return true;
         return false;
     }
 
@@ -637,11 +642,6 @@ struct FusionRule : public Rule
         if (eNode.opType == OpType::FUSED && eNode.opName != pNode.opName)
             return false;
 
-        // Constant-value check: if the pattern node is a constant (INPUT with
-        // a non-empty contentHash, created via graph.constant()), the e-graph
-        // eclass must carry the same constant data.  This prevents, for
-        // example, a SiLU pattern that uses e_val = 2.7182818f from matching
-        // a subgraph that uses a different constant for the exponential base.
         if (eNode.opType == OpType::INPUT && !pNode.contentHash.empty())
         {
             if (!ignoreConstantData)
@@ -649,18 +649,14 @@ struct FusionRule : public Rule
                 uint32_t eNodeEClass = egraph.getENodeEClass(eNodeIdx);
                 uint32_t canonEClass = egraph.findConst(eNodeEClass);
 
-                // The pattern requires a constant; the e-graph must have one too.
                 auto egraphIt = egraph.constantStaging.find(canonEClass);
                 if (egraphIt == egraph.constantStaging.end())
                     return false;
 
-                // Retrieve the pattern's constant data.
                 auto patternIt = pattern.graph.constantStaging.find(patternId);
                 if (patternIt == pattern.graph.constantStaging.end())
                     return false;
 
-                // Compare the raw bytes.  For small scalars (e.g. a single F32)
-                // this is very cheap.
                 const auto &egraphData = *egraphIt->second;
                 const auto &patternData = *patternIt->second;
                 if (egraphData.size() != patternData.size())
@@ -670,28 +666,17 @@ struct FusionRule : public Rule
             }
         }
 
-        // Variadic CONCAT: the pattern has [tensorVar, axisVar] (2 parents),
-        // but the e-graph CONCAT can have N+1 children (N tensors + 1 axis).
-        // We match all tensor children against the first pattern parent and
-        // the last child (axis) against the last pattern parent.
         if (eNode.opType == OpType::CONCAT && eNode.children.size() != pNode.parentIds.size())
         {
-            // Pattern must have at least 2 parents: [tensorVar, axisVar]
             if (pNode.parentIds.size() < 2)
                 return false;
-            // E-node must have at least 2 children: [tensor, axis]
             if (eNode.children.size() < 2)
                 return false;
 
-            // Match the axis: last e-node child <-> last pattern parent
             if (!matchPatternClass(eNode.children.back(), egraph,
                                    pNode.parentIds.back(), pattern, binding, protectedEClasses, true))
                 return false;
 
-            // Match all tensor children against the first pattern parent (tensorVar).
-            // The first successful binding establishes the variable; subsequent
-            // children only need to be valid e-classes (they'll be collected
-            // separately since the binding can only hold one e-class per variable).
             bool firstTensor = true;
             for (size_t i = 0; i < eNode.children.size() - 1; ++i)
             {
@@ -704,8 +689,6 @@ struct FusionRule : public Rule
                 }
                 else
                 {
-                    // For subsequent tensors, just verify the e-class exists and
-                    // has a compatible dtype. We don't re-bind the pattern variable.
                     uint32_t canonChild = egraph.findConst(eNode.children[i]);
                     const EClass &childCls = egraph.getEClass(canonChild);
                     if (childCls.dtype != pattern.dtypes[0])
@@ -736,25 +719,38 @@ struct InfinityDomination : public Rule
 
     std::string name() const override { return "InfinityDomination"; }
 
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         if (visited_enodes.count(eNodeIdx))
             return false;
 
-        const ENode &enode = egraph.getENodes()[eNodeIdx];
+        const ENode &enode = ctx.egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::ADD || enode.children.size() != 2)
             return false;
 
-        return isConstantFloat(egraph, enode.children[0]) || isConstantFloat(egraph, enode.children[1]);
+        return isConstantFloat(enode.children[0], ctx) || isConstantFloat(enode.children[1], ctx);
     }
 
-    bool isConstantFloat(const EGraph &egraph, uint32_t eclassId) const
+    bool isConstantFloat(uint32_t eclassId, RuleCtx &ctx) const
     {
-        uint32_t canon = egraph.findConst(eclassId);
-        const EClass &cls = egraph.getEClass(canon);
+        uint32_t canon = ctx.egraph.findConst(eclassId);
+        const EClass &cls = ctx.egraph.getEClass(canon);
         if (cls.dtype != DType::FLOAT32)
             return false;
-        return egraph.constantStaging.find(canon) != egraph.constantStaging.end();
+        if (ctx.egraph.constantStaging.find(canon) != ctx.egraph.constantStaging.end())
+            return true;
+
+        if (ctx.repo && ctx.repo->isValid())
+        {
+            uint32_t logicalId = ctx.eclassToLogical.count(canon) ? ctx.eclassToLogical.at(canon) : UINT32_MAX;
+            if (logicalId != UINT32_MAX && ctx.repo->has(logicalId))
+            {
+                auto data = ctx.repo->read(logicalId);
+                ctx.egraph.constantStaging[canon] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                return true;
+            }
+        }
+        return false;
     }
 
     uint32_t addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
@@ -762,14 +758,15 @@ struct InfinityDomination : public Rule
         return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, Backend::CPU, vals);
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical) override
+    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        EGraph &egraph = ctx.egraph;
         visited_enodes.insert(eNodeIdx);
 
         const ENode addNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
 
-        uint32_t constIdx = isConstantFloat(egraph, addNode.children[1]) ? 1 : 0;
+        uint32_t constIdx = isConstantFloat(addNode.children[1], ctx) ? 1 : 0;
         uint32_t varIdx = 1 - constIdx;
 
         uint32_t constClass = egraph.find(addNode.children[constIdx]);
@@ -853,7 +850,6 @@ struct InfinityDomination : public Rule
         }
         else
         {
-            // Forces a fresh buffer initialized strictly with the mask's original state
             currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {constClass}, outClass.shape, contigStrides, 0, outClass.dtype, outClass.backend);
         }
 
@@ -939,8 +935,9 @@ struct SlicePushDownElementwise : public Rule
 
     std::string name() const override { return "SlicePushDownElementwise"; }
 
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        const EGraph &egraph = ctx.egraph;
         const ENode &enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::CONTIGUOUS || enode.children.empty())
             return false;
@@ -952,7 +949,7 @@ struct SlicePushDownElementwise : public Rule
             if (childNode.opType == OpType::SLICE && childNode.children.size() == 4)
             {
                 uint32_t srcClass = egraph.findConst(childNode.children[0]);
-                if (!allowPushDownOnProtected && isEClassProtected(srcClass, protectedEClasses, egraph))
+                if (!allowPushDownOnProtected && isEClassProtected(srcClass, ctx.protectedEClasses, egraph))
                     continue;
 
                 for (uint32_t srcNodeIdx : egraph.getEClass(srcClass).enodes)
@@ -985,8 +982,9 @@ struct SlicePushDownElementwise : public Rule
         return false;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical) override
+    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        EGraph &egraph = ctx.egraph;
         const ENode contigNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
 
@@ -1066,10 +1064,8 @@ struct SlicePushDownElementwise : public Rule
 
                 uint32_t contigSlicedOp = addOpToEGraph(egraph, OpType::CONTIGUOUS, {opEClass}, sliceShape, sliceContigStrides, 0, sliceNode.dtype, sliceNode.backend, UINT32_MAX, partialPathId);
 
-                // Now create op_cache
-                uint32_t op_cache = createCacheInputNode(egraph, opNode, srcClass, partialPathId, eclassToLogical);
+                uint32_t op_cache = createCacheInputNode(egraph, opNode, srcClass, partialPathId, ctx.eclassToLogical);
 
-                // Create SCATTER and merge with srcClass
                 const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigSlicedOp, startsId, endsId, stepsId}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
 
@@ -1114,8 +1110,9 @@ struct SlicePushDownDot : public Rule
         return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, Backend::CPU, vals);
     }
 
-    bool match(const EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses) override
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        const EGraph &egraph = ctx.egraph;
         const ENode &enode = egraph.getENodes()[eNodeIdx];
         if (enode.opType != OpType::CONTIGUOUS || enode.children.empty())
             return false;
@@ -1127,8 +1124,7 @@ struct SlicePushDownDot : public Rule
             if (childNode.opType == OpType::SLICE && childNode.children.size() == 4)
             {
                 uint32_t srcClass = egraph.findConst(childNode.children[0]);
-                // PROTECTED CHECK: do not push slice down if the dot’s eclass is protected
-                if (!allowPushDownOnProtected && isEClassProtected(srcClass, protectedEClasses, egraph))
+                if (!allowPushDownOnProtected && isEClassProtected(srcClass, ctx.protectedEClasses, egraph))
                     continue;
 
                 for (uint32_t srcNodeIdx : egraph.getEClass(srcClass).enodes)
@@ -1145,8 +1141,9 @@ struct SlicePushDownDot : public Rule
         return false;
     }
 
-    void apply(EGraph &egraph, uint32_t eNodeIdx, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical) override
+    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
+        EGraph &egraph = ctx.egraph;
         const ENode contigNode = egraph.getENodes()[eNodeIdx];
         uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
 
@@ -1189,7 +1186,7 @@ struct SlicePushDownDot : public Rule
                 for (int32_t s : steps)
                 {
                     if (s != 1)
-                        validSteps = false; // Only support step=1 for pushing down through DOT
+                        validSteps = false;
                 }
                 if (!validSteps)
                     continue;
@@ -1197,7 +1194,7 @@ struct SlicePushDownDot : public Rule
                 std::vector<uint32_t> outClassShape = egraph.getEClass(srcClass).shape;
                 uint32_t rank = outClassShape.size();
                 if (rank != 2 && rank != 3 && rank != 4)
-                    continue; // DOT only supports rank 2, 3, 4
+                    continue;
 
                 while (starts.size() < rank)
                     starts.push_back(0);
@@ -1244,7 +1241,6 @@ struct SlicePushDownDot : public Rule
                 }
                 else if (rank == 4)
                 {
-                    // A: [B, H, M, K], B: [B, H, K, N]
                     startsA = {starts[0], starts[1], starts[2], 0};
                     endsA = {ends[0], ends[1], ends[2], (int32_t)K};
                     startsB = {starts[0], starts[1], 0, starts[3]};
@@ -1292,11 +1288,9 @@ struct SlicePushDownDot : public Rule
 
                 uint32_t contigSlicedOp = addOpToEGraph(egraph, OpType::CONTIGUOUS, {dotEClass}, sliceShape, sliceContigStrides, 0, sliceNode.dtype, sliceNode.backend, eclassId);
 
-                // Create op_cache
                 uint32_t partialPathId = srcNodeIdx | 0x80000000;
-                uint32_t op_cache = createCacheInputNode(egraph, dotNode, srcClass, partialPathId, eclassToLogical);
+                uint32_t op_cache = createCacheInputNode(egraph, dotNode, srcClass, partialPathId, ctx.eclassToLogical);
 
-                // Create SCATTER and merge with srcClass using the sliceNode's children for parameters
                 const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigSlicedOp, sliceNode.children[1], sliceNode.children[2], sliceNode.children[3]}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, dotNode.dtype, dotNode.backend, UINT32_MAX, partialPathId);
 

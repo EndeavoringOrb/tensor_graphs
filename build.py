@@ -1,3 +1,4 @@
+# build.py
 import argparse
 import os
 import sys
@@ -41,24 +42,16 @@ REGISTER_MACROS = [
 
 
 def validate_kernel_match_logic(rel_path, content):
-    """
-    Enforces the 'Clean Match Function' rule.
-    Match functions should only contain logic that cannot be expressed
-    in the registration macro.
-    """
-    # Find all registration macros
     reg_pattern = r"(REGISTER_[\w_]+)\s*\(\s*.*?\s*,\s*.*?\s*,\s*([\w_]+)\s*,.*?\)\s*;"
     registrations = re.findall(reg_pattern, content, re.DOTALL)
 
     for macro_type, match_func_name in registrations:
-        # Extract function body
         func_body_pattern = rf"bool\s+{match_func_name}\s*\([^{{]+\{{(.*?)\}}"
         func_body_match = re.search(func_body_pattern, content, re.DOTALL)
 
         if func_body_match:
             body = func_body_match.group(1)
 
-            # Map of regex patterns to (Error Name, Reason)
             redundancies = {
                 r"inputs\.size\(\)": (
                     "Input Count Check",
@@ -117,7 +110,6 @@ def get_compiler_cmd(fname: str):
             "cu",
         ]
 
-        # Fix for ARM64 NEON errors when using nvcc (pass flag to host compiler)
         if is_arm64:
             cmd.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
@@ -166,7 +158,6 @@ def get_compiler_cmd(fname: str):
 
 
 def get_file_hash(filepath):
-    """Return SHA256 hash of a file's content."""
     h = hashlib.sha256()
     try:
         with open(filepath, "rb") as f:
@@ -178,7 +169,6 @@ def get_file_hash(filepath):
 
 
 def generate_core_seed():
-    """Hashes core files to create a stable seed for all kernel IDs."""
     content_hashes = [get_file_hash(p) for p in CORE_DEPENDENCIES]
     combined = "".join(content_hashes)
     return hashlib.sha256(combined.encode("utf-8")).hexdigest()
@@ -197,19 +187,15 @@ def generate_kernel_uids(core_seed):
                 path = Path(root) / f
                 rel_path = path.relative_to(ROOT_DIR)
 
-                # --- Validation: Ensure single registration per file ---
                 try:
                     with open(path, "r", encoding="utf-8", errors="ignore") as f_in:
                         content = f_in.read()
 
-                    # LINT: Check for redundant match logic
                     if not NO_LINT:
                         validate_kernel_match_logic(rel_path, content)
 
                     reg_count = 0
                     for macro in REGISTER_MACROS:
-                        # Use \b for word boundary to avoid matching substring macros
-                        # Multiline mode allows ^ to match start of lines
                         matches = re.findall(rf"^\s*{macro}\b", content, re.MULTILINE)
                         reg_count += len(matches)
 
@@ -225,7 +211,6 @@ def generate_kernel_uids(core_seed):
                         )
                         sys.exit(1)
                 except Exception as e:
-                    # If it's the specific exit we triggered, just propagate
                     if isinstance(e, SystemExit):
                         raise e
                     console.print(
@@ -236,9 +221,7 @@ def generate_kernel_uids(core_seed):
                 combined = core_seed + file_content_hash
                 full_hash = hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
-                uid_val_raw = int(
-                    full_hash[:16], 16
-                )  # TODO: use full hash instead of first 16 chars
+                uid_val_raw = int(full_hash[:16], 16)
                 uid_val = f"0x{uid_val_raw:016x}ULL"
 
                 if uid_val in uid_to_path:
@@ -274,7 +257,6 @@ def generate_kernel_uids(core_seed):
 
 
 def generate_kernel_includes(core_seed):
-    """Generates cpu_kernels.gen.hpp and cuda_kernels.gen.cu with UID injection logic."""
     cpu_includes_hpp = GENERATED_DIR / "cpu_kernels.gen.hpp"
     cuda_includes_cu = GENERATED_DIR / "cuda_kernels.gen.cu"
     kernels_all_hpp = GENERATED_DIR / "kernels_all.gen.hpp"
@@ -351,7 +333,6 @@ def generate_kernel_includes(core_seed):
 
 
 def generate_build_context():
-    """Hashes compiler command arguments to detect build flag changes."""
     ctx_hpp = GENERATED_DIR / "build_context.gen.hpp"
     mode = "DEBUG" if DEBUG_MODE else "RELEASE"
     backend = "CUDA" if USE_CUDA else "CPU"
@@ -372,7 +353,6 @@ def compile_project(targets=None):
     out_ext = ".exe" if os.name == "nt" else ""
     is_arm64 = platform.machine().lower() in ("aarch64", "arm64")
 
-    # Use clang++ instead of cl.exe/g++
     if os.name == "nt":
         cxx = r'"C:\Program Files\LLVM\bin\clang++.exe"'
         nvcc = "nvcc"
@@ -395,7 +375,7 @@ def compile_project(targets=None):
         else:
             cxx_flags.extend(["-O3"])
             nvcc_flags.extend(["-O3"])
-            if PROFILE_MODE:  # <--- Added
+            if PROFILE_MODE:
                 cxx_flags.extend(["-g", "-gcodeview", "-Wl,-debug"])
     else:
         cxx_flags.extend(["-std=c++20"])
@@ -409,22 +389,28 @@ def compile_project(targets=None):
             nvcc_flags.extend(["-O3"])
 
     if USE_CUDA:
-        # Detect CUDA Path
         cuda_path = os.environ.get("CUDA_PATH", "/usr/local/cuda")
 
         if os.name == "nt":
             cxx_flags.append("-DUSE_CUDA")
-            cxx_flags.append(f'-I"{cuda_path}\\include"')  # Add CUDA include for clang
+            cxx_flags.append(f'-I"{cuda_path}\\include"')
             nvcc_flags.append("-DUSE_CUDA")
         else:
             cxx_flags.append("-DUSE_CUDA")
-            cxx_flags.append(f"-I{cuda_path}/include")  # Add CUDA include for clang
+            cxx_flags.append(f"-I{cuda_path}/include")
             nvcc_flags.append("-DUSE_CUDA")
             if is_arm64:
                 nvcc_flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
     if targets is None:
-        mains = ["main.cpp", "bench.cpp", "test.cpp", "test_model.cpp", "embed.cpp"]
+        mains = [
+            "main.cpp",
+            "bench.cpp",
+            "test.cpp",
+            "test_model.cpp",
+            "write_ref_tensors.cpp",
+            "embed.cpp",
+        ]
     else:
         mains = []
         for t in targets:
@@ -457,7 +443,6 @@ def compile_project(targets=None):
             )
             sys.exit(1)
         else:
-            # Display non-fatal warning messages (e.g. deprecations) in a yellow block
             if result.stderr.strip():
                 console.print(
                     Panel(
