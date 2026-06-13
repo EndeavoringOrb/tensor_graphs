@@ -141,6 +141,9 @@ public:
             Error::throw_err("[FileRegistry.getNodeFd] node id " + std::to_string(nodeId) + " is not registered");
         }
         const auto &pair = weightSources.at(nodeId);
-        return getFd(getFileId(pair.first));
+
+        // Resolve the actual shard path using metadata
+        TensorMetadata meta = getMetadata(pair.first, pair.second);
+        return getFd(getFileId(meta.filePath));
     }
 };

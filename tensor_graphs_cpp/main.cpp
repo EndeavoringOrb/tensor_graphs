@@ -175,10 +175,10 @@ void run_qwen_35b(bool only_plan)
     run_autoregressive_llm<Qwen3_6_35B_A3B_Config>(
         "qwen-3.6-35b-a3b",
         "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin",
-        {151644, 8948},
+        {24227},
         Qwen3_6_35B_A3B_Config().vocab_size,
         8,
-        6,
+        7,
         only_plan,
         build_qwen_graph);
 }

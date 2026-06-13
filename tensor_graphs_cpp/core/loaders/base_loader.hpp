@@ -9,6 +9,7 @@ struct TensorMetadata
     std::vector<uint32_t> shape;
     uint64_t dataOffsetStart;
     uint64_t dataOffsetEnd;
+    std::string filePath;
 };
 
 class ModelLoader

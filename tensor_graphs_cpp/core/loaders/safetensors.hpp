@@ -74,7 +74,7 @@ public:
         uint64_t absoluteStart = files[meta.fileIndex].dataStartOffset + meta.dataOffsetStart;
         uint64_t absoluteEnd = files[meta.fileIndex].dataStartOffset + meta.dataOffsetEnd;
 
-        return TensorMetadata{meta.dtype, meta.shape, absoluteStart, absoluteEnd};
+        return TensorMetadata{meta.dtype, meta.shape, absoluteStart, absoluteEnd, files[meta.fileIndex].path};
     }
 
     bool hasTensor(const std::string &name) const override

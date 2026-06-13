@@ -1,89 +1,139 @@
-from tokenizers import Tokenizer
+#!/usr/bin/env python3
+import sys
+import os
+import argparse
 
-# 1. Load the tokenizer file from your resources folder
-tokenizer: Tokenizer = Tokenizer.from_file("resources/tokenizer.json")
+def load_tokenizer(model_name_or_path: str):
+    """
+    Attempts to load the tokenizer first using the standard 'transformers' library,
+    and falls back to the native 'tokenizers' library if 'transformers' is not available.
+    Supports local paths as well as remote Hugging Face Hub repository IDs.
+    """
+    tokenizer = None
+    tokenizer_type = None
 
-# 2. These are the tokens currently in your main.cpp
-tokens = [
-    2,
-    105,
-    2364,
-    107,
-    155122,
-    27825,
-    49087,
-    531,
-    496,
-    236743,
-    236810,
-    1051,
-    2255,
-    236761,
-    106,
-    107,
-    105,
-    4368,
-    107,
-]
-tokens += [70895, 1106, 1106, 1106, 1106]
-# tokens += [70895, 506, 1902, 563, 1133, 496, 2563]
-# 3. Decode to string
-tokens = [
-    2,
-    9259,
-    236888,
-    564,
-    236789,
-    236757,
-    9775,
-    531,
-]  # good "Hello! I'm excited to"
-# tokens = [2, 9259, 236764, 564, 236789, 236757, 1401, 15025] # good
-# tokens = [2, 9259, 236761, 669, 3823, 236772, 4373, 497] # good
-# tokens = [2, 9259, 236888, 107, 236776, 33569, 2029, 56030] # bad
-# tokens = [2, 9259, 236888, 236888, 9259, 236764, 532, 236888] # bad
-# tokens = [2, 9259, 236888, 236888, 9259, 3810, 236888, 9259] # bad
-# tokens = [2, 9259, 236888, 11145] # bad
-# tokens = [2, 9259, 236888, 236888, 236888] # bad
-tokens = [2, 9259, 236888, 108, 106]  # bad
-tokens = "2 9259 236888 564 236789 236757 9775 531 577 822 861 16326 236888 564 236789 236757 1590 531 1601 611 607 4326 699 6514 872 822 2881 532 15724 822 9395 531 6655 1938 532 1894 236761 564 236789 236757 27322 531 3449 532 2171 607 611 236761 108 236777 236789 236757 5293 531 3890 1027 4137 611 735 236764 532 564 236789 236757 2462 5508 531 6361 236761 108 236777 236789 236757 5508 531 1601 611 607 4658 611 1202 236888 108 236777 236789 236757 1590 531 1601 611 607 4326 699 6514 872 822 2881 532 15724 822 9395 531 6655 1938 532 1894 236761 564 236789 236757 27322 531 3449 532 2171 607 611 236761 108 236777 236789 236757 5508 531 1601 611 607 4326"
-tokens = "2 9259 236888 108 236777 236789 236757 3182 573 496 1535 236764 13451 236764 532 17075"
-tokens = "2 9259 236888 564 236789 236757 9775 531 577 1590 236761 2088 740 564 1601 611 3124 236881 108 236777 236789 236757 5293 531 1601 607 4658 611 1202 236761 3792 786"  # good
-tokens = tokens.split(" ")
-tokens = [int(item) for item in tokens]
-# tokens = [2, 9259, 236888, 564, 236789, 236757, 5293, 531] # good "Hello! I'm happy to"
-# tokens = [2, 9259, 9259, 236823] # bad
-# tokens = [2, 9259, 236888, 108] # bad
-# tokens = [2, 9259, 236888, 12410] # bad
-# tokens = [2, 9259, 236888, 108, 1018, 1018, 1018, 1018] # bad
-# tokens = [2, 9259, 236888, 107, 818, 669, 669, 107] # bad
-# tokens = [2, 9259, 236888, 564, 236789, 859, 236789, 859] # bad
-tokens = [2, 9259, 236888, 564, 236789, 236757, 5293, 531]  # good
-tokens = [2, 9259, 236888, 108, 9259, 236888, 108, 236777]  # meh?
-tokens = [
-    2,
-    9259,
-    236888,
-    110794,
-    524,
-    35189,
-    2950,
-    34697,
-    138591,
-    123997,
-    108921,
-    2638,
-    8015,
-    31250,
-    236812,
-]
-tokens = [2, 9259, 532, 564, 236764, 564, 236764, 532]
-output_text = tokenizer.decode(tokens)
+    # Method 1: Try using transformers (recommended for online model IDs)
+    try:
+        from transformers import AutoTokenizer
+        print(f"Loading '{model_name_or_path}' via transformers.AutoTokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        tokenizer_type = "transformers"
+        return tokenizer, tokenizer_type
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"Could not load via transformers: {e}")
 
-print(f"Tokens: {tokens}")
-print(f"Decoded Text: {output_text}")
-for tok in list(set(tokens)):
-    print(f"{tok}={tokenizer.decode([tok], False)}")
+    # Method 2: Try using native tokenizers (fast Rust-backed library)
+    try:
+        from tokenizers import Tokenizer
+        print(f"Loading '{model_name_or_path}' via tokenizers.Tokenizer...")
+        
+        # Check if model_name_or_path points to a local directory or file
+        if os.path.exists(model_name_or_path):
+            if os.path.isdir(model_name_or_path):
+                json_path = os.path.join(model_name_or_path, "tokenizer.json")
+                if os.path.exists(json_path):
+                    tokenizer = Tokenizer.from_file(json_path)
+                else:
+                    raise FileNotFoundError(f"tokenizer.json not found in directory '{model_name_or_path}'")
+            else:
+                tokenizer = Tokenizer.from_file(model_name_or_path)
+        else:
+            # Fallback to downloading directly from Hugging Face Hub
+            tokenizer = Tokenizer.from_pretrained(model_name_or_path)
+            
+        tokenizer_type = "tokenizers"
+        return tokenizer, tokenizer_type
+    except ImportError:
+        print("Error: Neither 'transformers' nor 'tokenizers' libraries are installed.", file=sys.stderr)
+        print("Please install at least one: 'pip install tokenizers' or 'pip install transformers'", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Failed to load tokenizer using native tokenizers library: {e}", file=sys.stderr)
+        sys.exit(1)
 
-input_ids = tokenizer.encode("Chapter 1\n").ids
-print(input_ids)
+
+def parse_token_list(value: str) -> list[int]:
+    """
+    Validates and parses a comma-separated string of integers into a Python list of ints.
+    """
+    try:
+        return [int(t.strip()) for t in value.split(",")]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "Token list must be comma-separated integers (e.g. 24227,220,16)."
+        )
+
+
+def main():
+    # 1. Set up argument parsing
+    parser = argparse.ArgumentParser(
+        description="Decode token IDs and encode text using 'transformers' or native 'tokenizers' libraries."
+    )
+    
+    # We use nargs='?' to make these arguments optional positional,
+    # preserving the sequential syntax of your original script.
+    parser.add_argument(
+        "model",
+        nargs="?",
+        default="Qwen/Qwen2.5-7B-Instruct",
+        help="Hugging Face model ID or path to a local directory/file (default: Qwen/Qwen2.5-7B-Instruct)"
+    )
+    parser.add_argument(
+        "tokens",
+        nargs="?",
+        type=parse_token_list,
+        default=[24227, 220, 16, 198],
+        help="Comma-separated integer token IDs to decode (default: 24227,220,16,198)"
+    )
+    parser.add_argument(
+        "text",
+        nargs="?",
+        default="Chapter 1\n",
+        help="Test text to encode into token IDs (default: 'Chapter 1\\n')"
+    )
+
+    args = parser.parse_args()
+
+    # 2. Load tokenizer
+    tokenizer, tok_type = load_tokenizer(args.model)
+    print(f"Successfully loaded tokenizer using backend: {tok_type}\n")
+
+    # 3. Decode the full sequence of tokens
+    try:
+        output_text = tokenizer.decode(args.tokens)
+        print(f"Tokens to decode: {args.tokens}")
+        print(f"Decoded Text: {repr(output_text)}")  # repr() helps visually identify newlines (\n) or trailing spaces
+    except Exception as e:
+        print(f"Error decoding tokens: {e}", file=sys.stderr)
+
+    # 4. Decode individual tokens
+    print("\nIndividual Token Mapping:")
+    for tok in args.tokens:
+        try:
+            if tok_type == "transformers":
+                decoded_tok = tokenizer.decode([tok], skip_special_tokens=False)
+            else:
+                decoded_tok = tokenizer.decode([tok], False)
+            print(f"  {tok} = {repr(decoded_tok)}")
+        except Exception as e:
+            print(f"  {tok} = <Error decoding: {e}>")
+
+    # 5. Encode the test text
+    print(f"\nEncoding test text: {repr(args.text)}")
+    try:
+        encoded_obj = tokenizer.encode(args.text)
+        # Check if the returned object has an .ids attribute (native Tokenizer) 
+        # or is a raw list (transformers AutoTokenizer)
+        if hasattr(encoded_obj, "ids"):
+            input_ids = encoded_obj.ids
+        else:
+            input_ids = encoded_obj
+        print(f"Generated Token IDs: {input_ids}")
+    except Exception as e:
+        print(f"Error encoding test text: {e}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
