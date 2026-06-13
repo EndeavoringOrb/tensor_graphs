@@ -18,9 +18,12 @@
 #include "generated/kernels_all.gen.hpp"
 
 // We use a custom version of executeReferenceGraph for clean tensors
-void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &rootIds, Repo &repo)
+void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &rootIds, const std::vector<uint32_t> &dynamicInputs, Repo &repo)
 {
     std::vector<uint32_t> topo = topologicalSort(rootIds, graph);
+
+    // Create a set for O(1) lookup of dynamic model inputs
+    std::unordered_set<uint32_t> dynamicInputSet(dynamicInputs.begin(), dynamicInputs.end());
 
     // 1. Identify "clean" nodes
     std::unordered_map<uint32_t, bool> is_clean;
@@ -29,7 +32,8 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
         const TensorNode &node = graph.getNode(nodeId);
         if (node.opType == OpType::INPUT)
         {
-            is_clean[nodeId] = (node.storageType == StorageType::PERSISTENT && node.backend == Backend::CPU);
+            // If the node is a dynamic input, it is not considered clean/static
+            is_clean[nodeId] = (node.storageType == StorageType::PERSISTENT && node.backend == Backend::CPU && dynamicInputSet.count(nodeId) == 0);
         }
         else
         {
@@ -235,7 +239,7 @@ int main(int argc, char *argv[])
 
     Repo repo(repoPath, gHash, false);
 
-    computeAndWriteCleanTensors(g, roots.roots, repo);
+    computeAndWriteCleanTensors(g, roots.roots, roots.inputs, repo);
 
     std::cout << "Done writing reference tensors." << std::endl;
     return 0;
