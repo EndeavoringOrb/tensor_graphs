@@ -46,6 +46,14 @@ private:
     uint32_t eps_fp32;
     uint32_t half_fp32;
 
+    uint32_t repeat_ax(uint32_t id, uint32_t repeats, uint32_t axis)
+    {
+        if (repeats <= 1)
+            return id;
+        int32_t r = repeats, a = axis;
+        return g.repeat(id, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
+    }
+
 public:
     Qwen3_6_35B_A3B_Model(Qwen3_6_35B_A3B_Config config, uint32_t sequence_length, Graph &graph, MemoryManager &memory, const std::string &weight_path)
         : cfg(config), g(graph), mem(memory), w_path(weight_path), eps(1e-6f), seq_len(sequence_length)
@@ -74,6 +82,17 @@ public:
         return g.repeat(tensor_id, rep_node, ax_node);
     }
 
+    uint32_t repeat_4d_axis(uint32_t tensor_id, uint32_t repeats, uint32_t axis)
+    {
+        if (repeats <= 1)
+            return tensor_id;
+        int32_t rep[] = {(int32_t)repeats};
+        uint32_t rep_node = g.constant({1}, rep, DType::INT32);
+        int32_t ax[] = {(int32_t)axis};
+        uint32_t ax_node = g.constant({1}, ax, DType::INT32);
+        return g.repeat(tensor_id, rep_node, ax_node);
+    }
+
     uint32_t expand_scalar_to_3d(uint32_t scalar_id, uint32_t dim0, uint32_t dim1, uint32_t dim2)
     {
         int32_t shape_3d[] = {1, 1, 1};
@@ -88,6 +107,35 @@ public:
         return out;
     }
 
+    uint32_t expand_scalar_to_3d(float val, uint32_t dim0, uint32_t dim1, uint32_t dim2)
+    {
+        uint32_t node = g.constant({1}, &val, DType::FLOAT32);
+        return expand_scalar_to_3d(node, dim0, dim1, dim2);
+    }
+
+    uint32_t expand_scalar_to_4d(float val, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3)
+    {
+        uint32_t node = g.constant({1}, &val, DType::FLOAT32);
+        int32_t sh4[] = {1, 1, 1, 1};
+        uint32_t out = g.reshape(node, g.constant({4}, sh4, DType::INT32));
+        if (d0 > 1)
+            out = repeat_4d_axis(out, d0, 0);
+        if (d1 > 1)
+            out = repeat_4d_axis(out, d1, 1);
+        if (d2 > 1)
+            out = repeat_4d_axis(out, d2, 2);
+        if (d3 > 1)
+            out = repeat_4d_axis(out, d3, 3);
+        return out;
+    }
+
+    uint32_t expand_scalar_to_1d(float val, uint32_t d0)
+    {
+        uint32_t node = g.constant({1}, &val, DType::FLOAT32);
+        int32_t sh1[] = {1};
+        return repeat_3d_axis(g.reshape(node, g.constant({1}, sh1, DType::INT32)), d0, 0);
+    }
+
     uint32_t expand_1d_to_3d(uint32_t vec_id, uint32_t vec_len, uint32_t dim0, uint32_t dim1)
     {
         int32_t shape_3d[] = {1, 1, (int32_t)vec_len};
@@ -100,7 +148,7 @@ public:
         return out;
     }
 
-    uint32_t silu_atomic(uint32_t x_id, uint32_t last_dim)
+    uint32_t sigmoid(uint32_t x_id, uint32_t last_dim)
     {
         float neg_one_val = -1.0f;
         uint32_t neg_one = expand_scalar_to_3d(g.constant({1}, &neg_one_val, DType::FLOAT32), 1, seq_len, last_dim);
@@ -110,8 +158,44 @@ public:
         uint32_t exp_neg_x = g.pow(e_node, neg_x);
         uint32_t one_node = expand_scalar_to_3d(one_fp32, 1, seq_len, last_dim);
         uint32_t den = g.add(one_node, exp_neg_x);
+        return g.div(one_node, den);
+    }
+
+    uint32_t silu_atomic(uint32_t x_id, uint32_t last_dim)
+    {
+        return g.mul(x_id, sigmoid(x_id, last_dim));
+    }
+
+    uint32_t silu_atomic(uint32_t x_id, uint32_t N, uint32_t L, uint32_t D)
+    {
+        float neg_one_val = -1.0f;
+        uint32_t neg_one = expand_scalar_to_3d(g.constant({1}, &neg_one_val, DType::FLOAT32), N, L, D);
+        uint32_t neg_x = g.mul(x_id, neg_one);
+        float e_val = 2.718281828459045f;
+        uint32_t e_node = expand_scalar_to_3d(g.constant({1}, &e_val, DType::FLOAT32), N, L, D);
+        uint32_t exp_neg_x = g.pow(e_node, neg_x);
+        uint32_t one_node = expand_scalar_to_3d(one_fp32, N, L, D);
+        uint32_t den = g.add(one_node, exp_neg_x);
         uint32_t sigmoid = g.div(one_node, den);
         return g.mul(x_id, sigmoid);
+    }
+
+    uint32_t softmax(uint32_t scores, uint32_t dim_size)
+    {
+        int32_t axis_val = -1;
+        uint32_t axis_node = g.constant({1}, &axis_val, DType::INT32);
+        uint32_t max_scores = g.max(scores, axis_node);
+        uint32_t max_expanded = repeat_3d_axis(max_scores, dim_size, 2);
+        uint32_t shifted_scores = g.add(scores, g.neg(max_expanded));
+
+        float e_val = 2.718281828459045f;
+        uint32_t e_node = expand_scalar_to_3d(g.constant({1}, &e_val, DType::FLOAT32), 1, seq_len, dim_size);
+        uint32_t exp_scores = g.pow(e_node, shifted_scores);
+
+        uint32_t sum_exp = g.sum(exp_scores, axis_node);
+        uint32_t sum_exp_expanded = repeat_3d_axis(sum_exp, dim_size, 2);
+
+        return g.div(exp_scores, sum_exp_expanded);
     }
 
     uint32_t rms_norm_gemma_atomic(uint32_t x_id, uint32_t weight_id, uint32_t dim0, uint32_t dim_size)
@@ -138,6 +222,29 @@ public:
         uint32_t one_node_full = expand_scalar_to_3d(one_fp32, dim0, seq_len, dim_size);
         uint32_t scale = g.add(weight_expanded, one_node_full);
         return g.mul(x_norm, scale);
+    }
+
+    uint32_t gated_rms_norm(uint32_t x, uint32_t z, const std::string &w_name, uint32_t dims, uint32_t cur_seq_len)
+    {
+        uint32_t sq = g.mul(x, x);
+        int32_t ax = -1;
+        uint32_t sum_sq = g.sum(sq, g.constant({1}, &ax, DType::INT32));
+        uint32_t mean_sq = g.div(sum_sq, expand_scalar_to_3d((float)dims, 1, cur_seq_len, 1));
+        uint32_t var = g.add(mean_sq, expand_scalar_to_3d(1e-6f, 1, cur_seq_len, 1));
+        uint32_t std = g.pow(var, expand_scalar_to_3d(0.5f, 1, cur_seq_len, 1));
+        uint32_t inv_std = repeat_ax(g.div(expand_scalar_to_3d(1.0f, 1, cur_seq_len, 1), std), dims, 2);
+        uint32_t x_norm = g.mul(x, inv_std);
+
+        uint32_t w = weight(w_path, w_name);
+        int32_t sh3[] = {1, 1, (int32_t)dims};
+        uint32_t w_exp = repeat_ax(g.reshape(w, g.constant({3}, sh3, DType::INT32)), cur_seq_len, 1);
+
+        uint32_t x_norm_scaled = g.mul(x_norm, w_exp);
+
+        // Apply SiLU on gate z
+        uint32_t z_silu = silu_atomic(z, 1, cur_seq_len, dims);
+
+        return g.mul(x_norm_scaled, z_silu);
     }
 
     std::tuple<uint32_t, uint32_t> compute_rope()
@@ -398,32 +505,272 @@ public:
     }
 
     // --- GATED DELTANET (LINEAR ATTENTION LAYER) ---
-    // Approximates the structural connectivity footprint of Gated DeltaNet Token Mixer
     uint32_t linear_attention_atomic(uint32_t x, const std::string &prefix)
     {
         int32_t perm_dims[] = {1, 0};
         uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
 
-        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
+        auto project_tensor = [&](uint32_t input_tensor, const std::string &suffix, uint32_t in_d, uint32_t out_d)
         {
             uint32_t w = weight(w_path, prefix + suffix);
             uint32_t w_t = g.permute(w, dims_node);
             w_t = g.contiguous(w_t);
             int32_t s3[] = {1, (int32_t)in_d, (int32_t)out_d};
-            return g.dot(x, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
+            return g.dot(input_tensor, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
         };
 
-        uint32_t projection_size_z = cfg.linear_n_v_heads * cfg.linear_head_dim;
-        uint32_t z = project(".linear_attn.in_proj_z.weight", cfg.emb_dim, projection_size_z);
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
+        {
+            return project_tensor(x, suffix, in_d, out_d);
+        };
 
-        uint32_t w_o = weight(w_path, prefix + ".linear_attn.out_proj.weight");
-        uint32_t w_o_t = g.permute(w_o, dims_node);
-        w_o_t = g.contiguous(w_o_t);
+        // 1. Projections
+        uint32_t key_dim = cfg.linear_n_qk_heads * cfg.linear_head_dim;
+        uint32_t value_dim = cfg.linear_n_v_heads * cfg.linear_head_dim;
+        uint32_t qkv_dim = key_dim * 2 + value_dim;
 
-        int32_t s3[] = {1, (int32_t)(cfg.linear_n_v_heads * cfg.linear_head_dim), (int32_t)cfg.emb_dim};
-        uint32_t w_o_3d = g.reshape(w_o_t, g.constant({3}, s3, DType::INT32));
+        uint32_t mixed_qkv = project(".linear_attn.in_proj_qkv.weight", cfg.emb_dim, qkv_dim);
+        uint32_t z = project(".linear_attn.in_proj_z.weight", cfg.emb_dim, value_dim);
+        uint32_t b = project(".linear_attn.in_proj_b.weight", cfg.emb_dim, cfg.linear_n_v_heads);
+        uint32_t a = project(".linear_attn.in_proj_a.weight", cfg.emb_dim, cfg.linear_n_v_heads);
 
-        return g.dot(z, w_o_3d);
+        // 2. Causal 1D Convolution
+        int32_t perm_conv[] = {0, 2, 1};
+        uint32_t mixed_qkv_tr = g.contiguous(g.permute(mixed_qkv, g.constant({3}, perm_conv, DType::INT32)));
+
+        float zero_val = 0.0f;
+        int32_t pad_shape[] = {1, (int32_t)qkv_dim, 3};
+        uint32_t pad_zeros = g.fill(g.constant({1}, &zero_val, DType::FLOAT32), g.constant({3}, pad_shape, DType::INT32));
+
+        int32_t ax2 = 2;
+        uint32_t padded = g.concat({pad_zeros, mixed_qkv_tr}, g.constant({1}, &ax2, DType::INT32));
+
+        int32_t steps[] = {1, 1, 1};
+
+        int32_t starts0[] = {0, 0, 3};
+        int32_t ends0[] = {1, (int32_t)qkv_dim, (int32_t)(seq_len + 3)};
+        uint32_t padded_t0 = g.slice(padded, g.constant({3}, starts0, DType::INT32), g.constant({3}, ends0, DType::INT32), g.constant({3}, steps, DType::INT32));
+
+        int32_t starts1[] = {0, 0, 2};
+        int32_t ends1[] = {1, (int32_t)qkv_dim, (int32_t)(seq_len + 2)};
+        uint32_t padded_t1 = g.slice(padded, g.constant({3}, starts1, DType::INT32), g.constant({3}, ends1, DType::INT32), g.constant({3}, steps, DType::INT32));
+
+        int32_t starts2[] = {0, 0, 1};
+        int32_t ends2[] = {1, (int32_t)qkv_dim, (int32_t)(seq_len + 1)};
+        uint32_t padded_t2 = g.slice(padded, g.constant({3}, starts2, DType::INT32), g.constant({3}, ends2, DType::INT32), g.constant({3}, steps, DType::INT32));
+
+        int32_t starts3[] = {0, 0, 0};
+        int32_t ends3[] = {1, (int32_t)qkv_dim, (int32_t)seq_len};
+        uint32_t padded_t3 = g.slice(padded, g.constant({3}, starts3, DType::INT32), g.constant({3}, ends3, DType::INT32), g.constant({3}, steps, DType::INT32));
+
+        uint32_t conv_w = weight(w_path, prefix + ".linear_attn.conv1d.weight");
+
+        int32_t w_reshape_shape[] = {1, (int32_t)qkv_dim, 1};
+        uint32_t w_reshape = g.constant({3}, w_reshape_shape, DType::INT32);
+
+        int32_t w_steps[] = {1, 1, 1};
+
+        int32_t ws0[] = {0, 0, 0};
+        int32_t we0[] = {(int32_t)qkv_dim, 1, 1};
+        uint32_t w0 = g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws0, DType::INT32), g.constant({3}, we0, DType::INT32), g.constant({3}, w_steps, DType::INT32))), w_reshape);
+
+        int32_t ws1[] = {0, 0, 1};
+        int32_t we1[] = {(int32_t)qkv_dim, 1, 2};
+        uint32_t w1 = g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws1, DType::INT32), g.constant({3}, we1, DType::INT32), g.constant({3}, w_steps, DType::INT32))), w_reshape);
+
+        int32_t ws2[] = {0, 0, 2};
+        int32_t we2[] = {(int32_t)qkv_dim, 1, 3};
+        uint32_t w2 = g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws2, DType::INT32), g.constant({3}, we2, DType::INT32), g.constant({3}, w_steps, DType::INT32))), w_reshape);
+
+        int32_t ws3[] = {0, 0, 3};
+        int32_t we3[] = {(int32_t)qkv_dim, 1, 4};
+        uint32_t w3 = g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws3, DType::INT32), g.constant({3}, we3, DType::INT32), g.constant({3}, w_steps, DType::INT32))), w_reshape);
+
+        uint32_t w0_exp = repeat_3d_axis(w0, seq_len, 2);
+        uint32_t w1_exp = repeat_3d_axis(w1, seq_len, 2);
+        uint32_t w2_exp = repeat_3d_axis(w2, seq_len, 2);
+        uint32_t w3_exp = repeat_3d_axis(w3, seq_len, 2);
+
+        uint32_t term0 = g.mul(padded_t3, w0_exp);
+        uint32_t term1 = g.mul(padded_t2, w1_exp);
+        uint32_t term2 = g.mul(padded_t1, w2_exp);
+        uint32_t term3 = g.mul(padded_t0, w3_exp);
+
+        uint32_t conv_combined = g.add(g.add(g.add(term0, term1), term2), term3);
+
+        int32_t perm_back[] = {0, 2, 1};
+        uint32_t conv_out_tr = g.contiguous(g.permute(conv_combined, g.constant({3}, perm_back, DType::INT32)));
+
+        int32_t starts_q[] = {0, 0, 0};
+        int32_t ends_q[] = {1, (int32_t)seq_len, (int32_t)key_dim};
+        uint32_t q = g.contiguous(g.slice(conv_out_tr, g.constant({3}, starts_q, DType::INT32), g.constant({3}, ends_q, DType::INT32), g.constant({3}, steps, DType::INT32)));
+
+        int32_t starts_k[] = {0, 0, (int32_t)key_dim};
+        int32_t ends_k[] = {1, (int32_t)seq_len, (int32_t)(key_dim * 2)};
+        uint32_t k = g.contiguous(g.slice(conv_out_tr, g.constant({3}, starts_k, DType::INT32), g.constant({3}, ends_k, DType::INT32), g.constant({3}, steps, DType::INT32)));
+
+        int32_t starts_v[] = {0, 0, (int32_t)(key_dim * 2)};
+        int32_t ends_v[] = {1, (int32_t)seq_len, (int32_t)qkv_dim};
+        uint32_t v = g.contiguous(g.slice(conv_out_tr, g.constant({3}, starts_v, DType::INT32), g.constant({3}, ends_v, DType::INT32), g.constant({3}, steps, DType::INT32)));
+
+        // 3. Compute beta and g (decay alpha)
+        uint32_t beta = sigmoid(b, cfg.linear_n_v_heads);
+
+        uint32_t A_log = weight(w_path, prefix + ".linear_attn.A_log");
+        uint32_t dt_bias = weight(w_path, prefix + ".linear_attn.dt_bias");
+
+        int32_t ba_reshape_shape[] = {1, 1, (int32_t)cfg.linear_n_v_heads};
+        uint32_t dt_bias_3d = repeat_3d_axis(g.reshape(dt_bias, g.constant({3}, ba_reshape_shape, DType::INT32)), seq_len, 1);
+        uint32_t a_plus_dt_bias = g.add(a, dt_bias_3d);
+
+        uint32_t exp_x = g.pow(expand_scalar_to_3d(2.7182818f, 1, seq_len, cfg.linear_n_v_heads), a_plus_dt_bias);
+        uint32_t one_plus_exp = g.add(expand_scalar_to_3d(1.0f, 1, seq_len, cfg.linear_n_v_heads), exp_x);
+        uint32_t softplus_x = g.log(one_plus_exp);
+
+        uint32_t A_log_exp = g.pow(expand_scalar_to_1d(2.7182818f, cfg.linear_n_v_heads), A_log);
+        uint32_t A_log_exp_3d = repeat_3d_axis(g.reshape(A_log_exp, g.constant({3}, ba_reshape_shape, DType::INT32)), seq_len, 1);
+        uint32_t decay_g = g.mul(g.neg(A_log_exp_3d), softplus_x);
+        uint32_t decay_alpha = g.pow(expand_scalar_to_3d(2.7182818f, 1, seq_len, cfg.linear_n_v_heads), decay_g);
+
+        // 4. Reshape Q, K, V to head-based layout and L2 Norm
+        int32_t perm_heads[] = {0, 2, 1, 3};
+        int32_t q_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.linear_n_qk_heads, (int32_t)cfg.linear_head_dim};
+        uint32_t q_heads = g.contiguous(g.permute(g.reshape(q, g.constant({4}, q_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
+
+        int32_t k_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.linear_n_qk_heads, (int32_t)cfg.linear_head_dim};
+        uint32_t k_heads = g.contiguous(g.permute(g.reshape(k, g.constant({4}, k_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
+
+        int32_t v_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.linear_n_v_heads, (int32_t)cfg.linear_head_dim};
+        uint32_t v_heads = g.contiguous(g.permute(g.reshape(v, g.constant({4}, v_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
+
+        int32_t b_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.linear_n_v_heads, 1};
+        uint32_t b_heads = g.contiguous(g.permute(g.reshape(beta, g.constant({4}, b_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
+        uint32_t a_heads = g.contiguous(g.permute(g.reshape(decay_alpha, g.constant({4}, b_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
+
+        // 1. Reshape [1, 16, 8, 128] -> [1, 16, 1, 8, 128] to insert a unit dimension at axis 2
+        int32_t sh5[] = {1, (int32_t)cfg.linear_n_qk_heads, 1, (int32_t)seq_len, (int32_t)cfg.linear_head_dim};
+        uint32_t sh5_node = g.constant({5}, sh5, DType::INT32);
+        uint32_t q_heads_5d = g.reshape(q_heads, sh5_node);
+        uint32_t k_heads_5d = g.reshape(k_heads, sh5_node);
+
+        // 2. Repeat along the newly inserted axis (axis 2) of size 1 by r_heads (2)
+        int32_t r_heads = 2;
+        int32_t rep[] = {(int32_t)r_heads};
+        uint32_t rep_node = g.constant({1}, rep, DType::INT32);
+        int32_t ax[] = {2};
+        uint32_t ax_node = g.constant({1}, ax, DType::INT32);
+
+        uint32_t q_heads_rep = g.repeat(q_heads_5d, rep_node, ax_node);
+        uint32_t k_heads_rep = g.repeat(k_heads_5d, rep_node, ax_node);
+
+        // 3. Materialize the zero-stride view into contiguous memory
+        uint32_t q_heads_contig = g.contiguous(q_heads_rep);
+        uint32_t k_heads_contig = g.contiguous(k_heads_rep);
+
+        // 4. Reshape back to 4D: [1, 32, 8, 128], collapsing the [16, 2] dimensions into 32
+        int32_t sh4_target[] = {1, (int32_t)cfg.linear_n_v_heads, (int32_t)seq_len, (int32_t)cfg.linear_head_dim};
+        uint32_t sh4_target_node = g.constant({4}, sh4_target, DType::INT32);
+
+        uint32_t q_heads_exp = g.reshape(q_heads_contig, sh4_target_node);
+        uint32_t k_heads_exp = g.reshape(k_heads_contig, sh4_target_node);
+
+        int32_t ax_neg1 = -1;
+        uint32_t q_sq = g.mul(q_heads_exp, q_heads_exp);
+        uint32_t q_sum = g.sum(q_sq, g.constant({1}, &ax_neg1, DType::INT32));
+        uint32_t q_std = g.pow(g.add(q_sum, expand_scalar_to_4d(1e-6f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1)), expand_scalar_to_4d(0.5f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1));
+        uint32_t q_norm = g.mul(q_heads_exp, repeat_3d_axis(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), q_std), (int32_t)cfg.linear_head_dim, 3));
+
+        float scale_factor = 1.0f / std::sqrt((float)cfg.linear_head_dim);
+        q_norm = g.mul(q_norm, expand_scalar_to_4d(scale_factor, 1, (int32_t)cfg.linear_n_v_heads, seq_len, (int32_t)cfg.linear_head_dim));
+
+        uint32_t k_sq = g.mul(k_heads_exp, k_heads_exp);
+        uint32_t k_sum = g.sum(k_sq, g.constant({1}, &ax_neg1, DType::INT32));
+        uint32_t k_std = g.pow(g.add(k_sum, expand_scalar_to_4d(1e-6f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1)), expand_scalar_to_4d(0.5f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1));
+        uint32_t k_norm = g.mul(k_heads_exp, repeat_3d_axis(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), k_std), (int32_t)cfg.linear_head_dim, 3));
+
+        // 5. Gated Delta Rule Recurrence Loop
+        int32_t s_shape[] = {(int32_t)cfg.linear_n_v_heads, (int32_t)cfg.linear_head_dim, (int32_t)cfg.linear_head_dim};
+        uint32_t S = g.fill(g.constant({1}, &zero_val, DType::FLOAT32), g.constant({3}, s_shape, DType::INT32));
+
+        std::vector<uint32_t> outs;
+        for (uint32_t t = 0; t < seq_len; ++t)
+        {
+            int32_t starts_t_ab[] = {0, 0, (int32_t)t, 0};
+            int32_t ends_t_b[] = {1, (int32_t)cfg.linear_n_v_heads, (int32_t)(t + 1), 1};
+            int32_t steps_t[] = {1, 1, 1, 1};
+            uint32_t a_t = g.contiguous(g.slice(a_heads, g.constant({4}, starts_t_ab, DType::INT32), g.constant({4}, ends_t_b, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+
+            int32_t flat_scalar_shape[] = {(int32_t)cfg.linear_n_v_heads, 1, 1};
+            uint32_t a_t_flat = g.reshape(a_t, g.constant({3}, flat_scalar_shape, DType::INT32));
+
+            uint32_t a_t_exp = repeat_3d_axis(repeat_3d_axis(a_t_flat, (int32_t)cfg.linear_head_dim, 1), (int32_t)cfg.linear_head_dim, 2);
+            S = g.mul(S, a_t_exp);
+
+            int32_t starts_t_k[] = {0, 0, (int32_t)t, 0};
+            int32_t ends_t_k[] = {1, (int32_t)cfg.linear_n_v_heads, (int32_t)(t + 1), (int32_t)cfg.linear_head_dim};
+            uint32_t k_t = g.contiguous(g.slice(k_norm, g.constant({4}, starts_t_k, DType::INT32), g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+
+            int32_t flat_vector_shape[] = {(int32_t)cfg.linear_n_v_heads, 1, (int32_t)cfg.linear_head_dim};
+            uint32_t k_t_flat = g.reshape(k_t, g.constant({3}, flat_vector_shape, DType::INT32));
+
+            uint32_t v_t = g.contiguous(g.slice(v_heads, g.constant({4}, starts_t_k, DType::INT32), g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+            uint32_t v_t_flat = g.reshape(v_t, g.constant({3}, flat_vector_shape, DType::INT32));
+
+            uint32_t b_t = g.contiguous(g.slice(b_heads, g.constant({4}, starts_t_ab, DType::INT32), g.constant({4}, ends_t_b, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+            uint32_t b_t_flat = g.reshape(b_t, g.constant({3}, flat_scalar_shape, DType::INT32));
+
+            uint32_t kv_mem = g.contiguous(g.dot(k_t_flat, S));
+
+            uint32_t err = g.add(v_t_flat, g.neg(kv_mem));
+            uint32_t b_t_exp = repeat_3d_axis(b_t_flat, (int32_t)cfg.linear_head_dim, 2);
+            uint32_t delta = g.mul(err, b_t_exp);
+
+            int32_t perm_t[] = {0, 2, 1};
+            uint32_t k_t_t = g.contiguous(g.permute(k_t_flat, g.constant({3}, perm_t, DType::INT32)));
+            uint32_t outer_prod = g.contiguous(g.dot(k_t_t, delta));
+            S = g.add(S, outer_prod);
+
+            uint32_t q_t = g.contiguous(g.slice(q_norm, g.constant({4}, starts_t_k, DType::INT32), g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+            uint32_t q_t_flat = g.reshape(q_t, g.constant({3}, flat_vector_shape, DType::INT32));
+
+            uint32_t y_t = g.contiguous(g.dot(q_t_flat, S));
+
+            int32_t head_y_shape[] = {1, (int32_t)cfg.linear_n_v_heads, 1, (int32_t)cfg.linear_head_dim};
+            uint32_t y_t_head = g.reshape(y_t, g.constant({4}, head_y_shape, DType::INT32));
+            outs.push_back(y_t_head);
+        }
+
+        uint32_t context_heads;
+        if (seq_len > 1)
+        {
+            int32_t ax2_concat = 2;
+            context_heads = g.concat(outs, g.constant({1}, &ax2_concat, DType::INT32));
+        }
+        else
+        {
+            context_heads = outs[0];
+        }
+
+        int32_t perm_heads_back[] = {0, 2, 1, 3};
+        uint32_t context_perm = g.contiguous(g.permute(context_heads, g.constant({4}, perm_heads_back, DType::INT32)));
+
+        int32_t final_context_shape[] = {1, (int32_t)seq_len, (int32_t)value_dim};
+
+        // 6. Gated RMSNorm and Final Output Projection
+        // Reshape context and z to head-wise format: [1, seq_len * linear_n_v_heads, linear_head_dim]
+        int32_t head_format_shape[] = {1, (int32_t)(seq_len * cfg.linear_n_v_heads), (int32_t)cfg.linear_head_dim};
+        uint32_t head_format_shape_node = g.constant({3}, head_format_shape, DType::INT32);
+
+        uint32_t context_flat = g.reshape(context_perm, head_format_shape_node);
+        uint32_t z_flat = g.reshape(z, head_format_shape_node);
+
+        // Apply Gated RMSNorm on the head-wise format
+        uint32_t norm_flat = gated_rms_norm(context_flat, z_flat, prefix + ".linear_attn.norm.weight", cfg.linear_head_dim, seq_len * cfg.linear_n_v_heads);
+
+        // Reshape back to value_dim [1, seq_len, value_dim]
+        uint32_t output = g.reshape(norm_flat, g.constant({3}, final_context_shape, DType::INT32));
+
+        return project_tensor(output, ".linear_attn.out_proj.weight", value_dim, cfg.emb_dim);
     }
 
     // --- MIXTURE OF EXPERTS (MOE) MLP LAYER ---
@@ -432,14 +779,117 @@ public:
         int32_t perm_dims[] = {1, 0};
         uint32_t p_node = g.constant({2}, perm_dims, DType::INT32);
 
-        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
+        auto project_tensor = [&](uint32_t input_tensor, const std::string &suffix, uint32_t in_d, uint32_t out_d)
         {
             uint32_t w = weight(w_path, prefix + suffix);
             uint32_t w_t = g.permute(w, p_node);
             w_t = g.contiguous(w_t);
             int32_t s3[] = {1, (int32_t)in_d, (int32_t)out_d};
-            return g.dot(x, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
+            return g.dot(input_tensor, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
         };
+
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
+        {
+            return project_tensor(x, suffix, in_d, out_d);
+        };
+
+        float zero_val = 0.0f;
+        uint32_t routed_out = expand_scalar_to_3d(g.constant({1}, &zero_val, DType::FLOAT32), 1, seq_len, cfg.emb_dim);
+
+        // Detect if the model uses the fused expert layout
+        bool has_fused_experts = FileRegistry::get().hasTensor(w_path, prefix + ".mlp.experts.gate_up_proj");
+
+        if (has_fused_experts)
+        {
+            // Load the full fused tensors from the safetensors file
+            uint32_t fused_gate_up = weight(w_path, prefix + ".mlp.experts.gate_up_proj");
+            uint32_t fused_down = weight(w_path, prefix + ".mlp.experts.down_proj");
+
+            uint32_t expert_inter_dim = cfg.shared_expert_dim;
+            {
+                auto meta = FileRegistry::get().getMetadata(w_path, prefix + ".mlp.experts.gate_up_proj");
+                // gate_up_proj shape: [num_experts, 2 * ffn_dim, hidden_size]
+                expert_inter_dim = meta.shape[1] / 2;
+            }
+
+            // Project input to router logits and get probabilities
+            uint32_t router_logits = project(".mlp.gate.weight", cfg.emb_dim, cfg.n_experts);
+            uint32_t router_probs = softmax(router_logits, cfg.n_experts);
+
+            int32_t steps_3d[] = {1, 1, 1};
+            int32_t steps_2d[] = {1, 1};
+
+            for (uint32_t exp_idx = 0; exp_idx < cfg.n_experts; ++exp_idx)
+            {
+                // 1. Slice and extract gate_up_proj for the current expert
+                int32_t starts_gate_up[] = {(int32_t)exp_idx, 0, 0};
+                int32_t ends_gate_up[] = {(int32_t)(exp_idx + 1), (int32_t)(expert_inter_dim * 2), (int32_t)cfg.emb_dim};
+                uint32_t exp_gate_up_fused = g.slice(fused_gate_up,
+                                                     g.constant({3}, starts_gate_up, DType::INT32),
+                                                     g.constant({3}, ends_gate_up, DType::INT32),
+                                                     g.constant({3}, steps_3d, DType::INT32));
+
+                // Reshape from 3D [1, 2*I, H] to 2D [2*I, H]
+                int32_t shape_gate_up_2d[] = {(int32_t)(expert_inter_dim * 2), (int32_t)cfg.emb_dim};
+                uint32_t exp_gate_up_fused_2d = g.reshape(exp_gate_up_fused, g.constant({2}, shape_gate_up_2d, DType::INT32));
+
+                // Slice 2D tensor into individual gate_proj and up_proj weights
+                int32_t starts_gate[] = {0, 0};
+                int32_t ends_gate[] = {(int32_t)expert_inter_dim, (int32_t)cfg.emb_dim};
+                uint32_t exp_gate_weight = g.slice(exp_gate_up_fused_2d,
+                                                   g.constant({2}, starts_gate, DType::INT32),
+                                                   g.constant({2}, ends_gate, DType::INT32),
+                                                   g.constant({2}, steps_2d, DType::INT32));
+
+                int32_t starts_up[] = {(int32_t)expert_inter_dim, 0};
+                int32_t ends_up[] = {(int32_t)(expert_inter_dim * 2), (int32_t)cfg.emb_dim};
+                uint32_t exp_up_weight = g.slice(exp_gate_up_fused_2d,
+                                                 g.constant({2}, starts_up, DType::INT32),
+                                                 g.constant({2}, ends_up, DType::INT32),
+                                                 g.constant({2}, steps_2d, DType::INT32));
+
+                // 2. Project input x using the sliced weights
+                int32_t perm_w[] = {1, 0};
+                uint32_t exp_gate_weight_t = g.contiguous(g.permute(exp_gate_weight, g.constant({2}, perm_w, DType::INT32)));
+                uint32_t exp_up_weight_t = g.contiguous(g.permute(exp_up_weight, g.constant({2}, perm_w, DType::INT32)));
+
+                int32_t sh3_proj[] = {1, (int32_t)cfg.emb_dim, (int32_t)expert_inter_dim};
+                uint32_t exp_gate = g.dot(x, g.reshape(exp_gate_weight_t, g.constant({3}, sh3_proj, DType::INT32)));
+                uint32_t exp_up = g.dot(x, g.reshape(exp_up_weight_t, g.constant({3}, sh3_proj, DType::INT32)));
+
+                uint32_t exp_gate_silu = silu_atomic(exp_gate, expert_inter_dim);
+                uint32_t exp_gate_up = g.mul(exp_gate_silu, exp_up);
+
+                // 3. Slice and extract down_proj weight for the current expert
+                int32_t starts_down[] = {(int32_t)exp_idx, 0, 0};
+                int32_t ends_down[] = {(int32_t)(exp_idx + 1), (int32_t)cfg.emb_dim, (int32_t)expert_inter_dim};
+                uint32_t exp_down_fused = g.slice(fused_down,
+                                                  g.constant({3}, starts_down, DType::INT32),
+                                                  g.constant({3}, ends_down, DType::INT32),
+                                                  g.constant({3}, steps_3d, DType::INT32));
+
+                // Reshape from 3D [1, H, I] to 2D [H, I]
+                int32_t shape_down_2d[] = {(int32_t)cfg.emb_dim, (int32_t)expert_inter_dim};
+                uint32_t exp_down_weight = g.reshape(exp_down_fused, g.constant({2}, shape_down_2d, DType::INT32));
+                uint32_t exp_down_weight_t = g.contiguous(g.permute(exp_down_weight, g.constant({2}, perm_w, DType::INT32)));
+
+                int32_t sh3_down[] = {1, (int32_t)expert_inter_dim, (int32_t)cfg.emb_dim};
+                uint32_t exp_down = g.dot(exp_gate_up, g.reshape(exp_down_weight_t, g.constant({3}, sh3_down, DType::INT32)));
+
+                // 4. Weight by routing probability
+                int32_t starts_prob[] = {0, 0, (int32_t)exp_idx};
+                int32_t ends_prob[] = {1, (int32_t)seq_len, (int32_t)(exp_idx + 1)};
+                uint32_t exp_prob = g.slice(router_probs,
+                                            g.constant({3}, starts_prob, DType::INT32),
+                                            g.constant({3}, ends_prob, DType::INT32),
+                                            g.constant({3}, steps_3d, DType::INT32));
+
+                uint32_t exp_prob_exp = repeat_3d_axis(exp_prob, cfg.emb_dim, 2);
+                uint32_t scaled_exp_out = g.mul(exp_down, exp_prob_exp);
+
+                routed_out = g.add(routed_out, scaled_exp_out);
+            }
+        }
 
         // Shared Expert Component
         uint32_t shared_gate = project(".mlp.shared_expert.gate_proj.weight", cfg.emb_dim, cfg.shared_expert_dim);
@@ -467,10 +917,9 @@ public:
         uint32_t seg_sigmoid = g.div(one_node, den);
 
         uint32_t seg_expanded = repeat_3d_axis(seg_sigmoid, cfg.emb_dim, 2);
-        shared_out = g.mul(shared_out, seg_expanded);
+        uint32_t shared_out_gated = g.mul(shared_out, seg_expanded);
 
-        // Sparse Experts Routing Component Fallback Connectivity
-        return shared_out;
+        return g.add(routed_out, shared_out_gated);
     }
 
     uint32_t build_graph(uint32_t input_ids_id)

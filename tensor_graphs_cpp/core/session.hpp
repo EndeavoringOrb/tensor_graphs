@@ -361,12 +361,6 @@ struct Session
             }
         }
 
-        std::cout << "protectedCachedNodes" << std::endl;
-        for (const auto &pair : protectedCachedNodes)
-        {
-            std::cout << pair.first << ": " << pair.second << std::endl;
-        }
-
         std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size() << " protected eclasses..." << std::endl;
         for (size_t i = 0; i < manualBuckets.size(); ++i)
         {
