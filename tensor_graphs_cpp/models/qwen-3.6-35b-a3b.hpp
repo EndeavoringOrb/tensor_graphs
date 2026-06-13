@@ -396,17 +396,8 @@ public:
             return g.dot(x, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
         };
 
-        uint32_t projection_size_qkvz = cfg.linear_n_qk_heads * cfg.linear_head_dim * 2 + cfg.linear_n_v_heads * cfg.linear_head_dim * 2;
-        uint32_t projection_size_ba = cfg.linear_n_v_heads * 2;
-
-        uint32_t qkvz = project(".linear_attn.in_proj_qkvz.weight", cfg.emb_dim, projection_size_qkvz);
-        // uint32_t ba = project(".linear_attn.in_proj_ba.weight", cfg.emb_dim, projection_size_ba);
-
-        // Pass-through connection slice representing Z
-        int32_t s_z[] = {0, 0, 0};
-        int32_t e_z[] = {1, (int32_t)seq_len, (int32_t)(cfg.linear_n_v_heads * cfg.linear_head_dim)};
-        int32_t steps[] = {1, 1, 1};
-        uint32_t z = g.slice(qkvz, g.constant({3}, s_z, DType::INT32), g.constant({3}, e_z, DType::INT32), g.constant({3}, steps, DType::INT32));
+        uint32_t projection_size_z = cfg.linear_n_v_heads * cfg.linear_head_dim;
+        uint32_t z = project(".linear_attn.in_proj_z.weight", cfg.emb_dim, projection_size_z);
 
         uint32_t w_o = weight(w_path, prefix + ".linear_attn.out_proj.weight");
         uint32_t w_o_t = g.permute(w_o, dims_node);
