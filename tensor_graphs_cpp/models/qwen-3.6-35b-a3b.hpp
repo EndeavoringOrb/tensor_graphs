@@ -28,8 +28,7 @@ struct Qwen3_6_35B_A3B_Config
     // Mixture Of Experts (MoE)
     uint32_t n_experts = 256;
     uint32_t n_active_experts = 8;
-    uint32_t expert_intermediate_dim = 512;
-    uint32_t shared_expert_dim = 2048;
+    uint32_t shared_expert_dim = 512;
 
     uint32_t query_pre_attn_scalar = 256;
 };
