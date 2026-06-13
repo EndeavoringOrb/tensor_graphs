@@ -303,12 +303,30 @@ public:
         if (cfg.attn_n_q_heads != cfg.attn_n_kv_heads)
         {
             uint32_t repeats = cfg.attn_n_q_heads / cfg.attn_n_kv_heads;
+
+            // 1. Reshape [n_kv_heads, seq_len, head_dim] -> [n_kv_heads, 1, seq_len, head_dim]
+            int32_t sh4[] = {(int32_t)cfg.attn_n_kv_heads, 1, (int32_t)seq_len, (int32_t)cfg.attn_head_dim};
+            uint32_t sh4_node = g.constant({4}, sh4, DType::INT32);
+            k = g.reshape(k, sh4_node);
+            v = g.reshape(v, sh4_node);
+
+            // 2. Repeat the newly inserted axis (axis 1) of size 1 by 'repeats'
             int32_t rep[] = {(int32_t)repeats};
             uint32_t rep_node = g.constant({1}, rep, DType::INT32);
-            int32_t ax[] = {0};
+            int32_t ax[] = {1};
             uint32_t ax_node = g.constant({1}, ax, DType::INT32);
             k = g.repeat(k, rep_node, ax_node);
             v = g.repeat(v, rep_node, ax_node);
+
+            // 3. Materialize the zero-stride view into contiguous memory
+            k = g.contiguous(k);
+            v = g.contiguous(v);
+
+            // 4. Reshape back to 3D: [n_q_heads, seq_len, head_dim]
+            int32_t sh3[] = {(int32_t)cfg.attn_n_q_heads, (int32_t)seq_len, (int32_t)cfg.attn_head_dim};
+            uint32_t sh3_node = g.constant({3}, sh3, DType::INT32);
+            k = g.reshape(k, sh3_node);
+            v = g.reshape(v, sh3_node);
         }
         return std::make_tuple(g.contiguous(q), g.contiguous(k), g.contiguous(v), gate);
     }
