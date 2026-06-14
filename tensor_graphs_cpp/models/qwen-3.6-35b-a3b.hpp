@@ -796,99 +796,93 @@ public:
         float zero_val = 0.0f;
         uint32_t routed_out = expand_scalar_to_3d(g.constant({1}, &zero_val, DType::FLOAT32), 1, seq_len, cfg.emb_dim);
 
-        // Detect if the model uses the fused expert layout
-        bool has_fused_experts = FileRegistry::get().hasTensor(w_path, prefix + ".mlp.experts.gate_up_proj");
+        // Load the full fused tensors from the safetensors file
+        uint32_t fused_gate_up = weight(w_path, prefix + ".mlp.experts.gate_up_proj");
+        uint32_t fused_down = weight(w_path, prefix + ".mlp.experts.down_proj");
 
-        if (has_fused_experts)
+        uint32_t expert_inter_dim = cfg.shared_expert_dim;
         {
-            // Load the full fused tensors from the safetensors file
-            uint32_t fused_gate_up = weight(w_path, prefix + ".mlp.experts.gate_up_proj");
-            uint32_t fused_down = weight(w_path, prefix + ".mlp.experts.down_proj");
+            auto meta = FileRegistry::get().getMetadata(w_path, prefix + ".mlp.experts.gate_up_proj");
+            // gate_up_proj shape: [num_experts, 2 * ffn_dim, hidden_size]
+            expert_inter_dim = meta.shape[1] / 2;
+        }
 
-            uint32_t expert_inter_dim = cfg.shared_expert_dim;
-            {
-                auto meta = FileRegistry::get().getMetadata(w_path, prefix + ".mlp.experts.gate_up_proj");
-                // gate_up_proj shape: [num_experts, 2 * ffn_dim, hidden_size]
-                expert_inter_dim = meta.shape[1] / 2;
-            }
+        // Project input to router logits and get probabilities
+        uint32_t router_logits = project(".mlp.gate.weight", cfg.emb_dim, cfg.n_experts);
+        uint32_t router_probs = softmax(router_logits, cfg.n_experts);
 
-            // Project input to router logits and get probabilities
-            uint32_t router_logits = project(".mlp.gate.weight", cfg.emb_dim, cfg.n_experts);
-            uint32_t router_probs = softmax(router_logits, cfg.n_experts);
+        int32_t steps_3d[] = {1, 1, 1};
+        int32_t steps_2d[] = {1, 1};
 
-            int32_t steps_3d[] = {1, 1, 1};
-            int32_t steps_2d[] = {1, 1};
+        for (uint32_t exp_idx = 0; exp_idx < cfg.n_experts; ++exp_idx)
+        {
+            // 1. Slice and extract gate_up_proj for the current expert
+            int32_t starts_gate_up[] = {(int32_t)exp_idx, 0, 0};
+            int32_t ends_gate_up[] = {(int32_t)(exp_idx + 1), (int32_t)(expert_inter_dim * 2), (int32_t)cfg.emb_dim};
+            uint32_t exp_gate_up_fused = g.slice(fused_gate_up,
+                                                 g.constant({3}, starts_gate_up, DType::INT32),
+                                                 g.constant({3}, ends_gate_up, DType::INT32),
+                                                 g.constant({3}, steps_3d, DType::INT32));
 
-            for (uint32_t exp_idx = 0; exp_idx < cfg.n_experts; ++exp_idx)
-            {
-                // 1. Slice and extract gate_up_proj for the current expert
-                int32_t starts_gate_up[] = {(int32_t)exp_idx, 0, 0};
-                int32_t ends_gate_up[] = {(int32_t)(exp_idx + 1), (int32_t)(expert_inter_dim * 2), (int32_t)cfg.emb_dim};
-                uint32_t exp_gate_up_fused = g.slice(fused_gate_up,
-                                                     g.constant({3}, starts_gate_up, DType::INT32),
-                                                     g.constant({3}, ends_gate_up, DType::INT32),
-                                                     g.constant({3}, steps_3d, DType::INT32));
+            // Reshape from 3D [1, 2*I, H] to 2D [2*I, H]
+            int32_t shape_gate_up_2d[] = {(int32_t)(expert_inter_dim * 2), (int32_t)cfg.emb_dim};
+            uint32_t exp_gate_up_fused_2d = g.reshape(exp_gate_up_fused, g.constant({2}, shape_gate_up_2d, DType::INT32));
 
-                // Reshape from 3D [1, 2*I, H] to 2D [2*I, H]
-                int32_t shape_gate_up_2d[] = {(int32_t)(expert_inter_dim * 2), (int32_t)cfg.emb_dim};
-                uint32_t exp_gate_up_fused_2d = g.reshape(exp_gate_up_fused, g.constant({2}, shape_gate_up_2d, DType::INT32));
+            // Slice 2D tensor into individual gate_proj and up_proj weights
+            int32_t starts_gate[] = {0, 0};
+            int32_t ends_gate[] = {(int32_t)expert_inter_dim, (int32_t)cfg.emb_dim};
+            uint32_t exp_gate_weight = g.slice(exp_gate_up_fused_2d,
+                                               g.constant({2}, starts_gate, DType::INT32),
+                                               g.constant({2}, ends_gate, DType::INT32),
+                                               g.constant({2}, steps_2d, DType::INT32));
 
-                // Slice 2D tensor into individual gate_proj and up_proj weights
-                int32_t starts_gate[] = {0, 0};
-                int32_t ends_gate[] = {(int32_t)expert_inter_dim, (int32_t)cfg.emb_dim};
-                uint32_t exp_gate_weight = g.slice(exp_gate_up_fused_2d,
-                                                   g.constant({2}, starts_gate, DType::INT32),
-                                                   g.constant({2}, ends_gate, DType::INT32),
-                                                   g.constant({2}, steps_2d, DType::INT32));
+            int32_t starts_up[] = {(int32_t)expert_inter_dim, 0};
+            int32_t ends_up[] = {(int32_t)(expert_inter_dim * 2), (int32_t)cfg.emb_dim};
+            uint32_t exp_up_weight = g.slice(exp_gate_up_fused_2d,
+                                             g.constant({2}, starts_up, DType::INT32),
+                                             g.constant({2}, ends_up, DType::INT32),
+                                             g.constant({2}, steps_2d, DType::INT32));
 
-                int32_t starts_up[] = {(int32_t)expert_inter_dim, 0};
-                int32_t ends_up[] = {(int32_t)(expert_inter_dim * 2), (int32_t)cfg.emb_dim};
-                uint32_t exp_up_weight = g.slice(exp_gate_up_fused_2d,
-                                                 g.constant({2}, starts_up, DType::INT32),
-                                                 g.constant({2}, ends_up, DType::INT32),
-                                                 g.constant({2}, steps_2d, DType::INT32));
+            // 2. Project input x using the sliced weights
+            int32_t perm_w[] = {1, 0};
+            uint32_t exp_gate_weight_t = g.contiguous(g.permute(exp_gate_weight, g.constant({2}, perm_w, DType::INT32)));
+            uint32_t exp_up_weight_t = g.contiguous(g.permute(exp_up_weight, g.constant({2}, perm_w, DType::INT32)));
 
-                // 2. Project input x using the sliced weights
-                int32_t perm_w[] = {1, 0};
-                uint32_t exp_gate_weight_t = g.contiguous(g.permute(exp_gate_weight, g.constant({2}, perm_w, DType::INT32)));
-                uint32_t exp_up_weight_t = g.contiguous(g.permute(exp_up_weight, g.constant({2}, perm_w, DType::INT32)));
+            int32_t sh3_proj[] = {1, (int32_t)cfg.emb_dim, (int32_t)expert_inter_dim};
+            uint32_t exp_gate = g.dot(x, g.reshape(exp_gate_weight_t, g.constant({3}, sh3_proj, DType::INT32)));
+            uint32_t exp_up = g.dot(x, g.reshape(exp_up_weight_t, g.constant({3}, sh3_proj, DType::INT32)));
 
-                int32_t sh3_proj[] = {1, (int32_t)cfg.emb_dim, (int32_t)expert_inter_dim};
-                uint32_t exp_gate = g.dot(x, g.reshape(exp_gate_weight_t, g.constant({3}, sh3_proj, DType::INT32)));
-                uint32_t exp_up = g.dot(x, g.reshape(exp_up_weight_t, g.constant({3}, sh3_proj, DType::INT32)));
+            uint32_t exp_gate_silu = silu_atomic(exp_gate, expert_inter_dim);
+            uint32_t exp_gate_up = g.mul(exp_gate_silu, exp_up);
 
-                uint32_t exp_gate_silu = silu_atomic(exp_gate, expert_inter_dim);
-                uint32_t exp_gate_up = g.mul(exp_gate_silu, exp_up);
+            // 3. Slice and extract down_proj weight for the current expert
+            int32_t starts_down[] = {(int32_t)exp_idx, 0, 0};
+            int32_t ends_down[] = {(int32_t)(exp_idx + 1), (int32_t)cfg.emb_dim, (int32_t)expert_inter_dim};
+            uint32_t exp_down_fused = g.slice(fused_down,
+                                              g.constant({3}, starts_down, DType::INT32),
+                                              g.constant({3}, ends_down, DType::INT32),
+                                              g.constant({3}, steps_3d, DType::INT32));
 
-                // 3. Slice and extract down_proj weight for the current expert
-                int32_t starts_down[] = {(int32_t)exp_idx, 0, 0};
-                int32_t ends_down[] = {(int32_t)(exp_idx + 1), (int32_t)cfg.emb_dim, (int32_t)expert_inter_dim};
-                uint32_t exp_down_fused = g.slice(fused_down,
-                                                  g.constant({3}, starts_down, DType::INT32),
-                                                  g.constant({3}, ends_down, DType::INT32),
-                                                  g.constant({3}, steps_3d, DType::INT32));
+            // Reshape from 3D [1, H, I] to 2D [H, I]
+            int32_t shape_down_2d[] = {(int32_t)cfg.emb_dim, (int32_t)expert_inter_dim};
+            uint32_t exp_down_weight = g.reshape(exp_down_fused, g.constant({2}, shape_down_2d, DType::INT32));
+            uint32_t exp_down_weight_t = g.contiguous(g.permute(exp_down_weight, g.constant({2}, perm_w, DType::INT32)));
 
-                // Reshape from 3D [1, H, I] to 2D [H, I]
-                int32_t shape_down_2d[] = {(int32_t)cfg.emb_dim, (int32_t)expert_inter_dim};
-                uint32_t exp_down_weight = g.reshape(exp_down_fused, g.constant({2}, shape_down_2d, DType::INT32));
-                uint32_t exp_down_weight_t = g.contiguous(g.permute(exp_down_weight, g.constant({2}, perm_w, DType::INT32)));
+            int32_t sh3_down[] = {1, (int32_t)expert_inter_dim, (int32_t)cfg.emb_dim};
+            uint32_t exp_down = g.dot(exp_gate_up, g.reshape(exp_down_weight_t, g.constant({3}, sh3_down, DType::INT32)));
 
-                int32_t sh3_down[] = {1, (int32_t)expert_inter_dim, (int32_t)cfg.emb_dim};
-                uint32_t exp_down = g.dot(exp_gate_up, g.reshape(exp_down_weight_t, g.constant({3}, sh3_down, DType::INT32)));
+            // 4. Weight by routing probability
+            int32_t starts_prob[] = {0, 0, (int32_t)exp_idx};
+            int32_t ends_prob[] = {1, (int32_t)seq_len, (int32_t)(exp_idx + 1)};
+            uint32_t exp_prob = g.slice(router_probs,
+                                        g.constant({3}, starts_prob, DType::INT32),
+                                        g.constant({3}, ends_prob, DType::INT32),
+                                        g.constant({3}, steps_3d, DType::INT32));
 
-                // 4. Weight by routing probability
-                int32_t starts_prob[] = {0, 0, (int32_t)exp_idx};
-                int32_t ends_prob[] = {1, (int32_t)seq_len, (int32_t)(exp_idx + 1)};
-                uint32_t exp_prob = g.slice(router_probs,
-                                            g.constant({3}, starts_prob, DType::INT32),
-                                            g.constant({3}, ends_prob, DType::INT32),
-                                            g.constant({3}, steps_3d, DType::INT32));
+            uint32_t exp_prob_exp = repeat_3d_axis(exp_prob, cfg.emb_dim, 2);
+            uint32_t scaled_exp_out = g.mul(exp_down, exp_prob_exp);
 
-                uint32_t exp_prob_exp = repeat_3d_axis(exp_prob, cfg.emb_dim, 2);
-                uint32_t scaled_exp_out = g.mul(exp_down, exp_prob_exp);
-
-                routed_out = g.add(routed_out, scaled_exp_out);
-            }
+            routed_out = g.add(routed_out, scaled_exp_out);
         }
 
         // Shared Expert Component
