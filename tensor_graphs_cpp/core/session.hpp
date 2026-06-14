@@ -71,6 +71,7 @@ struct Session
 
     uint32_t fullBucketIdx;
     Repo *repo;
+    bool disableCaching = false;
 
     void ensureOutputDirectories() const
     {
@@ -154,8 +155,8 @@ struct Session
         manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
     }
 
-    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0, Repo *_repo = nullptr)
-        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes), repo(_repo)
+    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0, Repo *_repo = nullptr, bool _disableCaching = false)
+        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching)
     {
         ensureOutputDirectories();
         loadCache();
@@ -340,26 +341,29 @@ struct Session
 
         std::unordered_map<uint32_t, Backend> protectedCachedNodes;
 
-        for (size_t i = 0; i < manualBuckets.size(); ++i)
+        if (!disableCaching)
         {
-            const Bucket &bucket = manualBuckets[i];
-
-            CompiledGraph plan = planner.plan(
-                rootId, graph,
-                bucket,
-                protectedCachedNodes,
-                i == fullBucketIdx ? false : doSaturate,
-                false,
-                repo);
-
-            for (const auto &pair : plan.nodesMap)
+            for (size_t i = 0; i < manualBuckets.size(); ++i)
             {
-                if (pair.second.opType == OpType::CACHE)
+                const Bucket &bucket = manualBuckets[i];
+
+                CompiledGraph plan = planner.plan(
+                    rootId, graph,
+                    bucket,
+                    protectedCachedNodes,
+                    i == fullBucketIdx ? false : doSaturate,
+                    false,
+                    repo);
+
+                for (const auto &pair : plan.nodesMap)
                 {
-                    uint32_t logicalId = plan.getLogicalId(pair.first);
-                    if (logicalId != UINT32_MAX)
+                    if (pair.second.opType == OpType::CACHE)
                     {
-                        protectedCachedNodes[logicalId] = pair.second.backend;
+                        uint32_t logicalId = plan.getLogicalId(pair.first);
+                        if (logicalId != UINT32_MAX)
+                        {
+                            protectedCachedNodes[logicalId] = pair.second.backend;
+                        }
                     }
                 }
             }

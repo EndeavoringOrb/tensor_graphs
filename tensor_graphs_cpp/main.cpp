@@ -79,6 +79,7 @@ void run_autoregressive_llm(
     uint32_t max_seq_len,
     uint32_t num_tokens_to_generate,
     bool only_plan,
+    bool disable_caching,
     ModelGraphRoots (*builder)(Graph &, MemoryManager &))
 {
     std::vector<uint32_t> tokens = initial_tokens;
@@ -94,7 +95,7 @@ void run_autoregressive_llm(
     std::string gHash = computeGraphHash(g, roots.roots);
     Repo repo("benchmarks/repo_" + model_name, gHash, true);
 
-    Session session(g, mem, logits_id, cache_file, 0, &repo);
+    Session session(g, mem, logits_id, cache_file, 0, &repo, disable_caching);
 
     for (uint32_t i = tokens.size(); i < max_seq_len; ++i)
     {
@@ -157,7 +158,7 @@ void run_autoregressive_llm(
     }
 }
 
-void run_gemma(bool only_plan)
+void run_gemma(bool only_plan, bool disable_caching)
 {
     run_autoregressive_llm<Gemma3ModelConfig>(
         "gemma-3-270m",
@@ -167,10 +168,11 @@ void run_gemma(bool only_plan)
         8,
         6,
         only_plan,
+        disable_caching,
         build_gemma_graph);
 }
 
-void run_qwen_35b(bool only_plan)
+void run_qwen_35b(bool only_plan, bool disable_caching)
 {
     run_autoregressive_llm<Qwen3_6_35B_A3B_Config>(
         "qwen-3.6-35b-a3b",
@@ -180,10 +182,11 @@ void run_qwen_35b(bool only_plan)
         8,
         7,
         only_plan,
+        disable_caching,
         build_qwen_graph);
 }
 
-void run_flux(bool only_plan)
+void run_flux(bool only_plan, bool disable_caching)
 {
     FluxConfig cfg;
     auto bufferSizes = get_default_buffer_sizes();
@@ -204,13 +207,13 @@ void run_flux(bool only_plan)
     uint32_t in_sin = roots.inputs[5];
     uint32_t in_vae_latent = roots.inputs[6];
 
-    Session sess_text(g, mem, roots.roots[0], "dirty_region_caches/flux-text.bin", 0, &repo);
+    Session sess_text(g, mem, roots.roots[0], "dirty_region_caches/flux-text.bin", 0, &repo, disable_caching);
     sess_text.plan();
 
-    Session sess_trans(g, mem, roots.roots[1], "dirty_region_caches/flux-trans.bin", 0, &repo);
+    Session sess_trans(g, mem, roots.roots[1], "dirty_region_caches/flux-trans.bin", 0, &repo, disable_caching);
     sess_trans.plan();
 
-    Session sess_vae(g, mem, roots.roots[2], "dirty_region_caches/flux-vae.bin", 0, &repo);
+    Session sess_vae(g, mem, roots.roots[2], "dirty_region_caches/flux-vae.bin", 0, &repo, disable_caching);
     sess_vae.plan();
 
     if (only_plan)
@@ -312,6 +315,7 @@ int main(int argc, char *argv[])
 
     std::string model = "flux-klein-4b";
     bool only_plan = false;
+    bool disable_caching = false;
 
     if (argc > 1)
     {
@@ -322,6 +326,10 @@ int main(int argc, char *argv[])
             {
                 only_plan = true;
             }
+            else if (arg == "--disable-caching")
+            {
+                disable_caching = true;
+            }
             else
             {
                 model = arg;
@@ -330,11 +338,11 @@ int main(int argc, char *argv[])
     }
 
     if (model == "gemma-3-270m")
-        run_gemma(only_plan);
+        run_gemma(only_plan, disable_caching);
     else if (model == "flux-klein-4b")
-        run_flux(only_plan);
+        run_flux(only_plan, disable_caching);
     else if (model == "qwen-3.6-35b-a3b")
-        run_qwen_35b(only_plan);
+        run_qwen_35b(only_plan, disable_caching);
     else
         std::cout << "Model not implemented yet: " << model << std::endl;
 
