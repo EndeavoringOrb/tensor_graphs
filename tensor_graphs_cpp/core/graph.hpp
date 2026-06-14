@@ -463,6 +463,66 @@ struct Graph
         TensorNode &node = allocateNode(OpType::ARGMAX, "", DType::INT32, {id0, dim_id, k_id}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
+
+    uint32_t lt(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    {
+        if (getNode(id0).dtype != getNode(id1).dtype)
+        {
+            std::stringstream ss;
+            ss << "[Graph.lt] DType mismatch: " << getNode(id0).dtype << ", " << getNode(id1).dtype;
+            Error::throw_err(ss.str());
+        }
+        TensorNode &node = allocateNode(OpType::LT, "", DType::BOOL, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
+        return node.id;
+    }
+
+    uint32_t eq(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    {
+        if (getNode(id0).dtype != getNode(id1).dtype)
+        {
+            std::stringstream ss;
+            ss << "[Graph.eq] DType mismatch: " << getNode(id0).dtype << ", " << getNode(id1).dtype;
+            Error::throw_err(ss.str());
+        }
+        TensorNode &node = allocateNode(OpType::EQ, "", DType::BOOL, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
+        return node.id;
+    }
+
+    uint32_t logical_and(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    {
+        if (getNode(id0).dtype != DType::BOOL || getNode(id1).dtype != DType::BOOL)
+        {
+            std::stringstream ss;
+            ss << "[Graph.logical_and] Inputs must be BOOL. Got " << getNode(id0).dtype << " and " << getNode(id1).dtype;
+            Error::throw_err(ss.str());
+        }
+        TensorNode &node = allocateNode(OpType::AND, "", DType::BOOL, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
+        return node.id;
+    }
+
+    uint32_t logical_or(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    {
+        if (getNode(id0).dtype != DType::BOOL || getNode(id1).dtype != DType::BOOL)
+        {
+            std::stringstream ss;
+            ss << "[Graph.logical_or] Inputs must be BOOL. Got " << getNode(id0).dtype << " and " << getNode(id1).dtype;
+            Error::throw_err(ss.str());
+        }
+        TensorNode &node = allocateNode(OpType::OR, "", DType::BOOL, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
+        return node.id;
+    }
+
+    uint32_t logical_not(uint32_t id0, std::source_location loc = std::source_location::current())
+    {
+        if (getNode(id0).dtype != DType::BOOL)
+        {
+            std::stringstream ss;
+            ss << "[Graph.logical_not] Input must be BOOL. Got " << getNode(id0).dtype;
+            Error::throw_err(ss.str());
+        }
+        TensorNode &node = allocateNode(OpType::NOT, "", DType::BOOL, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
+        return node.id;
+    }
 };
 
 inline std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)

@@ -33,6 +33,11 @@ OP_TYPES = [
     "SCATTER",
     "LOG",
     "ARGMAX",
+    "LT",
+    "EQ",
+    "AND",
+    "OR",
+    "NOT",
     "FUSED",
 ]
 

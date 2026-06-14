@@ -445,6 +445,10 @@ struct ShapePropagator
         case OpType::MUL:
         case OpType::DIVIDE:
         case OpType::POWER:
+        case OpType::LT:
+        case OpType::EQ:
+        case OpType::AND:
+        case OpType::OR:
         {
             auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape();
             auto s1 = graph.getNode(graph.getNode(nodeId).parentIds[1]).getShape();
@@ -508,6 +512,7 @@ struct ShapePropagator
         case OpType::CONTIGUOUS:
         case OpType::SCATTER:
         case OpType::LOG:
+        case OpType::NOT:
         {
             graph.getNode(nodeId).setShape(graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape());
             break;
@@ -1582,6 +1587,11 @@ struct ShapePropagator
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
         case OpType::LOG:
+        case OpType::LT:
+        case OpType::EQ:
+        case OpType::AND:
+        case OpType::OR:
+        case OpType::NOT:
             return forwardElementwise(node, graph, parentRegions);
         case OpType::TRIU:
         {
@@ -1677,6 +1687,11 @@ struct ShapePropagator
         case OpType::COPY_TO:
         case OpType::CONTIGUOUS:
         case OpType::LOG:
+        case OpType::LT:
+        case OpType::EQ:
+        case OpType::AND:
+        case OpType::OR:
+        case OpType::NOT:
             return backwardElementwise(node, outputRegions);
         case OpType::TRIU:
             return {mergeRegions(outputRegions), makeFull(graph.getNode(node.parentIds[1]).getShape())};

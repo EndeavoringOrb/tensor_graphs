@@ -127,6 +127,17 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
         pRoot = pGraph.sum(pInputs[0], pInputs[1]);
     else if (op == OpType::MAX)
         pRoot = pGraph.max(pInputs[0], pInputs[1]);
+    // TODO: argmax
+    else if (op == OpType::LT)
+        pRoot = pGraph.lt(pInputs[0], pInputs[1]);
+    else if (op == OpType::EQ)
+        pRoot = pGraph.eq(pInputs[0], pInputs[1]);
+    else if (op == OpType::AND)
+        pRoot = pGraph.logical_and(pInputs[0], pInputs[1]);
+    else if (op == OpType::OR)
+        pRoot = pGraph.logical_or(pInputs[0], pInputs[1]);
+    else if (op == OpType::NOT)
+        pRoot = pGraph.logical_not(pInputs[0]);
 
     if (pRoot != UINT32_MAX)
     {
@@ -987,7 +998,8 @@ struct SlicePushDownElementwise : public Rule
                     const ENode &opNode = egraph.getENodes()[srcNodeIdx];
                     OpType op = opNode.opType;
                     if (!(op == OpType::ADD || op == OpType::MUL || op == OpType::DIVIDE || op == OpType::POWER ||
-                          op == OpType::SIN || op == OpType::COS || op == OpType::NEGATE || op == OpType::CAST))
+                          op == OpType::SIN || op == OpType::COS || op == OpType::NEGATE || op == OpType::CAST ||
+                          op == OpType::LT || op == OpType::EQ || op == OpType::AND || op == OpType::OR || op == OpType::NOT))
                         continue;
 
                     bool hasBroadcastChild = false;
@@ -1055,7 +1067,8 @@ struct SlicePushDownElementwise : public Rule
                 const ENode opNode = egraph.getENodes()[srcNodeIdx];
                 OpType op = opNode.opType;
                 if (!(op == OpType::ADD || op == OpType::MUL || op == OpType::DIVIDE || op == OpType::POWER ||
-                      op == OpType::SIN || op == OpType::COS || op == OpType::NEGATE || op == OpType::CAST))
+                      op == OpType::SIN || op == OpType::COS || op == OpType::NEGATE || op == OpType::CAST ||
+                      op == OpType::LT || op == OpType::EQ || op == OpType::AND || op == OpType::OR || op == OpType::NOT))
                 {
                     continue;
                 }

@@ -152,6 +152,11 @@ enum class OpType : uint32_t
     SCATTER,
     LOG,
     ARGMAX,
+    LT,
+    EQ,
+    AND,
+    OR,
+    NOT,
 
     FUSED
 };
@@ -559,6 +564,16 @@ inline std::string toString(OpType op) // TODO: make build.py check that each op
         return "LOG";
     case OpType::ARGMAX:
         return "ARGMAX";
+    case OpType::LT:
+        return "LT";
+    case OpType::EQ:
+        return "EQ";
+    case OpType::AND:
+        return "AND";
+    case OpType::OR:
+        return "OR";
+    case OpType::NOT:
+        return "NOT";
     case OpType::FUSED:
         return "FUSED";
     default:
