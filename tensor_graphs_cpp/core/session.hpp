@@ -352,13 +352,13 @@ struct Session
                 false,
                 repo);
 
-            for (const auto &pair : plan.nodesMap)
-            {
-                if (pair.second.opType == OpType::CACHE)
-                {
-                    protectedCachedNodes[plan.physicalToLogicalNodeMap.at(pair.first)] = pair.second.backend;
-                }
-            }
+            // for (const auto &pair : plan.nodesMap)
+            // {
+            //     if (pair.second.opType == OpType::CACHE)
+            //     {
+            //         protectedCachedNodes[plan.physicalToLogicalNodeMap.at(pair.first)] = pair.second.backend;
+            //     }
+            // }
         }
 
         std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size() << " protected eclasses..." << std::endl;

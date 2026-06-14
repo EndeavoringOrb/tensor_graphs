@@ -96,7 +96,7 @@ private:
         std::ofstream out(path, std::ios::binary);
         if (!out)
         {
-            std::cerr << "[Planner] Failed to open " << path << " for writing." << std::endl;
+            std::cerr << "[Planner.dumpEGraphBinary] Failed to open " << path << " for writing." << std::endl;
             return;
         }
 
@@ -179,7 +179,7 @@ private:
         }
 
         out.close();
-        std::cout << "[Planner] Dumped EGraph to " << path << std::endl;
+        std::cout << "[Planner.dumpEGraphBinary] Dumped EGraph to " << path << std::endl;
     }
 
     struct ENodeInfo
@@ -262,7 +262,7 @@ private:
         {
             if (InterruptManager::isInterrupted())
             {
-                std::cerr << "\n[Planner] Interrupt detected, aborting execution..." << std::endl;
+                std::cerr << "\n[Planner.saturate] Interrupt detected, aborting execution..." << std::endl;
                 InterruptManager::cleanup();
                 std::exit(SIGINT);
             }
@@ -317,6 +317,70 @@ private:
         return ref;
     }
 
+    // --- Extracted Helper: Compute Static Memory Baseline ---
+    std::unordered_map<Backend, uint64_t> computeStaticBaseline(
+        const Graph &graph,
+        const std::unordered_map<uint32_t, Backend> &cachedNodes) const
+    {
+        auto getAlignedSize = [](uint64_t size) -> uint64_t
+        {
+            return (size + 63) & ~63ULL;
+        };
+
+        std::unordered_map<Backend, uint64_t> baseline;
+
+        // 1. Account for all persistent nodes in the logical graph (weights, persistent inputs)
+        for (const auto &pair : graph.nodes)
+        {
+            const TensorNode &node = pair.second;
+            if (node.storageType == StorageType::PERSISTENT)
+            {
+                if (node.backend != Backend::STORAGE)
+                {
+                    uint64_t size = getAlignedSize(countElements(node.getShape()) * getDTypeSize(node.dtype));
+                    baseline[node.backend] += size;
+                }
+            }
+        }
+
+        // 2. Account for all pinned nodes in cachedNodes (protectedCachedNodes)
+        for (const auto &kv : cachedNodes)
+        {
+            uint32_t logicalId = kv.first;
+            Backend b = kv.second;
+            if (graph.hasNode(logicalId))
+            {
+                const TensorNode &node = graph.getNode(logicalId);
+                if (node.storageType != StorageType::PERSISTENT) // Avoid double counting
+                {
+                    uint64_t size = getAlignedSize(countElements(node.getShape()) * getDTypeSize(node.dtype));
+                    baseline[b] += size;
+                }
+            }
+        }
+
+        return baseline;
+    }
+
+    // --- Extracted Helper: Validate Static Memory Baseline ---
+    void validateStaticBaseline(const std::unordered_map<Backend, uint64_t> &baseline) const
+    {
+        for (const auto &kv : baseline)
+        {
+            auto limitIt = maxMemoryByBackend.find(kv.first);
+            if (limitIt != maxMemoryByBackend.end() && kv.second > limitIt->second)
+            {
+                std::stringstream ss;
+                ss << "[Static Memory Limit Exceeded] Static baseline memory of " << kv.second
+                   << " bytes on backend " << toString(kv.first)
+                   << " exceeds the memory limit of " << limitIt->second << " bytes. "
+                   << "This is likely because too many intermediate nodes are being protected/pinned "
+                   << "across scheduled buckets, exhausting the hardware limits.";
+                Error::throw_err(ss.str());
+            }
+        }
+    }
+
     std::unordered_map<Backend, uint64_t> computePeakMemory(
         const EGraph &egraph,
         const std::unordered_map<uint32_t, uint32_t> &selection_map,
@@ -327,10 +391,41 @@ private:
         const Graph &graph) const
     {
         auto ref = build_ref_counts(egraph, selection_map, root);
-        std::unordered_map<Backend, uint64_t> live_mem;
-        std::unordered_map<Backend, uint64_t> peak_mem;
+
+        // Initialize simulation memory with the calculated static baseline
+        std::unordered_map<Backend, uint64_t> live_mem = computeStaticBaseline(graph, cachedNodes);
+
         std::unordered_set<uint32_t> visited;
         std::unordered_map<uint32_t, uint32_t> sim_aliasMap;
+
+        // Alignment helper matching the allocator's 64-byte block boundary logic
+        auto getAlignedSize = [](uint64_t size) -> uint64_t
+        {
+            return (size + 63) & ~63ULL;
+        };
+
+        // Add selected eclasses that contain constant staging
+        for (const auto &kv : selection_map)
+        {
+            uint32_t eclassId = kv.first;
+            uint32_t canon = egraph.findConst(eclassId);
+            if (egraph.constantStaging.count(canon))
+            {
+                uint32_t logicalId = eclassToLogical.count(canon) ? eclassToLogical.at(canon) : UINT32_MAX;
+                if (logicalId == UINT32_MAX || !graph.hasNode(logicalId) || graph.getNode(logicalId).storageType != StorageType::PERSISTENT)
+                {
+                    const EClass &cls = egraph.getEClass(canon);
+                    if (cls.backend != Backend::STORAGE)
+                    {
+                        uint64_t size = getAlignedSize(countElements(cls.shape) * getDTypeSize(cls.dtype));
+                        live_mem[cls.backend] += size;
+                    }
+                }
+            }
+        }
+
+        // Start peak memory tracking from the calculated permanent memory baseline
+        std::unordered_map<Backend, uint64_t> peak_mem = live_mem;
 
         auto isPersistent = [&](uint32_t eclass_id) -> bool
         {
@@ -365,6 +460,7 @@ private:
             bool childIsCached = (logicalId != UINT32_MAX && cachedNodes.count(logicalId));
             bool childPersistent = isPersistent(id);
 
+            // Only release transient nodes; permanent/pinned nodes stay allocated
             if (!childIsCached && !childPersistent)
             {
                 auto selIt = selection_map.find(id);
@@ -378,7 +474,7 @@ private:
                     {
                         for (const auto &kv : info.memSizes)
                         {
-                            live_mem[kv.first] -= kv.second;
+                            live_mem[kv.first] -= getAlignedSize(kv.second);
                         }
                     }
                 }
@@ -404,12 +500,15 @@ private:
 
             uint32_t logicalId = eclassToLogical.count(eclass) ? eclassToLogical.at(eclass) : UINT32_MAX;
             bool isCached = (logicalId != UINT32_MAX && cachedNodes.count(logicalId));
+            bool is_perm = isCached || isPersistent(eclass);
 
-            if (!info.inplace && !info.isView && !isCached)
+            // Dynamically allocate only non-persistent, non-cached transient nodes
+            if (!info.inplace && !info.isView && !is_perm)
             {
                 for (const auto &kv : info.memSizes)
                 {
-                    live_mem[kv.first] += kv.second;
+                    uint64_t size = getAlignedSize(kv.second);
+                    live_mem[kv.first] += size;
                     peak_mem[kv.first] = std::max(peak_mem[kv.first], live_mem[kv.first]);
                 }
             }
@@ -442,7 +541,7 @@ private:
         return peak_mem;
     }
 
-    std::vector<uint32_t> getEClassTopoOrder(const EGraph &egraph, const std::unordered_map<uint32_t, uint32_t> &selectionMap, uint32_t rootEClassId)
+    std::vector<uint32_t> getEClassTopoOrder(const EGraph &egraph, const std::unordered_map<uint32_t, uint32_t> &selectionMap, uint32_t rootEClassId) const
     {
         std::vector<uint32_t> topo;
         std::unordered_set<uint32_t> visited_classes;
@@ -465,6 +564,89 @@ private:
 
         visit(rootEClassId);
         return topo;
+    }
+
+    bool validateInplaceSchedules(
+        const EGraph &egraph,
+        const std::unordered_map<uint32_t, uint32_t> &selection_map,
+        const std::vector<ENodeInfo> &enodeInfos,
+        uint32_t rootEClassId,
+        const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
+        std::string &outReason,
+        uint32_t &conflictEClass1,
+        uint32_t &conflictEClass2) const
+    {
+        std::vector<uint32_t> topo = getEClassTopoOrder(egraph, selection_map, rootEClassId);
+        std::unordered_map<uint32_t, uint32_t> overwritten;         // overwritten child_root -> eclass
+        std::unordered_map<uint32_t, uint32_t> overwritten_logical; // overwritten logicalId -> eclass
+        std::unordered_map<uint32_t, uint32_t> mem_root;            // eclass -> root eclass
+
+        for (size_t i = 0; i < topo.size(); i++)
+        {
+            auto choiceIt = selection_map.find(topo[i]);
+            if (choiceIt == selection_map.end())
+            {
+                Error::throw_err("[Planner.validateInplaceSchedules] Selection not found for active eclass");
+            }
+
+            const uint32_t eclass = topo[i];
+            const uint32_t enodeId = egraph.getEClass(eclass).enodes[choiceIt->second];
+            const ENode &enode = egraph.getENodes()[enodeId];
+            const ENodeInfo &info = enodeInfos[enodeId];
+
+            if (info.isView && !enode.children.empty())
+            {
+                uint32_t child_eclass = egraph.findConst(enode.children[0]);
+                mem_root[eclass] = mem_root.count(child_eclass) ? mem_root[child_eclass] : child_eclass;
+            }
+            else
+            {
+                mem_root[eclass] = eclass;
+            }
+
+            for (size_t j = 0; j < enode.children.size(); j++)
+            {
+                uint32_t child_eclass = egraph.findConst(enode.children[j]);
+                uint32_t child_root = mem_root.count(child_eclass) ? mem_root[child_eclass] : child_eclass;
+
+                if (overwritten.count(child_root))
+                {
+                    outReason = "inplace " + std::to_string(child_root);
+                    conflictEClass1 = overwritten[child_root];
+                    conflictEClass2 = eclass;
+                    return false;
+                }
+
+                uint32_t logicalId = eclassToLogical.count(child_root) ? eclassToLogical.at(child_root) : UINT32_MAX;
+                if (logicalId != UINT32_MAX && overwritten_logical.count(logicalId))
+                {
+                    // Only conflict if we're reading an old/different version of the logical node,
+                    // not the eclass that actually performed the inplace update.
+                    if (overwritten_logical[logicalId] != child_root)
+                    {
+                        outReason = "inplace_logical " + std::to_string(logicalId);
+                        conflictEClass1 = overwritten_logical[logicalId];
+                        conflictEClass2 = eclass;
+                        return false;
+                    }
+                }
+            }
+
+            if (info.inplace)
+            {
+                uint32_t inplace_child = egraph.findConst(enode.children[info.inplace_idx]);
+                uint32_t child_root = mem_root.count(inplace_child) ? mem_root[inplace_child] : inplace_child;
+                overwritten[child_root] = eclass;
+
+                uint32_t logicalId = eclassToLogical.count(child_root) ? eclassToLogical.at(child_root) : UINT32_MAX;
+                if (logicalId != UINT32_MAX)
+                {
+                    overwritten_logical[logicalId] = eclass;
+                }
+            }
+        }
+
+        return true;
     }
 
     ExtractionResult extractBest(const uint32_t rootId, const Graph &graph, EGraph &egraph,
@@ -1120,11 +1302,13 @@ private:
 
         float best_cost = INF;
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
+        std::unordered_map<Backend, uint64_t> minPeakMemSeen;
 
         int max_iters = 100000;
+        int remaining_iters = max_iters;
         ProgressTimer timer(max_iters, "extracting graphs ");
 
-        while (max_iters-- > 0)
+        while (remaining_iters-- > 0)
         {
             timer.tick();
             bool valid = true;
@@ -1262,6 +1446,28 @@ private:
                 peak = computePeakMemory(
                     egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical, graph);
 
+                bool newMinSeen = false;
+                for (const auto &kv : peak)
+                {
+                    auto mit = minPeakMemSeen.find(kv.first);
+                    if (mit == minPeakMemSeen.end() || kv.second < mit->second)
+                    {
+                        minPeakMemSeen[kv.first] = kv.second;
+                        newMinSeen = true;
+                    }
+                }
+                if (newMinSeen)
+                {
+                    std::cout << "[Planner.extractBest] New lowest peak mem candidate seen (iter " << (max_iters - remaining_iters) << "): ";
+                    for (auto it = minPeakMemSeen.begin(); it != minPeakMemSeen.end(); ++it)
+                    {
+                        if (it != minPeakMemSeen.begin())
+                            std::cout << ", ";
+                        std::cout << toString(it->first) << ": " << it->second << " bytes";
+                    }
+                    std::cout << std::endl;
+                }
+
                 for (const auto &kv : maxMemoryByBackend)
                 {
                     if (peak[kv.first] > kv.second)
@@ -1273,36 +1479,12 @@ private:
                 }
             }
 
+            uint32_t conflictEClass1 = UINT32_MAX;
+            uint32_t conflictEClass2 = UINT32_MAX;
+
             if (valid)
             {
-                std::vector<uint32_t> topo = getEClassTopoOrder(egraph, selection_map, rootEClassId);
-                std::unordered_set<uint32_t> overwritten;
-                bool valid = true;
-                for (int i = 0; i < topo.size(); i++)
-                {
-                    auto choiceIt = selection_map.find(topo[i]);
-                    if (choiceIt == selection_map.end())
-                        Error::throw_err("[Planner.extractBest] this should not happen");
-
-                    const uint32_t enodeId = egraph.getEClass(topo[i]).enodes[choiceIt->second];
-                    const ENode &enode = egraph.getENodes()[enodeId];
-                    const ENodeInfo &info = enodeInfos[enodeId];
-                    for (int j = 0; j < enode.children.size(); j++)
-                    {
-                        if (overwritten.count(enode.children[j]))
-                        {
-                            valid = false;
-                            reason = "inplace";
-                            break;
-                        }
-                    }
-                    if (!valid)
-                        break;
-                    if (info.inplace)
-                    {
-                        overwritten.insert(enode.children[info.inplace_idx]);
-                    }
-                }
+                valid = validateInplaceSchedules(egraph, selection_map, enodeInfos, rootEClassId, eclassToLogical, reason, conflictEClass1, conflictEClass2);
             }
 
             if (valid)
@@ -1333,8 +1515,34 @@ private:
                 }
             }
 
+            if (!valid)
+            {
+                std::cout << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters) << "] invalid reason: " << reason << std::endl;
+            }
+
             if (to_process_enode.empty())
                 break;
+
+            uint32_t target_backtrack_eclass = UINT32_MAX;
+            if (!valid && conflictEClass1 != UINT32_MAX && conflictEClass2 != UINT32_MAX)
+            {
+                int idx1 = -1;
+                int idx2 = -1;
+                for (int i = 0; i < (int)path.size(); ++i)
+                {
+                    if (path[i] == conflictEClass1)
+                        idx1 = i;
+                    if (path[i] == conflictEClass2)
+                        idx2 = i;
+                }
+                if (idx1 >= 0 && idx2 >= 0)
+                {
+                    target_backtrack_eclass = path[std::max(idx1, idx2)];
+                }
+            }
+
+            bool skip_increment = (target_backtrack_eclass != UINT32_MAX);
+            std::cout << "path size " << std::to_string(path.size()) << std::endl;
 
             while (!path.empty())
             {
@@ -1344,13 +1552,19 @@ private:
                 if (selection_map.find(current) == selection_map.end())
                     continue;
 
+                if (skip_increment && current == target_backtrack_eclass)
+                {
+                    std::cout << "skipped back to path size " << std::to_string(path.size()) << std::endl;
+                    skip_increment = false;
+                }
+
                 uint32_t sel = selection_map[current];
                 const auto &enodes = egraph.getEClass(current).enodes;
                 uint32_t enode_id = enodes[sel];
                 const ENode &node = egraph.getENodes()[enode_id];
                 const ENodeInfo &info = enodeInfos[enode_id];
 
-                if (sel + 1 < enodes.size())
+                if (!skip_increment && sel + 1 < enodes.size())
                 {
                     next_sel[current] = sel + 1;
 
@@ -1670,12 +1884,6 @@ private:
             uint32_t physId = kv.first;
             uint32_t ecl = baseState.egraph.find(kv.second);
             baseState.eclassToLogical[ecl] = physId;
-        }
-
-        if (doSaturate && false)
-        {
-            std::unordered_set<uint32_t> emptyProtected;
-            saturate(baseState.egraph, emptyProtected, baseState.eclassToLogical, false, false, repo);
         }
 
         baseStateInitialized = true;
@@ -2182,6 +2390,10 @@ public:
         bool strictCache = false,
         Repo *repo = nullptr)
     {
+        // Early static baseline validation
+        auto baseline = computeStaticBaseline(graph, cachedNodes);
+        validateStaticBaseline(baseline);
+
         initBaseEGraph(rootId, graph, doSaturate, repo);
 
         EGraph egraph = baseState.egraph;
@@ -2259,7 +2471,7 @@ public:
                 cacheNode.viewOffset = cls.viewOffset;
                 cacheNode.dtype = cls.dtype;
                 cacheNode.backend = cls.backend;
-                cacheNode.leafId = logicalId | 0x80000000;
+                cacheNode.leafId = logicalId | 0x40000000;
                 egraph.addENode(canonId, cacheNode);
             }
         }

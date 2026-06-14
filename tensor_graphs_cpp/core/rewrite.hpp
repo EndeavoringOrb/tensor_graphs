@@ -215,7 +215,7 @@ inline uint32_t copyToBackend(EGraph &egraph, uint32_t classId, Backend targetBa
     return addOpToEGraph(egraph, OpType::COPY_TO, {canon}, cls.shape, cls.strides, cls.viewOffset, cls.dtype, targetBackend);
 }
 
-inline uint32_t createCacheInputNode(EGraph &egraph, const ENode &sourceNode, uint32_t sourceClassId, uint32_t partialPathId, std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
+inline uint32_t createCacheInputNode(EGraph &egraph, uint32_t sourceClassId, uint32_t partialPathId, std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
 {
     uint32_t canonSrcClass = egraph.find(sourceClassId);
     const EClass srcClass = egraph.getEClass(canonSrcClass);
@@ -911,6 +911,10 @@ struct InfinityDomination : public Rule
     }
 };
 
+/*
+contiguous(slice(op(x))) -> scatter(cache, contiguous(op(contiguous(slice(x)))))
+op can be: add, mul, div, pow, sin, cos, neg, cast
+*/
 struct SlicePushDownElementwise : public Rule
 {
     struct MatchKey
@@ -951,24 +955,29 @@ struct SlicePushDownElementwise : public Rule
             if (childNode.opType == OpType::SLICE && childNode.children.size() == 4)
             {
                 uint32_t srcClass = egraph.findConst(childNode.children[0]);
-                
+
                 auto starts = getConstInt32(egraph, childNode.children[1]);
                 auto ends = getConstInt32(egraph, childNode.children[2]);
                 auto steps = getConstInt32(egraph, childNode.children[3]);
-                
-                if (starts.empty() || ends.empty() || steps.empty()) continue;
-                
-                const auto& origShape = egraph.getEClass(srcClass).shape;
+
+                if (starts.empty() || ends.empty() || steps.empty())
+                    continue;
+
+                const auto &origShape = egraph.getEClass(srcClass).shape;
                 bool isFull = true;
-                if (starts.size() != origShape.size()) isFull = false;
-                for (size_t d = 0; d < starts.size() && isFull; ++d) {
+                if (starts.size() != origShape.size())
+                    isFull = false;
+                for (size_t d = 0; d < starts.size() && isFull; ++d)
+                {
                     int32_t st = starts[d] < 0 ? starts[d] + origShape[d] : starts[d];
                     int32_t en = ends[d] < 0 ? ends[d] + origShape[d] : ends[d];
-                    if (st != 0 || en != (int32_t)origShape[d] || steps[d] != 1) {
+                    if (st != 0 || en != (int32_t)origShape[d] || steps[d] != 1)
+                    {
                         isFull = false;
                     }
                 }
-                if (isFull) continue;
+                if (isFull)
+                    continue;
 
                 if (!allowPushDownOnProtected && isEClassProtected(srcClass, ctx.protectedEClasses, egraph))
                     continue;
@@ -1085,7 +1094,7 @@ struct SlicePushDownElementwise : public Rule
 
                 uint32_t contigSlicedOp = addOpToEGraph(egraph, OpType::CONTIGUOUS, {opEClass}, sliceShape, sliceContigStrides, 0, sliceNode.dtype, sliceNode.backend, UINT32_MAX, partialPathId);
 
-                uint32_t op_cache = createCacheInputNode(egraph, opNode, srcClass, partialPathId, ctx.eclassToLogical);
+                uint32_t op_cache = createCacheInputNode(egraph, srcClass, partialPathId, ctx.eclassToLogical);
 
                 const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigSlicedOp, startsId, endsId, stepsId}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, opNode.dtype, opNode.backend, UINT32_MAX, partialPathId);
@@ -1145,24 +1154,29 @@ struct SlicePushDownDot : public Rule
             if (childNode.opType == OpType::SLICE && childNode.children.size() == 4)
             {
                 uint32_t srcClass = egraph.findConst(childNode.children[0]);
-                
+
                 auto starts = getConstInt32(egraph, childNode.children[1]);
                 auto ends = getConstInt32(egraph, childNode.children[2]);
                 auto steps = getConstInt32(egraph, childNode.children[3]);
-                
-                if (starts.empty() || ends.empty() || steps.empty()) continue;
-                
-                const auto& origShape = egraph.getEClass(srcClass).shape;
+
+                if (starts.empty() || ends.empty() || steps.empty())
+                    continue;
+
+                const auto &origShape = egraph.getEClass(srcClass).shape;
                 bool isFull = true;
-                if (starts.size() != origShape.size()) isFull = false;
-                for (size_t d = 0; d < starts.size() && isFull; ++d) {
+                if (starts.size() != origShape.size())
+                    isFull = false;
+                for (size_t d = 0; d < starts.size() && isFull; ++d)
+                {
                     int32_t st = starts[d] < 0 ? starts[d] + origShape[d] : starts[d];
                     int32_t en = ends[d] < 0 ? ends[d] + origShape[d] : ends[d];
-                    if (st != 0 || en != (int32_t)origShape[d] || steps[d] != 1) {
+                    if (st != 0 || en != (int32_t)origShape[d] || steps[d] != 1)
+                    {
                         isFull = false;
                     }
                 }
-                if (isFull) continue;
+                if (isFull)
+                    continue;
 
                 if (!allowPushDownOnProtected && isEClassProtected(srcClass, ctx.protectedEClasses, egraph))
                     continue;
@@ -1329,7 +1343,7 @@ struct SlicePushDownDot : public Rule
                 uint32_t contigSlicedOp = addOpToEGraph(egraph, OpType::CONTIGUOUS, {dotEClass}, sliceShape, sliceContigStrides, 0, sliceNode.dtype, sliceNode.backend, eclassId);
 
                 uint32_t partialPathId = srcNodeIdx | 0x80000000;
-                uint32_t op_cache = createCacheInputNode(egraph, dotNode, srcClass, partialPathId, ctx.eclassToLogical);
+                uint32_t op_cache = createCacheInputNode(egraph, srcClass, partialPathId, ctx.eclassToLogical);
 
                 const EClass srcEClass = egraph.getEClass(egraph.find(srcClass));
                 uint32_t scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigSlicedOp, sliceNode.children[1], sliceNode.children[2], sliceNode.children[3]}, srcEClass.shape, srcEClass.strides, srcEClass.viewOffset, dotNode.dtype, dotNode.backend, UINT32_MAX, partialPathId);
