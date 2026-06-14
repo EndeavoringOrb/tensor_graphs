@@ -965,6 +965,7 @@ private:
         }
 
         bool droppedInf = false;
+        size_t totalPruned = 0;
         for (size_t i = 0; i < egraph.getClasses().size(); ++i)
         {
             uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
@@ -975,6 +976,7 @@ private:
             std::vector<uint32_t> validEnodes;
             validEnodes.reserve(cls.enodes.size());
 
+            // 1. Remove infinite-cost nodes
             for (uint32_t enodeId : cls.enodes)
             {
                 if (enodeInfos[enodeId].cost == INF)
@@ -987,7 +989,65 @@ private:
                 }
             }
 
-            cls.enodes = std::move(validEnodes);
+            // 2. Prune strictly dominated nodes to minimize search space bloating
+            std::vector<uint32_t> prunedEnodes;
+            prunedEnodes.reserve(validEnodes.size());
+            for (size_t idxA = 0; idxA < validEnodes.size(); ++idxA)
+            {
+                uint32_t enodeIdA = validEnodes[idxA];
+                const ENode &enodeA = egraph.getENodes()[enodeIdA];
+                const ENodeInfo &infoA = enodeInfos[enodeIdA];
+
+                bool dominated = false;
+                for (size_t idxB = 0; idxB < validEnodes.size(); ++idxB)
+                {
+                    if (idxA == idxB)
+                        continue;
+
+                    uint32_t enodeIdB = validEnodes[idxB];
+                    const ENode &enodeB = egraph.getENodes()[enodeIdB];
+                    const ENodeInfo &infoB = enodeInfos[enodeIdB];
+
+                    // B dominates A if it has identical structural behavior and better/equal cost
+                    if (enodeA.children == enodeB.children &&
+                        enodeA.backend == enodeB.backend &&
+                        infoA.inplace == infoB.inplace &&
+                        infoA.inplace_idx == infoB.inplace_idx &&
+                        infoA.isView == infoB.isView &&
+                        infoA.isScatter == infoB.isScatter &&
+                        enodeA.strides == enodeB.strides &&
+                        enodeA.viewOffset == enodeB.viewOffset)
+                    {
+                        if (infoB.cost < infoA.cost)
+                        {
+                            dominated = true;
+                            break;
+                        }
+                        else if (std::abs(infoB.cost - infoA.cost) < 1e-9f)
+                        {
+                            // Tie-breaker: deterministically keep the enode with the smaller ID
+                            if (enodeIdB < enodeIdA)
+                            {
+                                dominated = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (!dominated)
+                {
+                    prunedEnodes.push_back(enodeIdA);
+                }
+            }
+
+            totalPruned += (validEnodes.size() - prunedEnodes.size());
+            cls.enodes = std::move(prunedEnodes);
+        }
+
+        if (totalPruned > 0)
+        {
+            std::cout << "[Planner.extractBest] Pruned " << totalPruned << " dominated enodes from the search space." << std::endl;
         }
 
         if (droppedInf)
