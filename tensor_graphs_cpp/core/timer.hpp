@@ -31,6 +31,14 @@ struct ProgressTimer
           has_total(total_ > 0),
           disable(disable_) {}
 
+    void reset()
+    {
+        start = clock::now();
+        last_print = start;
+        current = 0;
+        has_total = total > 0;
+    }
+
     inline void tick(size_t increment = 1)
     {
         if (disable)

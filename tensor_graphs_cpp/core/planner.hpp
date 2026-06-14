@@ -1363,6 +1363,328 @@ private:
 
         // TODO: prune dominated enodes. if A.cost < B.cost and they have the same inputs, and have the same inplace&view status, then remove B. basically if there are two kernels implementing the same thing but one is faster on this specific hardware/shape, we don't need to bloat the search space with B. maybe we can do this even earlier, as we don't need dag cost as long as A and B have same inputs and inplace and view stuff.
 
+        struct PrecompData
+        {
+            std::vector<bool> is_eclass_persistent;
+            std::vector<bool> is_eclass_cached;
+            std::vector<std::vector<uint32_t>> enode_canon_children;
+            uint64_t static_baseline_arr[3];
+            uint64_t mem_limits_arr[3];
+        } precomp;
+
+        precomp.is_eclass_persistent.assign(numClasses, false);
+        precomp.is_eclass_cached.assign(numClasses, false);
+        for (size_t i = 0; i < numClasses; ++i)
+        {
+            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
+            if (eclassId == i)
+            {
+                uint32_t logicalId = eclassToLogical.count(eclassId) ? eclassToLogical.at(eclassId) : UINT32_MAX;
+                if (logicalId != UINT32_MAX && graph.hasNode(logicalId) && graph.getNode(logicalId).storageType == StorageType::PERSISTENT)
+                    precomp.is_eclass_persistent[eclassId] = true;
+                if (egraph.constantStaging.count(eclassId))
+                    precomp.is_eclass_persistent[eclassId] = true;
+
+                if (logicalId != UINT32_MAX && cachedNodes.count(logicalId))
+                    precomp.is_eclass_cached[eclassId] = true;
+            }
+        }
+
+        auto baseline_map = computeStaticBaseline(graph, cachedNodes);
+        for (int i = 0; i < 3; ++i)
+        {
+            precomp.static_baseline_arr[i] = 0;
+            precomp.mem_limits_arr[i] = std::numeric_limits<uint64_t>::max();
+        }
+        for (const auto &kv : baseline_map)
+            precomp.static_baseline_arr[(uint32_t)kv.first] = kv.second;
+        for (const auto &kv : maxMemoryByBackend)
+            precomp.mem_limits_arr[(uint32_t)kv.first] = kv.second;
+
+        precomp.enode_canon_children.resize(egraph.getENodes().size());
+        for (size_t i = 0; i < egraph.getENodes().size(); ++i)
+        {
+            for (uint32_t c : egraph.getENodes()[i].children)
+            {
+                precomp.enode_canon_children[i].push_back(egraph.findConst(c));
+            }
+        }
+
+        std::vector<uint32_t> ref_counts(numClasses, 0);
+        std::vector<bool> processed_mem(numClasses, false);
+        std::vector<uint32_t> sim_aliasMap(numClasses, UINT32_MAX);
+        std::vector<bool> visit_visited(numClasses, false);
+
+        auto computePeakMemFast = [&](const std::unordered_map<uint32_t, uint32_t> &selection_map, const std::vector<uint32_t> &path) -> std::pair<std::vector<uint64_t>, uint32_t>
+        {
+            std::fill(ref_counts.begin(), ref_counts.end(), 0);
+            for (const auto &kv : selection_map)
+            {
+                uint32_t eclass = kv.first;
+                uint32_t sel = kv.second;
+                uint32_t enode_id = egraph.getEClass(eclass).enodes[sel];
+                for (uint32_t c : precomp.enode_canon_children[enode_id])
+                {
+                    ref_counts[c]++;
+                }
+            }
+            ref_counts[rootEClassId]++;
+
+            uint64_t live_mem[3] = {precomp.static_baseline_arr[0], precomp.static_baseline_arr[1], precomp.static_baseline_arr[2]};
+
+            uint32_t oomEClassId = UINT32_MAX;
+
+            std::fill(processed_mem.begin(), processed_mem.end(), false);
+            for (uint32_t eclassId : path)
+            {
+                uint32_t canon = egraph.findConst(eclassId);
+                if (processed_mem[canon])
+                    continue;
+                processed_mem[canon] = true;
+
+                auto mapIt = selection_map.find(canon);
+                if (mapIt == selection_map.end())
+                    continue;
+
+                uint32_t sel = mapIt->second;
+                uint32_t enode_id = egraph.getEClass(canon).enodes[sel];
+                const ENode &enode = egraph.getENodes()[enode_id];
+
+                if (enode.opType == OpType::CACHE)
+                {
+                    if (!precomp.is_eclass_cached[canon])
+                    {
+                        uint64_t size = (getSizeBytes(enode.shape, enode.dtype) + 63) & ~63ULL;
+                        uint32_t b_idx = (uint32_t)enode.backend;
+                        live_mem[b_idx] += size;
+                        if (live_mem[b_idx] > precomp.mem_limits_arr[b_idx] && oomEClassId == UINT32_MAX)
+                            oomEClassId = canon;
+                    }
+                }
+                else if (precomp.is_eclass_persistent[canon])
+                {
+                    if (!precomp.is_eclass_cached[canon])
+                    {
+                        const EClass &cls = egraph.getEClass(canon);
+                        if (cls.backend != Backend::STORAGE)
+                        {
+                            uint64_t size = (countElements(cls.shape) * getDTypeSize(cls.dtype) + 63) & ~63ULL;
+                            uint32_t b_idx = (uint32_t)cls.backend;
+                            live_mem[b_idx] += size;
+                            if (live_mem[b_idx] > precomp.mem_limits_arr[b_idx] && oomEClassId == UINT32_MAX)
+                                oomEClassId = canon;
+                        }
+                    }
+                }
+            }
+
+            uint64_t peak_mem[3] = {live_mem[0], live_mem[1], live_mem[2]};
+
+            auto isPersistentFast = [&](uint32_t eclass_id) -> bool
+            {
+                if (precomp.is_eclass_persistent[eclass_id])
+                    return true;
+                auto selIt = selection_map.find(eclass_id);
+                if (selIt != selection_map.end())
+                {
+                    uint32_t enode_id = egraph.getEClass(eclass_id).enodes[selIt->second];
+                    if (egraph.getENodes()[enode_id].opType == OpType::CACHE)
+                        return true;
+                }
+                return false;
+            };
+
+            std::fill(sim_aliasMap.begin(), sim_aliasMap.end(), UINT32_MAX);
+
+            auto release = [&](auto &self, uint32_t id) -> void
+            {
+                uint32_t targetId = sim_aliasMap[id];
+                if (targetId != UINT32_MAX)
+                {
+                    sim_aliasMap[id] = UINT32_MAX;
+                    if (ref_counts[targetId] > 0)
+                    {
+                        ref_counts[targetId]--;
+                        if (ref_counts[targetId] == 0)
+                            self(self, targetId);
+                    }
+                    return;
+                }
+
+                if (!precomp.is_eclass_cached[id] && !isPersistentFast(id))
+                {
+                    auto selIt = selection_map.find(id);
+                    if (selIt != selection_map.end())
+                    {
+                        uint32_t enode_id = egraph.getEClass(id).enodes[selIt->second];
+                        const ENodeInfo &info = enodeInfos[enode_id];
+                        if (!info.inplace && !info.isView)
+                        {
+                            for (const auto &kv : info.memSizes)
+                            {
+                                live_mem[(uint32_t)kv.first] -= (kv.second + 63) & ~63ULL;
+                            }
+                        }
+                    }
+                }
+            };
+
+            std::fill(visit_visited.begin(), visit_visited.end(), false);
+
+            std::function<void(uint32_t)> visit = [&](uint32_t eclass)
+            {
+                eclass = egraph.findConst(eclass);
+                if (visit_visited[eclass])
+                    return;
+                visit_visited[eclass] = true;
+
+                uint32_t sel = selection_map.at(eclass);
+                uint32_t enode_id = egraph.getEClass(eclass).enodes[sel];
+                const auto &canon_children = precomp.enode_canon_children[enode_id];
+                const ENodeInfo &info = enodeInfos[enode_id];
+
+                for (uint32_t c : canon_children)
+                {
+                    visit(c);
+                }
+
+                bool is_perm = precomp.is_eclass_cached[eclass] || isPersistentFast(eclass);
+
+                if (!info.inplace && !info.isView && !is_perm)
+                {
+                    for (const auto &kv : info.memSizes)
+                    {
+                        uint32_t b_idx = (uint32_t)kv.first;
+                        uint64_t size = (kv.second + 63) & ~63ULL;
+                        live_mem[b_idx] += size;
+                        if (live_mem[b_idx] > peak_mem[b_idx])
+                            peak_mem[b_idx] = live_mem[b_idx];
+                        if (live_mem[b_idx] > precomp.mem_limits_arr[b_idx] && oomEClassId == UINT32_MAX)
+                            oomEClassId = eclass;
+                    }
+                }
+
+                for (size_t i = 0; i < canon_children.size(); ++i)
+                {
+                    uint32_t c = canon_children[i];
+                    if (info.inplace && (int)i == info.inplace_idx)
+                    {
+                        sim_aliasMap[eclass] = c;
+                        continue;
+                    }
+                    if (info.isView && i == 0)
+                    {
+                        sim_aliasMap[eclass] = c;
+                        continue;
+                    }
+
+                    if (ref_counts[c] > 0)
+                    {
+                        ref_counts[c]--;
+                        if (ref_counts[c] == 0)
+                            release(release, c);
+                    }
+                }
+            };
+
+            visit(rootEClassId);
+            return {{peak_mem[0], peak_mem[1], peak_mem[2]}, oomEClassId};
+        };
+
+        std::vector<uint32_t> topo_order;
+        topo_order.reserve(numClasses);
+        std::vector<bool> val_visited_classes(numClasses, false);
+        std::vector<uint32_t> val_overwritten(numClasses, UINT32_MAX);
+        std::vector<uint32_t> val_mem_root(numClasses);
+
+        auto validateInplaceSchedulesFast = [&](
+                                                const std::unordered_map<uint32_t, uint32_t> &selection_map,
+                                                std::string &outReason,
+                                                uint32_t &conflictEClass1,
+                                                uint32_t &conflictEClass2) -> bool
+        {
+            topo_order.clear();
+            std::fill(val_visited_classes.begin(), val_visited_classes.end(), false);
+            std::function<void(uint32_t)> visit = [&](uint32_t eclassId)
+            {
+                eclassId = egraph.findConst(eclassId);
+                if (val_visited_classes[eclassId])
+                    return;
+                val_visited_classes[eclassId] = true;
+
+                auto choiceIt = selection_map.find(eclassId);
+                if (choiceIt == selection_map.end())
+                    return;
+
+                uint32_t enode_id = egraph.getEClass(eclassId).enodes[choiceIt->second];
+                for (uint32_t child : precomp.enode_canon_children[enode_id])
+                    visit(child);
+                topo_order.push_back(eclassId);
+            };
+            visit(rootEClassId);
+
+            std::fill(val_overwritten.begin(), val_overwritten.end(), UINT32_MAX);
+            std::unordered_map<uint32_t, uint32_t> overwritten_logical;
+            for (size_t i = 0; i < numClasses; ++i)
+                val_mem_root[i] = i;
+
+            for (uint32_t eclass : topo_order)
+            {
+                uint32_t sel = selection_map.at(eclass);
+                uint32_t enodeId = egraph.getEClass(eclass).enodes[sel];
+                const ENodeInfo &info = enodeInfos[enodeId];
+
+                if (info.isView && !precomp.enode_canon_children[enodeId].empty())
+                {
+                    uint32_t child_eclass = precomp.enode_canon_children[enodeId][0];
+                    val_mem_root[eclass] = val_mem_root[child_eclass];
+                }
+
+                for (uint32_t child_eclass : precomp.enode_canon_children[enodeId])
+                {
+                    uint32_t child_root = val_mem_root[child_eclass];
+
+                    if (val_overwritten[child_root] != UINT32_MAX)
+                    {
+                        outReason = "inplace " + std::to_string(child_root);
+                        conflictEClass1 = val_overwritten[child_root];
+                        conflictEClass2 = eclass;
+                        return false;
+                    }
+
+                    uint32_t logicalId = eclassToLogical.count(child_root) ? eclassToLogical.at(child_root) : UINT32_MAX;
+                    if (logicalId != UINT32_MAX && overwritten_logical.count(logicalId))
+                    {
+                        if (overwritten_logical[logicalId] != child_root)
+                        {
+                            outReason = "inplace_logical " + std::to_string(logicalId);
+                            conflictEClass1 = overwritten_logical[logicalId];
+                            conflictEClass2 = eclass;
+                            return false;
+                        }
+                    }
+                }
+
+                if (info.inplace)
+                {
+                    uint32_t inplace_child = precomp.enode_canon_children[enodeId][info.inplace_idx];
+                    uint32_t child_root = val_mem_root[inplace_child];
+                    val_overwritten[child_root] = eclass;
+
+                    uint32_t logicalId = eclassToLogical.count(child_root) ? eclassToLogical.at(child_root) : UINT32_MAX;
+                    if (logicalId != UINT32_MAX)
+                    {
+                        overwritten_logical[logicalId] = eclass;
+                    }
+                }
+            }
+            return true;
+        };
+
+        std::vector<uint32_t> indegree(numClasses, 0);
+        std::vector<uint32_t> zero_indegree;
+        zero_indegree.reserve(numClasses);
+
         std::unordered_map<uint32_t, uint32_t> selection_map;
         std::vector<uint32_t> path;
         std::vector<uint32_t> to_process = {rootEClassId};
@@ -1376,9 +1698,16 @@ private:
         int max_iters = 100000;
         int remaining_iters = max_iters;
         ProgressTimer timer(max_iters, "extracting graphs ");
-
+        ProgressTimer loopTimer(0, "", true);
         while (remaining_iters-- > 0)
         {
+            std::cout << "loop " << std::to_string(loopTimer.getElapsed() * 1000) << "ms";
+            if (max_iters - remaining_iters > 0)
+            {
+                std::cout << ", avg loop " << std::to_string(timer.getElapsed() * 1000 / (max_iters - remaining_iters)) << "ms";
+            }
+            std::cout << std::endl;
+            loopTimer.reset();
             timer.tick();
             bool valid = true;
             std::string reason = "";
@@ -1462,18 +1791,18 @@ private:
 
             if (valid)
             {
-                std::vector<uint32_t> indegree(numClasses, 0);
+                std::fill(indegree.begin(), indegree.end(), 0);
                 for (const auto &kv : selection_map)
                 {
                     uint32_t sel = kv.second;
-                    const ENode &enode = egraph.getENodes()[egraph.getEClass(kv.first).enodes[sel]];
-                    for (uint32_t child : enode.children)
+                    uint32_t enode_id = egraph.getEClass(kv.first).enodes[sel];
+                    for (uint32_t child : precomp.enode_canon_children[enode_id])
                     {
-                        indegree[egraph.find(child)]++;
+                        indegree[child]++;
                     }
                 }
 
-                std::vector<uint32_t> zero_indegree;
+                zero_indegree.clear();
                 for (const auto &kv : selection_map)
                 {
                     if (indegree[kv.first] == 0)
@@ -1490,10 +1819,9 @@ private:
                     processed++;
 
                     uint32_t sel = selection_map[curr];
-                    const ENode &enode = egraph.getENodes()[egraph.getEClass(curr).enodes[sel]];
-                    for (uint32_t child : enode.children)
+                    uint32_t enode_id = egraph.getEClass(curr).enodes[sel];
+                    for (uint32_t canonChild : precomp.enode_canon_children[enode_id])
                     {
-                        uint32_t canonChild = egraph.find(child);
                         indegree[canonChild]--;
                         if (indegree[canonChild] == 0)
                         {
@@ -1509,15 +1837,15 @@ private:
                 }
             }
 
-            PeakMemoryResult peakResult;
             std::unordered_map<Backend, uint64_t> peak;
             uint32_t oomEClassId = UINT32_MAX;
             if (valid)
             {
-                peakResult = computePeakMemory(
-                    egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical, graph, path);
-                peak = peakResult.peakMemory;
-                oomEClassId = peakResult.oomEClassId;
+                auto res = computePeakMemFast(selection_map, path);
+                peak[(Backend)0] = res.first[0];
+                peak[(Backend)1] = res.first[1];
+                peak[(Backend)2] = res.first[2];
+                oomEClassId = res.second;
 
                 bool newMinSeen = false;
                 for (const auto &kv : peak)
@@ -1557,7 +1885,7 @@ private:
 
             if (valid)
             {
-                valid = validateInplaceSchedules(egraph, selection_map, enodeInfos, rootEClassId, eclassToLogical, reason, conflictEClass1, conflictEClass2);
+                valid = validateInplaceSchedulesFast(selection_map, reason, conflictEClass1, conflictEClass2);
             }
 
             if (valid)
