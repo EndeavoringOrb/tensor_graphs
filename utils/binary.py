@@ -45,17 +45,21 @@ DTYPES = ["FLOAT32", "INT32", "INT64", "BF16", "BOOL", "ANY"]
 BACKENDS = ["STORAGE", "CPU", "CUDA"]
 STORAGE_TYPES = ["TRANSIENT", "PERSISTENT", "PINNED"]
 
+
 def make_enum_mapper(enum_list):
     def mapper(val):
         if val is None:
             return None
         return enum_list[val] if val < len(enum_list) else f"UNKNOWN({val})"
+
     return mapper
+
 
 to_dtype = make_enum_mapper(DTYPES)
 to_backend = make_enum_mapper(BACKENDS)
 to_storage = make_enum_mapper(STORAGE_TYPES)
 to_op_type = make_enum_mapper(OP_TYPES)
+
 
 class BinaryReader:
     def __init__(self, f, lazy=False, string_enums=False):
@@ -208,6 +212,7 @@ class BinaryReader:
                 self.read_storage_type() if self.string_enums else self.read_u32()
             ),
             "contentHash": self.read_string(),
+            "debugOrigin": self.read_string(),
         }
 
     def read_compiled_graph(self):
@@ -216,10 +221,7 @@ class BinaryReader:
         ref_counts = self.read_map(self.read_u32, self.read_u32)
         nodes_map = self.read_map(self.read_u32, self.read_tensor_node)
         assert nodes_map is not None
-        nodes_map = {
-            str(k): v
-            for k, v in nodes_map.items()
-        }
+        nodes_map = {str(k): v for k, v in nodes_map.items()}
         node_costs = self.read_map(self.read_u32, self.read_float)
         physical_to_logical = self.read_map(self.read_u32, self.read_u32)
 

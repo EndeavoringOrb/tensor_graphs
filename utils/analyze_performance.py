@@ -68,6 +68,7 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
                 input_shapes.append(p_node["shape"])
 
             shape = node["shape"]
+            debug_origin = node.get("debugOrigin", "UNKNOWN")
 
             # Identity for display purposes in the report
             display_identity = (
@@ -75,6 +76,7 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
                 hex(inst["fullKernelId"]),
                 tuple(shape),
                 json.dumps(input_shapes),
+                debug_origin,
             )
             bucket_sequence.append({"identity": display_identity, "runtime": runtime})
 
@@ -101,40 +103,88 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
     print(f"Total Estimated Execution Time: {format_ms(total_estimated_time)}")
 
     top_n = min(len(chain_stats), top_n)
-    print("\n" + "=" * 100)
-    print(
-        f"{f'Top {top_n} {chain_label}':<105} | {'Count':<6} | {'Total Time':<12} | {'Avg'}"
-    )
-    print("-" * 100)
-
     sorted_chains = sorted(
         chain_stats.items(), key=lambda x: x[1]["time"], reverse=True
     )
 
-    label_len = 0
+    # Pre-generate and cache formatted labels to avoid redundant work
+    formatted_chains = []
     for identities, stats in sorted_chains[:top_n]:
         parts = []
-        for op_name, uid, shape, in_shapes in identities:
-            parts.append(f"{op_name}({json.loads(in_shapes)}->{list(shape)})")
+        for op_name, uid, shape, in_shapes, debug_origin in identities:
+            parts.append(
+                f"{op_name}({json.loads(in_shapes)}->{list(shape)}) [{debug_origin}]"
+            )
         label = " -> ".join(parts)
-        label_len = max(len(label), label_len)
+        formatted_chains.append((label, stats))
 
-    for identities, stats in sorted_chains[:top_n]:
-        parts = []
-        for op_name, uid, shape, in_shapes in identities:
-            parts.append(f"{op_name}({json.loads(in_shapes)}->{list(shape)})")
-        label = " -> ".join(parts)
+    # Dynamically determine the column widths based on the contents to be printed
+    label_len = max((len(label) for label, _ in formatted_chains), default=0)
+    col1_header = f"Top {top_n} {chain_label}"
+    col1_width = max(label_len, len(col1_header))
+
+    col2_header = "Count"
+    col2_width = max(
+        len(col2_header),
+        max((len(str(stats["count"])) for _, stats in formatted_chains), default=0),
+    )
+
+    col3_header = "Total Time"
+    col3_width = max(
+        len(col3_header),
+        max(
+            (len(format_ms(stats["time"])) for _, stats in formatted_chains), default=0
+        ),
+    )
+
+    col4_header = "Avg"
+    col4_width = max(
+        len(col4_header),
+        max(
+            (
+                len(format_ms(stats["time"] / stats["count"]))
+                for _, stats in formatted_chains
+            ),
+            default=0,
+        ),
+    )
+
+    # Format headers dynamically and calculate total width for divider lines
+    header = f"{col1_header:<{col1_width}} | {col2_header:<{col2_width}} | {col3_header:<{col3_width}} | {col4_header:<{col4_width}}"
+    total_width = len(header)
+
+    print("\n" + "=" * total_width)
+    print(header)
+    print("-" * total_width)
+
+    for label, stats in formatted_chains:
         avg = stats["time"] / stats["count"]
         print(
-            f"{label:<{label_len}} | {stats['count']:<6} | {format_ms(stats['time']):<12} | {format_ms(avg)}"
+            f"{label:<{col1_width}} | {stats['count']:<{col2_width}} | {format_ms(stats['time']):<{col3_width}} | {format_ms(avg):<{col4_width}}"
         )
 
-    print("\n" + "=" * 40)
-    print(f"{'Operation Type':<25} | {'Total Time'}")
-    print("-" * 40)
+    # Dynamically format the Operation Type summary table
     sorted_ops = sorted(op_type_stats.items(), key=lambda x: x[1], reverse=True)
+
+    op_col1_header = "Operation Type"
+    op_col1_width = max(
+        len(op_col1_header), max((len(op) for op, _ in sorted_ops), default=0)
+    )
+
+    op_col2_header = "Total Time"
+    op_col2_width = max(
+        len(op_col2_header),
+        max((len(format_ms(time)) for _, time in sorted_ops), default=0),
+    )
+
+    op_header = f"{op_col1_header:<{op_col1_width}} | {op_col2_header:<{op_col2_width}}"
+    op_total_width = len(op_header)
+
+    print("\n" + "=" * op_total_width)
+    print(op_header)
+    print("-" * op_total_width)
     for op, time in sorted_ops:
-        print(f"{op:<25} | {format_ms(time)}")
+        print(f"{op:<{op_col1_width}} | {format_ms(time):<{op_col2_width}}")
 
 
 if __name__ == "__main__":

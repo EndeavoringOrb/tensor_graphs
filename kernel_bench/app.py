@@ -241,7 +241,10 @@ def get_analyze():
                             nodes[str(pid)]["shape"] if str(pid) in nodes else []
                             for pid in node["parentIds"]
                         ]
-                        identity = f"{op_name}({input_shapes}->{list(node['shape'])})"
+
+                        debug_origin = node.get("debugOrigin", "UNKNOWN")
+                        identity = f"{op_name}({input_shapes}->{list(node['shape'])}) [{debug_origin}]"
+
                         chain_stats[identity]["time"] += runtime
                         chain_stats[identity]["count"] += 1
                 elif t == 0:  # Metadata

@@ -991,7 +991,9 @@ inline void tg_serialize(BinaryWriter &bw, const TensorNode &val)
     bw.write(val.backend);
     bw.write(val.storageType);
     bw.write(val.contentHash);
+    bw.write(val.debugOrigin);
 }
+
 inline void tg_deserialize(BinaryReader &br, TensorNode &val)
 {
     br.read(val.id);
@@ -1007,6 +1009,7 @@ inline void tg_deserialize(BinaryReader &br, TensorNode &val)
     br.read(val.backend);
     br.read(val.storageType);
     br.read(val.contentHash);
+    br.read(val.debugOrigin);
 }
 
 inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
