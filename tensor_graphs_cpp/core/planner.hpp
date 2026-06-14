@@ -74,6 +74,12 @@ void propagateDirtyRegionsAtomic(
     }
 }
 
+struct PeakMemoryResult
+{
+    std::unordered_map<Backend, uint64_t> peakMemory;
+    uint32_t oomEClassId = UINT32_MAX;
+};
+
 class Planner
 {
 private:
@@ -381,22 +387,17 @@ private:
         }
     }
 
-    std::unordered_map<Backend, uint64_t> computePeakMemory(
+    PeakMemoryResult computePeakMemory(
         const EGraph &egraph,
         const std::unordered_map<uint32_t, uint32_t> &selection_map,
         const std::vector<ENodeInfo> &enodeInfos,
         uint32_t root,
         const std::unordered_map<uint32_t, Backend> &cachedNodes,
         const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
-        const Graph &graph) const
+        const Graph &graph,
+        const std::vector<uint32_t> &path) const
     {
         auto ref = build_ref_counts(egraph, selection_map, root);
-
-        // Initialize simulation memory with the calculated static baseline
-        std::unordered_map<Backend, uint64_t> live_mem = computeStaticBaseline(graph, cachedNodes);
-
-        std::unordered_set<uint32_t> visited;
-        std::unordered_map<uint32_t, uint32_t> sim_aliasMap;
 
         // Alignment helper matching the allocator's 64-byte block boundary logic
         auto getAlignedSize = [](uint64_t size) -> uint64_t
@@ -404,12 +405,51 @@ private:
             return (size + 63) & ~63ULL;
         };
 
-        // Add selected eclasses that contain constant staging
-        for (const auto &kv : selection_map)
+        // Initialize simulation memory with the calculated static baseline
+        std::unordered_map<Backend, uint64_t> live_mem = computeStaticBaseline(graph, cachedNodes);
+
+        std::unordered_set<uint32_t> visited;
+        std::unordered_map<uint32_t, uint32_t> sim_aliasMap;
+
+        uint32_t oomEClassId = UINT32_MAX;
+
+        // Add selected eclasses that contain constant staging or are chosen as CACHE nodes.
+        // Iterating in 'path' order guarantees we identify the earliest decision that causes OOM.
+        std::unordered_set<uint32_t> processed;
+        for (uint32_t eclassId : path)
         {
-            uint32_t eclassId = kv.first;
             uint32_t canon = egraph.findConst(eclassId);
-            if (egraph.constantStaging.count(canon))
+            if (processed.count(canon))
+                continue;
+            processed.insert(canon);
+
+            auto mapIt = selection_map.find(canon);
+            if (mapIt == selection_map.end())
+                continue;
+
+            // Check the selected enode for this class
+            uint32_t sel = mapIt->second;
+            uint32_t enode_id = egraph.getEClass(canon).enodes[sel];
+            const ENode &enode = egraph.getENodes()[enode_id];
+
+            if (enode.opType == OpType::CACHE)
+            {
+                uint32_t logicalId = eclassToLogical.count(canon) ? eclassToLogical.at(canon) : UINT32_MAX;
+                // Only add to baseline if it isn't already included in the static baseline via cachedNodes
+                if (logicalId == UINT32_MAX || cachedNodes.count(logicalId) == 0)
+                {
+                    uint64_t size = getAlignedSize(getSizeBytes(enode.shape, enode.dtype));
+                    live_mem[enode.backend] += size;
+                    if (live_mem[enode.backend] > getMemoryLimit(enode.backend))
+                    {
+                        if (oomEClassId == UINT32_MAX)
+                        {
+                            oomEClassId = canon;
+                        }
+                    }
+                }
+            }
+            else if (egraph.constantStaging.count(canon))
             {
                 uint32_t logicalId = eclassToLogical.count(canon) ? eclassToLogical.at(canon) : UINT32_MAX;
                 if (logicalId == UINT32_MAX || !graph.hasNode(logicalId) || graph.getNode(logicalId).storageType != StorageType::PERSISTENT)
@@ -419,6 +459,13 @@ private:
                     {
                         uint64_t size = getAlignedSize(countElements(cls.shape) * getDTypeSize(cls.dtype));
                         live_mem[cls.backend] += size;
+                        if (live_mem[cls.backend] > getMemoryLimit(cls.backend))
+                        {
+                            if (oomEClassId == UINT32_MAX)
+                            {
+                                oomEClassId = canon;
+                            }
+                        }
                     }
                 }
             }
@@ -429,11 +476,24 @@ private:
 
         auto isPersistent = [&](uint32_t eclass_id) -> bool
         {
+            eclass_id = egraph.findConst(eclass_id);
             uint32_t logicalId = eclassToLogical.count(eclass_id) ? eclassToLogical.at(eclass_id) : UINT32_MAX;
             if (logicalId != UINT32_MAX && graph.hasNode(logicalId) && graph.getNode(logicalId).storageType == StorageType::PERSISTENT)
                 return true;
             if (egraph.constantStaging.count(eclass_id))
                 return true;
+
+            // Treat newly chosen cache nodes as persistent
+            auto selIt = selection_map.find(eclass_id);
+            if (selIt != selection_map.end())
+            {
+                uint32_t sel = selIt->second;
+                uint32_t enode_id = egraph.getEClass(eclass_id).enodes[sel];
+                if (egraph.getENodes()[enode_id].opType == OpType::CACHE)
+                {
+                    return true;
+                }
+            }
             return false;
         };
 
@@ -510,6 +570,13 @@ private:
                     uint64_t size = getAlignedSize(kv.second);
                     live_mem[kv.first] += size;
                     peak_mem[kv.first] = std::max(peak_mem[kv.first], live_mem[kv.first]);
+                    if (live_mem[kv.first] > getMemoryLimit(kv.first))
+                    {
+                        if (oomEClassId == UINT32_MAX)
+                        {
+                            oomEClassId = eclass;
+                        }
+                    }
                 }
             }
 
@@ -538,7 +605,7 @@ private:
         };
 
         visit(root);
-        return peak_mem;
+        return {peak_mem, oomEClassId};
     }
 
     std::vector<uint32_t> getEClassTopoOrder(const EGraph &egraph, const std::unordered_map<uint32_t, uint32_t> &selectionMap, uint32_t rootEClassId) const
@@ -1294,6 +1361,8 @@ private:
         std::cout << "[Planner.extractBest] Optimistic root cost: "
                   << std::to_string(optimisticEnodeDagCost[egraph.getEClass(rootEClassId).enodes[0]]) << std::endl;
 
+        // TODO: prune dominated enodes. if A.cost < B.cost and they have the same inputs, and have the same inplace&view status, then remove B. basically if there are two kernels implementing the same thing but one is faster on this specific hardware/shape, we don't need to bloat the search space with B. maybe we can do this even earlier, as we don't need dag cost as long as A and B have same inputs and inplace and view stuff.
+
         std::unordered_map<uint32_t, uint32_t> selection_map;
         std::vector<uint32_t> path;
         std::vector<uint32_t> to_process = {rootEClassId};
@@ -1440,11 +1509,15 @@ private:
                 }
             }
 
+            PeakMemoryResult peakResult;
             std::unordered_map<Backend, uint64_t> peak;
+            uint32_t oomEClassId = UINT32_MAX;
             if (valid)
             {
-                peak = computePeakMemory(
-                    egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical, graph);
+                peakResult = computePeakMemory(
+                    egraph, selection_map, enodeInfos, rootEClassId, cachedNodes, eclassToLogical, graph, path);
+                peak = peakResult.peakMemory;
+                oomEClassId = peakResult.oomEClassId;
 
                 bool newMinSeen = false;
                 for (const auto &kv : peak)
@@ -1538,6 +1611,17 @@ private:
                 if (idx1 >= 0 && idx2 >= 0)
                 {
                     target_backtrack_eclass = path[std::max(idx1, idx2)];
+                }
+            }
+            else if (!valid && reason == "OOM" && oomEClassId != UINT32_MAX)
+            {
+                for (int i = 0; i < (int)path.size(); ++i)
+                {
+                    if (path[i] == oomEClassId)
+                    {
+                        target_backtrack_eclass = path[i];
+                        break;
+                    }
                 }
             }
 
