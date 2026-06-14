@@ -260,7 +260,7 @@ public:
         int32_t shape_1d[] = {(int32_t)(cfg.rope_dim / 2)};
         uint32_t h_dim_fp_1d = g.repeat(h_dim_fp, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
         uint32_t exponent = g.div(indices, h_dim_fp_1d);
-        float theta_val = 10000.0f;
+        float theta_val = 10'000'000.0f; // 10 million (1e7)
         uint32_t theta = g.constant({1}, &theta_val, DType::FLOAT32);
         uint32_t theta_1d = g.repeat(theta, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
         uint32_t base_to_exponent = g.pow(theta_1d, exponent);
@@ -365,27 +365,35 @@ public:
         // q_proj provides Q and Gate
         uint32_t q_and_gate = project(".self_attn.q_proj.weight", cfg.emb_dim, cfg.attn_n_q_heads * cfg.attn_head_dim * 2);
 
-        int32_t s_q[] = {0, 0, 0};
-        int32_t e_q[] = {1, (int32_t)seq_len, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim)};
-        int32_t steps[] = {1, 1, 1};
-        uint32_t q = g.contiguous(g.slice(q_and_gate, g.constant({3}, s_q, DType::INT32), g.constant({3}, e_q, DType::INT32), g.constant({3}, steps, DType::INT32)));
+        // Reshape to 4D to isolate the head_dim * 2 structure [1, seq_len, num_heads, head_dim * 2]
+        int32_t q_and_gate_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.attn_head_dim * 2};
+        uint32_t q_and_gate_4d = g.reshape(q_and_gate, g.constant({4}, q_and_gate_shape4, DType::INT32));
 
-        int32_t s_g[] = {0, 0, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim)};
-        int32_t e_g[] = {1, (int32_t)seq_len, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim * 2)};
-        uint32_t gate = g.slice(q_and_gate, g.constant({3}, s_g, DType::INT32), g.constant({3}, e_g, DType::INT32), g.constant({3}, steps, DType::INT32));
+        // Slice Q and Gate from the last axis (axis 3) of the 4D tensor
+        int32_t s_q[] = {0, 0, 0, 0};
+        int32_t e_q[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.attn_head_dim};
+        int32_t steps[] = {1, 1, 1, 1};
+        uint32_t q_4d = g.contiguous(g.slice(q_and_gate_4d, g.constant({4}, s_q, DType::INT32), g.constant({4}, e_q, DType::INT32), g.constant({4}, steps, DType::INT32)));
 
-        uint32_t k = project(".self_attn.k_proj.weight", cfg.emb_dim, cfg.attn_n_kv_heads * cfg.attn_head_dim);
-        uint32_t v = project(".self_attn.v_proj.weight", cfg.emb_dim, cfg.attn_n_kv_heads * cfg.attn_head_dim);
+        int32_t s_g[] = {0, 0, 0, (int32_t)cfg.attn_head_dim};
+        int32_t e_g[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.attn_head_dim * 2};
+        uint32_t gate_4d = g.contiguous(g.slice(q_and_gate_4d, g.constant({4}, s_g, DType::INT32), g.constant({4}, e_g, DType::INT32), g.constant({4}, steps, DType::INT32)));
+
+        // Reshape Gate back to 3D: [1, seq_len, num_heads * head_dim]
+        int32_t gate_shape3[] = {1, (int32_t)seq_len, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim)};
+        uint32_t gate = g.reshape(gate_4d, g.constant({3}, gate_shape3, DType::INT32));
 
         int32_t perm4[] = {0, 2, 1, 3};
         uint32_t perm4_node = g.constant({4}, perm4, DType::INT32);
 
-        int32_t q_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.attn_head_dim};
-        uint32_t q_4d = g.reshape(q, g.constant({4}, q_shape4, DType::INT32));
+        // Permute Q and reshape to 3D
         uint32_t q_perm = g.permute(q_4d, perm4_node);
         q_perm = g.contiguous(q_perm);
         int32_t shape3_q[] = {(int32_t)cfg.attn_n_q_heads, (int32_t)seq_len, (int32_t)cfg.attn_head_dim};
-        q = g.reshape(q_perm, g.constant({3}, shape3_q, DType::INT32));
+        uint32_t q = g.reshape(q_perm, g.constant({3}, shape3_q, DType::INT32));
+
+        uint32_t k = project(".self_attn.k_proj.weight", cfg.emb_dim, cfg.attn_n_kv_heads * cfg.attn_head_dim);
+        uint32_t v = project(".self_attn.v_proj.weight", cfg.emb_dim, cfg.attn_n_kv_heads * cfg.attn_head_dim);
 
         int32_t k_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_kv_heads, (int32_t)cfg.attn_head_dim};
         uint32_t k_4d = g.reshape(k, g.constant({4}, k_shape4, DType::INT32));
@@ -808,6 +816,49 @@ public:
         uint32_t router_logits = project(".mlp.gate.weight", cfg.emb_dim, cfg.n_experts);
         uint32_t router_probs = softmax(router_logits, cfg.n_experts);
 
+        // --- Gating Top-K Selection & Normalization ---
+        uint32_t S = seq_len;
+        uint32_t E = cfg.n_experts;
+        uint32_t K = cfg.n_active_experts; // 8
+
+        int32_t ax2_val = 2;
+        uint32_t ax2_node = g.constant({1}, &ax2_val, DType::INT32);
+        int32_t k_val = (int32_t)K;
+        uint32_t k_node = g.constant({1}, &k_val, DType::INT32);
+
+        // 1. Get Top-K Indices: [1, S, K]
+        uint32_t selected_experts = g.argmax(router_probs, ax2_node, k_node);
+
+        // 2. Expand selected_experts to [1, S, K, E]
+        int32_t sh4_sel[] = {1, (int32_t)S, (int32_t)K, 1};
+        uint32_t sel_reshaped = g.reshape(selected_experts, g.constant({4}, sh4_sel, DType::INT32));
+        uint32_t sel_expanded = g.contiguous(repeat_ax(sel_reshaped, E, 3));
+
+        // 3. Generate Expert Range: [1, S, K, E]
+        int32_t arange_start = 0, arange_stop = (int32_t)E, arange_step = 1;
+        uint32_t range_1d = g.arange(g.constant({1}, &arange_start, DType::INT32),
+                                     g.constant({1}, &arange_stop, DType::INT32),
+                                     g.constant({1}, &arange_step, DType::INT32));
+        int32_t sh4_range[] = {1, 1, 1, (int32_t)E};
+        uint32_t range_reshaped = g.reshape(range_1d, g.constant({4}, sh4_range, DType::INT32));
+        uint32_t range_expanded = g.contiguous(repeat_ax(repeat_ax(range_reshaped, S, 1), K, 2));
+
+        // 4. Compare elementwise and cast to float
+        uint32_t mask_bool = g.eq(sel_expanded, range_expanded);
+        uint32_t mask_float = g.cast(mask_bool, DType::FLOAT32); // [1, S, K, E]
+
+        // 5. Reduce sum on K axis to yield the final [1, S, E] mask
+        int32_t ax2_4d = 2;
+        uint32_t mask_reduced = g.sum(mask_float, g.constant({1}, &ax2_4d, DType::INT32)); // [1, S, 1, E]
+        int32_t sh3_final[] = {1, (int32_t)S, (int32_t)E};
+        uint32_t router_mask = g.reshape(mask_reduced, g.constant({3}, sh3_final, DType::INT32)); // [1, S, E]
+
+        // 6. Apply mask & Normalize top-k probabilities
+        uint32_t gated_probs = g.mul(router_probs, router_mask);      // [1, S, E]
+        uint32_t prob_sum = g.sum(gated_probs, ax2_node);             // [1, S, 1]
+        uint32_t prob_sum_exp = repeat_ax(prob_sum, E, 2);            // [1, S, E]
+        uint32_t normalized_probs = g.div(gated_probs, prob_sum_exp); // [1, S, E]
+
         // --- Step 1: Expand Input X to [E, S, H] ---
         int32_t shape_3d_x[] = {1, (int32_t)seq_len, (int32_t)cfg.emb_dim};
         uint32_t x_reshaped = g.reshape(x, g.constant({3}, shape_3d_x, DType::INT32));
@@ -854,19 +905,19 @@ public:
         uint32_t exp_down_perm = g.permute(exp_down, g.constant({3}, perm_esh, DType::INT32));
         exp_down_perm = g.contiguous(exp_down_perm); // [S, E, H]
 
-        // 2. Permute router_probs [1, S, E] -> [S, E, 1]
+        // 2. Permute normalized_probs [1, S, E] -> [S, E, 1]
         int32_t perm_1se[] = {1, 2, 0};
-        uint32_t router_probs_perm = g.permute(router_probs, g.constant({3}, perm_1se, DType::INT32));
-        router_probs_perm = g.contiguous(router_probs_perm); // [S, E, 1]
+        uint32_t normalized_probs_perm = g.permute(normalized_probs, g.constant({3}, perm_1se, DType::INT32));
+        normalized_probs_perm = g.contiguous(normalized_probs_perm); // [S, E, 1]
 
-        // 3. Repeat router_probs_perm [S, E, 1] -> [S, E, H]
+        // 3. Repeat normalized_probs_perm [S, E, 1] -> [S, E, H]
         int32_t rep_h[] = {(int32_t)cfg.emb_dim};
         int32_t ax_h[] = {2};
-        uint32_t router_probs_exp = g.repeat(router_probs_perm, g.constant({1}, rep_h, DType::INT32), g.constant({1}, ax_h, DType::INT32));
-        router_probs_exp = g.contiguous(router_probs_exp); // [S, E, H]
+        uint32_t normalized_probs_exp = g.repeat(normalized_probs_perm, g.constant({1}, rep_h, DType::INT32), g.constant({1}, ax_h, DType::INT32));
+        normalized_probs_exp = g.contiguous(normalized_probs_exp); // [S, E, H]
 
         // 4. Multiply element-wise
-        uint32_t weighted_outputs = g.mul(exp_down_perm, router_probs_exp); // [S, E, H]
+        uint32_t weighted_outputs = g.mul(exp_down_perm, normalized_probs_exp); // [S, E, H]
 
         // 5. Sum along the expert dimension (axis 1)
         int32_t sum_ax[] = {1};
@@ -952,13 +1003,15 @@ public:
         uint32_t w_final_ln = weight(w_path, "model.language_model.norm.weight");
         x = rms_norm_gemma_atomic(x, w_final_ln, 1, cfg.emb_dim);
 
+        uint32_t w_lm = weight(w_path, "lm_head.weight");
+
         int32_t perm_dims[] = {1, 0};
         uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
-        uint32_t w_emb_t = g.permute(w_emb, dims_node);
-        w_emb_t = g.contiguous(w_emb_t);
+        uint32_t w_lm_t = g.permute(w_lm, dims_node);
+        w_lm_t = g.contiguous(w_lm_t);
         int32_t s3[] = {1, (int32_t)cfg.emb_dim, (int32_t)cfg.vocab_size};
-        uint32_t w_emb_3d = g.reshape(w_emb_t, g.constant({3}, s3, DType::INT32));
+        uint32_t w_lm_3d = g.reshape(w_lm_t, g.constant({3}, s3, DType::INT32));
 
-        return g.dot(x, w_emb_3d);
+        return g.dot(x, w_lm_3d);
     }
 };
