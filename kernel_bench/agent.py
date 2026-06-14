@@ -19,7 +19,7 @@ AGENT_CONFIGS = [
         "model": "qwen3.6:35b",
         "target_model": "flux-klein-4b",
         "instances": 1,
-    }
+    },
 ]
 
 tools = [

@@ -57,7 +57,9 @@ def extract_all(egraph: EGraph, root_id: int):
                 ref_counts[child] += 1
 
             # enqueue children (DFS)
-            new_to_process = [child for child in node.children if child not in selection_map] # we don't need to descend into children we have already processed
+            new_to_process = [
+                child for child in node.children if child not in selection_map
+            ]  # we don't need to descend into children we have already processed
             to_process = new_to_process + to_process
 
         # reached a full tree
@@ -110,7 +112,9 @@ def extract_all(egraph: EGraph, root_id: int):
                 to_process = []
                 for eclass in path:
                     node = egraph.eclasses[eclass][selection_map[eclass]]
-                    new_to_process = [child for child in node.children if child not in selection_map]
+                    new_to_process = [
+                        child for child in node.children if child not in selection_map
+                    ]
                     to_process = new_to_process + to_process
 
                 break

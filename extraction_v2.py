@@ -26,7 +26,9 @@ class EGraph:
         inplace_idx: int = -1,
     ):
         if inplace and inplace_idx == -1:
-            raise RuntimeError(f"Must provide inplace_idx if inplace=true, but got inplace_idx={inplace_idx}")
+            raise RuntimeError(
+                f"Must provide inplace_idx if inplace=true, but got inplace_idx={inplace_idx}"
+            )
         self.eclasses[eclass_id].append(ENode(op, children, inplace, inplace_idx))
 
 
@@ -106,7 +108,7 @@ def extract_all(egraph: EGraph, root_id: int):
                 ref_counts[child] -= 1
                 if ref_counts[child] == 0:
                     del ref_counts[child]
-            
+
             # rollback need_single_ref
             if node.inplace and node.children[node.inplace_idx] in need_single_ref:
                 need_single_ref.remove(node.children[node.inplace_idx])

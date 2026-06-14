@@ -1372,7 +1372,10 @@ class FluxPipeline:
         print(f"Building Transformer graph for {latent_w * 16}x{latent_h * 16}...")
         self.load_transformer()
         self.flux_transformer = FluxTransformer(self.cfg)
-        self.transformer_session = GraphSession(self.flux_transformer.output, cache_path="dirty_region_caches/OLD-flux-trans.jsonl")
+        self.transformer_session = GraphSession(
+            self.flux_transformer.output,
+            cache_path="dirty_region_caches/OLD-flux-trans.jsonl",
+        )
 
         txt_len = self.cfg.text_max_seq
 
@@ -1422,7 +1425,9 @@ class FluxPipeline:
             weights_nodes[k] = self.text_encoder.param(k, shape)
 
         embeddings = self.text_encoder.forward(input_ids, weights_nodes)
-        self.text_encoder_session = GraphSession(embeddings, cache_path="dirty_region_caches/OLD-flux-text.jsonl")
+        self.text_encoder_session = GraphSession(
+            embeddings, cache_path="dirty_region_caches/OLD-flux-text.jsonl"
+        )
         sample_inputs = {
             "input_ids": np.zeros((1, self.cfg.text_max_seq), dtype=np.int32),
             "seq_len": np.array([self.cfg.text_max_seq], dtype=np.int32),
@@ -1452,7 +1457,11 @@ class FluxPipeline:
             )
 
         image = self.vae_decoder.decode(latent, h_node, w_node, weights)
-        self.vae_session = GraphSession(image, max_memory_bytes=10 * 1024**3, cache_path="dirty_region_caches/OLD-flux-vae.jsonl")
+        self.vae_session = GraphSession(
+            image,
+            max_memory_bytes=10 * 1024**3,
+            cache_path="dirty_region_caches/OLD-flux-vae.jsonl",
+        )
 
         sample_latent = np.zeros(
             (1, self.cfg.vae_channels, latent_h, latent_w), dtype=np.float32

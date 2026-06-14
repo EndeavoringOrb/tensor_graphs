@@ -72,7 +72,9 @@ def extract_all(egraph: EGraph, root_id: int):
                 selection_map[current] = sel + 1
 
                 # reset deeper selections
-                keys_to_delete = [k for k in selection_map if k not in path and k != current]
+                keys_to_delete = [
+                    k for k in selection_map if k not in path and k != current
+                ]
                 for k in keys_to_delete:
                     del selection_map[k]
 
@@ -117,8 +119,8 @@ eg.add_enode(3, "+", [1, 2])
 # eclass 4 has TWO enodes:
 #   0: a*(b+c)
 #   1: (a*b) + (a*c)
-eg.add_enode(4, "*", [0, 3])     # index 0
-eg.add_enode(4, "+", [5, 6])     # index 1
+eg.add_enode(4, "*", [0, 3])  # index 0
+eg.add_enode(4, "+", [5, 6])  # index 1
 
 # a*b and a*c
 eg.add_enode(5, "*", [0, 1])

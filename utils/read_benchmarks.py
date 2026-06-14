@@ -137,7 +137,7 @@ def main():
         ]
         backends = ",".join(b_list) if b_list else "CPU"
 
-        print(f"[{i+1}/{total}][{backends}] {name} ({uid})")
+        print(f"[{i + 1}/{total}][{backends}] {name} ({uid})")
 
         in_shapes = r.get("inputShapes", [])
         in_dtypes = r.get("inputDTypes", [])

@@ -14,22 +14,26 @@ class BinaryReader:
 
     def read_u8(self):
         buf = self.f.read(1)
-        if not buf: return None
+        if not buf:
+            return None
         return struct.unpack("<B", buf)[0]
 
     def read_u32(self):
         buf = self.f.read(4)
-        if not buf: return None
+        if not buf:
+            return None
         return struct.unpack("<I", buf)[0]
 
     def read_u64(self):
         buf = self.f.read(8)
-        if not buf: return None
+        if not buf:
+            return None
         return struct.unpack("<Q", buf)[0]
 
     def read_float(self):
         buf = self.f.read(4)
-        if not buf: return None
+        if not buf:
+            return None
         return struct.unpack("<f", buf)[0]
 
     def read_string(self):

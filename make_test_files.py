@@ -7,32 +7,64 @@ from safetensors.torch import save_file
 TEST_DIR = "tensor_graphs_cpp/tests"
 
 OP_TYPES = [
-    "INPUT", "ADD", "MUL", "DIVIDE", "DOT", "SIN", "COS", "NEGATE", "POWER",
-    "SUM", "MAX", "RESHAPE", "PERMUTE", "SLICE", "CONCAT", "CAST", "REPEAT",
-    "ARANGE", "TRIU", "GATHER", "FILL", "COPY_TO", "IM2COL", "CONTIGUOUS",
-    "SCATTER", "FUSED"
+    "INPUT",
+    "ADD",
+    "MUL",
+    "DIVIDE",
+    "DOT",
+    "SIN",
+    "COS",
+    "NEGATE",
+    "POWER",
+    "SUM",
+    "MAX",
+    "RESHAPE",
+    "PERMUTE",
+    "SLICE",
+    "CONCAT",
+    "CAST",
+    "REPEAT",
+    "ARANGE",
+    "TRIU",
+    "GATHER",
+    "FILL",
+    "COPY_TO",
+    "IM2COL",
+    "CONTIGUOUS",
+    "SCATTER",
+    "FUSED",
 ]
 
 DTYPE_MAP = {
-    torch.float32: 0,   # FLOAT32
-    torch.int32: 1,     # INT32
-    torch.int64: 2,     # INT64
+    torch.float32: 0,  # FLOAT32
+    torch.int32: 1,  # INT32
+    torch.int64: 2,  # INT64
     torch.bfloat16: 3,  # BF16
-    torch.bool: 4       # BOOL
+    torch.bool: 4,  # BOOL
 }
+
 
 class BinaryWriter:
     def __init__(self, f):
         self.f = f
 
-    def write_u8(self, v): self.f.write(struct.pack("<B", v))
-    def write_u32(self, v): self.f.write(struct.pack("<I", v))
-    def write_u64(self, v): self.f.write(struct.pack("<Q", v))
-    def write_i32(self, v): self.f.write(struct.pack("<i", v))
-    def write_float(self, v): self.f.write(struct.pack("<f", v))
-    
+    def write_u8(self, v):
+        self.f.write(struct.pack("<B", v))
+
+    def write_u32(self, v):
+        self.f.write(struct.pack("<I", v))
+
+    def write_u64(self, v):
+        self.f.write(struct.pack("<Q", v))
+
+    def write_i32(self, v):
+        self.f.write(struct.pack("<i", v))
+
+    def write_float(self, v):
+        self.f.write(struct.pack("<f", v))
+
     def write_string(self, s):
-        b = s.encode('utf-8')
+        b = s.encode("utf-8")
         self.write_u32(len(b))
         self.f.write(b)
 
@@ -45,16 +77,29 @@ class BinaryWriter:
         self.write_u64(r["kernelUid"])
         self.write_u64(r["buildContextId"])
         self.write_string(r["hwTag"])
-        self.write_vector(r["inputShapes"], lambda v: self.write_vector(v, self.write_u32))
-        self.write_vector(r["outputShapes"], lambda v: self.write_vector(v, self.write_u32))
-        self.write_vector(r["inputStrides"], lambda v: self.write_vector(v, self.write_u64))
-        self.write_vector(r["outputStrides"], lambda v: self.write_vector(v, self.write_u64))
+        self.write_vector(
+            r["inputShapes"], lambda v: self.write_vector(v, self.write_u32)
+        )
+        self.write_vector(
+            r["outputShapes"], lambda v: self.write_vector(v, self.write_u32)
+        )
+        self.write_vector(
+            r["inputStrides"], lambda v: self.write_vector(v, self.write_u64)
+        )
+        self.write_vector(
+            r["outputStrides"], lambda v: self.write_vector(v, self.write_u64)
+        )
         self.write_vector(r["inputDTypes"], self.write_u32)
         self.write_vector(r["outputDTypes"], self.write_u32)
-        self.write_vector(r["inputConstants"], lambda v: (self.write_u32(len(v)), self.f.write(v)))
+        self.write_vector(
+            r["inputConstants"], lambda v: (self.write_u32(len(v)), self.f.write(v))
+        )
         self.write_vector(r["backends"], self.write_u32)
-        self.write_vector(r["inputBackends"], lambda v: self.write_vector(v, self.write_u32))
+        self.write_vector(
+            r["inputBackends"], lambda v: self.write_vector(v, self.write_u32)
+        )
         self.write_float(r["runTime"])
+
 
 tests = []
 
@@ -160,9 +205,9 @@ for i, (op, inputs, output) in enumerate(tests):
         "inputDTypes": [DTYPE_MAP[inp.dtype] for inp in inputs],
         "outputDTypes": [DTYPE_MAP[output.dtype]],
         "inputConstants": [b"" for _ in inputs],
-        "backends": [0], # CPU
+        "backends": [0],  # CPU
         "inputBackends": [[0] for _ in inputs],
-        "runTime": 0.0
+        "runTime": 0.0,
     }
 
     tensors = {}
@@ -177,4 +222,3 @@ for i, (op, inputs, output) in enumerate(tests):
     save_file(tensors, f"{test_dir}/data.safetensors")
 
 print(f"Generated {len(tests)} tests in {TEST_DIR}/ directory.")
-

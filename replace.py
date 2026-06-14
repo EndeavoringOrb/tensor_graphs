@@ -16,7 +16,7 @@ def parse_patches(patch_file):
             print(f"Patch must contain pairs of old/new separated by ====: {c}")
             continue
         old, new = parts
-        old = old[old.find("\n"):]
+        old = old[old.find("\n") :]
         patches.append((old.strip(), new.strip()))
 
     return patches
