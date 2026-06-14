@@ -445,8 +445,10 @@ struct FusionRule : public Rule
                 outputNode.viewOffset = outViewOffset;
                 outputNode.backend = targetBackend;
 
+                bool ignoreInputBackends = (pattern.rootOpType != OpType::COPY_TO);
+
                 std::vector<uint64_t> kernelMatches = KernelRegistry::get().findMatchingKernels(
-                    OpType::FUSED, pattern.opName, targetBackend, inputNodes, outputNode, false, true, true);
+                    OpType::FUSED, pattern.opName, targetBackend, inputNodes, outputNode, false, ignoreInputBackends, true);
 
                 for (uint64_t uid : kernelMatches)
                 {
@@ -949,6 +951,25 @@ struct SlicePushDownElementwise : public Rule
             if (childNode.opType == OpType::SLICE && childNode.children.size() == 4)
             {
                 uint32_t srcClass = egraph.findConst(childNode.children[0]);
+                
+                auto starts = getConstInt32(egraph, childNode.children[1]);
+                auto ends = getConstInt32(egraph, childNode.children[2]);
+                auto steps = getConstInt32(egraph, childNode.children[3]);
+                
+                if (starts.empty() || ends.empty() || steps.empty()) continue;
+                
+                const auto& origShape = egraph.getEClass(srcClass).shape;
+                bool isFull = true;
+                if (starts.size() != origShape.size()) isFull = false;
+                for (size_t d = 0; d < starts.size() && isFull; ++d) {
+                    int32_t st = starts[d] < 0 ? starts[d] + origShape[d] : starts[d];
+                    int32_t en = ends[d] < 0 ? ends[d] + origShape[d] : ends[d];
+                    if (st != 0 || en != (int32_t)origShape[d] || steps[d] != 1) {
+                        isFull = false;
+                    }
+                }
+                if (isFull) continue;
+
                 if (!allowPushDownOnProtected && isEClassProtected(srcClass, ctx.protectedEClasses, egraph))
                     continue;
 
@@ -1124,6 +1145,25 @@ struct SlicePushDownDot : public Rule
             if (childNode.opType == OpType::SLICE && childNode.children.size() == 4)
             {
                 uint32_t srcClass = egraph.findConst(childNode.children[0]);
+                
+                auto starts = getConstInt32(egraph, childNode.children[1]);
+                auto ends = getConstInt32(egraph, childNode.children[2]);
+                auto steps = getConstInt32(egraph, childNode.children[3]);
+                
+                if (starts.empty() || ends.empty() || steps.empty()) continue;
+                
+                const auto& origShape = egraph.getEClass(srcClass).shape;
+                bool isFull = true;
+                if (starts.size() != origShape.size()) isFull = false;
+                for (size_t d = 0; d < starts.size() && isFull; ++d) {
+                    int32_t st = starts[d] < 0 ? starts[d] + origShape[d] : starts[d];
+                    int32_t en = ends[d] < 0 ? ends[d] + origShape[d] : ends[d];
+                    if (st != 0 || en != (int32_t)origShape[d] || steps[d] != 1) {
+                        isFull = false;
+                    }
+                }
+                if (isFull) continue;
+
                 if (!allowPushDownOnProtected && isEClassProtected(srcClass, ctx.protectedEClasses, egraph))
                     continue;
 
