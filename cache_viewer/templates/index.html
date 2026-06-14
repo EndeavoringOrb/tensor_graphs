@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Compiled Graph Viewer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #1e293b;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #475569;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans">
+
+    <!-- Header -->
+    <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex items-center justify-between shadow-lg">
+        <div class="flex items-center gap-3">
+            <span class="text-emerald-500 font-bold text-xl">TensorGraph</span>
+            <h1 class="text-slate-200 font-medium">Cache Compiler Visualizer</h1>
+        </div>
+
+        <!-- File Picker -->
+        <div class="flex items-center gap-3">
+            <select id="fileSelect"
+                class="bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500">
+                <option value="">Scan Cache Directory...</option>
+            </select>
+            <button onclick="loadFile()"
+                class="bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-4 py-1.5 rounded text-sm transition">
+                Load
+            </button>
+        </div>
+    </header>
+
+    <!-- App Body -->
+    <main class="flex-1 flex overflow-hidden">
+
+        <!-- Sidebar (Stats & Buckets) -->
+        <section
+            class="w-80 bg-slate-900 border-r border-slate-800 p-4 flex flex-col gap-4 overflow-y-auto custom-scrollbar">
+            <!-- Global Metadata -->
+            <div class="bg-slate-950 border border-slate-800 rounded-lg p-3">
+                <h3 class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Metadata</h3>
+                <div class="space-y-1.5 text-xs text-slate-300">
+                    <div class="flex justify-between"><span>Cache Version:</span><span id="metaVersion"
+                            class="font-mono text-emerald-400">-</span></div>
+                    <div class="flex justify-between"><span>Root Class ID:</span><span id="metaRootId"
+                            class="font-mono text-emerald-400">-</span></div>
+                    <div class="flex justify-between"><span>File Size:</span><span id="metaFileSize"
+                            class="font-mono text-emerald-400">-</span></div>
+                </div>
+            </div>
+
+            <!-- Buckets List -->
+            <div class="flex-1 flex flex-col min-h-[300px]">
+                <h3 class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Compiled Buckets</h3>
+                <div id="bucketList" class="flex-1 space-y-2 overflow-y-auto custom-scrollbar pr-1">
+                    <p class="text-slate-500 text-sm italic">Load a cache file to populate buckets.</p>
+                </div>
+            </div>
+
+            <!-- Analytics/Op breakdown -->
+            <div class="h-64 flex flex-col border-t border-slate-800 pt-3">
+                <h3 class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">OpType Cost Analytics
+                </h3>
+                <div id="analyticsPanel" class="flex-1 overflow-y-auto custom-scrollbar text-xs space-y-1.5">
+                    <p class="text-slate-500 italic">Select a bucket to view execution breakdown.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Workspace (Instruction Table) -->
+        <section class="flex-1 flex flex-col bg-slate-950 p-4 overflow-hidden">
+            <!-- Controls Grid -->
+            <div class="flex items-center justify-between gap-4 mb-3">
+                <div class="flex items-center gap-2 flex-1 max-w-md">
+                    <input type="text" id="searchInput" oninput="debounceFilter()"
+                        placeholder="Search node physical ID or OpType..."
+                        class="w-full bg-slate-900 border border-slate-800 rounded px-3 py-1.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500">
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="text-xs text-slate-400">Backend:</span>
+                    <select id="backendFilter" onchange="fetchInstructions(1)"
+                        class="bg-slate-900 border border-slate-800 rounded px-3 py-1 text-sm text-slate-200 focus:outline-none">
+                        <option value="">All</option>
+                        <option value="CPU">CPU</option>
+                        <option value="CUDA">CUDA</option>
+                        <option value="STORAGE">STORAGE</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Table Area -->
+            <div class="flex-1 overflow-auto custom-scrollbar border border-slate-800 rounded-lg bg-slate-900">
+                <table class="w-full text-left border-collapse text-sm">
+                    <thead
+                        class="bg-slate-950 border-b border-slate-800 sticky top-0 z-10 text-xs text-slate-400 uppercase tracking-wider">
+                        <tr>
+                            <th class="px-4 py-3">Exec order</th>
+                            <th class="px-4 py-3">Phys ID</th>
+                            <th class="px-4 py-3">Logical ID</th>
+                            <th class="px-4 py-3">Operation Type</th>
+                            <th class="px-4 py-3">Backend</th>
+                            <th class="px-4 py-3 text-right">Cost (ms)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="instructionTableBody" class="divide-y divide-slate-800/50">
+                        <tr>
+                            <td colspan="6" class="px-4 py-8 text-center text-slate-500 italic">No bucket currently
+                                active. Select one on the left.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination Bar -->
+            <div class="flex items-center justify-between mt-3 text-xs text-slate-400">
+                <div>
+                    Showing <span id="pagStart" class="text-slate-200">0</span> - <span id="pagEnd"
+                        class="text-slate-200">0</span> of <span id="pagTotal" class="text-slate-200">0</span>
+                    instructions
+                </div>
+                <div class="flex items-center gap-1">
+                    <button onclick="prevPage()" id="btnPrev"
+                        class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:pointer-events-none text-slate-200">Previous</button>
+                    <span id="currentPageNum" class="px-2 font-semibold">1</span>
+                    <button onclick="nextPage()" id="btnNext"
+                        class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:pointer-events-none text-slate-200">Next</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Right Sidebar (Drill-Down Inspector) -->
+        <section id="inspectorPanel"
+            class="w-96 bg-slate-900 border-l border-slate-800 p-4 flex flex-col gap-4 overflow-y-auto custom-scrollbar hidden">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                <h2 class="font-bold text-slate-200 flex items-center gap-2">
+                    <span id="inspectNodeId" class="text-emerald-500 font-mono text-lg">#0</span>
+                    <span class="text-slate-500 text-xs">Node Inspector</span>
+                </h2>
+                <button onclick="closeInspector()" class="text-slate-400 hover:text-white">&times;</button>
+            </div>
+
+            <div class="space-y-4 text-sm">
+                <!-- Attributes -->
+                <div class="space-y-2 bg-slate-950 border border-slate-800 rounded-lg p-3">
+                    <div class="flex justify-between"><span>Operation:</span><span id="inspectOp"
+                            class="font-semibold text-slate-200"></span></div>
+                    <div class="flex justify-between"><span>Backend:</span><span id="inspectBackend"
+                            class="px-1.5 py-0.5 rounded text-xs font-mono font-bold"></span></div>
+                    <div class="flex justify-between"><span>DType:</span><span id="inspectDType"
+                            class="font-mono"></span></div>
+                    <div class="flex justify-between"><span>Storage:</span><span id="inspectStorage"
+                            class="font-mono"></span></div>
+                    <div class="flex justify-between"><span>Cost:</span><span id="inspectCost"
+                            class="font-mono text-emerald-400"></span></div>
+                    <div class="flex justify-between"><span>Global Ref Count:</span><span id="inspectRefs"
+                            class="font-mono"></span></div>
+                    <div class="flex justify-between"><span>Static Const size:</span><span id="inspectConstSize"
+                            class="font-mono text-amber-500"></span></div>
+                </div>
+
+                <!-- Structural Geometry -->
+                <div class="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2 text-xs">
+                    <h4 class="font-semibold text-slate-400 uppercase tracking-wider text-[10px]">Strided Geometry</h4>
+                    <div>Shape: <span id="inspectShape" class="font-mono text-emerald-400"></span></div>
+                    <div>Strides: <span id="inspectStrides" class="font-mono text-emerald-400"></span></div>
+                    <div>View Offset: <span id="inspectOffset" class="font-mono text-slate-300"></span></div>
+                </div>
+
+                <!-- Dependencies -->
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="bg-slate-950 border border-slate-800 rounded-lg p-3 flex flex-col h-48">
+                        <h4 class="font-semibold text-slate-400 uppercase tracking-wider text-[10px] mb-2">Inputs
+                            (Parents)</h4>
+                        <div id="inspectParents" class="flex-1 overflow-y-auto space-y-1 custom-scrollbar text-xs">
+                        </div>
+                    </div>
+                    <div class="bg-slate-950 border border-slate-800 rounded-lg p-3 flex flex-col h-48">
+                        <h4 class="font-semibold text-slate-400 uppercase tracking-wider text-[10px] mb-2">Consumers
+                            (Dependents)</h4>
+                        <div id="inspectDependents" class="flex-1 overflow-y-auto space-y-1 custom-scrollbar text-xs">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Metadata Content Hash -->
+                <div
+                    class="bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-500 break-all font-mono">
+                    Hash: <span id="inspectHash"></span>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Javascript Client State Controller -->
+    <script>
+        let currentFile = "";
+        let currentBucketIndex = null;
+        let currentPage = 1;
+        const pageLimit = 100;
+        let filterTimeout = null;
+
+        // On Load initialization
+        window.addEventListener("DOMContentLoaded", () => {
+            fetchFiles();
+        });
+
+        async function fetchFiles() {
+            try {
+                const res = await fetch("/api/files");
+                const data = await res.json();
+                const selector = document.getElementById("fileSelect");
+                selector.innerHTML = '<option value="">Scan Cache Directory...</option>';
+                data.files.forEach(f => {
+                    const opt = document.createElement("option");
+                    opt.value = f.path;
+                    opt.textContent = `${f.name} (${f.size_mb} MB)`;
+                    selector.appendChild(opt);
+                });
+            } catch (e) {
+                console.error("Failed to query workspace caches:", e);
+            }
+        }
+
+        async function loadFile() {
+            const path = document.getElementById("fileSelect").value;
+            if (!path) return;
+
+            document.getElementById("bucketList").innerHTML = '<p class="text-slate-400 text-sm">Parsing file indexes lazily...</p>';
+            try {
+                const res = await fetch("/api/load", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ path })
+                });
+                const data = await res.json();
+                if (data.error) {
+                    alert(data.error);
+                    return;
+                }
+                currentFile = path;
+                fetchSummary();
+            } catch (e) {
+                alert("Error loading file: " + e);
+            }
+        }
+
+        async function fetchSummary() {
+            const res = await fetch("/api/summary");
+            const data = await res.json();
+
+            // Populate global metadata stats
+            document.getElementById("metaVersion").textContent = data.metadata ? data.metadata.cacheVersion : "N/A";
+            document.getElementById("metaRootId").textContent = data.metadata ? data.metadata.rootId : "N/A";
+            document.getElementById("metaFileSize").textContent = document.getElementById("fileSelect").selectedOptions[0].text.split("(")[1].replace(")", "");
+
+            // Build Bucket List
+            const list = document.getElementById("bucketList");
+            list.innerHTML = "";
+            data.buckets.forEach(b => {
+                const btn = document.createElement("button");
+                btn.className = "w-full text-left bg-slate-800 hover:bg-slate-700/80 border border-slate-700 rounded-lg p-3 transition flex flex-col gap-1.5 focus:ring-1 focus:ring-emerald-500/50";
+                btn.onclick = () => selectBucket(b.index);
+                btn.id = `bucketBtn-${b.index}`;
+                btn.innerHTML = `
+                    <div class="flex items-center justify-between text-xs">
+                        <span class="font-bold text-slate-200">Bucket #${b.index}</span>
+                        <span class="font-mono text-emerald-400 font-semibold">${b.total_estimated_time_ms} ms</span>
+                    </div>
+                    <div class="text-[11px] text-slate-400 flex justify-between">
+                        <span>Instructions: ${b.instructions_count}</span>
+                        <span>Nodes: ${b.nodes_count}</span>
+                    </div>
+                `;
+                list.appendChild(btn);
+            });
+
+            if (data.buckets.length > 0) {
+                selectBucket(0);
+            }
+        }
+
+        function selectBucket(index) {
+            // Highlighting active button
+            if (currentBucketIndex !== null) {
+                const oldBtn = document.getElementById(`bucketBtn-${currentBucketIndex}`);
+                if (oldBtn) oldBtn.classList.remove("border-emerald-500", "bg-slate-800/80");
+            }
+            currentBucketIndex = index;
+            const newBtn = document.getElementById(`bucketBtn-${index}`);
+            if (newBtn) newBtn.classList.add("border-emerald-500", "bg-slate-800/80");
+
+            currentPage = 1;
+            fetchInstructions(1);
+            fetchAnalytics();
+            closeInspector();
+        }
+
+        async function fetchInstructions(page = 1) {
+            if (currentBucketIndex === null) return;
+            currentPage = page;
+
+            const search = document.getElementById("searchInput").value;
+            const backend = document.getElementById("backendFilter").value;
+
+            const res = await fetch(`/api/bucket/${currentBucketIndex}/instructions?page=${page}&limit=${pageLimit}&search=${search}&backend=${backend}`);
+            const data = await res.json();
+
+            const tbody = document.getElementById("instructionTableBody");
+            tbody.innerHTML = "";
+
+            if (data.instructions.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="6" class="px-4 py-8 text-center text-slate-500 italic">No instructions matched filters.</td></tr>`;
+            }
+
+            data.instructions.forEach((inst, idx) => {
+                const globalIndex = (page - 1) * pageLimit + idx + 1;
+                const tr = document.createElement("tr");
+                tr.className = "hover:bg-slate-800/50 cursor-pointer transition border-b border-slate-800/40";
+                tr.onclick = () => inspectNode(inst.nodeId);
+
+                let badgeColor = "bg-slate-800 text-slate-400";
+                if (inst.backend === "CUDA") badgeColor = "bg-emerald-950/80 text-emerald-400 border border-emerald-900/50";
+                else if (inst.backend === "CPU") badgeColor = "bg-blue-950/80 text-blue-400 border border-blue-900/50";
+                else if (inst.backend === "STORAGE") badgeColor = "bg-amber-950/80 text-amber-400 border border-amber-900/50";
+
+                tr.innerHTML = `
+                    <td class="px-4 py-2.5 font-mono text-slate-500 text-xs">${globalIndex}</td>
+                    <td class="px-4 py-2.5 font-mono text-slate-200 font-semibold text-xs">${inst.nodeId}</td>
+                    <td class="px-4 py-2.5 font-mono text-slate-400 text-xs">${inst.logicalNodeId !== 4294967295 ? inst.logicalNodeId : "N/A"}</td>
+                    <td class="px-4 py-2.5 font-medium text-slate-300">
+                        ${inst.displayName}
+                        ${inst.inplaceInputIndex !== -1 ? '<span class="ml-1 text-[10px] bg-purple-950/80 text-purple-400 px-1 py-0.5 rounded border border-purple-900/40">Inplace</span>' : ""}
+                        ${inst.viewInputIndex !== -1 ? '<span class="ml-1 text-[10px] bg-indigo-950/80 text-indigo-400 px-1 py-0.5 rounded border border-indigo-900/40">View</span>' : ""}
+                    </td>
+                    <td class="px-4 py-2.5">
+                        <span class="px-1.5 py-0.5 rounded text-xs font-mono font-bold ${badgeColor}">${inst.backend}</span>
+                    </td>
+                    <td class="px-4 py-2.5 text-right font-mono text-emerald-400 text-xs font-semibold">${inst.cost_ms} ms</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            // Set pagination metadata
+            const start = data.total > 0 ? (page - 1) * pageLimit + 1 : 0;
+            const end = Math.min(start + pageLimit - 1, data.total);
+            document.getElementById("pagStart").textContent = start;
+            document.getElementById("pagEnd").textContent = end;
+            document.getElementById("pagTotal").textContent = data.total;
+            document.getElementById("currentPageNum").textContent = page;
+
+            document.getElementById("btnPrev").disabled = page === 1;
+            document.getElementById("btnNext").disabled = end >= data.total;
+        }
+
+        async function inspectNode(nodeId) {
+            const panel = document.getElementById("inspectorPanel");
+            panel.classList.remove("hidden");
+
+            const res = await fetch(`/api/bucket/${currentBucketIndex}/node/${nodeId}`);
+            if (res.status === 404) return;
+            const data = await res.json();
+
+            document.getElementById("inspectNodeId").textContent = `#${data.node.id}`;
+            document.getElementById("inspectOp").textContent = data.node.opType === "FUSED" ? `FUSED_${data.node.opName}` : data.node.opType;
+
+            // Backend badge
+            const bBadge = document.getElementById("inspectBackend");
+            bBadge.textContent = data.node.backend;
+            bBadge.className = "px-1.5 py-0.5 rounded text-xs font-mono font-bold " +
+                (data.node.backend === "CUDA" ? "bg-emerald-950/80 text-emerald-400" : (data.node.backend === "CPU" ? "bg-blue-950/80 text-blue-400" : "bg-amber-950/80 text-amber-400"));
+
+            document.getElementById("inspectDType").textContent = data.node.dtype;
+            document.getElementById("inspectStorage").textContent = data.node.storageType;
+            document.getElementById("inspectCost").textContent = `${data.cost_ms} ms`;
+            document.getElementById("inspectRefs").textContent = data.refCount;
+            document.getElementById("inspectConstSize").textContent = data.constant_size_bytes > 0 ? `${(data.constant_size_bytes / 1024).toFixed(2)} KB` : "None";
+
+            document.getElementById("inspectShape").textContent = `[${data.node.shape.join(", ")}]`;
+            document.getElementById("inspectStrides").textContent = `[${data.node.strides.join(", ")}]`;
+            document.getElementById("inspectOffset").textContent = data.node.viewOffset;
+            document.getElementById("inspectHash").textContent = data.node.contentHash || "No Hash (Transient)";
+
+            // Parent dependencies list
+            const pDiv = document.getElementById("inspectParents");
+            pDiv.innerHTML = "";
+            if (data.node.parentIds.length === 0) pDiv.innerHTML = '<span class="text-slate-500 italic">None</span>';
+            data.node.parentIds.forEach(pId => {
+                const el = document.createElement("button");
+                el.className = "w-full text-left bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-300 font-mono hover:bg-slate-800 hover:text-white";
+                el.textContent = `#${pId}`;
+                el.onclick = () => inspectNode(pId);
+                pDiv.appendChild(el);
+            });
+
+            // Consumers dependencies list
+            const dDiv = document.getElementById("inspectDependents");
+            dDiv.innerHTML = "";
+            if (data.dependents.length === 0) dDiv.innerHTML = '<span class="text-slate-500 italic">No dependents</span>';
+            data.dependents.forEach(dId => {
+                const el = document.createElement("button");
+                el.className = "w-full text-left bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-300 font-mono hover:bg-slate-800 hover:text-white";
+                el.textContent = `#${dId}`;
+                el.onclick = () => inspectNode(dId);
+                dDiv.appendChild(el);
+            });
+        }
+
+        async function fetchAnalytics() {
+            const res = await fetch(`/api/bucket/${currentBucketIndex}/analytics`);
+            const data = await res.json();
+            const container = document.getElementById("analyticsPanel");
+            container.innerHTML = "";
+
+            data.analytics.forEach(item => {
+                const div = document.createElement("div");
+                div.className = "flex items-center justify-between border-b border-slate-800/40 py-1";
+                div.innerHTML = `
+                    <span class="text-slate-300 truncate pr-2 max-w-[180px]" title="${item.op}">${item.op}</span>
+                    <div class="flex items-center gap-2">
+                        <span class="text-slate-500">x${item.count}</span>
+                        <span class="font-mono text-slate-200 font-semibold">${item.total_cost_ms} ms</span>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        function debounceFilter() {
+            clearTimeout(filterTimeout);
+            filterTimeout = setTimeout(() => {
+                fetchInstructions(1);
+            }, 300);
+        }
+
+        function nextPage() {
+            fetchInstructions(currentPage + 1);
+        }
+
+        function prevPage() {
+            if (currentPage > 1) {
+                fetchInstructions(currentPage - 1);
+            }
+        }
+
+        function closeInspector() {
+            document.getElementById("inspectorPanel").classList.add("hidden");
+        }
+    </script>
+</body>
+
+</html>

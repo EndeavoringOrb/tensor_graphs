@@ -1,11 +1,62 @@
-# File: binary_utils.py
+# File: utils/binary.py
 import struct
 import os
 
+# TODO: make build.py extract these from the C++ code
+# Common enums exported for reuse across the codebase (cache viewer, benchmarks, etc.)
+OP_TYPES = [
+    "INPUT",
+    "CACHE",
+    "ADD",
+    "MUL",
+    "DIVIDE",
+    "DOT",
+    "SIN",
+    "COS",
+    "NEGATE",
+    "POWER",
+    "SUM",
+    "MAX",
+    "RESHAPE",
+    "PERMUTE",
+    "SLICE",
+    "CONCAT",
+    "CAST",
+    "REPEAT",
+    "ARANGE",
+    "TRIU",
+    "GATHER",
+    "FILL",
+    "COPY_TO",
+    "IM2COL",
+    "CONTIGUOUS",
+    "SCATTER",
+    "LOG",
+    "ARGMAX",
+    "FUSED",
+]
+
+DTYPES = ["FLOAT32", "INT32", "INT64", "BF16", "BOOL", "ANY"]
+BACKENDS = ["STORAGE", "CPU", "CUDA"]
+STORAGE_TYPES = ["TRANSIENT", "PERSISTENT", "PINNED"]
+
+def make_enum_mapper(enum_list):
+    def mapper(val):
+        if val is None:
+            return None
+        return enum_list[val] if val < len(enum_list) else f"UNKNOWN({val})"
+    return mapper
+
+to_dtype = make_enum_mapper(DTYPES)
+to_backend = make_enum_mapper(BACKENDS)
+to_storage = make_enum_mapper(STORAGE_TYPES)
+to_op_type = make_enum_mapper(OP_TYPES)
 
 class BinaryReader:
-    def __init__(self, f):
+    def __init__(self, f, lazy=False, string_enums=False):
         self.f = f
+        self.lazy = lazy
+        self.string_enums = string_enums
 
     def read_u8(self):
         buf = self.f.read(1)
@@ -52,10 +103,16 @@ class BinaryReader:
         return [read_func() for _ in range(size)]
 
     def read_dtype(self):
-        return self.read_u32()
+        val = self.read_u32()
+        return to_dtype(val) if self.string_enums else val
 
     def read_backend(self):
-        return self.read_u32()
+        val = self.read_u32()
+        return to_backend(val) if self.string_enums else val
+
+    def read_storage_type(self):
+        val = self.read_u32()
+        return to_storage(val) if self.string_enums else val
 
     def read_map(self, read_key, read_val):
         size = self.read_u32()
@@ -106,15 +163,13 @@ class BinaryReader:
 
     def read_region(self):
         return {"region": self.read_vector(self.read_dim)}
-    
+
     def read_region_list(self):
         return self.read_vector(self.read_region)
 
     def read_bucket(self):
         return {
-            "inputDirtyRegions": self.read_map(
-                self.read_u32, self.read_region_list
-            ),
+            "inputDirtyRegions": self.read_map(self.read_u32, self.read_region_list),
             "outputNeededRegion": self.read_vector(self.read_region),
         }
 
@@ -128,47 +183,15 @@ class BinaryReader:
             "inplaceInputIndex": self.read_i32(),
             "viewInputIndex": self.read_i32(),
             "backend": self.read_backend(),
-            "outputStorageType": self.read_u32(),
+            "outputStorageType": (
+                self.read_storage_type() if self.string_enums else self.read_u32()
+            ),
         }
 
     def read_tensor_node(self):
-        _id = self.read_u32()
-        opType = self.read_u32()
-        opTypes = [
-            "INPUT",
-            "CACHE",
-            "ADD",
-            "MUL",
-            "DIVIDE",
-            "DOT",
-            "SIN",
-            "COS",
-            "NEGATE",
-            "POWER",
-            "SUM",
-            "MAX",
-            "RESHAPE",
-            "PERMUTE",
-            "SLICE",
-            "CONCAT",
-            "CAST",
-            "REPEAT",
-            "ARANGE",
-            "TRIU",
-            "GATHER",
-            "FILL",
-            "COPY_TO",
-            "IM2COL",
-            "CONTIGUOUS",
-            "SCATTER",
-            "LOG",
-            "ARGMAX",
-            "FUSED",
-        ]  # TODO: make build.py construct this from enum in tensor_graphs_cpp
-
         return {
-            "id": _id,
-            "opType": opTypes[opType] if opType < len(opTypes) else "UNKNOWN",
+            "id": self.read_u32(),
+            "opType": to_op_type(self.read_u32()),
             "opName": self.read_string(),
             "dtype": self.read_dtype(),
             "parentIds": self.read_vector(self.read_u32),
@@ -176,25 +199,59 @@ class BinaryReader:
             "strides": self.read_vector(self.read_u64),
             "viewOffset": self.read_u64(),
             "backend": self.read_backend(),
-            "storageType": self.read_u32(),
+            "storageType": (
+                self.read_storage_type() if self.string_enums else self.read_u32()
+            ),
             "contentHash": self.read_string(),
         }
 
     def read_compiled_graph(self):
-        return {
-            "bucket": self.read_bucket(),
-            "instructions": self.read_vector(self.read_op_instruction),
-            "refCounts": self.read_map(self.read_u32, self.read_u32),
-            "nodesMap": {
-                str(k): v
-                for k, v in self.read_map(self.read_u32, self.read_tensor_node).items()
-            },
-            "nodeCosts": self.read_map(self.read_u32, self.read_float),
-            "physicalToLogicalNodeMap": self.read_map(self.read_u32, self.read_u32),
-            "constStaging": self.read_vector(
-                lambda: (self.read_u32(), self.f.read(self.read_u32()))
-            ),
+        bucket = self.read_bucket()
+        instructions = self.read_vector(self.read_op_instruction)
+        ref_counts = self.read_map(self.read_u32, self.read_u32)
+        nodes_map = self.read_map(self.read_u32, self.read_tensor_node)
+        assert nodes_map is not None
+        nodes_map = {
+            str(k): v
+            for k, v in nodes_map.items()
         }
+        node_costs = self.read_map(self.read_u32, self.read_float)
+        physical_to_logical = self.read_map(self.read_u32, self.read_u32)
+
+        if self.lazy:
+            constants_meta = []
+            const_size = self.read_u32()
+            if const_size is not None:
+                for _ in range(const_size):
+                    node_id = self.read_u32()
+                    data_len = self.read_u32()
+                    offset = self.f.tell()
+                    self.f.seek(data_len, 1)  # Fast skip
+                    constants_meta.append(
+                        {"nodeId": node_id, "length": data_len, "offset": offset}
+                    )
+            return {
+                "bucket": bucket,
+                "instructions": instructions,
+                "refCounts": ref_counts,
+                "nodesMap": nodes_map,
+                "nodeCosts": node_costs,
+                "physicalToLogicalNodeMap": physical_to_logical,
+                "constantsMeta": constants_meta,
+            }
+        else:
+            const_staging = self.read_vector(
+                lambda: (self.read_u32(), self.f.read(self.read_u32()))
+            )
+            return {
+                "bucket": bucket,
+                "instructions": instructions,
+                "refCounts": ref_counts,
+                "nodesMap": nodes_map,
+                "nodeCosts": node_costs,
+                "physicalToLogicalNodeMap": physical_to_logical,
+                "constStaging": const_staging,
+            }
 
 
 def load_records_file(path):
@@ -210,11 +267,11 @@ def load_records_file(path):
     return records
 
 
-def load_cache_file(path):
+def load_cache_file(path, lazy=False, string_enums=False):
     entries = []
     if os.path.exists(path):
         with open(path, "rb") as f:
-            br = BinaryReader(f)
+            br = BinaryReader(f, lazy=lazy, string_enums=string_enums)
             while True:
                 t = br.read_u8()
                 if t is None:
@@ -235,13 +292,24 @@ def load_cache_file(path):
                     graph = br.read_compiled_graph()
                     entries.append({"type": "compiled_bucket", "graph": graph})
                 elif t == 2:  # Constants
-                    constants = {}
-                    count = br.read_u32()
-                    for _ in range(count):
-                        nodeId = br.read_u32()
-                        data = f.read(br.read_u32())
-                        constants[nodeId] = data
-                    entries.append({"type": "constants", "constants": constants})
+                    if lazy:
+                        # Skip global constants data
+                        count = br.read_u32()
+                        assert count is not None
+                        for _ in range(count):
+                            br.read_u32()
+                            data_len = br.read_u32()
+                            assert data_len is not None
+                            f.seek(data_len, 1)
+                    else:
+                        constants = {}
+                        count = br.read_u32()
+                        assert count is not None
+                        for _ in range(count):
+                            nodeId = br.read_u32()
+                            data = f.read(br.read_u32())
+                            constants[nodeId] = data
+                        entries.append({"type": "constants", "constants": constants})
                 else:
                     break
     return entries

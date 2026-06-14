@@ -32,10 +32,98 @@
 #include <fcntl.h>
 #endif
 
+// RAII helper to automatically close file descriptors and delete dummy files
+struct StorageFiles
+{
+    std::vector<std::string> paths;
+    std::vector<int> fds;
+
+    ~StorageFiles()
+    {
+        for (int fd : fds)
+        {
+            if (fd >= 0)
+            {
+#ifdef TG_OS_WINDOWS
+                _close(fd);
+#else
+                close(fd);
+#endif
+            }
+        }
+        for (const auto &path : paths)
+        {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+    }
+};
+
+// Creates storage-backed dummy files for cache-bashing during benchmarking
+StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel)
+{
+    StorageFiles sf;
+    std::vector<char> dummyBuf(1024 * 1024, 0); // 1MB zero buffer to chunk write
+
+    for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+    {
+        size_t ruleIdx = idx;
+        if (kernel.isVariadic)
+        {
+            ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+        }
+        Backend b = Backend::CPU;
+        if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
+            b = r.inputBackends[ruleIdx][0];
+
+        if (b == Backend::STORAGE)
+        {
+            uint64_t elements = countElements(r.inputShapes[idx]);
+            uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
+            if (bytes == 0)
+            {
+                Error::throw_err("[createStorageInputs] got 0 bytes for file size");
+            }
+
+            std::string path = "benchmarks/dummy_storage_" + std::to_string(sf.fds.size()) + "_" + std::to_string(r.kernelUid) + ".bin";
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out.is_open())
+            {
+                std::cerr << "Failed to create dummy storage file: " << path << std::endl;
+                continue;
+            }
+
+            uint64_t written = 0;
+            while (written < bytes)
+            {
+                uint64_t toWrite = std::min<uint64_t>(dummyBuf.size(), bytes - written);
+                out.write(dummyBuf.data(), toWrite);
+                written += toWrite;
+            }
+            out.close();
+            sf.paths.push_back(path);
+
+            int fd = -1;
+#ifdef TG_OS_WINDOWS
+            _wsopen_s(&fd, std::filesystem::path(path).c_str(), _O_RDONLY | _O_BINARY, _SH_DENYNO, 0);
+#else
+            fd = open(path.c_str(), O_RDONLY);
+#endif
+            if (fd < 0)
+            {
+                std::cerr << "Failed to open dummy storage file for reading: " << path << std::endl;
+            }
+            sf.fds.push_back(fd);
+        }
+    }
+    return sf;
+}
+
 int main(int argc, char *argv[])
 {
     int skipCount = 0;
     std::string targetKernel = "";
+    bool listOnly = false;
 
     // 1. Parse Arguments
     for (int i = 1; i < argc; ++i)
@@ -44,6 +132,10 @@ int main(int argc, char *argv[])
         if ((arg == "-s" || arg == "--skip") && i + 1 < argc)
         {
             skipCount = std::atoi(argv[++i]);
+        }
+        else if (arg == "-l" || arg == "--list")
+        {
+            listOnly = true;
         }
         else if (targetKernel.empty() && arg[0] != '-')
         {
@@ -123,91 +215,7 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    // 4. Pre-scan for Backend::STORAGE inputs
-    size_t maxStorageInputs = 0;
-    uint64_t maxStorageSize = 0;
-
-    for (const auto &r : toBenchmark)
-    {
-        const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
-        size_t currentStorageInputs = 0;
-        for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
-        {
-            size_t ruleIdx = idx;
-            if (kernel.isVariadic)
-            {
-                ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
-            }
-            Backend b = Backend::CPU;
-            if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
-                b = r.inputBackends[ruleIdx][0];
-
-            if (b == Backend::STORAGE)
-            {
-                currentStorageInputs++;
-                uint64_t elements = countElements(r.inputShapes[idx]);
-                uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
-                if (bytes > maxStorageSize)
-                {
-                    maxStorageSize = bytes;
-                }
-            }
-        }
-        if (currentStorageInputs > maxStorageInputs)
-        {
-            maxStorageInputs = currentStorageInputs;
-        }
-    }
-
-    if (maxStorageInputs > 0 && maxStorageSize == 0)
-    {
-        maxStorageSize = 4096; // Fallback minimum size
-    }
-
-    std::vector<std::string> dummyPaths;
-    std::vector<int> dummyFds;
-
-    if (maxStorageInputs > 0)
-    {
-        std::cout << "[Bench Init] Creating " << maxStorageInputs << " dummy files of size "
-                  << maxStorageSize << " bytes for Backend::STORAGE inputs." << std::endl;
-
-        std::vector<char> dummyBuf(1024 * 1024, 0); // 1MB zero buffer to chunk write
-        for (size_t i = 0; i < maxStorageInputs; ++i)
-        {
-            std::string path = "benchmarks/dummy_storage_" + std::to_string(i) + ".bin";
-            std::ofstream out(path, std::ios::binary | std::ios::trunc);
-            if (!out.is_open())
-            {
-                std::cerr << "Failed to create dummy storage file: " << path << std::endl;
-                continue;
-            }
-
-            uint64_t written = 0;
-            while (written < maxStorageSize)
-            {
-                uint64_t toWrite = std::min<uint64_t>(dummyBuf.size(), maxStorageSize - written);
-                out.write(dummyBuf.data(), toWrite);
-                written += toWrite;
-            }
-            out.close();
-            dummyPaths.push_back(path);
-
-            int fd = -1;
-#ifdef TG_OS_WINDOWS
-            _wsopen_s(&fd, std::filesystem::path(path).c_str(), _O_RDONLY | _O_BINARY, _SH_DENYNO, 0);
-#else
-            fd = open(path.c_str(), O_RDONLY);
-#endif
-            if (fd < 0)
-            {
-                std::cerr << "Failed to open dummy storage file for reading: " << path << std::endl;
-            }
-            dummyFds.push_back(fd);
-        }
-    }
-
-    // 5. Estimate costs for sorting
+    // 4. Estimate costs for sorting
     for (uint32_t i = 0; i < toBenchmark.size(); i++)
     {
         Record &r = toBenchmark[i];
@@ -217,7 +225,7 @@ int main(int argc, char *argv[])
         r.runTime = std::isinf(cost) ? -1.0f : cost;
     }
 
-    // 6. Sort kernels by cost (cheapest first)
+    // 5. Sort kernels by cost (cheapest first)
     // Fallback to element count for kernels with no previous data (inf cost).
     std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb)
                      {
@@ -239,26 +247,64 @@ int main(int argc, char *argv[])
         }
         return costA < costB; });
 
-    // 7. Benchmark Loop
-    std::ofstream outFile(recordsPath, std::ios::app | std::ios::binary);
-    BinaryWriter bw(outFile);
     size_t startIdx = (skipCount > (int)toBenchmark.size()) ? toBenchmark.size() : (size_t)std::max(0, skipCount);
 
     if (startIdx > 0)
     {
         std::cout << "Skipping the first " << startIdx << " kernels..." << std::endl;
     }
-    std::cout << "Benchmarking " << toBenchmark.size() - startIdx << " configurations..." << std::endl;
+
+    std::cout << (listOnly ? "Listing " : "Benchmarking ") << toBenchmark.size() - startIdx << " configurations..." << std::endl;
+
+    // 6. Main Processing Loop (Listing / Benchmarking)
+    std::ofstream outFile;
+    if (!listOnly)
+    {
+        outFile.open(recordsPath, std::ios::app | std::ios::binary);
+    }
+    BinaryWriter bw(outFile);
 
     for (size_t i = startIdx; i < toBenchmark.size(); ++i)
     {
         Record &r = toBenchmark[i];
         uint64_t kernelUid = r.kernelUid;
+        const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
+
+        // Print general information immediately
+        std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "][";
+        for (size_t bidx = 0; bidx < kernel.backends.size(); ++bidx)
+        {
+            if (bidx > 0)
+                std::cout << ",";
+            std::cout << toString(kernel.backends[bidx]);
+        }
+        std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
+                  << " (0x" << std::hex << kernelUid << std::dec << ")"
+                  << " est " << std::to_string(r.runTime) << " ms\n";
+
+        // Print All Inputs
+        for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+        {
+            std::cout << "  In  #" << idx << ": dtype=" << toString(r.inputDTypes[idx])
+                      << ", shape=" << toString(r.inputShapes[idx])
+                      << ", strides=" << toString(r.inputStrides[idx]) << "\n";
+        }
+
+        // Print All Outputs
+        for (size_t idx = 0; idx < r.outputShapes.size(); ++idx)
+        {
+            std::cout << "  Out #" << idx << ": dtype=" << toString(r.outputDTypes[idx])
+                      << ", shape=" << toString(r.outputShapes[idx])
+                      << ", strides=" << toString(r.outputStrides[idx]) << "\n";
+        }
+
+        if (listOnly)
+        {
+            continue;
+        }
 
         try
         {
-            const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
-
             // Build dummy nodes for validation against centralized matching logic
             std::vector<TensorNode> dummyInputs(r.inputShapes.size());
             for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
@@ -544,35 +590,12 @@ int main(int argc, char *argv[])
                 outViews[idx].dtype = r.outputDTypes[idx];
             }
 
-            std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "][";
-            for (size_t bidx = 0; bidx < kernel.backends.size(); ++bidx)
-            {
-                if (bidx > 0)
-                    std::cout << ",";
-                std::cout << toString(kernel.backends[bidx]);
-            }
-            std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                      << " (0x" << std::hex << kernelUid << std::dec << ")"
-                      << " est " << std::to_string(r.runTime) << " ms\n";
-
-            // Print All Inputs
-            for (size_t idx = 0; idx < inViews.size(); ++idx)
-            {
-                std::cout << "  In  #" << idx << ": dtype=" << toString(inViews[idx].dtype)
-                          << ", shape=" << toString(inViews[idx].getShape())
-                          << ", strides=" << toString(inViews[idx].strides) << "\n";
-            }
-
-            // Print All Outputs
-            for (size_t idx = 0; idx < outViews.size(); ++idx)
-            {
-                std::cout << "  Out #" << idx << ": dtype=" << toString(outViews[idx].dtype)
-                          << ", shape=" << toString(outViews[idx].getShape())
-                          << ", strides=" << toString(outViews[idx].strides) << "\n";
-            }
             std::cout << "  Benchmarking..." << std::flush;
 
-            // Map dummy files to Backend::STORAGE inputs
+            // Generate fresh, exact-sized Storage buffers (creates files/Fds for this execution run)
+            StorageFiles sf = createStorageInputs(r, kernel);
+
+            // Map files to Backend::STORAGE inputs
             KernelContext ctx;
             ctx.inputs = inPtrs;
             ctx.outputs = outPtrs;
@@ -594,9 +617,9 @@ int main(int argc, char *argv[])
 
                 if (b == Backend::STORAGE)
                 {
-                    if (storageInIdx < dummyFds.size())
+                    if (storageInIdx < sf.fds.size())
                     {
-                        ctx.fd[idx] = dummyFds[storageInIdx++];
+                        ctx.fd[idx] = sf.fds[storageInIdx++];
                     }
                 }
             }
@@ -635,7 +658,8 @@ int main(int argc, char *argv[])
                 auto iterEnd = std::chrono::high_resolution_clock::now();
                 float iterMs = std::chrono::duration<float, std::milli>(iterEnd - iterStart).count();
                 latencies.push_back(iterMs);
-                if (it != 0) {
+                if (it != 0)
+                {
                     std::cout << ",";
                 }
                 std::cout << " " << iterMs;
@@ -659,7 +683,10 @@ int main(int argc, char *argv[])
             r.runTime = runtimeMs;
             r.buildContextId = BUILD_CONTEXT_ID;
             bw.write(r);
-            outFile.flush();
+            if (outFile.is_open())
+            {
+                outFile.flush();
+            }
 
             std::cout << "\n  Benchmarked -> " << runtimeMs << " ms" << std::endl;
         }
@@ -667,24 +694,6 @@ int main(int argc, char *argv[])
         {
             std::cerr << "Failed to benchmark kernel " << kernelUid << ": " << e.what() << std::endl;
         }
-    }
-
-    // Cleanup resources
-    for (int fd : dummyFds)
-    {
-        if (fd >= 0)
-        {
-#ifdef TG_OS_WINDOWS
-            _close(fd);
-#else
-            close(fd);
-#endif
-        }
-    }
-    for (const auto &path : dummyPaths)
-    {
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
     }
 
     std::cout << "Benchmarking complete." << std::endl;
