@@ -423,7 +423,8 @@ private:
         const PrecompData &precomp,
         std::vector<uint32_t> &ref_counts,
         std::vector<uint32_t> &sim_aliasMap,
-        uint64_t *live_mem) const
+        uint64_t *live_mem,
+        std::vector<bool> &live_allocated) const // Added
     {
         uint32_t targetId = sim_aliasMap[id];
         if (targetId != UINT32_MAX)
@@ -433,7 +434,7 @@ private:
             {
                 ref_counts[targetId]--;
                 if (ref_counts[targetId] == 0)
-                    releaseFast(targetId, egraph, selection_map, enodeInfos, precomp, ref_counts, sim_aliasMap, live_mem);
+                    releaseFast(targetId, egraph, selection_map, enodeInfos, precomp, ref_counts, sim_aliasMap, live_mem, live_allocated);
             }
             return;
         }
@@ -451,6 +452,7 @@ private:
                     {
                         live_mem[(uint32_t)kv.first] -= (kv.second + 63) & ~63ULL;
                     }
+                    live_allocated[id] = false; // Mark transient as deallocated
                 }
             }
         }
@@ -467,7 +469,9 @@ private:
         std::vector<bool> &visit_visited,
         uint64_t *live_mem,
         uint64_t *peak_mem,
-        uint32_t &oomEClassId) const
+        uint32_t &oomEClassId,
+        std::vector<bool> &live_allocated,           // Added
+        std::vector<bool> &oom_live_allocated) const // Added
     {
         eclass = egraph.findConst(eclass);
         if (visit_visited[eclass])
@@ -481,13 +485,14 @@ private:
 
         for (uint32_t c : canon_children)
         {
-            visitFast(c, egraph, selection_map, enodeInfos, precomp, ref_counts, sim_aliasMap, visit_visited, live_mem, peak_mem, oomEClassId);
+            visitFast(c, egraph, selection_map, enodeInfos, precomp, ref_counts, sim_aliasMap, visit_visited, live_mem, peak_mem, oomEClassId, live_allocated, oom_live_allocated);
         }
 
         bool is_perm = precomp.is_eclass_cached[eclass] || isPersistentFast(eclass, egraph, selection_map, precomp);
 
         if (!info.inplace && !info.isView && !is_perm)
         {
+            live_allocated[eclass] = true; // Mark as currently live
             for (const auto &kv : info.memSizes)
             {
                 uint32_t b_idx = (uint32_t)kv.first;
@@ -496,7 +501,10 @@ private:
                 if (live_mem[b_idx] > peak_mem[b_idx])
                     peak_mem[b_idx] = live_mem[b_idx];
                 if (live_mem[b_idx] > precomp.mem_limits_arr[b_idx] && oomEClassId == UINT32_MAX)
+                {
                     oomEClassId = eclass;
+                    oom_live_allocated = live_allocated; // Snapshot the live set at point of failure
+                }
             }
         }
 
@@ -518,12 +526,12 @@ private:
             {
                 ref_counts[c]--;
                 if (ref_counts[c] == 0)
-                    releaseFast(c, egraph, selection_map, enodeInfos, precomp, ref_counts, sim_aliasMap, live_mem);
+                    releaseFast(c, egraph, selection_map, enodeInfos, precomp, ref_counts, sim_aliasMap, live_mem, live_allocated);
             }
         }
     }
 
-    std::pair<std::vector<uint64_t>, uint32_t> computePeakMemFast(
+    std::pair<std::vector<uint64_t>, std::pair<uint32_t, std::vector<bool>>> computePeakMemFast(
         const EGraph &egraph,
         const std::unordered_map<uint32_t, uint32_t> &selection_map,
         const std::vector<ENodeInfo> &enodeInfos,
@@ -553,6 +561,9 @@ private:
         uint64_t live_mem[3] = {precomp.static_baseline_arr[0], precomp.static_baseline_arr[1], precomp.static_baseline_arr[2]};
         uint32_t oomEClassId = UINT32_MAX;
 
+        std::vector<bool> live_allocated(egraph.getClasses().size(), false);
+        std::vector<bool> oom_live_allocated;
+
         std::fill(processed_mem.begin(), processed_mem.end(), false);
         for (uint32_t eclassId : path)
         {
@@ -575,9 +586,13 @@ private:
                 {
                     uint64_t size = (getSizeBytes(enode.shape, enode.dtype) + 63) & ~63ULL;
                     uint32_t b_idx = (uint32_t)enode.backend;
+                    live_allocated[canon] = true;
                     live_mem[b_idx] += size;
                     if (live_mem[b_idx] > precomp.mem_limits_arr[b_idx] && oomEClassId == UINT32_MAX)
+                    {
                         oomEClassId = canon;
+                        oom_live_allocated = live_allocated;
+                    }
                 }
             }
             else if (precomp.is_eclass_persistent[canon])
@@ -589,9 +604,13 @@ private:
                     {
                         uint64_t size = (countElements(cls.shape) * getDTypeSize(cls.dtype) + 63) & ~63ULL;
                         uint32_t b_idx = (uint32_t)cls.backend;
+                        live_allocated[canon] = true;
                         live_mem[b_idx] += size;
                         if (live_mem[b_idx] > precomp.mem_limits_arr[b_idx] && oomEClassId == UINT32_MAX)
+                        {
                             oomEClassId = canon;
+                            oom_live_allocated = live_allocated;
+                        }
                     }
                 }
             }
@@ -602,9 +621,9 @@ private:
         std::fill(sim_aliasMap.begin(), sim_aliasMap.end(), UINT32_MAX);
         std::fill(visit_visited.begin(), visit_visited.end(), false);
 
-        visitFast(rootEClassId, egraph, selection_map, enodeInfos, precomp, ref_counts, sim_aliasMap, visit_visited, live_mem, peak_mem, oomEClassId);
+        visitFast(rootEClassId, egraph, selection_map, enodeInfos, precomp, ref_counts, sim_aliasMap, visit_visited, live_mem, peak_mem, oomEClassId, live_allocated, oom_live_allocated);
 
-        return {{peak_mem[0], peak_mem[1], peak_mem[2]}, oomEClassId};
+        return {{peak_mem[0], peak_mem[1], peak_mem[2]}, {oomEClassId, oom_live_allocated}};
     }
 
     void visitTopoFast(
@@ -1412,8 +1431,6 @@ private:
         std::cout << "[Planner.extractBest] Optimistic root cost: "
                   << std::to_string(optimisticEnodeDagCost[egraph.getEClass(rootEClassId).enodes[0]]) << std::endl;
 
-        // TODO: prune dominated enodes. if A.cost < B.cost and they have the same inputs, and have the same inplace&view status, then remove B. basically if there are two kernels implementing the same thing but one is faster on this specific hardware/shape, we don't need to bloat the search space with B. maybe we can do this even earlier, as we don't need dag cost as long as A and B have same inputs and inplace and view stuff.
-
         PrecompData precomp;
         precomp.is_eclass_persistent.assign(numClasses, false);
         precomp.is_eclass_cached.assign(numClasses, false);
@@ -1622,13 +1639,15 @@ private:
 
             std::unordered_map<Backend, uint64_t> peak;
             uint32_t oomEClassId = UINT32_MAX;
+            std::vector<bool> oomLiveAllocated;
             if (valid)
             {
                 auto res = computePeakMemFast(egraph, selection_map, enodeInfos, rootEClassId, eclassToLogical, graph, path, precomp, ref_counts, processed_mem, sim_aliasMap, visit_visited);
                 peak[(Backend)0] = res.first[0];
                 peak[(Backend)1] = res.first[1];
                 peak[(Backend)2] = res.first[2];
-                oomEClassId = res.second;
+                oomEClassId = res.second.first;
+                oomLiveAllocated = res.second.second;
 
                 bool newMinSeen = false;
                 for (const auto &kv : peak)
@@ -1726,13 +1745,32 @@ private:
             }
             else if (!valid && reason == "OOM" && oomEClassId != UINT32_MAX)
             {
-                for (int i = 0; i < (int)path.size(); ++i)
+                int backtrack_idx = -1;
+                // Scan path to find first node that is actually live in memory and has alternative kernel paths to try
+                for (int i = 0; i < path.size(); i++)
                 {
-                    if (path[i] == oomEClassId)
+                    uint32_t eclassId = path[i];
+                    uint32_t canon = egraph.findConst(eclassId);
+
+                    if (canon < oomLiveAllocated.size() && oomLiveAllocated[canon])
                     {
-                        target_backtrack_eclass = path[i];
-                        break;
+                        auto choiceIt = selection_map.find(canon);
+                        if (choiceIt != selection_map.end())
+                        {
+                            uint32_t sel = choiceIt->second;
+                            const auto &enodes = egraph.getEClass(canon).enodes;
+                            if (sel + 1 < enodes.size())
+                            {
+                                backtrack_idx = i;
+                                break;
+                            }
+                        }
                     }
+                }
+
+                if (backtrack_idx >= 0)
+                {
+                    target_backtrack_eclass = path[backtrack_idx];
                 }
             }
 
