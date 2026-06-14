@@ -91,8 +91,8 @@ def main():
     parser.add_argument(
         "model",
         nargs="?",
-        default="Qwen/Qwen2.5-7B-Instruct",
-        help="Hugging Face model ID or path to a local directory/file (default: Qwen/Qwen2.5-7B-Instruct)",
+        default="Qwen/Qwen3.6-35B-A3B",
+        help="Hugging Face model ID or path to a local directory/file (default: Qwen/Qwen3.6-35B-A3B)",
     )
     parser.add_argument(
         "tokens",
