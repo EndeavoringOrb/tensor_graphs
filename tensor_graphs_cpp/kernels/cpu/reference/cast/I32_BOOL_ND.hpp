@@ -6,7 +6,7 @@ inline bool matchCastI32_BOOL_ND(const std::vector<TensorNode> &inputs, const Te
 {
     if (inputs[0].getShape() != output.getShape())
         return false;
-    if (!isContiguous(inputs[0]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
     return output.dtype == DType::BOOL;
 }

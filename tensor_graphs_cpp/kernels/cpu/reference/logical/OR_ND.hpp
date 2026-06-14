@@ -6,7 +6,7 @@ inline bool matchOr_ND(const std::vector<TensorNode> &inputs, const TensorNode &
 {
     if (inputs[0].getShape() != inputs[1].getShape() || inputs[0].getShape() != output.getShape())
         return false;
-    if (!isContiguous(inputs[0]) || !isContiguous(inputs[1]) || !isContiguous(output))
+    if (!isContiguous(output))
         return false;
     return output.dtype == DType::BOOL;
 }
