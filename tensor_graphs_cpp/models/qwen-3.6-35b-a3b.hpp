@@ -198,7 +198,7 @@ public:
         return g.div(exp_scores, sum_exp_expanded);
     }
 
-    uint32_t rms_norm_gemma_atomic(uint32_t x_id, uint32_t weight_id, uint32_t dim0, uint32_t dim_size)
+    uint32_t rms_norm_atomic(uint32_t x_id, uint32_t weight_id, uint32_t dim0, uint32_t dim_size)
     {
         uint32_t x_sq = g.mul(x_id, x_id);
         int32_t axis_val = -1;
@@ -219,9 +219,7 @@ public:
         uint32_t inv_std_expanded = repeat_3d_axis(inv_std, dim_size, 2);
         uint32_t x_norm = g.mul(x_id, inv_std_expanded);
         uint32_t weight_expanded = expand_1d_to_3d(weight_id, dim_size, dim0, seq_len);
-        uint32_t one_node_full = expand_scalar_to_3d(one_fp32, dim0, seq_len, dim_size);
-        uint32_t scale = g.add(weight_expanded, one_node_full);
-        return g.mul(x_norm, scale);
+        return g.mul(x_norm, weight_expanded);
     }
 
     uint32_t gated_rms_norm(uint32_t x, uint32_t z, const std::string &w_name, uint32_t dims, uint32_t cur_seq_len)
@@ -408,9 +406,9 @@ public:
         v = g.reshape(v_perm, g.constant({3}, shape3_k, DType::INT32));
 
         uint32_t q_norm_w = weight(w_path, prefix + ".self_attn.q_norm.weight");
-        q = rms_norm_gemma_atomic(q, q_norm_w, cfg.attn_n_q_heads, cfg.attn_head_dim);
+        q = rms_norm_atomic(q, q_norm_w, cfg.attn_n_q_heads, cfg.attn_head_dim);
         uint32_t k_norm_w = weight(w_path, prefix + ".self_attn.k_norm.weight");
-        k = rms_norm_gemma_atomic(k, k_norm_w, cfg.attn_n_kv_heads, cfg.attn_head_dim);
+        k = rms_norm_atomic(k, k_norm_w, cfg.attn_n_kv_heads, cfg.attn_head_dim);
 
         q = apply_rope(q, rope_cos, rope_sin, cfg.attn_n_q_heads, cfg.attn_head_dim);
         k = apply_rope(k, rope_cos, rope_sin, cfg.attn_n_kv_heads, cfg.attn_head_dim);
@@ -499,8 +497,11 @@ public:
         uint32_t one_node = expand_scalar_to_3d(one_fp32, 1, seq_len, cfg.attn_n_q_heads * cfg.attn_head_dim);
         uint32_t den = g.add(one_node, exp_neg_gate);
         uint32_t sigmoid_gate = g.div(one_node, den);
+        
+        // Compute SiLU(gate) = gate * Sigmoid(gate)
+        uint32_t silu_gate = g.mul(gate, sigmoid_gate);
 
-        ctx_flat = g.mul(ctx_flat, sigmoid_gate);
+        ctx_flat = g.mul(ctx_flat, silu_gate);
 
         uint32_t w_o = weight(w_path, prefix + ".self_attn.o_proj.weight");
         int32_t perm_dims[] = {1, 0};
@@ -973,7 +974,7 @@ public:
             std::string prefix = "model.language_model.layers." + std::to_string(i);
             uint32_t residual = x;
             uint32_t w_ln1 = weight(w_path, prefix + ".input_layernorm.weight");
-            x = rms_norm_gemma_atomic(x, w_ln1, 1, cfg.emb_dim);
+            x = rms_norm_atomic(x, w_ln1, 1, cfg.emb_dim);
 
             // 3:1 Hybrid Attention Stack Routing
             // 3 Linear Attention Layers followed by 1 Full Attention Layer
@@ -992,7 +993,7 @@ public:
             x = g.add(residual, x);
             residual = x;
             uint32_t w_ln2 = weight(w_path, prefix + ".post_attention_layernorm.weight");
-            x = rms_norm_gemma_atomic(x, w_ln2, 1, cfg.emb_dim);
+            x = rms_norm_atomic(x, w_ln2, 1, cfg.emb_dim);
 
             // Sparse Mixture of Experts (MoE) Base FeedForward
             x = mlp_moe_atomic(x, prefix);
@@ -1001,7 +1002,7 @@ public:
         }
 
         uint32_t w_final_ln = weight(w_path, "model.language_model.norm.weight");
-        x = rms_norm_gemma_atomic(x, w_final_ln, 1, cfg.emb_dim);
+        x = rms_norm_atomic(x, w_final_ln, 1, cfg.emb_dim);
 
         uint32_t w_lm = weight(w_path, "lm_head.weight");
 

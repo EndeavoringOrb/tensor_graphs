@@ -1964,6 +1964,7 @@ private:
                 if (graph.hasNode(logicalId))
                 {
                     tNode.storageType = graph.getNode(logicalId).storageType;
+                    tNode.debugOrigin = graph.getNode(logicalId).debugOrigin;
                 }
                 if (cachedNodes.count(logicalId) && (physId == lastPhysIdForLogical[logicalId] || tNode.opType == OpType::INPUT || tNode.opType == OpType::CACHE))
                 {
