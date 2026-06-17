@@ -1,3 +1,4 @@
+// File: tensor_graphs_cpp/models/qwen-3.6-35b-a3b.hpp
 #pragma once
 #include "core/types.hpp"
 #include "core/memory.hpp"
@@ -31,6 +32,10 @@ struct Qwen3_6_35B_A3B_Config
     uint32_t shared_expert_dim = 512;
 
     uint32_t query_pre_attn_scalar = 256;
+
+    uint32_t mrope_section_t = 11;
+    uint32_t mrope_section_h = 11;
+    uint32_t mrope_section_w = 10;
 };
 
 class Qwen3_6_35B_A3B_Model
@@ -245,83 +250,254 @@ public:
         return g.mul(x_norm_scaled, z_silu);
     }
 
+    // ======================================================================
+    // M-RoPE (Multimodal Rotary Position Embedding) with INTERLEAVED rotation.
+    //
+    // Two things the previous implementation got wrong:
+    //   1. mrope_interleaved = true  -> GPT-J-style interleaved rotation,
+    //      NOT the GPT-NeoX / Llama "rotate_half" style.
+    //   2. mrope_section = [11, 11, 10]  -> the rope_dim/2 = 32 frequency pairs
+    //      split into [time, height, width] sections, each driven by its own
+    //      position axis. For text-only inference, h_pos and w_pos are constant 1.
+    // ======================================================================
     std::tuple<uint32_t, uint32_t> compute_rope()
     {
-        int32_t start_val = 0, stop_val = cfg.rope_dim, step_val = 2;
-        uint32_t start = g.constant({1}, &start_val, DType::INT32);
-        uint32_t stop = g.constant({1}, &stop_val, DType::INT32);
-        uint32_t step = g.constant({1}, &step_val, DType::INT32);
-        uint32_t indices_int = g.arange(start, stop, step);
+        const int32_t zero = 0;
+        const int32_t one_i = 1;
+        const int32_t two_i = 2;
+        const int32_t rope_dim_i = (int32_t)cfg.rope_dim;       // 64
+        const int32_t half_dim_i = (int32_t)(cfg.rope_dim / 2); // 32
+        const int32_t seq_len_i = (int32_t)seq_len;
+
+        // mrope_section = [time, height, width] = [11, 11, 10], sums to rope_dim/2 = 32.
+
+        uint32_t zero_node = g.constant({1}, &zero, DType::INT32);
+        uint32_t one_int_node = g.constant({1}, &one_i, DType::INT32);
+        uint32_t two_node = g.constant({1}, &two_i, DType::INT32);
+        uint32_t rope_dim_int = g.constant({1}, &rope_dim_i, DType::INT32);
+
+        // -------- 1. inv_freq[i] = 1 / theta^(2i/rope_dim), shape [32] --------
+        // indices_int = [0, 2, 4, ..., 62]
+        uint32_t indices_int = g.arange(zero_node, rope_dim_int, two_node);
         uint32_t indices = g.cast(indices_int, DType::FLOAT32);
-        float h_dim_val = (float)cfg.rope_dim;
-        uint32_t h_dim_fp = g.constant({1}, &h_dim_val, DType::FLOAT32);
-        int32_t shape_1d[] = {(int32_t)(cfg.rope_dim / 2)};
-        uint32_t h_dim_fp_1d = g.repeat(h_dim_fp, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
-        uint32_t exponent = g.div(indices, h_dim_fp_1d);
-        float theta_val = 10'000'000.0f; // 10 million (1e7)
+
+        float rope_dim_f = (float)cfg.rope_dim;
+        uint32_t rope_dim_fp = g.constant({1}, &rope_dim_f, DType::FLOAT32);
+        int32_t rep32[] = {half_dim_i};
+        uint32_t rope_dim_fp_1d = g.repeat(rope_dim_fp,
+                                           g.constant({1}, rep32, DType::INT32),
+                                           g.constant({1}, &zero, DType::INT32));
+
+        uint32_t exponent = g.div(indices, rope_dim_fp_1d); // [0, 2/64, ..., 62/64]
+
+        float theta_val = 10'000'000.0f; // rope_theta = 1e7
         uint32_t theta = g.constant({1}, &theta_val, DType::FLOAT32);
-        uint32_t theta_1d = g.repeat(theta, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
+        uint32_t theta_1d = g.repeat(theta,
+                                     g.constant({1}, rep32, DType::INT32),
+                                     g.constant({1}, &zero, DType::INT32));
         uint32_t base_to_exponent = g.pow(theta_1d, exponent);
-        uint32_t one_1d = g.repeat(one_fp32, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
-        uint32_t inv_freq = g.div(one_1d, base_to_exponent);
 
-        int32_t pos_stop_val = seq_len;
-        int32_t pos_step_val = 1;
-        uint32_t pos_stop = g.constant({1}, &pos_stop_val, DType::INT32);
-        uint32_t pos_step = g.constant({1}, &pos_step_val, DType::INT32);
-        uint32_t pos_int = g.arange(start, pos_stop, pos_step);
-        uint32_t pos = g.cast(pos_int, DType::FLOAT32);
-        int32_t pos_col_shape[] = {(int32_t)seq_len, 1};
-        uint32_t pos_col = g.reshape(pos, g.constant({2}, pos_col_shape, DType::INT32));
-        int32_t freq_row_shape[] = {1, (int32_t)cfg.rope_dim / 2};
-        uint32_t freq_row = g.reshape(inv_freq, g.constant({2}, freq_row_shape, DType::INT32));
-        uint32_t pos_col_expanded = repeat_3d_axis(pos_col, cfg.rope_dim / 2, 1);
-        uint32_t freq_row_expanded = repeat_3d_axis(freq_row, seq_len, 0);
-        uint32_t angles_half = g.mul(pos_col_expanded, freq_row_expanded);
-        int32_t axis_val = 1;
-        uint32_t axis_node = g.constant({1}, &axis_val, DType::INT32);
-        uint32_t angles = g.concat({angles_half, angles_half}, axis_node);
+        float one_val = 1.0f;
+        uint32_t one_node = g.constant({1}, &one_val, DType::FLOAT32);
+        uint32_t one_1d = g.repeat(one_node,
+                                   g.constant({1}, rep32, DType::INT32),
+                                   g.constant({1}, &zero, DType::INT32));
+        uint32_t inv_freq = g.div(one_1d, base_to_exponent); // [32]
 
-        int32_t final_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.rope_dim};
-        uint32_t final_shape_node = g.constant({3}, final_shape, DType::INT32);
-        uint32_t cos_out = g.reshape(g.cos(angles), final_shape_node);
-        uint32_t sin_out = g.reshape(g.sin(angles), final_shape_node);
+        // -------- 2. Build the three M-RoPE position axes (text-only) --------
+        //   t_pos = [0, 1, 2, ..., seq_len-1]
+        //   h_pos = [1, 1, ..., 1]
+        //   w_pos = [1, 1, ..., 1]
+        uint32_t seq_len_int = g.constant({1}, &seq_len_i, DType::INT32);
+        uint32_t t_pos_int = g.arange(zero_node, seq_len_int, one_int_node);
+        uint32_t t_pos = g.cast(t_pos_int, DType::FLOAT32); // [seq_len]
+
+        int32_t seq_shape_arr[] = {seq_len_i};
+        uint32_t seq_shape_node = g.constant({1}, seq_shape_arr, DType::INT32);
+        uint32_t h_pos = g.fill(one_node, seq_shape_node); // [seq_len] all ones
+        uint32_t w_pos = g.fill(one_node, seq_shape_node); // [seq_len] all ones
+
+        // -------- 3. Slice inv_freq into [11, 11, 10] sections --------
+        int32_t st_t[] = {0};
+        int32_t en_t[] = {(int32_t)cfg.mrope_section_t};
+        int32_t st_h[] = {(int32_t)cfg.mrope_section_t};
+        int32_t en_h[] = {(int32_t)(cfg.mrope_section_t + cfg.mrope_section_h)};
+        int32_t st_w[] = {(int32_t)(cfg.mrope_section_t + cfg.mrope_section_h)};
+        int32_t en_w[] = {(int32_t)(cfg.mrope_section_t + cfg.mrope_section_h + cfg.mrope_section_w)};
+        int32_t steps1[] = {1};
+        uint32_t steps1_node = g.constant({1}, steps1, DType::INT32);
+
+        uint32_t inv_freq_t = g.contiguous(g.slice(inv_freq,
+                                                   g.constant({1}, st_t, DType::INT32),
+                                                   g.constant({1}, en_t, DType::INT32),
+                                                   steps1_node)); // [11]
+        uint32_t inv_freq_h = g.contiguous(g.slice(inv_freq,
+                                                   g.constant({1}, st_h, DType::INT32),
+                                                   g.constant({1}, en_h, DType::INT32),
+                                                   steps1_node)); // [11]
+        uint32_t inv_freq_w = g.contiguous(g.slice(inv_freq,
+                                                   g.constant({1}, st_w, DType::INT32),
+                                                   g.constant({1}, en_w, DType::INT32),
+                                                   steps1_node)); // [10]
+
+        // -------- 4. Per-section outer product: pos[seq_len] x freq[sec_len] --------
+        // Produces three [seq_len, sec_len] matrices that we concat along axis 1
+        // to get angles_half of shape [seq_len, 32].
+        auto outer_section = [&](uint32_t pos_1d, uint32_t freq_1d, uint32_t section_len) -> uint32_t
+        {
+            // pos_1d: [seq_len] -> [seq_len, 1] -> broadcast to [seq_len, section_len]
+            int32_t pos_shape[] = {seq_len_i, 1};
+            uint32_t pos_col = g.reshape(pos_1d, g.constant({2}, pos_shape, DType::INT32));
+            uint32_t pos_expanded = repeat_3d_axis(pos_col, section_len, 1);
+
+            // freq_1d: [section_len] -> [1, section_len] -> broadcast to [seq_len, section_len]
+            int32_t freq_shape[] = {1, (int32_t)section_len};
+            uint32_t freq_row = g.reshape(freq_1d, g.constant({2}, freq_shape, DType::INT32));
+            uint32_t freq_expanded = repeat_3d_axis(freq_row, seq_len, 0);
+
+            return g.mul(pos_expanded, freq_expanded); // [seq_len, section_len]
+        };
+
+        uint32_t angles_t = outer_section(t_pos, inv_freq_t, cfg.mrope_section_t); // [seq_len, 11]
+        uint32_t angles_h = outer_section(h_pos, inv_freq_h, cfg.mrope_section_h); // [seq_len, 11]
+        uint32_t angles_w = outer_section(w_pos, inv_freq_w, cfg.mrope_section_w); // [seq_len, 10]
+
+        int32_t ax1 = 1;
+        uint32_t angles_half_2d = g.concat({angles_t, angles_h, angles_w},
+                                           g.constant({1}, &ax1, DType::INT32)); // [seq_len, 32]
+
+        int32_t half_shape[] = {1, seq_len_i, half_dim_i};
+        uint32_t angles_half = g.reshape(angles_half_2d,
+                                         g.constant({3}, half_shape, DType::INT32)); // [1, seq_len, 32]
+
+        // -------- 5. cos/sin on the half-angles --------
+        uint32_t cos_half = g.cos(angles_half); // [1, seq_len, 32]
+        uint32_t sin_half = g.sin(angles_half); // [1, seq_len, 32]
+
+        // -------- 6. Interleave: [1, seq_len, 32] -> [1, seq_len, 64] --------
+        // For interleaved rotation, we need:
+        //   cos_interleaved[..., 2i]   = cos_half[..., i]
+        //   cos_interleaved[..., 2i+1] = cos_half[..., i]
+        // (sin likewise).
+        //
+        // Implementation: reshape to [1, seq_len, 32, 1], repeat axis 3 by 2,
+        // reshape back to [1, seq_len, 64]. This works whether g.repeat is
+        // "tile" or "repeat_interleave" — when the axis being repeated has
+        // size 1, both give the same result.
+        auto repeat_interleave_last = [&](uint32_t x_id) -> uint32_t
+        {
+            int32_t shape4[] = {1, seq_len_i, half_dim_i, 1};
+            uint32_t x_4d = g.reshape(x_id, g.constant({4}, shape4, DType::INT32));
+            int32_t rep2[] = {2};
+            int32_t ax3[] = {3};
+            uint32_t x_rep = g.repeat(x_4d,
+                                      g.constant({1}, rep2, DType::INT32),
+                                      g.constant({1}, ax3, DType::INT32));
+            int32_t shape3[] = {1, seq_len_i, rope_dim_i};
+            return g.reshape(g.contiguous(x_rep), g.constant({3}, shape3, DType::INT32));
+        };
+
+        uint32_t cos_out = repeat_interleave_last(cos_half); // [1, seq_len, 64]
+        uint32_t sin_out = repeat_interleave_last(sin_half); // [1, seq_len, 64]
+
         return {cos_out, sin_out};
     }
 
-    uint32_t apply_rope(uint32_t x_id, uint32_t cos_id, uint32_t sin_id, uint32_t n_groups, uint32_t head_dim)
+    // ======================================================================
+    // Interleaved (GPT-J-style) RoPE application.
+    //
+    // For each pair (x[2i], x[2i+1]):
+    //   out[2i]   = x[2i]   * cos[i] - x[2i+1] * sin[i]
+    //   out[2i+1] = x[2i+1] * cos[i] + x[2i]   * sin[i]
+    //
+    // cos_id / sin_id are pre-built in interleaved layout by compute_rope():
+    //   cos_id[..., 2i] = cos_id[..., 2i+1] = cos_half[i]
+    // ======================================================================
+    uint32_t apply_rope(uint32_t x_id, uint32_t cos_id, uint32_t sin_id,
+                        uint32_t n_groups, uint32_t head_dim)
     {
-        uint32_t rope_dim = cfg.rope_dim;
+        uint32_t rope_dim = cfg.rope_dim; // 64
+        uint32_t half_dim = rope_dim / 2; // 32
+        int32_t seq_len_i = (int32_t)seq_len;
+        int32_t n_groups_i = (int32_t)n_groups;
+        int32_t rope_dim_i = (int32_t)rope_dim;
+        int32_t half_dim_i = (int32_t)half_dim;
+        int32_t head_dim_i = (int32_t)head_dim;
 
-        int32_t starts1[] = {0, 0, 0};
-        int32_t ends1[] = {(int32_t)n_groups, (int32_t)seq_len, (int32_t)rope_dim / 2};
-        int32_t steps1[] = {1, 1, 1};
-        uint32_t x1 = g.slice(x_id, g.constant({3}, starts1, DType::INT32), g.constant({3}, ends1, DType::INT32), g.constant({3}, steps1, DType::INT32));
-        x1 = g.contiguous(x1);
+        int32_t steps_111[] = {1, 1, 1};
+        uint32_t steps_111_node = g.constant({3}, steps_111, DType::INT32);
 
-        int32_t starts2[] = {0, 0, (int32_t)rope_dim / 2};
-        int32_t ends2[] = {(int32_t)n_groups, (int32_t)seq_len, (int32_t)rope_dim};
-        uint32_t x2 = g.slice(x_id, g.constant({3}, starts2, DType::INT32), g.constant({3}, ends2, DType::INT32), g.constant({3}, steps1, DType::INT32));
-        uint32_t neg_x2 = g.neg(x2);
-        int32_t axis = 2;
-        uint32_t rotated = g.concat({neg_x2, x1}, g.constant({1}, &axis, DType::INT32));
+        // -------- 1. Slice out the rotary portion of x --------
+        // x_rope = x_id[..., :rope_dim]   shape [n_groups, seq_len, 64]
+        int32_t starts_rope[] = {0, 0, 0};
+        int32_t ends_rope[] = {n_groups_i, seq_len_i, rope_dim_i};
+        uint32_t x_rope = g.contiguous(g.slice(x_id,
+                                               g.constant({3}, starts_rope, DType::INT32),
+                                               g.constant({3}, ends_rope, DType::INT32),
+                                               steps_111_node));
+
+        // -------- 2. Slice x_rope into even and odd indexed elements --------
+        // x_even = x_rope[..., 0::2]   shape [n_groups, seq_len, 32]
+        int32_t starts_even[] = {0, 0, 0};
+        int32_t ends_even[] = {n_groups_i, seq_len_i, rope_dim_i};
+        int32_t steps_even[] = {1, 1, 2};
+        uint32_t x_even = g.contiguous(g.slice(x_rope,
+                                               g.constant({3}, starts_even, DType::INT32),
+                                               g.constant({3}, ends_even, DType::INT32),
+                                               g.constant({3}, steps_even, DType::INT32)));
+
+        // x_odd = x_rope[..., 1::2]   shape [n_groups, seq_len, 32]
+        int32_t starts_odd[] = {0, 0, 1};
+        int32_t ends_odd[] = {n_groups_i, seq_len_i, rope_dim_i};
+        int32_t steps_odd[] = {1, 1, 2};
+        uint32_t x_odd = g.contiguous(g.slice(x_rope,
+                                              g.constant({3}, starts_odd, DType::INT32),
+                                              g.constant({3}, ends_odd, DType::INT32),
+                                              g.constant({3}, steps_odd, DType::INT32)));
+
+        // -------- 3. Build the interleaved rotated tensor --------
+        //   rotated[..., 2i]   = -x_odd[i]
+        //   rotated[..., 2i+1] =  x_even[i]
+        //
+        // Implementation: reshape [-x_odd, x_even] each to [n_groups, seq_len, 32, 1],
+        // concat along axis 3 -> [n_groups, seq_len, 32, 2],
+        // reshape back to [n_groups, seq_len, 64].
+        uint32_t neg_x_odd = g.neg(x_odd);
+
+        int32_t shape4[] = {n_groups_i, seq_len_i, half_dim_i, 1};
+        uint32_t neg_x_odd_4d = g.reshape(neg_x_odd, g.constant({4}, shape4, DType::INT32));
+        uint32_t x_even_4d = g.reshape(x_even, g.constant({4}, shape4, DType::INT32));
+
+        int32_t ax3 = 3;
+        uint32_t stacked = g.concat({neg_x_odd_4d, x_even_4d},
+                                    g.constant({1}, &ax3, DType::INT32)); // [n_groups, seq_len, 32, 2]
+
+        int32_t shape3[] = {n_groups_i, seq_len_i, rope_dim_i};
+        uint32_t rotated = g.reshape(stacked,
+                                     g.constant({3}, shape3, DType::INT32)); // [n_groups, seq_len, 64]
+
+        // -------- 4. Broadcast cos/sin over the head axis --------
+        // cos_id / sin_id are [1, seq_len, 64] -> [n_groups, seq_len, 64]
         uint32_t cos_expanded = repeat_3d_axis(cos_id, n_groups, 0);
         uint32_t sin_expanded = repeat_3d_axis(sin_id, n_groups, 0);
 
-        int32_t starts_rope[] = {0, 0, 0};
-        int32_t ends_rope[] = {(int32_t)n_groups, (int32_t)seq_len, (int32_t)rope_dim};
-        uint32_t x_rope = g.slice(x_id, g.constant({3}, starts_rope, DType::INT32), g.constant({3}, ends_rope, DType::INT32), g.constant({3}, steps1, DType::INT32));
-
+        // -------- 5. Apply rotation: out = x_rope * cos + rotated * sin --------
         uint32_t term1 = g.mul(x_rope, cos_expanded);
         uint32_t term2 = g.mul(rotated, sin_expanded);
         uint32_t x_rope_applied = g.add(term1, term2);
 
+        // -------- 6. Pass through the non-rotary portion (rope_dim < head_dim) --------
         if (rope_dim < head_dim)
         {
-            int32_t starts_pass[] = {0, 0, (int32_t)rope_dim};
-            int32_t ends_pass[] = {(int32_t)n_groups, (int32_t)seq_len, (int32_t)head_dim};
-            uint32_t x_pass = g.slice(x_id, g.constant({3}, starts_pass, DType::INT32), g.constant({3}, ends_pass, DType::INT32), g.constant({3}, steps1, DType::INT32));
-            return g.concat({x_rope_applied, x_pass}, g.constant({1}, &axis, DType::INT32));
+            int32_t starts_pass[] = {0, 0, rope_dim_i};
+            int32_t ends_pass[] = {n_groups_i, seq_len_i, head_dim_i};
+            uint32_t x_pass = g.contiguous(g.slice(x_id,
+                                                   g.constant({3}, starts_pass, DType::INT32),
+                                                   g.constant({3}, ends_pass, DType::INT32),
+                                                   steps_111_node));
+            int32_t ax2 = 2;
+            return g.concat({x_rope_applied, x_pass},
+                            g.constant({1}, &ax2, DType::INT32));
         }
         return x_rope_applied;
     }
@@ -497,11 +673,8 @@ public:
         uint32_t one_node = expand_scalar_to_3d(one_fp32, 1, seq_len, cfg.attn_n_q_heads * cfg.attn_head_dim);
         uint32_t den = g.add(one_node, exp_neg_gate);
         uint32_t sigmoid_gate = g.div(one_node, den);
-        
-        // Compute SiLU(gate) = gate * Sigmoid(gate)
-        uint32_t silu_gate = g.mul(gate, sigmoid_gate);
 
-        ctx_flat = g.mul(ctx_flat, silu_gate);
+        ctx_flat = g.mul(ctx_flat, sigmoid_gate);
 
         uint32_t w_o = weight(w_path, prefix + ".self_attn.o_proj.weight");
         int32_t perm_dims[] = {1, 0};
@@ -610,6 +783,8 @@ public:
         int32_t perm_back[] = {0, 2, 1};
         uint32_t conv_out_tr = g.contiguous(g.permute(conv_combined, g.constant({3}, perm_back, DType::INT32)));
 
+        conv_out_tr = silu_atomic(conv_out_tr, 1, seq_len, qkv_dim);
+
         int32_t starts_q[] = {0, 0, 0};
         int32_t ends_q[] = {1, (int32_t)seq_len, (int32_t)key_dim};
         uint32_t q = g.contiguous(g.slice(conv_out_tr, g.constant({3}, starts_q, DType::INT32), g.constant({3}, ends_q, DType::INT32), g.constant({3}, steps, DType::INT32)));
@@ -663,7 +838,7 @@ public:
         uint32_t k_heads_5d = g.reshape(k_heads, sh5_node);
 
         // 2. Repeat along the newly inserted axis (axis 2) of size 1 by r_heads (2)
-        int32_t r_heads = 2;
+        int32_t r_heads = cfg.linear_n_v_heads / cfg.linear_n_qk_heads;
         int32_t rep[] = {(int32_t)r_heads};
         uint32_t rep_node = g.constant({1}, rep, DType::INT32);
         int32_t ax[] = {2};
@@ -854,11 +1029,12 @@ public:
         int32_t sh3_final[] = {1, (int32_t)S, (int32_t)E};
         uint32_t router_mask = g.reshape(mask_reduced, g.constant({3}, sh3_final, DType::INT32)); // [1, S, E]
 
-        // 6. Apply mask & Normalize top-k probabilities
-        uint32_t gated_probs = g.mul(router_probs, router_mask);      // [1, S, E]
-        uint32_t prob_sum = g.sum(gated_probs, ax2_node);             // [1, S, 1]
-        uint32_t prob_sum_exp = repeat_ax(prob_sum, E, 2);            // [1, S, E]
-        uint32_t normalized_probs = g.div(gated_probs, prob_sum_exp); // [1, S, E]
+        // 6. Apply mask
+        uint32_t gated_probs = g.mul(router_probs, router_mask); // [1, S, E]
+        int32_t axis = -1;
+        uint32_t row_sum = g.sum(gated_probs, g.constant({1}, &axis, DType::INT32)); // [1, S, 1]
+        row_sum = g.contiguous(repeat_ax(row_sum, cfg.n_experts, 2));
+        uint32_t normalized_probs = g.div(gated_probs, row_sum);
 
         // --- Step 1: Expand Input X to [E, S, H] ---
         int32_t shape_3d_x[] = {1, (int32_t)seq_len, (int32_t)cfg.emb_dim};
