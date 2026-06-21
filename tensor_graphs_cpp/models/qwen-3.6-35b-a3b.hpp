@@ -24,8 +24,9 @@ struct Qwen3_6_35B_A3B_Config
     // Gated Attention (Full Attention)
     uint32_t attn_n_q_heads = 16;
     uint32_t attn_n_kv_heads = 2;
-    uint32_t attn_head_dim = 256;
-    uint32_t rope_dim = 64;
+    uint32_t head_dim = 256;
+    uint32_t rope_dim = 64; // head_dim * partial_rotary_factor = 256 * 0.25 = 64
+    float rope_theta = 10'000'000.0f;
 
     // Mixture Of Experts (MoE)
     uint32_t n_experts = 256;
@@ -278,7 +279,7 @@ public:
 
         uint32_t exponent = g.div(indices, rope_dim_fp_1d);
 
-        float theta_val = 10'000'000.0f; // rope_theta = 1e7
+        float theta_val = cfg.rope_theta;
         uint32_t theta = g.constant({1}, &theta_val, DType::FLOAT32);
         uint32_t theta_1d = g.repeat(theta,
                                      g.constant({1}, rep32, DType::INT32),
@@ -468,24 +469,24 @@ public:
         };
 
         // q_proj provides Q and Gate
-        uint32_t q_and_gate = project(".self_attn.q_proj.weight", cfg.hidden_size, cfg.attn_n_q_heads * cfg.attn_head_dim * 2);
+        uint32_t q_and_gate = project(".self_attn.q_proj.weight", cfg.hidden_size, cfg.attn_n_q_heads * cfg.head_dim * 2);
 
         // Reshape to 4D to isolate the head_dim * 2 structure [1, seq_len, num_heads, head_dim * 2]
-        int32_t q_and_gate_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.attn_head_dim * 2};
+        int32_t q_and_gate_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.head_dim * 2};
         uint32_t q_and_gate_4d = g.reshape(q_and_gate, g.constant({4}, q_and_gate_shape4, DType::INT32));
 
         // Slice Q and Gate from the last axis (axis 3) of the 4D tensor
         int32_t s_q[] = {0, 0, 0, 0};
-        int32_t e_q[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.attn_head_dim};
+        int32_t e_q[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.head_dim};
         int32_t steps[] = {1, 1, 1, 1};
         uint32_t q_4d = g.contiguous(g.slice(q_and_gate_4d, g.constant({4}, s_q, DType::INT32), g.constant({4}, e_q, DType::INT32), g.constant({4}, steps, DType::INT32)));
 
-        int32_t s_g[] = {0, 0, 0, (int32_t)cfg.attn_head_dim};
-        int32_t e_g[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.attn_head_dim * 2};
+        int32_t s_g[] = {0, 0, 0, (int32_t)cfg.head_dim};
+        int32_t e_g[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.head_dim * 2};
         uint32_t gate_4d = g.contiguous(g.slice(q_and_gate_4d, g.constant({4}, s_g, DType::INT32), g.constant({4}, e_g, DType::INT32), g.constant({4}, steps, DType::INT32)));
 
         // Reshape Gate back to 3D: [1, seq_len, num_heads * head_dim]
-        int32_t gate_shape3[] = {1, (int32_t)seq_len, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim)};
+        int32_t gate_shape3[] = {1, (int32_t)seq_len, (int32_t)(cfg.attn_n_q_heads * cfg.head_dim)};
         uint32_t gate = g.reshape(gate_4d, g.constant({3}, gate_shape3, DType::INT32));
 
         int32_t perm4[] = {0, 2, 1, 3};
@@ -494,17 +495,17 @@ public:
         // Permute Q and reshape to 3D
         uint32_t q_perm = g.permute(q_4d, perm4_node);
         q_perm = g.contiguous(q_perm);
-        int32_t shape3_q[] = {(int32_t)cfg.attn_n_q_heads, (int32_t)seq_len, (int32_t)cfg.attn_head_dim};
+        int32_t shape3_q[] = {(int32_t)cfg.attn_n_q_heads, (int32_t)seq_len, (int32_t)cfg.head_dim};
         uint32_t q = g.reshape(q_perm, g.constant({3}, shape3_q, DType::INT32));
 
-        uint32_t k = project(".self_attn.k_proj.weight", cfg.hidden_size, cfg.attn_n_kv_heads * cfg.attn_head_dim);
-        uint32_t v = project(".self_attn.v_proj.weight", cfg.hidden_size, cfg.attn_n_kv_heads * cfg.attn_head_dim);
+        uint32_t k = project(".self_attn.k_proj.weight", cfg.hidden_size, cfg.attn_n_kv_heads * cfg.head_dim);
+        uint32_t v = project(".self_attn.v_proj.weight", cfg.hidden_size, cfg.attn_n_kv_heads * cfg.head_dim);
 
-        int32_t k_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_kv_heads, (int32_t)cfg.attn_head_dim};
+        int32_t k_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_kv_heads, (int32_t)cfg.head_dim};
         uint32_t k_4d = g.reshape(k, g.constant({4}, k_shape4, DType::INT32));
         uint32_t k_perm = g.permute(k_4d, perm4_node);
         k_perm = g.contiguous(k_perm);
-        int32_t shape3_k[] = {(int32_t)cfg.attn_n_kv_heads, (int32_t)seq_len, (int32_t)cfg.attn_head_dim};
+        int32_t shape3_k[] = {(int32_t)cfg.attn_n_kv_heads, (int32_t)seq_len, (int32_t)cfg.head_dim};
         k = g.reshape(k_perm, g.constant({3}, shape3_k, DType::INT32));
 
         uint32_t v_4d = g.reshape(v, g.constant({4}, k_shape4, DType::INT32));
@@ -513,19 +514,19 @@ public:
         v = g.reshape(v_perm, g.constant({3}, shape3_k, DType::INT32));
 
         uint32_t q_norm_w = weight(w_path, prefix + ".self_attn.q_norm.weight");
-        q = rms_norm_atomic(q, q_norm_w, cfg.attn_n_q_heads, cfg.attn_head_dim);
+        q = rms_norm_atomic(q, q_norm_w, cfg.attn_n_q_heads, cfg.head_dim);
         uint32_t k_norm_w = weight(w_path, prefix + ".self_attn.k_norm.weight");
-        k = rms_norm_atomic(k, k_norm_w, cfg.attn_n_kv_heads, cfg.attn_head_dim);
+        k = rms_norm_atomic(k, k_norm_w, cfg.attn_n_kv_heads, cfg.head_dim);
 
-        q = apply_rope(q, rope_cos, rope_sin, cfg.attn_n_q_heads, cfg.attn_head_dim);
-        k = apply_rope(k, rope_cos, rope_sin, cfg.attn_n_kv_heads, cfg.attn_head_dim);
+        q = apply_rope(q, rope_cos, rope_sin, cfg.attn_n_q_heads, cfg.head_dim);
+        k = apply_rope(k, rope_cos, rope_sin, cfg.attn_n_kv_heads, cfg.head_dim);
 
         if (cfg.attn_n_q_heads != cfg.attn_n_kv_heads)
         {
             uint32_t repeats = cfg.attn_n_q_heads / cfg.attn_n_kv_heads;
 
             // 1. Reshape [n_kv_heads, seq_len, head_dim] -> [n_kv_heads, 1, seq_len, head_dim]
-            int32_t sh4[] = {(int32_t)cfg.attn_n_kv_heads, 1, (int32_t)seq_len, (int32_t)cfg.attn_head_dim};
+            int32_t sh4[] = {(int32_t)cfg.attn_n_kv_heads, 1, (int32_t)seq_len, (int32_t)cfg.head_dim};
             uint32_t sh4_node = g.constant({4}, sh4, DType::INT32);
             k = g.reshape(k, sh4_node);
             v = g.reshape(v, sh4_node);
@@ -543,7 +544,7 @@ public:
             v = g.contiguous(v);
 
             // 4. Reshape back to 3D: [n_q_heads, seq_len, head_dim]
-            int32_t sh3[] = {(int32_t)cfg.attn_n_q_heads, (int32_t)seq_len, (int32_t)cfg.attn_head_dim};
+            int32_t sh3[] = {(int32_t)cfg.attn_n_q_heads, (int32_t)seq_len, (int32_t)cfg.head_dim};
             uint32_t sh3_node = g.constant({3}, sh3, DType::INT32);
             k = g.reshape(k, sh3_node);
             v = g.reshape(v, sh3_node);
@@ -558,8 +559,8 @@ public:
         uint32_t v = std::get<2>(qkvg);
         uint32_t gate = std::get<3>(qkvg);
 
-        float scale_val = 1.0f / std::sqrt((float)cfg.attn_head_dim);
-        uint32_t scale_node = expand_scalar_to_3d(g.constant({1}, &scale_val, DType::FLOAT32), cfg.attn_n_q_heads, seq_len, cfg.attn_head_dim);
+        float scale_val = 1.0f / std::sqrt((float)cfg.head_dim);
+        uint32_t scale_node = expand_scalar_to_3d(g.constant({1}, &scale_val, DType::FLOAT32), cfg.attn_n_q_heads, seq_len, cfg.head_dim);
         uint32_t scaled_q = g.mul(q, scale_node);
 
         int32_t perm_k[] = {0, 2, 1};
@@ -585,23 +586,23 @@ public:
         uint32_t probs = g.div(exp_scores, sum_exp);
         uint32_t context = g.dot(probs, v);
 
-        int32_t ctx_shape4[] = {1, (int32_t)cfg.attn_n_q_heads, (int32_t)seq_len, (int32_t)cfg.attn_head_dim};
+        int32_t ctx_shape4[] = {1, (int32_t)cfg.attn_n_q_heads, (int32_t)seq_len, (int32_t)cfg.head_dim};
         uint32_t ctx_4d = g.reshape(context, g.constant({4}, ctx_shape4, DType::INT32));
 
         int32_t perm_ctx[] = {0, 2, 1, 3};
         uint32_t ctx_perm = g.permute(ctx_4d, g.constant({4}, perm_ctx, DType::INT32));
         ctx_perm = g.contiguous(ctx_perm);
 
-        int32_t ctx_shape3[] = {1, (int32_t)seq_len, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim)};
+        int32_t ctx_shape3[] = {1, (int32_t)seq_len, (int32_t)(cfg.attn_n_q_heads * cfg.head_dim)};
         uint32_t ctx_flat = g.reshape(ctx_perm, g.constant({3}, ctx_shape3, DType::INT32));
 
         // multiply by sigmoid(gate)
         float neg_one_val = -1.0f;
-        uint32_t neg_one = expand_scalar_to_3d(g.constant({1}, &neg_one_val, DType::FLOAT32), 1, seq_len, cfg.attn_n_q_heads * cfg.attn_head_dim);
+        uint32_t neg_one = expand_scalar_to_3d(g.constant({1}, &neg_one_val, DType::FLOAT32), 1, seq_len, cfg.attn_n_q_heads * cfg.head_dim);
         uint32_t neg_gate = g.mul(gate, neg_one);
-        uint32_t e_node_gate = expand_scalar_to_3d(g.constant({1}, &e_val, DType::FLOAT32), 1, seq_len, cfg.attn_n_q_heads * cfg.attn_head_dim);
+        uint32_t e_node_gate = expand_scalar_to_3d(g.constant({1}, &e_val, DType::FLOAT32), 1, seq_len, cfg.attn_n_q_heads * cfg.head_dim);
         uint32_t exp_neg_gate = g.pow(e_node_gate, neg_gate);
-        uint32_t one_node = expand_scalar_to_3d(one_fp32, 1, seq_len, cfg.attn_n_q_heads * cfg.attn_head_dim);
+        uint32_t one_node = expand_scalar_to_3d(one_fp32, 1, seq_len, cfg.attn_n_q_heads * cfg.head_dim);
         uint32_t den = g.add(one_node, exp_neg_gate);
         uint32_t sigmoid_gate = g.div(one_node, den);
 
@@ -612,7 +613,7 @@ public:
         uint32_t w_o_t = g.permute(w_o, g.constant({2}, perm_dims, DType::INT32));
         w_o_t = g.contiguous(w_o_t);
 
-        int32_t s3[] = {1, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim), (int32_t)cfg.hidden_size};
+        int32_t s3[] = {1, (int32_t)(cfg.attn_n_q_heads * cfg.head_dim), (int32_t)cfg.hidden_size};
         uint32_t w_o_3d = g.reshape(w_o_t, g.constant({3}, s3, DType::INT32));
         return g.dot(ctx_flat, w_o_3d);
     }
@@ -1078,7 +1079,7 @@ public:
         // #L1289 text_position_ids [1, B, seq_len]
         // #L1290 position_ids [3, B, seq_len]
 
-        uint32_t mask_id = compute_causal_mask();
+        uint32_t mask_id = compute_causal_mask(); // #L1294
 
         auto rope = compute_rope();
         uint32_t rope_cos = std::get<0>(rope);
