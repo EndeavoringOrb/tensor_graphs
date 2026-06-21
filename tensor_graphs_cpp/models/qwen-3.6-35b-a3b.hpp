@@ -291,7 +291,7 @@ public:
         uint32_t one_1d = g.repeat(one_node,
                                    g.constant({1}, rep32, DType::INT32),
                                    g.constant({1}, &zero, DType::INT32));
-        uint32_t inv_freq = g.div(one_1d, base_to_exponent);
+        uint32_t inv_freq = g.div(one_1d, base_to_exponent); // [32]
 
         // -------- 2. Build the three M-RoPE position axes (text-only) --------
         uint32_t seq_len_int = g.constant({1}, &seq_len_i, DType::INT32);
@@ -618,9 +618,13 @@ public:
         return g.dot(ctx_flat, w_o_3d);
     }
 
-    // --- GATED DELTANET (LINEAR ATTENTION LAYER) ---
+    /*
+    --- GATED DELTANET (LINEAR ATTENTION LAYER) ---
+    x [B, seq_len, hidden_size]
+    */
     uint32_t linear_attention_atomic(uint32_t x, const std::string &prefix)
     {
+        // no mask of padding states L443
         int32_t perm_dims[] = {1, 0};
         uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
 
@@ -1081,16 +1085,16 @@ public:
 
         uint32_t mask_id = compute_causal_mask(); // #L1294
 
-        auto rope = compute_rope();
+        auto rope = compute_rope(); // #L1304
         uint32_t rope_cos = std::get<0>(rope);
         uint32_t rope_sin = std::get<1>(rope);
 
         for (uint32_t i = 0; i < cfg.num_hidden_layers; ++i)
         {
             std::string prefix = "model.language_model.layers." + std::to_string(i);
-            uint32_t residual = x;
+            uint32_t residual = x; // [B, seq_len, hidden_size]
             uint32_t w_ln1 = weight(w_path, prefix + ".input_layernorm.weight");
-            x = rms_norm_atomic(x, w_ln1, 1, cfg.hidden_size);
+            x = rms_norm_atomic(x, w_ln1, 1, cfg.hidden_size); // #L862
 
             // 3:1 Hybrid Attention Stack Routing
             // 3 Linear Attention Layers followed by 1 Full Attention Layer
