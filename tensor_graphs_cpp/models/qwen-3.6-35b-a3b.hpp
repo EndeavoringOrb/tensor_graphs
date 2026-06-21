@@ -226,7 +226,12 @@ public:
         uint32_t inv_std_expanded = repeat_3d_axis(inv_std, dim_size, 2);
         uint32_t x_norm = g.mul(x_id, inv_std_expanded);
         uint32_t weight_expanded = expand_1d_to_3d(weight_id, dim_size, dim0, seq_len);
-        return g.mul(x_norm, weight_expanded);
+
+        // Qwen3.5 MoE / Qwen2 RMSNorm adds 1.0 to the weights (which are initialized to 0)
+        uint32_t one_full = expand_scalar_to_3d(one_fp32, dim0, seq_len, dim_size);
+        uint32_t weight_plus_one = g.add(weight_expanded, one_full);
+
+        return g.mul(x_norm, weight_plus_one);
     }
 
     uint32_t gated_rms_norm(uint32_t x, uint32_t z, const std::string &w_name, uint32_t dims, uint32_t cur_seq_len)
@@ -293,7 +298,7 @@ public:
                                    g.constant({1}, &zero, DType::INT32));
         uint32_t inv_freq = g.div(one_1d, base_to_exponent); // [32]
 
-        // -------- 2. Build the three M-RoPE position axes (text-only) --------
+        // -------- 2. Build the three M-RoPE position axes --------
         uint32_t seq_len_int = g.constant({1}, &seq_len_i, DType::INT32);
         uint32_t t_pos_int = g.arange(zero_node, seq_len_int, one_int_node);
         uint32_t t_pos = g.cast(t_pos_int, DType::FLOAT32);
@@ -303,62 +308,61 @@ public:
         uint32_t h_pos = g.fill(one_node, seq_shape_node);
         uint32_t w_pos = g.fill(one_node, seq_shape_node);
 
-        // -------- 3. Slice inv_freq into [11, 11, 10] sections --------
-        int32_t st_t[] = {0};
-        int32_t en_t[] = {(int32_t)cfg.mrope_section_t};
-        int32_t st_h[] = {(int32_t)cfg.mrope_section_t};
-        int32_t en_h[] = {(int32_t)(cfg.mrope_section_t + cfg.mrope_section_h)};
-        int32_t st_w[] = {(int32_t)(cfg.mrope_section_t + cfg.mrope_section_h)};
-        int32_t en_w[] = {(int32_t)(cfg.mrope_section_t + cfg.mrope_section_h + cfg.mrope_section_w)};
-        int32_t steps1[] = {1};
-        uint32_t steps1_node = g.constant({1}, steps1, DType::INT32);
-
-        uint32_t inv_freq_t = g.contiguous(g.slice(inv_freq,
-                                                   g.constant({1}, st_t, DType::INT32),
-                                                   g.constant({1}, en_t, DType::INT32),
-                                                   steps1_node));
-        uint32_t inv_freq_h = g.contiguous(g.slice(inv_freq,
-                                                   g.constant({1}, st_h, DType::INT32),
-                                                   g.constant({1}, en_h, DType::INT32),
-                                                   steps1_node));
-        uint32_t inv_freq_w = g.contiguous(g.slice(inv_freq,
-                                                   g.constant({1}, st_w, DType::INT32),
-                                                   g.constant({1}, en_w, DType::INT32),
-                                                   steps1_node));
-
-        // -------- 4. Per-section outer product --------
-        auto outer_section = [&](uint32_t pos_1d, uint32_t freq_1d, uint32_t section_len) -> uint32_t
+        // -------- 3. Compute full 32-element angles for T, H, W --------
+        auto outer_full = [&](uint32_t pos_1d) -> uint32_t
         {
-            int32_t pos_shape[] = {seq_len_i, 1};
-            uint32_t pos_col = g.reshape(pos_1d, g.constant({2}, pos_shape, DType::INT32));
-            uint32_t pos_expanded = repeat_3d_axis(pos_col, section_len, 1);
+            // [seq_len] → [1, seq_len, 1], repeat on axis 2 → [1, seq_len, half_dim]
+            int32_t pos_shape[] = {1, seq_len_i, 1};
+            uint32_t pos_col = g.reshape(pos_1d, g.constant({3}, pos_shape, DType::INT32));
+            uint32_t pos_expanded = repeat_3d_axis(pos_col, half_dim_i, 2);
 
-            int32_t freq_shape[] = {1, (int32_t)section_len};
-            uint32_t freq_row = g.reshape(freq_1d, g.constant({2}, freq_shape, DType::INT32));
-            uint32_t freq_expanded = repeat_3d_axis(freq_row, seq_len, 0);
+            // [half_dim] → [1, 1, half_dim], repeat on axis 1 → [1, seq_len, half_dim]
+            int32_t freq_shape[] = {1, 1, half_dim_i};
+            uint32_t freq_row = g.reshape(inv_freq, g.constant({3}, freq_shape, DType::INT32));
+            uint32_t freq_expanded = repeat_3d_axis(freq_row, seq_len_i, 1);
 
-            return g.mul(pos_expanded, freq_expanded);
+            return g.mul(pos_expanded, freq_expanded); // [1, seq_len, half_dim]
         };
 
-        uint32_t angles_t = outer_section(t_pos, inv_freq_t, cfg.mrope_section_t);
-        uint32_t angles_h = outer_section(h_pos, inv_freq_h, cfg.mrope_section_h);
-        uint32_t angles_w = outer_section(w_pos, inv_freq_w, cfg.mrope_section_w);
+        uint32_t angles_t_full = outer_full(t_pos);
+        uint32_t angles_h_full = outer_full(h_pos);
+        uint32_t angles_w_full = outer_full(w_pos);
 
-        int32_t ax1 = 1;
-        uint32_t angles_half_2d = g.concat({angles_t, angles_h, angles_w},
-                                           g.constant({1}, &ax1, DType::INT32));
+        // -------- 4. Interleave index-by-index to match index % 3 logic --------
+        std::vector<uint32_t> interleaved_slices;
+        int32_t steps_slice[] = {1, 1, 1}; // Slice from 3D tensor
+        uint32_t steps_slice_node = g.constant({3}, steps_slice, DType::INT32);
 
-        int32_t half_shape[] = {1, seq_len_i, half_dim_i};
-        uint32_t angles_half = g.reshape(angles_half_2d,
-                                         g.constant({3}, half_shape, DType::INT32));
+        for (int32_t i = 0; i < half_dim_i; ++i)
+        {
+            int32_t starts[] = {0, 0, i};
+            int32_t ends[] = {1, seq_len_i, i + 1};
+            uint32_t starts_node = g.constant({3}, starts, DType::INT32);
+            uint32_t ends_node = g.constant({3}, ends, DType::INT32);
 
-        // -------- 5. cos/sin on the half-angles --------
+            uint32_t source_angles = angles_t_full;
+            if (i % 3 == 1)
+            {
+                source_angles = angles_h_full;
+            }
+            else if (i % 3 == 2)
+            {
+                source_angles = angles_w_full;
+            }
+
+            uint32_t slice_i = g.contiguous(g.slice(source_angles, starts_node, ends_node, steps_slice_node));
+            interleaved_slices.push_back(slice_i);
+        }
+
+        // -------- 5. Concatenate interleaved elements along the channel axis --------
+        int32_t ax2_concat = 2;
+        uint32_t angles_half = g.concat(interleaved_slices, g.constant({1}, &ax2_concat, DType::INT32));
+
+        // -------- 6. cos/sin on the interleaved half-angles --------
         uint32_t cos_half = g.cos(angles_half);
         uint32_t sin_half = g.sin(angles_half);
 
-        // -------- 6. Concat: [1, seq_len, 32] -> [1, seq_len, 64] --------
-        // Instead of interleaved repeating, we concatenate the halves to match rotate_half
-        int32_t ax2_concat = 2;
+        // -------- 7. Concat halves to match rotate_half --------
         uint32_t cos_out = g.concat({cos_half, cos_half}, g.constant({1}, &ax2_concat, DType::INT32));
         uint32_t sin_out = g.concat({sin_half, sin_half}, g.constant({1}, &ax2_concat, DType::INT32));
 
@@ -823,9 +827,6 @@ public:
             int32_t flat_scalar_shape[] = {(int32_t)cfg.linear_n_v_heads, 1, 1};
             uint32_t a_t_flat = g.reshape(a_t, g.constant({3}, flat_scalar_shape, DType::INT32));
 
-            uint32_t a_t_exp = repeat_3d_axis(repeat_3d_axis(a_t_flat, (int32_t)cfg.linear_head_dim, 1), (int32_t)cfg.linear_head_dim, 2);
-            S = g.mul(S, a_t_exp);
-
             int32_t starts_t_k[] = {0, 0, (int32_t)t, 0};
             int32_t ends_t_k[] = {1, (int32_t)cfg.linear_n_v_heads, (int32_t)(t + 1), (int32_t)cfg.linear_head_dim};
             uint32_t k_t = g.contiguous(g.slice(k_norm, g.constant({4}, starts_t_k, DType::INT32), g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
@@ -839,20 +840,27 @@ public:
             uint32_t b_t = g.contiguous(g.slice(b_heads, g.constant({4}, starts_t_ab, DType::INT32), g.constant({4}, ends_t_b, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
             uint32_t b_t_flat = g.reshape(b_t, g.constant({3}, flat_scalar_shape, DType::INT32));
 
+            uint32_t q_t = g.contiguous(g.slice(q_norm, g.constant({4}, starts_t_k, DType::INT32), g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+            uint32_t q_t_flat = g.reshape(q_t, g.constant({3}, flat_vector_shape, DType::INT32));
+
+            // 1. Recall from the CURRENT (pre-decay) state
             uint32_t kv_mem = g.contiguous(g.dot(k_t_flat, S));
 
+            // 2. Compute error and delta correction
             uint32_t err = g.add(v_t_flat, g.neg(kv_mem));
             uint32_t b_t_exp = repeat_3d_axis(b_t_flat, (int32_t)cfg.linear_head_dim, 2);
             uint32_t delta = g.mul(err, b_t_exp);
 
+            // 3. Compute outer product k^T ⊗ delta
             int32_t perm_t[] = {0, 2, 1};
             uint32_t k_t_t = g.contiguous(g.permute(k_t_flat, g.constant({3}, perm_t, DType::INT32)));
             uint32_t outer_prod = g.contiguous(g.dot(k_t_t, delta));
-            S = g.add(S, outer_prod);
 
-            uint32_t q_t = g.contiguous(g.slice(q_norm, g.constant({4}, starts_t_k, DType::INT32), g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
-            uint32_t q_t_flat = g.reshape(q_t, g.constant({3}, flat_vector_shape, DType::INT32));
+            // 4. Apply decay AND write in one expression: S = g*S + outer
+            uint32_t a_t_exp = repeat_3d_axis(repeat_3d_axis(a_t_flat, (int32_t)cfg.linear_head_dim, 1), (int32_t)cfg.linear_head_dim, 2);
+            S = g.add(g.mul(S, a_t_exp), outer_prod);
 
+            // 5. Read output from the fully updated state
             uint32_t y_t = g.contiguous(g.dot(q_t_flat, S));
 
             int32_t head_y_shape[] = {1, (int32_t)cfg.linear_n_v_heads, 1, (int32_t)cfg.linear_head_dim};
