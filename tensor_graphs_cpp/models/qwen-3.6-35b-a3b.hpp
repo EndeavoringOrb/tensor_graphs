@@ -1,4 +1,5 @@
 // File: tensor_graphs_cpp/models/qwen-3.6-35b-a3b.hpp
+// ref: https://github.com/huggingface/transformers/blob/1048e9af78a6045444244412dfe216ba5810e7fb/src/transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py
 #pragma once
 #include "core/types.hpp"
 #include "core/memory.hpp"
@@ -11,8 +12,8 @@ struct Qwen3_6_35B_A3B_Config
 {
     // Token Embedding
     uint32_t vocab_size = 248320;
-    uint32_t n_layers = 40;
-    uint32_t emb_dim = 2048;
+    uint32_t num_hidden_layers = 40;
+    uint32_t hidden_size = 2048;
 
     // Gated DeltaNet (Linear Attention)
     uint32_t linear_n_v_heads = 32;
@@ -250,16 +251,6 @@ public:
         return g.mul(x_norm_scaled, z_silu);
     }
 
-    // ======================================================================
-    // M-RoPE (Multimodal Rotary Position Embedding) with INTERLEAVED rotation.
-    //
-    // Two things the previous implementation got wrong:
-    //   1. mrope_interleaved = true  -> GPT-J-style interleaved rotation,
-    //      NOT the GPT-NeoX / Llama "rotate_half" style.
-    //   2. mrope_section = [11, 11, 10]  -> the rope_dim/2 = 32 frequency pairs
-    //      split into [time, height, width] sections, each driven by its own
-    //      position axis. For text-only inference, h_pos and w_pos are constant 1.
-    // ======================================================================
     std::tuple<uint32_t, uint32_t> compute_rope()
     {
         const int32_t zero = 0;
@@ -269,15 +260,12 @@ public:
         const int32_t half_dim_i = (int32_t)(cfg.rope_dim / 2); // 32
         const int32_t seq_len_i = (int32_t)seq_len;
 
-        // mrope_section = [time, height, width] = [11, 11, 10], sums to rope_dim/2 = 32.
-
         uint32_t zero_node = g.constant({1}, &zero, DType::INT32);
         uint32_t one_int_node = g.constant({1}, &one_i, DType::INT32);
         uint32_t two_node = g.constant({1}, &two_i, DType::INT32);
         uint32_t rope_dim_int = g.constant({1}, &rope_dim_i, DType::INT32);
 
         // -------- 1. inv_freq[i] = 1 / theta^(2i/rope_dim), shape [32] --------
-        // indices_int = [0, 2, 4, ..., 62]
         uint32_t indices_int = g.arange(zero_node, rope_dim_int, two_node);
         uint32_t indices = g.cast(indices_int, DType::FLOAT32);
 
@@ -288,7 +276,7 @@ public:
                                            g.constant({1}, rep32, DType::INT32),
                                            g.constant({1}, &zero, DType::INT32));
 
-        uint32_t exponent = g.div(indices, rope_dim_fp_1d); // [0, 2/64, ..., 62/64]
+        uint32_t exponent = g.div(indices, rope_dim_fp_1d);
 
         float theta_val = 10'000'000.0f; // rope_theta = 1e7
         uint32_t theta = g.constant({1}, &theta_val, DType::FLOAT32);
@@ -302,20 +290,17 @@ public:
         uint32_t one_1d = g.repeat(one_node,
                                    g.constant({1}, rep32, DType::INT32),
                                    g.constant({1}, &zero, DType::INT32));
-        uint32_t inv_freq = g.div(one_1d, base_to_exponent); // [32]
+        uint32_t inv_freq = g.div(one_1d, base_to_exponent);
 
         // -------- 2. Build the three M-RoPE position axes (text-only) --------
-        //   t_pos = [0, 1, 2, ..., seq_len-1]
-        //   h_pos = [1, 1, ..., 1]
-        //   w_pos = [1, 1, ..., 1]
         uint32_t seq_len_int = g.constant({1}, &seq_len_i, DType::INT32);
         uint32_t t_pos_int = g.arange(zero_node, seq_len_int, one_int_node);
-        uint32_t t_pos = g.cast(t_pos_int, DType::FLOAT32); // [seq_len]
+        uint32_t t_pos = g.cast(t_pos_int, DType::FLOAT32);
 
         int32_t seq_shape_arr[] = {seq_len_i};
         uint32_t seq_shape_node = g.constant({1}, seq_shape_arr, DType::INT32);
-        uint32_t h_pos = g.fill(one_node, seq_shape_node); // [seq_len] all ones
-        uint32_t w_pos = g.fill(one_node, seq_shape_node); // [seq_len] all ones
+        uint32_t h_pos = g.fill(one_node, seq_shape_node);
+        uint32_t w_pos = g.fill(one_node, seq_shape_node);
 
         // -------- 3. Slice inv_freq into [11, 11, 10] sections --------
         int32_t st_t[] = {0};
@@ -330,89 +315,55 @@ public:
         uint32_t inv_freq_t = g.contiguous(g.slice(inv_freq,
                                                    g.constant({1}, st_t, DType::INT32),
                                                    g.constant({1}, en_t, DType::INT32),
-                                                   steps1_node)); // [11]
+                                                   steps1_node));
         uint32_t inv_freq_h = g.contiguous(g.slice(inv_freq,
                                                    g.constant({1}, st_h, DType::INT32),
                                                    g.constant({1}, en_h, DType::INT32),
-                                                   steps1_node)); // [11]
+                                                   steps1_node));
         uint32_t inv_freq_w = g.contiguous(g.slice(inv_freq,
                                                    g.constant({1}, st_w, DType::INT32),
                                                    g.constant({1}, en_w, DType::INT32),
-                                                   steps1_node)); // [10]
+                                                   steps1_node));
 
-        // -------- 4. Per-section outer product: pos[seq_len] x freq[sec_len] --------
-        // Produces three [seq_len, sec_len] matrices that we concat along axis 1
-        // to get angles_half of shape [seq_len, 32].
+        // -------- 4. Per-section outer product --------
         auto outer_section = [&](uint32_t pos_1d, uint32_t freq_1d, uint32_t section_len) -> uint32_t
         {
-            // pos_1d: [seq_len] -> [seq_len, 1] -> broadcast to [seq_len, section_len]
             int32_t pos_shape[] = {seq_len_i, 1};
             uint32_t pos_col = g.reshape(pos_1d, g.constant({2}, pos_shape, DType::INT32));
             uint32_t pos_expanded = repeat_3d_axis(pos_col, section_len, 1);
 
-            // freq_1d: [section_len] -> [1, section_len] -> broadcast to [seq_len, section_len]
             int32_t freq_shape[] = {1, (int32_t)section_len};
             uint32_t freq_row = g.reshape(freq_1d, g.constant({2}, freq_shape, DType::INT32));
             uint32_t freq_expanded = repeat_3d_axis(freq_row, seq_len, 0);
 
-            return g.mul(pos_expanded, freq_expanded); // [seq_len, section_len]
+            return g.mul(pos_expanded, freq_expanded);
         };
 
-        uint32_t angles_t = outer_section(t_pos, inv_freq_t, cfg.mrope_section_t); // [seq_len, 11]
-        uint32_t angles_h = outer_section(h_pos, inv_freq_h, cfg.mrope_section_h); // [seq_len, 11]
-        uint32_t angles_w = outer_section(w_pos, inv_freq_w, cfg.mrope_section_w); // [seq_len, 10]
+        uint32_t angles_t = outer_section(t_pos, inv_freq_t, cfg.mrope_section_t);
+        uint32_t angles_h = outer_section(h_pos, inv_freq_h, cfg.mrope_section_h);
+        uint32_t angles_w = outer_section(w_pos, inv_freq_w, cfg.mrope_section_w);
 
         int32_t ax1 = 1;
         uint32_t angles_half_2d = g.concat({angles_t, angles_h, angles_w},
-                                           g.constant({1}, &ax1, DType::INT32)); // [seq_len, 32]
+                                           g.constant({1}, &ax1, DType::INT32));
 
         int32_t half_shape[] = {1, seq_len_i, half_dim_i};
         uint32_t angles_half = g.reshape(angles_half_2d,
-                                         g.constant({3}, half_shape, DType::INT32)); // [1, seq_len, 32]
+                                         g.constant({3}, half_shape, DType::INT32));
 
         // -------- 5. cos/sin on the half-angles --------
-        uint32_t cos_half = g.cos(angles_half); // [1, seq_len, 32]
-        uint32_t sin_half = g.sin(angles_half); // [1, seq_len, 32]
+        uint32_t cos_half = g.cos(angles_half);
+        uint32_t sin_half = g.sin(angles_half);
 
-        // -------- 6. Interleave: [1, seq_len, 32] -> [1, seq_len, 64] --------
-        // For interleaved rotation, we need:
-        //   cos_interleaved[..., 2i]   = cos_half[..., i]
-        //   cos_interleaved[..., 2i+1] = cos_half[..., i]
-        // (sin likewise).
-        //
-        // Implementation: reshape to [1, seq_len, 32, 1], repeat axis 3 by 2,
-        // reshape back to [1, seq_len, 64]. This works whether g.repeat is
-        // "tile" or "repeat_interleave" — when the axis being repeated has
-        // size 1, both give the same result.
-        auto repeat_interleave_last = [&](uint32_t x_id) -> uint32_t
-        {
-            int32_t shape4[] = {1, seq_len_i, half_dim_i, 1};
-            uint32_t x_4d = g.reshape(x_id, g.constant({4}, shape4, DType::INT32));
-            int32_t rep2[] = {2};
-            int32_t ax3[] = {3};
-            uint32_t x_rep = g.repeat(x_4d,
-                                      g.constant({1}, rep2, DType::INT32),
-                                      g.constant({1}, ax3, DType::INT32));
-            int32_t shape3[] = {1, seq_len_i, rope_dim_i};
-            return g.reshape(g.contiguous(x_rep), g.constant({3}, shape3, DType::INT32));
-        };
-
-        uint32_t cos_out = repeat_interleave_last(cos_half); // [1, seq_len, 64]
-        uint32_t sin_out = repeat_interleave_last(sin_half); // [1, seq_len, 64]
+        // -------- 6. Concat: [1, seq_len, 32] -> [1, seq_len, 64] --------
+        // Instead of interleaved repeating, we concatenate the halves to match rotate_half
+        int32_t ax2_concat = 2;
+        uint32_t cos_out = g.concat({cos_half, cos_half}, g.constant({1}, &ax2_concat, DType::INT32));
+        uint32_t sin_out = g.concat({sin_half, sin_half}, g.constant({1}, &ax2_concat, DType::INT32));
 
         return {cos_out, sin_out};
     }
 
-    // ======================================================================
-    // Interleaved (GPT-J-style) RoPE application.
-    //
-    // For each pair (x[2i], x[2i+1]):
-    //   out[2i]   = x[2i]   * cos[i] - x[2i+1] * sin[i]
-    //   out[2i+1] = x[2i+1] * cos[i] + x[2i]   * sin[i]
-    //
-    // cos_id / sin_id are pre-built in interleaved layout by compute_rope():
-    //   cos_id[..., 2i] = cos_id[..., 2i+1] = cos_half[i]
-    // ======================================================================
     uint32_t apply_rope(uint32_t x_id, uint32_t cos_id, uint32_t sin_id,
                         uint32_t n_groups, uint32_t head_dim)
     {
@@ -428,7 +379,6 @@ public:
         uint32_t steps_111_node = g.constant({3}, steps_111, DType::INT32);
 
         // -------- 1. Slice out the rotary portion of x --------
-        // x_rope = x_id[..., :rope_dim]   shape [n_groups, seq_len, 64]
         int32_t starts_rope[] = {0, 0, 0};
         int32_t ends_rope[] = {n_groups_i, seq_len_i, rope_dim_i};
         uint32_t x_rope = g.contiguous(g.slice(x_id,
@@ -436,48 +386,29 @@ public:
                                                g.constant({3}, ends_rope, DType::INT32),
                                                steps_111_node));
 
-        // -------- 2. Slice x_rope into even and odd indexed elements --------
-        // x_even = x_rope[..., 0::2]   shape [n_groups, seq_len, 32]
-        int32_t starts_even[] = {0, 0, 0};
-        int32_t ends_even[] = {n_groups_i, seq_len_i, rope_dim_i};
-        int32_t steps_even[] = {1, 1, 2};
-        uint32_t x_even = g.contiguous(g.slice(x_rope,
-                                               g.constant({3}, starts_even, DType::INT32),
-                                               g.constant({3}, ends_even, DType::INT32),
-                                               g.constant({3}, steps_even, DType::INT32)));
+        // -------- 2. Slice x_rope into first and second half elements --------
+        // x_first = x_rope[..., :32]
+        int32_t starts_first[] = {0, 0, 0};
+        int32_t ends_first[] = {n_groups_i, seq_len_i, half_dim_i};
+        uint32_t x_first = g.contiguous(g.slice(x_rope,
+                                                g.constant({3}, starts_first, DType::INT32),
+                                                g.constant({3}, ends_first, DType::INT32),
+                                                steps_111_node));
 
-        // x_odd = x_rope[..., 1::2]   shape [n_groups, seq_len, 32]
-        int32_t starts_odd[] = {0, 0, 1};
-        int32_t ends_odd[] = {n_groups_i, seq_len_i, rope_dim_i};
-        int32_t steps_odd[] = {1, 1, 2};
-        uint32_t x_odd = g.contiguous(g.slice(x_rope,
-                                              g.constant({3}, starts_odd, DType::INT32),
-                                              g.constant({3}, ends_odd, DType::INT32),
-                                              g.constant({3}, steps_odd, DType::INT32)));
+        // x_second = x_rope[..., 32:64]
+        int32_t starts_second[] = {0, 0, half_dim_i};
+        int32_t ends_second[] = {n_groups_i, seq_len_i, rope_dim_i};
+        uint32_t x_second = g.contiguous(g.slice(x_rope,
+                                                 g.constant({3}, starts_second, DType::INT32),
+                                                 g.constant({3}, ends_second, DType::INT32),
+                                                 steps_111_node));
 
-        // -------- 3. Build the interleaved rotated tensor --------
-        //   rotated[..., 2i]   = -x_odd[i]
-        //   rotated[..., 2i+1] =  x_even[i]
-        //
-        // Implementation: reshape [-x_odd, x_even] each to [n_groups, seq_len, 32, 1],
-        // concat along axis 3 -> [n_groups, seq_len, 32, 2],
-        // reshape back to [n_groups, seq_len, 64].
-        uint32_t neg_x_odd = g.neg(x_odd);
-
-        int32_t shape4[] = {n_groups_i, seq_len_i, half_dim_i, 1};
-        uint32_t neg_x_odd_4d = g.reshape(neg_x_odd, g.constant({4}, shape4, DType::INT32));
-        uint32_t x_even_4d = g.reshape(x_even, g.constant({4}, shape4, DType::INT32));
-
-        int32_t ax3 = 3;
-        uint32_t stacked = g.concat({neg_x_odd_4d, x_even_4d},
-                                    g.constant({1}, &ax3, DType::INT32)); // [n_groups, seq_len, 32, 2]
-
-        int32_t shape3[] = {n_groups_i, seq_len_i, rope_dim_i};
-        uint32_t rotated = g.reshape(stacked,
-                                     g.constant({3}, shape3, DType::INT32)); // [n_groups, seq_len, 64]
+        // -------- 3. Build the standard rotated tensor: [-x_second, x_first] --------
+        uint32_t neg_x_second = g.neg(x_second);
+        int32_t ax2 = 2;
+        uint32_t rotated = g.concat({neg_x_second, x_first}, g.constant({1}, &ax2, DType::INT32));
 
         // -------- 4. Broadcast cos/sin over the head axis --------
-        // cos_id / sin_id are [1, seq_len, 64] -> [n_groups, seq_len, 64]
         uint32_t cos_expanded = repeat_3d_axis(cos_id, n_groups, 0);
         uint32_t sin_expanded = repeat_3d_axis(sin_id, n_groups, 0);
 
@@ -495,9 +426,9 @@ public:
                                                    g.constant({3}, starts_pass, DType::INT32),
                                                    g.constant({3}, ends_pass, DType::INT32),
                                                    steps_111_node));
-            int32_t ax2 = 2;
+            int32_t ax2_pass = 2;
             return g.concat({x_rope_applied, x_pass},
-                            g.constant({1}, &ax2, DType::INT32));
+                            g.constant({1}, &ax2_pass, DType::INT32));
         }
         return x_rope_applied;
     }
@@ -537,7 +468,7 @@ public:
         };
 
         // q_proj provides Q and Gate
-        uint32_t q_and_gate = project(".self_attn.q_proj.weight", cfg.emb_dim, cfg.attn_n_q_heads * cfg.attn_head_dim * 2);
+        uint32_t q_and_gate = project(".self_attn.q_proj.weight", cfg.hidden_size, cfg.attn_n_q_heads * cfg.attn_head_dim * 2);
 
         // Reshape to 4D to isolate the head_dim * 2 structure [1, seq_len, num_heads, head_dim * 2]
         int32_t q_and_gate_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.attn_head_dim * 2};
@@ -566,8 +497,8 @@ public:
         int32_t shape3_q[] = {(int32_t)cfg.attn_n_q_heads, (int32_t)seq_len, (int32_t)cfg.attn_head_dim};
         uint32_t q = g.reshape(q_perm, g.constant({3}, shape3_q, DType::INT32));
 
-        uint32_t k = project(".self_attn.k_proj.weight", cfg.emb_dim, cfg.attn_n_kv_heads * cfg.attn_head_dim);
-        uint32_t v = project(".self_attn.v_proj.weight", cfg.emb_dim, cfg.attn_n_kv_heads * cfg.attn_head_dim);
+        uint32_t k = project(".self_attn.k_proj.weight", cfg.hidden_size, cfg.attn_n_kv_heads * cfg.attn_head_dim);
+        uint32_t v = project(".self_attn.v_proj.weight", cfg.hidden_size, cfg.attn_n_kv_heads * cfg.attn_head_dim);
 
         int32_t k_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_kv_heads, (int32_t)cfg.attn_head_dim};
         uint32_t k_4d = g.reshape(k, g.constant({4}, k_shape4, DType::INT32));
@@ -681,7 +612,7 @@ public:
         uint32_t w_o_t = g.permute(w_o, g.constant({2}, perm_dims, DType::INT32));
         w_o_t = g.contiguous(w_o_t);
 
-        int32_t s3[] = {1, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim), (int32_t)cfg.emb_dim};
+        int32_t s3[] = {1, (int32_t)(cfg.attn_n_q_heads * cfg.attn_head_dim), (int32_t)cfg.hidden_size};
         uint32_t w_o_3d = g.reshape(w_o_t, g.constant({3}, s3, DType::INT32));
         return g.dot(ctx_flat, w_o_3d);
     }
@@ -711,10 +642,10 @@ public:
         uint32_t value_dim = cfg.linear_n_v_heads * cfg.linear_head_dim;
         uint32_t qkv_dim = key_dim * 2 + value_dim;
 
-        uint32_t mixed_qkv = project(".linear_attn.in_proj_qkv.weight", cfg.emb_dim, qkv_dim);
-        uint32_t z = project(".linear_attn.in_proj_z.weight", cfg.emb_dim, value_dim);
-        uint32_t b = project(".linear_attn.in_proj_b.weight", cfg.emb_dim, cfg.linear_n_v_heads);
-        uint32_t a = project(".linear_attn.in_proj_a.weight", cfg.emb_dim, cfg.linear_n_v_heads);
+        uint32_t mixed_qkv = project(".linear_attn.in_proj_qkv.weight", cfg.hidden_size, qkv_dim);
+        uint32_t z = project(".linear_attn.in_proj_z.weight", cfg.hidden_size, value_dim);
+        uint32_t b = project(".linear_attn.in_proj_b.weight", cfg.hidden_size, cfg.linear_n_v_heads);
+        uint32_t a = project(".linear_attn.in_proj_a.weight", cfg.hidden_size, cfg.linear_n_v_heads);
 
         // 2. Causal 1D Convolution
         int32_t perm_conv[] = {0, 2, 1};
@@ -954,7 +885,7 @@ public:
         // Reshape back to value_dim [1, seq_len, value_dim]
         uint32_t output = g.reshape(norm_flat, g.constant({3}, final_context_shape, DType::INT32));
 
-        return project_tensor(output, ".linear_attn.out_proj.weight", value_dim, cfg.emb_dim);
+        return project_tensor(output, ".linear_attn.out_proj.weight", value_dim, cfg.hidden_size);
     }
 
     // --- MIXTURE OF EXPERTS (MOE) MLP LAYER ---
@@ -989,7 +920,7 @@ public:
         }
 
         // Project input to router logits and get probabilities
-        uint32_t router_logits = project(".mlp.gate.weight", cfg.emb_dim, cfg.n_experts);
+        uint32_t router_logits = project(".mlp.gate.weight", cfg.hidden_size, cfg.n_experts);
         uint32_t router_probs = softmax(router_logits, cfg.n_experts);
 
         // --- Gating Top-K Selection & Normalization ---
@@ -1037,7 +968,7 @@ public:
         uint32_t normalized_probs = g.div(gated_probs, row_sum);
 
         // --- Step 1: Expand Input X to [E, S, H] ---
-        int32_t shape_3d_x[] = {1, (int32_t)seq_len, (int32_t)cfg.emb_dim};
+        int32_t shape_3d_x[] = {1, (int32_t)seq_len, (int32_t)cfg.hidden_size};
         uint32_t x_reshaped = g.reshape(x, g.constant({3}, shape_3d_x, DType::INT32));
 
         int32_t rep_e[] = {(int32_t)cfg.n_experts};
@@ -1088,7 +1019,7 @@ public:
         normalized_probs_perm = g.contiguous(normalized_probs_perm); // [S, E, 1]
 
         // 3. Repeat normalized_probs_perm [S, E, 1] -> [S, E, H]
-        int32_t rep_h[] = {(int32_t)cfg.emb_dim};
+        int32_t rep_h[] = {(int32_t)cfg.hidden_size};
         int32_t ax_h[] = {2};
         uint32_t normalized_probs_exp = g.repeat(normalized_probs_perm, g.constant({1}, rep_h, DType::INT32), g.constant({1}, ax_h, DType::INT32));
         normalized_probs_exp = g.contiguous(normalized_probs_exp); // [S, E, H]
@@ -1101,22 +1032,22 @@ public:
         uint32_t routed_out_sum = g.sum(weighted_outputs, g.constant({1}, sum_ax, DType::INT32)); // [S, 1, H]
 
         // 6. Reshape [S, 1, H] -> [1, S, H]
-        int32_t final_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.emb_dim};
+        int32_t final_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.hidden_size};
         uint32_t routed_out = g.reshape(routed_out_sum, g.constant({3}, final_shape, DType::INT32));
 
         // Shared Expert Component (remains unchanged)
-        uint32_t shared_gate = project(".mlp.shared_expert.gate_proj.weight", cfg.emb_dim, cfg.shared_expert_dim);
-        uint32_t shared_up = project(".mlp.shared_expert.up_proj.weight", cfg.emb_dim, cfg.shared_expert_dim);
+        uint32_t shared_gate = project(".mlp.shared_expert.gate_proj.weight", cfg.hidden_size, cfg.shared_expert_dim);
+        uint32_t shared_up = project(".mlp.shared_expert.up_proj.weight", cfg.hidden_size, cfg.shared_expert_dim);
         uint32_t shared_gate_silu = silu_atomic(shared_gate, cfg.shared_expert_dim);
         uint32_t shared_gate_up = g.mul(shared_gate_silu, shared_up);
 
         uint32_t w_shared_down = weight(w_path, prefix + ".mlp.shared_expert.down_proj.weight");
         uint32_t w_shared_down_t = g.permute(w_shared_down, p_node);
         w_shared_down_t = g.contiguous(w_shared_down_t);
-        int32_t s3_shared[] = {1, (int32_t)cfg.shared_expert_dim, (int32_t)cfg.emb_dim};
+        int32_t s3_shared[] = {1, (int32_t)cfg.shared_expert_dim, (int32_t)cfg.hidden_size};
         uint32_t shared_out = g.dot(shared_gate_up, g.reshape(w_shared_down_t, g.constant({3}, s3_shared, DType::INT32)));
 
-        uint32_t shared_expert_gate = project(".mlp.shared_expert_gate.weight", cfg.emb_dim, 1);
+        uint32_t shared_expert_gate = project(".mlp.shared_expert_gate.weight", cfg.hidden_size, 1);
 
         // Sigmoid mapping for shared_expert_gate
         float neg_one_val = -1.0f;
@@ -1129,7 +1060,7 @@ public:
         uint32_t den = g.add(one_node, exp_neg_seg);
         uint32_t seg_sigmoid = g.div(one_node, den);
 
-        uint32_t seg_expanded = repeat_3d_axis(seg_sigmoid, cfg.emb_dim, 2);
+        uint32_t seg_expanded = repeat_3d_axis(seg_sigmoid, cfg.hidden_size, 2);
         uint32_t shared_out_gated = g.mul(shared_out, seg_expanded);
 
         return g.add(routed_out, shared_out_gated);
@@ -1137,20 +1068,28 @@ public:
 
     uint32_t build_graph(uint32_t input_ids_id)
     {
-        uint32_t w_emb = weight(w_path, "model.language_model.embed_tokens.weight");
-        uint32_t x = g.gather(w_emb, input_ids_id);
+        // #L1275
+        uint32_t w_emb = weight(w_path, "model.language_model.embed_tokens.weight"); // [vocab_size, hidden_size]
+        uint32_t x = g.gather(w_emb, input_ids_id);                                  // [B, seq_len, hidden_size]
+
+        // #L1283 position_ids [B, seq_len]
+        // #L1284 position_ids [1, 1, seq_len] -> [4, B, seq_len]
+
+        // #L1289 text_position_ids [1, B, seq_len]
+        // #L1290 position_ids [3, B, seq_len]
+
+        uint32_t mask_id = compute_causal_mask();
 
         auto rope = compute_rope();
         uint32_t rope_cos = std::get<0>(rope);
         uint32_t rope_sin = std::get<1>(rope);
-        uint32_t mask_id = compute_causal_mask();
 
-        for (uint32_t i = 0; i < cfg.n_layers; ++i)
+        for (uint32_t i = 0; i < cfg.num_hidden_layers; ++i)
         {
             std::string prefix = "model.language_model.layers." + std::to_string(i);
             uint32_t residual = x;
             uint32_t w_ln1 = weight(w_path, prefix + ".input_layernorm.weight");
-            x = rms_norm_atomic(x, w_ln1, 1, cfg.emb_dim);
+            x = rms_norm_atomic(x, w_ln1, 1, cfg.hidden_size);
 
             // 3:1 Hybrid Attention Stack Routing
             // 3 Linear Attention Layers followed by 1 Full Attention Layer
@@ -1169,7 +1108,7 @@ public:
             x = g.add(residual, x);
             residual = x;
             uint32_t w_ln2 = weight(w_path, prefix + ".post_attention_layernorm.weight");
-            x = rms_norm_atomic(x, w_ln2, 1, cfg.emb_dim);
+            x = rms_norm_atomic(x, w_ln2, 1, cfg.hidden_size);
 
             // Sparse Mixture of Experts (MoE) Base FeedForward
             x = mlp_moe_atomic(x, prefix);
@@ -1178,7 +1117,7 @@ public:
         }
 
         uint32_t w_final_ln = weight(w_path, "model.language_model.norm.weight");
-        x = rms_norm_atomic(x, w_final_ln, 1, cfg.emb_dim);
+        x = rms_norm_atomic(x, w_final_ln, 1, cfg.hidden_size);
 
         uint32_t w_lm = weight(w_path, "lm_head.weight");
 
@@ -1186,7 +1125,7 @@ public:
         uint32_t dims_node = g.constant({2}, perm_dims, DType::INT32);
         uint32_t w_lm_t = g.permute(w_lm, dims_node);
         w_lm_t = g.contiguous(w_lm_t);
-        int32_t s3[] = {1, (int32_t)cfg.emb_dim, (int32_t)cfg.vocab_size};
+        int32_t s3[] = {1, (int32_t)cfg.hidden_size, (int32_t)cfg.vocab_size};
         uint32_t w_lm_3d = g.reshape(w_lm_t, g.constant({3}, s3, DType::INT32));
 
         return g.dot(x, w_lm_3d);
