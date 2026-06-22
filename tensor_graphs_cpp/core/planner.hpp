@@ -786,7 +786,7 @@ private:
                 info.isView = kernel.isView;
                 if (info.inplace && kernel.numInputs > 0)
                 {
-                    info.inplace_idx = 0;
+                    info.inplace_idx = 0; // TODO: populate this somehow
                 }
 
                 if (enode.opType == OpType::SCATTER)
@@ -1008,60 +1008,62 @@ private:
                 }
             }
 
-            // 2. Prune strictly dominated nodes to minimize search space bloating
-            std::vector<uint32_t> prunedEnodes;
-            prunedEnodes.reserve(validEnodes.size());
+            // 2. Prune duplicated nodes to minimize search space bloat
+            std::vector<uint32_t> deduped;
+            deduped.reserve(validEnodes.size());
             for (size_t idxA = 0; idxA < validEnodes.size(); ++idxA)
             {
-                uint32_t enodeIdA = validEnodes[idxA];
-                const ENode &enodeA = egraph.getENodes()[enodeIdA];
-                const ENodeInfo &infoA = enodeInfos[enodeIdA];
+                uint32_t idA = validEnodes[idxA];
+                const ENode &a = egraph.getENodes()[idA];
+                const ENodeInfo &ia = enodeInfos[idA];
 
                 bool dominated = false;
                 for (size_t idxB = 0; idxB < validEnodes.size(); ++idxB)
                 {
                     if (idxA == idxB)
                         continue;
+                    uint32_t idB = validEnodes[idxB];
+                    const ENode &b = egraph.getENodes()[idB];
+                    const ENodeInfo &ib = enodeInfos[idB];
 
-                    uint32_t enodeIdB = validEnodes[idxB];
-                    const ENode &enodeB = egraph.getENodes()[enodeIdB];
-                    const ENodeInfo &infoB = enodeInfos[enodeIdB];
+                    // Require FULL structural equality (including kernelUid, opType, leafId, opName,
+                    // shape, dtype) — not just the relaxed signature from the old check.
+                    const bool sameStruct =
+                        a.kernelUid == b.kernelUid &&
+                        a.opType == b.opType &&
+                        a.leafId == b.leafId &&
+                        a.opName == b.opName &&
+                        a.children == b.children &&
+                        a.backend == b.backend &&
+                        a.shape == b.shape &&
+                        a.dtype == b.dtype &&
+                        a.strides == b.strides &&
+                        a.viewOffset == b.viewOffset &&
+                        ia.inplace == ib.inplace &&
+                        ia.inplace_idx == ib.inplace_idx &&
+                        ia.isView == ib.isView &&
+                        ia.isScatter == ib.isScatter;
 
-                    // B dominates A if it has identical structural behavior and better/equal cost
-                    if (enodeA.children == enodeB.children &&
-                        enodeA.backend == enodeB.backend &&
-                        infoA.inplace == infoB.inplace &&
-                        infoA.inplace_idx == infoB.inplace_idx &&
-                        infoA.isView == infoB.isView &&
-                        infoA.isScatter == infoB.isScatter &&
-                        enodeA.strides == enodeB.strides &&
-                        enodeA.viewOffset == enodeB.viewOffset)
+                    if (!sameStruct)
+                        continue;
+
+                    // B dominates A only if strictly cheaper, OR equal-cost with smaller ID.
+                    if (ib.cost < ia.cost - 1e-9f)
                     {
-                        if (infoB.cost < infoA.cost)
-                        {
-                            dominated = true;
-                            break;
-                        }
-                        else if (std::abs(infoB.cost - infoA.cost) < 1e-9f)
-                        {
-                            // Tie-breaker: deterministically keep the enode with the smaller ID
-                            if (enodeIdB < enodeIdA)
-                            {
-                                dominated = true;
-                                break;
-                            }
-                        }
+                        dominated = true;
+                        break;
+                    }
+                    if (std::abs(ib.cost - ia.cost) <= 1e-9f && idB < idA)
+                    {
+                        dominated = true;
+                        break;
                     }
                 }
-
                 if (!dominated)
-                {
-                    prunedEnodes.push_back(enodeIdA);
-                }
+                    deduped.push_back(idA);
             }
-
-            totalPruned += (validEnodes.size() - prunedEnodes.size());
-            cls.enodes = std::move(prunedEnodes);
+            totalPruned += (validEnodes.size() - deduped.size());
+            cls.enodes = std::move(deduped);
         }
 
         if (totalPruned > 0)
@@ -1430,6 +1432,10 @@ private:
         }
         std::cout << "[Planner.extractBest] Optimistic root cost: "
                   << std::to_string(optimisticEnodeDagCost[egraph.getEClass(rootEClassId).enodes[0]]) << std::endl;
+        if (std::isinf(optimisticEnodeDagCost[egraph.getEClass(rootEClassId).enodes[0]]))
+        {
+            Error::throw_err("[Planner.extractBest] cannot have inf root cost");
+        }
 
         PrecompData precomp;
         precomp.is_eclass_persistent.assign(numClasses, false);

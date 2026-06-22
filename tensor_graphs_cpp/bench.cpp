@@ -38,7 +38,28 @@ struct StorageFiles
     std::vector<std::string> paths;
     std::vector<int> fds;
 
-    ~StorageFiles()
+    StorageFiles() = default;
+
+    // Prevent copy semantics to avoid double-free/double-close issues
+    StorageFiles(const StorageFiles &) = delete;
+    StorageFiles &operator=(const StorageFiles &) = delete;
+
+    // Enable clean move semantics
+    StorageFiles(StorageFiles &&other) noexcept
+        : paths(std::move(other.paths)), fds(std::move(other.fds)) {}
+
+    StorageFiles &operator=(StorageFiles &&other) noexcept
+    {
+        if (this != &other)
+        {
+            clear();
+            paths = std::move(other.paths);
+            fds = std::move(other.fds);
+        }
+        return *this;
+    }
+
+    void clear()
     {
         for (int fd : fds)
         {
@@ -51,16 +72,23 @@ struct StorageFiles
 #endif
             }
         }
+        fds.clear();
         for (const auto &path : paths)
         {
             std::error_code ec;
             std::filesystem::remove(path, ec);
         }
+        paths.clear();
+    }
+
+    ~StorageFiles()
+    {
+        clear();
     }
 };
 
 // Creates storage-backed dummy files for cache-bashing during benchmarking
-StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel)
+StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel, int runIdx)
 {
     StorageFiles sf;
     std::vector<char> dummyBuf(1024 * 1024, 0); // 1MB zero buffer to chunk write
@@ -85,7 +113,7 @@ StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel)
                 Error::throw_err("[createStorageInputs] got 0 bytes for file size");
             }
 
-            std::string path = "benchmarks/dummy_storage_" + std::to_string(sf.fds.size()) + "_" + std::to_string(r.kernelUid) + ".bin";
+            std::string path = "benchmarks/dummy_storage_" + std::to_string(sf.fds.size()) + "_" + std::to_string(r.kernelUid) + "_run_" + std::to_string(runIdx) + ".bin";
             std::ofstream out(path, std::ios::binary | std::ios::trunc);
             if (!out.is_open())
             {
@@ -590,11 +618,6 @@ int main(int argc, char *argv[])
                 outViews[idx].dtype = r.outputDTypes[idx];
             }
 
-            std::cout << "  Benchmarking..." << std::flush;
-
-            // Generate fresh, exact-sized Storage buffers (creates files/Fds for this execution run)
-            StorageFiles sf = createStorageInputs(r, kernel);
-
             // Map files to Backend::STORAGE inputs
             KernelContext ctx;
             ctx.inputs = inPtrs;
@@ -603,30 +626,39 @@ int main(int argc, char *argv[])
             ctx.outViews = outViews;
             ctx.fd.assign(inPtrs.size(), -1);
 
-            size_t storageInIdx = 0;
-            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
-            {
-                size_t ruleIdx = idx;
-                if (kernel.isVariadic)
-                {
-                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
-                }
-                Backend b = Backend::CPU;
-                if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
-                    b = r.inputBackends[ruleIdx][0];
+            StorageFiles sf;
 
-                if (b == Backend::STORAGE)
+            auto updateStorageContext = [&](int runIdx)
+            {
+                sf = createStorageInputs(r, kernel, runIdx);
+                size_t storageInIdx = 0;
+                for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
                 {
-                    if (storageInIdx < sf.fds.size())
+                    size_t ruleIdx = idx;
+                    if (kernel.isVariadic)
                     {
-                        ctx.fd[idx] = sf.fds[storageInIdx++];
+                        ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+                    }
+                    Backend b = Backend::CPU;
+                    if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
+                        b = r.inputBackends[ruleIdx][0];
+
+                    if (b == Backend::STORAGE)
+                    {
+                        if (storageInIdx < sf.fds.size())
+                        {
+                            ctx.fd[idx] = sf.fds[storageInIdx++];
+                        }
                     }
                 }
-            }
+            };
 
-            // Warmup
+            std::cout << "  Benchmarking..." << std::flush;
+
+            // Warmup (runIndex = 0)
             if (!kernel.isView)
             {
+                updateStorageContext(0);
                 kernel.run(ctx);
 #ifdef USE_CUDA
                 cudaDeviceSynchronize();
@@ -638,6 +670,12 @@ int main(int argc, char *argv[])
             latencies.reserve(iters);
             for (int it = 0; it < iters; ++it)
             {
+                // Generate a brand new storage file before every single execute iteration
+                if (!kernel.isView)
+                {
+                    updateStorageContext(it + 1);
+                }
+
                 auto iterStart = std::chrono::high_resolution_clock::now();
                 if (!kernel.isView)
                 {
