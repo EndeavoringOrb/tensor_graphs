@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 import os
-import sys
 import argparse
 import re
 import struct
-
-# Robust import to support running directly or as a module
-try:
-    from utils.binary import load_cache_file, load_records_file
-except ModuleNotFoundError:
-    from binary import load_cache_file, load_records_file
+from binary import load_cache_file, load_records_file
 
 
 def _format_constants(raw_bytes, dtype):
