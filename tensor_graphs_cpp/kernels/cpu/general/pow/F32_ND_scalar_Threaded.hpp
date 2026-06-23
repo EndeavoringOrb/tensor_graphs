@@ -70,4 +70,4 @@ inline uint32_t refFactoryPowND_Scalar_Threaded(const std::vector<uint32_t> &inp
     return graph.pow(idND, out);
 }
 
-REGISTER_KERNEL("Pow_ND_Scalar_Threaded", 2, matchPowF32_ND_Scalar_Threaded, runPowF32_ND_Scalar_Threaded, refFactoryPowND_Scalar_Threaded, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 32, 512, 128}, {1}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Pow_ND_Scalar_Threaded", 2, matchPowF32_ND_Scalar_Threaded, runPowF32_ND_Scalar_Threaded, refFactoryPowND_Scalar_Threaded, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{128}, {1}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});

@@ -250,6 +250,8 @@ private:
         RuleCtx ctx{egraph, protectedEClasses, eclassToLogical, repo};
         std::vector<std::unique_ptr<Rule>> rules;
         rules.emplace_back(std::make_unique<FusionRule>());
+        rules.emplace_back(std::make_unique<FlattenBatchDot>());
+        rules.emplace_back(std::make_unique<FlattenElementwise>());
         if (injected)
         {
             rules.emplace_back(std::make_unique<InfinityDomination>());

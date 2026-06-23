@@ -208,24 +208,6 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
     cs.patch_input.assign((size_t)1 * num_patches * PATCH_DIM, 0.0f);
 }
 
-// -----------------------------------------------------------------------------
-// PATCH LAYOUT FIX (was the root cause of embedding drift, cosine ~0.22).
-//
-// HF Qwen2VLImageProcessor.patchify() lays out each 1536-dim patch vector in
-// (T_patch, P, Q, C) order — temporal outer, channel inner.  The C++ previously
-// built patches in (C, T_patch, P, Q) order (channel outer), which made the
-// subsequent patch_embed matmul mix spatial and channel axes — the model still
-// produced *some* output (so the server didn't crash), but the resulting
-// embedding was effectively noise relative to the HF reference.
-//
-// The Conv3d weight (768, 3, 2, 16, 16) is reshaped to (768, 1536) via row-major
-// view, which keeps its flat dim in (C, T, P, Q) order — exactly matching what
-// HF does internally when it calls F.linear(patch, weight.view(768, -1)).
-//
-// So the patch input must be assembled in (T, P, Q, C) order to line up with
-// HF's patchify output, NOT in (C, T, P, Q) order.  This is what this function
-// now does.
-// -----------------------------------------------------------------------------
 static void build_patch_input_inplace(const std::vector<float> &norm_image,
                                       int width, int height,
                                       std::vector<float> &patch_input)
@@ -237,7 +219,12 @@ static void build_patch_input_inplace(const std::vector<float> &norm_image,
     if ((int)patch_input.size() != 1 * num_patches * PATCH_DIM)
         patch_input.assign((size_t)1 * num_patches * PATCH_DIM, 0.0f);
 
-    // Per-patch flat layout: ((t * P + p) * P + q) * C + c   ← (T, P, Q, C)
+    // Per-patch flat layout: c * (T * P * Q) + t * (P * Q) + p * Q + q  ← (C, T, P, Q)
+    // The HF processor flattens patches as (C, T, P, Q), matching the layout expected
+    // by PyTorch when F.linear is applied to a Conv3d weight viewed as (Out, In).
+    int spatial_stride = PATCH_SIZE * PATCH_SIZE;
+    int temporal_stride = TEMPORAL_PATCH_SIZE * spatial_stride;
+
     for (int gi = 0; gi < grid_h; ++gi)
     {
         for (int gj = 0; gj < grid_w; ++gj)
@@ -254,17 +241,16 @@ static void build_patch_input_inplace(const std::vector<float> &norm_image,
                         int img_y = gi * PATCH_SIZE + p;
                         int img_x = gj * PATCH_SIZE + q;
 
-                        // norm_image is CHW: (c * H + y) * W + x
-                        int dst_row = dst_base +
-                                      (((t * PATCH_SIZE) + p) * PATCH_SIZE + q) * IN_CHANNELS;
+                        int local_offset = t * spatial_stride + p * PATCH_SIZE + q;
 
-                        // Unrolled over channels — only 3 iterations.
+                        // norm_image is CHW: (c * H + y) * W + x
                         int src_r = ((0 * height + img_y) * width + img_x);
                         int src_g = ((1 * height + img_y) * width + img_x);
                         int src_b = ((2 * height + img_y) * width + img_x);
-                        patch_input[dst_row + 0] = norm_image[src_r];
-                        patch_input[dst_row + 1] = norm_image[src_g];
-                        patch_input[dst_row + 2] = norm_image[src_b];
+
+                        patch_input[dst_base + 0 * temporal_stride + local_offset] = norm_image[src_r];
+                        patch_input[dst_base + 1 * temporal_stride + local_offset] = norm_image[src_g];
+                        patch_input[dst_base + 2 * temporal_stride + local_offset] = norm_image[src_b];
                     }
                 }
             }
@@ -306,25 +292,16 @@ static void normalize_image_inplace(const uint8_t *pixel_data,
 }
 
 // Normalize raw uint8 HWC pixel data to float32 CHW, mean/std normalized.
+//
+// Wrapper kept for backwards compatibility — internally delegates to the
+// in-place variant so both code paths produce identical output.  Prefer
+// normalize_image_inplace() in new code to avoid the per-call allocation.
 static std::vector<float> normalize_image(const uint8_t *pixel_data,
                                           int width, int height, int channels)
 {
-    std::vector<float> norm_image(IN_CHANNELS * height * width, 0.0f);
-    for (int c = 0; c < IN_CHANNELS; ++c)
-    {
-        for (int y = 0; y < height; ++y)
-        {
-            for (int x = 0; x < width; ++x)
-            {
-                int src_idx = (y * width + x) * channels + c;
-                float pixel = static_cast<float>(pixel_data[src_idx]) * RESCALE_FACTOR;
-                pixel = (pixel - IMAGE_MEAN) / IMAGE_STD;
-                int dst_idx = (c * height + y) * width + x; // CHW
-                norm_image[dst_idx] = pixel;
-            }
-        }
-    }
-    return norm_image;
+    std::vector<float> out;
+    normalize_image_inplace(pixel_data, width, height, channels, out);
+    return out;
 }
 
 int main(int argc, char *argv[])
@@ -354,6 +331,24 @@ int main(int argc, char *argv[])
 
     static const std::string WEIGHTS_PATH =
         "models/jinaai/jina-embeddings-v5-omni-nano-retrieval/model.safetensors";
+
+    // -----------------------------------------------------------------------
+    // Optional chat-template token override.
+    //
+    // Looks for chat_template_tokens.json next to the model weights.  If
+    // present, it overrides the hardcoded CHAT_PREFIX_TOKEN_IDS /
+    // CHAT_SUFFIX_TOKEN_IDS — useful if a future tokenizer revision turns
+    // <|im_start|>/<|im_end|> into single special-token IDs.
+    // -----------------------------------------------------------------------
+    {
+        std::string override_path =
+            "models/jinaai/jina-embeddings-v5-omni-nano-retrieval/chat_template_tokens.json";
+        if (JinaV5OmniNanoRetrievalModel::load_chat_template_overrides(override_path))
+        {
+            std::cout << "[Server] Loaded chat-template token overrides from "
+                      << override_path << std::endl;
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Memory manager (shared across all compiled sessions)

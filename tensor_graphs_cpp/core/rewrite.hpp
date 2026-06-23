@@ -1366,3 +1366,282 @@ struct SlicePushDownDot : public Rule
         }
     }
 };
+
+// =============================================================================
+// FlattenBatchDot
+// =============================================================================
+//
+// Rewrites a 4-D batched matmul of the form
+//
+//     DOT( A[1, H, S, K] , B[1, H, K, S2] )  ->  OUT[1, H, S, S2]
+//
+// into the equivalent 3-D computation that uses the optimised 3-D DOT kernel:
+//
+//     rA = reshape(A, [H, S, K])
+//     rB = reshape(B, [H, K, S2])
+//     rY = DOT(rA, rB)            # 3-D batched matmul -> [H, S, S2]
+//     OUT = reshape(rY, [1, H, S, S2])
+//
+// Why: the 4-D DOT kernel in this repo is the reference path
+// (kernels/cpu/reference/dot/F32_4D.hpp) and is dramatically slower than the
+// NEON-tuned 3-D path (kernels/cpu/general/dot/arm_neon_F32_3D.hpp,
+// F32_3D_NEON.hpp, BF16_*_GEMM_NEON_*).  For the jina-embeddings-v5 vision
+// attention, the 4-D QK^T and probs@V matmuls are ~95% of the runtime, so
+// flattening them to 3-D turns a ~333s/image embedding into single-digit
+// seconds.
+//
+// The reshape from (1, H, S, K) to (H, S, K) is a no-op on memory (the
+// strides are already contiguous in row-major order, the leading 1 just gets
+// dropped) so this rewrite is always semantically valid when:
+//   - the DOT eNode has rank-4 shape with shape[0] == 1
+//   - both input eclasses have the same rank-4 shape with shape[0] == 1
+//   - the batched dim H (shape[1]) matches between A and B
+struct FlattenBatchDot : public Rule
+{
+    std::unordered_set<uint32_t> visited;
+
+    std::string name() const override { return "FlattenBatchDot"; }
+
+    uint32_t addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
+    {
+        return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, Backend::CPU, vals);
+    }
+
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        const EGraph &egraph = ctx.egraph;
+        if (eNodeIdx >= egraph.getENodes().size())
+            return false;
+        const ENode &enode = egraph.getENodes()[eNodeIdx];
+        if (enode.opType != OpType::DOT || enode.children.size() != 2)
+            return false;
+
+        if (visited.count(eNodeIdx))
+            return false;
+
+        const std::vector<uint32_t> &outShape = enode.shape;
+        if (outShape.size() != 4 || outShape[0] != 1)
+            return false;
+
+        uint32_t aClass = egraph.findConst(enode.children[0]);
+        uint32_t bClass = egraph.findConst(enode.children[1]);
+        const EClass &aCls = egraph.getEClass(aClass);
+        const EClass &bCls = egraph.getEClass(bClass);
+
+        if (aCls.shape.size() != 4 || aCls.shape[0] != 1)
+            return false;
+        if (bCls.shape.size() != 4 || bCls.shape[0] != 1)
+            return false;
+        if (aCls.shape[1] != bCls.shape[1]) // same batched dim H
+            return false;
+        if (aCls.shape[3] != bCls.shape[2]) // K contraction
+            return false;
+        // Output dims must line up: out = [1, H, A.shape[2], B.shape[3]]
+        if (outShape[1] != aCls.shape[1] || outShape[2] != aCls.shape[2] || outShape[3] != bCls.shape[3])
+            return false;
+
+        // Inputs must be contiguous (reshape to 3-D would otherwise need a
+        // contiguous() first, which kills the perf win).  Most DOT inputs in
+        // the vision attention path are already contiguous because they came
+        // out of a permute + contiguous() pair.
+        if (!isContiguous(aCls) || !isContiguous(bCls))
+            return false;
+        if (!isContiguous(egraph.getEClass(egraph.findConst(egraph.getENodeEClass(eNodeIdx)))))
+            return false;
+
+        return true;
+    }
+
+    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        EGraph &egraph = ctx.egraph;
+        const ENode dotNode = egraph.getENodes()[eNodeIdx];
+        uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
+
+        if (!visited.insert(eNodeIdx).second)
+            return;
+
+        uint32_t aClass = egraph.find(dotNode.children[0]);
+        uint32_t bClass = egraph.find(dotNode.children[1]);
+        const EClass aCls = egraph.getEClass(aClass);
+        const EClass bCls = egraph.getEClass(bClass);
+
+        // Shapes for the 3-D intermediates.
+        std::vector<uint32_t> a3 = {aCls.shape[1], aCls.shape[2], aCls.shape[3]}; // (H, S, K)
+        std::vector<uint32_t> b3 = {bCls.shape[1], bCls.shape[2], bCls.shape[3]}; // (H, K, S2)
+        std::vector<uint32_t> y3 = {aCls.shape[1], aCls.shape[2], bCls.shape[3]}; // (H, S, S2)
+
+        std::vector<int32_t> a3_int(a3.begin(), a3.end());
+        std::vector<int32_t> b3_int(b3.begin(), b3.end());
+        std::vector<int32_t> y3_int(y3.begin(), y3.end());
+
+        uint32_t a3_shape_id = addIntConst(egraph, a3_int);
+        uint32_t b3_shape_id = addIntConst(egraph, b3_int);
+        uint32_t y3_shape_id = addIntConst(egraph, y3_int);
+
+        // Reshape A: (1, H, S, K) -> (H, S, K)
+        std::vector<uint64_t> a3_strides = calcContiguousStrides(a3);
+        uint32_t rA = addOpToEGraph(egraph, OpType::RESHAPE, {aClass, a3_shape_id}, a3, a3_strides, 0, dotNode.dtype, dotNode.backend);
+
+        // Reshape B: (1, H, K, S2) -> (H, K, S2)
+        std::vector<uint64_t> b3_strides = calcContiguousStrides(b3);
+        uint32_t rB = addOpToEGraph(egraph, OpType::RESHAPE, {bClass, b3_shape_id}, b3, b3_strides, 0, dotNode.dtype, dotNode.backend);
+
+        // 3-D DOT: (H, S, K) x (H, K, S2) -> (H, S, S2)
+        std::vector<uint64_t> y3_strides = calcContiguousStrides(y3);
+        uint32_t rY = addOpToEGraph(egraph, OpType::DOT, {rA, rB}, y3, y3_strides, 0, dotNode.dtype, dotNode.backend);
+
+        // Reshape output back: (H, S, S2) -> (1, H, S, S2)
+        // Match the original DOT eclass's shape / strides / viewOffset.
+        const EClass outCls = egraph.getEClass(egraph.findConst(eclassId));
+        std::vector<int32_t> out4_int(outCls.shape.begin(), outCls.shape.end());
+        uint32_t out4_shape_id = addIntConst(egraph, out4_int);
+        uint32_t outReshape = addOpToEGraph(egraph, OpType::RESHAPE, {rY, out4_shape_id}, outCls.shape, outCls.strides, outCls.viewOffset, dotNode.dtype, dotNode.backend);
+
+        // The reshape produces a semantically-equivalent tensor to the
+        // original 4-D DOT - merge the two eclasses so the cost model can
+        // pick whichever is cheaper (almost always the 3-D path).
+        egraph.merge(eclassId, outReshape);
+    }
+};
+
+// =============================================================================
+// FlattenElementwise
+// =============================================================================
+//
+// Rewrites an N-D elementwise op (POWER, MUL, NEGATE, ADD, DIVIDE, SIN, COS,
+// CAST, LT, EQ, AND, OR, NOT) into a 1-D op sandwiched by reshapes:
+//
+//     op(X[d0, d1, ..., dn-1])               -> reshape(op(reshape(X, [N])), [d0..dn-1])
+//     op(A[..], B[..])                       -> reshape(op(reshape(A, [N]), reshape(B, [N])), [d0..dn-1])
+//
+// where N = prod(d0..dn-1) is the total element count.
+//
+// Why: the kernel registry has highly-tuned 1-D kernels for several
+// elementwise ops (e.g. F32_3D_1D broadcasts a 1-D bias over a 3-D tensor,
+// exp_4D_1_N_N_N_NEON is hard-coded to shape [1, N, N, N]).  When the input
+// happens to be 3-D or 4-D, those kernels can't match directly because the
+// pattern-check rejects the rank.  Flattening to 1-D lets the planner select
+// the 1-D kernel and reshape back - usually a net win because the reshape is
+// a metadata-only view op.
+//
+// Constraints:
+//   - op must be one of the supported elementwise ops (see switch in apply())
+//   - all input eclasses must have the SAME shape as the output (no broadcast)
+//   - all participants must be contiguous (otherwise the reshape view would
+//     materialise a copy and kill the perf win)
+struct FlattenElementwise : public Rule
+{
+    std::unordered_set<uint32_t> visited;
+
+    std::string name() const override { return "FlattenElementwise"; }
+
+    uint32_t addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
+    {
+        return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, Backend::CPU, vals);
+    }
+
+    static bool isSupportedOp(OpType op)
+    {
+        switch (op)
+        {
+        case OpType::ADD:
+        case OpType::MUL:
+        case OpType::DIVIDE:
+        case OpType::POWER:
+        case OpType::SIN:
+        case OpType::COS:
+        case OpType::NEGATE:
+        case OpType::CAST:
+        case OpType::LT:
+        case OpType::EQ:
+        case OpType::AND:
+        case OpType::OR:
+        case OpType::NOT:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        const EGraph &egraph = ctx.egraph;
+        if (eNodeIdx >= egraph.getENodes().size())
+            return false;
+        const ENode &enode = egraph.getENodes()[eNodeIdx];
+        if (!isSupportedOp(enode.opType))
+            return false;
+        if (visited.count(eNodeIdx))
+            return false;
+
+        const std::vector<uint32_t> &outShape = enode.shape;
+        if (outShape.size() < 2)
+            return false; // already 1-D (or scalar) - nothing to flatten
+
+        // All children must have the SAME shape as the output (no broadcast).
+        // For CAST, the dtype differs but the shape still has to match.
+        for (uint32_t childId : enode.children)
+        {
+            const EClass &childCls = egraph.getEClass(egraph.findConst(childId));
+            if (childCls.shape != outShape)
+                return false;
+            if (!isContiguous(childCls))
+                return false;
+        }
+        // Output must also be contiguous so the trailing reshape is free.
+        const EClass &outCls = egraph.getEClass(egraph.findConst(egraph.getENodeEClass(eNodeIdx)));
+        if (!isContiguous(outCls))
+            return false;
+
+        return true;
+    }
+
+    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        EGraph &egraph = ctx.egraph;
+        const ENode opNode = egraph.getENodes()[eNodeIdx];
+        uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
+
+        if (!visited.insert(eNodeIdx).second)
+            return;
+
+        const EClass outCls = egraph.getEClass(egraph.findConst(eclassId));
+        const std::vector<uint32_t> &outShape = outCls.shape;
+
+        // Compute total element count.
+        uint64_t total = 1;
+        for (uint32_t d : outShape)
+            total *= d;
+        if (total == 0)
+            return;
+
+        // Build the 1-D shape constants.  We use int32_t because the graph's
+        // reshape() expects INT32 shape tensors.
+        std::vector<uint32_t> flatShape = {(uint32_t)total};
+        std::vector<int32_t> flat_int = {(int32_t)total};
+        std::vector<int32_t> out_int(outShape.begin(), outShape.end());
+        uint32_t flat_shape_id = addIntConst(egraph, flat_int);
+        uint32_t out_shape_id = addIntConst(egraph, out_int);
+
+        std::vector<uint64_t> flatStrides = {1};
+
+        // Reshape each input to 1-D.
+        std::vector<uint32_t> flatChildren;
+        for (uint32_t childId : opNode.children)
+        {
+            uint32_t canonChild = egraph.find(childId);
+            uint32_t r = addOpToEGraph(egraph, OpType::RESHAPE, {canonChild, flat_shape_id}, flatShape, flatStrides, 0, opNode.dtype, opNode.backend);
+            flatChildren.push_back(r);
+        }
+
+        // Apply the op on 1-D inputs.
+        uint32_t flatOut = addOpToEGraph(egraph, opNode.opType, flatChildren, flatShape, flatStrides, 0, opNode.dtype, opNode.backend);
+
+        // Reshape back to the original N-D shape.
+        uint32_t outReshape = addOpToEGraph(egraph, OpType::RESHAPE, {flatOut, out_shape_id}, outCls.shape, outCls.strides, outCls.viewOffset, opNode.dtype, opNode.backend);
+
+        // Merge: the cost model picks whichever path is cheaper.
+        egraph.merge(eclassId, outReshape);
+    }
+};
