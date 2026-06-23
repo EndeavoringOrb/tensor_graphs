@@ -71,6 +71,6 @@ inline uint32_t refFactoryNegND_NEON_Threaded(const std::vector<uint32_t> &input
 }
 
 REGISTER_KERNEL("Neg_F32_ND_NEON_Threaded", 1, matchNegF32_ND_NEON_Threaded, runNegF32_ND_NEON_Threaded, refFactoryNegND_NEON_Threaded,
-                {Backend::CPU}, {DType::FLOAT32}, {{1, 24, 1536, 1536}}, {true}, {{Backend::CPU}});
+                {Backend::CPU}, {DType::FLOAT32}, {{1536}}, {true}, {{Backend::CPU}});
 
 #endif // TG_HAS_NEON

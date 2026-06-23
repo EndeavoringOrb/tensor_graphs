@@ -4,13 +4,13 @@
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 
-inline bool matchMulF32_3D_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchMulF32_1D_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     return inputs[0].getShape().size() == 3 &&
            isContiguous(output);
 }
 
-inline void runMulF32_3D_NEON(const KernelContext &ctx)
+inline void runMulF32_1D_NEON(const KernelContext &ctx)
 {
     const float *a = static_cast<const float *>(ctx.inputs[0]);
     const float *b = static_cast<const float *>(ctx.inputs[1]);
@@ -28,11 +28,11 @@ inline void runMulF32_3D_NEON(const KernelContext &ctx)
         out[i] = a[i] * b[i];
 }
 
-inline uint32_t refFactoryMul3D_NEON(const std::vector<uint32_t> &inputs, Graph &graph)
+inline uint32_t refFactoryMul1D_NEON(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     return graph.mul(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Mul_3D_NEON", 2, matchMulF32_3D_NEON, runMulF32_3D_NEON, refFactoryMul3D_NEON, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 2048}, {1, 8, 2048}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Mul_1D_NEON", 2, matchMulF32_1D_NEON, runMulF32_1D_NEON, refFactoryMul1D_NEON, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{2048}, {2048}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
 
 #endif

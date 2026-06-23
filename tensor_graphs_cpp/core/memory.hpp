@@ -112,6 +112,7 @@ struct DeviceBuffer
 
     DeviceBuffer(Backend b, uint64_t _sizeBytes) : backend(b), sizeBytes(_sizeBytes)
     {
+        // TODO: should call reset() here?
         MemBlock initialFree;
         initialFree.offset = 0;
         initialFree.sizeBytes = _sizeBytes;
@@ -163,6 +164,20 @@ struct DeviceBuffer
     {
         InterruptManager::unregisterBuffer(this);
         freeArena();
+    }
+
+    void reset()
+    {
+        blocks.clear();
+        allocationMap.clear();
+        // Re-add the initial free block spanning the entire arena
+        MemBlock initialFree;
+        initialFree.offset = 0;
+        initialFree.sizeBytes = sizeBytes;
+        initialFree.nodeId = UINT32_MAX;
+        initialFree.cost = 0.0f;
+        initialFree.isLocked = false;
+        blocks.push_back(initialFree);
     }
 
     void mergeFreeBlocks()
@@ -441,6 +456,7 @@ struct MemoryManager
         for (auto &buf : buffers)
         {
             buf.second.init();
+            buf.second.reset();
         }
         // Clear stale alias entries left over from any previous execution cycle.
         // Multiple sessions sharing a MemoryManager have overlapping node-ID spaces

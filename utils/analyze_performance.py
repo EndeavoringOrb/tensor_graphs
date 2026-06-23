@@ -4,6 +4,30 @@ import json
 import os
 from collections import defaultdict
 from binary import load_cache_file
+import re
+
+
+def load_uids_from_cpp():
+    # Locate the generated header file relative to the script directory
+    header_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "tensor_graphs_cpp",
+        "generated",
+        "kernel_uids.gen.hpp",
+    )
+    uid_to_name = {}
+    if not os.path.exists(header_path):
+        return uid_to_name
+
+    pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
+    with open(header_path, "r") as f:
+        content = f.read()
+        matches = pattern.findall(content)
+        for name, hex_val in matches:
+            val_int = int(hex_val, 16)
+            uid_to_name[val_int] = name
+    return uid_to_name
 
 
 def format_ms(ms):
@@ -13,6 +37,9 @@ def format_ms(ms):
 def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
     print(f"Loading compiled buckets from: {cache_file}")
     cache_entries = load_cache_file(cache_file)
+
+    # Load the physical UID mapping
+    uid_map = load_uids_from_cpp()
 
     compiled_buckets = [
         entry for entry in cache_entries if entry.get("type") == "compiled_bucket"
@@ -53,14 +80,17 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
             node_id = inst["nodeId"]
             node = nodes[str(node_id)]
 
-            # Fetch the runtime exactly as the C++ planner saw it
-            runtime = node_costs[
-                node_id
-            ]  # I want this to error if node_id isn't present
+            # Fetch the runtime
+            runtime = node_costs[node_id]
 
-            op_name = node["opType"]
-            if op_name == "FUSED":
-                op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
+            # --- RESOLVE PHYSICAL KERNEL NAME ---
+            kernel_uid = inst.get("fullKernelId", 0)
+            if kernel_uid in uid_map:
+                op_name = uid_map[kernel_uid]
+            else:
+                op_name = node["opType"]
+                if op_name == "FUSED":
+                    op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
 
             input_shapes = []
             for pid in inst["inputNodeIds"]:
