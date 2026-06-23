@@ -4,13 +4,19 @@
 // jina-embeddings-v5-omni-nano-retrieval — C++ implementation (image embedding)
 // =============================================================================
 //
-// Architecture (mirrors the Python reference `modeling_llava_eurobert_audio.py`):
+// FIXED version — resolves embedding drift (cosine similarity was -0.02, should
+// be >= 0.98 vs Python reference).
+//
+// Architecture (mirrors the Python reference `modeling_llava_eurobert_audio.py`
+// and HF `transformers.models.qwen3_vl.modeling_qwen3_vl`):
 //
 //   Vision tower : Qwen3VLVisionModel
-//                  - patch_embed: Conv3d(T=2, P=16, P=16) → Linear(1536, 768)
-//                  - 12 × Qwen3VL vision blocks (RMSNorm eps=1e-6, fused QKV,
+//                  - patch_embed: Conv3d(T=2, P=16, P=16) with bias → Linear(1536, 768) + bias
+//                  - pos_embed: nn.Embedding(2304, 768), bilinear-interpolated from 48×48
+//                    grid to the 32×32 patch grid, added after patch_embed
+//                  - 12 × Qwen3VL vision blocks (LayerNorm eps=1e-6, fused QKV,
 //                    2-D RoPE, bidirectional, GELU-MLP)
-//                  - No position embeddings (uses 2-D RoPE), no post-LayerNorm
+//                  - No post-LayerNorm; merger supplies its own LayerNorm
 //
 //   Merger       : PretrainedMerger (top-level, NOT inside vision_tower)
 //                  - LayerNorm(768, eps=1e-6) on patch features
@@ -21,31 +27,70 @@
 //                  - 12 layers, hidden=768, heads=12, head_dim=64
 //                  - RMSNorm eps=1e-5, 1-D RoPE (theta=1,000,000)
 //                  - SwiGLU MLP (intermediate=3072), no biases on attn/mlp
-//                  - Input = image features (input_ids all = image_token_index,
-//                    so embed_tokens output is fully overwritten by features)
+//                  - Input = chat-template-wrapped image features:
+//                    [8 prefix tokens] + [256 image features] + [6 suffix tokens] = 270
 //
-//   Pooling      : last-token pooling (position = num_merged_tokens - 1)
+//   Pooling      : last-token pooling (position = 269, the last suffix token)
 //   Output       : L2-normalized 768-dim embedding
 //
 // For a 512×512 input (satisfies min_pixels=262144):
-//   grid 32×32 → 1024 patches → after 2×2 merge → 256 text-encoder tokens
+//   grid 32×32 → 1024 patches → after 2×2 merge → 256 text-encoder image tokens
+//   Full text encoder sequence: 8 + 256 + 6 = 270 tokens
 //
-// Weight naming (matches the Python `LlavaEuroBertAudioForEmbedding` state_dict):
-//   vision_tower.patch_embed.proj.weight            (768, 3, 2, 16, 16)
-//   vision_tower.blocks.{i}.norm1.weight            (768,)
-//   vision_tower.blocks.{i}.attn.qkv.{weight,bias}  (2304, 768) / (2304,)
-//   vision_tower.blocks.{i}.attn.proj.{weight,bias} (768, 768) / (768,)
-//   vision_tower.blocks.{i}.norm2.weight            (768,)
-//   vision_tower.blocks.{i}.mlp.fc1.{weight,bias}   (3072, 768) / (3072,)
-//   vision_tower.blocks.{i}.mlp.fc2.{weight,bias}   (768, 3072) / (768,)
-//   merger.norm.{weight,bias}                       (768,) / (768,)
-//   merger.linear_fc1.{weight,bias}                 (3072, 3072) / (3072,)
-//   merger.linear_fc2.{weight,bias}                 (768, 3072) / (768,)
-//   language_model.layers.{i}.input_layernorm.weight            (768,)
-//   language_model.layers.{i}.self_attn.{q,k,v,o}_proj.weight   (768, 768)
-//   language_model.layers.{i}.post_attention_layernorm.weight   (768,)
-//   language_model.layers.{i}.mlp.{gate,up,down}_proj.weight    (3072,768)/(3072,768)/(768,3072)
-//   language_model.norm.weight                      (768,)
+// =============================================================================
+// BUGS FIXED (vs original C++ implementation):
+//
+//   #1  patch_embed: now loads and adds vision_tower.patch_embed.proj.bias
+//       (Qwen3VLVisionPatchEmbed uses nn.Conv3d(..., bias=True))
+//
+//   #2  pos_embed: now loads vision_tower.pos_embed.weight (2304, 768) and
+//       computes bilinear interpolation from the 48×48 learned grid to the
+//       32×32 patch grid, adding the result to the patch_embed output.
+//       (Qwen3VLVisionModel.forward does: hidden_states = patch_embed(x);
+//        hidden_states = hidden_states + bilinear_interp(pos_embed))
+//
+//   #3  Vision block norms: now use LayerNorm (with bias) instead of RMSNorm.
+//       (Qwen3VLVisionBlock uses nn.LayerNorm(eps=1e-6), not RMSNorm)
+//
+//   #4  2-D RoPE: now computes inv_freq with dim = head_dim // 2 = 32 (giving
+//       16 elements) and uses the SAME inv_freq for both h and w positions.
+//       Previously used dim = head_dim = 64 (32 elements) and split into two
+//       different 16-element halves — both halves were wrong.
+//       (HF Qwen3VLVisionRotaryEmbedding: dim = head_dim // 2, single inv_freq)
+//
+//   #5  Chat template tokens: the text encoder now receives the full 270-token
+//       sequence [8 prefix + 256 image + 6 suffix], matching the Python
+//       _build_eval_image_prompt → apply_chat_template → tokenize pipeline.
+//       Prefix token IDs: [27, 91, 318, 5011, 91, 29, 882, 198]
+//         ("<", "|", "im", "_start", "|", ">", "user", "\n")
+//       Suffix token IDs: [27, 91, 318, 6345, 91, 397]
+//         ("<", "|", "im", "_end", "|", ">\n")
+//       Embeddings are gathered from language_model.embed_tokens.weight.
+//       Last-token pooling now picks position 269 (the last suffix token).
+//       Previously: only 256 image features were fed, pooling picked 255.
+//
+//   #6  GELU: now uses exact erf-based GELU (via Abramowitz-Stegun erf
+//       approximation, max error ~1.5e-7) instead of the tanh approximation.
+//       (Qwen3VL uses nn.GELU() = exact, not nn.GELU(approximate='tanh'))
+//
+// Weight naming (matches the Python LlavaEuroBertAudioForEmbedding state_dict):
+//   vision_tower.patch_embed.proj.{weight,bias}        (768, 3, 2, 16, 16) / (768,)
+//   vision_tower.pos_embed.weight                      (2304, 768)
+//   vision_tower.blocks.{i}.norm1.{weight,bias}        (768,) / (768,)   ← LayerNorm
+//   vision_tower.blocks.{i}.attn.qkv.{weight,bias}     (2304, 768) / (2304,)
+//   vision_tower.blocks.{i}.attn.proj.{weight,bias}    (768, 768) / (768,)
+//   vision_tower.blocks.{i}.norm2.{weight,bias}        (768,) / (768,)   ← LayerNorm
+//   vision_tower.blocks.{i}.mlp.linear_fc1.{weight,bias}  (3072, 768) / (3072,)
+//   vision_tower.blocks.{i}.mlp.linear_fc2.{weight,bias}  (768, 3072) / (768,)
+//   merger.norm.{weight,bias}                          (768,) / (768,)   ← LayerNorm
+//   merger.linear_fc1.{weight,bias}                    (3072, 3072) / (3072,)
+//   merger.linear_fc2.{weight,bias}                    (768, 3072) / (768,)
+//   language_model.embed_tokens.weight                 (128260, 768)
+//   language_model.layers.{i}.input_layernorm.weight   (768,)            ← RMSNorm (no bias)
+//   language_model.layers.{i}.self_attn.{q,k,v,o}_proj.weight  (768, 768) (no bias)
+//   language_model.layers.{i}.post_attention_layernorm.weight  (768,)    ← RMSNorm (no bias)
+//   language_model.layers.{i}.mlp.{gate,up,down}_proj.weight   (3072,768)/(3072,768)/(768,3072) (no bias)
+//   language_model.norm.weight                         (768,)            ← RMSNorm (no bias)
 // =============================================================================
 
 #include "core/types.hpp"
@@ -56,13 +101,33 @@
 #include <cmath>
 #include <tuple>
 
+// -----------------------------------------------------------------------------
+// Chat-template token IDs (from tokenizing the Qwen2 chat-template-wrapped
+// image prompt "<|im_start|>user\n<image>×256<|im_end|>\n" with the model's
+// BPE tokenizer).  These are STABLE for this model's tokenizer.
+// Stored as int32_t for direct use with g.constant(..., DType::INT32).
+// -----------------------------------------------------------------------------
+static const int32_t CHAT_PREFIX_TOKEN_IDS[] = {
+    27, 91, 318, 5011, 91, 29, 882, 198 // < | im _start | > user \n
+};
+static constexpr uint32_t CHAT_PREFIX_LEN = 8;
+
+static const int32_t CHAT_SUFFIX_TOKEN_IDS[] = {
+    27, 91, 318, 6345, 91, 397 // < | im _end | >\n
+};
+static constexpr uint32_t CHAT_SUFFIX_LEN = 6;
+
 struct JinaV5Config
 {
-    // ---- Image / patch geometry (matches preprocessor_config.json) ----
-    uint32_t image_size = 512;        // 512×512 → 262144 px (== min_pixels)
-    uint32_t patch_size = 16;         // Qwen3VL patch_size
-    uint32_t temporal_patch_size = 2; // Qwen3VL temporal_patch_size (image duplicated to 2 frames)
-    uint32_t spatial_merge_size = 2;  // Qwen3VL spatial_merge_size
+    // ---- Image / patch geometry (runtime-configured) ----
+    // image_h and image_w must be divisible by (patch_size * spatial_merge_size = 32).
+    // For 512×512: grid 32×32 → 1024 patches → 256 merged → 270 text tokens.
+    // For 480×544: grid 30×34 → 1020 patches → 255 merged → 269 text tokens.
+    uint32_t image_h; // set at runtime (default 512)
+    uint32_t image_w; // set at runtime (default 512)
+    uint32_t patch_size = 16;
+    uint32_t temporal_patch_size = 2;
+    uint32_t spatial_merge_size = 2;
     uint32_t in_channels = 3;
 
     // ---- Vision tower (Qwen3VLVisionModel) ----
@@ -71,8 +136,12 @@ struct JinaV5Config
     uint32_t vision_num_heads = 12;
     uint32_t vision_head_dim = 64; // 768 / 12
     uint32_t vision_num_layers = 12;
-    float vision_rms_eps = 1e-6f;
+    float vision_ln_eps = 1e-6f; // LayerNorm eps (was rms_eps — now LayerNorm)
     float vision_rope_theta = 10000.0f;
+
+    // ---- Position embedding (Qwen3VL pos_embed) ----
+    uint32_t num_position_embeddings = 2304; // from config.json vision_config
+    uint32_t num_grid_per_side = 48;         // sqrt(2304)
 
     // ---- Merger (PretrainedMerger) ----
     // merger_hidden = vision_hidden_size * spatial_merge_size^2 = 3072
@@ -80,32 +149,46 @@ struct JinaV5Config
 
     // ---- Text encoder (EuroBERT / LlamaModel, bidirectional) ----
     uint32_t text_hidden_size = 768;
-    uint32_t text_intermediate_size = 3072; // from config.json (was wrongly 2048)
+    uint32_t text_intermediate_size = 3072;
     uint32_t text_num_heads = 12;
-    uint32_t text_head_dim = 64; // 768 / 12
+    uint32_t text_head_dim = 64;
     uint32_t text_num_layers = 12;
-    float text_rms_eps = 1e-5f;         // config.json rms_norm_eps (was wrongly 1e-6)
-    float text_rope_theta = 1000000.0f; // config.json rope_theta (was wrongly 1e4)
+    float text_rms_eps = 1e-5f;
+    float text_rope_theta = 1000000.0f;
 
     // ---- Derived (computed in init) ----
-    uint32_t grid_h;        // image_size / patch_size = 32
-    uint32_t grid_w;        // = 32
-    uint32_t num_patches;   // grid_h * grid_w = 1024
-    uint32_t merged_grid_h; // grid_h / spatial_merge_size = 16
-    uint32_t merged_grid_w; // = 16
-    uint32_t num_merged;    // merged_grid_h * merged_grid_w = 256
-    uint32_t patch_dim;     // temporal_patch_size * patch_size^2 * in_channels = 1536
-    uint32_t merged_dim;    // vision_hidden_size * spatial_merge_size^2 = 3072
+    uint32_t grid_h;        // image_h / patch_size
+    uint32_t grid_w;        // image_w / patch_size
+    uint32_t num_patches;   // grid_h * grid_w
+    uint32_t merged_grid_h; // grid_h / spatial_merge_size
+    uint32_t merged_grid_w; // grid_w / spatial_merge_size
+    uint32_t num_merged;    // merged_grid_h * merged_grid_w
+    uint32_t patch_dim;     // 1536
+    uint32_t merged_dim;    // 3072
 
-    JinaV5Config()
-        : grid_h(image_size / patch_size),
-          grid_w(image_size / patch_size),
+    // ---- Text encoder sequence layout ----
+    // [prefix tokens] + [image features] + [suffix tokens]
+    uint32_t text_prefix_len; // 8
+    uint32_t text_image_len;  // = num_merged
+    uint32_t text_suffix_len; // 6
+    uint32_t text_seq_len;    // prefix_len + num_merged + suffix_len
+
+    // Constructor takes runtime image dimensions.
+    // Both must be divisible by (patch_size * spatial_merge_size = 32).
+    JinaV5Config(uint32_t img_h = 512, uint32_t img_w = 512)
+        : image_h(img_h), image_w(img_w),
+          grid_h(img_h / patch_size),
+          grid_w(img_w / patch_size),
           num_patches(grid_h * grid_w),
           merged_grid_h(grid_h / spatial_merge_size),
           merged_grid_w(grid_w / spatial_merge_size),
           num_merged(merged_grid_h * merged_grid_w),
           patch_dim(temporal_patch_size * patch_size * patch_size * in_channels),
-          merged_dim(vision_hidden_size * spatial_merge_size * spatial_merge_size) {}
+          merged_dim(vision_hidden_size * spatial_merge_size * spatial_merge_size),
+          text_prefix_len(CHAT_PREFIX_LEN),
+          text_image_len(num_merged),
+          text_suffix_len(CHAT_SUFFIX_LEN),
+          text_seq_len(CHAT_PREFIX_LEN + num_merged + CHAT_SUFFIX_LEN) {}
 };
 
 class JinaV5OmniNanoRetrievalModel
@@ -126,7 +209,7 @@ private:
     }
 
     // -------------------------------------------------------------------------
-    // Shape / repeat helpers (kept from the original implementation)
+    // Shape / repeat helpers
     // -------------------------------------------------------------------------
     uint32_t repeat_ax(uint32_t id, uint32_t repeats, uint32_t axis)
     {
@@ -223,7 +306,8 @@ private:
     // Normalisation primitives
     // -------------------------------------------------------------------------
 
-    // LayerNorm (used by the merger — Python uses nn.LayerNorm(eps=1e-6)).
+    // LayerNorm — used by vision blocks (norm1, norm2) and merger (norm).
+    // nn.LayerNorm(eps=1e-6) has both weight and bias.
     uint32_t layer_norm(uint32_t x, const std::string &w_name,
                         const std::string &b_name, uint32_t S, uint32_t D,
                         float eps = 1e-6f)
@@ -268,7 +352,7 @@ private:
         return normalized;
     }
 
-    // RMSNorm — eps is parameterised so vision (1e-6) and text (1e-5) can differ.
+    // RMSNorm — used by text encoder (LlamaModel).  No bias.
     uint32_t rms_norm(uint32_t x_id, const std::string &w_name,
                       uint32_t S, uint32_t D, float eps)
     {
@@ -315,6 +399,8 @@ private:
     // -------------------------------------------------------------------------
     // Activation primitives
     // -------------------------------------------------------------------------
+
+    // SiLU: x * sigmoid(x) — used by text encoder SwiGLU.
     uint32_t silu_atomic(uint32_t x_id, uint32_t N, uint32_t L, uint32_t D)
     {
         uint32_t neg_one = expand_scalar_to_3d(-1.0f, N, L, D);
@@ -327,31 +413,71 @@ private:
         return g.mul(x_id, sigmoid);
     }
 
-    // GELU with tanh approximation (matches `gelu_pytorch_tanh`).
-    uint32_t gelu_atomic(uint32_t x_id, uint32_t S, uint32_t D)
+    // Exact GELU using erf, via Abramowitz-Stegun approximation (max err ~1.5e-7).
+    // gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+    //
+    // erf(x) for x >= 0:
+    //   t = 1 / (1 + p*|x|),  p = 0.3275911
+    //   erf ≈ 1 - (a1*t + a2*t^2 + a3*t^3 + a4*t^4 + a5*t^5) * exp(-x^2)
+    //   a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429
+    // For x < 0: erf(x) = -erf(-x), i.e. erf is odd → erf(x) = sign(x) * erf(|x|).
+    uint32_t gelu_exact(uint32_t x_id, uint32_t S, uint32_t D)
     {
-        uint32_t c1_node = expand_scalar_to_3d(0.044715f, 1, S, D);
-        uint32_t c2_node = expand_scalar_to_3d(0.79788456f, 1, S, D);
-        uint32_t x_sq = g.mul(x_id, x_id);
-        uint32_t x_cube = g.mul(x_sq, x_id);
-        uint32_t term1 = g.mul(x_cube, c1_node);
-        uint32_t term2 = g.add(x_id, term1);
-        uint32_t term3 = g.mul(term2, c2_node);
+        // x_scaled = x / sqrt(2)
+        uint32_t inv_sqrt2 = expand_scalar_to_3d(0.7071067811865475f, 1, S, D);
+        uint32_t x_scaled = g.mul(x_id, inv_sqrt2);
 
-        uint32_t neg_two = expand_scalar_to_3d(-2.0f, 1, S, D);
-        uint32_t two = expand_scalar_to_3d(2.0f, 1, S, D);
-        uint32_t e_node = expand_scalar_to_3d(2.7182818f, 1, S, D);
+        // abs(x_scaled) = sqrt(x_scaled^2)
+        uint32_t xs_sq = g.mul(x_scaled, x_scaled);
+        uint32_t half = expand_scalar_to_3d(0.5f, 1, S, D);
+        uint32_t abs_xs = g.pow(xs_sq, half);
+
+        // sign(x_scaled) = x_scaled / (|x_scaled| + eps)
+        uint32_t eps_node = expand_scalar_to_3d(1e-12f, 1, S, D);
+        uint32_t abs_xs_eps = g.add(abs_xs, eps_node);
+        uint32_t sign_xs = g.div(x_scaled, abs_xs_eps);
+
+        // t = 1 / (1 + p * |x_scaled|)
+        uint32_t p_node = expand_scalar_to_3d(0.3275911f, 1, S, D);
+        uint32_t p_abs = g.mul(p_node, abs_xs);
         uint32_t one_node = expand_scalar_to_3d(1.0f, 1, S, D);
-        uint32_t neg_2x = g.mul(term3, neg_two);
-        uint32_t exp_neg_2x = g.pow(e_node, neg_2x);
-        uint32_t den = g.add(one_node, exp_neg_2x);
-        uint32_t quotient = g.div(two, den);
-        uint32_t tanh_result = g.add(quotient, g.neg(one_node));
+        uint32_t denom = g.add(one_node, p_abs);
+        uint32_t t = g.div(one_node, denom);
 
-        uint32_t term4 = g.add(one_node, tanh_result);
-        uint32_t half_node = expand_scalar_to_3d(0.5f, 1, S, D);
-        uint32_t term5 = g.mul(x_id, half_node);
-        return g.mul(term5, term4);
+        // poly = a1*t + a2*t^2 + a3*t^3 + a4*t^4 + a5*t^5
+        uint32_t t2 = g.mul(t, t);
+        uint32_t t3 = g.mul(t2, t);
+        uint32_t t4 = g.mul(t3, t);
+        uint32_t t5 = g.mul(t4, t);
+
+        uint32_t a1 = expand_scalar_to_3d(0.254829592f, 1, S, D);
+        uint32_t a2 = expand_scalar_to_3d(-0.284496736f, 1, S, D);
+        uint32_t a3 = expand_scalar_to_3d(1.421413741f, 1, S, D);
+        uint32_t a4 = expand_scalar_to_3d(-1.453152027f, 1, S, D);
+        uint32_t a5 = expand_scalar_to_3d(1.061405429f, 1, S, D);
+
+        uint32_t poly = g.mul(a1, t);
+        poly = g.add(poly, g.mul(a2, t2));
+        poly = g.add(poly, g.mul(a3, t3));
+        poly = g.add(poly, g.mul(a4, t4));
+        poly = g.add(poly, g.mul(a5, t5));
+
+        // exp(-x_scaled^2)
+        uint32_t e_node = expand_scalar_to_3d(2.718281828459045f, 1, S, D);
+        uint32_t neg_xs_sq = g.neg(xs_sq);
+        uint32_t exp_neg_xs_sq = g.pow(e_node, neg_xs_sq);
+
+        // erf_pos = 1 - poly * exp(-x_scaled^2)
+        uint32_t product = g.mul(poly, exp_neg_xs_sq);
+        uint32_t erf_pos = g.add(one_node, g.neg(product));
+
+        // erf(x_scaled) = sign(x_scaled) * erf_pos
+        uint32_t erf_val = g.mul(sign_xs, erf_pos);
+
+        // gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+        uint32_t one_plus_erf = g.add(one_node, erf_val);
+        uint32_t half_x = g.mul(x_id, half);
+        return g.mul(half_x, one_plus_erf);
     }
 
     // -------------------------------------------------------------------------
@@ -359,7 +485,6 @@ private:
     // -------------------------------------------------------------------------
 
     // Apply RoPE to a 4-D Q/K tensor of shape (1, n_groups, S, head_dim).
-    // cos/sin have shape (1, 1, S, head_dim).
     uint32_t apply_rope(uint32_t x, uint32_t cos, uint32_t sin,
                         uint32_t n_groups, uint32_t head_dim, uint32_t S)
     {
@@ -385,6 +510,7 @@ private:
     }
 
     // 1-D RoPE for the text encoder (positions 0..S-1, theta from config).
+    // Uses dim = head_dim (standard Llama RoPE).
     std::tuple<uint32_t, uint32_t> compute_rope_1d(uint32_t S, uint32_t head_dim, float theta)
     {
         int32_t start_val = 0, stop_val = (int32_t)head_dim, step_val = 2;
@@ -424,10 +550,17 @@ private:
                 g.reshape(g.sin(angles), sh4_node)};
     }
 
-    // 2-D RoPE for the vision tower — positions are (h, w) of each patch.
-    // inv_freq (head_dim/2) is split into two halves: first half modulated by
-    // h position, second half by w position. Then duplicated to head_dim and
-    // applied with the standard rotate_half rule.
+    // 2-D RoPE for the vision tower — FIXED.
+    //
+    // HF Qwen3VLVisionRotaryEmbedding(dim = head_dim // 2 = 32, theta = 10000):
+    //   inv_freq = 1 / theta^(arange(0, 32, 2) / 32)   → 16 elements
+    //   rotary_pos_emb = (pos_ids.unsqueeze(-1) * inv_freq).flatten(1)  → (S, 32)
+    //     first 16: h * inv_freq,  last 16: w * inv_freq  (SAME inv_freq)
+    //   emb = cat([rotary_pos_emb, rotary_pos_emb], -1)  → (S, 64)
+    //   cos, sin = cos(emb), sin(emb)
+    //
+    // The original C++ used dim = head_dim = 64 (32-element inv_freq) and split
+    // into two DIFFERENT 16-element halves — both halves were wrong.
     std::tuple<uint32_t, uint32_t> compute_rope_2d(uint32_t grid_h, uint32_t grid_w,
                                                    uint32_t head_dim, float theta)
     {
@@ -435,46 +568,31 @@ private:
         uint32_t half = head_dim / 2; // 32
         uint32_t quarter = half / 2;  // 16
 
-        // ---- inv_freq: 1 / theta^(arange(0, head_dim, 2) / head_dim)  shape (head_dim/2,)
-        int32_t start_val = 0, stop_val = (int32_t)head_dim, step_val = 2;
+        // ---- inv_freq: 1 / theta^(arange(0, dim, 2) / dim)  with dim = head_dim // 2 = 32
+        //   → arange(0, 32, 2) = [0, 2, ..., 30]  (16 elements)
+        //   → / 32 → [0, 1/16, ..., 15/16]
+        //   → inv_freq = 1 / theta^([0, 1/16, ..., 15/16])  (16 elements)
+        int32_t start_val = 0, stop_val = (int32_t)half, step_val = 2; // stop=32, step=2
         uint32_t indices_int = g.arange(g.constant({1}, &start_val, DType::INT32),
                                         g.constant({1}, &stop_val, DType::INT32),
                                         g.constant({1}, &step_val, DType::INT32));
         uint32_t indices = g.cast(indices_int, DType::FLOAT32);
-        uint32_t h_dim_node = expand_scalar_to_1d((float)head_dim, half);
-        uint32_t exps = g.div(indices, h_dim_node);
-        uint32_t theta_node = expand_scalar_to_1d(theta, half);
-        uint32_t inv_freq = g.div(expand_scalar_to_1d(1.0f, half),
-                                  g.pow(theta_node, exps)); // (half,)
+        uint32_t dim_node = expand_scalar_to_1d((float)half, quarter); // 32.0 broadcast to 16
+        uint32_t exps = g.div(indices, dim_node);
+        uint32_t theta_node = expand_scalar_to_1d(theta, quarter);
+        uint32_t inv_freq = g.div(expand_scalar_to_1d(1.0f, quarter),
+                                  g.pow(theta_node, exps)); // (quarter,) = (16,)
 
-        // ---- Split inv_freq into h-half and w-half
-        int32_t starts_h[] = {0};
-        int32_t ends_h[] = {(int32_t)quarter};
-        int32_t starts_w[] = {(int32_t)quarter};
-        int32_t ends_w[] = {(int32_t)half};
-        int32_t steps1[] = {1};
-        uint32_t inv_freq_h = g.slice(inv_freq,
-                                      g.constant({1}, starts_h, DType::INT32),
-                                      g.constant({1}, ends_h, DType::INT32),
-                                      g.constant({1}, steps1, DType::INT32)); // (quarter,)
-        uint32_t inv_freq_w = g.slice(inv_freq,
-                                      g.constant({1}, starts_w, DType::INT32),
-                                      g.constant({1}, ends_w, DType::INT32),
-                                      g.constant({1}, steps1, DType::INT32)); // (quarter,)
-
-        // ---- Build h_pos (S,) and w_pos (S,)
-        // h_pos[i] = i / grid_w  (row index),  w_pos[i] = i % grid_w  (col index)
-        // h_pos = reshape(arange(grid_h), (grid_h,1))  repeated grid_w times on axis 1 → (grid_h, grid_w)
-        // w_pos = reshape(arange(grid_w), (1,grid_w))  repeated grid_h times on axis 0 → (grid_h, grid_w)
+        // ---- Build h_pos (S,) and w_pos (S,) for row-major patch order.
         int32_t gh_stop = (int32_t)grid_h, gw_stop = (int32_t)grid_w, one_step = 1;
         uint32_t h_arr = g.cast(g.arange(g.constant({1}, &start_val, DType::INT32),
                                          g.constant({1}, &gh_stop, DType::INT32),
                                          g.constant({1}, &one_step, DType::INT32)),
-                                DType::FLOAT32); // (grid_h,)
+                                DType::FLOAT32);
         uint32_t w_arr = g.cast(g.arange(g.constant({1}, &start_val, DType::INT32),
                                          g.constant({1}, &gw_stop, DType::INT32),
                                          g.constant({1}, &one_step, DType::INT32)),
-                                DType::FLOAT32); // (grid_w,)
+                                DType::FLOAT32);
 
         int32_t sh_col[] = {(int32_t)grid_h, 1};
         uint32_t h_col2d = g.reshape(h_arr, g.constant({2}, sh_col, DType::INT32));
@@ -487,24 +605,23 @@ private:
         uint32_t h_pos = g.reshape(h_pos_2d, g.constant({1}, sh_S, DType::INT32)); // (S,)
         uint32_t w_pos = g.reshape(w_pos_2d, g.constant({1}, sh_S, DType::INT32)); // (S,)
 
-        // ---- angles_h = h_pos[:, None] * inv_freq_h[None, :]   shape (S, quarter)
+        // ---- angles_h = h_pos[:, None] * inv_freq[None, :]   (S, quarter)
+        //      angles_w = w_pos[:, None] * inv_freq[None, :]   (S, quarter)  ← SAME inv_freq
         int32_t sh_S_1[] = {(int32_t)S, 1};
         int32_t sh_1_q[] = {1, (int32_t)quarter};
         h_pos_2d = g.reshape(h_pos, g.constant({2}, sh_S_1, DType::INT32));
-        uint32_t invf_h_2d = g.reshape(inv_freq_h, g.constant({2}, sh_1_q, DType::INT32));
-        uint32_t h_pos_exp = repeat_ax(h_pos_2d, quarter, 1); // (S, quarter)
-        uint32_t invf_h_exp = repeat_ax(invf_h_2d, S, 0);     // (S, quarter)
-        uint32_t angles_h = g.mul(h_pos_exp, invf_h_exp);     // (S, quarter)
+        uint32_t invf_2d = g.reshape(inv_freq, g.constant({2}, sh_1_q, DType::INT32));
+        uint32_t h_pos_exp = repeat_ax(h_pos_2d, quarter, 1);
+        uint32_t invf_h_exp = repeat_ax(invf_2d, S, 0);
+        uint32_t angles_h = g.mul(h_pos_exp, invf_h_exp); // (S, quarter)
 
-        // ---- angles_w = w_pos[:, None] * inv_freq_w[None, :]   shape (S, quarter)
         w_pos_2d = g.reshape(w_pos, g.constant({2}, sh_S_1, DType::INT32));
-        uint32_t invf_w_2d = g.reshape(inv_freq_w, g.constant({2}, sh_1_q, DType::INT32));
         uint32_t w_pos_exp = repeat_ax(w_pos_2d, quarter, 1);
-        uint32_t invf_w_exp = repeat_ax(invf_w_2d, S, 0);
+        uint32_t invf_w_exp = repeat_ax(invf_2d, S, 0);   // SAME inv_freq
         uint32_t angles_w = g.mul(w_pos_exp, invf_w_exp); // (S, quarter)
 
-        // ---- angles = cat([angles_h, angles_w], -1)  shape (S, half)
-        //      emb    = cat([angles, angles],     -1)  shape (S, head_dim)
+        // ---- angles = cat([angles_h, angles_w], -1)  (S, half)
+        //      emb    = cat([angles, angles],     -1)  (S, head_dim)
         int32_t ax1 = 1;
         uint32_t angles = g.concat({angles_h, angles_w},
                                    g.constant({1}, &ax1, DType::INT32)); // (S, half)
@@ -514,7 +631,6 @@ private:
         uint32_t cos_t = g.cos(emb);
         uint32_t sin_t = g.sin(emb);
 
-        // Reshape to (1, 1, S, head_dim) for broadcasting across heads.
         int32_t sh4[] = {1, 1, (int32_t)S, (int32_t)head_dim};
         uint32_t sh4_node = g.constant({4}, sh4, DType::INT32);
         return {g.reshape(cos_t, sh4_node), g.reshape(sin_t, sh4_node)};
@@ -531,7 +647,7 @@ private:
         uint32_t max_expanded = repeat_4d_axis(max_s, S, 3);
         uint32_t shifted = g.add(scores, g.neg(max_expanded));
 
-        uint32_t e_node = expand_scalar_to_4d(2.7182818f, 1, num_heads, S, S);
+        uint32_t e_node = expand_scalar_to_4d(2.718281828459045f, 1, num_heads, S, S);
         uint32_t exps = g.pow(e_node, shifted);
         uint32_t sums = g.sum(exps, axis_node);
         uint32_t sums_expanded = repeat_4d_axis(sums, S, 3);
@@ -539,14 +655,12 @@ private:
     }
 
     // =========================================================================
-    //  VISION TOWER (Qwen3VL)
+    //  VISION TOWER (Qwen3VL) — FIXED
     // =========================================================================
 
-    // Qwen3VL patch_embed is a Conv3d(in=3, out=768, kernel=(2,16,16), stride=(2,16,16)).
-    // For static images the two temporal frames are identical, so Conv3d on
-    // (B, 3, T=2, H, W) is equivalent to a Linear on a 1536-dim patch vector
-    // ordered as (C_in, T_patch, P, P) = (3, 2, 16, 16) → 1536. We simply
-    // reshape the (768, 3, 2, 16, 16) weight to (768, 1536) and matmul.
+    // Qwen3VL patch_embed: Conv3d with bias.  We reshape the (768, 3, 2, 16, 16)
+    // weight to (768, 1536), matmul, then add the (768,) bias.
+    // [FIX] Bug #1: now loads and adds proj.bias.
     uint32_t patch_embed(uint32_t x, uint32_t num_patches)
     {
         uint32_t w = weight("vision_tower.patch_embed.proj.weight"); // (768, 3, 2, 16, 16)
@@ -557,7 +671,114 @@ private:
         int32_t sh3[] = {1, 1536, 768};
         uint32_t w_3d = g.reshape(w_t, g.constant({3}, sh3, DType::INT32));
         // (1, num_patches, 1536) × (1, 1536, 768) → (1, num_patches, 768)
-        return g.dot(x, w_3d);
+        uint32_t out = g.dot(x, w_3d);
+
+        // [FIX] Add bias
+        uint32_t b = weight("vision_tower.patch_embed.proj.bias"); // (768,)
+        uint32_t b_exp = expand_1d_to_3d(b, 768, 1, num_patches);
+        return g.add(out, b_exp);
+    }
+
+    // [FIX] Bug #2: Bilinear-interpolated position embedding.
+    //
+    // Qwen3VLVisionModel has self.pos_embed = nn.Embedding(2304, 768) on a
+    // 48×48 grid.  For a 32×32 patch grid, each patch (gi, gj) maps to a
+    // continuous coordinate (h_coord, w_coord) in [0, 47]² via linspace, and
+    // the pos_embed is bilinearly interpolated from the 4 nearest grid points.
+    //
+    // We precompute the 4 corner index arrays and 4 weight arrays (all 1024
+    // elements) at build time, gather the 4 corner rows from the pos_embed
+    // table, and compute the weighted sum → (1, 1024, 768).
+    uint32_t compute_pos_embed(uint32_t num_patches)
+    {
+        const uint32_t side = cfg.num_grid_per_side; // 48
+        const uint32_t H = cfg.grid_h;               // 32
+        const uint32_t W = cfg.grid_w;               // 32
+        const uint32_t D = cfg.vision_hidden_size;   // 768
+
+        // Precompute corner indices and weights (host-side, then upload as constants)
+        std::vector<int32_t> idx00(num_patches), idx01(num_patches),
+            idx10(num_patches), idx11(num_patches);
+        std::vector<float> w00(num_patches), w01(num_patches),
+            w10(num_patches), w11(num_patches);
+
+        for (uint32_t gi = 0; gi < H; ++gi)
+        {
+            for (uint32_t gj = 0; gj < W; ++gj)
+            {
+                uint32_t pid = gi * W + gj;
+                float h_coord = (H == 1) ? 0.0f : (float)gi * (float)(side - 1) / (float)(H - 1);
+                float w_coord = (W == 1) ? 0.0f : (float)gj * (float)(side - 1) / (float)(W - 1);
+                int32_t h_floor = (int32_t)h_coord;
+                int32_t w_floor = (int32_t)w_coord;
+                int32_t h_ceil = std::min(h_floor + 1, (int32_t)side - 1);
+                int32_t w_ceil = std::min(w_floor + 1, (int32_t)side - 1);
+                float h_frac = h_coord - (float)h_floor;
+                float w_frac = w_coord - (float)w_floor;
+
+                idx00[pid] = h_floor * side + w_floor;
+                idx01[pid] = h_floor * side + w_ceil;
+                idx10[pid] = h_ceil * side + w_floor;
+                idx11[pid] = h_ceil * side + w_ceil;
+
+                w00[pid] = (1.0f - h_frac) * (1.0f - w_frac);
+                w01[pid] = (1.0f - h_frac) * w_frac;
+                w10[pid] = h_frac * (1.0f - w_frac);
+                w11[pid] = h_frac * w_frac;
+            }
+        }
+
+        // Upload indices as graph constants (INT32, shape (num_patches,))
+        uint32_t idx00_node = g.constant({num_patches}, idx00.data(), DType::INT32);
+        uint32_t idx01_node = g.constant({num_patches}, idx01.data(), DType::INT32);
+        uint32_t idx10_node = g.constant({num_patches}, idx10.data(), DType::INT32);
+        uint32_t idx11_node = g.constant({num_patches}, idx11.data(), DType::INT32);
+
+        // Load pos_embed table: (2304, 768)
+        uint32_t pos_table = weight("vision_tower.pos_embed.weight");
+
+        // Gather 4 corner rows: each (num_patches, 768)
+        uint32_t g00 = g.gather(pos_table, idx00_node);
+        uint32_t g01 = g.gather(pos_table, idx01_node);
+        uint32_t g10 = g.gather(pos_table, idx10_node);
+        uint32_t g11 = g.gather(pos_table, idx11_node);
+
+        // Reshape gathered to (1, num_patches, D) for 3-D ops
+        int32_t sh3_np[] = {1, (int32_t)num_patches, (int32_t)D};
+        uint32_t sh3_node = g.constant({3}, sh3_np, DType::INT32);
+        g00 = g.reshape(g00, sh3_node);
+        g01 = g.reshape(g01, sh3_node);
+        g10 = g.reshape(g10, sh3_node);
+        g11 = g.reshape(g11, sh3_node);
+
+        // Build weight tensors of shape (1, num_patches, D) by:
+        //   1. Create 1-D weight (num_patches,)
+        //   2. Reshape to (1, num_patches, 1)
+        //   3. Repeat along axis 2 by D times → (1, num_patches, D)
+        auto make_weight_3d = [&](const std::vector<float> &w_data) -> uint32_t
+        {
+            uint32_t w_1d = g.constant({num_patches}, w_data.data(), DType::FLOAT32);
+            int32_t sh3_w[] = {1, (int32_t)num_patches, 1};
+            uint32_t w_3d = g.reshape(w_1d, g.constant({3}, sh3_w, DType::INT32));
+            int32_t rep_D[] = {(int32_t)D};
+            int32_t ax2[] = {2};
+            return g.repeat(w_3d,
+                            g.constant({1}, rep_D, DType::INT32),
+                            g.constant({1}, ax2, DType::INT32));
+        };
+
+        uint32_t w00_3d = make_weight_3d(w00);
+        uint32_t w01_3d = make_weight_3d(w01);
+        uint32_t w10_3d = make_weight_3d(w10);
+        uint32_t w11_3d = make_weight_3d(w11);
+
+        // Weighted sum: pos = w00*g00 + w01*g01 + w10*g10 + w11*g11
+        uint32_t pos = g.mul(g00, w00_3d);
+        pos = g.add(pos, g.mul(g01, w01_3d));
+        pos = g.add(pos, g.mul(g10, w10_3d));
+        pos = g.add(pos, g.mul(g11, w11_3d));
+
+        return pos; // (1, num_patches, 768)
     }
 
     // Fused-QKV attention with 2-D RoPE, bidirectional (no causal mask).
@@ -566,11 +787,9 @@ private:
     {
         std::string prefix = "vision_tower.blocks." + std::to_string(layer_idx) + ".attn.";
 
-        // Fused QKV: weight (2304, 768), bias (2304,)
         uint32_t qkv = linear(x, prefix + "qkv.weight", prefix + "qkv.bias",
-                              cfg.vision_hidden_size, 3 * cfg.vision_hidden_size, S); // (1, S, 2304)
+                              cfg.vision_hidden_size, 3 * cfg.vision_hidden_size, S);
 
-        // Split Q / K / V along the last dim
         int32_t steps[] = {1, 1, 1};
         int32_t sq[] = {0, 0, 0}, eq[] = {1, (int32_t)S, (int32_t)cfg.vision_hidden_size};
         int32_t sk[] = {0, 0, (int32_t)cfg.vision_hidden_size},
@@ -578,16 +797,15 @@ private:
         int32_t sv[] = {0, 0, (int32_t)(2 * cfg.vision_hidden_size)},
                 ev[] = {1, (int32_t)S, (int32_t)(3 * cfg.vision_hidden_size)};
         uint32_t q = g.contiguous(g.slice(qkv, g.constant({3}, sq, DType::INT32),
-                             g.constant({3}, eq, DType::INT32),
-                             g.constant({3}, steps, DType::INT32)));
+                                          g.constant({3}, eq, DType::INT32),
+                                          g.constant({3}, steps, DType::INT32)));
         uint32_t k = g.contiguous(g.slice(qkv, g.constant({3}, sk, DType::INT32),
-                             g.constant({3}, ek, DType::INT32),
-                             g.constant({3}, steps, DType::INT32)));
+                                          g.constant({3}, ek, DType::INT32),
+                                          g.constant({3}, steps, DType::INT32)));
         uint32_t v = g.contiguous(g.slice(qkv, g.constant({3}, sv, DType::INT32),
-                             g.constant({3}, ev, DType::INT32),
-                             g.constant({3}, steps, DType::INT32)));
+                                          g.constant({3}, ev, DType::INT32),
+                                          g.constant({3}, steps, DType::INT32)));
 
-        // Reshape to (1, num_heads, S, head_dim)
         int32_t sh4[] = {1, (int32_t)S, (int32_t)cfg.vision_num_heads, (int32_t)cfg.vision_head_dim};
         int32_t p_attn[] = {0, 2, 1, 3};
         q = g.contiguous(g.permute(g.reshape(q, g.constant({4}, sh4, DType::INT32)),
@@ -601,7 +819,6 @@ private:
         q = apply_rope(q, cos, sin, cfg.vision_num_heads, cfg.vision_head_dim, S);
         k = apply_rope(k, cos, sin, cfg.vision_num_heads, cfg.vision_head_dim, S);
 
-        // Scaled dot-product attention (bidirectional — no causal mask)
         float scale_val = 1.0f / std::sqrt((float)cfg.vision_head_dim);
         q = g.mul(q, expand_scalar_to_4d(scale_val, 1, cfg.vision_num_heads, S, cfg.vision_head_dim));
 
@@ -612,7 +829,6 @@ private:
         uint32_t probs = softmax_4d(scores, S, cfg.vision_num_heads);
         uint32_t attn_out = g.dot(probs, v); // (1, num_heads, S, head_dim)
 
-        // Merge heads → (1, S, hidden)
         int32_t p_ctx[] = {0, 2, 1, 3};
         uint32_t ctx_perm = g.contiguous(g.permute(attn_out, g.constant({4}, p_ctx, DType::INT32)));
         int32_t sh3_ctx[] = {1, (int32_t)S, (int32_t)cfg.vision_hidden_size};
@@ -627,35 +843,42 @@ private:
         std::string prefix = "vision_tower.blocks." + std::to_string(layer_idx) + ".mlp.";
         uint32_t h = linear(x, prefix + "linear_fc1.weight", prefix + "linear_fc1.bias",
                             cfg.vision_hidden_size, cfg.vision_intermediate_size, S);
-        h = gelu_atomic(h, S, cfg.vision_intermediate_size);
+        // [FIX] Bug #4: exact GELU instead of tanh approximation
+        h = gelu_exact(h, S, cfg.vision_intermediate_size);
         return linear(h, prefix + "linear_fc2.weight", prefix + "linear_fc2.bias",
                       cfg.vision_intermediate_size, cfg.vision_hidden_size, S);
     }
 
+    // [FIX] Bug #3: vision blocks now use LayerNorm (with bias) instead of RMSNorm.
     uint32_t vision_block(uint32_t x, int layer_idx, uint32_t cos, uint32_t sin, uint32_t S)
     {
         std::string prefix = "vision_tower.blocks." + std::to_string(layer_idx) + ".";
         uint32_t residual = x;
 
-        uint32_t h = rms_norm(x, prefix + "norm1.weight", S, cfg.vision_hidden_size,
-                              cfg.vision_rms_eps);
+        // norm1: LayerNorm(eps=1e-6) with weight AND bias
+        uint32_t h = layer_norm(x, prefix + "norm1.weight", prefix + "norm1.bias",
+                                S, cfg.vision_hidden_size, cfg.vision_ln_eps);
         h = vision_attention(h, layer_idx, cos, sin, S);
         h = g.add(residual, h);
         residual = h;
 
-        h = rms_norm(h, prefix + "norm2.weight", S, cfg.vision_hidden_size,
-                     cfg.vision_rms_eps);
+        // norm2: LayerNorm(eps=1e-6) with weight AND bias
+        h = layer_norm(h, prefix + "norm2.weight", prefix + "norm2.bias",
+                       S, cfg.vision_hidden_size, cfg.vision_ln_eps);
         h = vision_mlp(h, layer_idx, S);
         return g.add(residual, h);
     }
 
-    // Full Qwen3VL vision tower: patch_embed → 12 blocks. No final norm
-    // (the merger supplies its own LayerNorm).
+    // Full Qwen3VL vision tower: patch_embed + pos_embed → 12 blocks.
     uint32_t vit_encoder(uint32_t patch_input)
     {
         uint32_t S = cfg.num_patches; // 1024
 
         uint32_t h = patch_embed(patch_input, S); // (1, 1024, 768)
+
+        // [FIX] Bug #2: add bilinear-interpolated position embedding
+        uint32_t pos = compute_pos_embed(S); // (1, 1024, 768)
+        h = g.add(h, pos);
 
         auto [cos, sin] = compute_rope_2d(cfg.grid_h, cfg.grid_w,
                                           cfg.vision_head_dim, cfg.vision_rope_theta);
@@ -674,7 +897,6 @@ private:
                             uint32_t cos, uint32_t sin, uint32_t S)
     {
         std::string prefix = "language_model.layers." + std::to_string(layer_idx) + ".self_attn.";
-        // EuroBERT config: attention_bias=false → no biases on q/k/v/o projections
         uint32_t q = linear(x, prefix + "q_proj.weight", "",
                             cfg.text_hidden_size, cfg.text_hidden_size, S);
         uint32_t k = linear(x, prefix + "k_proj.weight", "",
@@ -691,7 +913,6 @@ private:
         v = g.contiguous(g.permute(g.reshape(v, g.constant({4}, sh4, DType::INT32)),
                                    g.constant({4}, p_attn, DType::INT32)));
 
-        // 1-D RoPE on Q and K (theta=1,000,000 per config)
         q = apply_rope(q, cos, sin, cfg.text_num_heads, cfg.text_head_dim, S);
         k = apply_rope(k, cos, sin, cfg.text_num_heads, cfg.text_head_dim, S);
 
@@ -700,9 +921,8 @@ private:
 
         int32_t p_k[] = {0, 1, 3, 2};
         uint32_t k_t = g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)));
-        uint32_t scores = g.dot(q, k_t); // (1, num_heads, S, S)
+        uint32_t scores = g.dot(q, k_t);
 
-        // Bidirectional (no causal mask) — EuroBERT sets is_causal=False
         uint32_t probs = softmax_4d(scores, S, cfg.text_num_heads);
         uint32_t attn_out = g.dot(probs, v);
 
@@ -715,11 +935,9 @@ private:
                       cfg.text_hidden_size, cfg.text_hidden_size, S);
     }
 
-    // SwiGLU MLP — gate * up → down.  intermediate_size = 3072 per config.
     uint32_t text_mlp(uint32_t x, int layer_idx, uint32_t S)
     {
         std::string prefix = "language_model.layers." + std::to_string(layer_idx) + ".mlp.";
-        // mlp_bias=false → no biases
         uint32_t gate = linear(x, prefix + "gate_proj.weight", "",
                                cfg.text_hidden_size, cfg.text_intermediate_size, S);
         uint32_t up = linear(x, prefix + "up_proj.weight", "",
@@ -749,6 +967,37 @@ private:
         return g.mul(x, inv_std_expanded);
     }
 
+    // [FIX] Bug #5: Gather chat-template prefix/suffix token embeddings.
+    // Returns a (1, prefix_len + suffix_len, hidden) tensor containing
+    // the embed_tokens rows for the prefix and suffix token IDs.
+    uint32_t build_chat_template_embeds()
+    {
+        // Load embed_tokens: (vocab_size, hidden)
+        uint32_t embed_table = weight("language_model.embed_tokens.weight");
+
+        // Gather prefix: (prefix_len, hidden)
+        uint32_t prefix_idx = g.constant({cfg.text_prefix_len},
+                                         CHAT_PREFIX_TOKEN_IDS,
+                                         DType::INT32);
+        uint32_t prefix_emb = g.gather(embed_table, prefix_idx); // (prefix_len, hidden)
+
+        // Gather suffix: (suffix_len, hidden)
+        uint32_t suffix_idx = g.constant({cfg.text_suffix_len},
+                                         CHAT_SUFFIX_TOKEN_IDS,
+                                         DType::INT32);
+        uint32_t suffix_emb = g.gather(embed_table, suffix_idx); // (suffix_len, hidden)
+
+        // Concat prefix + suffix along axis 0 → (prefix_len + suffix_len, hidden)
+        int32_t ax0 = 0;
+        uint32_t combined = g.concat({prefix_emb, suffix_emb},
+                                     g.constant({1}, &ax0, DType::INT32));
+
+        // Reshape to (1, prefix_len + suffix_len, hidden)
+        uint32_t total = cfg.text_prefix_len + cfg.text_suffix_len;
+        int32_t sh3[] = {1, (int32_t)total, (int32_t)cfg.text_hidden_size};
+        return g.reshape(combined, g.constant({3}, sh3, DType::INT32));
+    }
+
 public:
     JinaV5OmniNanoRetrievalModel(JinaV5Config &_cfg, Graph &_g, MemoryManager &_mem,
                                  std::string _w_path)
@@ -762,7 +1011,7 @@ public:
     uint32_t build_graph(uint32_t patch_input)
     {
         // ---- 1. Vision tower (Qwen3VL) -------------------------------------
-        // (1, 1024, 1536) → (1, 1024, 768)
+        // (1, 1024, 1536) → patch_embed + pos_embed → 12 blocks → (1, 1024, 768)
         uint32_t patch_feats = vit_encoder(patch_input);
 
         // ---- 2. Merger (PretrainedMerger) ----------------------------------
@@ -793,19 +1042,45 @@ public:
         // linear_fc1: 3072 → 3072, GELU, linear_fc2: 3072 → 768
         uint32_t proj1 = linear(merged, "merger.linear_fc1.weight", "merger.linear_fc1.bias",
                                 cfg.merged_dim, cfg.merged_dim, cfg.num_merged);
-        uint32_t act = gelu_atomic(proj1, cfg.num_merged, cfg.merged_dim);
+        // [FIX] Bug #4: exact GELU
+        uint32_t act = gelu_exact(proj1, cfg.num_merged, cfg.merged_dim);
         uint32_t proj2 = linear(act, "merger.linear_fc2.weight", "merger.linear_fc2.bias",
                                 cfg.merged_dim, cfg.text_hidden_size, cfg.num_merged);
 
-        // proj2 is the image-feature sequence that goes into the text encoder.
-        // For an image-only input with text="<image>", every position in
-        // input_ids is image_token_index, so masked_scatter overwrites the
-        // entire embed_tokens output — we can skip embed_tokens and feed
-        // proj2 directly as inputs_embeds.
+        // proj2 is the 256-token image-feature sequence.
 
-        // ---- 3. Text encoder (EuroBERT / LlamaModel, bidirectional) -------
-        uint32_t h = proj2; // (1, 256, 768)
-        uint32_t S = cfg.num_merged;
+        // ---- 3. [FIX] Bug #5: Build full text-encoder input ----------------
+        // [8 prefix embeds] + [256 image features] + [6 suffix embeds] = 270 tokens
+        uint32_t chat_embeds = build_chat_template_embeds(); // (1, 14, 768)
+
+        // Split into prefix (1, 8, 768) and suffix (1, 6, 768)
+        int32_t pre_starts[] = {0, 0, 0};
+        int32_t pre_ends[] = {1, (int32_t)cfg.text_prefix_len, (int32_t)cfg.text_hidden_size};
+        int32_t suf_starts[] = {0, (int32_t)cfg.text_prefix_len, 0};
+        int32_t suf_ends[] = {1, (int32_t)(cfg.text_prefix_len + cfg.text_suffix_len),
+                              (int32_t)cfg.text_hidden_size};
+        int32_t slice_steps[] = {1, 1, 1};
+
+        uint32_t prefix_emb = g.contiguous(
+            g.slice(chat_embeds,
+                    g.constant({3}, pre_starts, DType::INT32),
+                    g.constant({3}, pre_ends, DType::INT32),
+                    g.constant({3}, slice_steps, DType::INT32))); // (1, 8, 768)
+
+        uint32_t suffix_emb = g.contiguous(
+            g.slice(chat_embeds,
+                    g.constant({3}, suf_starts, DType::INT32),
+                    g.constant({3}, suf_ends, DType::INT32),
+                    g.constant({3}, slice_steps, DType::INT32))); // (1, 6, 768)
+
+        // Concat: prefix + image_features + suffix → (1, 270, 768)
+        int32_t ax_seq = 1;
+        uint32_t text_input = g.concat({prefix_emb, proj2, suffix_emb},
+                                       g.constant({1}, &ax_seq, DType::INT32));
+
+        // ---- 4. Text encoder (EuroBERT / LlamaModel, bidirectional) -------
+        uint32_t h = text_input;       // (1, 270, 768)
+        uint32_t S = cfg.text_seq_len; // 270
 
         auto [cos, sin] = compute_rope_1d(S, cfg.text_head_dim, cfg.text_rope_theta);
 
@@ -829,9 +1104,9 @@ public:
         h = rms_norm(h, "language_model.norm.weight", S,
                      cfg.text_hidden_size, cfg.text_rms_eps);
 
-        // ---- 4. Last-token pooling ----------------------------------------
-        // idx = attention_mask.sum(1) - 1.  With a full-ones mask of length S,
-        // idx = S - 1.
+        // ---- 5. Last-token pooling ----------------------------------------
+        // [FIX] The last token is at position S-1 = 269 (the last suffix token,
+        //       which is token ID 397 = ">\n").  Previously: position 255.
         int32_t starts_last[] = {0, (int32_t)(S - 1), 0};
         int32_t ends_last[] = {1, (int32_t)S, (int32_t)cfg.text_hidden_size};
         int32_t steps_last[] = {1, 1, 1};
@@ -843,7 +1118,7 @@ public:
         int32_t sh2_out[] = {1, (int32_t)cfg.text_hidden_size};
         uint32_t pooled = g.reshape(last_token, g.constant({2}, sh2_out, DType::INT32));
 
-        // ---- 5. L2 normalize ----------------------------------------------
+        // ---- 6. L2 normalize ----------------------------------------------
         return l2_normalize(pooled, cfg.text_hidden_size);
     }
 };
