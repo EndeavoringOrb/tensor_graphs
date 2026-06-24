@@ -1784,26 +1784,41 @@ private:
             else if (!valid && reason == "cycle")
             {
                 // After a failed topological sort, any e-class with indegree > 0 is
-                // either part of a cycle or transitively downstream of one. Jumping
-                // directly to such an e-class (rather than popping the path one node
-                // at a time) avoids wasting thousands of iterations re-trying
-                // selections near the leaves that cannot possibly break the cycle.
+                // either part of a cycle or transitively downstream of one. The
+                // previous heuristic picked the LATEST such e-class in path with an
+                // alternative. But when a cycle involves multiple e-classes in path
+                // (e.g. A at path[3906] and B at path[3911] both on the same cycle),
+                // backtracking only to the latest (B) leaves A's selection intact.
+                // The next iteration re-selects B with a different alternative, but
+                // A is unchanged so the cycle immediately re-forms. This produces
+                // the oscillation:
+                //   iter k:   cycle -> backtrack to B (path 4148 -> 3911)
+                //   iter k+1: cycle -> backtrack to B (path 4148 -> 3911)  [B's next alt]
+                //   ...
+                //   iter k+n: cycle -> backtrack to A (path 4206 -> 3906)  [B exhausted]
+                //   iter k+n+1: cycle -> backtrack to B (path 4148 -> 3911)  [A's next alt]
                 //
-                // We pick the LATEST such e-class in path because the cycle was
-                // created by the most recent selection decisions, and changing a
-                // more recent choice preserves more of the earlier (presumably
-                // good) work. If no cycle member has alternatives, we fall through
-                // to the default one-node-at-a-time backtracking below.
-                //
-                // Note: `indegree` is only fresh when we actually entered the
-                // cycle-detection block above (i.e. valid was true up to that
-                // point). When reason == "cycle" we are guaranteed to have gone
-                // through that block, so the array is safe to read here.
+                // Fix: recurrently check, for each candidate latest->earliest, whether
+                // the prefix path[0..idx) still contains a cycle given the current
+                // selections. If it does, backtracking to this candidate cannot break
+                // the cycle - the cause is earlier. Pick the LATEST candidate whose
+                // prefix is cycle-free; that's the minimal backtrack guaranteed to
+                // make progress. Fall back to the latest candidate if no prefix is
+                // cycle-free (defensive - shouldn't normally happen).
+
+                // Step 1: collect cycle-members in path with >= 1 alternative.
+                // Order: latest (largest path index) first.
+                struct CycleCandidate
+                {
+                    int path_idx;
+                    uint32_t eclass_id;
+                };
+                std::vector<CycleCandidate> candidates;
+                candidates.reserve(16);
                 for (int i = (int)path.size() - 1; i >= 0; --i)
                 {
                     uint32_t eclassId = path[i];
                     uint32_t canon = egraph.findConst(eclassId);
-
                     if (canon < indegree.size() && indegree[canon] > 0)
                     {
                         auto choiceIt = selection_map.find(canon);
@@ -1812,19 +1827,100 @@ private:
                             uint32_t sel = choiceIt->second;
                             const auto &enodes = egraph.getEClass(canon).enodes;
                             if (sel + 1 < enodes.size())
-                            {
-                                target_backtrack_eclass = eclassId;
-                                break;
-                            }
+                                candidates.push_back({i, eclassId});
                         }
                     }
                 }
+
+                // Step 2: scratch buffers for the simulated topo sort, reused across
+                // candidate checks. path_position[eclass] = index in path, or -1.
+                std::vector<uint32_t> temp_indegree(numClasses, 0);
+                std::vector<int> path_position(numClasses, -1);
+                for (int i = 0; i < (int)path.size(); ++i)
+                    path_position[path[i]] = i;
+
+                // Returns true if path[0..prefix_len) contains a cycle under the
+                // current selection_map. Rebuilds a fresh indegree map each call.
+                auto prefixHasCycle = [&](int prefix_len) -> bool
+                {
+                    if (prefix_len <= 0)
+                        return false;
+
+                    std::fill(temp_indegree.begin(), temp_indegree.end(), 0);
+
+                    for (int i = 0; i < prefix_len; ++i)
+                    {
+                        uint32_t eclassId = path[i];
+                        auto choiceIt = selection_map.find(eclassId);
+                        if (choiceIt == selection_map.end())
+                            continue;
+                        uint32_t sel = choiceIt->second;
+                        uint32_t enode_id = egraph.getEClass(eclassId).enodes[sel];
+                        for (uint32_t child : precomp.enode_canon_children[enode_id])
+                            temp_indegree[child]++;
+                    }
+
+                    std::vector<uint32_t> queue;
+                    queue.reserve(prefix_len);
+                    for (int i = 0; i < prefix_len; ++i)
+                    {
+                        uint32_t eclassId = path[i];
+                        if (temp_indegree[eclassId] == 0 && selection_map.count(eclassId))
+                            queue.push_back(eclassId);
+                    }
+
+                    uint32_t processed = 0;
+                    while (!queue.empty())
+                    {
+                        uint32_t curr = queue.back();
+                        queue.pop_back();
+                        processed++;
+
+                        auto choiceIt = selection_map.find(curr);
+                        if (choiceIt == selection_map.end())
+                            continue;
+                        uint32_t sel = choiceIt->second;
+                        uint32_t enode_id = egraph.getEClass(curr).enodes[sel];
+                        for (uint32_t canonChild : precomp.enode_canon_children[enode_id])
+                        {
+                            if (--temp_indegree[canonChild] == 0)
+                            {
+                                int pos = path_position[canonChild];
+                                if (pos >= 0 && pos < prefix_len)
+                                    queue.push_back(canonChild);
+                            }
+                        }
+                    }
+
+                    return processed < (uint32_t)prefix_len;
+                };
+
+                // Step 3: walk latest->earliest. Pick the first candidate whose
+                // prefix is cycle-free. Because smaller prefix is monotonically
+                // less likely to contain a cycle, the first cycle-free candidate
+                // we encounter is also the latest cycle-free one.
+                for (const auto &cand : candidates)
+                {
+                    if (!prefixHasCycle(cand.path_idx))
+                    {
+                        target_backtrack_eclass = cand.eclass_id;
+                        break;
+                    }
+                }
+
+                // Defensive fallback: if every candidate's prefix still has a cycle
+                // (e.g. cycle anchored by selections not in `path`), use the latest
+                // candidate so we at least try something.
+                if (target_backtrack_eclass == UINT32_MAX && !candidates.empty())
+                    target_backtrack_eclass = candidates.front().eclass_id;
 
                 if (target_backtrack_eclass != UINT32_MAX)
                 {
                     std::cout << "[Planner.extractBest] cycle: backtracking to eclass "
                               << std::to_string(target_backtrack_eclass)
-                              << " (path size " << std::to_string(path.size()) << ")"
+                              << " (path size " << std::to_string(path.size())
+                              << ", considered " << std::to_string(candidates.size())
+                              << " candidates)"
                               << std::endl;
                 }
             }
