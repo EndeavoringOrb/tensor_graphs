@@ -1781,6 +1781,53 @@ private:
                     target_backtrack_eclass = path[backtrack_idx];
                 }
             }
+            else if (!valid && reason == "cycle")
+            {
+                // After a failed topological sort, any e-class with indegree > 0 is
+                // either part of a cycle or transitively downstream of one. Jumping
+                // directly to such an e-class (rather than popping the path one node
+                // at a time) avoids wasting thousands of iterations re-trying
+                // selections near the leaves that cannot possibly break the cycle.
+                //
+                // We pick the LATEST such e-class in path because the cycle was
+                // created by the most recent selection decisions, and changing a
+                // more recent choice preserves more of the earlier (presumably
+                // good) work. If no cycle member has alternatives, we fall through
+                // to the default one-node-at-a-time backtracking below.
+                //
+                // Note: `indegree` is only fresh when we actually entered the
+                // cycle-detection block above (i.e. valid was true up to that
+                // point). When reason == "cycle" we are guaranteed to have gone
+                // through that block, so the array is safe to read here.
+                for (int i = (int)path.size() - 1; i >= 0; --i)
+                {
+                    uint32_t eclassId = path[i];
+                    uint32_t canon = egraph.findConst(eclassId);
+
+                    if (canon < indegree.size() && indegree[canon] > 0)
+                    {
+                        auto choiceIt = selection_map.find(canon);
+                        if (choiceIt != selection_map.end())
+                        {
+                            uint32_t sel = choiceIt->second;
+                            const auto &enodes = egraph.getEClass(canon).enodes;
+                            if (sel + 1 < enodes.size())
+                            {
+                                target_backtrack_eclass = eclassId;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (target_backtrack_eclass != UINT32_MAX)
+                {
+                    std::cout << "[Planner.extractBest] cycle: backtracking to eclass "
+                              << std::to_string(target_backtrack_eclass)
+                              << " (path size " << std::to_string(path.size()) << ")"
+                              << std::endl;
+                }
+            }
 
             bool skip_increment = (target_backtrack_eclass != UINT32_MAX);
             std::cout << "path size " << std::to_string(path.size()) << std::endl;
