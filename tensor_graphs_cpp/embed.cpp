@@ -181,11 +181,14 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
     int grid_w = width / PATCH_SIZE;
     int num_patches = grid_h * grid_w;
 
+    std::vector<uint32_t> inShape = {1, (uint32_t)num_patches, (uint32_t)PATCH_DIM};
+    std::vector<uint32_t> outShape = {1, EMBEDDING_DIM};
+
     cs.graph = std::make_unique<Graph>();
     cs.cfg = std::make_unique<JinaV5Config>((uint32_t)height, (uint32_t)width);
 
     cs.patch_input_id = cs.graph->input(
-        {1, (uint32_t)num_patches, (uint32_t)PATCH_DIM},
+        inShape,
         DType::FLOAT32, {}, StorageType::PERSISTENT);
 
     JinaV5OmniNanoRetrievalModel model(*cs.cfg, *cs.graph, mem, weights_path);
@@ -202,10 +205,11 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
 
     // Register a bucket where ONLY the image input is dirty (all weights are clean/static)
     std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
-    inputDirty[cs.patch_input_id] = makeFull(cs.graph->getNode(cs.patch_input_id).getShape());
+    inputDirty[cs.patch_input_id] = makeFull(inShape);
 
-    std::vector<Region> outputNeeded = makeFull(cs.graph->getNode(cs.root_id).getShape());
+    std::vector<Region> outputNeeded = makeFull(outShape);
 
+    std::cout << "[build_session] added bucket in: " << toString(inShape) << ", out: " << toString(outShape) << std::endl;
     cs.session->addBucket(inputDirty, outputNeeded);
 
     cs.session->compile(true);
@@ -461,8 +465,8 @@ int main(int argc, char *argv[])
                     continue;
                 }
 
-                try
-                {
+                // try
+                // {
                     // Rebuild graph if dimensions changed
                     if (width != cs.width || height != cs.height)
                     {
@@ -543,12 +547,12 @@ int main(int argc, char *argv[])
                     std::memcpy(shm_payload->embedding, host_output,
                                 EMBEDDING_DIM * sizeof(float));
                     shm_payload->status = 0;
-                }
-                catch (const std::exception &e)
-                {
-                    std::cerr << "[Server Error] Exception: " << e.what() << std::endl;
-                    shm_payload->status = -1;
-                }
+                // }
+                // catch (const std::exception &e)
+                // {
+                //     std::cerr << "[Server Error] Exception: " << e.what() << std::endl;
+                //     shm_payload->status = -1;
+                // }
                 shm_payload->state = 2;
             }
             else if (shm_payload->state == 3)

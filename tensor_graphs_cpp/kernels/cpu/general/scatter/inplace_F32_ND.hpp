@@ -5,6 +5,22 @@
 
 inline bool matchScatterF32_ND_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
+    // Ensure target (inputs[0]), updates (inputs[1]), and output have the same rank
+    if (inputs[0].getShape().size() != inputs[1].getShape().size() ||
+        inputs[0].getShape().size() != output.getShape().size())
+    {
+        return false;
+    }
+
+    // Ensure the index tensors (starts, ends, steps) have size matching the rank
+    uint32_t rank = static_cast<uint32_t>(inputs[0].getShape().size());
+    if (inputs[2].getShape().size() != 1 || inputs[2].getShape()[0] != rank)
+        return false;
+    if (inputs[3].getShape().size() != 1 || inputs[3].getShape()[0] != rank)
+        return false;
+    if (inputs[4].getShape().size() != 1 || inputs[4].getShape()[0] != rank)
+        return false;
+
     return true;
 }
 
