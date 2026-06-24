@@ -1783,144 +1783,129 @@ private:
             }
             else if (!valid && reason == "cycle")
             {
-                // After a failed topological sort, any e-class with indegree > 0 is
-                // either part of a cycle or transitively downstream of one. The
-                // previous heuristic picked the LATEST such e-class in path with an
-                // alternative. But when a cycle involves multiple e-classes in path
-                // (e.g. A at path[3906] and B at path[3911] both on the same cycle),
-                // backtracking only to the latest (B) leaves A's selection intact.
-                // The next iteration re-selects B with a different alternative, but
-                // A is unchanged so the cycle immediately re-forms. This produces
-                // the oscillation:
-                //   iter k:   cycle -> backtrack to B (path 4148 -> 3911)
-                //   iter k+1: cycle -> backtrack to B (path 4148 -> 3911)  [B's next alt]
-                //   ...
-                //   iter k+n: cycle -> backtrack to A (path 4206 -> 3906)  [B exhausted]
-                //   iter k+n+1: cycle -> backtrack to B (path 4148 -> 3911)  [A's next alt]
-                //
-                // Fix: recurrently check, for each candidate latest->earliest, whether
-                // the prefix path[0..idx) still contains a cycle given the current
-                // selections. If it does, backtracking to this candidate cannot break
-                // the cycle - the cause is earlier. Pick the LATEST candidate whose
-                // prefix is cycle-free; that's the minimal backtrack guaranteed to
-                // make progress. Fall back to the latest candidate if no prefix is
-                // cycle-free (defensive - shouldn't normally happen).
+                // Compute SCCs of the selection-induced subgraph using Tarjan's algorithm.
+                // For each SCC of size > 1 (or size == 1 with a self-loop, i.e. a true cycle):
+                //   collect members that are in `path` and have >= 1 alternative.
+                // Among all such members across all non-trivial SCCs, pick the one
+                // with the smallest path index. That's the backtrack target.
 
-                // Step 1: collect cycle-members in path with >= 1 alternative.
-                // Order: latest (largest path index) first.
-                struct CycleCandidate
+                int best_backtrack_idx = std::numeric_limits<int>::max();
+                std::vector<int> path_idx(numClasses, -1);
+                for (int i = 0; i < (int)path.size(); ++i)
                 {
-                    int path_idx;
-                    uint32_t eclass_id;
-                };
-                std::vector<CycleCandidate> candidates;
-                candidates.reserve(16);
-                for (int i = (int)path.size() - 1; i >= 0; --i)
-                {
-                    uint32_t eclassId = path[i];
-                    uint32_t canon = egraph.findConst(eclassId);
-                    if (canon < indegree.size() && indegree[canon] > 0)
-                    {
-                        auto choiceIt = selection_map.find(canon);
-                        if (choiceIt != selection_map.end())
-                        {
-                            uint32_t sel = choiceIt->second;
-                            const auto &enodes = egraph.getEClass(canon).enodes;
-                            if (sel + 1 < enodes.size())
-                                candidates.push_back({i, eclassId});
-                        }
-                    }
+                    path_idx[egraph.findConst(path[i])] = i;
                 }
 
-                // Step 2: scratch buffers for the simulated topo sort, reused across
-                // candidate checks. path_position[eclass] = index in path, or -1.
-                std::vector<uint32_t> temp_indegree(numClasses, 0);
-                std::vector<int> path_position(numClasses, -1);
-                for (int i = 0; i < (int)path.size(); ++i)
-                    path_position[path[i]] = i;
+                std::vector<int> disc(numClasses, -1);
+                std::vector<int> low(numClasses, -1);
+                std::vector<bool> onStack(numClasses, false);
+                std::vector<uint32_t> st;
+                int time_counter = 0;
 
-                // Returns true if path[0..prefix_len) contains a cycle under the
-                // current selection_map. Rebuilds a fresh indegree map each call.
-                auto prefixHasCycle = [&](int prefix_len) -> bool
+                std::function<void(uint32_t)> tarjan = [&](uint32_t u)
                 {
-                    if (prefix_len <= 0)
-                        return false;
+                    disc[u] = low[u] = time_counter++;
+                    st.push_back(u);
+                    onStack[u] = true;
 
-                    std::fill(temp_indegree.begin(), temp_indegree.end(), 0);
-
-                    for (int i = 0; i < prefix_len; ++i)
+                    auto it = selection_map.find(u);
+                    if (it != selection_map.end())
                     {
-                        uint32_t eclassId = path[i];
-                        auto choiceIt = selection_map.find(eclassId);
-                        if (choiceIt == selection_map.end())
-                            continue;
-                        uint32_t sel = choiceIt->second;
-                        uint32_t enode_id = egraph.getEClass(eclassId).enodes[sel];
-                        for (uint32_t child : precomp.enode_canon_children[enode_id])
-                            temp_indegree[child]++;
-                    }
-
-                    std::vector<uint32_t> queue;
-                    queue.reserve(prefix_len);
-                    for (int i = 0; i < prefix_len; ++i)
-                    {
-                        uint32_t eclassId = path[i];
-                        if (temp_indegree[eclassId] == 0 && selection_map.count(eclassId))
-                            queue.push_back(eclassId);
-                    }
-
-                    uint32_t processed = 0;
-                    while (!queue.empty())
-                    {
-                        uint32_t curr = queue.back();
-                        queue.pop_back();
-                        processed++;
-
-                        auto choiceIt = selection_map.find(curr);
-                        if (choiceIt == selection_map.end())
-                            continue;
-                        uint32_t sel = choiceIt->second;
-                        uint32_t enode_id = egraph.getEClass(curr).enodes[sel];
-                        for (uint32_t canonChild : precomp.enode_canon_children[enode_id])
+                        uint32_t sel = it->second;
+                        uint32_t enode_id = egraph.getEClass(u).enodes[sel];
+                        for (uint32_t v : precomp.enode_canon_children[enode_id])
                         {
-                            if (--temp_indegree[canonChild] == 0)
+                            if (selection_map.find(v) != selection_map.end())
                             {
-                                int pos = path_position[canonChild];
-                                if (pos >= 0 && pos < prefix_len)
-                                    queue.push_back(canonChild);
+                                if (disc[v] == -1)
+                                {
+                                    tarjan(v);
+                                    low[u] = std::min(low[u], low[v]);
+                                }
+                                else if (onStack[v])
+                                {
+                                    low[u] = std::min(low[u], disc[v]);
+                                }
                             }
                         }
                     }
 
-                    return processed < (uint32_t)prefix_len;
+                    if (low[u] == disc[u])
+                    {
+                        std::vector<uint32_t> scc;
+                        while (true)
+                        {
+                            uint32_t v = st.back();
+                            st.pop_back();
+                            onStack[v] = false;
+                            scc.push_back(v);
+                            if (u == v)
+                                break;
+                        }
+
+                        bool is_cycle = false;
+                        if (scc.size() > 1)
+                        {
+                            is_cycle = true;
+                        }
+                        else if (scc.size() == 1)
+                        {
+                            uint32_t v = scc[0];
+                            auto itv = selection_map.find(v);
+                            if (itv != selection_map.end())
+                            {
+                                uint32_t sel = itv->second;
+                                uint32_t enode_id = egraph.getEClass(v).enodes[sel];
+                                for (uint32_t child : precomp.enode_canon_children[enode_id])
+                                {
+                                    if (child == v)
+                                    {
+                                        is_cycle = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (is_cycle)
+                        {
+                            for (uint32_t v : scc)
+                            {
+                                if (path_idx[v] != -1)
+                                {
+                                    auto choiceIt = selection_map.find(v);
+                                    if (choiceIt != selection_map.end())
+                                    {
+                                        uint32_t sel = choiceIt->second;
+                                        const auto &enodes = egraph.getEClass(v).enodes;
+                                        if (sel + 1 < enodes.size())
+                                        {
+                                            if (path_idx[v] < best_backtrack_idx)
+                                            {
+                                                best_backtrack_idx = path_idx[v];
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 };
 
-                // Step 3: walk latest->earliest. Pick the first candidate whose
-                // prefix is cycle-free. Because smaller prefix is monotonically
-                // less likely to contain a cycle, the first cycle-free candidate
-                // we encounter is also the latest cycle-free one.
-                for (const auto &cand : candidates)
+                for (const auto &kv : selection_map)
                 {
-                    if (!prefixHasCycle(cand.path_idx))
+                    if (disc[kv.first] == -1)
                     {
-                        target_backtrack_eclass = cand.eclass_id;
-                        break;
+                        tarjan(kv.first);
                     }
                 }
 
-                // Defensive fallback: if every candidate's prefix still has a cycle
-                // (e.g. cycle anchored by selections not in `path`), use the latest
-                // candidate so we at least try something.
-                if (target_backtrack_eclass == UINT32_MAX && !candidates.empty())
-                    target_backtrack_eclass = candidates.front().eclass_id;
-
-                if (target_backtrack_eclass != UINT32_MAX)
+                if (best_backtrack_idx != std::numeric_limits<int>::max())
                 {
+                    target_backtrack_eclass = path[best_backtrack_idx];
                     std::cout << "[Planner.extractBest] cycle: backtracking to eclass "
                               << std::to_string(target_backtrack_eclass)
-                              << " (path size " << std::to_string(path.size())
-                              << ", considered " << std::to_string(candidates.size())
-                              << " candidates)"
+                              << " (path index " << best_backtrack_idx << " of " << path.size() << ")"
                               << std::endl;
                 }
             }
