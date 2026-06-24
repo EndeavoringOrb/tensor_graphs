@@ -49,6 +49,7 @@
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
 #include "core/repo.hpp"
+#include "core/shapes.hpp"
 
 #include "models/jina-embeddings-v5-omni-nano-retrieval.hpp"
 #include "generated/kernels_all.gen.hpp"
@@ -163,6 +164,7 @@ struct CompiledSession
     uint32_t root_id = 0;
     int width = 0;
     int height = 0;
+    bool has_run = false;
 
     // Reusable staging buffers — sized to match the current (width, height).
     // build_patch_input_inplace() and normalize_image_inplace() write into them.
@@ -197,10 +199,20 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
 
     cs.session = std::make_unique<Session>(*cs.graph, mem, cs.root_id,
                                            cache_file, 0, &repo);
+
+    // Register a bucket where ONLY the image input is dirty (all weights are clean/static)
+    std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
+    inputDirty[cs.patch_input_id] = makeFull(cs.graph->getNode(cs.patch_input_id).getShape());
+
+    std::vector<Region> outputNeeded = makeFull(cs.graph->getNode(cs.root_id).getShape());
+
+    cs.session->addBucket(inputDirty, outputNeeded);
+
     cs.session->compile(true);
 
     cs.width = width;
     cs.height = height;
+    cs.has_run = false; // Reset run tracking flag on rebuild/compile
 
     // Pre-allocate reusable staging buffers for this image size so the polling
     // loop doesn't allocate/free on every single image.
@@ -481,14 +493,12 @@ int main(int argc, char *argv[])
                                   << std::endl;
                     }
 
-                    // 1. Normalize image in-place into cs.norm_image (no realloc
-                    //    when dimensions match the previous image — embed.py
-                    //    groups images by dimensions so this is the common path).
+                    // 1. Normalize image in-place
                     normalize_image_inplace(
                         shm_payload->pixel_data, width, height, channels,
                         cs.norm_image);
 
-                    // 2. Build patch input in-place into cs.patch_input.
+                    // 2. Build patch input in-place
                     build_patch_input_inplace(cs.norm_image, width, height,
                                               cs.patch_input);
 
@@ -497,8 +507,18 @@ int main(int argc, char *argv[])
                                                  cs.patch_input.data(),
                                                  cs.patch_input.size() * sizeof(float));
 
+                    // Use the incremental bucket if we have already loaded the static weights on the first run
+                    Bucket b;
+                    if (cs.has_run)
+                    {
+                        b.inputDirtyRegions[cs.patch_input_id] = makeFull(cs.graph->getNode(cs.patch_input_id).getShape());
+                        b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
+                    }
+
                     const float *device_output_ptr =
-                        static_cast<const float *>(cs.session->run());
+                        static_cast<const float *>(cs.session->run(b));
+
+                    cs.has_run = true; // Mark as run completed so subsequent passes bypass weight copy
 
                     // 4. Copy embedding back
                     float host_output[EMBEDDING_DIM];

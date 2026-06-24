@@ -1,3 +1,7 @@
+rewrite rule equivalent subgraphs
+mul(x, -1) -> neg(x)
+mul(-1, x) -> mul(x, -1)
+
 Backend::STORAGE
 -allow cache of copyto(storage->cpu). this means we need to allow clean nodes to be marked as protected. this means we need to know which nodes are clean. to generalize to weights, this means we need to check ALL inputs for dirtyness (not just user input). have user specify dirty regions instead of diffing inputs, this way we avoid the expensive diff check. This way we don't need special handling for the full bucket, it will automatically initialize everything because all inputs are dirty. This should also remove the need for a constant folding rewrite rule
 -make storage device buffer. maybe separate DeviceBuffer into a base thing and then an inherited class for each backend. but we don't want the storage device buffer to actually read from file, basically it should just handle offsets within the file, then the copyto storage->cpu kernel will handle loading. the copyto storage->cpu kernel should replace the model loaders. perhaps model loaders can be reworked into "model indexers" that handle hasTensor, getMetadata, and translate name -> file pointer (is a file pointer a thing?) & offset. I'm imagining the kernel getting a file pointer, an offset, then it can use the inViews to determine what to load. The KernelFunc signature would need to be generalized to elegantly handle file & tensor inputs. Maybe a custom struct instead of std::vector<const void *>.
