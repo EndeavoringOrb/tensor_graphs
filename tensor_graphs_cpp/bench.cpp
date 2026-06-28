@@ -32,7 +32,167 @@
 #include <fcntl.h>
 #endif
 
-// RAII helper to automatically close file descriptors and delete dummy files
+// =============================================================================
+// Extensible Unified RAII Device Buffer
+// =============================================================================
+struct BenchBuffer
+{
+    Backend backend = Backend::CPU;
+    uint64_t bytes = 0;
+    std::vector<uint8_t> hostData;
+    void *devicePtr = nullptr;
+
+    BenchBuffer() = default;
+    ~BenchBuffer()
+    {
+        free();
+    }
+
+    // Disable copy
+    BenchBuffer(const BenchBuffer &) = delete;
+    BenchBuffer &operator=(const BenchBuffer &) = delete;
+
+    // Support move
+    BenchBuffer(BenchBuffer &&o) noexcept
+    {
+        *this = std::move(o);
+    }
+
+    BenchBuffer &operator=(BenchBuffer &&o) noexcept
+    {
+        if (this != &o)
+        {
+            free();
+            backend = o.backend;
+            bytes = o.bytes;
+            hostData = std::move(o.hostData);
+            devicePtr = o.devicePtr;
+            o.devicePtr = nullptr;
+            o.bytes = 0;
+        }
+        return *this;
+    }
+
+    void allocate(Backend b, uint64_t size)
+    {
+        free();
+        backend = b;
+        bytes = size == 0 ? 1 : size;
+
+        hostData.resize(bytes, 0);
+
+        if (backend == Backend::CUDA)
+        {
+#ifdef USE_CUDA
+            cudaError_t err = cudaMalloc(&devicePtr, bytes);
+            if (err != cudaSuccess)
+            {
+                Error::throw_err("cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
+            }
+#else
+            Error::throw_err("CUDA backend requested but USE_CUDA is not defined.");
+#endif
+        }
+        else if (backend == Backend::OPENCL)
+        {
+            OpenCLState::get().init();
+            cl_context ctx = OpenCLState::get().context;
+            if (!ctx)
+            {
+                Error::throw_err("OpenCL context not initialized.");
+            }
+            devicePtr = clSVMAlloc(ctx, CL_MEM_READ_WRITE | CL_MEM_SVM_FINE_GRAIN_BUFFER, bytes, 0);
+            if (!devicePtr)
+            {
+                Error::throw_err("clSVMAlloc failed to allocate memory of size " + std::to_string(bytes));
+            }
+        }
+        else
+        {
+            devicePtr = hostData.data();
+        }
+    }
+
+    void upload()
+    {
+        if (backend == Backend::CUDA)
+        {
+#ifdef USE_CUDA
+            cudaError_t err = cudaMemcpy(devicePtr, hostData.data(), bytes, cudaMemcpyHostToDevice);
+            if (err != cudaSuccess)
+            {
+                Error::throw_err("cudaMemcpy HostToDevice failed: " + std::string(cudaGetErrorString(err)));
+            }
+#endif
+        }
+        else if (backend == Backend::OPENCL)
+        {
+            if (devicePtr != hostData.data() && devicePtr && !hostData.empty())
+            {
+                std::memcpy(devicePtr, hostData.data(), bytes);
+            }
+        }
+    }
+
+    void download()
+    {
+        if (backend == Backend::CUDA)
+        {
+#ifdef USE_CUDA
+            cudaError_t err = cudaMemcpy(hostData.data(), devicePtr, bytes, cudaMemcpyDeviceToHost);
+            if (err != cudaSuccess)
+            {
+                Error::throw_err("cudaMemcpy DeviceToHost failed: " + std::string(cudaGetErrorString(err)));
+            }
+#endif
+        }
+        else if (backend == Backend::OPENCL)
+        {
+            if (devicePtr != hostData.data() && devicePtr && !hostData.empty())
+            {
+                std::memcpy(hostData.data(), devicePtr, bytes);
+            }
+        }
+    }
+
+    void free()
+    {
+        if (devicePtr)
+        {
+            if (backend == Backend::CUDA)
+            {
+#ifdef USE_CUDA
+                cudaFree(devicePtr);
+#endif
+            }
+            else if (backend == Backend::OPENCL)
+            {
+                cl_context ctx = OpenCLState::get().context;
+                if (ctx)
+                {
+                    clSVMFree(ctx, devicePtr);
+                }
+            }
+            devicePtr = nullptr;
+        }
+        bytes = 0;
+        hostData.clear();
+    }
+
+    const void *getReadPtr() const
+    {
+        return (backend == Backend::STORAGE) ? nullptr : devicePtr;
+    }
+
+    void *getWritePtr()
+    {
+        return devicePtr;
+    }
+};
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
 struct StorageFiles
 {
     std::vector<std::string> paths;
@@ -40,11 +200,9 @@ struct StorageFiles
 
     StorageFiles() = default;
 
-    // Prevent copy semantics to avoid double-free/double-close issues
     StorageFiles(const StorageFiles &) = delete;
     StorageFiles &operator=(const StorageFiles &) = delete;
 
-    // Enable clean move semantics
     StorageFiles(StorageFiles &&other) noexcept
         : paths(std::move(other.paths)), fds(std::move(other.fds)) {}
 
@@ -87,11 +245,10 @@ struct StorageFiles
     }
 };
 
-// Creates storage-backed dummy files for cache-bashing during benchmarking
 StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel, int runIdx)
 {
     StorageFiles sf;
-    std::vector<char> dummyBuf(1024 * 1024, 0); // 1MB zero buffer to chunk write
+    std::vector<char> dummyBuf(1024 * 1024, 0);
 
     for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
     {
@@ -147,13 +304,33 @@ StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel, int
     return sf;
 }
 
+void synchronizeBackend(Backend backend)
+{
+    if (backend == Backend::CUDA)
+    {
+#ifdef USE_CUDA
+        cudaError_t err = cudaDeviceSynchronize();
+        if (err != cudaSuccess)
+        {
+            Error::throw_err("CUDA Synchronization failed: " + std::string(cudaGetErrorString(err)));
+        }
+#endif
+    }
+    else if (backend == Backend::OPENCL)
+    {
+        clFinish(OpenCLState::get().queue);
+    }
+}
+
+// =============================================================================
+// Entry Point
+// =============================================================================
 int main(int argc, char *argv[])
 {
     int skipCount = 0;
     std::string targetKernel = "";
     bool listOnly = false;
 
-    // 1. Parse Arguments
     for (int i = 1; i < argc; ++i)
     {
         std::string arg = argv[i];
@@ -180,11 +357,9 @@ int main(int argc, char *argv[])
         std::cout << "Filtering benchmarks for kernel containing: " << targetKernel << std::endl;
     }
 
-    // 2. Initialize CostModel and load existing records
     CostModel costModel;
     costModel.load(recordsPath);
 
-    // Build a registry of already benchmarked kernels to skip redundancy
     std::unordered_set<std::string> recordedKeys;
     std::ifstream recordsFile(recordsPath, std::ios::binary);
     if (recordsFile.is_open())
@@ -194,7 +369,7 @@ int main(int argc, char *argv[])
         {
             Record r;
             br.read(r);
-            r.runTime = 0.0f; // Normalize for skip comparison
+            r.runTime = 0.0f;
             recordedKeys.insert(serializeToString(r));
         }
     }
@@ -206,7 +381,6 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    // 3. Filter and Collect unique calls
     std::vector<Record> toBenchmark;
     std::unordered_set<std::string> seenCalls;
 
@@ -228,7 +402,6 @@ int main(int argc, char *argv[])
                 const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
                 std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
 
-                // Simple string match filtering
                 if (!targetKernel.empty() && name.find(targetKernel) == std::string::npos)
                     continue;
 
@@ -243,7 +416,6 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    // 4. Estimate costs for sorting
     for (uint32_t i = 0; i < toBenchmark.size(); i++)
     {
         Record &r = toBenchmark[i];
@@ -253,8 +425,6 @@ int main(int argc, char *argv[])
         r.runTime = std::isinf(cost) ? -1.0f : cost;
     }
 
-    // 5. Sort kernels by cost (cheapest first)
-    // Fallback to element count for kernels with no previous data (inf cost).
     std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb)
                      {
         float costA = ra.runTime;
@@ -284,7 +454,6 @@ int main(int argc, char *argv[])
 
     std::cout << (listOnly ? "Listing " : "Benchmarking ") << toBenchmark.size() - startIdx << " configurations..." << std::endl;
 
-    // 6. Main Processing Loop (Listing / Benchmarking)
     std::ofstream outFile;
     if (!listOnly)
     {
@@ -298,7 +467,6 @@ int main(int argc, char *argv[])
         uint64_t kernelUid = r.kernelUid;
         const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
 
-        // Print general information immediately
         std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "][";
         for (size_t bidx = 0; bidx < kernel.backends.size(); ++bidx)
         {
@@ -310,7 +478,6 @@ int main(int argc, char *argv[])
                   << " (0x" << std::hex << kernelUid << std::dec << ")"
                   << " est " << std::to_string(r.runTime) << " ms\n";
 
-        // Print All Inputs
         for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
         {
             std::cout << "  In  #" << idx << ": dtype=" << toString(r.inputDTypes[idx])
@@ -318,7 +485,6 @@ int main(int argc, char *argv[])
                       << ", strides=" << toString(r.inputStrides[idx]) << "\n";
         }
 
-        // Print All Outputs
         for (size_t idx = 0; idx < r.outputShapes.size(); ++idx)
         {
             std::cout << "  Out #" << idx << ": dtype=" << toString(r.outputDTypes[idx])
@@ -333,7 +499,6 @@ int main(int argc, char *argv[])
 
         try
         {
-            // Build dummy nodes for validation against centralized matching logic
             std::vector<TensorNode> dummyInputs(r.inputShapes.size());
             for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
@@ -362,82 +527,20 @@ int main(int argc, char *argv[])
                 dummyOutput.backend = r.backends.empty() ? Backend::CPU : r.backends[0];
             }
 
-            // Run central match that safely ignores OOB array evaluations
             if (!kernel.matches(dummyInputs, dummyOutput))
             {
                 std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelUid << "): record fails matches() validity check." << std::endl;
                 continue;
             }
 
-            std::vector<std::vector<uint8_t>> inData(r.inputShapes.size());
+            // Unified RAII buffer lists
+            std::vector<BenchBuffer> inputBuffers(r.inputShapes.size());
             std::vector<const void *> inPtrs(r.inputShapes.size(), nullptr);
             std::vector<TensorView> inViews(r.inputShapes.size());
 
-            std::vector<std::vector<uint8_t>> outData(r.outputShapes.size());
+            std::vector<BenchBuffer> outputBuffers(r.outputShapes.size());
             std::vector<void *> outPtrs(r.outputShapes.size(), nullptr);
             std::vector<TensorView> outViews(r.outputShapes.size());
-
-#ifdef USE_CUDA
-            std::vector<bool> inIsCuda(r.inputShapes.size(), false);
-            bool runCuda = false;
-            for (Backend b : kernel.backends)
-            {
-                if (b == Backend::CUDA)
-                    runCuda = true;
-            }
-
-            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
-            {
-                size_t ruleIdx = idx;
-                if (kernel.isVariadic)
-                {
-                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
-                }
-
-                if (ruleIdx < kernel.inputBackends.size())
-                {
-                    bool hasCuda = false;
-                    for (Backend b : kernel.inputBackends[ruleIdx])
-                    {
-                        if (b == Backend::CUDA)
-                            hasCuda = true;
-                    }
-                    inIsCuda[idx] = hasCuda;
-                }
-                else
-                {
-                    inIsCuda[idx] = runCuda;
-                }
-            }
-            bool isOutputCuda = runCuda;
-#else
-            std::vector<bool> inIsCuda(r.inputShapes.size(), false);
-            bool isOutputCuda = false;
-#endif
-
-            // RAII wrapper to guarantee device memory is freed even if an exception occurs
-            struct CudaCleanup
-            {
-                std::vector<const void *> &inPtrs;
-                std::vector<void *> &outPtrs;
-                const std::vector<bool> &inIsCuda;
-                bool isOutputCuda;
-                ~CudaCleanup()
-                {
-#ifdef USE_CUDA
-                    for (size_t idx = 0; idx < inPtrs.size(); ++idx)
-                    {
-                        if (idx < inIsCuda.size() && inIsCuda[idx] && inPtrs[idx])
-                            cudaFree(const_cast<void *>(inPtrs[idx]));
-                    }
-                    for (size_t idx = 0; idx < outPtrs.size(); ++idx)
-                    {
-                        if (isOutputCuda && outPtrs[idx])
-                            cudaFree(outPtrs[idx]);
-                    }
-#endif
-                }
-            } cleanup{inPtrs, outPtrs, inIsCuda, isOutputCuda};
 
             for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
@@ -454,26 +557,33 @@ int main(int argc, char *argv[])
                 if (elements == 0)
                     elements = 1;
                 uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
-                inData[idx].resize(bytes);
 
-                // Prioritize providing the explicit constants if the planner saved them,
-                // to avoid index-out-of-bounds or zero-division runtime crashes inside reference kernels
+                size_t ruleIdx = idx;
+                if (kernel.isVariadic)
+                {
+                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+                }
+                Backend b = Backend::CPU;
+                if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
+                    b = r.inputBackends[ruleIdx][0];
+
+                inputBuffers[idx].allocate(b, bytes);
+
                 if (idx < r.inputConstants.size() && !r.inputConstants[idx].empty() && r.inputConstants[idx].size() == bytes)
                 {
-                    std::memcpy(inData[idx].data(), r.inputConstants[idx].data(), bytes);
+                    std::memcpy(inputBuffers[idx].hostData.data(), r.inputConstants[idx].data(), bytes);
                 }
                 else
                 {
-                    // Pre-fill everything with safely predictable "1" values otherwise
                     if (r.inputDTypes[idx] == DType::FLOAT32)
                     {
-                        float *fptr = reinterpret_cast<float *>(inData[idx].data());
+                        float *fptr = reinterpret_cast<float *>(inputBuffers[idx].hostData.data());
                         for (size_t k = 0; k < elements; ++k)
                             fptr[k] = 1.0f;
                     }
                     else if (r.inputDTypes[idx] == DType::INT32)
                     {
-                        int32_t *iptr = reinterpret_cast<int32_t *>(inData[idx].data());
+                        int32_t *iptr = reinterpret_cast<int32_t *>(inputBuffers[idx].hostData.data());
                         if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos)
                         {
                             if (idx == 1 && r.inputShapes.size() > 0 && r.outputShapes.size() > 0 &&
@@ -482,7 +592,7 @@ int main(int argc, char *argv[])
                                 std::vector<bool> used(elements, false);
                                 for (size_t k = 0; k < elements; ++k)
                                 {
-                                    size_t found_d = k; // default fallback
+                                    size_t found_d = k;
                                     for (size_t d = 0; d < elements; ++d)
                                     {
                                         if (!used[d] && r.inputShapes[0][d] == r.outputShapes[0][k])
@@ -536,41 +646,18 @@ int main(int argc, char *argv[])
                     }
                     else if (r.inputDTypes[idx] == DType::BF16)
                     {
-                        uint16_t *bptr = reinterpret_cast<uint16_t *>(inData[idx].data());
+                        uint16_t *bptr = reinterpret_cast<uint16_t *>(inputBuffers[idx].hostData.data());
                         for (size_t k = 0; k < elements; ++k)
                             bptr[k] = 0x3F80;
                     }
                     else
                     {
-                        std::memset(inData[idx].data(), 1, bytes);
+                        std::memset(inputBuffers[idx].hostData.data(), 1, bytes);
                     }
                 }
 
-                if (inIsCuda[idx])
-                {
-#ifdef USE_CUDA
-                    void *d_ptr = nullptr;
-                    cudaError_t err = cudaMalloc(&d_ptr, bytes);
-                    if (err != cudaSuccess)
-                    {
-                        throw std::runtime_error("cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
-                    }
-                    if (bytes > 0 && inData[idx].data())
-                    {
-                        err = cudaMemcpy(d_ptr, inData[idx].data(), bytes, cudaMemcpyHostToDevice);
-                        if (err != cudaSuccess)
-                        {
-                            cudaFree(d_ptr);
-                            throw std::runtime_error("cudaMemcpy failed: " + std::string(cudaGetErrorString(err)));
-                        }
-                    }
-                    inPtrs[idx] = d_ptr;
-#endif
-                }
-                else
-                {
-                    inPtrs[idx] = inData[idx].data();
-                }
+                inputBuffers[idx].upload();
+                inPtrs[idx] = inputBuffers[idx].getReadPtr();
 
                 inViews[idx].setShape(r.inputShapes[idx]);
                 inViews[idx].strides = r.inputStrides[idx];
@@ -593,24 +680,17 @@ int main(int argc, char *argv[])
                 if (elements == 0)
                     elements = 1;
                 uint64_t bytes = elements * getDTypeSize(r.outputDTypes[idx]);
-                outData[idx].resize(bytes);
 
-                if (isOutputCuda)
+                Backend outBackend = r.backends.empty() ? Backend::CPU : r.backends[0];
+                outputBuffers[idx].allocate(outBackend, bytes);
+
+                if (kernel.inplace && idx == 0)
                 {
-#ifdef USE_CUDA
-                    void *d_ptr = nullptr;
-                    cudaError_t err = cudaMalloc(&d_ptr, bytes);
-                    if (err != cudaSuccess)
-                    {
-                        throw std::runtime_error("cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
-                    }
-                    outPtrs[idx] = d_ptr;
-#endif
+                    std::memcpy(outputBuffers[idx].hostData.data(), inputBuffers[0].hostData.data(), std::min(inputBuffers[0].bytes, outputBuffers[idx].bytes));
+                    outputBuffers[idx].upload();
                 }
-                else
-                {
-                    outPtrs[idx] = outData[idx].data();
-                }
+
+                outPtrs[idx] = outputBuffers[idx].getWritePtr();
 
                 outViews[idx].setShape(r.outputShapes[idx]);
                 outViews[idx].strides = r.outputStrides[idx];
@@ -618,7 +698,6 @@ int main(int argc, char *argv[])
                 outViews[idx].dtype = r.outputDTypes[idx];
             }
 
-            // Map files to Backend::STORAGE inputs
             KernelContext ctx;
             ctx.inputs = inPtrs;
             ctx.outputs = outPtrs;
@@ -653,16 +732,26 @@ int main(int argc, char *argv[])
                 }
             };
 
+            bool anyCuda = std::any_of(inputBuffers.begin(), inputBuffers.end(), [](const BenchBuffer &b)
+                                       { return b.backend == Backend::CUDA; }) ||
+                           std::any_of(outputBuffers.begin(), outputBuffers.end(), [](const BenchBuffer &b)
+                                       { return b.backend == Backend::CUDA; });
+            bool anyOpenCL = std::any_of(inputBuffers.begin(), inputBuffers.end(), [](const BenchBuffer &b)
+                                         { return b.backend == Backend::OPENCL; }) ||
+                             std::any_of(outputBuffers.begin(), outputBuffers.end(), [](const BenchBuffer &b)
+                                         { return b.backend == Backend::OPENCL; });
+
             std::cout << "  Benchmarking..." << std::flush;
 
-            // Warmup (runIndex = 0)
+            // Warmup
             if (!kernel.isView)
             {
                 updateStorageContext(0);
                 kernel.run(ctx);
-#ifdef USE_CUDA
-                cudaDeviceSynchronize();
-#endif
+                if (anyCuda)
+                    synchronizeBackend(Backend::CUDA);
+                if (anyOpenCL)
+                    synchronizeBackend(Backend::OPENCL);
             }
 
             int iters = 8;
@@ -670,7 +759,6 @@ int main(int argc, char *argv[])
             latencies.reserve(iters);
             for (int it = 0; it < iters; ++it)
             {
-                // Generate a brand new storage file before every single execute iteration
                 if (!kernel.isView)
                 {
                     updateStorageContext(it + 1);
@@ -681,18 +769,10 @@ int main(int argc, char *argv[])
                 {
                     kernel.run(ctx);
                 }
-#ifdef USE_CUDA
-                bool anyInputCuda = std::any_of(inIsCuda.begin(), inIsCuda.end(), [](bool b)
-                                                { return b; });
-                if (anyInputCuda || isOutputCuda)
-                {
-                    cudaError_t err = cudaDeviceSynchronize();
-                    if (err != cudaSuccess)
-                    {
-                        throw std::runtime_error("CUDA Synchronization failed: " + std::string(cudaGetErrorString(err)));
-                    }
-                }
-#endif
+                if (anyCuda)
+                    synchronizeBackend(Backend::CUDA);
+                if (anyOpenCL)
+                    synchronizeBackend(Backend::OPENCL);
                 auto iterEnd = std::chrono::high_resolution_clock::now();
                 float iterMs = std::chrono::duration<float, std::milli>(iterEnd - iterStart).count();
                 latencies.push_back(iterMs);
@@ -702,7 +782,7 @@ int main(int argc, char *argv[])
                 }
                 std::cout << " " << iterMs;
             }
-            // Calculate Median
+
             std::sort(latencies.begin(), latencies.end());
 
             float runtimeMs = 0.0f;

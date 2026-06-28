@@ -176,6 +176,30 @@ def generate_core_seed():
     return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
 
+def generate_opencl_strings():
+    cl_files = []
+    for root, _, files in os.walk(KERNELS_DIR):
+        for f in files:
+            if f.endswith(".cl"):
+                cl_files.append(Path(root) / f)
+
+    out_file = GENERATED_DIR / "opencl_kernels.gen.hpp"
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write("#pragma once\n")
+        f.write("#include <unordered_map>\n")
+        f.write("#include <string>\n\n")
+        f.write(
+            "inline const std::unordered_map<std::string, const char*> OPENCL_SOURCE_MAP = {\n"
+        )
+        for cl_path in cl_files:
+            rel_path = cl_path.relative_to(ROOT_DIR).as_posix()
+            with open(cl_path, "r", encoding="utf-8") as cl_f:
+                content = cl_f.read()
+            f.write(f'    {{"{rel_path}", R"TG_OPENCL(\n{content}\n)TG_OPENCL"}},\n')
+        f.write("};\n")
+    console.print(f"[dim]Generated {len(cl_files)} OpenCL kernel strings.[/dim]")
+
+
 def generate_kernel_uids(core_seed):
     os.makedirs(GENERATED_DIR, exist_ok=True)
     uids_hpp = GENERATED_DIR / "kernel_uids.gen.hpp"
@@ -373,9 +397,11 @@ def compile_project(targets=None):
         cxx_flags.extend(
             [
                 "-std=c++20",
-                "-IC:/Users/aaron/CODING/Tools/cpp_libs/OpenCL-SDK-v2026.05.29-Win-x64/include",
-                "-LC:/Users/aaron/CODING/Tools/cpp_libs/OpenCL-SDK-v2026.05.29-Win-x64/lib",
+                "-I./OpenCL-SDK/install/include",
+                "-L./OpenCL-SDK/install/lib",
                 "-lOpenCL",
+                "-DCL_TARGET_OPENCL_VERSION=310",
+                "-v"
             ]
         )
         if DEBUG_MODE:
@@ -555,6 +581,7 @@ def main():
         f"\n[bold cyan]Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...[/bold cyan]\n"
     )
     core_seed = generate_core_seed()
+    generate_opencl_strings()
     generate_kernel_uids(core_seed)
     generate_kernel_includes(core_seed)
     generate_build_context()

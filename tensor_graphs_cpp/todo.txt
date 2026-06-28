@@ -1,3 +1,7 @@
+add grid search for kernel params like tile size
+
+only allocate DeviceBuffer if a plan uses that backend
+
 rewrite rule equivalent subgraphs
 mul(x, -1) -> neg(x)
 mul(-1, x) -> mul(x, -1)

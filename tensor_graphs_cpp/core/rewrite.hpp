@@ -439,6 +439,10 @@ struct FusionRule : public Rule
 #ifdef USE_CUDA
             targetBackends.push_back(Backend::CUDA);
 #endif
+            if (HardwareCaps::get().has_opencl)
+            {
+                targetBackends.push_back(Backend::OPENCL);
+            }
 
             DType outDtype = matchedClass.dtype;
             std::vector<uint32_t> outShape = matchedClass.shape;

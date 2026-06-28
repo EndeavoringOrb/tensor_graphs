@@ -37,6 +37,9 @@ std::unordered_map<Backend, uint64_t> get_default_buffer_sizes()
 #ifdef USE_CUDA
     bufferSizes[Backend::CUDA] = 24ULL * 1024 * 1024 * 1024;
 #endif
+    if (HardwareCaps::get().has_opencl) {
+        bufferSizes[Backend::OPENCL] = 1ULL * 1024 * 1024 * 1024;
+    }
     return bufferSizes;
 }
 
