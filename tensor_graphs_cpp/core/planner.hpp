@@ -563,7 +563,7 @@ private:
         std::vector<uint64_t> live_mem((uint32_t)Backend::_COUNT);
         for (int i = 0; i < (uint32_t)Backend::_COUNT; i++)
         {
-            live_mem.emplace_back(precomp.static_baseline_arr[i]);
+            live_mem[i] = precomp.static_baseline_arr[i];
         }
         uint32_t oomEClassId = UINT32_MAX;
 

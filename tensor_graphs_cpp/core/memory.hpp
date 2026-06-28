@@ -718,6 +718,7 @@ struct MemoryManager
         }
 
         // Cross-backend lookup for Unified Memory
+        // TODO: is there a better way to do this?
         Backend actualBackend = node.backend;
         if (buffers.find(Backend::CUDA) != buffers.end() && buffers.at(Backend::CUDA).allocationMap.count(targetId))
         {
@@ -726,6 +727,10 @@ struct MemoryManager
         else if (buffers.find(Backend::CPU) != buffers.end() && buffers.at(Backend::CPU).allocationMap.count(targetId))
         {
             actualBackend = Backend::CPU;
+        }
+        else if (buffers.find(Backend::OPENCL) != buffers.end() && buffers.at(Backend::OPENCL).allocationMap.count(targetId))
+        {
+            actualBackend = Backend::OPENCL;
         }
 
         const DeviceBuffer &buf = buffers.at(actualBackend);
