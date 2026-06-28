@@ -511,7 +511,8 @@ std::vector<float> executeReferenceGraph(
 }
 
 // ============================================================
-// Fused Kernel Direct Execution
+// executeFusedKernel
+// Rebuilt to use unified PreparedKernel logic, ensuring proper CUDA & OpenCL execution
 // ============================================================
 std::vector<float> executeFusedKernel(
     const KernelEntry &kernel,
@@ -535,53 +536,55 @@ std::vector<float> executeFusedKernel(
                          std::to_string(inputData.size()));
     }
 
-    std::vector<const void *> inputPtrs;
-    std::vector<TensorView> inputViews;
-    for (size_t i = 0; i < inputData.size(); ++i)
+    Record r;
+    r.kernelUid = kernel.uid;
+    r.outputShapes.push_back(outShape);
+    r.outputStrides.push_back(outStrides);
+    r.outputDTypes.push_back(outDType);
+    r.backends.push_back(kernel.backends.empty() ? Backend::CPU : kernel.backends[0]);
+
+    for (size_t i = 0; i < inputIds.size(); ++i)
     {
-        inputPtrs.push_back(inputData[i].data());
-        TensorView view;
         const TensorNode &node = graph.getNode(inputIds[i]);
-        view.setShape(node.getShape());
-        view.strides = node.strides.empty() ? calcContiguousStrides(node.getShape()) : node.strides;
-        view.baseOffset = node.viewOffset * getDTypeSize(node.dtype);
-        view.dtype = node.dtype;
-        inputViews.push_back(view);
+        r.inputShapes.push_back(node.getShape());
+        r.inputStrides.push_back(node.strides.empty() ? calcContiguousStrides(node.getShape()) : node.strides);
+        r.inputDTypes.push_back(node.dtype);
+
+        Backend b = node.backend;
+        size_t ruleIdx = i;
+        if (kernel.isVariadic)
+        {
+            ruleIdx = (i == inputIds.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+        }
+        if (ruleIdx < kernel.inputBackends.size() && !kernel.inputBackends[ruleIdx].empty())
+        {
+            b = kernel.inputBackends[ruleIdx][0];
+        }
+        r.inputBackends.push_back({b});
     }
+
+    PreparedKernel pk;
+    pk.prepare(kernel, r, &inputData);
+    pk.run(kernel);
+    pk.synchronize();
+    pk.download();
 
     TensorView outView;
     outView.setShape(outShape);
     outView.strides = outStrides.empty() ? calcContiguousStrides(outShape) : outStrides;
     outView.baseOffset = 0;
     outView.dtype = outDType;
-    std::vector<TensorView> outputViews = {outView};
 
-    size_t outBufElements = getRequiredBufferSize(outView);
-    std::vector<uint8_t> outputData;
-
-    if (kernel.inplace && inputData.size() > 0 && !kernel.inferView)
-    {
-        outputData = inputData[0];
-        if (outputData.size() < outBufElements * getDTypeSize(outDType))
-        {
-            outputData.resize(outBufElements * getDTypeSize(outDType));
-        }
-    }
-    else
-    {
-        outputData.resize(outBufElements * getDTypeSize(outDType), 0);
-    }
-
-    if (kernel.isView && inputData.size() > 0 && kernel.inferView)
+    if (kernel.isView && !pk.inputBuffers.empty() && kernel.inferView)
     {
         std::vector<TensorNode> dummyInputs(inputData.size());
         for (size_t i = 0; i < inputData.size(); ++i)
         {
             dummyInputs[i].id = inputIds[i];
-            dummyInputs[i].setShape(inputViews[i].getShape());
-            dummyInputs[i].strides = inputViews[i].strides;
-            dummyInputs[i].dtype = inputViews[i].dtype;
-            dummyInputs[i].viewOffset = inputViews[i].baseOffset / getDTypeSize(inputViews[i].dtype);
+            dummyInputs[i].setShape(pk.inViews[i].getShape());
+            dummyInputs[i].strides = pk.inViews[i].strides;
+            dummyInputs[i].dtype = pk.inViews[i].dtype;
+            dummyInputs[i].viewOffset = pk.inViews[i].baseOffset / getDTypeSize(dummyInputs[i].dtype);
         }
         TensorNode dummyOutput;
         dummyOutput.setShape(outShape);
@@ -591,132 +594,10 @@ std::vector<float> executeFusedKernel(
         outView.strides = dummyOutput.strides;
         outView.baseOffset = dummyOutput.viewOffset * getDTypeSize(outDType);
 
-        return flattenOutput(inputData[0].data() + outView.baseOffset, outView.getShape(), outView.strides, outView.dtype);
+        return flattenOutput(pk.inputBuffers[0].hostData.data() + outView.baseOffset, outView.getShape(), outView.strides, outView.dtype);
     }
 
-#ifdef USE_CUDA
-    bool anyCuda = false;
-    for (Backend b : kernel.backends)
-    {
-        if (b == Backend::CUDA)
-            anyCuda = true;
-    }
-    for (const auto &bb : kernel.inputBackends)
-    {
-        for (Backend b : bb)
-        {
-            if (b == Backend::CUDA)
-                anyCuda = true;
-        }
-    }
-
-    if (anyCuda)
-    {
-        bool outputNeedsCuda = false;
-        for (Backend b : kernel.backends)
-        {
-            if (b == Backend::CUDA)
-                outputNeedsCuda = true;
-        }
-
-        std::vector<void *> d_inputs;
-        std::vector<void *> d_outputs;
-        std::vector<bool> inputOnDevice(inputData.size(), false);
-        for (size_t i = 0; i < inputData.size(); ++i)
-        {
-            bool inputNeedsCuda = false;
-            size_t ruleIdx = i;
-            if (kernel.isVariadic)
-            {
-                ruleIdx = (i == inputData.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
-            }
-
-            if (ruleIdx < kernel.inputBackends.size())
-            {
-                for (Backend b : kernel.inputBackends[ruleIdx])
-                {
-                    if (b == Backend::CUDA)
-                    {
-                        inputNeedsCuda = true;
-                        break;
-                    }
-                }
-            }
-            else
-            {
-                inputNeedsCuda = outputNeedsCuda;
-            }
-
-            if (kernel.opType == OpType::COPY_TO)
-            {
-                inputNeedsCuda = !outputNeedsCuda;
-            }
-
-            if (inputNeedsCuda)
-            {
-                void *d_ptr = nullptr;
-                cudaMalloc(&d_ptr, inputData[i].size());
-                cudaMemcpy(d_ptr, inputData[i].data(), inputData[i].size(), cudaMemcpyHostToDevice);
-                d_inputs.push_back(d_ptr);
-                inputOnDevice[i] = true;
-            }
-            else
-            {
-                d_inputs.push_back(const_cast<uint8_t *>(inputData[i].data()));
-                inputOnDevice[i] = false;
-            }
-        }
-
-        void *d_out = nullptr;
-        uint64_t outBytes = outputData.size();
-        if (outputNeedsCuda)
-        {
-            cudaMalloc(&d_out, outBytes);
-            if (kernel.inplace && !kernel.inferView)
-            {
-                cudaMemcpy(d_out, outputData.data(), outBytes, cudaMemcpyHostToDevice);
-            }
-            d_outputs.push_back(d_out);
-        }
-        else
-        {
-            d_outputs.push_back(outputData.data());
-        }
-
-        std::vector<const void *> d_input_ptrs;
-        for (void *p : d_inputs)
-            d_input_ptrs.push_back(p);
-
-        if (kernel.run)
-            kernel.run(d_input_ptrs, d_outputs, inputViews, outputViews);
-
-        cudaDeviceSynchronize();
-
-        if (outputNeedsCuda)
-        {
-            cudaMemcpy(outputData.data(), d_out, outBytes, cudaMemcpyDeviceToHost);
-            cudaFree(d_out);
-        }
-
-        for (size_t i = 0; i < d_inputs.size(); ++i)
-        {
-            if (inputOnDevice[i])
-                cudaFree(d_inputs[i]);
-        }
-    }
-    else
-    {
-        std::vector<void *> outputPtrs = {outputData.data()};
-        if (kernel.run)
-            kernel.run(KernelContext(inputPtrs, outputPtrs, inputViews, outputViews)); // TODO: construct inputPtrs, outputPtrs, inputViews, outputViews on ctx.inputs, ... instead of creating at last moment
-    }
-#else
-    std::vector<void *> outputPtrs = {outputData.data()};
-    if (kernel.run)
-        kernel.run(KernelContext(inputPtrs, outputPtrs, inputViews, outputViews)); // TODO: construct inputPtrs, outputPtrs, inputViews, outputViews on ctx.inputs, ... instead of creating at last moment
-#endif
-
-    return flattenOutput(outputData.data() + outView.baseOffset, outView.getShape(), outView.strides, outView.dtype);
+    return flattenOutput(pk.outputBuffers[0].hostData.data() + outView.baseOffset, outView.getShape(), outView.strides, outView.dtype);
 }
 
 // ============================================================

@@ -84,9 +84,7 @@ def main():
         description="Inspect and pretty-print metadata and tensor layouts of a .safetensors file.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "file", help="Path to the .safetensors file to inspect."
-    )
+    parser.add_argument("file", help="Path to the .safetensors file to inspect.")
     parser.add_argument(
         "--name-only",
         action="store_true",
@@ -151,7 +149,9 @@ def main():
         # Determine comfortable column width for alignment
         max_name_len = max(len(n) for n in names)
         max_name_len = max(max_name_len, 11)  # Minimum width matching "Tensor Name"
-        max_name_len = min(max_name_len, 60)  # Soft limit to prevent overflow of wide terminal views
+        max_name_len = min(
+            max_name_len, 60
+        )  # Soft limit to prevent overflow of wide terminal views
 
         header_line = f"  {'Tensor Name':<{max_name_len}} | {'Dtype':<8} | {'Shape':<25} | {'Elements':<10} | {'Byte Size':<10}"
         print(header_line)
@@ -188,8 +188,12 @@ def main():
             print("-" * 85)
             print("Summary:")
             print(f"  Total Tensors:    {len(header)}")
-            print(f"  Total Parameters: {format_params(total_elements)} ({total_elements:,} elements)")
-            print(f"  Total Data Size:  {format_size(total_bytes)} ({total_bytes:,} bytes)")
+            print(
+                f"  Total Parameters: {format_params(total_elements)} ({total_elements:,} elements)"
+            )
+            print(
+                f"  Total Data Size:  {format_size(total_bytes)} ({total_bytes:,} bytes)"
+            )
     print("=" * 85)
 
 

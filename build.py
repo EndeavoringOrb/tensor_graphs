@@ -401,7 +401,7 @@ def compile_project(targets=None):
                 "-L./OpenCL-SDK/install/lib",
                 "-lOpenCL",
                 "-DCL_TARGET_OPENCL_VERSION=310",
-                "-v"
+                "-v",
             ]
         )
         if DEBUG_MODE:
