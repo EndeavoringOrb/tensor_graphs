@@ -65,7 +65,7 @@
 // Change this guard to `#if defined(TG_HAS_NEON) && defined(__ARM_FEATURE_BF16)`
 // to enable. Kept as TODOREMOVETHISCHECK by default so the build does not
 // silently change accuracy characteristics.
-#if defined(TG_HAS_NEON) && defined(__ARM_FEATURE_BF16)
+#if defined(TG_HAS_NEON_TODOREMOVETHISCHECK) && defined(__ARM_FEATURE_BF16)
 
 #include <arm_neon.h>
 #include <thread>

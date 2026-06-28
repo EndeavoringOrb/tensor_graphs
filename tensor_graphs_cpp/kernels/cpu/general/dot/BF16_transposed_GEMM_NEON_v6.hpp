@@ -2,7 +2,7 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 
-#if defined(TG_HAS_NEON) // degrades quality due to bf16 activations instead of f32. can use once framework supports compiling with accuracy tolerance.
+#if defined(TG_HAS_NEON_TODOREMOVETHISCHECK) // degrades quality due to bf16 activations instead of f32. can use once framework supports compiling with accuracy tolerance.
 #include <arm_neon.h>
 #include <thread>
 #include <vector>
