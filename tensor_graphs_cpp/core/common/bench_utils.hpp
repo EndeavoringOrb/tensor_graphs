@@ -266,7 +266,9 @@ struct StorageFiles
     }
 };
 
-inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel, int runIdx)
+// In tensor_graphs_cpp/core/common/bench_utils.hpp
+
+inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel, int runIdx, const std::vector<BenchBuffer> *inputBuffers = nullptr)
 {
     StorageFiles sf;
     std::vector<char> dummyBuf(1024 * 1024, 0);
@@ -299,12 +301,20 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
                 continue;
             }
 
-            uint64_t written = 0;
-            while (written < bytes)
+            // Write prepared host-side data if available; otherwise, write fallback zeroes
+            if (inputBuffers && idx < inputBuffers->size() && !(*inputBuffers)[idx].hostData.empty())
             {
-                uint64_t toWrite = std::min<uint64_t>(dummyBuf.size(), bytes - written);
-                out.write(dummyBuf.data(), toWrite);
-                written += toWrite;
+                out.write(reinterpret_cast<const char *>((*inputBuffers)[idx].hostData.data()), bytes);
+            }
+            else
+            {
+                uint64_t written = 0;
+                while (written < bytes)
+                {
+                    uint64_t toWrite = std::min<uint64_t>(dummyBuf.size(), bytes - written);
+                    out.write(dummyBuf.data(), toWrite);
+                    written += toWrite;
+                }
             }
             out.close();
             sf.paths.push_back(path);
@@ -545,7 +555,7 @@ struct PreparedKernel
 
     void updateStorageContext(const KernelEntry &kernel, const Record &r, int runIdx)
     {
-        sf = createStorageInputs(r, kernel, runIdx);
+        sf = createStorageInputs(r, kernel, runIdx, &inputBuffers);
         size_t storageInIdx = 0;
         for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
         {

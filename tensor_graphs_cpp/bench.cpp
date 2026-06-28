@@ -422,7 +422,7 @@ int main(int argc, char *argv[])
 
             auto updateStorageContext = [&](int runIdx)
             {
-                sf = createStorageInputs(r, kernel, runIdx);
+                sf = createStorageInputs(r, kernel, runIdx, &inputBuffers);
                 size_t storageInIdx = 0;
                 for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
                 {

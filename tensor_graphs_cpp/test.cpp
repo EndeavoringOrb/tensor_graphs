@@ -565,6 +565,7 @@ std::vector<float> executeFusedKernel(
 
     PreparedKernel pk;
     pk.prepare(kernel, r, &inputData);
+    pk.updateStorageContext(kernel, r, 0);
     pk.run(kernel);
     pk.synchronize();
     pk.download();
