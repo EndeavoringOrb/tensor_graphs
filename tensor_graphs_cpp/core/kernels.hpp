@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <CL/cl.h>
 
 struct KernelContext
 {
@@ -15,6 +16,8 @@ struct KernelContext
     std::vector<TensorView> inViews;
     std::vector<TensorView> outViews;
     std::vector<int> fd; // same number of elements as inputs/inViews, has -1 if not a file, positive number file descriptor if is a file. COPY_TO kernels that start from STORAGE should use fd + inViews baseOffset to read from file
+    std::vector<cl_mem> cl_inputs;
+    std::vector<cl_mem> cl_outputs;
 
     KernelContext() {}
     KernelContext(const std::vector<const void *> &_inputs,
@@ -25,6 +28,11 @@ struct KernelContext
         for (int i = 0; i < inputs.size(); i++)
         {
             fd.push_back(-1);
+            cl_inputs.push_back(nullptr);
+        }
+        for (int i = 0; i < outputs.size(); i++)
+        {
+            cl_outputs.push_back(nullptr);
         }
     }
 };
@@ -522,14 +530,17 @@ struct KernelRegistrar
 #ifndef REGISTER_REF_KERNEL_INPLACE
 #define REGISTER_REF_KERNEL_INPLACE(op, match, run, ...)
 #endif
+#ifndef REGISTER_REF_KERNEL_VIEW
+#define REGISTER_REF_KERNEL_VIEW(op, match, run, ...)
+#endif
 #ifndef REGISTER_KERNEL
 #define REGISTER_KERNEL(opName, numInputs, match, run, refFactory, ...)
 #endif
 #ifndef REGISTER_KERNEL_INPLACE
 #define REGISTER_KERNEL_INPLACE(opName, numInputs, match, run, refFactory, ...)
 #endif
-#ifndef REGISTER_KERNEL_INPLACE_VIEW
-#define REGISTER_KERNEL_INPLACE_VIEW(opName, numInputs, match, run, refFactory, inferView, ...)
+#ifndef REGISTER_KERNEL_VIEW
+#define REGISTER_KERNEL_VIEW(opName, numInputs, match, ref, inferView, ...)
 #endif
 
 #define REGISTER_REF_KERNEL_INTERNAL(uid, op, n, match, run, ...) \

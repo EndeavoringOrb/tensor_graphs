@@ -34,9 +34,6 @@ inline bool matchContiguous_OpenCL_ND(const std::vector<TensorNode> &inputs, con
 
 inline void runContiguous_OpenCL_ND(const KernelContext &ctx)
 {
-    const uint8_t *src = static_cast<const uint8_t *>(ctx.inputs[0]);
-    uint8_t *dst = static_cast<uint8_t *>(ctx.outputs[0]);
-
     uint64_t numElements = countElements(ctx.outViews[0].getShape());
     uint64_t elemSize = getDTypeSize(ctx.inViews[0].dtype);
     if (numElements == 0)
@@ -54,8 +51,8 @@ inline void runContiguous_OpenCL_ND(const KernelContext &ctx)
 
     cl_kernel k = OpenCL::getKernel("kernels/opencl/contiguous/contiguous.cl", "contiguous_generic");
 
-    OpenCL::setArgSVM(k, 0, src);
-    OpenCL::setArgSVM(k, 1, dst);
+    OpenCL::setArgBuffer(k, 0, ctx.cl_inputs[0]);
+    OpenCL::setArgBuffer(k, 1, ctx.cl_outputs[0]);
     clSetKernelArg(k, 2, sizeof(uint64_t), &numElements);
     clSetKernelArg(k, 3, sizeof(uint64_t), &elemSize);
     clSetKernelArg(k, 4, sizeof(ContiguousParamsOpenCL), &p);

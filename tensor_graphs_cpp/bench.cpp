@@ -1,3 +1,4 @@
+// tensor_graphs_cpp/bench.cpp
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -41,6 +42,7 @@ struct BenchBuffer
     uint64_t bytes = 0;
     std::vector<uint8_t> hostData;
     void *devicePtr = nullptr;
+    cl_mem clMem = nullptr;
 
     BenchBuffer() = default;
     ~BenchBuffer()
@@ -67,7 +69,9 @@ struct BenchBuffer
             bytes = o.bytes;
             hostData = std::move(o.hostData);
             devicePtr = o.devicePtr;
+            clMem = o.clMem;
             o.devicePtr = nullptr;
+            o.clMem = nullptr;
             o.bytes = 0;
         }
         return *this;
@@ -101,10 +105,12 @@ struct BenchBuffer
             {
                 Error::throw_err("OpenCL context not initialized.");
             }
-            devicePtr = clSVMAlloc(ctx, CL_MEM_READ_WRITE | CL_MEM_SVM_FINE_GRAIN_BUFFER, bytes, 0);
-            if (!devicePtr)
+            devicePtr = hostData.data();
+            cl_int err;
+            clMem = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, bytes, devicePtr, &err);
+            if (err != CL_SUCCESS || !clMem)
             {
-                Error::throw_err("clSVMAlloc failed to allocate memory of size " + std::to_string(bytes));
+                Error::throw_err("clCreateBuffer failed to allocate memory of size " + std::to_string(bytes) + ". Error: " + std::to_string(err));
             }
         }
         else
@@ -167,10 +173,10 @@ struct BenchBuffer
             }
             else if (backend == Backend::OPENCL)
             {
-                cl_context ctx = OpenCLState::get().context;
-                if (ctx)
+                if (clMem)
                 {
-                    clSVMFree(ctx, devicePtr);
+                    clReleaseMemObject(clMem);
+                    clMem = nullptr;
                 }
             }
             devicePtr = nullptr;
@@ -704,6 +710,15 @@ int main(int argc, char *argv[])
             ctx.inViews = inViews;
             ctx.outViews = outViews;
             ctx.fd.assign(inPtrs.size(), -1);
+
+            for (size_t idx = 0; idx < inputBuffers.size(); ++idx)
+            {
+                ctx.cl_inputs.push_back(inputBuffers[idx].clMem);
+            }
+            for (size_t idx = 0; idx < outputBuffers.size(); ++idx)
+            {
+                ctx.cl_outputs.push_back(outputBuffers[idx].clMem);
+            }
 
             StorageFiles sf;
 

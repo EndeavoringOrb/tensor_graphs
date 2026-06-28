@@ -16,18 +16,14 @@ inline bool matchAddF32_OpenCL_1D(const std::vector<TensorNode> &inputs, const T
 
 inline void runAddF32_OpenCL_1D(const KernelContext &ctx)
 {
-    const float *A = static_cast<const float *>(ctx.inputs[0]);
-    const float *B = static_cast<const float *>(ctx.inputs[1]);
-    float *Out = static_cast<float *>(ctx.outputs[0]);
-
     uint64_t n = countElements(ctx.outViews[0].getShape());
     if (n == 0)
         return;
 
     cl_kernel k = OpenCL::getKernel("kernels/opencl/add/add.cl", "add_f32_nd");
-    OpenCL::setArgSVM(k, 0, A);
-    OpenCL::setArgSVM(k, 1, B);
-    OpenCL::setArgSVM(k, 2, Out);
+    OpenCL::setArgBuffer(k, 0, ctx.cl_inputs[0]);
+    OpenCL::setArgBuffer(k, 1, ctx.cl_inputs[1]);
+    OpenCL::setArgBuffer(k, 2, ctx.cl_outputs[0]);
     clSetKernelArg(k, 3, sizeof(uint64_t), &n);
 
     size_t local_work_size = 256;

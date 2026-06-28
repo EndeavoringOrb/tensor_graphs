@@ -141,6 +141,7 @@ struct DeviceBuffer
     Backend backend;
     std::vector<uint8_t> cpu_arena;
     uint8_t *arena_ptr = nullptr;
+    cl_mem arena_ptr_cl_mem = nullptr;
     uint64_t sizeBytes;
     bool initialized = false;
 
@@ -156,24 +157,22 @@ struct DeviceBuffer
             arena_ptr = nullptr;
         }
 #endif
-        if (arena_ptr != nullptr && backend == Backend::OPENCL)
+        if (arena_ptr_cl_mem != nullptr && backend == Backend::OPENCL)
         {
-            // Free OpenCL Shared Virtual Memory
-            cl_context ctx = OpenCLState::get().context;
-            if (ctx)
-            {
-                clSVMFree(ctx, arena_ptr);
-            }
-            arena_ptr = nullptr;
+            clReleaseMemObject(arena_ptr_cl_mem);
+            arena_ptr_cl_mem = nullptr;
         }
+        arena_ptr = nullptr;
     }
 
     DeviceBuffer(Backend b, uint64_t _sizeBytes) : backend(b), sizeBytes(_sizeBytes)
     {
-        // TODO: should call reset() here?
+        // Align overall size to 512 bytes to facilitate OpenCL sub-buffers
+        sizeBytes = (sizeBytes + 511) & ~511ULL;
+
         MemBlock initialFree;
         initialFree.offset = 0;
-        initialFree.sizeBytes = _sizeBytes;
+        initialFree.sizeBytes = sizeBytes;
         initialFree.nodeId = UINT32_MAX;
         initialFree.cost = 0.0f;
         initialFree.isLocked = false;
@@ -188,11 +187,12 @@ struct DeviceBuffer
 
     DeviceBuffer(DeviceBuffer &&other) noexcept
         : backend(other.backend), cpu_arena(std::move(other.cpu_arena)),
-          arena_ptr(other.arena_ptr), sizeBytes(other.sizeBytes),
+          arena_ptr(other.arena_ptr), arena_ptr_cl_mem(other.arena_ptr_cl_mem), sizeBytes(other.sizeBytes),
           initialized(other.initialized),
           blocks(std::move(other.blocks)), allocationMap(std::move(other.allocationMap))
     {
         other.arena_ptr = nullptr;
+        other.arena_ptr_cl_mem = nullptr;
         InterruptManager::unregisterBuffer(&other);
         InterruptManager::registerBuffer(this);
     }
@@ -206,12 +206,14 @@ struct DeviceBuffer
             backend = other.backend;
             cpu_arena = std::move(other.cpu_arena);
             arena_ptr = other.arena_ptr;
+            arena_ptr_cl_mem = other.arena_ptr_cl_mem;
             sizeBytes = other.sizeBytes;
             initialized = other.initialized;
             blocks = std::move(other.blocks);
             allocationMap = std::move(other.allocationMap);
 
             other.arena_ptr = nullptr;
+            other.arena_ptr_cl_mem = nullptr;
             InterruptManager::unregisterBuffer(&other);
             InterruptManager::registerBuffer(this);
         }
@@ -293,20 +295,26 @@ struct DeviceBuffer
                 Error::throw_err("[DeviceBuffer] Failed to initialize OpenCL Context for Backend::OPENCL");
             }
 
-            // Allocate physically unified memory using Fine-Grained SVM
-            arena_ptr = static_cast<uint8_t *>(clSVMAlloc(
-                ctx,
-                CL_MEM_READ_WRITE | CL_MEM_SVM_FINE_GRAIN_BUFFER,
-                sizeBytes,
-                0));
+            cpu_arena.resize(sizeBytes + 64);
+            uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
+            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
 
-            if (!arena_ptr)
+            cl_int err;
+            arena_ptr_cl_mem = clCreateBuffer(
+                ctx,
+                CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                sizeBytes,
+                arena_ptr,
+                &err);
+
+            if (err != CL_SUCCESS || !arena_ptr_cl_mem)
             {
-                Error::throw_err("[DeviceBuffer] clSVMAlloc failed to allocate unified memory.");
+                Error::throw_err("[DeviceBuffer] clCreateBuffer failed to allocate memory of size " +
+                                 std::to_string(sizeBytes) + ". Error: " + std::to_string(err));
             }
         }
 #ifdef USE_CUDA
-        if (backend == Backend::CUDA)
+        else if (backend == Backend::CUDA)
         {
             if (caps.has_unified_memory)
             {
@@ -325,16 +333,6 @@ struct DeviceBuffer
                     Error::throw_err("[DeviceBuffer] cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
                 }
             }
-        }
-        else if (backend == Backend::CPU)
-        {
-            cpu_arena.resize(sizeBytes + 64);
-            uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
-            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
-        }
-        else
-        {
-            Error::throw_err("Unknown backend");
         }
 #endif // USE_CUDA
         else if (backend == Backend::CPU)
@@ -441,8 +439,8 @@ struct DeviceBuffer
 
     uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost)
     {
-        // Align allocated size to 64 bytes to maintain alignment of all internal blocks
-        _sizeBytes = (_sizeBytes + 63) & ~63ULL;
+        // Align to 512 bytes for standard OpenCL sub-buffer compatibility
+        _sizeBytes = (_sizeBytes + 511) & ~511ULL;
 
         // 1. If it's already cached, lock it and update
         auto mapIt = allocationMap.find(nodeId);

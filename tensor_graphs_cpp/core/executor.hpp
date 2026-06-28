@@ -86,6 +86,7 @@ public:
                     ctx.inViews.push_back(view);
                     ctx.inputs.push_back(nullptr);
                     ctx.fd.push_back(FileRegistry::get().getNodeFd(logicalInId));
+                    ctx.cl_inputs.push_back(nullptr);
                 }
                 else
                 {
@@ -100,6 +101,33 @@ public:
                     ctx.inViews.push_back(view);
                     ctx.inputs.push_back(memManager.buffers.at(inNode.backend).arena_ptr + view.baseOffset);
                     ctx.fd.push_back(-1);
+
+                    if (inNode.backend == Backend::OPENCL)
+                    {
+                        DeviceBuffer &buf = memManager.buffers.at(Backend::OPENCL);
+                        cl_buffer_region region;
+                        region.origin = view.baseOffset;
+                        region.size = countElements(view) * getDTypeSize(view.dtype);
+                        if (region.size == 0)
+                            region.size = 1;
+
+                        cl_int err;
+                        cl_mem sub_buffer = clCreateSubBuffer(
+                            buf.arena_ptr_cl_mem,
+                            CL_MEM_READ_WRITE,
+                            CL_BUFFER_CREATE_TYPE_REGION,
+                            &region,
+                            &err);
+                        if (err != CL_SUCCESS)
+                        {
+                            Error::throw_err("OpenCL: Failed to create sub-buffer for input. Error code: " + std::to_string(err));
+                        }
+                        ctx.cl_inputs.push_back(sub_buffer);
+                    }
+                    else
+                    {
+                        ctx.cl_inputs.push_back(nullptr);
+                    }
                 }
             }
 
@@ -181,6 +209,33 @@ public:
             ctx.outViews = {TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype))};
             ctx.outputs = {actualBuf.arena_ptr + ctx.outViews[0].baseOffset};
 
+            if (node.backend == Backend::OPENCL)
+            {
+                DeviceBuffer &buf = memManager.buffers.at(Backend::OPENCL);
+                cl_buffer_region region;
+                region.origin = ctx.outViews[0].baseOffset;
+                region.size = countElements(ctx.outViews[0]) * getDTypeSize(ctx.outViews[0].dtype);
+                if (region.size == 0)
+                    region.size = 1;
+
+                cl_int err;
+                cl_mem sub_buffer = clCreateSubBuffer(
+                    buf.arena_ptr_cl_mem,
+                    CL_MEM_READ_WRITE,
+                    CL_BUFFER_CREATE_TYPE_REGION,
+                    &region,
+                    &err);
+                if (err != CL_SUCCESS)
+                {
+                    Error::throw_err("OpenCL: Failed to create sub-buffer for output. Error code: " + std::to_string(err));
+                }
+                ctx.cl_outputs.push_back(sub_buffer);
+            }
+            else
+            {
+                ctx.cl_outputs.push_back(nullptr);
+            }
+
             if (inst.viewInputIndex < 0)
             {
                 if (memManager.aliasMap.find(outputMemId) != memManager.aliasMap.end())
@@ -204,6 +259,18 @@ public:
                 // ProgressTimer kernelTimer(0, "", true);
                 kernel.run(ctx);
                 // totalKernelTime += kernelTimer.getElapsed();
+            }
+
+            // Cleanup OpenCL sub-buffers created during this step
+            for (cl_mem sub : ctx.cl_inputs)
+            {
+                if (sub)
+                    clReleaseMemObject(sub);
+            }
+            for (cl_mem sub : ctx.cl_outputs)
+            {
+                if (sub)
+                    clReleaseMemObject(sub);
             }
 
             if (debugCallback && logicalId != UINT32_MAX && isEndOfLogicalChain)
@@ -230,12 +297,20 @@ public:
                 else
 #endif
                 {
+                    if (actualBackend == Backend::OPENCL)
+                    {
+                        clFinish(OpenCLState::get().queue);
+                    }
                     debugCallback(logicalId, ctx.outViews[0], basePtr);
                 }
             }
 
             TensorNode debugOutput = compiled.nodesMap.at(inst.nodeId);
             debugOutput.id = outputMemId;
+            if (actualBackend == Backend::OPENCL)
+            {
+                clFinish(OpenCLState::get().queue);
+            }
             Debug::checkNan(debugOutput, memManager, "Kernel Output: " + std::to_string(inst.nodeId));
 
             for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)

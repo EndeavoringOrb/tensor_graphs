@@ -23,10 +23,6 @@ inline bool matchDotF32_3D_OpenCL(const std::vector<TensorNode> &inputs, const T
 
 inline void runDotF32_3D_OpenCL(const KernelContext &ctx)
 {
-    const float *A = static_cast<const float *>(ctx.inputs[0]);
-    const float *B = static_cast<const float *>(ctx.inputs[1]);
-    float *Out = static_cast<float *>(ctx.outputs[0]);
-
     uint64_t B_count = ctx.inViews[0].getShape()[0];
     uint64_t M = ctx.inViews[0].getShape()[1];
     uint64_t K = ctx.inViews[0].getShape()[2];
@@ -34,9 +30,9 @@ inline void runDotF32_3D_OpenCL(const KernelContext &ctx)
 
     cl_kernel k = OpenCL::getKernel("kernels/opencl/dot/dot.cl", "dot_f32_3d");
 
-    OpenCL::setArgSVM(k, 0, A);
-    OpenCL::setArgSVM(k, 1, B);
-    OpenCL::setArgSVM(k, 2, Out);
+    OpenCL::setArgBuffer(k, 0, ctx.cl_inputs[0]);
+    OpenCL::setArgBuffer(k, 1, ctx.cl_inputs[1]);
+    OpenCL::setArgBuffer(k, 2, ctx.cl_outputs[0]);
     clSetKernelArg(k, 3, sizeof(uint64_t), &B_count);
     clSetKernelArg(k, 4, sizeof(uint64_t), &M);
     clSetKernelArg(k, 5, sizeof(uint64_t), &K);
