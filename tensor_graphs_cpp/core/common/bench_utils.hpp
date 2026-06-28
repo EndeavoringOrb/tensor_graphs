@@ -129,9 +129,20 @@ struct BenchBuffer
         }
         else if (backend == Backend::OPENCL)
         {
-            if (devicePtr != hostData.data() && devicePtr && !hostData.empty())
+            if (clMem && !hostData.empty())
             {
-                std::memcpy(devicePtr, hostData.data(), bytes);
+                cl_int err = clEnqueueWriteBuffer(
+                    OpenCLState::get().queue,
+                    clMem,
+                    CL_TRUE, // Blocking write to guarantee host-to-device visibility
+                    0,
+                    bytes,
+                    hostData.data(),
+                    0, nullptr, nullptr);
+                if (err != CL_SUCCESS)
+                {
+                    Error::throw_err("clEnqueueWriteBuffer failed with error: " + std::to_string(err));
+                }
             }
         }
     }
@@ -150,9 +161,20 @@ struct BenchBuffer
         }
         else if (backend == Backend::OPENCL)
         {
-            if (devicePtr != hostData.data() && devicePtr && !hostData.empty())
+            if (clMem && !hostData.empty())
             {
-                std::memcpy(hostData.data(), devicePtr, bytes);
+                cl_int err = clEnqueueReadBuffer(
+                    OpenCLState::get().queue,
+                    clMem,
+                    CL_TRUE, // Blocking read to guarantee device-to-host visibility
+                    0,
+                    bytes,
+                    hostData.data(),
+                    0, nullptr, nullptr);
+                if (err != CL_SUCCESS)
+                {
+                    Error::throw_err("clEnqueueReadBuffer failed with error: " + std::to_string(err));
+                }
             }
         }
     }
