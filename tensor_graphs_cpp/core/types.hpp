@@ -172,7 +172,8 @@ enum class Backend : uint32_t
     STORAGE,
     CPU,
     CUDA,
-    OPENCL
+    OPENCL,
+    _COUNT
 };
 
 enum class StorageType : uint32_t
