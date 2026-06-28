@@ -97,32 +97,59 @@ public:
                         activeInId = inLogicalId;
                     }
 
+                    // Resolve the actual physical backend for this input
+                    uint32_t targetInId = activeInId;
+                    while (memManager.aliasMap.find(targetInId) != memManager.aliasMap.end())
+                    {
+                        targetInId = memManager.aliasMap.at(targetInId);
+                    }
+
+                    Backend actualInBackend = inNode.backend;
+                    if (memManager.buffers.count(Backend::CUDA) && memManager.buffers.at(Backend::CUDA).allocationMap.count(targetInId))
+                        actualInBackend = Backend::CUDA;
+                    else if (memManager.buffers.count(Backend::CPU) && memManager.buffers.at(Backend::CPU).allocationMap.count(targetInId))
+                        actualInBackend = Backend::CPU;
+                    else if (memManager.buffers.count(Backend::OPENCL) && memManager.buffers.at(Backend::OPENCL).allocationMap.count(targetInId))
+                        actualInBackend = Backend::OPENCL;
+
                     TensorView view = memManager.getView(inNode, activeInId);
                     ctx.inViews.push_back(view);
-                    ctx.inputs.push_back(memManager.buffers.at(inNode.backend).arena_ptr + view.baseOffset);
+                    void *host_ptr = memManager.buffers.at(actualInBackend).arena_ptr + view.baseOffset;
+                    ctx.inputs.push_back(host_ptr);
                     ctx.fd.push_back(-1);
 
-                    if (inNode.backend == Backend::OPENCL)
+                    if (node.backend == Backend::OPENCL)
                     {
-                        DeviceBuffer &buf = memManager.buffers.at(Backend::OPENCL);
-                        cl_buffer_region region;
-                        region.origin = view.baseOffset;
-                        region.size = countElements(view) * getDTypeSize(view.dtype);
-                        if (region.size == 0)
-                            region.size = 1;
+                        size_t size = countElements(view) * getDTypeSize(view.dtype);
+                        if (size == 0)
+                            size = 1;
 
-                        cl_int err;
-                        cl_mem sub_buffer = clCreateSubBuffer(
-                            buf.arena_ptr_cl_mem,
-                            CL_MEM_READ_WRITE,
-                            CL_BUFFER_CREATE_TYPE_REGION,
-                            &region,
-                            &err);
-                        if (err != CL_SUCCESS)
+                        // Deduplicate inplace or duplicate inputs to avoid overlapping cl_mem creation
+                        cl_mem buf = nullptr;
+                        for (size_t i = 0; i < ctx.cl_inputs.size(); i++)
                         {
-                            Error::throw_err("OpenCL: Failed to create sub-buffer for input. Error code: " + std::to_string(err));
+                            if (ctx.inputs[i] == host_ptr && ctx.cl_inputs[i] != nullptr)
+                            {
+                                buf = ctx.cl_inputs[i];
+                                clRetainMemObject(buf); // Retain so the release loop balances out
+                                break;
+                            }
                         }
-                        ctx.cl_inputs.push_back(sub_buffer);
+                        if (!buf)
+                        {
+                            cl_int err;
+                            buf = clCreateBuffer(
+                                OpenCLState::get().context,
+                                CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                                size,
+                                host_ptr,
+                                &err);
+                            if (err != CL_SUCCESS)
+                            {
+                                Error::throw_err("OpenCL: Failed to create buffer for input. Error code: " + std::to_string(err));
+                            }
+                        }
+                        ctx.cl_inputs.push_back(buf);
                     }
                     else
                     {
@@ -207,29 +234,41 @@ public:
 
             // Create views and pointers relative to the actual physical buffer
             ctx.outViews = {TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype))};
-            ctx.outputs = {actualBuf.arena_ptr + ctx.outViews[0].baseOffset};
+            void *host_ptr = actualBuf.arena_ptr + ctx.outViews[0].baseOffset;
+            ctx.outputs = {host_ptr};
 
             if (node.backend == Backend::OPENCL)
             {
-                DeviceBuffer &buf = memManager.buffers.at(Backend::OPENCL);
-                cl_buffer_region region;
-                region.origin = ctx.outViews[0].baseOffset;
-                region.size = countElements(ctx.outViews[0]) * getDTypeSize(ctx.outViews[0].dtype);
-                if (region.size == 0)
-                    region.size = 1;
+                size_t size = countElements(ctx.outViews[0]) * getDTypeSize(ctx.outViews[0].dtype);
+                if (size == 0)
+                    size = 1;
 
-                cl_int err;
-                cl_mem sub_buffer = clCreateSubBuffer(
-                    buf.arena_ptr_cl_mem,
-                    CL_MEM_READ_WRITE,
-                    CL_BUFFER_CREATE_TYPE_REGION,
-                    &region,
-                    &err);
-                if (err != CL_SUCCESS)
+                cl_mem buf = nullptr;
+                // Check if this output aliases a just-wrapped input (inplace memory operation)
+                for (size_t i = 0; i < ctx.cl_inputs.size(); i++)
                 {
-                    Error::throw_err("OpenCL: Failed to create sub-buffer for output. Error code: " + std::to_string(err));
+                    if (ctx.inputs[i] == host_ptr && ctx.cl_inputs[i] != nullptr)
+                    {
+                        buf = ctx.cl_inputs[i];
+                        clRetainMemObject(buf);
+                        break;
+                    }
                 }
-                ctx.cl_outputs.push_back(sub_buffer);
+                if (!buf)
+                {
+                    cl_int err;
+                    buf = clCreateBuffer(
+                        OpenCLState::get().context,
+                        CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                        size,
+                        host_ptr,
+                        &err);
+                    if (err != CL_SUCCESS)
+                    {
+                        Error::throw_err("OpenCL: Failed to create buffer for output. Error code: " + std::to_string(err));
+                    }
+                }
+                ctx.cl_outputs.push_back(buf);
             }
             else
             {

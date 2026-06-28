@@ -509,7 +509,7 @@ struct FusionRule : public Rule
             }
 
             bool needCopy = !foundBackend;
-            bool needContig = kernel.requiresContiguous[ruleIdx] && !isContiguous(parent);
+            bool needContig = (kernel.requiresContiguous[ruleIdx] || needCopy) && !isContiguous(parent);
 
             if (!needCopy && !needContig)
             {
@@ -520,16 +520,18 @@ struct FusionRule : public Rule
             uint32_t currentPid = pid;
             EClass currentClass = parent;
 
+            if (needContig)
+            {
+                currentPid = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentPid}, currentClass.shape, calcContiguousStrides(currentClass.shape), 0, currentClass.dtype, currentClass.backend);
+                currentClass = egraph.getEClass(egraph.find(currentPid));
+            }
+
             if (needCopy)
             {
                 currentPid = addOpToEGraph(egraph, OpType::COPY_TO, {currentPid}, currentClass.shape, currentClass.strides, currentClass.viewOffset, currentClass.dtype, expectedBackend);
                 currentClass = egraph.getEClass(egraph.find(currentPid));
             }
 
-            if (needContig)
-            {
-                currentPid = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentPid}, currentClass.shape, calcContiguousStrides(currentClass.shape), 0, currentClass.dtype, currentClass.backend);
-            }
             adaptedParents.push_back(currentPid);
         }
 

@@ -364,7 +364,9 @@ inline uint32_t refFactoryFlashAttention4D(const std::vector<uint32_t> &inputs, 
 
     int32_t axis = -1;
     uint32_t axis_node = g.constant({1}, &axis, DType::INT32);
-    auto s_shape = g.getNode(scores).getShape();
+    auto Q_shape = g.getNode(Q).getShape();
+    auto K_shape = g.getNode(K).getShape();
+    std::vector<uint32_t> s_shape = {Q_shape[0], Q_shape[1], Q_shape[2], K_shape[2]};
     int32_t S_val = (int32_t)s_shape[s_shape.size() - 1];
     uint32_t m_rep = g.constant({1}, &S_val, DType::INT32);
     uint32_t ax_rep = g.constant({1}, &axis, DType::INT32);

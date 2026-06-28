@@ -159,6 +159,7 @@ struct DeviceBuffer
 #endif
         if (arena_ptr_cl_mem != nullptr && backend == Backend::OPENCL)
         {
+            clEnqueueUnmapMemObject(OpenCLState::get().queue, arena_ptr_cl_mem, arena_ptr, 0, nullptr, nullptr);
             clReleaseMemObject(arena_ptr_cl_mem);
             arena_ptr_cl_mem = nullptr;
         }
@@ -290,27 +291,41 @@ struct DeviceBuffer
         {
             OpenCLState::get().init();
             cl_context ctx = OpenCLState::get().context;
-            if (!ctx)
+            cl_command_queue queue = OpenCLState::get().queue;
+            if (!ctx || !queue)
             {
-                Error::throw_err("[DeviceBuffer] Failed to initialize OpenCL Context for Backend::OPENCL");
+                Error::throw_err("[DeviceBuffer] Failed to initialize OpenCL Context/Queue");
             }
 
-            cpu_arena.resize(sizeBytes + 64);
-            uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
-            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
-
             cl_int err;
+            // 1. Allocate cache-coherent physical memory (zero-copy) via the driver
             arena_ptr_cl_mem = clCreateBuffer(
                 ctx,
-                CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
+                CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
                 sizeBytes,
-                arena_ptr,
+                nullptr,
                 &err);
 
             if (err != CL_SUCCESS || !arena_ptr_cl_mem)
             {
                 Error::throw_err("[DeviceBuffer] clCreateBuffer failed to allocate memory of size " +
                                  std::to_string(sizeBytes) + ". Error: " + std::to_string(err));
+            }
+
+            // 2. Map it permanently into the CPU's virtual address space
+            arena_ptr = (uint8_t*)clEnqueueMapBuffer(
+                queue,
+                arena_ptr_cl_mem,
+                CL_TRUE, // blocking
+                CL_MAP_READ | CL_MAP_WRITE,
+                0,
+                sizeBytes,
+                0, nullptr, nullptr,
+                &err);
+
+            if (err != CL_SUCCESS || !arena_ptr)
+            {
+                Error::throw_err("[DeviceBuffer] clEnqueueMapBuffer failed. Error: " + std::to_string(err));
             }
         }
 #ifdef USE_CUDA
