@@ -1,6 +1,7 @@
 import os
 import struct
 import torch
+import torch.nn.functional as F
 import shutil
 from safetensors.torch import save_file
 
@@ -8,6 +9,7 @@ TEST_DIR = "tensor_graphs_cpp/tests"
 
 OP_TYPES = [
     "INPUT",
+    "CACHE",
     "ADD",
     "MUL",
     "DIVIDE",
@@ -32,6 +34,13 @@ OP_TYPES = [
     "IM2COL",
     "CONTIGUOUS",
     "SCATTER",
+    "LOG",
+    "ARGMAX",
+    "LT",
+    "EQ",
+    "AND",
+    "OR",
+    "NOT",
     "FUSED",
 ]
 
@@ -119,6 +128,30 @@ add_test("SIN", [a], torch.sin(a))
 add_test("COS", [a], torch.cos(a))
 add_test("NEGATE", [a], -a)
 
+a_log = torch.rand((4, 8), dtype=torch.float32) + 0.1
+add_test("LOG", [a_log], torch.log(a_log))
+
+# --- Logical & Comparison ---
+a_lt = torch.rand((4, 8), dtype=torch.float32)
+b_lt = torch.rand((4, 8), dtype=torch.float32)
+add_test("LT", [a_lt, b_lt], a_lt < b_lt)
+
+a_eq = torch.randint(0, 5, (4, 8), dtype=torch.int32)
+b_eq = torch.randint(0, 5, (4, 8), dtype=torch.int32)
+add_test("EQ", [a_eq, b_eq], a_eq == b_eq)
+
+a_and = torch.randint(0, 2, (4, 8), dtype=torch.bool)
+b_and = torch.randint(0, 2, (4, 8), dtype=torch.bool)
+add_test("AND", [a_and, b_and], a_and & b_and)
+
+a_or = torch.randint(0, 2, (4, 8), dtype=torch.bool)
+b_or = torch.randint(0, 2, (4, 8), dtype=torch.bool)
+add_test("OR", [a_or, b_or], a_or | b_or)
+
+a_not = torch.randint(0, 2, (4, 8), dtype=torch.bool)
+add_test("NOT", [a_not], ~a_not)
+
+
 # --- DOT (Batched 3D) ---
 a_dot = torch.rand((2, 4, 8), dtype=torch.float32)
 b_dot = torch.rand((2, 8, 4), dtype=torch.float32)
@@ -129,6 +162,15 @@ a_sum = torch.rand((4, 8, 4), dtype=torch.float32)
 axis_sum = torch.tensor([-1], dtype=torch.int32)
 add_test("SUM", [a_sum, axis_sum], torch.sum(a_sum, dim=-1, keepdim=True))
 add_test("MAX", [a_sum, axis_sum], torch.max(a_sum, dim=-1, keepdim=True).values)
+
+a_argmax = torch.rand((4, 8, 4), dtype=torch.float32)
+axis_argmax = torch.tensor([-1], dtype=torch.int32)
+k_argmax = torch.tensor([2], dtype=torch.int32)
+add_test(
+    "ARGMAX",
+    [a_argmax, axis_argmax, k_argmax],
+    torch.topk(a_argmax, k=2, dim=-1).indices.to(torch.int32),
+)
 
 # --- Manipulation ---
 a_res = torch.rand((4, 8), dtype=torch.float32)
@@ -185,6 +227,28 @@ add_test(
 val_fill = torch.tensor([3.14], dtype=torch.float32)
 shape_fill = torch.tensor([2, 4], dtype=torch.int32)
 add_test("FILL", [val_fill, shape_fill], torch.full((2, 4), 3.14, dtype=torch.float32))
+
+# --- Memory / Structural ---
+target_scat = torch.zeros((4, 8), dtype=torch.float32)
+updates_scat = torch.rand((2, 4), dtype=torch.float32)
+starts_scat = torch.tensor([1, 2], dtype=torch.int32)
+ends_scat = torch.tensor([3, 6], dtype=torch.int32)
+steps_scat = torch.tensor([1, 1], dtype=torch.int32)
+out_scatter = target_scat.clone()
+out_scatter[1:3:1, 2:6:1] = updates_scat
+add_test(
+    "SCATTER",
+    [target_scat, updates_scat, starts_scat, ends_scat, steps_scat],
+    out_scatter,
+)
+
+img = torch.rand((1, 3, 8, 8), dtype=torch.float32)
+k_size = torch.tensor([3], dtype=torch.int32)
+stride = torch.tensor([1], dtype=torch.int32)
+padding = torch.tensor([1], dtype=torch.int32)
+out_im2col = F.unfold(img, kernel_size=3, padding=1, stride=1)
+add_test("IM2COL", [img, k_size, stride, padding], out_im2col)
+
 
 if os.path.exists(TEST_DIR):
     shutil.rmtree(TEST_DIR)
