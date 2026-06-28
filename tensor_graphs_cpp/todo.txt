@@ -2,17 +2,7 @@ rewrite rule equivalent subgraphs
 mul(x, -1) -> neg(x)
 mul(-1, x) -> mul(x, -1)
 
-Backend::STORAGE
--allow cache of copyto(storage->cpu). this means we need to allow clean nodes to be marked as protected. this means we need to know which nodes are clean. to generalize to weights, this means we need to check ALL inputs for dirtyness (not just user input). have user specify dirty regions instead of diffing inputs, this way we avoid the expensive diff check. This way we don't need special handling for the full bucket, it will automatically initialize everything because all inputs are dirty. This should also remove the need for a constant folding rewrite rule
--make storage device buffer. maybe separate DeviceBuffer into a base thing and then an inherited class for each backend. but we don't want the storage device buffer to actually read from file, basically it should just handle offsets within the file, then the copyto storage->cpu kernel will handle loading. the copyto storage->cpu kernel should replace the model loaders. perhaps model loaders can be reworked into "model indexers" that handle hasTensor, getMetadata, and translate name -> file pointer (is a file pointer a thing?) & offset. I'm imagining the kernel getting a file pointer, an offset, then it can use the inViews to determine what to load. The KernelFunc signature would need to be generalized to elegantly handle file & tensor inputs. Maybe a custom struct instead of std::vector<const void *>.
--alternatively, instead of updating DeviceBuffer & KernelFunc signature, I could make COPY_TO (STORAGE -> CPU) be distinct from COPY_TO, and take in a bunch of constants. The constants could be like (file_descriptor, offset) encoded as uint64_t for both. In order for this to work, we would update Graph.weight to use the "model indexers" to keep a global file descriptor for every file (so we don't waste time opening/closing file every kernel call), then find the file_descriptor and offset for the name, then add those as constant inputs to a STORAGE_COPY node. The model indexers would be globally shared and would be responsible for keeping files open. This way we wouldn't have to update KernelFunc because the inputs would be std::vector<const void *>. And DeviceBuffer wouldn't handle file stuff at all because the kernels would load from file directly. And if in the future we have weird file formats that store compressed weights or something, we can update the MatchFunc to take in the constantStaging and check the file_path to see if it supports the extension, so we could make specialized kernels for specific file types.
--add OpType::CACHE to differentiate between input and cache, this way cached nodes can easily be extracted to protected Eclasses without filtering based on scatter instructions.
--Then we want to add OpType::CACHE enodes to all clean eclasses. We want OpType::CACHE so that after the first run (where all inputs including weights are dirty) initializes the eclass's logical memory, subsequent runs can choose the zero cost OpType::CACHE node. Think something like rope/causal mask computation, or keeping weights cached on CPU after the first run loads them from storage. In order to determine which eclasses are clean, we basically initialize the dirty eclasses based on which ids are in dirtyOutputRegions. Then propagate through using the rule that if any parent node is dirty, then this node is dirty. After iterating over all eclasses in topo order, we will know which eclasses are clean and which are dirty for this bucket (we should also pass in Bucket bucket to plan() instead of dirtyOutputRegions and outputNeeded). The question is should we add a bool dirty field to EClass/ENode and propagate during saturation, or should this be a separate function that stores the dirty/clean information in std::unordered_map<uint32_t, bool> where uint32_t is EClass id? The end goal is to add OpType::CACHE enode to all clean eclasses. So if we go with the separate function, we would then add OpType::CACHE manually to all clean eclasses. If we go with adding a bool dirty field, we could make a rewrite rule that checks parent dirty/clean and if clean then add enode OpType::CACHE. BUT that rewrite rule would be flawed, because if it is called on a node lower down (like the root node) before the dirtyness has propagated through the graph, an eclass might be improperly marked as clean.
--remove cheapInputCopy
-
 does serialization work across changes like inserting an OpType? Or does the numbering get out of sync?
-
-analyze_performance separate by compiled graph
 
 add constants (like e, pi) so they are consistent
 
@@ -21,8 +11,6 @@ examples/gemma-3-270m-cpp.py
 graph parallel
 
 improve hash stability. right now if you change a single character in a commented line in core/types.hpp, system benchmarks all kernels again
-
-allow finer user control over dirty bucket caching. Maybe they know a certain input will always be fully dirty so isn't worth computing diff each time. or maybe add a mode where user can provide the dirty slice so we don't have to compute input diff
 
 rewrite rules:
 -swap order of copyto & scatter if kernels exist
@@ -41,11 +29,7 @@ PERFORMANCE:
 -parallel graph execution
 -constant folding?
 
-is it properly slicing backward gather for the first gather with gather(embeddings, input_seq)?
-
 remove duplicate logic from kernel match functions and findMatchingKernels
-
-constant fold non-contiguous values (repeat), or just look past them?
 
 something more robust for collision than 0x40000000 and 0x80000000
 

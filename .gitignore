@@ -61,3 +61,5 @@ kernel_bench/jobs_history.jsonl
 
 # Generated C++ headers
 tensor_graphs_cpp/generated/
+
+OpenCL-SDK

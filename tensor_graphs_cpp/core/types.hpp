@@ -20,6 +20,7 @@ using json = nlohmann::json;
 
 inline uint32_t GlobalNextPhysId = 0x80000000;
 
+// TODO: os & architecture detection should be in hardware.hpp and types should include hardware.hpp
 // --- OS Detection ---
 #if defined(_WIN32) || defined(_WIN64)
 #define TG_OS_WINDOWS
@@ -170,7 +171,8 @@ enum class Backend : uint32_t
 {
     STORAGE,
     CPU,
-    CUDA
+    CUDA,
+    OPENCL
 };
 
 enum class StorageType : uint32_t
@@ -591,6 +593,8 @@ inline std::string toString(Backend backend) // TODO: make build.py check that e
         return "CPU";
     case Backend::CUDA:
         return "CUDA";
+    case Backend::OPENCL:
+        return "OPENCL";
     default:
         return "UNKNOWN_BACKEND";
     }

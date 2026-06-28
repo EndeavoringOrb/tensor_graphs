@@ -10,6 +10,8 @@ import platform
 from rich.console import Console
 from rich.panel import Panel
 
+# TODO: add linter check that every `#endif` has a comment that matches `#if`/`#ifdef`
+
 console = Console()
 
 # --- Configuration ---
@@ -368,7 +370,14 @@ def compile_project(targets=None):
             cxx_flags.extend(
                 ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
             )
-        cxx_flags.extend(["-std=c++20"])
+        cxx_flags.extend(
+            [
+                "-std=c++20",
+                "-IC:/Users/aaron/CODING/Tools/cpp_libs/OpenCL-SDK-v2026.05.29-Win-x64/include",
+                "-LC:/Users/aaron/CODING/Tools/cpp_libs/OpenCL-SDK-v2026.05.29-Win-x64/lib",
+                "-lOpenCL",
+            ]
+        )
         if DEBUG_MODE:
             cxx_flags.extend(["-g", "-O0", "-DDEBUG"])
             nvcc_flags.extend(["-g", "-G", "-O0", "-DDEBUG"])
@@ -378,7 +387,7 @@ def compile_project(targets=None):
             if PROFILE_MODE:
                 cxx_flags.extend(["-g", "-gcodeview", "-Wl,-debug"])
     else:
-        cxx_flags.extend(["-std=c++20"])
+        cxx_flags.extend(["-std=c++20", "-lOpenCL"])
         if is_arm64:
             cxx_flags.append("-march=armv8.6-a+bf16+i8mm")
         if DEBUG_MODE:

@@ -18,6 +18,54 @@
 #include <cuda_runtime.h>
 #endif
 
+// Add global variables to hold OpenCL Context and Queue
+struct OpenCLState
+{
+    cl_context context = nullptr;
+    cl_command_queue queue = nullptr;
+    cl_device_id device = nullptr;
+    bool initialized = false;
+
+    void init()
+    {
+        if (initialized)
+            return;
+        cl_uint numPlatforms = 0;
+        clGetPlatformIDs(0, nullptr, &numPlatforms);
+        if (numPlatforms == 0)
+            return;
+        std::vector<cl_platform_id> platforms(numPlatforms);
+        clGetPlatformIDs(numPlatforms, platforms.data(), nullptr);
+
+        for (auto plat : platforms)
+        {
+            cl_uint numDevices = 0;
+            clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices);
+            if (numDevices > 0)
+            {
+                std::vector<cl_device_id> devices(numDevices);
+                clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, numDevices, devices.data(), nullptr);
+                device = devices[0]; // Take the first GPU
+                break;
+            }
+        }
+
+        if (device)
+        {
+            cl_int err;
+            context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
+            queue = clCreateCommandQueueWithProperties(context, device, nullptr, &err);
+            initialized = true;
+        }
+    }
+
+    static OpenCLState &get()
+    {
+        static OpenCLState instance;
+        return instance;
+    }
+};
+
 // Forward declarations
 struct DeviceBuffer;
 
@@ -108,6 +156,16 @@ struct DeviceBuffer
             arena_ptr = nullptr;
         }
 #endif
+        if (arena_ptr != nullptr && backend == Backend::OPENCL)
+        {
+            // Free OpenCL Shared Virtual Memory
+            cl_context ctx = OpenCLState::get().context;
+            if (ctx)
+            {
+                clSVMFree(ctx, arena_ptr);
+            }
+            arena_ptr = nullptr;
+        }
     }
 
     DeviceBuffer(Backend b, uint64_t _sizeBytes) : backend(b), sizeBytes(_sizeBytes)
@@ -226,6 +284,27 @@ struct DeviceBuffer
             return;
         auto &caps = HardwareCaps::get();
 
+        if (backend == Backend::OPENCL)
+        {
+            OpenCLState::get().init();
+            cl_context ctx = OpenCLState::get().context;
+            if (!ctx)
+            {
+                Error::throw_err("[DeviceBuffer] Failed to initialize OpenCL Context for Backend::OPENCL");
+            }
+
+            // Allocate physically unified memory using Fine-Grained SVM
+            arena_ptr = static_cast<uint8_t *>(clSVMAlloc(
+                ctx,
+                CL_MEM_READ_WRITE | CL_MEM_SVM_FINE_GRAIN_BUFFER,
+                sizeBytes,
+                0));
+
+            if (!arena_ptr)
+            {
+                Error::throw_err("[DeviceBuffer] clSVMAlloc failed to allocate unified memory.");
+            }
+        }
 #ifdef USE_CUDA
         if (backend == Backend::CUDA)
         {
@@ -257,22 +336,17 @@ struct DeviceBuffer
         {
             Error::throw_err("Unknown backend");
         }
-#else
-        if (backend == Backend::CPU)
+#endif // USE_CUDA
+        else if (backend == Backend::CPU)
         {
             cpu_arena.resize(sizeBytes + 64);
             uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
             arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
         }
-        else if (backend == Backend::CUDA)
-        {
-            Error::throw_err("CUDA backend not supported without USE_CUDA");
-        }
         else
         {
             Error::throw_err("Unknown backend");
         }
-#endif
         initialized = true;
     }
 
