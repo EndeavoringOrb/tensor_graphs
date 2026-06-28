@@ -1181,6 +1181,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 // ============================================================
 // Main Test Loop
 // ============================================================
+// TODO: this is sort of redundant with Session::loadCache
 std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
 {
     std::unordered_map<uint64_t, std::vector<Record>> recordsByUid;
@@ -1209,10 +1210,9 @@ std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std:
         }
         else if (type == 1) // Compiled Bucket
         {
-            std::string key;
             CompiledGraph cg;
-            br.read(key);
             br.read(cg);
+
             for (const auto &inst : cg.instructions)
             {
                 if (inst.fullKernelId == 0)
