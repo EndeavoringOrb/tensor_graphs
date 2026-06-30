@@ -216,14 +216,21 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
     return cls;
 }
 
-inline uint32_t copyToBackend(EGraph &egraph, uint32_t classId, Backend targetBackend)
+inline uint32_t copyToBackend(EGraph &egraph, uint32_t classId, Backend targetBackend, std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
 {
     uint32_t canon = egraph.find(classId);
     const EClass &cls = egraph.getEClass(canon);
     if (cls.backend == targetBackend)
         return canon;
 
-    return addOpToEGraph(egraph, OpType::COPY_TO, {canon}, cls.shape, cls.strides, cls.viewOffset, cls.dtype, targetBackend);
+    uint32_t newPid = addOpToEGraph(egraph, OpType::COPY_TO, {canon}, cls.shape, cls.strides, cls.viewOffset, cls.dtype, targetBackend);
+    uint32_t newCanon = egraph.find(newPid);
+    auto it = eclassToLogical.find(canon);
+    if (it != eclassToLogical.end())
+    {
+        eclassToLogical[newCanon] = it->second;
+    }
+    return newCanon;
 }
 
 inline uint32_t createCacheInputNode(EGraph &egraph, uint32_t sourceClassId, uint32_t partialPathId, std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
@@ -468,14 +475,15 @@ struct FusionRule : public Rule
                 for (uint64_t uid : kernelMatches)
                 {
                     const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
-                    addFusedNode(egraph, kernel, targetBackend, inputs, eNodeIdx);
+                    addFusedNode(ctx, kernel, targetBackend, inputs, eNodeIdx);
                 }
             }
         }
     }
 
-    void addFusedNode(EGraph &egraph, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &parentIds, uint32_t eNodeIdx) const
+    void addFusedNode(RuleCtx &ctx, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &parentIds, uint32_t eNodeIdx) const
     {
+        EGraph &egraph = ctx.egraph;
         std::vector<uint32_t> adaptedParents;
         if (!kernel.isVariadic && parentIds.size() != kernel.numInputs)
         {
@@ -523,13 +531,25 @@ struct FusionRule : public Rule
             if (needContig)
             {
                 currentPid = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentPid}, currentClass.shape, calcContiguousStrides(currentClass.shape), 0, currentClass.dtype, currentClass.backend);
-                currentClass = egraph.getEClass(egraph.find(currentPid));
+                uint32_t newCanon = egraph.find(currentPid);
+                auto it = ctx.eclassToLogical.find(egraph.find(pid));
+                if (it != ctx.eclassToLogical.end())
+                {
+                    ctx.eclassToLogical[newCanon] = it->second;
+                }
+                currentClass = egraph.getEClass(newCanon);
             }
 
             if (needCopy)
             {
                 currentPid = addOpToEGraph(egraph, OpType::COPY_TO, {currentPid}, currentClass.shape, currentClass.strides, currentClass.viewOffset, currentClass.dtype, expectedBackend);
-                currentClass = egraph.getEClass(egraph.find(currentPid));
+                uint32_t newCanon = egraph.find(currentPid);
+                auto it = ctx.eclassToLogical.find(egraph.find(pid));
+                if (it != ctx.eclassToLogical.end())
+                {
+                    ctx.eclassToLogical[newCanon] = it->second;
+                }
+                currentClass = egraph.getEClass(newCanon);
             }
 
             adaptedParents.push_back(currentPid);
@@ -570,6 +590,12 @@ struct FusionRule : public Rule
             newEClass = egraph.addENode(newEClass, enode);
 
             addOpToEGraph(egraph, OpType::COPY_TO, {newEClass}, enode.shape, enode.strides, enode.viewOffset, enode.dtype, originalBackend, eclassId);
+
+            auto it = ctx.eclassToLogical.find(egraph.find(eclassId));
+            if (it != ctx.eclassToLogical.end())
+            {
+                ctx.eclassToLogical[newEClass] = it->second;
+            }
         }
     }
 
@@ -914,8 +940,8 @@ struct InfinityDomination : public Rule
             uint32_t contigV = addOpToEGraph(egraph, OpType::CONTIGUOUS, {sliceV}, sliceShape, sliceContigStrides, 0, vClass.dtype, vClass.backend);
             uint32_t contigC = addOpToEGraph(egraph, OpType::CONTIGUOUS, {sliceC}, sliceShape, sliceContigStrides, 0, cClass.dtype, cClass.backend);
 
-            contigV = copyToBackend(egraph, contigV, outClass.backend);
-            contigC = copyToBackend(egraph, contigC, outClass.backend);
+            contigV = copyToBackend(egraph, contigV, outClass.backend, ctx.eclassToLogical);
+            contigC = copyToBackend(egraph, contigC, outClass.backend, ctx.eclassToLogical);
 
             uint32_t child0 = (constIdx == 0) ? contigC : contigV;
             uint32_t child1 = (constIdx == 1) ? contigC : contigV;
