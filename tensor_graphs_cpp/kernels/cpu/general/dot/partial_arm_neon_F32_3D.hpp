@@ -36,6 +36,7 @@ inline bool matchScatterDotF32_3D_Optimized_Inplace(const std::vector<TensorNode
 
 inline void runScatterDotF32_3D_Optimized_Inplace(const KernelContext &ctx)
 {
+    const float *target_ptr = static_cast<const float *>(ctx.inputs[0]);
     const float *A_ptr = static_cast<const float *>(ctx.inputs[1]);
     const float *B_ptr = static_cast<const float *>(ctx.inputs[2]);
 
@@ -50,6 +51,10 @@ inline void runScatterDotF32_3D_Optimized_Inplace(const KernelContext &ctx)
     const int32_t *stepsB_raw = static_cast<const int32_t *>(ctx.inputs[11]);
 
     float *out_cache_ptr = static_cast<float *>(ctx.outputs[0]);
+
+    if (target_ptr != out_cache_ptr) {
+        Error::throw_err("[runScatterDotF32_3D_Optimized_Inplace] target_ptr != out_cache_ptr");
+    }
 
     const TensorView &view_cache = ctx.outViews[0];
     const TensorView &view_A = ctx.inViews[1];

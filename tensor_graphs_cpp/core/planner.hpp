@@ -394,8 +394,8 @@ private:
         std::vector<bool> is_eclass_persistent;
         std::vector<bool> is_eclass_cached;
         std::vector<std::vector<uint32_t>> enode_canon_children;
-        uint64_t static_baseline_arr[3];
-        uint64_t mem_limits_arr[3];
+        uint64_t static_baseline_arr[static_cast<size_t>(Backend::_COUNT)];
+        uint64_t mem_limits_arr[static_cast<size_t>(Backend::_COUNT)];
     };
 
 private:
