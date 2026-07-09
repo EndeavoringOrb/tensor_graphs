@@ -211,6 +211,7 @@ inline uint32_t refFactoryJinaGeluExact_F32_3D(const std::vector<uint32_t> &inpu
 {
     uint32_t x_id = inputs[0];
     const auto &shape = g.getNode(x_id).getShape();
+    uint32_t B = shape[0];
     uint32_t S = shape[1];
     uint32_t D = shape[2];
 
@@ -220,6 +221,14 @@ inline uint32_t refFactoryJinaGeluExact_F32_3D(const std::vector<uint32_t> &inpu
         uint32_t node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
         uint32_t out = g.reshape(node, g.constant({3}, sh, DType::INT32));
+        if (B > 1)
+        {
+            int32_t rep = (int32_t)B;
+            int32_t ax = 0;
+            out = g.repeat(out,
+                           g.constant({1}, &rep, DType::INT32),
+                           g.constant({1}, &ax, DType::INT32));
+        }
         if (S > 1)
         {
             int32_t rep = (int32_t)S;

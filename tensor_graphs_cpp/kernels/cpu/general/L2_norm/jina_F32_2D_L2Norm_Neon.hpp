@@ -42,33 +42,39 @@ inline void runJinaL2Norm_F32_2D(const KernelContext &ctx)
     const float *x = static_cast<const float *>(ctx.inputs[0]);
     float *out = static_cast<float *>(ctx.outputs[0]);
 
+    const uint32_t B = ctx.inViews[0].getShape()[0];
     const uint32_t D = ctx.inViews[0].getShape()[1];
     const float eps = 1e-12f;
 
-    // Pass 1: sum of squares
-    float32x4_t v_sum_sq = vdupq_n_f32(0.0f);
-    uint32_t d = 0;
-    for (; d + 4 <= D; d += 4)
-    {
-        float32x4_t v_x = vld1q_f32(x + d);
-        v_sum_sq = vfmaq_f32(v_sum_sq, v_x, v_x);
-    }
-    float sum_sq = vaddvq_f32(v_sum_sq);
-    for (; d < D; ++d)
-        sum_sq += x[d] * x[d];
+    for (uint32_t b = 0; b < B; ++b) {
+        const float *x_row = x + b * D;
+        float *out_row = out + b * D;
 
-    float inv_norm = 1.0f / std::sqrt(sum_sq + eps);
+        // Pass 1: sum of squares
+        float32x4_t v_sum_sq = vdupq_n_f32(0.0f);
+        uint32_t d = 0;
+        for (; d + 4 <= D; d += 4)
+        {
+            float32x4_t v_x = vld1q_f32(x_row + d);
+            v_sum_sq = vfmaq_f32(v_sum_sq, v_x, v_x);
+        }
+        float sum_sq = vaddvq_f32(v_sum_sq);
+        for (; d < D; ++d)
+            sum_sq += x_row[d] * x_row[d];
 
-    // Pass 2: x * inv_norm
-    float32x4_t v_inv = vdupq_n_f32(inv_norm);
-    d = 0;
-    for (; d + 4 <= D; d += 4)
-    {
-        float32x4_t v_x = vld1q_f32(x + d);
-        vst1q_f32(out + d, vmulq_f32(v_x, v_inv));
+        float inv_norm = 1.0f / std::sqrt(sum_sq + eps);
+
+        // Pass 2: x * inv_norm
+        float32x4_t v_inv = vdupq_n_f32(inv_norm);
+        d = 0;
+        for (; d + 4 <= D; d += 4)
+        {
+            float32x4_t v_x = vld1q_f32(x_row + d);
+            vst1q_f32(out_row + d, vmulq_f32(v_x, v_inv));
+        }
+        for (; d < D; ++d)
+            out_row[d] = x_row[d] * inv_norm;
     }
-    for (; d < D; ++d)
-        out[d] = x[d] * inv_norm;
 }
 
 // Reference Factory — mirrors JinaV5OmniNanoRetrievalModel::l2_normalize()
@@ -80,16 +86,21 @@ inline uint32_t refFactoryJinaL2Norm_F32_2D(const std::vector<uint32_t> &inputs,
 {
     uint32_t x_id = inputs[0];
     const auto &shape = g.getNode(x_id).getShape();
+    uint32_t B = shape[0];
     uint32_t D = shape[1];
 
-    // Helper: expand_scalar_to_2d(val, 1, 1) → {1, 1}
-    // Mirrors JinaV5OmniNanoRetrievalModel::expand_scalar_to_2d(val, 1, 1).
+    // Helper: expand_scalar_to_2d(val, B, 1) → {B, 1}
+    // Mirrors JinaV5OmniNanoRetrievalModel::expand_scalar_to_2d(val, B, 1).
     auto expand_scalar_11 = [&](float val) -> uint32_t
     {
         uint32_t node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1};
-        return g.reshape(node, g.constant({2}, sh, DType::INT32));
-        // dim0=1, dim1=1 → no repeats needed
+        uint32_t out = g.reshape(node, g.constant({2}, sh, DType::INT32));
+        if (B > 1) {
+            int32_t r = B, a = 0;
+            out = g.repeat(out, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
+        }
+        return out;
     };
 
     // x_sq = x * x

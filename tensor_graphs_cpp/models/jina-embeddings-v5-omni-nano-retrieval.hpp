@@ -155,8 +155,9 @@ struct JinaV5Config
     // image_h and image_w must be divisible by (patch_size * spatial_merge_size = 32).
     // For 512×512: grid 32×32 → 1024 patches → 256 merged → 270 text tokens.
     // For 480×544: grid 30×34 → 1020 patches → 255 merged → 269 text tokens.
-    uint32_t image_h; // set at runtime (default 512)
-    uint32_t image_w; // set at runtime (default 512)
+    uint32_t batch_size; // set at runtime
+    uint32_t image_h;    // set at runtime
+    uint32_t image_w;    // set at runtime
     uint32_t patch_size = 16;
     uint32_t temporal_patch_size = 2;
     uint32_t spatial_merge_size = 2;
@@ -211,8 +212,8 @@ struct JinaV5Config
     // chat_template_tokens.json, their lengths are used for prefix/suffix;
     // otherwise the hardcoded CHAT_PREFIX_LEN / CHAT_SUFFIX_LEN defaults
     // (8 / 6) are used.
-    JinaV5Config(uint32_t img_h = 512, uint32_t img_w = 512)
-        : image_h(img_h), image_w(img_w),
+    JinaV5Config(uint32_t b = 1, uint32_t img_h = 512, uint32_t img_w = 512)
+        : batch_size(b), image_h(img_h), image_w(img_w),
           grid_h(img_h / patch_size),
           grid_w(img_w / patch_size),
           num_patches(grid_h * grid_w),
@@ -264,33 +265,14 @@ private:
                         g.constant({1}, &a, DType::INT32));
     }
 
-    uint32_t repeat_3d_axis(uint32_t tensor_id, uint32_t repeats, uint32_t axis)
-    {
-        if (repeats <= 1)
-            return tensor_id;
-        int32_t rep[] = {(int32_t)repeats};
-        int32_t ax[] = {(int32_t)axis};
-        return g.repeat(tensor_id,
-                        g.constant({1}, rep, DType::INT32),
-                        g.constant({1}, ax, DType::INT32));
-    }
-
-    uint32_t repeat_4d_axis(uint32_t tensor_id, uint32_t repeats, uint32_t axis)
-    {
-        if (repeats <= 1)
-            return tensor_id;
-        int32_t rep[] = {(int32_t)repeats};
-        int32_t ax[] = {(int32_t)axis};
-        return g.repeat(tensor_id,
-                        g.constant({1}, rep, DType::INT32),
-                        g.constant({1}, ax, DType::INT32));
-    }
-
     uint32_t expand_scalar_to_1d(float val, uint32_t d0)
     {
         uint32_t node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh1[] = {1};
-        return repeat_3d_axis(g.reshape(node, g.constant({1}, sh1, DType::INT32)), d0, 0);
+        uint32_t out = g.reshape(node, g.constant({1}, sh1, DType::INT32));
+        if (d0 > 1)
+            out = repeat_ax(out, d0, 0);
+        return out;
     }
 
     uint32_t expand_scalar_to_2d(float val, uint32_t dim0, uint32_t dim1)
@@ -299,9 +281,9 @@ private:
         int32_t shape_2d[] = {1, 1};
         uint32_t out = g.reshape(node, g.constant({2}, shape_2d, DType::INT32));
         if (dim0 > 1)
-            out = repeat_3d_axis(out, dim0, 0);
+            out = repeat_ax(out, dim0, 0);
         if (dim1 > 1)
-            out = repeat_3d_axis(out, dim1, 1);
+            out = repeat_ax(out, dim1, 1);
         return out;
     }
 
@@ -311,11 +293,11 @@ private:
         int32_t shape_3d[] = {1, 1, 1};
         uint32_t out = g.reshape(node, g.constant({3}, shape_3d, DType::INT32));
         if (dim0 > 1)
-            out = repeat_3d_axis(out, dim0, 0);
+            out = repeat_ax(out, dim0, 0);
         if (dim1 > 1)
-            out = repeat_3d_axis(out, dim1, 1);
+            out = repeat_ax(out, dim1, 1);
         if (dim2 > 1)
-            out = repeat_3d_axis(out, dim2, 2);
+            out = repeat_ax(out, dim2, 2);
         return out;
     }
 
@@ -325,13 +307,13 @@ private:
         int32_t sh4[] = {1, 1, 1, 1};
         uint32_t out = g.reshape(node, g.constant({4}, sh4, DType::INT32));
         if (d0 > 1)
-            out = repeat_4d_axis(out, d0, 0);
+            out = repeat_ax(out, d0, 0);
         if (d1 > 1)
-            out = repeat_4d_axis(out, d1, 1);
+            out = repeat_ax(out, d1, 1);
         if (d2 > 1)
-            out = repeat_4d_axis(out, d2, 2);
+            out = repeat_ax(out, d2, 2);
         if (d3 > 1)
-            out = repeat_4d_axis(out, d3, 3);
+            out = repeat_ax(out, d3, 3);
         return out;
     }
 
@@ -340,9 +322,9 @@ private:
         int32_t shape_3d[] = {1, 1, (int32_t)vec_len};
         uint32_t out = g.reshape(vec_id, g.constant({3}, shape_3d, DType::INT32));
         if (dim0 > 1)
-            out = repeat_3d_axis(out, dim0, 0);
+            out = repeat_ax(out, dim0, 0);
         if (dim1 > 1)
-            out = repeat_3d_axis(out, dim1, 1);
+            out = repeat_ax(out, dim1, 1);
         return out;
     }
 
@@ -360,37 +342,37 @@ private:
         uint32_t axis_node = g.constant({1}, &ax_val, DType::INT32);
 
         uint32_t sum_x = g.sum(x, axis_node);
-        uint32_t d_node = expand_scalar_to_3d((float)D, 1, S, 1);
+        uint32_t d_node = expand_scalar_to_3d((float)D, cfg.batch_size, S, 1);
         uint32_t mean_val = g.div(sum_x, d_node);
-        uint32_t mean = repeat_3d_axis(mean_val, D, 2);
+        uint32_t mean = repeat_ax(mean_val, D, 2);
 
         uint32_t x_sub = g.add(x, g.neg(mean));
         uint32_t sq = g.mul(x_sub, x_sub);
         uint32_t sum_sq = g.sum(sq, axis_node);
         uint32_t var = g.div(sum_sq, d_node);
 
-        uint32_t eps_node = expand_scalar_to_3d(eps, 1, S, 1);
+        uint32_t eps_node = expand_scalar_to_3d(eps, cfg.batch_size, S, 1);
         uint32_t var_plus_eps = g.add(var, eps_node);
 
-        uint32_t sqrt_exp = expand_scalar_to_3d(0.5f, 1, S, 1);
+        uint32_t sqrt_exp = expand_scalar_to_3d(0.5f, cfg.batch_size, S, 1);
         uint32_t std_dev = g.pow(var_plus_eps, sqrt_exp);
 
-        uint32_t one_node = expand_scalar_to_3d(1.0f, 1, S, 1);
+        uint32_t one_node = expand_scalar_to_3d(1.0f, cfg.batch_size, S, 1);
         uint32_t inv_std = g.div(one_node, std_dev);
-        uint32_t inv_std_expanded = repeat_3d_axis(inv_std, D, 2);
+        uint32_t inv_std_expanded = repeat_ax(inv_std, D, 2);
 
         uint32_t normalized = g.mul(x_sub, inv_std_expanded);
 
         if (!w_name.empty())
         {
             uint32_t w = weight(w_name);
-            uint32_t w_exp = expand_1d_to_3d(w, D, 1, S);
+            uint32_t w_exp = expand_1d_to_3d(w, D, cfg.batch_size, S);
             normalized = g.mul(normalized, w_exp);
         }
         if (!b_name.empty())
         {
             uint32_t b = weight(b_name);
-            uint32_t b_exp = expand_1d_to_3d(b, D, 1, S);
+            uint32_t b_exp = expand_1d_to_3d(b, D, cfg.batch_size, S);
             normalized = g.add(normalized, b_exp);
         }
         return normalized;
@@ -404,18 +386,18 @@ private:
         int32_t axis_val = -1;
         uint32_t axis_node = g.constant({1}, &axis_val, DType::INT32);
         uint32_t sum_sq = g.sum(x_sq, axis_node);
-        uint32_t n_node = expand_scalar_to_3d((float)D, 1, S, 1);
+        uint32_t n_node = expand_scalar_to_3d((float)D, cfg.batch_size, S, 1);
         uint32_t mean_sq = g.div(sum_sq, n_node);
-        uint32_t eps_expanded = expand_scalar_to_3d(eps, 1, S, 1);
+        uint32_t eps_expanded = expand_scalar_to_3d(eps, cfg.batch_size, S, 1);
         uint32_t mean_sq_plus_eps = g.add(mean_sq, eps_expanded);
-        uint32_t sqrt_node = expand_scalar_to_3d(0.5f, 1, S, 1);
+        uint32_t sqrt_node = expand_scalar_to_3d(0.5f, cfg.batch_size, S, 1);
         uint32_t std = g.pow(mean_sq_plus_eps, sqrt_node);
-        uint32_t one_node = expand_scalar_to_3d(1.0f, 1, S, 1);
+        uint32_t one_node = expand_scalar_to_3d(1.0f, cfg.batch_size, S, 1);
         uint32_t inv_std = g.div(one_node, std);
-        uint32_t inv_std_expanded = repeat_3d_axis(inv_std, D, 2);
+        uint32_t inv_std_expanded = repeat_ax(inv_std, D, 2);
         uint32_t x_norm = g.mul(x_id, inv_std_expanded);
         uint32_t w = weight(w_name);
-        uint32_t w_exp = expand_1d_to_3d(w, D, 1, S);
+        uint32_t w_exp = expand_1d_to_3d(w, D, cfg.batch_size, S);
         return g.mul(x_norm, w_exp);
     }
 
@@ -430,11 +412,13 @@ private:
         uint32_t w_t = g.permute(w, g.constant({2}, p, DType::INT32));
         w_t = g.contiguous(w_t);
         int32_t sh3[] = {1, (int32_t)in_d, (int32_t)out_d};
-        uint32_t out = g.dot(x, g.reshape(w_t, g.constant({3}, sh3, DType::INT32)));
+        uint32_t w_3d = g.contiguous(g.reshape(w_t, g.constant({3}, sh3, DType::INT32)));
+        w_3d = g.contiguous(repeat_ax(w_3d, cfg.batch_size, 0));
+        uint32_t out = g.dot(x, w_3d);
         if (!b_name.empty())
         {
             uint32_t b = weight(b_name);
-            uint32_t b_exp = expand_1d_to_3d(b, out_d, 1, S);
+            uint32_t b_exp = expand_1d_to_3d(b, out_d, cfg.batch_size, S);
             out = g.add(out, b_exp);
         }
         return out;
@@ -468,23 +452,23 @@ private:
     uint32_t gelu_exact(uint32_t x_id, uint32_t S, uint32_t D)
     {
         // x_scaled = x / sqrt(2)
-        uint32_t inv_sqrt2 = expand_scalar_to_3d(0.7071067811865475f, 1, S, D);
+        uint32_t inv_sqrt2 = expand_scalar_to_3d(0.7071067811865475f, cfg.batch_size, S, D);
         uint32_t x_scaled = g.mul(x_id, inv_sqrt2);
 
         // abs(x_scaled) = sqrt(x_scaled^2)
         uint32_t xs_sq = g.mul(x_scaled, x_scaled);
-        uint32_t half = expand_scalar_to_3d(0.5f, 1, S, D);
+        uint32_t half = expand_scalar_to_3d(0.5f, cfg.batch_size, S, D);
         uint32_t abs_xs = g.pow(xs_sq, half);
 
         // sign(x_scaled) = x_scaled / (|x_scaled| + eps)
-        uint32_t eps_node = expand_scalar_to_3d(1e-12f, 1, S, D);
+        uint32_t eps_node = expand_scalar_to_3d(1e-12f, cfg.batch_size, S, D);
         uint32_t abs_xs_eps = g.add(abs_xs, eps_node);
         uint32_t sign_xs = g.div(x_scaled, abs_xs_eps);
 
         // t = 1 / (1 + p * |x_scaled|)
-        uint32_t p_node = expand_scalar_to_3d(0.3275911f, 1, S, D);
+        uint32_t p_node = expand_scalar_to_3d(0.3275911f, cfg.batch_size, S, D);
         uint32_t p_abs = g.mul(p_node, abs_xs);
-        uint32_t one_node = expand_scalar_to_3d(1.0f, 1, S, D);
+        uint32_t one_node = expand_scalar_to_3d(1.0f, cfg.batch_size, S, D);
         uint32_t denom = g.add(one_node, p_abs);
         uint32_t t = g.div(one_node, denom);
 
@@ -494,11 +478,11 @@ private:
         uint32_t t4 = g.mul(t3, t);
         uint32_t t5 = g.mul(t4, t);
 
-        uint32_t a1 = expand_scalar_to_3d(0.254829592f, 1, S, D);
-        uint32_t a2 = expand_scalar_to_3d(-0.284496736f, 1, S, D);
-        uint32_t a3 = expand_scalar_to_3d(1.421413741f, 1, S, D);
-        uint32_t a4 = expand_scalar_to_3d(-1.453152027f, 1, S, D);
-        uint32_t a5 = expand_scalar_to_3d(1.061405429f, 1, S, D);
+        uint32_t a1 = expand_scalar_to_3d(0.254829592f, cfg.batch_size, S, D);
+        uint32_t a2 = expand_scalar_to_3d(-0.284496736f, cfg.batch_size, S, D);
+        uint32_t a3 = expand_scalar_to_3d(1.421413741f, cfg.batch_size, S, D);
+        uint32_t a4 = expand_scalar_to_3d(-1.453152027f, cfg.batch_size, S, D);
+        uint32_t a5 = expand_scalar_to_3d(1.061405429f, cfg.batch_size, S, D);
 
         uint32_t poly = g.mul(a1, t);
         poly = g.add(poly, g.mul(a2, t2));
@@ -507,7 +491,7 @@ private:
         poly = g.add(poly, g.mul(a5, t5));
 
         // exp(-x_scaled^2)
-        uint32_t e_node = expand_scalar_to_3d(2.718281828459045f, 1, S, D);
+        uint32_t e_node = expand_scalar_to_3d(2.718281828459045f, cfg.batch_size, S, D);
         uint32_t neg_xs_sq = g.neg(xs_sq);
         uint32_t exp_neg_xs_sq = g.pow(e_node, neg_xs_sq);
 
@@ -533,9 +517,9 @@ private:
                         uint32_t n_groups, uint32_t head_dim, uint32_t S)
     {
         int32_t starts1[] = {0, 0, 0, 0};
-        int32_t ends1[] = {1, (int32_t)n_groups, (int32_t)S, (int32_t)head_dim / 2};
+        int32_t ends1[] = {(int32_t)cfg.batch_size, (int32_t)n_groups, (int32_t)S, (int32_t)head_dim / 2};
         int32_t starts2[] = {0, 0, 0, (int32_t)head_dim / 2};
-        int32_t ends2[] = {1, (int32_t)n_groups, (int32_t)S, (int32_t)head_dim};
+        int32_t ends2[] = {(int32_t)cfg.batch_size, (int32_t)n_groups, (int32_t)S, (int32_t)head_dim};
         int32_t steps[] = {1, 1, 1, 1};
 
         uint32_t x1 = g.slice(x, g.constant({4}, starts1, DType::INT32),
@@ -550,6 +534,11 @@ private:
 
         uint32_t cos_exp = repeat_ax(cos, n_groups, 1);
         uint32_t sin_exp = repeat_ax(sin, n_groups, 1);
+        if (cfg.batch_size > 1)
+        {
+            cos_exp = repeat_ax(cos_exp, cfg.batch_size, 0);
+            sin_exp = repeat_ax(sin_exp, cfg.batch_size, 0);
+        }
         return g.add(g.mul(x, cos_exp), g.mul(rotated, sin_exp));
     }
 
@@ -685,16 +674,16 @@ private:
     // -------------------------------------------------------------------------
     uint32_t softmax_4d(uint32_t scores, uint32_t S, uint32_t num_heads)
     {
-        int32_t axis_val = -1;
-        uint32_t axis_node = g.constant({1}, &axis_val, DType::INT32);
+        int32_t ax_val = -1;
+        uint32_t axis_node = g.constant({1}, &ax_val, DType::INT32);
         uint32_t max_s = g.max(scores, axis_node);
-        uint32_t max_expanded = repeat_4d_axis(max_s, S, 3);
+        uint32_t max_expanded = repeat_ax(max_s, S, 3);
         uint32_t shifted = g.add(scores, g.neg(max_expanded));
 
-        uint32_t e_node = expand_scalar_to_4d(2.718281828459045f, 1, num_heads, S, S);
+        uint32_t e_node = expand_scalar_to_4d(2.718281828459045f, cfg.batch_size, num_heads, S, S);
         uint32_t exps = g.pow(e_node, shifted);
         uint32_t sums = g.sum(exps, axis_node);
-        uint32_t sums_expanded = repeat_4d_axis(sums, S, 3);
+        uint32_t sums_expanded = repeat_ax(sums, S, 3);
         return g.div(exps, sums_expanded);
     }
 
@@ -714,12 +703,13 @@ private:
         uint32_t w_t = g.contiguous(g.permute(w_2d, g.constant({2}, p, DType::INT32))); // (1536, 768)
         int32_t sh3[] = {1, 1536, 768};
         uint32_t w_3d = g.reshape(w_t, g.constant({3}, sh3, DType::INT32));
-        // (1, num_patches, 1536) × (1, 1536, 768) → (1, num_patches, 768)
+        w_3d = g.contiguous(repeat_ax(w_3d, cfg.batch_size, 0)); // Repeat across batch to match input batch size
+        // (B, num_patches, 1536) × (B, 1536, 768) → (B, num_patches, 768)
         uint32_t out = g.dot(x, w_3d);
 
         // [FIX] Add bias
-        uint32_t b = weight("vision_tower.patch_embed.proj.bias"); // (768,)
-        uint32_t b_exp = expand_1d_to_3d(b, 768, 1, num_patches);
+        uint32_t b = weight("vision_tower.patch_embed.proj.bias");             // (768,)
+        uint32_t b_exp = expand_1d_to_3d(b, 768, cfg.batch_size, num_patches); // Dynamically use cfg.batch_size
         return g.add(out, b_exp);
     }
 
@@ -822,7 +812,12 @@ private:
         pos = g.add(pos, g.mul(g10, w10_3d));
         pos = g.add(pos, g.mul(g11, w11_3d));
 
-        return pos; // (1, num_patches, 768)
+        if (cfg.batch_size > 1)
+        {
+            pos = repeat_ax(pos, cfg.batch_size, 0);
+            pos = g.contiguous(pos);
+        }
+        return pos; // (B, num_patches, 768)
     }
 
     // Fused-QKV attention with 2-D RoPE, bidirectional (no causal mask).
@@ -852,11 +847,11 @@ private:
 
         int32_t sh4[] = {1, (int32_t)S, (int32_t)cfg.vision_num_heads, (int32_t)cfg.vision_head_dim};
         int32_t p_attn[] = {0, 2, 1, 3};
-        q = g.contiguous(g.permute(g.reshape(q, g.constant({4}, sh4, DType::INT32)),
+        q = g.contiguous(g.permute(g.contiguous(repeat_ax(g.reshape(q, g.constant({4}, sh4, DType::INT32)), cfg.batch_size, 0)),
                                    g.constant({4}, p_attn, DType::INT32)));
-        k = g.contiguous(g.permute(g.reshape(k, g.constant({4}, sh4, DType::INT32)),
+        k = g.contiguous(g.permute(g.contiguous(repeat_ax(g.reshape(k, g.constant({4}, sh4, DType::INT32)), cfg.batch_size, 0)),
                                    g.constant({4}, p_attn, DType::INT32)));
-        v = g.contiguous(g.permute(g.reshape(v, g.constant({4}, sh4, DType::INT32)),
+        v = g.contiguous(g.permute(g.contiguous(repeat_ax(g.reshape(v, g.constant({4}, sh4, DType::INT32)), cfg.batch_size, 0)),
                                    g.constant({4}, p_attn, DType::INT32)));
 
         // 2-D RoPE on Q and K
@@ -864,18 +859,18 @@ private:
         k = apply_rope(k, cos, sin, cfg.vision_num_heads, cfg.vision_head_dim, S);
 
         float scale_val = 1.0f / std::sqrt((float)cfg.vision_head_dim);
-        q = g.mul(q, expand_scalar_to_4d(scale_val, 1, cfg.vision_num_heads, S, cfg.vision_head_dim));
+        q = g.mul(q, expand_scalar_to_4d(scale_val, cfg.batch_size, cfg.vision_num_heads, S, cfg.vision_head_dim));
 
         int32_t p_k[] = {0, 1, 3, 2};
         uint32_t k_t = g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)));
-        uint32_t scores = g.dot(q, k_t); // (1, num_heads, S, S)
+        uint32_t scores = g.dot(q, k_t); // (B, num_heads, S, S)
 
         uint32_t probs = softmax_4d(scores, S, cfg.vision_num_heads);
-        uint32_t attn_out = g.dot(probs, v); // (1, num_heads, S, head_dim)
+        uint32_t attn_out = g.dot(probs, v); // (B, num_heads, S, head_dim)
 
         int32_t p_ctx[] = {0, 2, 1, 3};
         uint32_t ctx_perm = g.contiguous(g.permute(attn_out, g.constant({4}, p_ctx, DType::INT32)));
-        int32_t sh3_ctx[] = {1, (int32_t)S, (int32_t)cfg.vision_hidden_size};
+        int32_t sh3_ctx[] = {(int32_t)cfg.batch_size, (int32_t)S, (int32_t)cfg.vision_hidden_size};
         uint32_t ctx_flat = g.reshape(ctx_perm, g.constant({3}, sh3_ctx, DType::INT32));
 
         return linear(ctx_flat, prefix + "proj.weight", prefix + "proj.bias",
@@ -948,7 +943,7 @@ private:
         uint32_t v = linear(x, prefix + "v_proj.weight", "",
                             cfg.text_hidden_size, cfg.text_hidden_size, S);
 
-        int32_t sh4[] = {1, (int32_t)S, (int32_t)cfg.text_num_heads, (int32_t)cfg.text_head_dim};
+        int32_t sh4[] = {(int32_t)cfg.batch_size, (int32_t)S, (int32_t)cfg.text_num_heads, (int32_t)cfg.text_head_dim};
         int32_t p_attn[] = {0, 2, 1, 3};
         q = g.contiguous(g.permute(g.reshape(q, g.constant({4}, sh4, DType::INT32)),
                                    g.constant({4}, p_attn, DType::INT32)));
@@ -961,7 +956,7 @@ private:
         k = apply_rope(k, cos, sin, cfg.text_num_heads, cfg.text_head_dim, S);
 
         float scale_val = 1.0f / std::sqrt((float)cfg.text_head_dim);
-        q = g.mul(q, expand_scalar_to_4d(scale_val, 1, cfg.text_num_heads, S, cfg.text_head_dim));
+        q = g.mul(q, expand_scalar_to_4d(scale_val, cfg.batch_size, cfg.text_num_heads, S, cfg.text_head_dim));
 
         int32_t p_k[] = {0, 1, 3, 2};
         uint32_t k_t = g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)));
@@ -972,7 +967,7 @@ private:
 
         int32_t p_ctx[] = {0, 2, 1, 3};
         uint32_t ctx_perm = g.contiguous(g.permute(attn_out, g.constant({4}, p_ctx, DType::INT32)));
-        int32_t sh3_ctx[] = {1, (int32_t)S, (int32_t)cfg.text_hidden_size};
+        int32_t sh3_ctx[] = {(int32_t)cfg.batch_size, (int32_t)S, (int32_t)cfg.text_hidden_size};
         uint32_t ctx_flat = g.reshape(ctx_perm, g.constant({3}, sh3_ctx, DType::INT32));
 
         return linear(ctx_flat, prefix + "o_proj.weight", "",
@@ -986,7 +981,7 @@ private:
                                cfg.text_hidden_size, cfg.text_intermediate_size, S);
         uint32_t up = linear(x, prefix + "up_proj.weight", "",
                              cfg.text_hidden_size, cfg.text_intermediate_size, S);
-        uint32_t gate_silu = silu_atomic(gate, 1, S, cfg.text_intermediate_size);
+        uint32_t gate_silu = silu_atomic(gate, cfg.batch_size, S, cfg.text_intermediate_size);
         uint32_t gate_up = g.mul(gate_silu, up);
         return linear(gate_up, prefix + "down_proj.weight", "",
                       cfg.text_intermediate_size, cfg.text_hidden_size, S);
@@ -998,16 +993,12 @@ private:
         int32_t axis_val = -1;
         uint32_t axis_node = g.constant({1}, &axis_val, DType::INT32);
         uint32_t sum_sq = g.sum(x_sq, axis_node);
-        uint32_t eps_expanded = expand_scalar_to_2d(1e-12f, 1, 1);
+        uint32_t eps_expanded = expand_scalar_to_2d(1e-12f, cfg.batch_size, 1);
         uint32_t sum_sq_plus_eps = g.add(sum_sq, eps_expanded);
-        uint32_t std = g.pow(sum_sq_plus_eps, expand_scalar_to_2d(0.5f, 1, 1));
-        uint32_t inv_std = g.div(expand_scalar_to_2d(1.0f, 1, 1), std);
+        uint32_t std = g.pow(sum_sq_plus_eps, expand_scalar_to_2d(0.5f, cfg.batch_size, 1));
+        uint32_t inv_std = g.div(expand_scalar_to_2d(1.0f, cfg.batch_size, 1), std);
 
-        int32_t rep[] = {(int32_t)D};
-        int32_t axis[] = {1};
-        uint32_t inv_std_expanded = g.repeat(inv_std,
-                                             g.constant({1}, rep, DType::INT32),
-                                             g.constant({1}, axis, DType::INT32));
+        uint32_t inv_std_expanded = repeat_ax(inv_std, D, 1);
         return g.mul(x, inv_std_expanded);
     }
 
@@ -1147,23 +1138,23 @@ public:
                                          "merger.norm.weight", "merger.norm.bias",
                                          cfg.num_patches, cfg.vision_hidden_size);
 
-        // Reshape (1, num_patches, 768) → (1, grid_h, grid_w, 768)
-        int32_t sh4_grid[] = {1, (int32_t)cfg.grid_h, (int32_t)cfg.grid_w, (int32_t)cfg.vision_hidden_size};
+        // Reshape (B, num_patches, 768) → (B, grid_h, grid_w, 768)
+        int32_t sh4_grid[] = {(int32_t)cfg.batch_size, (int32_t)cfg.grid_h, (int32_t)cfg.grid_w, (int32_t)cfg.vision_hidden_size};
         uint32_t grid = g.reshape(ln_patches, g.constant({4}, sh4_grid, DType::INT32));
 
-        // Split into 2×2 blocks: (1, merged_h, 2, merged_w, 2, 768)
-        int32_t sh6_split[] = {1,
+        // Split into 2×2 blocks: (B, merged_h, 2, merged_w, 2, 768)
+        int32_t sh6_split[] = {(int32_t)cfg.batch_size,
                                (int32_t)cfg.merged_grid_h, (int32_t)cfg.spatial_merge_size,
                                (int32_t)cfg.merged_grid_w, (int32_t)cfg.spatial_merge_size,
                                (int32_t)cfg.vision_hidden_size};
         uint32_t split = g.reshape(grid, g.constant({6}, sh6_split, DType::INT32));
 
-        // Permute so the 2×2 block dims are adjacent: (1, merged_h, merged_w, 2, 2, 768)
+        // Permute so the 2×2 block dims are adjacent: (B, merged_h, merged_w, 2, 2, 768)
         int32_t perm6[] = {0, 1, 3, 2, 4, 5};
         uint32_t perm_split = g.contiguous(g.permute(split, g.constant({6}, perm6, DType::INT32)));
 
-        // Flatten to (1, num_merged, merged_dim) = (1, 256, 3072)
-        int32_t sh3_merged[] = {1, (int32_t)cfg.num_merged, (int32_t)cfg.merged_dim};
+        // Flatten to (B, num_merged, merged_dim) = (B, 256, 3072)
+        int32_t sh3_merged[] = {(int32_t)cfg.batch_size, (int32_t)cfg.num_merged, (int32_t)cfg.merged_dim};
         uint32_t merged = g.reshape(perm_split, g.constant({3}, sh3_merged, DType::INT32));
 
         // linear_fc1: 3072 → 3072, GELU, linear_fc2: 3072 → 768
@@ -1200,7 +1191,13 @@ public:
                     g.constant({3}, suf_ends, DType::INT32),
                     g.constant({3}, slice_steps, DType::INT32))); // (1, 6, 768)
 
-        // Concat: prefix + image_features + suffix → (1, 270, 768)
+        if (cfg.batch_size > 1)
+        {
+            prefix_emb = g.contiguous(repeat_ax(prefix_emb, cfg.batch_size, 0));
+            suffix_emb = g.contiguous(repeat_ax(suffix_emb, cfg.batch_size, 0));
+        }
+
+        // Concat: prefix + image_features + suffix → (B, 270, 768)
         int32_t ax_seq = 1;
         uint32_t text_input = g.concat({prefix_emb, proj2, suffix_emb},
                                        g.constant({1}, &ax_seq, DType::INT32));
@@ -1235,14 +1232,14 @@ public:
         // [FIX] The last token is at position S-1 = 269 (the last suffix token,
         //       which is token ID 397 = ">\n").  Previously: position 255.
         int32_t starts_last[] = {0, (int32_t)(S - 1), 0};
-        int32_t ends_last[] = {1, (int32_t)S, (int32_t)cfg.text_hidden_size};
+        int32_t ends_last[] = {(int32_t)cfg.batch_size, (int32_t)S, (int32_t)cfg.text_hidden_size};
         int32_t steps_last[] = {1, 1, 1};
         uint32_t last_token = g.contiguous(g.slice(h,
                                                    g.constant({3}, starts_last, DType::INT32),
                                                    g.constant({3}, ends_last, DType::INT32),
                                                    g.constant({3}, steps_last, DType::INT32)));
 
-        int32_t sh2_out[] = {1, (int32_t)cfg.text_hidden_size};
+        int32_t sh2_out[] = {(int32_t)cfg.batch_size, (int32_t)cfg.text_hidden_size};
         uint32_t pooled = g.reshape(last_token, g.constant({2}, sh2_out, DType::INT32));
 
         // ---- 6. L2 normalize ----------------------------------------------

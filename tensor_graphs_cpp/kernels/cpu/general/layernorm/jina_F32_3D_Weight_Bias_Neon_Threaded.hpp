@@ -216,6 +216,14 @@ inline uint32_t refFactoryJinaLayerNormWB_F32_3D(const std::vector<uint32_t> &in
         uint32_t node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
         uint32_t out = g.reshape(node, g.constant({3}, sh, DType::INT32));
+        if (B > 1)
+        {
+            int32_t rep = (int32_t)B;
+            int32_t ax = 0;
+            out = g.repeat(out,
+                           g.constant({1}, &rep, DType::INT32),
+                           g.constant({1}, &ax, DType::INT32));
+        }
         if (S > 1)
         {
             int32_t rep = (int32_t)S;
@@ -237,12 +245,20 @@ inline uint32_t refFactoryJinaLayerNormWB_F32_3D(const std::vector<uint32_t> &in
                         g.constant({1}, &ax, DType::INT32));
     };
 
-    // Helper: expand_1d_to_3d(vec, D, 1, S) → {1, S, D}
+    // Helper: expand_1d_to_3d(vec, D, B, S) → {B, S, D}
     // Mirrors JinaV5OmniNanoRetrievalModel::expand_1d_to_3d exactly.
     auto expand_1d_1SD = [&](uint32_t vec) -> uint32_t
     {
         int32_t sh[] = {1, 1, (int32_t)D};
         uint32_t out = g.reshape(vec, g.constant({3}, sh, DType::INT32));
+        if (B > 1)
+        {
+            int32_t rep = (int32_t)B;
+            int32_t ax = 0;
+            out = g.repeat(out,
+                           g.constant({1}, &rep, DType::INT32),
+                           g.constant({1}, &ax, DType::INT32));
+        }
         if (S > 1)
         {
             int32_t rep = (int32_t)S;

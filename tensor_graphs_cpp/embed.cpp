@@ -84,11 +84,12 @@ static constexpr float IMAGE_STD = 0.5f;
 static constexpr float RESCALE_FACTOR = 1.0f / 255.0f;
 
 // Shared memory layout constants
-static constexpr int SHM_HEADER_SIZE = 20;                   // 5 × int32
-static constexpr int SHM_PIXEL_DATA_SIZE = MAX_PIXELS * 3;   // 3,932,160
-static constexpr int SHM_EMBEDDING_SIZE = EMBEDDING_DIM * 4; // 3,072
+static constexpr int MAX_BATCH_SIZE = 16;
+static constexpr int SHM_HEADER_SIZE = 24; // 6 × int32
+static constexpr int SHM_PIXEL_DATA_SIZE = MAX_PIXELS * 3 * MAX_BATCH_SIZE;
+static constexpr int SHM_EMBEDDING_SIZE = EMBEDDING_DIM * 4 * MAX_BATCH_SIZE;
 static constexpr int SHM_EMBEDDING_OFFSET = SHM_HEADER_SIZE + SHM_PIXEL_DATA_SIZE;
-static constexpr int SHM_TOTAL_SIZE = SHM_EMBEDDING_OFFSET + SHM_EMBEDDING_SIZE; // 3,935,252
+static constexpr int SHM_TOTAL_SIZE = SHM_EMBEDDING_OFFSET + SHM_EMBEDDING_SIZE;
 
 #pragma pack(push, 1)
 struct SharedMemoryPayload
@@ -99,12 +100,13 @@ struct SharedMemoryPayload
     // 3: Exit/Shutdown
     volatile int32_t state;
 
+    int32_t batch_size;
     int32_t width;
     int32_t height;
     int32_t channels;
     int32_t status; // 0 = success, -1 = error
     uint8_t pixel_data[SHM_PIXEL_DATA_SIZE];
-    float embedding[EMBEDDING_DIM];
+    float embedding[EMBEDDING_DIM * MAX_BATCH_SIZE];
 };
 #pragma pack(pop)
 
@@ -162,30 +164,30 @@ struct CompiledSession
     std::unique_ptr<JinaV5Config> cfg;
     uint32_t patch_input_id = 0;
     uint32_t root_id = 0;
+    int batch_size = 0;
     int width = 0;
     int height = 0;
     bool has_run = false;
 
-    // Reusable staging buffers — sized to match the current (width, height).
-    // build_patch_input_inplace() and normalize_image_inplace() write into them.
-    std::vector<float> norm_image;  // CHW, size = 3 * H * W
-    std::vector<float> patch_input; // (1, num_patches, PATCH_DIM)
+    // Reusable staging buffers — sized to match the current (batch_size, width, height).
+    std::vector<float> norm_image;
+    std::vector<float> patch_input;
 };
 
 // Build (or rebuild) the graph + session for the given image dimensions.
 static void build_session(CompiledSession &cs, MemoryManager &mem,
-                          int width, int height,
+                          int batch_size, int width, int height,
                           const std::string &weights_path)
 {
     int grid_h = height / PATCH_SIZE;
     int grid_w = width / PATCH_SIZE;
     int num_patches = grid_h * grid_w;
 
-    std::vector<uint32_t> inShape = {1, (uint32_t)num_patches, (uint32_t)PATCH_DIM};
-    std::vector<uint32_t> outShape = {1, EMBEDDING_DIM};
+    std::vector<uint32_t> inShape = {(uint32_t)batch_size, (uint32_t)num_patches, (uint32_t)PATCH_DIM};
+    std::vector<uint32_t> outShape = {(uint32_t)batch_size, EMBEDDING_DIM};
 
     cs.graph = std::make_unique<Graph>();
-    cs.cfg = std::make_unique<JinaV5Config>((uint32_t)height, (uint32_t)width);
+    cs.cfg = std::make_unique<JinaV5Config>((uint32_t)batch_size, (uint32_t)height, (uint32_t)width);
 
     cs.patch_input_id = cs.graph->input(
         inShape,
@@ -198,12 +200,12 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
     Repo repo("benchmarks/repo_jina-embeddings-v5-omni-nano-retrieval", gHash, true);
 
     std::string cache_file = "dirty_region_caches/jina-v5-" +
+                             std::to_string(batch_size) + "x" +
                              std::to_string(width) + "x" + std::to_string(height) + ".bin";
 
     cs.session = std::make_unique<Session>(*cs.graph, mem, cs.root_id,
                                            cache_file, 0, &repo);
 
-    // Register a bucket where ONLY the image input is dirty (all weights are clean/static)
     std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
     inputDirty[cs.patch_input_id] = makeFull(inShape);
 
@@ -214,59 +216,63 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
 
     cs.session->compile(true);
 
+    cs.batch_size = batch_size;
     cs.width = width;
     cs.height = height;
     cs.has_run = false; // Reset run tracking flag on rebuild/compile
 
-    // Pre-allocate reusable staging buffers for this image size so the polling
-    // loop doesn't allocate/free on every single image.
-    cs.norm_image.assign((size_t)IN_CHANNELS * width * height, 0.0f);
-    cs.patch_input.assign((size_t)1 * num_patches * PATCH_DIM, 0.0f);
+    cs.norm_image.assign((size_t)batch_size * IN_CHANNELS * width * height, 0.0f);
+    cs.patch_input.assign((size_t)batch_size * num_patches * PATCH_DIM, 0.0f);
 }
 
-static void build_patch_input_inplace(const std::vector<float> &norm_image,
-                                      int width, int height,
-                                      std::vector<float> &patch_input)
+static void build_patch_input_inplace_batch(const std::vector<float> &norm_image,
+                                            int batch_size,
+                                            int width, int height,
+                                            std::vector<float> &patch_input)
 {
     int grid_h = height / PATCH_SIZE;
     int grid_w = width / PATCH_SIZE;
     int num_patches = grid_h * grid_w;
 
-    if ((int)patch_input.size() != 1 * num_patches * PATCH_DIM)
-        patch_input.assign((size_t)1 * num_patches * PATCH_DIM, 0.0f);
+    size_t required_size = (size_t)batch_size * num_patches * PATCH_DIM;
+    if (patch_input.size() != required_size)
+        patch_input.assign(required_size, 0.0f);
 
-    // Per-patch flat layout: c * (T * P * Q) + t * (P * Q) + p * Q + q  ← (C, T, P, Q)
-    // The HF processor flattens patches as (C, T, P, Q), matching the layout expected
-    // by PyTorch when F.linear is applied to a Conv3d weight viewed as (Out, In).
     int spatial_stride = PATCH_SIZE * PATCH_SIZE;
     int temporal_stride = TEMPORAL_PATCH_SIZE * spatial_stride;
+    size_t img_pixels = width * height;
 
-    for (int gi = 0; gi < grid_h; ++gi)
+    for (int b = 0; b < batch_size; ++b)
     {
-        for (int gj = 0; gj < grid_w; ++gj)
+        const float *src_b = norm_image.data() + b * IN_CHANNELS * img_pixels;
+        float *dst_b = patch_input.data() + b * num_patches * PATCH_DIM;
+
+        for (int gi = 0; gi < grid_h; ++gi)
         {
-            int patch_idx = gi * grid_w + gj;
-            int dst_base = patch_idx * PATCH_DIM;
-
-            for (int t = 0; t < TEMPORAL_PATCH_SIZE; ++t)
+            for (int gj = 0; gj < grid_w; ++gj)
             {
-                for (int p = 0; p < PATCH_SIZE; ++p)
+                int patch_idx = gi * grid_w + gj;
+                int dst_base = patch_idx * PATCH_DIM;
+
+                for (int t = 0; t < TEMPORAL_PATCH_SIZE; ++t)
                 {
-                    for (int q = 0; q < PATCH_SIZE; ++q)
+                    for (int p = 0; p < PATCH_SIZE; ++p)
                     {
-                        int img_y = gi * PATCH_SIZE + p;
-                        int img_x = gj * PATCH_SIZE + q;
+                        for (int q = 0; q < PATCH_SIZE; ++q)
+                        {
+                            int img_y = gi * PATCH_SIZE + p;
+                            int img_x = gj * PATCH_SIZE + q;
 
-                        int local_offset = t * spatial_stride + p * PATCH_SIZE + q;
+                            int local_offset = t * spatial_stride + p * PATCH_SIZE + q;
 
-                        // norm_image is CHW: (c * H + y) * W + x
-                        int src_r = ((0 * height + img_y) * width + img_x);
-                        int src_g = ((1 * height + img_y) * width + img_x);
-                        int src_b = ((2 * height + img_y) * width + img_x);
+                            int src_r_idx = ((0 * height + img_y) * width + img_x);
+                            int src_g_idx = ((1 * height + img_y) * width + img_x);
+                            int src_b_idx = ((2 * height + img_y) * width + img_x);
 
-                        patch_input[dst_base + 0 * temporal_stride + local_offset] = norm_image[src_r];
-                        patch_input[dst_base + 1 * temporal_stride + local_offset] = norm_image[src_g];
-                        patch_input[dst_base + 2 * temporal_stride + local_offset] = norm_image[src_b];
+                            dst_b[dst_base + 0 * temporal_stride + local_offset] = src_b[src_r_idx];
+                            dst_b[dst_base + 1 * temporal_stride + local_offset] = src_b[src_g_idx];
+                            dst_b[dst_base + 2 * temporal_stride + local_offset] = src_b[src_b_idx];
+                        }
                     }
                 }
             }
@@ -274,51 +280,39 @@ static void build_patch_input_inplace(const std::vector<float> &norm_image,
     }
 }
 
-// Backwards-compatible wrapper (still allocates) — used by standalone file mode.
-static std::vector<float> build_patch_input(const std::vector<float> &norm_image,
-                                            int width, int height)
+static void normalize_image_inplace_batch(const uint8_t *pixel_data,
+                                          int batch_size,
+                                          int width, int height, int channels,
+                                          std::vector<float> &norm_image)
 {
-    std::vector<float> out;
-    build_patch_input_inplace(norm_image, width, height, out);
-    return out;
-}
+    size_t required_size = (size_t)batch_size * IN_CHANNELS * width * height;
+    if (norm_image.size() != required_size)
+        norm_image.assign(required_size, 0.0f);
 
-// In-place normalize: writes directly into cs.norm_image, no per-call alloc.
-static void normalize_image_inplace(const uint8_t *pixel_data,
-                                    int width, int height, int channels,
-                                    std::vector<float> &norm_image)
-{
-    if ((int)norm_image.size() != IN_CHANNELS * width * height)
-        norm_image.assign((size_t)IN_CHANNELS * width * height, 0.0f);
+    size_t img_pixels = width * height;
 
-    for (int c = 0; c < IN_CHANNELS; ++c)
+    for (int b = 0; b < batch_size; ++b)
     {
-        for (int y = 0; y < height; ++y)
+        const uint8_t *src_b = pixel_data + b * img_pixels * channels;
+        float *dst_b = norm_image.data() + b * IN_CHANNELS * img_pixels;
+
+        for (int c = 0; c < IN_CHANNELS; ++c)
         {
-            for (int x = 0; x < width; ++x)
+            for (int y = 0; y < height; ++y)
             {
-                int src_idx = (y * width + x) * channels + c;
-                float pixel = static_cast<float>(pixel_data[src_idx]) * RESCALE_FACTOR;
-                pixel = (pixel - IMAGE_MEAN) / IMAGE_STD;
-                int dst_idx = (c * height + y) * width + x; // CHW
-                norm_image[dst_idx] = pixel;
+                for (int x = 0; x < width; ++x)
+                {
+                    int src_idx = (y * width + x) * channels + c;
+                    float pixel = static_cast<float>(src_b[src_idx]) * RESCALE_FACTOR;
+                    pixel = (pixel - IMAGE_MEAN) / IMAGE_STD;
+                    int dst_idx = (c * height + y) * width + x; // CHW
+                    dst_b[dst_idx] = pixel;
+                }
             }
         }
     }
 }
 
-// Normalize raw uint8 HWC pixel data to float32 CHW, mean/std normalized.
-//
-// Wrapper kept for backwards compatibility — internally delegates to the
-// in-place variant so both code paths produce identical output.  Prefer
-// normalize_image_inplace() in new code to avoid the per-call allocation.
-static std::vector<float> normalize_image(const uint8_t *pixel_data,
-                                          int width, int height, int channels)
-{
-    std::vector<float> out;
-    normalize_image_inplace(pixel_data, width, height, channels, out);
-    return out;
-}
 
 int main(int argc, char *argv[])
 {
@@ -453,13 +447,14 @@ int main(int argc, char *argv[])
         {
             if (shm_payload->state == 1)
             {
+                int batch_size = shm_payload->batch_size;
                 int width = shm_payload->width;
                 int height = shm_payload->height;
                 int channels = shm_payload->channels;
 
-                if (width <= 0 || height <= 0 || channels != 3)
+                if (batch_size <= 0 || batch_size > MAX_BATCH_SIZE || width <= 0 || height <= 0 || channels != 3)
                 {
-                    std::cerr << "[Server Error] Invalid image dimensions or channels" << std::endl;
+                    std::cerr << "[Server Error] Invalid image dimensions, batch size, or channels" << std::endl;
                     shm_payload->status = -1;
                     shm_payload->state = 2;
                     continue;
@@ -467,86 +462,86 @@ int main(int argc, char *argv[])
 
                 // try
                 // {
-                    // Rebuild graph if dimensions changed
-                    if (width != cs.width || height != cs.height)
+                // Rebuild graph if dimensions or batch_size changed
+                if (batch_size != cs.batch_size || width != cs.width || height != cs.height)
+                {
+                    if (width % SMART_RESIZE_FACTOR != 0 || height % SMART_RESIZE_FACTOR != 0)
                     {
-                        if (width % SMART_RESIZE_FACTOR != 0 || height % SMART_RESIZE_FACTOR != 0)
-                        {
-                            throw std::runtime_error(
-                                "Image dimensions must be divisible by " +
-                                std::to_string(SMART_RESIZE_FACTOR) +
-                                " (got " + std::to_string(width) + "x" +
-                                std::to_string(height) + ")");
-                        }
-                        int total_pixels = width * height;
-                        if (total_pixels < MIN_PIXELS || total_pixels > MAX_PIXELS)
-                        {
-                            throw std::runtime_error(
-                                "Image pixel count " + std::to_string(total_pixels) +
-                                " is outside [" + std::to_string(MIN_PIXELS) + ", " +
-                                std::to_string(MAX_PIXELS) + "]");
-                        }
-
-                        std::cout << "[Server] Building graph for "
-                                  << width << "x" << height << "..." << std::endl;
-                        build_session(cs, mem, width, height, WEIGHTS_PATH);
-                        std::cout << "[Server] Graph ready ("
-                                  << cs.cfg->num_patches << " patches, "
-                                  << cs.cfg->num_merged << " merged tokens, "
-                                  << cs.cfg->text_seq_len << " text tokens)"
-                                  << std::endl;
+                        throw std::runtime_error(
+                            "Image dimensions must be divisible by " +
+                            std::to_string(SMART_RESIZE_FACTOR) +
+                            " (got " + std::to_string(width) + "x" +
+                            std::to_string(height) + ")");
+                    }
+                    int total_pixels = width * height;
+                    if (total_pixels < MIN_PIXELS || total_pixels > MAX_PIXELS)
+                    {
+                        throw std::runtime_error(
+                            "Image pixel count " + std::to_string(total_pixels) +
+                            " is outside [" + std::to_string(MIN_PIXELS) + ", " +
+                            std::to_string(MAX_PIXELS) + "]");
                     }
 
-                    // 1. Normalize image in-place
-                    normalize_image_inplace(
-                        shm_payload->pixel_data, width, height, channels,
-                        cs.norm_image);
+                    std::cout << "[Server] Building graph for "
+                              << batch_size << "x" << width << "x" << height << "..." << std::endl;
+                    build_session(cs, mem, batch_size, width, height, WEIGHTS_PATH);
+                    std::cout << "[Server] Graph ready ("
+                              << cs.cfg->num_patches << " patches, "
+                              << cs.cfg->num_merged << " merged tokens, "
+                              << cs.cfg->text_seq_len << " text tokens)"
+                              << std::endl;
+                }
 
-                    // 2. Build patch input in-place
-                    build_patch_input_inplace(cs.norm_image, width, height,
-                                              cs.patch_input);
+                // 1. Normalize image in-place
+                normalize_image_inplace_batch(
+                    shm_payload->pixel_data, batch_size, width, height, channels,
+                    cs.norm_image);
 
-                    // 3. Write input and run
-                    cs.session->memManager.write(Backend::CPU, cs.patch_input_id,
-                                                 cs.patch_input.data(),
-                                                 cs.patch_input.size() * sizeof(float));
+                // 2. Build patch input in-place
+                build_patch_input_inplace_batch(cs.norm_image, batch_size, width, height,
+                                                cs.patch_input);
 
-                    // Use the incremental bucket if we have already loaded the static weights on the first run
-                    Bucket b;
-                    if (cs.has_run)
-                    {
-                        b.inputDirtyRegions[cs.patch_input_id] = makeFull(cs.graph->getNode(cs.patch_input_id).getShape());
-                        b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
-                    }
+                // 3. Write input and run
+                cs.session->memManager.write(Backend::CPU, cs.patch_input_id,
+                                             cs.patch_input.data(),
+                                             cs.patch_input.size() * sizeof(float));
 
-                    const float *device_output_ptr =
-                        static_cast<const float *>(cs.session->run(b));
+                // Use the incremental bucket if we have already loaded the static weights on the first run
+                Bucket b;
+                if (cs.has_run)
+                {
+                    b.inputDirtyRegions[cs.patch_input_id] = makeFull(cs.graph->getNode(cs.patch_input_id).getShape());
+                    b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
+                }
 
-                    cs.has_run = true; // Mark as run completed so subsequent passes bypass weight copy
+                const float *device_output_ptr =
+                    static_cast<const float *>(cs.session->run(b));
 
-                    // 4. Copy embedding back
-                    float host_output[EMBEDDING_DIM];
+                cs.has_run = true; // Mark as run completed so subsequent passes bypass weight copy
+
+                // 4. Copy embedding back
+                float host_output[EMBEDDING_DIM];
 #ifdef USE_CUDA
-                    cudaPointerAttributes attrs;
-                    if (cudaPointerGetAttributes(&attrs, device_output_ptr) == cudaSuccess &&
-                        attrs.type == cudaMemoryTypeDevice)
-                    {
-                        cudaMemcpy(host_output, device_output_ptr,
-                                   EMBEDDING_DIM * sizeof(float), cudaMemcpyDeviceToHost);
-                    }
-                    else
-                    {
-                        std::memcpy(host_output, device_output_ptr,
-                                    EMBEDDING_DIM * sizeof(float));
-                    }
-#else
+                cudaPointerAttributes attrs;
+                if (cudaPointerGetAttributes(&attrs, device_output_ptr) == cudaSuccess &&
+                    attrs.type == cudaMemoryTypeDevice)
+                {
+                    cudaMemcpy(host_output, device_output_ptr,
+                               EMBEDDING_DIM * batch_size * sizeof(float), cudaMemcpyDeviceToHost);
+                }
+                else
+                {
                     std::memcpy(host_output, device_output_ptr,
-                                EMBEDDING_DIM * sizeof(float));
+                                EMBEDDING_DIM * batch_size * sizeof(float));
+                }
+#else
+                std::memcpy(host_output, device_output_ptr,
+                            EMBEDDING_DIM * batch_size * sizeof(float));
 #endif
 
-                    std::memcpy(shm_payload->embedding, host_output,
-                                EMBEDDING_DIM * sizeof(float));
-                    shm_payload->status = 0;
+                std::memcpy(shm_payload->embedding, host_output,
+                            EMBEDDING_DIM * batch_size * sizeof(float));
+                shm_payload->status = 0;
                 // }
                 // catch (const std::exception &e)
                 // {
@@ -640,13 +635,13 @@ int main(int argc, char *argv[])
         // Build graph for this image's dimensions (build_session also
         // pre-allocates cs.norm_image and cs.patch_input for reuse).
         CompiledSession cs;
-        build_session(cs, mem, final_w, final_h, WEIGHTS_PATH);
+        build_session(cs, mem, 1, final_w, final_h, WEIGHTS_PATH);
 
         // Normalize in-place into cs.norm_image
-        normalize_image_inplace(resized_data, final_w, final_h, 3, cs.norm_image);
+        normalize_image_inplace_batch(resized_data, 1, final_w, final_h, 3, cs.norm_image);
 
         // Build patch input in-place into cs.patch_input (uses (T,P,Q,C) layout)
-        build_patch_input_inplace(cs.norm_image, final_w, final_h, cs.patch_input);
+        build_patch_input_inplace_batch(cs.norm_image, 1, final_w, final_h, cs.patch_input);
 
         // Run
         std::cout << "Running inference..." << std::endl;
