@@ -37,6 +37,7 @@ tokenize_flux.py
 models/*
 .vs
 clean.txt
+OpenCL-SDK
 
 # Profiling artifacts
 profile_output*

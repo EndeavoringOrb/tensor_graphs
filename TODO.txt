@@ -1,0 +1,29 @@
+General Notes:
+My custom tensor graph inference engine (similar to llama.cpp or sglang) currently executes node operations in sequence, even if there are multiple devices. Right now the abstraction is
+Backend (storage, cpu, cuda)
+and kernels are registered with
+-an input backend
+-an output backend
+-accompanying reference graph for matching against the graph being executed so we know if we can use the kernel to compute some subgraph
+
+the way I move data is with a copyto operation storage->cpu, cpu->gpu or gpu->cpu. the problem with keeping this as I move to parallel execution is that this will block both backends while in actuality, there is often a separate DMA or something that allows simultaneous copy & processing. My current abstraction also won't easily expand to multiple gpus, and doesn't easily encompass shared memory computers.
+
+I'd like to avoid separating operations into compute and transfer. It could be argued that an out of place addition is also a transfer because it writes memory to a different spot from the inputs. I want a clean abstraction that can handle both. Storage->cpu or storage->gpu should not be treated separately either.
+
+Freedom of fusion is very important. The whole point of the framework is verifying kernels based on their accompanying reference graph. If someone wants to fuse the entire model graph into a single kernel, spanning across all engines, they should be able to do that to squeeze out the absolute maximum performance.
+
+Things to change:
+1. Planner/extraction will move to critical path cost. `critical_path_cost = max(child.cost for child in node.children) + node.cost` but also if node A and B are scheduled on gpu, the cost is serial, not parallel. Perhaps keep a per-engine running cost then max over that instead of over children directly. Heterogeneous Earliest Finish Time? have a map {cpu0: time, gpu0: time, diskIO: time, dma0: time}. Use upward rank to determine topo order.
+2. Instead of Backend, have Memory Types (ram, nvidia vram, disk), Memory Spaces/Instances/Something (ram0, nvidia vram0, nvidia vram1), Engine Types (cpu, gpu, dma, disk io async), and Engine instances (cpu0, gpu0, gpu1). Then a kernel registers mem space per input & output, and registers a list of engines which it blocks while running. This way if someone wants to fuse a huge portion of the graph that covers disk io, cpu, gpu dma and gpu, they can do that. One engine per cuda stream (gpu0_compute, gpu0_dma). Need to add linter check so people don't register kernels with input & output vram but engine cpu.
+3. Executor needs to wait until all dependencies required for next node are finished.
+4. Memory planning should move to static memory planning (register allocation? memory coloring?). No uncertainty at runtime. Should enforce execution order (barriers) to guarantee memory lifetimes assumed by planner.
+5. For cpu->gpu & gpu->cpu async copy, cpu mem must be page-locked (pinned) otherwise I think it does some os paging copying stuff that is slow. For cuda specifically can use cudaHostAlloc or cudaMallocHost & that should still work with normal cpu stuff, but I'm not sure if that pinning approach will work well in the future when expanding to other backends (rocm, OpenCL). Maybe use something (on windows) like Direct3D 12 shared heaps and the use NT DXGI handle with respective backend external memory interop api. dma-buf for Linux.
+6. If a unified mem system like dgx GB10 is detected, then a special copyto kernel can be registered that does cudaMemPrefetchAsync and blocks gpu dma. If a unified mem system like snapdragon/adreno x1-85 is detected, then a special copyto kernel can be registered that ensures cache coherency by flushing cpu cache and blocks cpu.
+7. Make each cpu core an individual engine. Then to do a parallel add of two vectors, it is up to the planner (a new rewrite rule?) to split up the add into x->slice0,slice1->add0,add1->scatter0,scatter1 and then run add0,scatter0 on cpu engine 0 and add1,scatter1 on cpu engine 1. This abstraction gets the benefit of allocating different work sizes to P-cores vs E-cores, and when applied to gpu as well, naturally discovers tensor parallelism. Tensor parallelism is an important optimization and if my framework can naturally discover it that is a huge benefit. But this can easily cause a large increase in e-graph size: do I split across cpu & gpu0, or cpu & gpu0 & gpu1, and if I decide to split across 2 engines, and the add vector has 1024 elements, I could split it (1, 1023), (2, 1022), (3, 1021), ..., (1023, 1). This framework already leans heavily towards compile time in the compile-graph_execution_speed tradeoff (more compile time means better execution speed) so I think it is ok to have this slicing feature, but there is probably a happy middle ground. I think a good solution is to have a central cpu worker pool with thread affinities, then a cpu kernel assigns work to the worker pool and there is work stealing with chase-lev deques. A system with 12 P-cores and 4 E-cores will have 2 cpu engines (one with 12 P-cores and one with 4 E-cores). A NUMA system with 4 sockets will have 4 cpu engines. We will generate egraphs for splits across all combinations of devices, and for tensor splits either limit it to chunks being a multiple of some number or base it off relative speed.
+8. async storage->cpu windows kernel can use FILE_FLAG_OVERLAPPED, FILE_FLAG_NO_BUFFERING, FILE_FLAG_SEQUENTIAL_SCAN. Optionally if user has it enabled, there can be a special kernel that utilizes bypassio (`fsutil bypassio state /v C:\`)
+
+Action Items:
+1. What problems are there with the ideas above?
+2. For the new parallel planning extraction, how do we calculate the cost of an eclass? do we take the minimum cost of the enodes in the eclass?
+
+I don't want an implementation, I'm still in the planning phase.
