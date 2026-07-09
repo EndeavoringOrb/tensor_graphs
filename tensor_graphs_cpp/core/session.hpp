@@ -347,11 +347,12 @@ struct Session
             {
                 const Bucket &bucket = manualBuckets[i];
 
+                if (i == fullBucketIdx) continue;
                 CompiledGraph plan = planner.plan(
                     rootId, graph,
                     bucket,
                     protectedCachedNodes,
-                    i == fullBucketIdx ? false : doSaturate,
+                    doSaturate,
                     false,
                     repo);
 

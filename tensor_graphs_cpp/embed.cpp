@@ -84,7 +84,7 @@ static constexpr float IMAGE_STD = 0.5f;
 static constexpr float RESCALE_FACTOR = 1.0f / 255.0f;
 
 // Shared memory layout constants
-static constexpr int MAX_BATCH_SIZE = 16;
+static constexpr int MAX_BATCH_SIZE = 4;
 static constexpr int SHM_HEADER_SIZE = 24; // 6 × int32
 static constexpr int SHM_PIXEL_DATA_SIZE = MAX_PIXELS * 3 * MAX_BATCH_SIZE;
 static constexpr int SHM_EMBEDDING_SIZE = EMBEDDING_DIM * 4 * MAX_BATCH_SIZE;
@@ -177,7 +177,8 @@ struct CompiledSession
 // Build (or rebuild) the graph + session for the given image dimensions.
 static void build_session(CompiledSession &cs, MemoryManager &mem,
                           int batch_size, int width, int height,
-                          const std::string &weights_path)
+                          const std::string &weights_path,
+                          bool disable_caching = false) // <-- Added parameter
 {
     int grid_h = height / PATCH_SIZE;
     int grid_w = width / PATCH_SIZE;
@@ -203,8 +204,9 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
                              std::to_string(batch_size) + "x" +
                              std::to_string(width) + "x" + std::to_string(height) + ".bin";
 
+    // Pass the disable_caching flag as the 7th argument
     cs.session = std::make_unique<Session>(*cs.graph, mem, cs.root_id,
-                                           cache_file, 0, &repo);
+                                           cache_file, 0, &repo, disable_caching);
 
     std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
     inputDirty[cs.patch_input_id] = makeFull(inShape);
@@ -219,7 +221,7 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
     cs.batch_size = batch_size;
     cs.width = width;
     cs.height = height;
-    cs.has_run = false; // Reset run tracking flag on rebuild/compile
+    cs.has_run = false;
 
     cs.norm_image.assign((size_t)batch_size * IN_CHANNELS * width * height, 0.0f);
     cs.patch_input.assign((size_t)batch_size * num_patches * PATCH_DIM, 0.0f);
@@ -313,25 +315,39 @@ static void normalize_image_inplace_batch(const uint8_t *pixel_data,
     }
 }
 
-
 int main(int argc, char *argv[])
 {
-    if (argc < 2)
+    bool is_server = false;
+    bool disable_caching = false;
+    std::string image_path = "";
+
+    // Parse all arguments dynamically
+    for (int i = 1; i < argc; ++i)
     {
-        std::cerr << "Usage: " << argv[0] << " <image_path>" << std::endl;
-        std::cerr << "       " << argv[0] << " --server" << std::endl;
+        std::string arg = argv[i];
+        if (arg == "--server")
+        {
+            is_server = true;
+        }
+        else if (arg == "--disable-caching")
+        {
+            disable_caching = true;
+        }
+        else if (image_path.empty() && arg[0] != '-')
+        {
+            image_path = arg;
+        }
+    }
+
+    if (!is_server && image_path.empty())
+    {
+        std::cerr << "Usage: " << argv[0] << " <image_path> [--disable-caching]" << std::endl;
+        std::cerr << "       " << argv[0] << " --server [--disable-caching]" << std::endl;
         return 1;
     }
 
-    bool is_server = false;
-    std::string image_path;
-    if (std::string(argv[1]) == "--server")
+    if (!is_server)
     {
-        is_server = true;
-    }
-    else
-    {
-        image_path = argv[1];
         if (!std::filesystem::exists(image_path))
         {
             std::cerr << "Error: Image file " << image_path << " does not exist." << std::endl;
@@ -460,8 +476,6 @@ int main(int argc, char *argv[])
                     continue;
                 }
 
-                // try
-                // {
                 // Rebuild graph if dimensions or batch_size changed
                 if (batch_size != cs.batch_size || width != cs.width || height != cs.height)
                 {
@@ -484,7 +498,7 @@ int main(int argc, char *argv[])
 
                     std::cout << "[Server] Building graph for "
                               << batch_size << "x" << width << "x" << height << "..." << std::endl;
-                    build_session(cs, mem, batch_size, width, height, WEIGHTS_PATH);
+                    build_session(cs, mem, batch_size, width, height, WEIGHTS_PATH, disable_caching); // <-- Passed parameter
                     std::cout << "[Server] Graph ready ("
                               << cs.cfg->num_patches << " patches, "
                               << cs.cfg->num_merged << " merged tokens, "
@@ -632,10 +646,9 @@ int main(int argc, char *argv[])
                   << (final_w / PATCH_SIZE) * (final_h / PATCH_SIZE) << " patches)..."
                   << std::endl;
 
-        // Build graph for this image's dimensions (build_session also
-        // pre-allocates cs.norm_image and cs.patch_input for reuse).
+        // Build graph for this image's dimensions
         CompiledSession cs;
-        build_session(cs, mem, 1, final_w, final_h, WEIGHTS_PATH);
+        build_session(cs, mem, 1, final_w, final_h, WEIGHTS_PATH, disable_caching);
 
         // Normalize in-place into cs.norm_image
         normalize_image_inplace_batch(resized_data, 1, final_w, final_h, 3, cs.norm_image);
