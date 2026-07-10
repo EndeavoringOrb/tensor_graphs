@@ -662,7 +662,7 @@ private:
         std::vector<bool> &val_visited_classes,
         std::vector<uint32_t> &val_overwritten,
         std::vector<uint32_t> &val_mem_root,
-        std::string &outReason,
+        std::string &reason,
         uint32_t &conflictEClass1,
         uint32_t &conflictEClass2) const
     {
@@ -693,7 +693,7 @@ private:
 
                 if (val_overwritten[child_root] != UINT32_MAX)
                 {
-                    outReason = "inplace " + std::to_string(child_root);
+                    reason = "inplace " + std::to_string(child_root);
                     conflictEClass1 = val_overwritten[child_root];
                     conflictEClass2 = eclass;
                     return false;
@@ -704,7 +704,7 @@ private:
                 {
                     if (overwritten_logical[logicalId] != child_root)
                     {
-                        outReason = "inplace_logical " + std::to_string(logicalId);
+                        reason = "inplace_logical " + std::to_string(logicalId);
                         conflictEClass1 = overwritten_logical[logicalId];
                         conflictEClass2 = eclass;
                         return false;
@@ -1077,6 +1077,90 @@ private:
         {
             std::cout << "[Planner.extractBest] Warning: Filtered out nodes with infinite cost. "
                       << "You may need to run 'bench' to gather missing kernel performance data." << std::endl;
+        }
+
+        // ---- Propagate dead-end eclasses upward ---------------------------------
+        // An eclass is "dead" if it has zero valid enodes after pruning.
+        // Any enode that references a dead child is itself infeasible
+        // (the forward expansion would walk into the dead child and fail).
+        // Remove such enodes; if a parent eclass then becomes empty, it is
+        // also dead — propagate via worklist.
+        {
+            // Build child-canon -> parent-eclass reverse adjacency.
+            std::unordered_map<uint32_t, std::vector<uint32_t>> parentsOf;
+            parentsOf.reserve(egraph.getClasses().size());
+            for (size_t i = 0; i < egraph.getClasses().size(); ++i)
+            {
+                uint32_t eid = egraph.find(static_cast<uint32_t>(i));
+                if (eid != i)
+                    continue;
+                for (uint32_t enodeId : egraph.getEClass(eid).enodes)
+                    for (uint32_t c : egraph.getENodes()[enodeId].children)
+                        parentsOf[egraph.find(c)].push_back(eid);
+            }
+
+            std::vector<bool> dead(egraph.getClasses().size(), false);
+            std::vector<uint32_t> wl;
+            for (size_t i = 0; i < egraph.getClasses().size(); ++i)
+            {
+                uint32_t eid = egraph.find(static_cast<uint32_t>(i));
+                if (eid != i)
+                    continue;
+                if (egraph.getEClass(eid).enodes.empty())
+                {
+                    if (!dead[eid])
+                    {
+                        dead[eid] = true;
+                        wl.push_back(eid);
+                    }
+                }
+            }
+
+            while (!wl.empty())
+            {
+                uint32_t d = wl.back();
+                wl.pop_back();
+                auto pit = parentsOf.find(d);
+                if (pit == parentsOf.end())
+                    continue;
+                for (uint32_t parentId : pit->second)
+                {
+                    if (dead[parentId])
+                        continue;
+                    const auto &cls = egraph.getEClass(parentId);
+                    std::vector<uint32_t> keep;
+                    keep.reserve(cls.enodes.size());
+                    for (uint32_t enodeId : cls.enodes)
+                    {
+                        bool refsDead = false;
+                        for (uint32_t c : egraph.getENodes()[enodeId].children)
+                            if (dead[egraph.find(c)])
+                            {
+                                refsDead = true;
+                                break;
+                            }
+                        if (!refsDead)
+                            keep.push_back(enodeId);
+                    }
+                    if (keep.size() != cls.enodes.size())
+                        egraph.getEClass(parentId).enodes = std::move(keep);
+                    if (egraph.getEClass(parentId).enodes.empty())
+                    {
+                        dead[parentId] = true;
+                        wl.push_back(parentId);
+                    }
+                }
+            }
+
+            uint32_t rootEClassId_check = egraph.find(nodeToEClass.at(rootId));
+            if (dead[rootEClassId_check])
+            {
+                Error::throw_err(
+                    "[Planner.extractBest] root eclass " + std::to_string(rootEClassId_check) +
+                    " has no feasible extraction path after dead-end propagation. "
+                    "Some kernels lack benchmark data for the batched shape — "
+                    "run `embed.exe bench` and retry.");
+            }
         }
 
         auto rootIt = nodeToEClass.find(rootId);
@@ -1498,12 +1582,19 @@ private:
         std::vector<uint32_t> to_process = {rootEClassId};
         std::vector<uint32_t> to_process_enode;
         std::unordered_map<uint32_t, uint32_t> next_sel;
+        // [FIX] Memoize eclasses whose alternatives are ALL exhausted for a
+        // given conflict-partner sel.  Key: exhausted eclass.  Value:
+        // (partner_eclass, partner_sel_at_exhaustion).  Prevents re-trying
+        // known-failing alternatives after backtracking past the conflict,
+        // which is what caused the multi-hundred-iteration stall at
+        // "inplace 563" in the original code.
+        std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> exhausted_for_conflict;
 
         float best_cost = INF;
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
         std::unordered_map<Backend, uint64_t> minPeakMemSeen;
 
-        int max_iters = 100000;
+        int max_iters = 1'000'000;
         int remaining_iters = max_iters;
         ProgressTimer timer(max_iters, "extracting graphs ");
         ProgressTimer loopTimer(0, "", true);
@@ -1520,6 +1611,11 @@ private:
             bool valid = true;
             std::string reason = "";
             float current_cost = 0.0f;
+            // [FIX] Moved earlier so the to_process loop can set conflict
+            // info when skipping a memoized-exhausted eclass (without
+            // needing to run the expensive validation pass).
+            uint32_t conflictEClass1 = UINT32_MAX;
+            uint32_t conflictEClass2 = UINT32_MAX;
 
             for (const auto &kv : selection_map)
             {
@@ -1549,6 +1645,15 @@ private:
                 }
 
                 const auto &enodes = egraph.getEClass(current).enodes;
+                if (enodes.empty())
+                {
+                    // All enodes for this eclass were pruned (INF cost / dominated).
+                    // Treat like an INF-cost selection: invalidate this branch and let
+                    // backtracking pick a different alternative for the parent eclass.
+                    valid = false;
+                    reason = "no valid enodes for eclass " + std::to_string(current);
+                    break;
+                }
                 if (sel >= enodes.size())
                 {
                     Error::throw_err("Invalid selection index in EGraph");
@@ -1571,6 +1676,38 @@ private:
                 {
                     valid = false;
                     reason = "cost=" + std::to_string(current_cost);
+                }
+
+                // [FIX] If this eclass was previously exhausted for the
+                // current sel of its conflict partner, skip the expensive
+                // validation/peak-mem passes and go straight to backtracking
+                // on that partner.  This is the memoization that breaks the
+                // "inplace 563" stall: once we know all alternatives of
+                // `current` fail while `partner` is at sel X, we don't try
+                // them again until `partner`'s sel changes.
+                if (valid)
+                {
+                    auto exIt = exhausted_for_conflict.find(current);
+                    if (exIt != exhausted_for_conflict.end())
+                    {
+                        uint32_t partner = exIt->second.first;
+                        uint32_t partner_sel_at_exhaustion = exIt->second.second;
+                        auto partnerSelIt = selection_map.find(partner);
+                        if (partnerSelIt != selection_map.end() &&
+                            partnerSelIt->second == partner_sel_at_exhaustion)
+                        {
+                            valid = false;
+                            reason = "exhausted_for_conflict " + std::to_string(partner);
+                            conflictEClass1 = partner;
+                            conflictEClass2 = current;
+                        }
+                        else
+                        {
+                            // Partner's sel changed (or partner was popped);
+                            // the memoized exhaustion no longer applies.
+                            exhausted_for_conflict.erase(exIt);
+                        }
+                    }
                 }
 
                 if (enodes.size() > sel + 1)
@@ -1690,9 +1827,6 @@ private:
                 }
             }
 
-            uint32_t conflictEClass1 = UINT32_MAX;
-            uint32_t conflictEClass2 = UINT32_MAX;
-
             if (valid)
             {
                 valid = validateInplaceSchedulesFast(egraph, selection_map, enodeInfos, rootEClassId, eclassToLogical, precomp, topo_order, val_visited_classes, val_overwritten, val_mem_root, reason, conflictEClass1, conflictEClass2);
@@ -1779,6 +1913,25 @@ private:
                 if (backtrack_idx >= 0)
                 {
                     target_backtrack_eclass = path[backtrack_idx];
+                }
+                else
+                {
+                    // Fallback: Locate the OOM bottleneck node itself in the path
+                    // and backtrack to it. This forces the pop loop to discard all
+                    // downstream nodes allocated after the bottleneck.
+                    int oom_idx = -1;
+                    for (int i = 0; i < (int)path.size(); i++)
+                    {
+                        if (egraph.findConst(path[i]) == oomEClassId)
+                        {
+                            oom_idx = i;
+                            break;
+                        }
+                    }
+                    if (oom_idx >= 0)
+                    {
+                        target_backtrack_eclass = path[oom_idx];
+                    }
                 }
             }
             else if (!valid && reason == "cycle")
@@ -1921,21 +2074,63 @@ private:
                 if (selection_map.find(current) == selection_map.end())
                     continue;
 
+                uint32_t sel = selection_map[current];
+                const auto &enodes = egraph.getEClass(current).enodes;
+
                 if (skip_increment && current == target_backtrack_eclass)
                 {
-                    std::cout << "skipped back to path size " << std::to_string(path.size()) << std::endl;
+                    std::cout << "skipped back to path size " << std::to_string(path.size()) << ", sel " << std::to_string(sel + 1) << "/" << enodes.size() << std::endl;
                     skip_increment = false;
                 }
 
-                uint32_t sel = selection_map[current];
-                const auto &enodes = egraph.getEClass(current).enodes;
                 uint32_t enode_id = enodes[sel];
                 const ENode &node = egraph.getENodes()[enode_id];
                 const ENodeInfo &info = enodeInfos[enode_id];
 
-                if (!skip_increment && sel + 1 < enodes.size())
+                // [FIX] Check the exhaustion memo.  If `current` is memoized
+                // as exhausted for its partner's current sel, don't try to
+                // increment it -- go straight to the else branch (erase +
+                // jump to partner).  Trying the next alternative would just
+                // re-discover the same conflict.
+                bool current_memo_exhausted = false;
+                if (conflictEClass1 != UINT32_MAX && conflictEClass2 != UINT32_MAX)
+                {
+                    auto exIt = exhausted_for_conflict.find(current);
+                    if (exIt != exhausted_for_conflict.end())
+                    {
+                        uint32_t partner = exIt->second.first;
+                        uint32_t partner_sel_at_exhaustion = exIt->second.second;
+                        auto partnerSelIt = selection_map.find(partner);
+                        if (partnerSelIt != selection_map.end() &&
+                            partnerSelIt->second == partner_sel_at_exhaustion)
+                        {
+                            current_memo_exhausted = true;
+                        }
+                        else
+                        {
+                            exhausted_for_conflict.erase(exIt);
+                        }
+                    }
+                }
+
+                if (!skip_increment && !current_memo_exhausted && sel + 1 < enodes.size())
                 {
                     next_sel[current] = sel + 1;
+
+                    // [FIX] `current`'s sel just changed.  Any exhaustion
+                    // memo that depended on `current`'s old sel (either as
+                    // the exhausted eclass itself, or as the partner of some
+                    // other exhausted eclass) is now stale and must be
+                    // cleared, because the conflict may now be resolvable.
+                    exhausted_for_conflict.erase(current);
+                    for (auto mit = exhausted_for_conflict.begin();
+                         mit != exhausted_for_conflict.end();)
+                    {
+                        if (mit->second.first == current)
+                            mit = exhausted_for_conflict.erase(mit);
+                        else
+                            ++mit;
+                    }
 
                     std::vector<uint32_t> keys_to_delete;
                     keys_to_delete.reserve(selection_map.size());
@@ -1986,6 +2181,45 @@ private:
                     auto it = std::remove(to_process_enode.begin(), to_process_enode.end(), current);
                     if (it != to_process_enode.end())
                         to_process_enode.erase(it, to_process_enode.end());
+
+                    // [FIX] If we just exhausted `target_backtrack_eclass`
+                    // (either because it ran out of alternatives, or because
+                    // it was memoized as exhausted), record the exhaustion
+                    // and JUMP DIRECTLY to the other conflict party.
+                    //
+                    // The original code popped intermediate path nodes one
+                    // by one, incrementing whichever had alternatives.  None
+                    // of those intermediate nodes can break an inplace
+                    // conflict between (writer, reader), so all those
+                    // increments were wasted work -- and worse, each
+                    // increment caused the search to re-expand back to the
+                    // reader and re-try all its alternatives from sel=0,
+                    // producing the ~800-iteration stall visible in the log
+                    // at "inplace 563".
+                    if (!skip_increment && current == target_backtrack_eclass &&
+                        conflictEClass1 != UINT32_MAX && conflictEClass2 != UINT32_MAX)
+                    {
+                        uint32_t partner = (current == conflictEClass1) ? conflictEClass2 : conflictEClass1;
+
+                        // Record exhaustion so we don't re-try `current`'s
+                        // alternatives until `partner`'s sel changes.
+                        auto partnerSelIt = selection_map.find(partner);
+                        if (partnerSelIt != selection_map.end())
+                        {
+                            exhausted_for_conflict[current] = {partner, partnerSelIt->second};
+                        }
+                        // Clear stale next_sel so we start fresh from sel=0
+                        // if partner's sel later changes.
+                        next_sel.erase(current);
+
+                        // Jump straight to the partner (skip intermediate).
+                        if (partner != current &&
+                            std::find(path.begin(), path.end(), partner) != path.end())
+                        {
+                            target_backtrack_eclass = partner;
+                            skip_increment = true;
+                        }
+                    }
                 }
             }
         }

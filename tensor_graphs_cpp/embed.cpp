@@ -84,7 +84,7 @@ static constexpr float IMAGE_STD = 0.5f;
 static constexpr float RESCALE_FACTOR = 1.0f / 255.0f;
 
 // Shared memory layout constants
-static constexpr int MAX_BATCH_SIZE = 4;
+static constexpr int MAX_BATCH_SIZE = 2;
 static constexpr int SHM_HEADER_SIZE = 24; // 6 × int32
 static constexpr int SHM_PIXEL_DATA_SIZE = MAX_PIXELS * 3 * MAX_BATCH_SIZE;
 static constexpr int SHM_EMBEDDING_SIZE = EMBEDDING_DIM * 4 * MAX_BATCH_SIZE;
