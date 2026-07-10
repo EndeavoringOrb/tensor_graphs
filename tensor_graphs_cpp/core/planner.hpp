@@ -252,6 +252,7 @@ private:
         rules.emplace_back(std::make_unique<FusionRule>());
         rules.emplace_back(std::make_unique<FlattenBatchDot>());
         rules.emplace_back(std::make_unique<FlattenElementwise>());
+        rules.emplace_back(std::make_unique<InsertContiguousRepair>());
         if (injected)
         {
             rules.emplace_back(std::make_unique<InfinityDomination>());

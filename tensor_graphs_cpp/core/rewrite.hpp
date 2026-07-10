@@ -1659,3 +1659,117 @@ struct FlattenElementwise : public Rule
         egraph.merge(eclassId, outReshape);
     }
 };
+
+// =============================================================================
+// InsertContiguousRepair
+// =============================================================================
+//
+// For every elementwise op with a non-contiguous input, create an alternative
+// enode where that input is first materialized via CONTIGUOUS.  The two enodes
+// are merged into the same eclass so the cost model picks the cheaper path.
+//
+// This unblocks NEON elementwise kernels (Div_ND_NEON_Threaded, Pow_1D_*, etc.)
+// which require contiguous inputs but are ~100x faster than the scalar
+// reference fallbacks.
+//
+// The rule is idempotent: it only fires when an input is non-contiguous, and
+// the inserted CONTIGUOUS op produces a contiguous tensor so the rule won't
+// fire again on the new enode.
+struct InsertContiguousRepair : public Rule
+{
+    std::unordered_set<uint32_t> visited;
+
+    std::string name() const override { return "InsertContiguousRepair"; }
+
+    static bool isElementwiseOp(OpType op)
+    {
+        switch (op)
+        {
+        case OpType::ADD:
+        case OpType::MUL:
+        case OpType::DIVIDE:
+        case OpType::POWER:
+        case OpType::SIN:
+        case OpType::COS:
+        case OpType::NEGATE:
+        case OpType::CAST:
+        case OpType::LT:
+        case OpType::EQ:
+        case OpType::AND:
+        case OpType::OR:
+        case OpType::NOT:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        const EGraph &egraph = ctx.egraph;
+        if (eNodeIdx >= egraph.getENodes().size())
+            return false;
+        const ENode &enode = egraph.getENodes()[eNodeIdx];
+        if (!isElementwiseOp(enode.opType))
+            return false;
+        if (visited.count(eNodeIdx))
+            return false;
+
+        // Fire if ANY input eclass is non-contiguous.
+        for (uint32_t childId : enode.children)
+        {
+            const EClass &childCls = egraph.getEClass(egraph.findConst(childId));
+            if (!isContiguous(childCls))
+                return true;
+        }
+        return false;
+    }
+
+    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        EGraph &egraph = ctx.egraph;
+        const ENode opNode = egraph.getENodes()[eNodeIdx];
+        uint32_t eclassId = egraph.getENodeEClass(eNodeIdx);
+
+        if (!visited.insert(eNodeIdx).second)
+            return;
+
+        const EClass outCls = egraph.getEClass(egraph.findConst(eclassId));
+
+        // Build a new enode with the same op, but with each non-contiguous
+        // input replaced by CONTIGUOUS(input).
+        std::vector<uint32_t> newChildren;
+        newChildren.reserve(opNode.children.size());
+        for (uint32_t childId : opNode.children)
+        {
+            uint32_t canonChild = egraph.find(childId);
+            const EClass &childCls = egraph.getEClass(canonChild);
+
+            if (!isContiguous(childCls))
+            {
+                // Insert CONTIGUOUS(child).
+                // Output shape = child shape, contiguous strides, offset 0.
+                std::vector<uint64_t> contigStrides = calcContiguousStrides(childCls.shape);
+                uint32_t contigEnode = addOpToEGraph(
+                    egraph, OpType::CONTIGUOUS, {canonChild},
+                    childCls.shape, contigStrides, 0,
+                    childCls.dtype, childCls.backend);
+                newChildren.push_back(contigEnode);
+            }
+            else
+            {
+                newChildren.push_back(canonChild);
+            }
+        }
+
+        // Create the alternative enode (same op, repaired inputs).
+        uint32_t repairedEnode = addOpToEGraph(
+            egraph, opNode.opType, newChildren,
+            outCls.shape, calcContiguousStrides(outCls.shape), 0,
+            opNode.dtype, opNode.backend);
+
+        // Merge: cost model picks whichever is cheaper.
+        // The repaired path is almost always cheaper because it can use NEON.
+        egraph.merge(eclassId, repairedEnode);
+    }
+};
