@@ -1420,7 +1420,10 @@ struct FlattenBatchDot : public Rule
             return false;
 
         const std::vector<uint32_t> &outShape = enode.shape;
-        if (outShape.size() != 4 || outShape[0] != 1)
+        // [FIX] Was: outShape[0] != 1 (only batch=1).  Now accept any batch
+        // size B >= 1.  For B > 1 we merge B and H into a single dim B*H
+        // so the 3-D NEON dot kernel can handle it.
+        if (outShape.size() != 4)
             return false;
 
         uint32_t aClass = egraph.findConst(enode.children[0]);
@@ -1428,16 +1431,22 @@ struct FlattenBatchDot : public Rule
         const EClass &aCls = egraph.getEClass(aClass);
         const EClass &bCls = egraph.getEClass(bClass);
 
-        if (aCls.shape.size() != 4 || aCls.shape[0] != 1)
+        if (aCls.shape.size() != 4)
             return false;
-        if (bCls.shape.size() != 4 || bCls.shape[0] != 1)
+        if (bCls.shape.size() != 4)
             return false;
-        if (aCls.shape[1] != bCls.shape[1]) // same batched dim H
+        // Both inputs must share the same batch B and head H dims.
+        if (aCls.shape[0] != bCls.shape[0])
+            return false;
+        if (aCls.shape[1] != bCls.shape[1])
             return false;
         if (aCls.shape[3] != bCls.shape[2]) // K contraction
             return false;
-        // Output dims must line up: out = [1, H, A.shape[2], B.shape[3]]
-        if (outShape[1] != aCls.shape[1] || outShape[2] != aCls.shape[2] || outShape[3] != bCls.shape[3])
+        // Output dims must line up: out = [B, H, A.shape[2], B.shape[3]]
+        if (outShape[0] != aCls.shape[0] ||
+            outShape[1] != aCls.shape[1] ||
+            outShape[2] != aCls.shape[2] ||
+            outShape[3] != bCls.shape[3])
             return false;
 
         // Inputs must be contiguous (reshape to 3-D would otherwise need a
@@ -1467,9 +1476,14 @@ struct FlattenBatchDot : public Rule
         const EClass bCls = egraph.getEClass(bClass);
 
         // Shapes for the 3-D intermediates.
-        std::vector<uint32_t> a3 = {aCls.shape[1], aCls.shape[2], aCls.shape[3]}; // (H, S, K)
-        std::vector<uint32_t> b3 = {bCls.shape[1], bCls.shape[2], bCls.shape[3]}; // (H, K, S2)
-        std::vector<uint32_t> y3 = {aCls.shape[1], aCls.shape[2], bCls.shape[3]}; // (H, S, S2)
+        // [FIX] Merge batch B and heads H into a single dim B*H.
+        // For B=1 this reduces to the old (H, S, K) behavior.
+        // For B>1 this gives (B*H, S, K) which the 3-D NEON dot kernel
+        // accepts (it treats the first dim as an independent batch).
+        uint32_t BH = aCls.shape[0] * aCls.shape[1];
+        std::vector<uint32_t> a3 = {BH, aCls.shape[2], aCls.shape[3]}; // (B*H, S, K)
+        std::vector<uint32_t> b3 = {BH, bCls.shape[2], bCls.shape[3]}; // (B*H, K, S2)
+        std::vector<uint32_t> y3 = {BH, aCls.shape[2], bCls.shape[3]}; // (B*H, S, S2)
 
         std::vector<int32_t> a3_int(a3.begin(), a3.end());
         std::vector<int32_t> b3_int(b3.begin(), b3.end());
@@ -1479,19 +1493,19 @@ struct FlattenBatchDot : public Rule
         uint32_t b3_shape_id = addIntConst(egraph, b3_int);
         uint32_t y3_shape_id = addIntConst(egraph, y3_int);
 
-        // Reshape A: (1, H, S, K) -> (H, S, K)
+        // Reshape A: (B, H, S, K) -> (B*H, S, K)
         std::vector<uint64_t> a3_strides = calcContiguousStrides(a3);
         uint32_t rA = addOpToEGraph(egraph, OpType::RESHAPE, {aClass, a3_shape_id}, a3, a3_strides, 0, dotNode.dtype, dotNode.backend);
 
-        // Reshape B: (1, H, K, S2) -> (H, K, S2)
+        // Reshape B: (B, H, K, S2) -> (B*H, K, S2)
         std::vector<uint64_t> b3_strides = calcContiguousStrides(b3);
         uint32_t rB = addOpToEGraph(egraph, OpType::RESHAPE, {bClass, b3_shape_id}, b3, b3_strides, 0, dotNode.dtype, dotNode.backend);
 
-        // 3-D DOT: (H, S, K) x (H, K, S2) -> (H, S, S2)
+        // 3-D DOT: (B*H, S, K) x (B*H, K, S2) -> (B*H, S, S2)
         std::vector<uint64_t> y3_strides = calcContiguousStrides(y3);
         uint32_t rY = addOpToEGraph(egraph, OpType::DOT, {rA, rB}, y3, y3_strides, 0, dotNode.dtype, dotNode.backend);
 
-        // Reshape output back: (H, S, S2) -> (1, H, S, S2)
+        // Reshape output back: (B*H, S, S2) -> (B, H, S, S2)
         // Match the original DOT eclass's shape / strides / viewOffset.
         const EClass outCls = egraph.getEClass(egraph.findConst(eclassId));
         std::vector<int32_t> out4_int(outCls.shape.begin(), outCls.shape.end());
