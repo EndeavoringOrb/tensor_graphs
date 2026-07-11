@@ -237,234 +237,17 @@ int main(int argc, char *argv[])
                 continue;
             }
 
-            // Unified RAII buffer lists
-            std::vector<BenchBuffer> inputBuffers(r.inputShapes.size());
-            std::vector<const void *> inPtrs(r.inputShapes.size(), nullptr);
-            std::vector<TensorView> inViews(r.inputShapes.size());
-
-            std::vector<BenchBuffer> outputBuffers(r.outputShapes.size());
-            std::vector<void *> outPtrs(r.outputShapes.size(), nullptr);
-            std::vector<TensorView> outViews(r.outputShapes.size());
-
-            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
-            {
-                uint64_t maxIndex = 0;
-                for (size_t d = 0; d < r.inputShapes[idx].size(); ++d)
-                {
-                    if (r.inputShapes[idx][d] > 0)
-                    {
-                        maxIndex += (r.inputShapes[idx][d] - 1) * r.inputStrides[idx][d];
-                    }
-                }
-                uint64_t elements = r.inputShapes[idx].empty() ? 1 : maxIndex + 1;
-
-                if (elements == 0)
-                    elements = 1;
-                uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
-
-                size_t ruleIdx = idx;
-                if (kernel.isVariadic)
-                {
-                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
-                }
-                Backend b = Backend::CPU;
-                if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
-                    b = r.inputBackends[ruleIdx][0];
-
-                inputBuffers[idx].allocate(b, bytes);
-
-                if (idx < r.inputConstants.size() && !r.inputConstants[idx].empty() && r.inputConstants[idx].size() == bytes)
-                {
-                    std::memcpy(inputBuffers[idx].hostData.data(), r.inputConstants[idx].data(), bytes);
-                }
-                else
-                {
-                    if (r.inputDTypes[idx] == DType::FLOAT32)
-                    {
-                        float *fptr = reinterpret_cast<float *>(inputBuffers[idx].hostData.data());
-                        for (size_t k = 0; k < elements; ++k)
-                            fptr[k] = 1.0f;
-                    }
-                    else if (r.inputDTypes[idx] == DType::INT32)
-                    {
-                        int32_t *iptr = reinterpret_cast<int32_t *>(inputBuffers[idx].hostData.data());
-                        if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos)
-                        {
-                            if (idx == 1 && r.inputShapes.size() > 0 && r.outputShapes.size() > 0 &&
-                                r.inputShapes[0].size() == r.outputShapes[0].size() && elements == r.inputShapes[0].size())
-                            {
-                                std::vector<bool> used(elements, false);
-                                for (size_t k = 0; k < elements; ++k)
-                                {
-                                    size_t found_d = k;
-                                    for (size_t d = 0; d < elements; ++d)
-                                    {
-                                        if (!used[d] && r.inputShapes[0][d] == r.outputShapes[0][k])
-                                        {
-                                            found_d = d;
-                                            break;
-                                        }
-                                    }
-                                    used[found_d] = true;
-                                    iptr[k] = found_d;
-                                }
-                            }
-                            else
-                            {
-                                for (size_t k = 0; k < elements; ++k)
-                                    iptr[k] = k;
-                            }
-                        }
-                        else if (kernel.opType == OpType::CONCAT || kernel.opName.find("Concat") != std::string::npos)
-                        {
-                            if (idx == r.inputShapes.size() - 1)
-                            {
-                                int32_t concat_axis = -1;
-                                if (!r.inputShapes.empty() && !r.outputShapes.empty())
-                                {
-                                    for (size_t d = 0; d < r.outputShapes[0].size(); ++d)
-                                    {
-                                        if (r.outputShapes[0][d] != r.inputShapes[0][d])
-                                        {
-                                            concat_axis = (int32_t)d;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if (concat_axis == -1)
-                                    concat_axis = 0;
-                                for (size_t k = 0; k < elements; ++k)
-                                    iptr[k] = concat_axis;
-                            }
-                            else
-                            {
-                                for (size_t k = 0; k < elements; ++k)
-                                    iptr[k] = 1;
-                            }
-                        }
-                        else
-                        {
-                            for (size_t k = 0; k < elements; ++k)
-                                iptr[k] = 1;
-                        }
-                    }
-                    else if (r.inputDTypes[idx] == DType::BF16)
-                    {
-                        uint16_t *bptr = reinterpret_cast<uint16_t *>(inputBuffers[idx].hostData.data());
-                        for (size_t k = 0; k < elements; ++k)
-                            bptr[k] = 0x3F80;
-                    }
-                    else
-                    {
-                        std::memset(inputBuffers[idx].hostData.data(), 1, bytes);
-                    }
-                }
-
-                inputBuffers[idx].upload();
-                inPtrs[idx] = inputBuffers[idx].getReadPtr();
-
-                inViews[idx].setShape(r.inputShapes[idx]);
-                inViews[idx].strides = r.inputStrides[idx];
-                inViews[idx].baseOffset = 0;
-                inViews[idx].dtype = r.inputDTypes[idx];
-            }
-
-            for (size_t idx = 0; idx < r.outputShapes.size(); ++idx)
-            {
-                uint64_t maxIndex = 0;
-                for (size_t d = 0; d < r.outputShapes[idx].size(); ++d)
-                {
-                    if (r.outputShapes[idx][d] > 0)
-                    {
-                        maxIndex += (r.outputShapes[idx][d] - 1) * r.outputStrides[idx][d];
-                    }
-                }
-                uint64_t elements = r.outputShapes[idx].empty() ? 1 : maxIndex + 1;
-
-                if (elements == 0)
-                    elements = 1;
-                uint64_t bytes = elements * getDTypeSize(r.outputDTypes[idx]);
-
-                Backend outBackend = r.backends.empty() ? Backend::CPU : r.backends[0];
-                outputBuffers[idx].allocate(outBackend, bytes);
-
-                if (kernel.inplace && idx == 0)
-                {
-                    std::memcpy(outputBuffers[idx].hostData.data(), inputBuffers[0].hostData.data(), std::min(inputBuffers[0].bytes, outputBuffers[idx].bytes));
-                    outputBuffers[idx].upload();
-                }
-
-                outPtrs[idx] = outputBuffers[idx].getWritePtr();
-
-                outViews[idx].setShape(r.outputShapes[idx]);
-                outViews[idx].strides = r.outputStrides[idx];
-                outViews[idx].baseOffset = 0;
-                outViews[idx].dtype = r.outputDTypes[idx];
-            }
-
-            KernelContext ctx;
-            ctx.inputs = inPtrs;
-            ctx.outputs = outPtrs;
-            ctx.inViews = inViews;
-            ctx.outViews = outViews;
-            ctx.fd.assign(inPtrs.size(), -1);
-
-            for (size_t idx = 0; idx < inputBuffers.size(); ++idx)
-            {
-                ctx.cl_inputs.push_back(inputBuffers[idx].clMem);
-            }
-            for (size_t idx = 0; idx < outputBuffers.size(); ++idx)
-            {
-                ctx.cl_outputs.push_back(outputBuffers[idx].clMem);
-            }
-
-            StorageFiles sf;
-
-            auto updateStorageContext = [&](int runIdx)
-            {
-                sf = createStorageInputs(r, kernel, runIdx, &inputBuffers);
-                size_t storageInIdx = 0;
-                for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
-                {
-                    size_t ruleIdx = idx;
-                    if (kernel.isVariadic)
-                    {
-                        ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
-                    }
-                    Backend b = Backend::CPU;
-                    if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
-                        b = r.inputBackends[ruleIdx][0];
-
-                    if (b == Backend::STORAGE)
-                    {
-                        if (storageInIdx < sf.fds.size())
-                        {
-                            ctx.fd[idx] = sf.fds[storageInIdx++];
-                        }
-                    }
-                }
-            };
-
-            bool anyCuda = std::any_of(inputBuffers.begin(), inputBuffers.end(), [](const BenchBuffer &b)
-                                       { return b.backend == Backend::CUDA; }) ||
-                           std::any_of(outputBuffers.begin(), outputBuffers.end(), [](const BenchBuffer &b)
-                                       { return b.backend == Backend::CUDA; });
-            bool anyOpenCL = std::any_of(inputBuffers.begin(), inputBuffers.end(), [](const BenchBuffer &b)
-                                         { return b.backend == Backend::OPENCL; }) ||
-                             std::any_of(outputBuffers.begin(), outputBuffers.end(), [](const BenchBuffer &b)
-                                         { return b.backend == Backend::OPENCL; });
+            PreparedKernel pk;
+            pk.prepare(kernel, r);
 
             std::cout << "  Benchmarking..." << std::flush;
 
             // Warmup
             if (!kernel.isView)
             {
-                updateStorageContext(0);
-                kernel.run(ctx);
-                if (anyCuda)
-                    synchronizeBackend(Backend::CUDA);
-                if (anyOpenCL)
-                    synchronizeBackend(Backend::OPENCL);
+                pk.updateStorageContext(kernel, r, 0);
+                pk.run(kernel);
+                pk.synchronize();
             }
 
             int iters = 8;
@@ -474,18 +257,15 @@ int main(int argc, char *argv[])
             {
                 if (!kernel.isView)
                 {
-                    updateStorageContext(it + 1);
+                    pk.updateStorageContext(kernel, r, it + 1);
                 }
 
                 auto iterStart = std::chrono::high_resolution_clock::now();
                 if (!kernel.isView)
                 {
-                    kernel.run(ctx);
+                    pk.run(kernel);
                 }
-                if (anyCuda)
-                    synchronizeBackend(Backend::CUDA);
-                if (anyOpenCL)
-                    synchronizeBackend(Backend::OPENCL);
+                pk.synchronize();
                 auto iterEnd = std::chrono::high_resolution_clock::now();
                 float iterMs = std::chrono::duration<float, std::milli>(iterEnd - iterStart).count();
                 latencies.push_back(iterMs);

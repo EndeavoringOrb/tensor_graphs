@@ -424,7 +424,7 @@ std::vector<float> executeReferenceGraph(
         TensorNode outNodeNC = node;
         auto refs_nc = KernelRegistry::get().findMatchingKernels(
             node.opType, node.opName, node.backend,
-            inputNodes, outNodeNC, {}, true);
+            inputNodes, outNodeNC, true);
         TensorView chosenOutView;
         uint64_t chosenKernelUid = 0;
         if (forceNonContiguous && !refs_nc.empty())
@@ -437,7 +437,7 @@ std::vector<float> executeReferenceGraph(
             TensorNode outNodeC = node;
             auto refs_c = KernelRegistry::get().findMatchingKernels(
                 node.opType, node.opName, node.backend,
-                inputNodes, outNodeC, {}, true);
+                inputNodes, outNodeC, true);
             if (refs_c.empty())
             {
                 Error::throw_err("No reference kernel found for node " + std::to_string(nodeId) +
@@ -1373,7 +1373,7 @@ int main(int argc, char *argv[])
         }
 
         total++;
-        std::cout << "Testing " << kernel.opName << " ... " << std::flush;
+        std::cout << "[" << std::to_string(total) << "/" << std::to_string(kernels.size()) << "] Testing " << kernel.opName << " ... " << std::flush;
 
         bool dummyOk = true;
         if (cachePath.empty())

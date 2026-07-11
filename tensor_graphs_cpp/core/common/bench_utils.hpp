@@ -551,6 +551,12 @@ struct PreparedKernel
         {
             ctx.cl_outputs.push_back(outputBuffers[idx].clMem);
         }
+
+        if (kernel.inplace && !ctx.inputs.empty() && !ctx.outputs.empty())
+        {
+            ctx.inputs[0] = ctx.outputs[0];
+            ctx.cl_inputs[0] = ctx.cl_outputs[0];
+        }
     }
 
     void updateStorageContext(const KernelEntry &kernel, const Record &r, int runIdx)
