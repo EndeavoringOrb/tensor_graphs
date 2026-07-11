@@ -41,6 +41,8 @@
 #include <thread>
 #include <memory>
 #include <utility>
+#include <unordered_map>
+#include <limits>
 
 #include "core/types.hpp"
 #include "core/memory.hpp"
@@ -331,14 +333,38 @@ int main(int argc, char *argv[])
 
     bool is_server = false;
     std::string image_path;
-    if (std::string(argv[1]) == "--server")
+    std::string write_refs = "";
+    std::string compare_refs = "";
+
+    for (int i = 1; i < argc; ++i)
     {
-        is_server = true;
+        std::string arg = argv[i];
+        if (arg == "--server")
+        {
+            is_server = true;
+        }
+        else if (arg == "--write-refs" && i + 1 < argc)
+        {
+            write_refs = argv[++i];
+        }
+        else if (arg == "--compare-refs" && i + 1 < argc)
+        {
+            compare_refs = argv[++i];
+        }
+        else
+        {
+            image_path = arg;
+        }
     }
-    else
+
+    if (!is_server)
     {
-        image_path = argv[1];
-        if (!std::filesystem::exists(image_path))
+        if (image_path.empty())
+        {
+            std::cerr << "Error: Image file path is required in standalone mode." << std::endl;
+            return 1;
+        }
+        else if (!std::filesystem::exists(image_path))
         {
             std::cerr << "Error: Image file " << image_path << " does not exist." << std::endl;
             return 1;
@@ -367,6 +393,209 @@ int main(int argc, char *argv[])
     }
 
     // -----------------------------------------------------------------------
+    // Intermediate Debug / Reference Globals & Files
+    // -----------------------------------------------------------------------
+    struct RefIndexEntry
+    {
+        uint64_t fileOffset;
+        uint64_t numElements;
+        std::string opName;
+    };
+
+    std::unordered_map<uint32_t, int> callCounts;
+    std::ofstream refOutFile;
+    std::ifstream refInFile;
+    std::unordered_map<std::string, RefIndexEntry> refIndex;
+    int mismatchCount = 0;
+
+    if (!compare_refs.empty())
+    {
+        refInFile.open(compare_refs, std::ios::binary);
+        if (refInFile.is_open())
+        {
+            while (refInFile.peek() != EOF)
+            {
+                uint32_t logicalId;
+                if (!refInFile.read(reinterpret_cast<char *>(&logicalId), sizeof(logicalId)))
+                    break;
+
+                uint32_t nameLen;
+                refInFile.read(reinterpret_cast<char *>(&nameLen), sizeof(nameLen));
+                std::string opName(nameLen, '\0');
+                if (nameLen > 0)
+                    refInFile.read(&opName[0], nameLen);
+
+                uint64_t numElements;
+                refInFile.read(reinterpret_cast<char *>(&numElements), sizeof(numElements));
+
+                RefIndexEntry entry;
+                entry.opName = opName;
+                entry.numElements = numElements;
+                entry.fileOffset = refInFile.tellg();
+
+                int iter = callCounts[logicalId]++;
+                std::string key = std::to_string(logicalId) + "_" + std::to_string(iter);
+                refIndex[key] = entry;
+
+                refInFile.seekg(numElements * sizeof(float), std::ios::cur);
+            }
+            callCounts.clear(); // Reset for the actual execution
+            std::cout << ">>> Loaded Reference Index from " << compare_refs << " (" << refIndex.size() << " tensors)\n";
+
+            std::cout << "\n=======================================================================================\n";
+            std::cout << "Accuracy Comparison (Reference vs Optimized)\n";
+            std::cout << "=======================================================================================\n";
+            std::cout << std::left
+                      << std::setw(15) << "Node_Iter"
+                      << std::setw(25) << "OpType"
+                      << std::setw(15) << "Min Diff"
+                      << std::setw(15) << "Max Diff"
+                      << std::setw(15) << "Avg Diff"
+                      << "Details\n";
+            std::cout << std::string(120, '-') << "\n";
+        }
+        else
+        {
+            std::cerr << "Failed to open reference file: " << compare_refs << "\n";
+            return 1;
+        }
+    }
+    else if (!write_refs.empty())
+    {
+        refOutFile.open(write_refs, std::ios::binary | std::ios::trunc);
+        if (!refOutFile.is_open())
+        {
+            std::cerr << "Failed to open reference file for writing: " << write_refs << "\n";
+            return 1;
+        }
+        std::cout << ">>> Writing Reference Tensors to " << write_refs << "\n";
+    }
+
+    auto makeDebugCb = [&](Graph *graph, const std::string &mode)
+    {
+        return [graph, mode, &callCounts, &refOutFile, &refInFile, &refIndex, &mismatchCount](uint32_t logicalId, const TensorView &view, const void *data)
+        {
+            if (mode == "none" || !graph)
+                return;
+
+            std::vector<float> optData = flattenOutput(data, view.getShape(), view.strides, view.dtype);
+            std::string opName = "UNKNOWN";
+            if (graph->hasNode(logicalId))
+            {
+                auto node = graph->getNode(logicalId);
+                opName = toString(node.opType);
+                if (node.opType == OpType::FUSED)
+                {
+                    opName = "FUSED_" + node.opName;
+                }
+            }
+
+            int iter = callCounts[logicalId]++;
+            std::string key = std::to_string(logicalId) + "_" + std::to_string(iter);
+
+            if (mode == "write")
+            {
+                uint32_t nameLen = opName.size();
+                uint64_t numElems = optData.size();
+
+                refOutFile.write(reinterpret_cast<const char *>(&logicalId), sizeof(logicalId));
+                refOutFile.write(reinterpret_cast<const char *>(&nameLen), sizeof(nameLen));
+                if (nameLen > 0)
+                    refOutFile.write(opName.c_str(), nameLen);
+                refOutFile.write(reinterpret_cast<const char *>(&numElems), sizeof(numElems));
+
+                RefIndexEntry entry;
+                entry.opName = opName;
+                entry.numElements = numElems;
+                entry.fileOffset = refOutFile.tellp();
+                refIndex[key] = entry;
+
+                refOutFile.write(reinterpret_cast<const char *>(optData.data()), numElems * sizeof(float));
+            }
+            else if (mode == "compare")
+            {
+                auto it = refIndex.find(key);
+                if (it == refIndex.end())
+                    return;
+
+                const auto &entry = it->second;
+                if (entry.numElements != optData.size())
+                {
+                    std::cout << std::left << std::setw(15) << key
+                              << "SIZE MISMATCH: " << entry.numElements << " vs " << optData.size() << "\n";
+                    mismatchCount++;
+                    return;
+                }
+
+                if (optData.empty())
+                    return;
+
+                std::vector<float> refData(entry.numElements);
+                refInFile.seekg(entry.fileOffset, std::ios::beg);
+                refInFile.read(reinterpret_cast<char *>(refData.data()), entry.numElements * sizeof(float));
+
+                float minDiff = std::numeric_limits<float>::max();
+                float maxDiff = 0.0f;
+                double sumDiff = 0.0;
+                bool hasNan = false;
+
+                for (size_t i = 0; i < refData.size(); ++i)
+                {
+                    float diff = std::abs(refData[i] - optData[i]);
+                    if (std::isnan(diff))
+                    {
+                        hasNan = true;
+                        break;
+                    }
+                    if (diff < minDiff)
+                        minDiff = diff;
+                    if (diff > maxDiff)
+                        maxDiff = diff;
+                    sumDiff += diff;
+                }
+
+                if (hasNan)
+                {
+                    minDiff = std::numeric_limits<float>::quiet_NaN();
+                    maxDiff = std::numeric_limits<float>::quiet_NaN();
+                    sumDiff = std::numeric_limits<double>::quiet_NaN();
+                }
+
+                float avgDiff = static_cast<float>(sumDiff / refData.size());
+
+                if (maxDiff > 1e-2f || hasNan)
+                {
+                    std::cout << "\033[1;31m";
+                    mismatchCount++;
+                }
+
+                std::cout << std::left
+                          << std::setw(15) << key
+                          << std::setw(25) << entry.opName.substr(0, 24)
+                          << std::setw(15) << minDiff
+                          << std::setw(15) << maxDiff
+                          << std::setw(15) << avgDiff
+                          << "dtype=" << toString(view.dtype)
+                          << ", shape=" << toString(view.getShape())
+                          << ", strides=" << toString(view.strides)
+                          << "\n";
+
+                if (maxDiff > 1e-2f || hasNan)
+                {
+                    std::cout << "\033[0m";
+                }
+            }
+        };
+    };
+
+    // Determine current hook mode
+    std::string dbg_mode = "none";
+    if (!write_refs.empty())
+        dbg_mode = "write";
+    else if (!compare_refs.empty())
+        dbg_mode = "compare";
+
+    // -----------------------------------------------------------------------
     // Memory manager (shared across all compiled sessions)
     // -----------------------------------------------------------------------
     // TODO: make this and get_default_buffer_sizes load from some common place
@@ -375,7 +604,8 @@ int main(int argc, char *argv[])
 #ifdef USE_CUDA
     bufferSizes[Backend::CUDA] = 16ULL * 1024 * 1024 * 1024;
 #endif
-    if (HardwareCaps::get().has_opencl) {
+    if (HardwareCaps::get().has_opencl)
+    {
         bufferSizes[Backend::OPENCL] = 1ULL * 1024 * 1024 * 1024;
     }
     MemoryManager mem(bufferSizes);
@@ -471,86 +701,88 @@ int main(int argc, char *argv[])
 
                 // try
                 // {
-                    // Rebuild graph if dimensions changed
-                    if (width != cs.width || height != cs.height)
+                // Rebuild graph if dimensions changed
+                if (width != cs.width || height != cs.height)
+                {
+                    if (width % SMART_RESIZE_FACTOR != 0 || height % SMART_RESIZE_FACTOR != 0)
                     {
-                        if (width % SMART_RESIZE_FACTOR != 0 || height % SMART_RESIZE_FACTOR != 0)
-                        {
-                            throw std::runtime_error(
-                                "Image dimensions must be divisible by " +
-                                std::to_string(SMART_RESIZE_FACTOR) +
-                                " (got " + std::to_string(width) + "x" +
-                                std::to_string(height) + ")");
-                        }
-                        int total_pixels = width * height;
-                        if (total_pixels < MIN_PIXELS || total_pixels > MAX_PIXELS)
-                        {
-                            throw std::runtime_error(
-                                "Image pixel count " + std::to_string(total_pixels) +
-                                " is outside [" + std::to_string(MIN_PIXELS) + ", " +
-                                std::to_string(MAX_PIXELS) + "]");
-                        }
-
-                        std::cout << "[Server] Building graph for "
-                                  << width << "x" << height << "..." << std::endl;
-                        build_session(cs, mem, width, height, WEIGHTS_PATH);
-                        std::cout << "[Server] Graph ready ("
-                                  << cs.cfg->num_patches << " patches, "
-                                  << cs.cfg->num_merged << " merged tokens, "
-                                  << cs.cfg->text_seq_len << " text tokens)"
-                                  << std::endl;
+                        throw std::runtime_error(
+                            "Image dimensions must be divisible by " +
+                            std::to_string(SMART_RESIZE_FACTOR) +
+                            " (got " + std::to_string(width) + "x" +
+                            std::to_string(height) + ")");
+                    }
+                    int total_pixels = width * height;
+                    if (total_pixels < MIN_PIXELS || total_pixels > MAX_PIXELS)
+                    {
+                        throw std::runtime_error(
+                            "Image pixel count " + std::to_string(total_pixels) +
+                            " is outside [" + std::to_string(MIN_PIXELS) + ", " +
+                            std::to_string(MAX_PIXELS) + "]");
                     }
 
-                    // 1. Normalize image in-place
-                    normalize_image_inplace(
-                        shm_payload->pixel_data, width, height, channels,
-                        cs.norm_image);
+                    std::cout << "[Server] Building graph for "
+                              << width << "x" << height << "..." << std::endl;
+                    build_session(cs, mem, width, height, WEIGHTS_PATH);
+                    std::cout << "[Server] Graph ready ("
+                              << cs.cfg->num_patches << " patches, "
+                              << cs.cfg->num_merged << " merged tokens, "
+                              << cs.cfg->text_seq_len << " text tokens)"
+                              << std::endl;
+                }
 
-                    // 2. Build patch input in-place
-                    build_patch_input_inplace(cs.norm_image, width, height,
-                                              cs.patch_input);
+                // 1. Normalize image in-place
+                normalize_image_inplace(
+                    shm_payload->pixel_data, width, height, channels,
+                    cs.norm_image);
 
-                    // 3. Write input and run
-                    cs.session->memManager.write(Backend::CPU, cs.patch_input_id,
-                                                 cs.patch_input.data(),
-                                                 cs.patch_input.size() * sizeof(float));
+                // 2. Build patch input in-place
+                build_patch_input_inplace(cs.norm_image, width, height,
+                                          cs.patch_input);
 
-                    // Use the incremental bucket if we have already loaded the static weights on the first run
-                    Bucket b;
-                    if (cs.has_run)
-                    {
-                        b.inputDirtyRegions[cs.patch_input_id] = makeFull(cs.graph->getNode(cs.patch_input_id).getShape());
-                        b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
-                    }
+                // 3. Write input and run
+                cs.session->memManager.write(Backend::CPU, cs.patch_input_id,
+                                             cs.patch_input.data(),
+                                             cs.patch_input.size() * sizeof(float));
 
-                    const float *device_output_ptr =
-                        static_cast<const float *>(cs.session->run(b));
+                // Use the incremental bucket if we have already loaded the static weights on the first run
+                Bucket b;
+                if (cs.has_run)
+                {
+                    b.inputDirtyRegions[cs.patch_input_id] = makeFull(cs.graph->getNode(cs.patch_input_id).getShape());
+                    b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
+                }
 
-                    cs.has_run = true; // Mark as run completed so subsequent passes bypass weight copy
+                callCounts.clear();
+                auto cb = makeDebugCb(cs.graph.get(), dbg_mode);
+                const float *device_output_ptr =
+                    static_cast<const float *>(cs.session->run(b, cb));
 
-                    // 4. Copy embedding back
-                    float host_output[EMBEDDING_DIM];
+                cs.has_run = true; // Mark as run completed so subsequent passes bypass weight copy
+
+                // 4. Copy embedding back
+                float host_output[EMBEDDING_DIM];
 #ifdef USE_CUDA
-                    cudaPointerAttributes attrs;
-                    if (cudaPointerGetAttributes(&attrs, device_output_ptr) == cudaSuccess &&
-                        attrs.type == cudaMemoryTypeDevice)
-                    {
-                        cudaMemcpy(host_output, device_output_ptr,
-                                   EMBEDDING_DIM * sizeof(float), cudaMemcpyDeviceToHost);
-                    }
-                    else
-                    {
-                        std::memcpy(host_output, device_output_ptr,
-                                    EMBEDDING_DIM * sizeof(float));
-                    }
-#else
+                cudaPointerAttributes attrs;
+                if (cudaPointerGetAttributes(&attrs, device_output_ptr) == cudaSuccess &&
+                    attrs.type == cudaMemoryTypeDevice)
+                {
+                    cudaMemcpy(host_output, device_output_ptr,
+                               EMBEDDING_DIM * sizeof(float), cudaMemcpyDeviceToHost);
+                }
+                else
+                {
                     std::memcpy(host_output, device_output_ptr,
                                 EMBEDDING_DIM * sizeof(float));
+                }
+#else
+                std::memcpy(host_output, device_output_ptr,
+                            EMBEDDING_DIM * sizeof(float));
 #endif
 
-                    std::memcpy(shm_payload->embedding, host_output,
-                                EMBEDDING_DIM * sizeof(float));
-                    shm_payload->status = 0;
+                std::memcpy(shm_payload->embedding, host_output,
+                            EMBEDDING_DIM * sizeof(float));
+                shm_payload->status = 0;
                 // }
                 // catch (const std::exception &e)
                 // {
@@ -659,7 +891,14 @@ int main(int argc, char *argv[])
                                      cs.patch_input.size() * sizeof(float));
 
         auto start = std::chrono::high_resolution_clock::now();
-        const float *device_output_ptr = static_cast<const float *>(cs.session->run());
+
+        callCounts.clear();
+        auto cb = makeDebugCb(cs.graph.get(), dbg_mode);
+        Bucket b;
+        b.inputDirtyRegions[cs.patch_input_id] = makeFull(cs.graph->getNode(cs.patch_input_id).getShape());
+        b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
+        const float *device_output_ptr = static_cast<const float *>(cs.session->run(b, cb));
+
         auto end = std::chrono::high_resolution_clock::now();
         float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
 
@@ -699,6 +938,19 @@ int main(int argc, char *argv[])
         l2_norm = std::sqrt(l2_norm);
         std::cout << "L2 norm: " << std::fixed << std::setprecision(6) << l2_norm
                   << " (should be ~1.0)" << std::endl;
+    }
+
+    if (!compare_refs.empty())
+    {
+        std::cout << "=======================================================================================\n";
+        if (mismatchCount > 0)
+        {
+            std::cout << "Found " << mismatchCount << " nodes with high deviation (>1e-2) or NaNs.\n";
+        }
+        else
+        {
+            std::cout << "All nodes matched perfectly or within acceptable precision limits.\n";
+        }
     }
 
     return 0;

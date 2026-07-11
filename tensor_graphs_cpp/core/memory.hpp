@@ -168,8 +168,8 @@ struct DeviceBuffer
 
     DeviceBuffer(Backend b, uint64_t _sizeBytes) : backend(b), sizeBytes(_sizeBytes)
     {
-        // Align overall size to 512 bytes to facilitate OpenCL sub-buffers
-        sizeBytes = (sizeBytes + 511) & ~511ULL;
+        // Align overall size to 4096 bytes to facilitate OpenCL zero-copy page alignment
+        sizeBytes = (sizeBytes + 4095) & ~4095ULL; // TODO: make this a compile time variable somewhere that is based on hardware query instead of vibes
 
         MemBlock initialFree;
         initialFree.offset = 0;
@@ -352,9 +352,9 @@ struct DeviceBuffer
 #endif // USE_CUDA
         else if (backend == Backend::CPU)
         {
-            cpu_arena.resize(sizeBytes + 64);
+            cpu_arena.resize(sizeBytes + 4096);
             uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
-            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
+            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 4095) & ~4095ULL);
         }
         else
         {
@@ -454,8 +454,8 @@ struct DeviceBuffer
 
     uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost)
     {
-        // Align to 512 bytes for standard OpenCL sub-buffer compatibility
-        _sizeBytes = (_sizeBytes + 511) & ~511ULL;
+        // Align to 4096 bytes for standard OpenCL zero-copy page alignment requirements
+        _sizeBytes = (_sizeBytes + 4095) & ~4095ULL;
 
         // 1. If it's already cached, lock it and update
         auto mapIt = allocationMap.find(nodeId);

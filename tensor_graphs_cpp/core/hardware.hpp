@@ -123,6 +123,7 @@ private:
 #endif
 
         // 3. Detect OpenCL & Adreno GPU
+#ifndef TG_DISABLE_OPENCL
         cl_uint numPlatforms = 0;
         if (clGetPlatformIDs(0, nullptr, &numPlatforms) == CL_SUCCESS && numPlatforms > 0)
         {
@@ -157,6 +158,7 @@ private:
                 }
             }
         }
+#endif
 
         // 4. Generate HW_TAG
         std::string os = "UnknownOS";

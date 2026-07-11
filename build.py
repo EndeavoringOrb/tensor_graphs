@@ -31,6 +31,7 @@ USE_CUDA = False
 DEBUG_MODE = False
 NO_LINT = False
 PROFILE_MODE = False
+DISABLE_OPENCL = False
 
 # List of macros that register a kernel with a unique UID
 REGISTER_MACROS = [
@@ -120,6 +121,9 @@ def get_compiler_cmd(fname: str):
         else:
             cmd.extend(["-O3"])
 
+        if DISABLE_OPENCL:
+            cmd.append("-DTG_DISABLE_OPENCL")
+
         cmd.append(str(ROOT_DIR / fname))
         cmd.extend(["-o", out_name])
         return cmd
@@ -139,6 +143,9 @@ def get_compiler_cmd(fname: str):
             else:
                 cmd.extend(["-O3"])
 
+            if DISABLE_OPENCL:
+                cmd.append("-DTG_DISABLE_OPENCL")
+
             cmd.append(str(ROOT_DIR / fname))
             cmd.extend(["-o", out_name])
             return cmd
@@ -153,6 +160,9 @@ def get_compiler_cmd(fname: str):
                 cmd.extend(["-g", "-O0", "-DDEBUG", "-fno-omit-frame-pointer"])
             else:
                 cmd.extend(["-O3"])
+
+            if DISABLE_OPENCL:
+                cmd.append("-DTG_DISABLE_OPENCL")
 
             cmd.append(str(ROOT_DIR / fname))
             cmd.extend(["-o", out_name])
@@ -437,6 +447,11 @@ def compile_project(targets=None):
             if is_arm64:
                 nvcc_flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
+    if DISABLE_OPENCL:
+        cxx_flags.append("-DTG_DISABLE_OPENCL")
+        if USE_CUDA:
+            nvcc_flags.append("-DTG_DISABLE_OPENCL")
+
     if targets is None:
         mains = [
             "main.cpp",
@@ -565,17 +580,21 @@ def main():
         "--no-lint", action="store_true", help="Skip kernel validation checks"
     )
     parser.add_argument(
+        "--disable-opencl", action="store_true", help="Disable OpenCL backend"
+    )
+    parser.add_argument(
         "--targets",
         nargs="+",
         help="Specify which target C++ files to build (e.g. main, bench, test, test_model)",
     )
     args = parser.parse_args()
 
-    global USE_CUDA, DEBUG_MODE, NO_LINT, PROFILE_MODE
+    global USE_CUDA, DEBUG_MODE, NO_LINT, PROFILE_MODE, DISABLE_OPENCL
     USE_CUDA = args.cuda
     DEBUG_MODE = args.debug
     NO_LINT = args.no_lint
     PROFILE_MODE = args.profile
+    DISABLE_OPENCL = args.disable_opencl
 
     console.print(
         f"\n[bold cyan]Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...[/bold cyan]\n"
