@@ -1898,50 +1898,22 @@ private:
             else if (!valid && reason == "OOM" && oomEClassId != UINT32_MAX)
             {
                 int backtrack_idx = -1;
-                // Scan path to find first node that is actually live in memory and has alternative kernel paths to try
-                for (int i = 0; i < path.size(); i++)
-                {
-                    uint32_t eclassId = path[i];
-                    uint32_t canon = egraph.findConst(eclassId);
 
-                    if (canon < oomLiveAllocated.size() && oomLiveAllocated[canon])
+                // Locate the OOM bottleneck node in the path
+                // and backtrack to it. This forces the pop loop to discard all
+                // downstream nodes allocated after the bottleneck.
+                int oom_idx = -1;
+                for (int i = 0; i < (int)path.size(); i++)
+                {
+                    if (egraph.findConst(path[i]) == oomEClassId)
                     {
-                        auto choiceIt = selection_map.find(canon);
-                        if (choiceIt != selection_map.end())
-                        {
-                            uint32_t sel = choiceIt->second;
-                            const auto &enodes = egraph.getEClass(canon).enodes;
-                            if (sel + 1 < enodes.size())
-                            {
-                                backtrack_idx = i;
-                                break;
-                            }
-                        }
+                        oom_idx = i;
+                        break;
                     }
                 }
-
-                if (backtrack_idx >= 0)
+                if (oom_idx >= 0)
                 {
-                    target_backtrack_eclass = path[backtrack_idx];
-                }
-                else
-                {
-                    // Fallback: Locate the OOM bottleneck node itself in the path
-                    // and backtrack to it. This forces the pop loop to discard all
-                    // downstream nodes allocated after the bottleneck.
-                    int oom_idx = -1;
-                    for (int i = 0; i < (int)path.size(); i++)
-                    {
-                        if (egraph.findConst(path[i]) == oomEClassId)
-                        {
-                            oom_idx = i;
-                            break;
-                        }
-                    }
-                    if (oom_idx >= 0)
-                    {
-                        target_backtrack_eclass = path[oom_idx];
-                    }
+                    target_backtrack_eclass = path[oom_idx];
                 }
             }
             else if (!valid && reason == "cycle")
@@ -2032,24 +2004,19 @@ private:
 
                         if (is_cycle)
                         {
+                            int current_cycle_max = -1;
                             for (uint32_t v : scc)
                             {
-                                if (path_idx[v] != -1)
+                                if (path_idx[v] > current_cycle_max)
                                 {
-                                    auto choiceIt = selection_map.find(v);
-                                    if (choiceIt != selection_map.end())
-                                    {
-                                        uint32_t sel = choiceIt->second;
-                                        const auto &enodes = egraph.getEClass(v).enodes;
-                                        if (sel + 1 < enodes.size())
-                                        {
-                                            if (path_idx[v] < best_backtrack_idx)
-                                            {
-                                                best_backtrack_idx = path_idx[v];
-                                            }
-                                        }
-                                    }
+                                    current_cycle_max = path_idx[v];
                                 }
+                            }
+
+                            // We want the earliest (min) of the cycle closures (max)
+                            if (current_cycle_max != -1 && current_cycle_max < best_backtrack_idx)
+                            {
+                                best_backtrack_idx = current_cycle_max;
                             }
                         }
                     }

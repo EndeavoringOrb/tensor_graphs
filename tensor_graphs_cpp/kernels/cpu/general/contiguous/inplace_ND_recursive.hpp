@@ -61,13 +61,10 @@ inline void runRecursiveContiguous_ND_Inplace(const KernelContext &ctx)
     uint8_t *dst_base = static_cast<uint8_t *>(ctx.outputs[0]);
     const uint64_t elementSize = getDTypeSize(view.dtype);
 
-    if (shape.empty())
+    if (shape.empty() || countElements(shape) == 0) return;
+    if (src_base != dst_base)
     {
-        if (src_base != dst_base)
-        {
-            std::memcpy(dst_base, src_base, elementSize);
-        }
-        return;
+        Error::throw_err("[runRecursiveContiguous_ND_Inplace] src_base != dst_base");
     }
 
     // Contiguity analysis
@@ -102,10 +99,6 @@ inline void runRecursiveContiguous_ND_Inplace(const KernelContext &ctx)
     // Already contiguous inside the same buffer
     if (contig_dim_start == 0)
     {
-        if (src_base != dst_base)
-        {
-            std::memcpy(dst_base, src_base, countElements(shape) * elementSize);
-        }
         return;
     }
 
