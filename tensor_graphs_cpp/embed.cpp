@@ -362,24 +362,6 @@ int main(int argc, char *argv[])
         "models/jinaai/jina-embeddings-v5-omni-nano-retrieval/model.safetensors";
 
     // -----------------------------------------------------------------------
-    // Optional chat-template token override.
-    //
-    // Looks for chat_template_tokens.json next to the model weights.  If
-    // present, it overrides the hardcoded CHAT_PREFIX_TOKEN_IDS /
-    // CHAT_SUFFIX_TOKEN_IDS — useful if a future tokenizer revision turns
-    // <|im_start|>/<|im_end|> into single special-token IDs.
-    // -----------------------------------------------------------------------
-    {
-        std::string override_path =
-            "models/jinaai/jina-embeddings-v5-omni-nano-retrieval/chat_template_tokens.json";
-        if (JinaV5OmniNanoRetrievalModel::load_chat_template_overrides(override_path))
-        {
-            std::cout << "[Server] Loaded chat-template token overrides from "
-                      << override_path << std::endl;
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // Intermediate Debug / Reference Globals & Files
     // -----------------------------------------------------------------------
     struct RefIndexEntry
