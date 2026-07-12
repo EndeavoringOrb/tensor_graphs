@@ -3,7 +3,7 @@
 #include "core/kernels.hpp"
 #include "kernels/opencl/opencl_utils.hpp"
 
-inline bool matchDotF32_3D_OpenCL(const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchDotF32_3D_OpenCL_v0(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (output.dtype != DType::FLOAT32)
         return false;
@@ -21,14 +21,14 @@ inline bool matchDotF32_3D_OpenCL(const std::vector<TensorNode> &inputs, const T
     return true;
 }
 
-inline void runDotF32_3D_OpenCL(const KernelContext &ctx)
+inline void runDotF32_3D_OpenCL_v0(const KernelContext &ctx)
 {
     uint64_t B_count = ctx.inViews[0].getShape()[0];
     uint64_t M = ctx.inViews[0].getShape()[1];
     uint64_t K = ctx.inViews[0].getShape()[2];
     uint64_t N = ctx.inViews[1].getShape()[2];
 
-    cl_kernel k = OpenCL::getKernel("kernels/opencl/dot/dot.cl", "dot_f32_3d");
+    cl_kernel k = OpenCL::getKernel("kernels/opencl/dot/v0/dot.cl", "dot_f32_3d");
 
     OpenCL::setArgBuffer(k, 0, ctx.cl_inputs[0]);
     OpenCL::setArgBuffer(k, 1, ctx.cl_inputs[1]);
@@ -46,14 +46,14 @@ inline void runDotF32_3D_OpenCL(const KernelContext &ctx)
 
     cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 3, nullptr, global_work_size, local_work_size, 0, nullptr, nullptr);
     if (err != CL_SUCCESS)
-        Error::throw_err("OpenCL: Failed to enqueue Dot_F32_3D");
+        Error::throw_err("OpenCL: Failed to enqueue Dot_F32_3D_v0");
 
     clFinish(OpenCLState::get().queue);
 }
 
-inline uint32_t refFactoryDotF32_3D_OpenCL(const std::vector<uint32_t> &inputs, Graph &graph)
+inline uint32_t refFactoryDotF32_3D_OpenCL_v0(const std::vector<uint32_t> &inputs, Graph &graph)
 {
     return graph.dot(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Dot_F32_3D_OpenCL", 2, matchDotF32_3D_OpenCL, runDotF32_3D_OpenCL, refFactoryDotF32_3D_OpenCL, {Backend::OPENCL}, {DType::FLOAT32, DType::FLOAT32}, {{1, 16, 32}, {1, 32, 16}}, {true, true}, {{Backend::OPENCL}, {Backend::OPENCL}});
+REGISTER_KERNEL("Dot_F32_3D_OpenCL_v0", 2, matchDotF32_3D_OpenCL_v0, runDotF32_3D_OpenCL_v0, refFactoryDotF32_3D_OpenCL_v0, {Backend::OPENCL}, {DType::FLOAT32, DType::FLOAT32}, {{1, 16, 32}, {1, 32, 16}}, {true, true}, {{Backend::OPENCL}, {Backend::OPENCL}});
