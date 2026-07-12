@@ -20,7 +20,7 @@ inline void runMulF32_OpenCL_1D(const KernelContext &ctx)
     if (n == 0)
         return;
 
-    cl_kernel k = OpenCL::getKernel("kernels/opencl/mul/mul.cl", "mul_f32_nd");
+    cl_kernel k = OpenCL::getKernel("kernels/opencl/mul/v0/mul.cl", "mul_f32_nd");
     OpenCL::setArgBuffer(k, 0, ctx.cl_inputs[0]);
     OpenCL::setArgBuffer(k, 1, ctx.cl_inputs[1]);
     OpenCL::setArgBuffer(k, 2, ctx.cl_outputs[0]);
