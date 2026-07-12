@@ -97,7 +97,7 @@ void run_autoregressive_llm(
     ModelGraphRoots (*builder)(Graph &, MemoryManager &),
     bool refOnly = false,
     bool doSaturate = true,
-    const std::function<void(uint32_t, const TensorView &, const void *)> &debugCb = nullptr,
+    const Debug::Callback &debugCb = nullptr,
     Graph **activeGraphOut = nullptr)
 {
     KernelRegistry::get().setReferenceOnly(refOnly);
@@ -181,7 +181,7 @@ void run_autoregressive_llm(
     }
 }
 
-void run_gemma(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const std::function<void(uint32_t, const TensorView &, const void *)> &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+void run_gemma(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
     run_autoregressive_llm<Gemma3ModelConfig>(
         "gemma-3-270m",
@@ -199,7 +199,7 @@ void run_gemma(bool only_plan, bool disable_caching, bool refOnly = false, bool 
         activeGraphOut);
 }
 
-void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const std::function<void(uint32_t, const TensorView &, const void *)> &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
     run_autoregressive_llm<Qwen3_6_35B_A3B_Config>(
         "qwen-3.6-35b-a3b",
@@ -217,7 +217,7 @@ void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bo
         activeGraphOut);
 }
 
-void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const std::function<void(uint32_t, const TensorView &, const void *)> &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
     KernelRegistry::get().setReferenceOnly(refOnly);
     FluxConfig cfg;
@@ -379,9 +379,9 @@ int main(int argc, char *argv[])
     bool doSaturate = write_refs.empty();
 
     Graph *activeGraphPtr = nullptr;
-    auto debugCb = [&](uint32_t logicalId, const TensorView &view, const void *data)
+    auto debugCb = [&](uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)
     {
-        verifier.verify(logicalId, view, data, activeGraphPtr);
+        verifier.verify(logicalId, node, ctx, data, activeGraphPtr);
     };
 
     if (model == "gemma-3-270m")
