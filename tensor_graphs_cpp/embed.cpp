@@ -52,6 +52,7 @@
 #include "core/misc.hpp"
 #include "core/repo.hpp"
 #include "core/shapes.hpp"
+#include "core/argparse.hpp"
 
 #include "models/jina-embeddings-v5-omni-nano-retrieval.hpp"
 #include "generated/kernels_all.gen.hpp"
@@ -177,7 +178,8 @@ struct CompiledSession
 // Build (or rebuild) the graph + session for the given image dimensions.
 static void build_session(CompiledSession &cs, MemoryManager &mem,
                           int width, int height,
-                          const std::string &weights_path)
+                          const std::string &weights_path,
+                          bool disable_caching = false)
 {
     int grid_h = height / PATCH_SIZE;
     int grid_w = width / PATCH_SIZE;
@@ -203,7 +205,7 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
                              std::to_string(width) + "x" + std::to_string(height) + ".bin";
 
     cs.session = std::make_unique<Session>(*cs.graph, mem, cs.root_id,
-                                           cache_file, 0, &repo);
+                                           cache_file, 0, &repo, disable_caching);
 
     // Register a bucket where ONLY the image input is dirty (all weights are clean/static)
     std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
@@ -324,38 +326,23 @@ static std::vector<float> normalize_image(const uint8_t *pixel_data,
 
 int main(int argc, char *argv[])
 {
-    if (argc < 2)
+    ArgParser parser("embed", "Embed an image using Jina embeddings.");
+    parser.add_flag({"--server"}, "Run in shared-memory server mode.");
+    parser.add_flag({"--disable-caching"}, "Disable dirty region caching.");
+    parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "reference_tensors/embed.bin");
+    parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "reference_tensors/embed.bin");
+    parser.add_positional("image_path", "Path to input image file (optional in server mode).");
+
+    if (!parser.parse(argc, argv))
     {
-        std::cerr << "Usage: " << argv[0] << " <image_path>" << std::endl;
-        std::cerr << "       " << argv[0] << " --server" << std::endl;
         return 1;
     }
 
-    bool is_server = false;
-    std::string image_path;
-    std::string write_refs = "";
-    std::string compare_refs = "";
-
-    for (int i = 1; i < argc; ++i)
-    {
-        std::string arg = argv[i];
-        if (arg == "--server")
-        {
-            is_server = true;
-        }
-        else if (arg == "--write-refs" && i + 1 < argc)
-        {
-            write_refs = argv[++i];
-        }
-        else if (arg == "--compare-refs" && i + 1 < argc)
-        {
-            compare_refs = argv[++i];
-        }
-        else
-        {
-            image_path = arg;
-        }
-    }
+    bool is_server = parser.get_flag("--server");
+    bool disable_caching = parser.get_flag("--disable-caching");
+    std::string write_refs = parser.get_option("--write-refs");
+    std::string compare_refs = parser.get_option("--compare-refs");
+    std::string image_path = parser.get_positional("image_path");
 
     if (!is_server)
     {
@@ -699,8 +686,6 @@ int main(int argc, char *argv[])
                     continue;
                 }
 
-                // try
-                // {
                 // Rebuild graph if dimensions changed
                 if (width != cs.width || height != cs.height)
                 {
@@ -723,7 +708,7 @@ int main(int argc, char *argv[])
 
                     std::cout << "[Server] Building graph for "
                               << width << "x" << height << "..." << std::endl;
-                    build_session(cs, mem, width, height, WEIGHTS_PATH);
+                    build_session(cs, mem, width, height, WEIGHTS_PATH, disable_caching);
                     std::cout << "[Server] Graph ready ("
                               << cs.cfg->num_patches << " patches, "
                               << cs.cfg->num_merged << " merged tokens, "
@@ -783,12 +768,6 @@ int main(int argc, char *argv[])
                 std::memcpy(shm_payload->embedding, host_output,
                             EMBEDDING_DIM * sizeof(float));
                 shm_payload->status = 0;
-                // }
-                // catch (const std::exception &e)
-                // {
-                //     std::cerr << "[Server Error] Exception: " << e.what() << std::endl;
-                //     shm_payload->status = -1;
-                // }
                 shm_payload->state = 2;
             }
             else if (shm_payload->state == 3)
@@ -876,7 +855,7 @@ int main(int argc, char *argv[])
         // Build graph for this image's dimensions (build_session also
         // pre-allocates cs.norm_image and cs.patch_input for reuse).
         CompiledSession cs;
-        build_session(cs, mem, final_w, final_h, WEIGHTS_PATH);
+        build_session(cs, mem, final_w, final_h, WEIGHTS_PATH, disable_caching);
 
         // Normalize in-place into cs.norm_image
         normalize_image_inplace(resized_data, final_w, final_h, 3, cs.norm_image);
