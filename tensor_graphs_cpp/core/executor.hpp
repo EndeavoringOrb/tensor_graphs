@@ -20,13 +20,11 @@ private:
     std::unordered_map<uint32_t, float> nodeCosts;
 
 public:
-    using DebugCallback = std::function<void(uint32_t logicalId, const TensorView &view, const void *data)>;
-
     Executor(MemoryManager &mm)
         : memManager(mm) {}
 
     void run(const CompiledGraph &compiled,
-             const DebugCallback &debugCallback = nullptr)
+             const Debug::Callback &debugCallback = nullptr)
     {
         double totalKernelTime = 0.0f;
 
@@ -118,7 +116,7 @@ public:
                     ctx.inputs.push_back(host_ptr);
                     ctx.fd.push_back(-1);
 
-                    if (node.backend == Backend::OPENCL)
+                    if (actualInBackend == Backend::OPENCL)
                     {
                         size_t size = countElements(view) * getDTypeSize(view.dtype);
                         if (size == 0)
@@ -312,7 +310,7 @@ public:
                     clReleaseMemObject(sub);
             }
 
-            if (debugCallback && logicalId != UINT32_MAX && isEndOfLogicalChain)
+            if (debugCallback)
             {
                 const uint8_t *basePtr = actualBuf.arena_ptr + ctx.outViews[0].baseOffset;
                 uint64_t maxOffset = 0;
@@ -331,7 +329,7 @@ public:
                     cudaDeviceSynchronize();
                     std::vector<uint8_t> hostData(bytesToCopy);
                     cudaMemcpy(hostData.data(), basePtr, bytesToCopy, cudaMemcpyDeviceToHost);
-                    debugCallback(logicalId, ctx.outViews[0], hostData.data());
+                    debugCallback(logicalId, node, ctx, hostData.data());
                 }
                 else
 #endif
@@ -340,7 +338,7 @@ public:
                     {
                         clFinish(OpenCLState::get().queue);
                     }
-                    debugCallback(logicalId, ctx.outViews[0], basePtr);
+                    debugCallback(logicalId, node, ctx, basePtr);
                 }
             }
 

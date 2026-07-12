@@ -526,9 +526,9 @@ int main(int argc, char *argv[])
                     b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
                 }
 
-                auto cb = [&](uint32_t logicalId, const TensorView &view, const void *data)
+                auto cb = [&](uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)
                 {
-                    verifier.verify(logicalId, view, data, cs.graph.get());
+                    verifier.verify(logicalId, node, ctx, data, cs.graph.get());
                 };
 
                 const float *device_output_ptr = static_cast<const float *>(cs.session->run(b, cb));
@@ -660,9 +660,9 @@ int main(int argc, char *argv[])
 
         auto start = std::chrono::high_resolution_clock::now();
 
-        auto cb = [&](uint32_t logicalId, const TensorView &view, const void *data)
+        auto cb = [&](uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)
         {
-            verifier.verify(logicalId, view, data, cs.graph.get());
+            verifier.verify(logicalId, node, ctx, data, cs.graph.get());
         };
 
         Bucket b;

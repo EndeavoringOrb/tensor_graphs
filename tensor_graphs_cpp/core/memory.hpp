@@ -169,7 +169,7 @@ struct DeviceBuffer
     DeviceBuffer(Backend b, uint64_t _sizeBytes) : backend(b), sizeBytes(_sizeBytes)
     {
         // Align overall size to 4096 bytes to facilitate OpenCL zero-copy page alignment
-        sizeBytes = (sizeBytes + 4095) & ~4095ULL; // TODO: make this a compile time variable somewhere that is based on hardware query instead of vibes
+        sizeBytes = (sizeBytes + 4095) & ~4095ULL; // TODO: make this a compile time variable somewhere that is based on hardware query instead of vibes (CL_DEVICE_MEM_BASE_ADDR_ALIGN)
 
         MemBlock initialFree;
         initialFree.offset = 0;

@@ -14,16 +14,29 @@ inline bool matchCopy_CPU_OpenCL(const std::vector<TensorNode> &inputs, const Te
 
 inline void runCopy_CPU_OpenCL(const KernelContext &ctx)
 {
-    // Because the OpenCL arena is mapped via CL_MEM_ALLOC_HOST_PTR,
-    // we can copy data into it directly using standard CPU memcpy.
-    // The GPU will then compute directly on this buffer.
-    const uint8_t *src = static_cast<const uint8_t *>(ctx.inputs[0]);
-    uint8_t *dst = static_cast<uint8_t *>(ctx.outputs[0]);
+    const uint8_t *src_host_ptr = static_cast<const uint8_t *>(ctx.inputs[0]);
+    cl_mem dst_device_buf = ctx.cl_outputs[0];
 
     uint64_t numElements = countElements(ctx.inViews[0].getShape());
     uint64_t elemSize = getDTypeSize(ctx.inViews[0].dtype);
+    size_t size_bytes = numElements * elemSize;
 
-    std::memcpy(dst, src, numElements * elemSize);
+    if (size_bytes == 0)
+        return;
+
+    cl_int err = clEnqueueWriteBuffer(
+        OpenCLState::get().queue,
+        dst_device_buf,
+        CL_TRUE, // Blocking write
+        0,
+        size_bytes,
+        src_host_ptr,
+        0, nullptr, nullptr);
+
+    if (err != CL_SUCCESS)
+    {
+        Error::throw_err("OpenCL: clEnqueueWriteBuffer failed in runCopy_CPU_OpenCL");
+    }
 }
 
 REGISTER_REF_KERNEL(OpType::COPY_TO, 1, matchCopy_CPU_OpenCL, runCopy_CPU_OpenCL, {Backend::OPENCL}, {DType::ANY}, {{8, 32}}, {true}, {{Backend::CPU}});

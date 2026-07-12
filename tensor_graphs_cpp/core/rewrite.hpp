@@ -1644,7 +1644,8 @@ struct FlattenElementwise : public Rule
         for (uint32_t childId : opNode.children)
         {
             uint32_t canonChild = egraph.find(childId);
-            uint32_t r = addOpToEGraph(egraph, OpType::RESHAPE, {canonChild, flat_shape_id}, flatShape, flatStrides, 0, opNode.dtype, opNode.backend);
+            const EClass childCls = egraph.getEClass(canonChild);
+            uint32_t r = addOpToEGraph(egraph, OpType::RESHAPE, {canonChild, flat_shape_id}, flatShape, flatStrides, 0, childCls.dtype, opNode.backend);
             flatChildren.push_back(r);
         }
 

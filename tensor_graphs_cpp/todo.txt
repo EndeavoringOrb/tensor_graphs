@@ -1,3 +1,5 @@
+Executor::run shouldn't handle backend specific stuff like clRetainMemObject or clCreateSubBuffer. that memory management stuff should all be inside the respective DeviceBuffer
+
 add grid search for kernel params like tile size
 
 only allocate DeviceBuffer if a plan uses that backend

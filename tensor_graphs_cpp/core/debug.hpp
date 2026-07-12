@@ -17,6 +17,8 @@
 
 namespace Debug
 {
+    using Callback = std::function<void(uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)>;
+
     inline void checkNan(const TensorNode &node, const MemoryManager &mem, const std::string &context)
     {
 #ifndef DEBUG_CHECKNAN
@@ -227,11 +229,12 @@ namespace Debug
         std::string getMode() const { return mode; }
         int getMismatchCount() const { return mismatchCount; }
 
-        void verify(uint32_t logicalId, const TensorView &view, const void *data, Graph *graph)
+        void verify(uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data, Graph *graph)
         {
             if (mode == "none" || !graph)
                 return;
 
+            const TensorView &view = ctx.outViews[0];
             std::vector<float> optData = flattenOutput(data, view.getShape(), view.strides, view.dtype);
             std::string opName = "UNKNOWN";
             if (graph->hasNode(logicalId))
@@ -262,71 +265,140 @@ namespace Debug
             }
             else if (mode == "compare")
             {
-                auto it = refIndex.find(key);
-                if (it == refIndex.end())
-                    return;
-
-                const auto &entry = it->second;
-                if (entry.numElements != optData.size())
-                {
-                    std::cout << std::left << std::setw(15) << key
-                              << "SIZE MISMATCH: " << entry.numElements << " vs " << optData.size() << "\n";
-                    mismatchCount++;
-                    return;
-                }
-
-                if (optData.empty())
-                    return;
-
-                std::vector<float> refData(entry.numElements);
-                refInFile.seekg(entry.fileOffset, std::ios::beg);
-                refInFile.read(reinterpret_cast<char *>(refData.data()), entry.numElements * sizeof(float));
-
                 float minDiff = std::numeric_limits<float>::max();
                 float maxDiff = 0.0f;
                 double sumDiff = 0.0;
+                float avgDiff = 0.0f;
                 bool hasNan = false;
+                std::string opName = node.opType == OpType::FUSED ? "FUSED_" + node.opName : toString(node.opType);
 
-                for (size_t i = 0; i < refData.size(); ++i)
+                auto it = refIndex.find(key);
+                if (it != refIndex.end())
                 {
-                    float diff = std::abs(refData[i] - optData[i]);
-                    if (std::isnan(diff))
+                    const auto &entry = it->second;
+                    if (entry.numElements != optData.size())
                     {
-                        hasNan = true;
-                        break;
+                        std::cout << std::left << std::setw(15) << key
+                                  << "SIZE MISMATCH: " << entry.numElements << " vs " << optData.size() << "\n";
+                        mismatchCount++;
+                        return;
                     }
-                    if (diff < minDiff)
-                        minDiff = diff;
-                    if (diff > maxDiff)
-                        maxDiff = diff;
-                    sumDiff += diff;
-                }
 
-                if (hasNan)
-                {
-                    minDiff = std::numeric_limits<float>::quiet_NaN();
-                    maxDiff = std::numeric_limits<float>::quiet_NaN();
-                    sumDiff = std::numeric_limits<double>::quiet_NaN();
-                }
+                    std::vector<float> refData(entry.numElements);
+                    refInFile.seekg(entry.fileOffset, std::ios::beg);
+                    refInFile.read(reinterpret_cast<char *>(refData.data()), entry.numElements * sizeof(float));
 
-                float avgDiff = static_cast<float>(sumDiff / refData.size());
+                    for (size_t i = 0; i < refData.size(); ++i)
+                    {
+                        float diff = std::abs(refData[i] - optData[i]);
+                        if (std::isnan(diff))
+                        {
+                            hasNan = true;
+                            break;
+                        }
+                        if (diff < minDiff)
+                            minDiff = diff;
+                        if (diff > maxDiff)
+                            maxDiff = diff;
+                        sumDiff += diff;
+                    }
 
-                if (maxDiff > 1e-2f || hasNan)
-                {
-                    std::cout << "\033[1;31m";
-                    mismatchCount++;
+                    if (hasNan)
+                    {
+                        minDiff = std::numeric_limits<float>::quiet_NaN();
+                        maxDiff = std::numeric_limits<float>::quiet_NaN();
+                        sumDiff = std::numeric_limits<double>::quiet_NaN();
+                    }
+
+                    avgDiff = static_cast<float>(sumDiff / refData.size());
+
+                    if (maxDiff > 1e-2f || hasNan)
+                    {
+                        std::cout << "\033[1;31m";
+                        mismatchCount++;
+                    }
                 }
 
                 std::cout << std::left
                           << std::setw(15) << key
-                          << std::setw(25) << entry.opName.substr(0, 24)
+                          << std::setw(25) << opName.substr(0, 24)
                           << std::setw(15) << minDiff
                           << std::setw(15) << maxDiff
                           << std::setw(15) << avgDiff
-                          << "dtype=" << toString(view.dtype)
+                          << "id=" << node.id
+                          << ", dtype=" << toString(view.dtype)
                           << ", shape=" << toString(view.getShape())
                           << ", strides=" << toString(view.strides)
+                          << ", offset=" << view.baseOffset
+                          << ", debugOrigin=" << node.debugOrigin
                           << "\n";
+
+                // Print detailed information for all input-related buffers
+                size_t maxInputs = std::max({ctx.inputs.size(), ctx.inViews.size(), ctx.fd.size(), ctx.cl_inputs.size()});
+                if (maxInputs > 0)
+                {
+                    std::cout << "  Inputs:\n";
+                    for (size_t i = 0; i < maxInputs; ++i)
+                    {
+                        std::cout << "    [" << i << "] ";
+
+                        if (i < node.parentIds.size()) {
+                            std::cout << "id=" << node.parentIds[i];
+                        }
+
+                        if (i < ctx.inputs.size())
+                            std::cout << ", ptr=" << ctx.inputs[i];
+                        else
+                            std::cout << ", ptr=N/A";
+
+                        if (i < ctx.inViews.size())
+                        {
+                            const auto &inView = ctx.inViews[i];
+                            std::cout << ", dtype=" << toString(inView.dtype)
+                                      << ", shape=" << toString(inView.getShape())
+                                      << ", strides=" << toString(inView.strides)
+                                      << ", offset=" << inView.baseOffset;
+                        }
+                        if (i < ctx.fd.size())
+                        {
+                            std::cout << ", fd=" << ctx.fd[i];
+                        }
+                        if (i < ctx.cl_inputs.size())
+                        {
+                            std::cout << ", cl_mem=" << ctx.cl_inputs[i];
+                        }
+                        std::cout << "\n";
+                    }
+                }
+
+                // Print detailed information for all output-related buffers
+                size_t maxOutputs = std::max({ctx.outputs.size(), ctx.outViews.size(), ctx.cl_outputs.size()});
+                if (maxOutputs > 0)
+                {
+                    std::cout << "  Outputs:\n";
+                    for (size_t i = 0; i < maxOutputs; ++i)
+                    {
+                        std::cout << "    [" << i << "] ";
+                        if (i < ctx.outputs.size())
+                            std::cout << "ptr=" << ctx.outputs[i];
+                        else
+                            std::cout << "ptr=N/A";
+
+                        if (i < ctx.outViews.size())
+                        {
+                            const auto &outView = ctx.outViews[i];
+                            std::cout << ", dtype=" << toString(outView.dtype)
+                                      << ", shape=" << toString(outView.getShape())
+                                      << ", strides=" << toString(outView.strides)
+                                      << ", offset=" << outView.baseOffset;
+                        }
+                        if (i < ctx.cl_outputs.size())
+                        {
+                            std::cout << ", cl_mem=" << ctx.cl_outputs[i];
+                        }
+                        std::cout << "\n";
+                    }
+                }
 
                 if (maxDiff > 1e-2f || hasNan)
                 {
