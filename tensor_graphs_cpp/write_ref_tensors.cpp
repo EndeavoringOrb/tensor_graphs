@@ -14,6 +14,7 @@
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
 #include "core/repo.hpp"
+#include "core/argparse.hpp"
 #include "models/run_models.hpp"
 #include "generated/kernels_all.gen.hpp"
 
@@ -196,15 +197,15 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
 
 int main(int argc, char *argv[])
 {
-    std::string model = "gemma-3-270m";
-    for (int i = 1; i < argc; ++i)
+    ArgParser parser("write_ref_tensors", "Compute and write reference/clean tensors for a model.");
+    parser.add_positional("model", "Name of the target model (gemma-3-270m, flux-klein-4b, qwen-3.6-35b-a3b).", "gemma-3-270m");
+
+    if (!parser.parse(argc, argv))
     {
-        std::string arg = argv[i];
-        if (arg == "flux-klein-4b" || arg == "gemma-3-270m" || arg == "qwen-3.6-35b-a3b")
-        {
-            model = arg;
-        }
+        return 1;
     }
+
+    std::string model = parser.get_positional("model");
 
     std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 24ULL * 1024 * 1024 * 1024}};
     MemoryManager mem(bufferSizes);

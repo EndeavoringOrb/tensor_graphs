@@ -20,37 +20,28 @@
 #include "core/kernels.hpp"
 #include "core/cost_model.hpp"
 #include "core/misc.hpp"
+#include "core/argparse.hpp"
 
 #include "core/common/bench_utils.hpp"
 
 #include "generated/kernels_all.gen.hpp"
 #include "generated/build_context.gen.hpp"
 
-// =============================================================================
-// Entry Point
-// =============================================================================
 int main(int argc, char *argv[])
 {
-    int skipCount = 0;
-    std::string targetKernel = "";
-    bool listOnly = false;
+    ArgParser parser("bench", "Benchmark registered kernels.");
+    parser.add_option({"--skip", "-s"}, "Number of kernels to skip.", "0");
+    parser.add_flag({"--list", "-l"}, "Only list the configurations, do not benchmark.");
+    parser.add_positional("targetKernel", "Bench only kernels whose name contain this string.", "");
 
-    for (int i = 1; i < argc; ++i)
+    if (!parser.parse(argc, argv))
     {
-        std::string arg = argv[i];
-        if ((arg == "-s" || arg == "--skip") && i + 1 < argc)
-        {
-            skipCount = std::atoi(argv[++i]);
-        }
-        else if (arg == "-l" || arg == "--list")
-        {
-            listOnly = true;
-        }
-        else if (targetKernel.empty() && arg[0] != '-')
-        {
-            targetKernel = arg;
-        }
+        return 1;
     }
+
+    int skipCount = std::stoi(parser.get_option("--skip"));
+    bool listOnly = parser.get_flag("--list");
+    std::string targetKernel = parser.get_positional("targetKernel");
 
     std::filesystem::create_directories("benchmarks");
     std::string callsPath = "benchmarks/calls.bin";

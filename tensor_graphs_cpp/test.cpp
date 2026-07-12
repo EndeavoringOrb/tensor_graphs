@@ -18,16 +18,14 @@
 #include "core/planner.hpp"
 #include "core/session.hpp"
 #include "core/loaders/safetensors.hpp"
-#include "core/cost_model.hpp" // For Record struct
+#include "core/cost_model.hpp"
 #include "core/misc.hpp"
+#include "core/argparse.hpp"
 
 #include "core/common/bench_utils.hpp"
 
 #include "generated/kernels_all.gen.hpp"
 
-// ============================================================
-// Helper Functions
-// ============================================================
 void fillRandom(void *ptr, size_t elements, DType dtype)
 {
     static std::mt19937 gen(42);
@@ -335,9 +333,6 @@ void runShapePropagationTests()
     }
 }
 
-// ============================================================
-// Reference Graph Executor (Manual Traversal)
-// ============================================================
 std::vector<float> executeReferenceGraph(
     uint32_t rootId,
     Graph &graph,
@@ -510,10 +505,6 @@ std::vector<float> executeReferenceGraph(
     return finalOut;
 }
 
-// ============================================================
-// executeFusedKernel
-// Rebuilt to use unified PreparedKernel logic, ensuring proper CUDA & OpenCL execution
-// ============================================================
 std::vector<float> executeFusedKernel(
     const KernelEntry &kernel,
     const std::vector<std::vector<uint8_t>> &inputData,
@@ -601,9 +592,6 @@ std::vector<float> executeFusedKernel(
     return flattenOutput(pk.outputBuffers[0].hostData.data() + outView.baseOffset, outView.getShape(), outView.strides, outView.dtype);
 }
 
-// ============================================================
-// Test Setup Helpers
-// ============================================================
 struct TestInputs
 {
     std::vector<uint32_t> inputIds;
@@ -799,7 +787,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
 
         if (isConstantParam[i])
         {
-            std::vector<int32_t> constData(elements, 0); // default to 0
+            std::vector<int32_t> constData(elements, 0);
             if (!constantValues[i].empty())
             {
                 for (size_t j = 0; j < elements; ++j)
@@ -822,10 +810,6 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
     }
     return result;
 }
-
-// ============================================================
-// JSONL / Record Testing Helpers
-// ============================================================
 
 bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
 {
@@ -1007,9 +991,6 @@ std::unordered_map<uint64_t, std::vector<Record>> loadCallRecords(const std::str
     return records;
 }
 
-// ============================================================
-// Python Test Loop
-// ============================================================
 void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 {
     std::cout << "\n========================================" << std::endl;
@@ -1179,9 +1160,6 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
               << std::endl;
 }
 
-// ============================================================
-// Main Test Loop
-// ============================================================
 // TODO: this is sort of redundant with Session::loadCache
 std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
 {
@@ -1283,42 +1261,19 @@ std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std:
 
 int main(int argc, char *argv[])
 {
-    std::string targetKernel = "";
-    bool useRecords = true;
-    std::string cachePath = "";
+    ArgParser parser("test", "Run tests.");
+    parser.add_flag({"--no-records"}, "Disable record-based testing.");
+    parser.add_option({"--cache"}, "Path to cache file. If provided, only kernel calls present in the cache file will be tested.", "");
+    parser.add_positional("targetKernel", "Test only kernels whose name contain this string.", "");
 
-    // Parse arguments
-    for (int i = 1; i < argc; ++i)
+    if (!parser.parse(argc, argv))
     {
-        std::string arg = argv[i];
-        if (arg == "--no-records")
-        {
-            useRecords = false;
-        }
-        else if (arg == "--cache" && i + 1 < argc)
-        {
-            cachePath = argv[++i];
-        }
-        else if (targetKernel.empty() && arg[0] != '-')
-        {
-            targetKernel = arg;
-        }
+        return 1;
     }
 
-    if (!targetKernel.empty())
-    {
-        std::cout << "Filtering tests for kernel containing: " << targetKernel << std::endl;
-    }
-
-    if (!cachePath.empty())
-    {
-        std::cout << "Filtering tests for kernels strictly present in cache: " << cachePath << std::endl;
-    }
-
-    if (!useRecords)
-    {
-        std::cout << "Record-based testing disabled (--no-records flag detected)." << std::endl;
-    }
+    std::string targetKernel = parser.get_positional("targetKernel");
+    bool useRecords = !parser.get_flag("--no-records");
+    std::string cachePath = parser.get_option("--cache");
 
     if (targetKernel.empty() && cachePath.empty())
     {

@@ -26,6 +26,7 @@
 #include "core/session.hpp"
 #include "core/kernels.hpp"
 #include "core/repo.hpp"
+#include "core/argparse.hpp"
 
 #include "models/run_models.hpp"
 #include "generated/kernels_all.gen.hpp"
@@ -37,7 +38,8 @@ std::unordered_map<Backend, uint64_t> get_default_buffer_sizes()
 #ifdef USE_CUDA
     bufferSizes[Backend::CUDA] = 24ULL * 1024 * 1024 * 1024;
 #endif
-    if (HardwareCaps::get().has_opencl) {
+    if (HardwareCaps::get().has_opencl)
+    {
         bufferSizes[Backend::OPENCL] = 1ULL * 1024 * 1024 * 1024;
     }
     return bufferSizes;
@@ -316,29 +318,19 @@ int main(int argc, char *argv[])
     _controlfp_s(nullptr, _EM_INVALID | _EM_ZERODIVIDE | _EM_OVERFLOW, _MCW_EM);
 #endif
 
-    std::string model = "flux-klein-4b";
-    bool only_plan = false;
-    bool disable_caching = false;
+    ArgParser parser("main", "Run a target model inference or plan execution.");
+    parser.add_flag({"--only-plan"}, "Only plan the execution and generate cache.");
+    parser.add_flag({"--disable-caching"}, "Disable dirty region session caching.");
+    parser.add_positional("model", "Name of the target model (flux-klein-4b, gemma-3-270m, qwen-3.6-35b-a3b).", "gemma-3-270m");
 
-    if (argc > 1)
+    if (!parser.parse(argc, argv))
     {
-        for (int i = 1; i < argc; ++i)
-        {
-            std::string arg = argv[i];
-            if (arg == "--only-plan")
-            {
-                only_plan = true;
-            }
-            else if (arg == "--disable-caching")
-            {
-                disable_caching = true;
-            }
-            else
-            {
-                model = arg;
-            }
-        }
+        return 1;
     }
+
+    std::string model = parser.get_positional("model");
+    bool only_plan = parser.get_flag("--only-plan");
+    bool disable_caching = parser.get_flag("--disable-caching");
 
     if (model == "gemma-3-270m")
         run_gemma(only_plan, disable_caching);
