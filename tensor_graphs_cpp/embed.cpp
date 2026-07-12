@@ -330,8 +330,8 @@ int main(int argc, char *argv[])
     ArgParser parser("embed", "Embed an image using Jina embeddings.");
     parser.add_flag({"--server"}, "Run in shared-memory server mode.");
     parser.add_flag({"--disable-caching"}, "Disable dirty region caching.");
-    parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "reference_tensors/embed.bin");
-    parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "reference_tensors/embed.bin");
+    parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
+    parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
     parser.add_positional("image_path", "Path to input image file (optional in server mode).");
 
     if (!parser.parse(argc, argv))
