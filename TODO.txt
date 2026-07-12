@@ -31,5 +31,3 @@ Node.Work_Vector[node.engine] += node.execution_time
 3. same `while (remaining_iters-- > 0)` as current code to iterate over each graph in the egraph, but for each graph:
 3.1. calculate upward ranks & assign topological order of nodes
 3.2. determine static memory allocation per node
-
-Please update the framework to do parallel execution.
