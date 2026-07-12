@@ -46,6 +46,10 @@ inline void runPartialBF16TransposedGEMM(const KernelContext &ctx)
 
     float *out_cache_ptr = static_cast<float *>(ctx.outputs[0]);
 
+    if (target_ptr != out_cache_ptr) {
+        Error::throw_err("[runPartialBF16TransposedGEMM] target_ptr != out_cache_ptr");
+    }
+
     const TensorView &view_cache = ctx.inViews[0];
     const TensorView &view_A = ctx.inViews[1];
     const TensorView &view_W = ctx.inViews[2];

@@ -37,6 +37,7 @@ tokenize_flux.py
 models/*
 .vs
 clean.txt
+analysis.txt
 
 # Profiling artifacts
 profile_output*
@@ -61,3 +62,5 @@ kernel_bench/jobs_history.jsonl
 
 # Generated C++ headers
 tensor_graphs_cpp/generated/
+
+OpenCL-SDK

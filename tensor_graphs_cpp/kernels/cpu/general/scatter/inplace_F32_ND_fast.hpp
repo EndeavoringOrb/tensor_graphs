@@ -320,4 +320,4 @@ uint32_t refFactoryScatterF32_ND_Inplace_Fast(const std::vector<uint32_t> &input
     return graph.scatter(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
 }
 
-REGISTER_KERNEL_INPLACE("SCATTER_inplace_fast", 5, matchScatterF32_ND_Inplace_Fast, runInplaceScatterF32_ND_Fast, refFactoryScatterF32_ND_Inplace_Fast, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {8}, {8}, {8}}, {false, false, false, false, false}, {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL_INPLACE("SCATTER_inplace_fast", 5, matchScatterF32_ND_Inplace_Fast, runInplaceScatterF32_ND_Fast, refFactoryScatterF32_ND_Inplace_Fast, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false}, {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});

@@ -439,6 +439,10 @@ struct FusionRule : public Rule
 #ifdef USE_CUDA
             targetBackends.push_back(Backend::CUDA);
 #endif
+            if (HardwareCaps::get().has_opencl)
+            {
+                targetBackends.push_back(Backend::OPENCL);
+            }
 
             DType outDtype = matchedClass.dtype;
             std::vector<uint32_t> outShape = matchedClass.shape;
@@ -464,14 +468,15 @@ struct FusionRule : public Rule
                 for (uint64_t uid : kernelMatches)
                 {
                     const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
-                    addFusedNode(egraph, kernel, targetBackend, inputs, eNodeIdx);
+                    addFusedNode(ctx, kernel, targetBackend, inputs, eNodeIdx);
                 }
             }
         }
     }
 
-    void addFusedNode(EGraph &egraph, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &parentIds, uint32_t eNodeIdx) const
+    void addFusedNode(RuleCtx &ctx, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &parentIds, uint32_t eNodeIdx) const
     {
+        EGraph &egraph = ctx.egraph;
         std::vector<uint32_t> adaptedParents;
         if (!kernel.isVariadic && parentIds.size() != kernel.numInputs)
         {
@@ -505,7 +510,7 @@ struct FusionRule : public Rule
             }
 
             bool needCopy = !foundBackend;
-            bool needContig = kernel.requiresContiguous[ruleIdx] && !isContiguous(parent);
+            bool needContig = (kernel.requiresContiguous[ruleIdx] || needCopy) && !isContiguous(parent);
 
             if (!needCopy && !needContig)
             {
@@ -516,16 +521,18 @@ struct FusionRule : public Rule
             uint32_t currentPid = pid;
             EClass currentClass = parent;
 
+            if (needContig)
+            {
+                currentPid = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentPid}, currentClass.shape, calcContiguousStrides(currentClass.shape), 0, currentClass.dtype, currentClass.backend);
+                currentClass = egraph.getEClass(egraph.find(currentPid));
+            }
+
             if (needCopy)
             {
                 currentPid = addOpToEGraph(egraph, OpType::COPY_TO, {currentPid}, currentClass.shape, currentClass.strides, currentClass.viewOffset, currentClass.dtype, expectedBackend);
                 currentClass = egraph.getEClass(egraph.find(currentPid));
             }
 
-            if (needContig)
-            {
-                currentPid = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentPid}, currentClass.shape, calcContiguousStrides(currentClass.shape), 0, currentClass.dtype, currentClass.backend);
-            }
             adaptedParents.push_back(currentPid);
         }
 
@@ -564,6 +571,12 @@ struct FusionRule : public Rule
             newEClass = egraph.addENode(newEClass, enode);
 
             addOpToEGraph(egraph, OpType::COPY_TO, {newEClass}, enode.shape, enode.strides, enode.viewOffset, enode.dtype, originalBackend, eclassId);
+
+            auto it = ctx.eclassToLogical.find(egraph.find(eclassId));
+            if (it != ctx.eclassToLogical.end())
+            {
+                ctx.eclassToLogical[newEClass] = it->second;
+            }
         }
     }
 
@@ -1631,7 +1644,8 @@ struct FlattenElementwise : public Rule
         for (uint32_t childId : opNode.children)
         {
             uint32_t canonChild = egraph.find(childId);
-            uint32_t r = addOpToEGraph(egraph, OpType::RESHAPE, {canonChild, flat_shape_id}, flatShape, flatStrides, 0, opNode.dtype, opNode.backend);
+            const EClass childCls = egraph.getEClass(canonChild);
+            uint32_t r = addOpToEGraph(egraph, OpType::RESHAPE, {canonChild, flat_shape_id}, flatShape, flatStrides, 0, childCls.dtype, opNode.backend);
             flatChildren.push_back(r);
         }
 

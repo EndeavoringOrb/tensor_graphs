@@ -118,15 +118,6 @@
 // are NOT registered as single special tokens — they fall through to the
 // raw Llama BPE path and split into the 6-token sequences below.  The
 // IDs are stable for this tokenizer version.
-//
-// If you ever switch tokenizer revisions and the chat template tokens become
-// special single IDs (e.g. 151644 / 151645 in standard Qwen2.5), drop a
-// `chat_template_tokens.json` next to the model weights containing
-//
-//     { "prefix": [....], "suffix": [....] }
-//
-// and build_chat_template_embeds() below will pick it up automatically
-// (override via JinaV5OmniNanoRetrievalModel::load_chat_template_overrides).
 // -----------------------------------------------------------------------------
 static const int32_t CHAT_PREFIX_TOKEN_IDS[] = {
     27, 91, 318, 5011, 91, 29, 882, 198 // < | im _start | > user \n
@@ -137,17 +128,6 @@ static const int32_t CHAT_SUFFIX_TOKEN_IDS[] = {
     27, 91, 318, 6345, 91, 397, 128001 // < | im _end | >\n
 };
 static constexpr uint32_t CHAT_SUFFIX_LEN = 7;
-
-// Optional override loaded from chat_template_tokens.json (see comment above).
-// Statically shared so all model instances in the same process see the same
-// override — set once via load_chat_template_overrides() before build_graph().
-struct ChatTemplateOverrides
-{
-    std::vector<int32_t> prefix_ids;
-    std::vector<int32_t> suffix_ids;
-    bool loaded = false;
-};
-static ChatTemplateOverrides g_chat_template_overrides;
 
 struct JinaV5Config
 {
@@ -200,17 +180,13 @@ struct JinaV5Config
 
     // ---- Text encoder sequence layout ----
     // [prefix tokens] + [image features] + [suffix tokens]
-    uint32_t text_prefix_len; // 8
-    uint32_t text_image_len;  // = num_merged
-    uint32_t text_suffix_len; // 6
-    uint32_t text_seq_len;    // prefix_len + num_merged + suffix_len
+    uint32_t text_prefix_len;
+    uint32_t text_image_len; // = num_merged
+    uint32_t text_suffix_len;
+    uint32_t text_seq_len; // prefix_len + num_merged + suffix_len
 
     // Constructor takes runtime image dimensions.
     // Both must be divisible by (patch_size * spatial_merge_size = 32).
-    // If chat-template overrides have been loaded from
-    // chat_template_tokens.json, their lengths are used for prefix/suffix;
-    // otherwise the hardcoded CHAT_PREFIX_LEN / CHAT_SUFFIX_LEN defaults
-    // (8 / 6) are used.
     JinaV5Config(uint32_t img_h = 512, uint32_t img_w = 512)
         : image_h(img_h), image_w(img_w),
           grid_h(img_h / patch_size),
@@ -221,17 +197,10 @@ struct JinaV5Config
           num_merged(merged_grid_h * merged_grid_w),
           patch_dim(temporal_patch_size * patch_size * patch_size * in_channels),
           merged_dim(vision_hidden_size * spatial_merge_size * spatial_merge_size),
-          text_prefix_len(g_chat_template_overrides.loaded
-                              ? (uint32_t)g_chat_template_overrides.prefix_ids.size()
-                              : CHAT_PREFIX_LEN),
+          text_prefix_len(CHAT_PREFIX_LEN),
           text_image_len(num_merged),
-          text_suffix_len(g_chat_template_overrides.loaded
-                              ? (uint32_t)g_chat_template_overrides.suffix_ids.size()
-                              : CHAT_SUFFIX_LEN),
-          text_seq_len((g_chat_template_overrides.loaded
-                            ? (uint32_t)(g_chat_template_overrides.prefix_ids.size() +
-                                         g_chat_template_overrides.suffix_ids.size())
-                            : CHAT_PREFIX_LEN + CHAT_SUFFIX_LEN) +
+          text_suffix_len(CHAT_SUFFIX_LEN),
+          text_seq_len((CHAT_PREFIX_LEN + CHAT_SUFFIX_LEN) +
                        num_merged) {}
 };
 
@@ -1015,12 +984,8 @@ private:
     // Returns a (1, prefix_len + suffix_len, hidden) tensor containing
     // the embed_tokens rows for the prefix and suffix token IDs.
     //
-    // Token IDs come from either:
-    //   (a) the static CHAT_PREFIX_TOKEN_IDS / CHAT_SUFFIX_TOKEN_IDS tables
-    //       (Llama-BPE tokenisation of "<|im_start|>user\n" / "<|im_end|>\n"),
-    //   (b) a chat_template_tokens.json override loaded once at startup via
-    //       load_chat_template_overrides() — useful if a future tokenizer
-    //       revision turns <|im_start|>/<|im_end|> into single special IDs.
+    // Token IDs come from the static CHAT_PREFIX_TOKEN_IDS / CHAT_SUFFIX_TOKEN_IDS tables
+    //       (Llama-BPE tokenisation of "<|im_start|>user\n" / "<|im_end|>\n")
     uint32_t build_chat_template_embeds()
     {
         // Load embed_tokens: (vocab_size, hidden)
@@ -1028,11 +993,6 @@ private:
 
         const int32_t *prefix_ids = CHAT_PREFIX_TOKEN_IDS;
         const int32_t *suffix_ids = CHAT_SUFFIX_TOKEN_IDS;
-        if (g_chat_template_overrides.loaded)
-        {
-            prefix_ids = g_chat_template_overrides.prefix_ids.data();
-            suffix_ids = g_chat_template_overrides.suffix_ids.data();
-        }
 
         // Gather prefix: (prefix_len, hidden)
         uint32_t prefix_idx = g.constant({cfg.text_prefix_len},
@@ -1061,74 +1021,6 @@ public:
     JinaV5OmniNanoRetrievalModel(JinaV5Config &_cfg, Graph &_g, MemoryManager &_mem,
                                  std::string _w_path)
         : cfg(_cfg), g(_g), mem(_mem), w_path(std::move(_w_path)) {}
-
-    // ---------------------------------------------------------------------
-    // Optional chat-template token override loader.
-    //
-    // Call ONCE at startup (before constructing any JinaV5Config) if you want
-    // to override the hardcoded CHAT_PREFIX_TOKEN_IDS / CHAT_SUFFIX_TOKEN_IDS
-    // — e.g. because a future tokenizer revision turned <|im_start|> /
-    // <|im_end|> into single special-token IDs and the Llama-BPE fallback no
-    // longer applies.
-    //
-    // The JSON file format is:
-    //   { "prefix": [int, int, ...], "suffix": [int, int, ...] }
-    //
-    // Returns true on success.  On any error (file missing, parse error,
-    // empty arrays) the static defaults are kept and the function returns
-    // false — the caller can treat this as a soft warning.
-    // ---------------------------------------------------------------------
-    static bool load_chat_template_overrides(const std::string &json_path)
-    {
-        std::ifstream f(json_path);
-        if (!f.is_open())
-            return false;
-
-        std::string content((std::istreambuf_iterator<char>(f)),
-                            std::istreambuf_iterator<char>());
-
-        // Tiny JSON parser: looks for "prefix": [ ... ] and "suffix": [ ... ].
-        auto extract_array = [](const std::string &haystack,
-                                const std::string &key) -> std::vector<int32_t>
-        {
-            std::vector<int32_t> out;
-            auto kpos = haystack.find("\"" + key + "\"");
-            if (kpos == std::string::npos)
-                return out;
-            auto lbracket = haystack.find('[', kpos);
-            auto rbracket = haystack.find(']', lbracket);
-            if (lbracket == std::string::npos || rbracket == std::string::npos)
-                return out;
-            std::stringstream ss(haystack.substr(lbracket + 1, rbracket - lbracket - 1));
-            std::string tok;
-            while (std::getline(ss, tok, ','))
-            {
-                // Trim whitespace.
-                size_t s = tok.find_first_not_of(" \t\r\n");
-                if (s == std::string::npos)
-                    continue;
-                try
-                {
-                    out.push_back(std::stoi(tok.substr(s)));
-                }
-                catch (...)
-                {
-                    // skip malformed token
-                }
-            }
-            return out;
-        };
-
-        std::vector<int32_t> pfx = extract_array(content, "prefix");
-        std::vector<int32_t> sfx = extract_array(content, "suffix");
-        if (pfx.empty() || sfx.empty())
-            return false;
-
-        g_chat_template_overrides.prefix_ids = std::move(pfx);
-        g_chat_template_overrides.suffix_ids = std::move(sfx);
-        g_chat_template_overrides.loaded = true;
-        return true;
-    }
 
     // Build the image-embedding graph.
     //

@@ -286,7 +286,7 @@ struct Session
         isCompiled = true;
     }
 
-    const void *run(Bucket bucket = {}, std::function<void(uint32_t, const TensorView &, const void *)> debugCallback = nullptr,
+    const void *run(Bucket bucket = {}, Debug::Callback debugCallback = nullptr,
                     bool doSaturate = true)
     {
         if (!isCompiled)
