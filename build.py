@@ -10,6 +10,8 @@ import platform
 from rich.console import Console
 from rich.panel import Panel
 
+# TODO: add linter check that every `#endif` has a comment that matches `#if`/`#ifdef`
+
 console = Console()
 
 # --- Configuration ---
@@ -29,6 +31,7 @@ USE_CUDA = False
 DEBUG_MODE = False
 NO_LINT = False
 PROFILE_MODE = False
+DISABLE_OPENCL = False
 
 # List of macros that register a kernel with a unique UID
 REGISTER_MACROS = [
@@ -118,6 +121,9 @@ def get_compiler_cmd(fname: str):
         else:
             cmd.extend(["-O3"])
 
+        if DISABLE_OPENCL:
+            cmd.append("-DTG_DISABLE_OPENCL")
+
         cmd.append(str(ROOT_DIR / fname))
         cmd.extend(["-o", out_name])
         return cmd
@@ -137,6 +143,9 @@ def get_compiler_cmd(fname: str):
             else:
                 cmd.extend(["-O3"])
 
+            if DISABLE_OPENCL:
+                cmd.append("-DTG_DISABLE_OPENCL")
+
             cmd.append(str(ROOT_DIR / fname))
             cmd.extend(["-o", out_name])
             return cmd
@@ -151,6 +160,9 @@ def get_compiler_cmd(fname: str):
                 cmd.extend(["-g", "-O0", "-DDEBUG", "-fno-omit-frame-pointer"])
             else:
                 cmd.extend(["-O3"])
+
+            if DISABLE_OPENCL:
+                cmd.append("-DTG_DISABLE_OPENCL")
 
             cmd.append(str(ROOT_DIR / fname))
             cmd.extend(["-o", out_name])
@@ -172,6 +184,30 @@ def generate_core_seed():
     content_hashes = [get_file_hash(p) for p in CORE_DEPENDENCIES]
     combined = "".join(content_hashes)
     return hashlib.sha256(combined.encode("utf-8")).hexdigest()
+
+
+def generate_opencl_strings():
+    cl_files = []
+    for root, _, files in os.walk(KERNELS_DIR):
+        for f in files:
+            if f.endswith(".cl"):
+                cl_files.append(Path(root) / f)
+
+    out_file = GENERATED_DIR / "opencl_kernels.gen.hpp"
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write("#pragma once\n")
+        f.write("#include <unordered_map>\n")
+        f.write("#include <string>\n\n")
+        f.write(
+            "inline const std::unordered_map<std::string, const char*> OPENCL_SOURCE_MAP = {\n"
+        )
+        for cl_path in cl_files:
+            rel_path = cl_path.relative_to(ROOT_DIR).as_posix()
+            with open(cl_path, "r", encoding="utf-8") as cl_f:
+                content = cl_f.read()
+            f.write(f'    {{"{rel_path}", R"TG_OPENCL(\n{content}\n)TG_OPENCL"}},\n')
+        f.write("};\n")
+    console.print(f"[dim]Generated {len(cl_files)} OpenCL kernel strings.[/dim]")
 
 
 def generate_kernel_uids(core_seed):
@@ -368,7 +404,16 @@ def compile_project(targets=None):
             cxx_flags.extend(
                 ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
             )
-        cxx_flags.extend(["-std=c++20"])
+        cxx_flags.extend(
+            [
+                "-std=c++20",
+                "-I./OpenCL-SDK/install/include",
+                "-L./OpenCL-SDK/install/lib",
+                "-lOpenCL",
+                "-DCL_TARGET_OPENCL_VERSION=310",
+                "-v",
+            ]
+        )
         if DEBUG_MODE:
             cxx_flags.extend(["-g", "-O0", "-DDEBUG"])
             nvcc_flags.extend(["-g", "-G", "-O0", "-DDEBUG"])
@@ -378,7 +423,7 @@ def compile_project(targets=None):
             if PROFILE_MODE:
                 cxx_flags.extend(["-g", "-gcodeview", "-Wl,-debug"])
     else:
-        cxx_flags.extend(["-std=c++20"])
+        cxx_flags.extend(["-std=c++20", "-lOpenCL"])
         if is_arm64:
             cxx_flags.append("-march=armv8.6-a+bf16+i8mm")
         if DEBUG_MODE:
@@ -401,6 +446,11 @@ def compile_project(targets=None):
             nvcc_flags.append("-DUSE_CUDA")
             if is_arm64:
                 nvcc_flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
+
+    if DISABLE_OPENCL:
+        cxx_flags.append("-DTG_DISABLE_OPENCL")
+        if USE_CUDA:
+            nvcc_flags.append("-DTG_DISABLE_OPENCL")
 
     if targets is None:
         mains = [
@@ -530,22 +580,27 @@ def main():
         "--no-lint", action="store_true", help="Skip kernel validation checks"
     )
     parser.add_argument(
+        "--disable-opencl", action="store_true", help="Disable OpenCL backend"
+    )
+    parser.add_argument(
         "--targets",
         nargs="+",
         help="Specify which target C++ files to build (e.g. main, bench, test, test_model)",
     )
     args = parser.parse_args()
 
-    global USE_CUDA, DEBUG_MODE, NO_LINT, PROFILE_MODE
+    global USE_CUDA, DEBUG_MODE, NO_LINT, PROFILE_MODE, DISABLE_OPENCL
     USE_CUDA = args.cuda
     DEBUG_MODE = args.debug
     NO_LINT = args.no_lint
     PROFILE_MODE = args.profile
+    DISABLE_OPENCL = args.disable_opencl
 
     console.print(
         f"\n[bold cyan]Starting One-Click Build [{'DEBUG' if DEBUG_MODE else 'RELEASE'}]...[/bold cyan]\n"
     )
     core_seed = generate_core_seed()
+    generate_opencl_strings()
     generate_kernel_uids(core_seed)
     generate_kernel_includes(core_seed)
     generate_build_context()

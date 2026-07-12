@@ -18,6 +18,54 @@
 #include <cuda_runtime.h>
 #endif
 
+// Add global variables to hold OpenCL Context and Queue
+struct OpenCLState
+{
+    cl_context context = nullptr;
+    cl_command_queue queue = nullptr;
+    cl_device_id device = nullptr;
+    bool initialized = false;
+
+    void init()
+    {
+        if (initialized)
+            return;
+        cl_uint numPlatforms = 0;
+        clGetPlatformIDs(0, nullptr, &numPlatforms);
+        if (numPlatforms == 0)
+            return;
+        std::vector<cl_platform_id> platforms(numPlatforms);
+        clGetPlatformIDs(numPlatforms, platforms.data(), nullptr);
+
+        for (auto plat : platforms)
+        {
+            cl_uint numDevices = 0;
+            clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices);
+            if (numDevices > 0)
+            {
+                std::vector<cl_device_id> devices(numDevices);
+                clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, numDevices, devices.data(), nullptr);
+                device = devices[0]; // Take the first GPU
+                break;
+            }
+        }
+
+        if (device)
+        {
+            cl_int err;
+            context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
+            queue = clCreateCommandQueueWithProperties(context, device, nullptr, &err);
+            initialized = true;
+        }
+    }
+
+    static OpenCLState &get()
+    {
+        static OpenCLState instance;
+        return instance;
+    }
+};
+
 // Forward declarations
 struct DeviceBuffer;
 
@@ -93,6 +141,7 @@ struct DeviceBuffer
     Backend backend;
     std::vector<uint8_t> cpu_arena;
     uint8_t *arena_ptr = nullptr;
+    cl_mem arena_ptr_cl_mem = nullptr;
     uint64_t sizeBytes;
     bool initialized = false;
 
@@ -108,14 +157,23 @@ struct DeviceBuffer
             arena_ptr = nullptr;
         }
 #endif
+        if (arena_ptr_cl_mem != nullptr && backend == Backend::OPENCL)
+        {
+            clEnqueueUnmapMemObject(OpenCLState::get().queue, arena_ptr_cl_mem, arena_ptr, 0, nullptr, nullptr);
+            clReleaseMemObject(arena_ptr_cl_mem);
+            arena_ptr_cl_mem = nullptr;
+        }
+        arena_ptr = nullptr;
     }
 
     DeviceBuffer(Backend b, uint64_t _sizeBytes) : backend(b), sizeBytes(_sizeBytes)
     {
-        // TODO: should call reset() here?
+        // Align overall size to 4096 bytes to facilitate OpenCL zero-copy page alignment
+        sizeBytes = (sizeBytes + 4095) & ~4095ULL; // TODO: make this a compile time variable somewhere that is based on hardware query instead of vibes (CL_DEVICE_MEM_BASE_ADDR_ALIGN)
+
         MemBlock initialFree;
         initialFree.offset = 0;
-        initialFree.sizeBytes = _sizeBytes;
+        initialFree.sizeBytes = sizeBytes;
         initialFree.nodeId = UINT32_MAX;
         initialFree.cost = 0.0f;
         initialFree.isLocked = false;
@@ -130,11 +188,12 @@ struct DeviceBuffer
 
     DeviceBuffer(DeviceBuffer &&other) noexcept
         : backend(other.backend), cpu_arena(std::move(other.cpu_arena)),
-          arena_ptr(other.arena_ptr), sizeBytes(other.sizeBytes),
+          arena_ptr(other.arena_ptr), arena_ptr_cl_mem(other.arena_ptr_cl_mem), sizeBytes(other.sizeBytes),
           initialized(other.initialized),
           blocks(std::move(other.blocks)), allocationMap(std::move(other.allocationMap))
     {
         other.arena_ptr = nullptr;
+        other.arena_ptr_cl_mem = nullptr;
         InterruptManager::unregisterBuffer(&other);
         InterruptManager::registerBuffer(this);
     }
@@ -148,12 +207,14 @@ struct DeviceBuffer
             backend = other.backend;
             cpu_arena = std::move(other.cpu_arena);
             arena_ptr = other.arena_ptr;
+            arena_ptr_cl_mem = other.arena_ptr_cl_mem;
             sizeBytes = other.sizeBytes;
             initialized = other.initialized;
             blocks = std::move(other.blocks);
             allocationMap = std::move(other.allocationMap);
 
             other.arena_ptr = nullptr;
+            other.arena_ptr_cl_mem = nullptr;
             InterruptManager::unregisterBuffer(&other);
             InterruptManager::registerBuffer(this);
         }
@@ -226,8 +287,49 @@ struct DeviceBuffer
             return;
         auto &caps = HardwareCaps::get();
 
+        if (backend == Backend::OPENCL)
+        {
+            OpenCLState::get().init();
+            cl_context ctx = OpenCLState::get().context;
+            cl_command_queue queue = OpenCLState::get().queue;
+            if (!ctx || !queue)
+            {
+                Error::throw_err("[DeviceBuffer] Failed to initialize OpenCL Context/Queue");
+            }
+
+            cl_int err;
+            // 1. Allocate cache-coherent physical memory (zero-copy) via the driver
+            arena_ptr_cl_mem = clCreateBuffer(
+                ctx,
+                CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR,
+                sizeBytes,
+                nullptr,
+                &err);
+
+            if (err != CL_SUCCESS || !arena_ptr_cl_mem)
+            {
+                Error::throw_err("[DeviceBuffer] clCreateBuffer failed to allocate memory of size " +
+                                 std::to_string(sizeBytes) + ". Error: " + std::to_string(err));
+            }
+
+            // 2. Map it permanently into the CPU's virtual address space
+            arena_ptr = (uint8_t*)clEnqueueMapBuffer(
+                queue,
+                arena_ptr_cl_mem,
+                CL_TRUE, // blocking
+                CL_MAP_READ | CL_MAP_WRITE,
+                0,
+                sizeBytes,
+                0, nullptr, nullptr,
+                &err);
+
+            if (err != CL_SUCCESS || !arena_ptr)
+            {
+                Error::throw_err("[DeviceBuffer] clEnqueueMapBuffer failed. Error: " + std::to_string(err));
+            }
+        }
 #ifdef USE_CUDA
-        if (backend == Backend::CUDA)
+        else if (backend == Backend::CUDA)
         {
             if (caps.has_unified_memory)
             {
@@ -247,32 +349,17 @@ struct DeviceBuffer
                 }
             }
         }
+#endif // USE_CUDA
         else if (backend == Backend::CPU)
         {
-            cpu_arena.resize(sizeBytes + 64);
+            cpu_arena.resize(sizeBytes + 4096);
             uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
-            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
+            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 4095) & ~4095ULL);
         }
         else
         {
             Error::throw_err("Unknown backend");
         }
-#else
-        if (backend == Backend::CPU)
-        {
-            cpu_arena.resize(sizeBytes + 64);
-            uintptr_t ptr = reinterpret_cast<uintptr_t>(cpu_arena.data());
-            arena_ptr = reinterpret_cast<uint8_t *>((ptr + 63) & ~63ULL);
-        }
-        else if (backend == Backend::CUDA)
-        {
-            Error::throw_err("CUDA backend not supported without USE_CUDA");
-        }
-        else
-        {
-            Error::throw_err("Unknown backend");
-        }
-#endif
         initialized = true;
     }
 
@@ -367,8 +454,8 @@ struct DeviceBuffer
 
     uint64_t allocate(uint32_t nodeId, uint64_t _sizeBytes, StorageType storageType, int32_t refCount, float cost)
     {
-        // Align allocated size to 64 bytes to maintain alignment of all internal blocks
-        _sizeBytes = (_sizeBytes + 63) & ~63ULL;
+        // Align to 4096 bytes for standard OpenCL zero-copy page alignment requirements
+        _sizeBytes = (_sizeBytes + 4095) & ~4095ULL;
 
         // 1. If it's already cached, lock it and update
         auto mapIt = allocationMap.find(nodeId);
@@ -646,6 +733,7 @@ struct MemoryManager
         }
 
         // Cross-backend lookup for Unified Memory
+        // TODO: is there a better way to do this?
         Backend actualBackend = node.backend;
         if (buffers.find(Backend::CUDA) != buffers.end() && buffers.at(Backend::CUDA).allocationMap.count(targetId))
         {
@@ -654,6 +742,10 @@ struct MemoryManager
         else if (buffers.find(Backend::CPU) != buffers.end() && buffers.at(Backend::CPU).allocationMap.count(targetId))
         {
             actualBackend = Backend::CPU;
+        }
+        else if (buffers.find(Backend::OPENCL) != buffers.end() && buffers.at(Backend::OPENCL).allocationMap.count(targetId))
+        {
+            actualBackend = Backend::OPENCL;
         }
 
         const DeviceBuffer &buf = buffers.at(actualBackend);
