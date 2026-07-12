@@ -1,3 +1,4 @@
+// tensor_graphs_cpp/main.cpp
 #include <iostream>
 #include <vector>
 #include <string>
@@ -5,6 +6,11 @@
 #include <cmath>
 #include <random>
 #include <algorithm>
+#include <unordered_map>
+#include <fstream>
+#include <sstream>
+#include <filesystem>
+#include <iomanip>
 
 #if defined(_WIN32)
 #include <float.h>
@@ -26,10 +32,14 @@
 #include "core/session.hpp"
 #include "core/kernels.hpp"
 #include "core/repo.hpp"
+#include "core/argparse.hpp"
+#include "core/debug.hpp"
 
 #include "models/run_models.hpp"
 #include "generated/kernels_all.gen.hpp"
 #include "generated/build_context.gen.hpp"
+
+namespace fs = std::filesystem;
 
 std::unordered_map<Backend, uint64_t> get_default_buffer_sizes()
 {
@@ -37,6 +47,10 @@ std::unordered_map<Backend, uint64_t> get_default_buffer_sizes()
 #ifdef USE_CUDA
     bufferSizes[Backend::CUDA] = 24ULL * 1024 * 1024 * 1024;
 #endif
+    if (HardwareCaps::get().has_opencl)
+    {
+        bufferSizes[Backend::OPENCL] = 1ULL * 1024 * 1024 * 1024;
+    }
     return bufferSizes;
 }
 
@@ -80,12 +94,21 @@ void run_autoregressive_llm(
     uint32_t num_tokens_to_generate,
     bool only_plan,
     bool disable_caching,
-    ModelGraphRoots (*builder)(Graph &, MemoryManager &))
+    ModelGraphRoots (*builder)(Graph &, MemoryManager &),
+    bool refOnly = false,
+    bool doSaturate = true,
+    const std::function<void(uint32_t, const TensorView &, const void *)> &debugCb = nullptr,
+    Graph **activeGraphOut = nullptr)
 {
+    KernelRegistry::get().setReferenceOnly(refOnly);
     std::vector<uint32_t> tokens = initial_tokens;
     auto bufferSizes = get_default_buffer_sizes();
     MemoryManager mem(bufferSizes);
     Graph g;
+    if (activeGraphOut)
+    {
+        *activeGraphOut = &g;
+    }
 
     std::cout << "Building " << model_name << " Graph..." << std::endl;
     auto roots = builder(g, mem);
@@ -111,10 +134,10 @@ void run_autoregressive_llm(
 
     if (only_plan)
     {
-        session.plan();
+        session.plan(doSaturate);
         return;
     }
-    session.compile();
+    session.compile(doSaturate);
 
     std::vector<int32_t> input_data(max_seq_len, 0);
     std::vector<float> host_output;
@@ -141,7 +164,7 @@ void run_autoregressive_llm(
         }
 
         auto start = std::chrono::high_resolution_clock::now();
-        const float *device_output_ptr = static_cast<const float *>(session.run(b));
+        const float *device_output_ptr = static_cast<const float *>(session.run(b, debugCb, doSaturate));
         auto end = std::chrono::high_resolution_clock::now();
         float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
 
@@ -158,7 +181,7 @@ void run_autoregressive_llm(
     }
 }
 
-void run_gemma(bool only_plan, bool disable_caching)
+void run_gemma(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const std::function<void(uint32_t, const TensorView &, const void *)> &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
     run_autoregressive_llm<Gemma3ModelConfig>(
         "gemma-3-270m",
@@ -169,10 +192,14 @@ void run_gemma(bool only_plan, bool disable_caching)
         6,
         only_plan,
         disable_caching,
-        build_gemma_graph);
+        build_gemma_graph,
+        refOnly,
+        doSaturate,
+        debugCb,
+        activeGraphOut);
 }
 
-void run_qwen_35b(bool only_plan, bool disable_caching)
+void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const std::function<void(uint32_t, const TensorView &, const void *)> &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
     run_autoregressive_llm<Qwen3_6_35B_A3B_Config>(
         "qwen-3.6-35b-a3b",
@@ -183,15 +210,24 @@ void run_qwen_35b(bool only_plan, bool disable_caching)
         7,
         only_plan,
         disable_caching,
-        build_qwen_graph);
+        build_qwen_graph,
+        refOnly,
+        doSaturate,
+        debugCb,
+        activeGraphOut);
 }
 
-void run_flux(bool only_plan, bool disable_caching)
+void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const std::function<void(uint32_t, const TensorView &, const void *)> &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
+    KernelRegistry::get().setReferenceOnly(refOnly);
     FluxConfig cfg;
     auto bufferSizes = get_default_buffer_sizes();
     MemoryManager mem(bufferSizes);
     Graph g;
+    if (activeGraphOut)
+    {
+        *activeGraphOut = &g;
+    }
 
     std::cout << "Building FLUX Graphs..." << std::endl;
     auto roots = build_flux_graph(g, mem);
@@ -208,13 +244,13 @@ void run_flux(bool only_plan, bool disable_caching)
     uint32_t in_vae_latent = roots.inputs[6];
 
     Session sess_text(g, mem, roots.roots[0], "dirty_region_caches/flux-text.bin", 0, &repo, disable_caching);
-    sess_text.plan();
+    sess_text.plan(doSaturate);
 
     Session sess_trans(g, mem, roots.roots[1], "dirty_region_caches/flux-trans.bin", 0, &repo, disable_caching);
-    sess_trans.plan();
+    sess_trans.plan(doSaturate);
 
     Session sess_vae(g, mem, roots.roots[2], "dirty_region_caches/flux-vae.bin", 0, &repo, disable_caching);
-    sess_vae.plan();
+    sess_vae.plan(doSaturate);
 
     if (only_plan)
     {
@@ -228,7 +264,7 @@ void run_flux(bool only_plan, bool disable_caching)
     std::cout << "Executing Text Encoder..." << std::endl;
     std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);
     sess_text.memManager.write(Backend::CPU, in_ids, input_ids.data(), input_ids.size() * sizeof(int32_t));
-    const float *text_emb_ptr = static_cast<const float *>(sess_text.run());
+    const float *text_emb_ptr = static_cast<const float *>(sess_text.run({}, debugCb, doSaturate));
 
     std::vector<float> text_emb_buf;
     const float *text_emb_host = sync_output_to_host(text_emb_ptr, 1 * txt_seq * cfg.text_dim, text_emb_buf);
@@ -258,7 +294,8 @@ void run_flux(bool only_plan, bool disable_caching)
         sess_trans.memManager.write(Backend::CPU, in_cos, rope_cos.data(), rope_cos.size() * sizeof(float));
         sess_trans.memManager.write(Backend::CPU, in_sin, rope_sin.data(), rope_sin.size() * sizeof(float));
 
-        const float *v_ptr = static_cast<const float *>(sess_trans.run());
+        Bucket b; // TODO: proper bucket to avoid weight loads?
+        const float *v_ptr = static_cast<const float *>(sess_trans.run(b, debugCb, doSaturate));
 
         std::vector<float> v_buf;
         const float *v_host_ptr = sync_output_to_host(v_ptr, z.size(), v_buf);
@@ -271,7 +308,7 @@ void run_flux(bool only_plan, bool disable_caching)
 
     std::cout << "Executing VAE Decoder..." << std::endl;
     sess_vae.memManager.write(Backend::CPU, in_vae_latent, z.data(), z.size() * sizeof(float));
-    const float *img_ptr = static_cast<const float *>(sess_vae.run());
+    const float *img_ptr = static_cast<const float *>(sess_vae.run({}, debugCb, doSaturate));
 
     std::vector<float> img_buf;
     img_ptr = sync_output_to_host(img_ptr, 3 * height * width, img_buf);
@@ -313,38 +350,49 @@ int main(int argc, char *argv[])
     _controlfp_s(nullptr, _EM_INVALID | _EM_ZERODIVIDE | _EM_OVERFLOW, _MCW_EM);
 #endif
 
-    std::string model = "flux-klein-4b";
-    bool only_plan = false;
-    bool disable_caching = false;
+    ArgParser parser("main", "Run a target model inference or plan execution.");
+    parser.add_flag({"--only-plan"}, "Only plan the execution and generate cache.");
+    parser.add_flag({"--disable-caching"}, "Disable dirty region session caching.");
+    parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
+    parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
+    parser.add_positional("model", "Name of the target model (flux-klein-4b, gemma-3-270m, qwen-3.6-35b-a3b).", "gemma-3-270m");
 
-    if (argc > 1)
+    if (!parser.parse(argc, argv))
     {
-        for (int i = 1; i < argc; ++i)
-        {
-            std::string arg = argv[i];
-            if (arg == "--only-plan")
-            {
-                only_plan = true;
-            }
-            else if (arg == "--disable-caching")
-            {
-                disable_caching = true;
-            }
-            else
-            {
-                model = arg;
-            }
-        }
+        return 1;
     }
 
+    std::string model = parser.get_positional("model");
+    bool only_plan = parser.get_flag("--only-plan");
+    bool disable_caching = parser.get_flag("--disable-caching");
+    std::string write_refs = parser.get_option("--write-refs");
+    std::string compare_refs = parser.get_option("--compare-refs");
+
+    Debug::ReferenceVerifier verifier;
+    if (!verifier.init(write_refs, compare_refs))
+    {
+        return 1;
+    }
+    std::string dbg_mode = verifier.getMode();
+
+    bool refOnly = !write_refs.empty();
+    bool doSaturate = write_refs.empty();
+
+    Graph *activeGraphPtr = nullptr;
+    auto debugCb = [&](uint32_t logicalId, const TensorView &view, const void *data)
+    {
+        verifier.verify(logicalId, view, data, activeGraphPtr);
+    };
+
     if (model == "gemma-3-270m")
-        run_gemma(only_plan, disable_caching);
+        run_gemma(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
     else if (model == "flux-klein-4b")
-        run_flux(only_plan, disable_caching);
+        run_flux(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
     else if (model == "qwen-3.6-35b-a3b")
-        run_qwen_35b(only_plan, disable_caching);
+        run_qwen_35b(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
     else
         std::cout << "Model not implemented yet: " << model << std::endl;
 
+    verifier.printSummary();
     return 0;
 }

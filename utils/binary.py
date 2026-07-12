@@ -1,4 +1,5 @@
 # File: utils/binary.py
+import torch
 import struct
 import os
 
@@ -44,6 +45,14 @@ OP_TYPES = [
 DTYPES = ["FLOAT32", "INT32", "INT64", "BF16", "BOOL", "ANY"]
 BACKENDS = ["STORAGE", "CPU", "CUDA"]
 STORAGE_TYPES = ["TRANSIENT", "PERSISTENT", "PINNED"]
+
+DTYPE_MAP = {
+    torch.float32: 0,  # FLOAT32
+    torch.int32: 1,  # INT32
+    torch.int64: 2,  # INT64
+    torch.bfloat16: 3,  # BF16
+    torch.bool: 4,  # BOOL
+}
 
 
 def make_enum_mapper(enum_list):
@@ -259,6 +268,63 @@ class BinaryReader:
                 "physicalToLogicalNodeMap": physical_to_logical,
                 "constStaging": const_staging,
             }
+
+
+class BinaryWriter:
+    def __init__(self, f):
+        self.f = f
+
+    def write_u8(self, v):
+        self.f.write(struct.pack("<B", v))
+
+    def write_u32(self, v):
+        self.f.write(struct.pack("<I", v))
+
+    def write_u64(self, v):
+        self.f.write(struct.pack("<Q", v))
+
+    def write_i32(self, v):
+        self.f.write(struct.pack("<i", v))
+
+    def write_float(self, v):
+        self.f.write(struct.pack("<f", v))
+
+    def write_string(self, s):
+        b = s.encode("utf-8")
+        self.write_u32(len(b))
+        self.f.write(b)
+
+    def write_vector(self, v, write_func):
+        self.write_u32(len(v))
+        for x in v:
+            write_func(x)
+
+    def write_record(self, r):
+        self.write_u64(r["kernelUid"])
+        self.write_u64(r["buildContextId"])
+        self.write_string(r["hwTag"])
+        self.write_vector(
+            r["inputShapes"], lambda v: self.write_vector(v, self.write_u32)
+        )
+        self.write_vector(
+            r["outputShapes"], lambda v: self.write_vector(v, self.write_u32)
+        )
+        self.write_vector(
+            r["inputStrides"], lambda v: self.write_vector(v, self.write_u64)
+        )
+        self.write_vector(
+            r["outputStrides"], lambda v: self.write_vector(v, self.write_u64)
+        )
+        self.write_vector(r["inputDTypes"], self.write_u32)
+        self.write_vector(r["outputDTypes"], self.write_u32)
+        self.write_vector(
+            r["inputConstants"], lambda v: (self.write_u32(len(v)), self.f.write(v))
+        )
+        self.write_vector(r["backends"], self.write_u32)
+        self.write_vector(
+            r["inputBackends"], lambda v: self.write_vector(v, self.write_u32)
+        )
+        self.write_float(r["runTime"])
 
 
 def load_records_file(path):

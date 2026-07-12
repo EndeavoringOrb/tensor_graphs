@@ -395,8 +395,8 @@ private:
         std::vector<bool> is_eclass_persistent;
         std::vector<bool> is_eclass_cached;
         std::vector<std::vector<uint32_t>> enode_canon_children;
-        uint64_t static_baseline_arr[3];
-        uint64_t mem_limits_arr[3];
+        uint64_t static_baseline_arr[static_cast<size_t>(Backend::_COUNT)];
+        uint64_t mem_limits_arr[static_cast<size_t>(Backend::_COUNT)];
     };
 
 private:
@@ -426,7 +426,7 @@ private:
         const PrecompData &precomp,
         std::vector<uint32_t> &ref_counts,
         std::vector<uint32_t> &sim_aliasMap,
-        uint64_t *live_mem,
+        std::vector<uint64_t> &live_mem,
         std::vector<bool> &live_allocated) const // Added
     {
         uint32_t targetId = sim_aliasMap[id];
@@ -470,8 +470,8 @@ private:
         std::vector<uint32_t> &ref_counts,
         std::vector<uint32_t> &sim_aliasMap,
         std::vector<bool> &visit_visited,
-        uint64_t *live_mem,
-        uint64_t *peak_mem,
+        std::vector<uint64_t> &live_mem,
+        std::vector<uint64_t> &peak_mem,
         uint32_t &oomEClassId,
         std::vector<bool> &live_allocated,           // Added
         std::vector<bool> &oom_live_allocated) const // Added
@@ -561,7 +561,11 @@ private:
         }
         ref_counts[rootEClassId]++;
 
-        uint64_t live_mem[3] = {precomp.static_baseline_arr[0], precomp.static_baseline_arr[1], precomp.static_baseline_arr[2]};
+        std::vector<uint64_t> live_mem((uint32_t)Backend::_COUNT);
+        for (int i = 0; i < (uint32_t)Backend::_COUNT; i++)
+        {
+            live_mem[i] = precomp.static_baseline_arr[i];
+        }
         uint32_t oomEClassId = UINT32_MAX;
 
         std::vector<bool> live_allocated(egraph.getClasses().size(), false);
@@ -619,14 +623,18 @@ private:
             }
         }
 
-        uint64_t peak_mem[3] = {live_mem[0], live_mem[1], live_mem[2]};
+        std::vector<uint64_t> peak_mem((uint32_t)Backend::_COUNT);
+        for (int i = 0; i < (uint32_t)Backend::_COUNT; i++)
+        {
+            peak_mem[i] = live_mem[i];
+        }
 
         std::fill(sim_aliasMap.begin(), sim_aliasMap.end(), UINT32_MAX);
         std::fill(visit_visited.begin(), visit_visited.end(), false);
 
         visitFast(rootEClassId, egraph, selection_map, enodeInfos, precomp, ref_counts, sim_aliasMap, visit_visited, live_mem, peak_mem, oomEClassId, live_allocated, oom_live_allocated);
 
-        return {{peak_mem[0], peak_mem[1], peak_mem[2]}, {oomEClassId, oom_live_allocated}};
+        return {peak_mem, {oomEClassId, oom_live_allocated}};
     }
 
     void visitTopoFast(
@@ -1544,7 +1552,7 @@ private:
         }
 
         auto baseline_map = computeStaticBaseline(graph, cachedNodes);
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < (uint32_t)Backend::_COUNT; ++i)
         {
             precomp.static_baseline_arr[i] = 0;
             precomp.mem_limits_arr[i] = std::numeric_limits<uint64_t>::max();
@@ -1789,9 +1797,10 @@ private:
             if (valid)
             {
                 auto res = computePeakMemFast(egraph, selection_map, enodeInfos, rootEClassId, eclassToLogical, graph, path, precomp, ref_counts, processed_mem, sim_aliasMap, visit_visited);
-                peak[(Backend)0] = res.first[0];
-                peak[(Backend)1] = res.first[1];
-                peak[(Backend)2] = res.first[2];
+                for (int i = 0; i < (uint32_t)Backend::_COUNT; i++)
+                {
+                    peak[(Backend)i] = res.first[i];
+                }
                 oomEClassId = res.second.first;
                 oomLiveAllocated = res.second.second;
 

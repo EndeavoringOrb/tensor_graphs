@@ -41,6 +41,8 @@
 #include <thread>
 #include <memory>
 #include <utility>
+#include <unordered_map>
+#include <limits>
 
 #include "core/types.hpp"
 #include "core/memory.hpp"
@@ -50,6 +52,8 @@
 #include "core/misc.hpp"
 #include "core/repo.hpp"
 #include "core/shapes.hpp"
+#include "core/argparse.hpp"
+#include "core/debug.hpp"
 
 #include "models/jina-embeddings-v5-omni-nano-retrieval.hpp"
 #include "generated/kernels_all.gen.hpp"
@@ -178,7 +182,7 @@ struct CompiledSession
 static void build_session(CompiledSession &cs, MemoryManager &mem,
                           int batch_size, int width, int height,
                           const std::string &weights_path,
-                          bool disable_caching = false) // <-- Added parameter
+                          bool disable_caching = false)
 {
     int grid_h = height / PATCH_SIZE;
     int grid_w = width / PATCH_SIZE;
@@ -317,38 +321,32 @@ static void normalize_image_inplace_batch(const uint8_t *pixel_data,
 
 int main(int argc, char *argv[])
 {
-    bool is_server = false;
-    bool disable_caching = false;
-    std::string image_path = "";
+    ArgParser parser("embed", "Embed an image using Jina embeddings.");
+    parser.add_flag({"--server"}, "Run in shared-memory server mode.");
+    parser.add_flag({"--disable-caching"}, "Disable dirty region caching.");
+    parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
+    parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
+    parser.add_positional("image_path", "Path to input image file (optional in server mode).");
 
-    // Parse all arguments dynamically
-    for (int i = 1; i < argc; ++i)
+    if (!parser.parse(argc, argv))
     {
-        std::string arg = argv[i];
-        if (arg == "--server")
-        {
-            is_server = true;
-        }
-        else if (arg == "--disable-caching")
-        {
-            disable_caching = true;
-        }
-        else if (image_path.empty() && arg[0] != '-')
-        {
-            image_path = arg;
-        }
-    }
-
-    if (!is_server && image_path.empty())
-    {
-        std::cerr << "Usage: " << argv[0] << " <image_path> [--disable-caching]" << std::endl;
-        std::cerr << "       " << argv[0] << " --server [--disable-caching]" << std::endl;
         return 1;
     }
 
+    bool is_server = parser.get_flag("--server");
+    bool disable_caching = parser.get_flag("--disable-caching");
+    std::string write_refs = parser.get_option("--write-refs");
+    std::string compare_refs = parser.get_option("--compare-refs");
+    std::string image_path = parser.get_positional("image_path");
+
     if (!is_server)
     {
-        if (!std::filesystem::exists(image_path))
+        if (image_path.empty())
+        {
+            std::cerr << "Error: Image file path is required in standalone mode." << std::endl;
+            return 1;
+        }
+        else if (!std::filesystem::exists(image_path))
         {
             std::cerr << "Error: Image file " << image_path << " does not exist." << std::endl;
             return 1;
@@ -358,32 +356,27 @@ int main(int argc, char *argv[])
     static const std::string WEIGHTS_PATH =
         "models/jinaai/jina-embeddings-v5-omni-nano-retrieval/model.safetensors";
 
-    // -----------------------------------------------------------------------
-    // Optional chat-template token override.
-    //
-    // Looks for chat_template_tokens.json next to the model weights.  If
-    // present, it overrides the hardcoded CHAT_PREFIX_TOKEN_IDS /
-    // CHAT_SUFFIX_TOKEN_IDS — useful if a future tokenizer revision turns
-    // <|im_start|>/<|im_end|> into single special-token IDs.
-    // -----------------------------------------------------------------------
+    // Initialize the ReferenceVerifier
+    Debug::ReferenceVerifier verifier;
+    if (!verifier.init(write_refs, compare_refs))
     {
-        std::string override_path =
-            "models/jinaai/jina-embeddings-v5-omni-nano-retrieval/chat_template_tokens.json";
-        if (JinaV5OmniNanoRetrievalModel::load_chat_template_overrides(override_path))
-        {
-            std::cout << "[Server] Loaded chat-template token overrides from "
-                      << override_path << std::endl;
-        }
+        return 1;
     }
+    std::string dbg_mode = verifier.getMode();
 
     // -----------------------------------------------------------------------
     // Memory manager (shared across all compiled sessions)
     // -----------------------------------------------------------------------
+    // TODO: make this and get_default_buffer_sizes load from some common place
     std::unordered_map<Backend, uint64_t> bufferSizes = {
         {Backend::CPU, 16ULL * 1024 * 1024 * 1024}};
 #ifdef USE_CUDA
     bufferSizes[Backend::CUDA] = 16ULL * 1024 * 1024 * 1024;
 #endif
+    if (HardwareCaps::get().has_opencl)
+    {
+        bufferSizes[Backend::OPENCL] = 1ULL * 1024 * 1024 * 1024;
+    }
     MemoryManager mem(bufferSizes);
 
     SharedMemoryPayload *shm_payload = nullptr;
@@ -498,7 +491,7 @@ int main(int argc, char *argv[])
 
                     std::cout << "[Server] Building graph for "
                               << batch_size << "x" << width << "x" << height << "..." << std::endl;
-                    build_session(cs, mem, batch_size, width, height, WEIGHTS_PATH, disable_caching); // <-- Passed parameter
+                    build_session(cs, mem, batch_size, width, height, WEIGHTS_PATH, disable_caching);
                     std::cout << "[Server] Graph ready ("
                               << cs.cfg->num_patches << " patches, "
                               << cs.cfg->num_merged << " merged tokens, "
@@ -528,9 +521,12 @@ int main(int argc, char *argv[])
                     b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
                 }
 
-                const float *device_output_ptr =
-                    static_cast<const float *>(cs.session->run(b));
+                auto cb = [&](uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)
+                {
+                    verifier.verify(logicalId, node, ctx, data, cs.graph.get());
+                };
 
+                const float *device_output_ptr = static_cast<const float *>(cs.session->run(b, cb));
                 cs.has_run = true; // Mark as run completed so subsequent passes bypass weight copy
 
                 // 4. Copy embedding back
@@ -663,7 +659,15 @@ int main(int argc, char *argv[])
                                      cs.patch_input.size() * sizeof(float));
 
         auto start = std::chrono::high_resolution_clock::now();
-        const float *device_output_ptr = static_cast<const float *>(cs.session->run());
+
+        auto cb = [&](uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)
+        {
+            verifier.verify(logicalId, node, ctx, data, cs.graph.get());
+        };
+
+        Bucket b;
+        const float *device_output_ptr = static_cast<const float *>(cs.session->run(b, cb));
+
         auto end = std::chrono::high_resolution_clock::now();
         float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
 
@@ -705,5 +709,6 @@ int main(int argc, char *argv[])
                   << " (should be ~1.0)" << std::endl;
     }
 
+    verifier.printSummary();
     return 0;
 }
