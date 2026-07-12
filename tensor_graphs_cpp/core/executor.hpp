@@ -135,16 +135,21 @@ public:
                         }
                         if (!buf)
                         {
+                            cl_buffer_region region;
+                            region.origin = view.baseOffset;
+                            region.size = size;
+
                             cl_int err;
-                            buf = clCreateBuffer(
-                                OpenCLState::get().context,
-                                CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
-                                size,
-                                host_ptr,
+                            buf = clCreateSubBuffer(
+                                memManager.buffers.at(actualInBackend).arena_ptr_cl_mem,
+                                CL_MEM_READ_WRITE,
+                                CL_BUFFER_CREATE_TYPE_REGION,
+                                &region,
                                 &err);
+
                             if (err != CL_SUCCESS)
                             {
-                                Error::throw_err("OpenCL: Failed to create buffer for input. Error code: " + std::to_string(err));
+                                Error::throw_err("OpenCL: Failed to create sub-buffer for input. Error code: " + std::to_string(err));
                             }
                         }
                         ctx.cl_inputs.push_back(buf);
@@ -254,16 +259,21 @@ public:
                 }
                 if (!buf)
                 {
+                    cl_buffer_region region;
+                    region.origin = ctx.outViews[0].baseOffset;
+                    region.size = size;
+
                     cl_int err;
-                    buf = clCreateBuffer(
-                        OpenCLState::get().context,
-                        CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR,
-                        size,
-                        host_ptr,
+                    buf = clCreateSubBuffer(
+                        memManager.buffers.at(actualBackend).arena_ptr_cl_mem,
+                        CL_MEM_READ_WRITE,
+                        CL_BUFFER_CREATE_TYPE_REGION,
+                        &region,
                         &err);
+
                     if (err != CL_SUCCESS)
                     {
-                        Error::throw_err("OpenCL: Failed to create buffer for output. Error code: " + std::to_string(err));
+                        Error::throw_err("OpenCL: Failed to create sub-buffer for output. Error code: " + std::to_string(err));
                     }
                 }
                 ctx.cl_outputs.push_back(buf);
