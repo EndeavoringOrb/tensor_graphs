@@ -7,6 +7,7 @@
 #include "core/shapes.hpp"
 #include "core/misc.hpp"
 #include "core/egraph.hpp"
+#include "core/extractor.hpp"
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -187,16 +188,6 @@ private:
         out.close();
         std::cout << "[Planner.dumpEGraphBinary] Dumped EGraph to " << path << std::endl;
     }
-
-    struct ENodeInfo
-    {
-        float cost;
-        std::unordered_map<Backend, uint64_t> memSizes;
-        bool inplace;
-        int32_t inplace_idx;
-        bool isScatter;
-        bool isView;
-    };
 
     struct ExtractChoice
     {
@@ -745,7 +736,6 @@ private:
                                  bool stopOnFirstValid = true,
                                  bool strictCache = false)
     {
-        constexpr float INF = std::numeric_limits<float>::infinity();
         constexpr float EPS = 1e-6f;
 
         auto isConstantNeeded = [](OpType op, size_t inputIdx, size_t numInputs) -> bool
@@ -833,11 +823,11 @@ private:
                     uint32_t logicalId = eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : UINT32_MAX;
                     if (logicalId == UINT32_MAX || cachedNodes.find(logicalId) == cachedNodes.end())
                     {
-                        info.cost = INF;
+                        info.cost = TGConstants::INF;
                     }
                     else if (enode.backend != cachedNodes.at(logicalId))
                     {
-                        info.cost = INF;
+                        info.cost = TGConstants::INF;
                     }
                 }
             }
@@ -980,7 +970,7 @@ private:
                     uint32_t mutated_eclass = egraph.find(enode.children[info.inplace_idx]);
                     if (immutable_eclasses.count(mutated_eclass) && !info.isScatter)
                     {
-                        info.cost = INF;
+                        info.cost = TGConstants::INF;
                     }
                 }
             }
@@ -1008,7 +998,7 @@ private:
             // 1. Remove infinite-cost nodes
             for (uint32_t enodeId : cls.enodes)
             {
-                if (enodeInfos[enodeId].cost == INF)
+                if (enodeInfos[enodeId].cost == TGConstants::INF)
                 {
                     droppedInf = true;
                 }
@@ -1130,8 +1120,8 @@ private:
 
         struct OptSummary
         {
-            float cost = INF;
-            float intrinsic = INF;
+            float cost = TGConstants::INF;
+            float intrinsic = TGConstants::INF;
             uint32_t chosenEnode = UINT32_MAX;
             std::vector<uint64_t> coveredBits;
             bool valid = false;
@@ -1186,7 +1176,7 @@ private:
         }
 
         std::vector<uint64_t> candidateBits(bitWords, 0);
-        std::vector<float> optimisticEnodeDagCost(egraph.getENodes().size(), INF);
+        std::vector<float> optimisticEnodeDagCost(egraph.getENodes().size(), TGConstants::INF);
 
         ProgressTimer optTimer(0, "calculating optimistic cost");
         while (!worklist.empty())
@@ -1202,7 +1192,7 @@ private:
                 for (uint32_t enodeId : cls.enodes)
                 {
                     const ENodeInfo &info = enodeInfos[enodeId];
-                    if (info.cost == INF)
+                    if (info.cost == TGConstants::INF)
                         continue;
 
                     std::fill(candidateBits.begin(), candidateBits.end(), 0);
@@ -1317,7 +1307,7 @@ private:
             optTimer.tick();
         }
 
-        std::vector<float> eclassMinCost(numClasses, INF);
+        std::vector<float> eclassMinCost(numClasses, TGConstants::INF);
         for (size_t i = 0; i < numClasses; ++i)
         {
             uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
@@ -1338,9 +1328,9 @@ private:
             for (uint32_t enodeId : cls.enodes)
             {
                 const ENodeInfo &info = enodeInfos[enodeId];
-                if (info.cost == INF)
+                if (info.cost == TGConstants::INF)
                 {
-                    optimisticEnodeDagCost[enodeId] = INF;
+                    optimisticEnodeDagCost[enodeId] = TGConstants::INF;
                     continue;
                 }
 
@@ -1411,7 +1401,7 @@ private:
                     }
                 }
 
-                optimisticEnodeDagCost[enodeId] = valid ? total : INF;
+                optimisticEnodeDagCost[enodeId] = valid ? total : TGConstants::INF;
             }
         }
 
@@ -1501,13 +1491,9 @@ private:
         std::vector<uint32_t> zero_indegree;
         zero_indegree.reserve(numClasses);
 
-        std::unordered_map<uint32_t, uint32_t> selection_map;
-        std::vector<uint32_t> path;
-        std::vector<uint32_t> to_process = {rootEClassId};
-        std::vector<uint32_t> to_process_enode;
-        std::unordered_map<uint32_t, uint32_t> next_sel;
+        Extractor extractor = Extractor(enodeInfos);
 
-        float best_cost = INF;
+        float best_cost = TGConstants::INF;
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
         std::unordered_map<Backend, uint64_t> minPeakMemSeen;
 
@@ -1525,85 +1511,8 @@ private:
             std::cout << std::endl;
             loopTimer.reset();
             timer.tick();
-            bool valid = true;
-            std::string reason = "";
-            float current_cost = 0.0f;
 
-            for (const auto &kv : selection_map)
-            {
-                uint32_t eclass = kv.first;
-                uint32_t sel = kv.second;
-                current_cost += enodeInfos[egraph.getEClass(eclass).enodes[sel]].cost;
-            }
-
-            while (!to_process.empty())
-            {
-                uint32_t current = to_process.front();
-                to_process.erase(to_process.begin());
-
-                if (selection_map.find(current) != selection_map.end())
-                {
-                    continue;
-                }
-
-                path.push_back(current);
-
-                uint32_t sel = 0;
-                auto nextIt = next_sel.find(current);
-                if (nextIt != next_sel.end())
-                {
-                    sel = nextIt->second;
-                    next_sel.erase(nextIt);
-                }
-
-                const auto &enodes = egraph.getEClass(current).enodes;
-                if (sel >= enodes.size())
-                {
-                    Error::throw_err("Invalid selection index in EGraph");
-                }
-
-                uint32_t enode_id = enodes[sel];
-                const ENode &node = egraph.getENodes()[enode_id];
-                const ENodeInfo &info = enodeInfos[enode_id];
-
-                selection_map[current] = sel;
-                current_cost += info.cost;
-
-                if (info.cost == INF)
-                {
-                    valid = false;
-                    reason = "cost=inf";
-                }
-
-                if (best_cost != INF && current_cost >= best_cost)
-                {
-                    valid = false;
-                    reason = "cost=" + std::to_string(current_cost);
-                }
-
-                if (enodes.size() > sel + 1)
-                {
-                    if (std::find(to_process_enode.begin(), to_process_enode.end(), current) == to_process_enode.end())
-                    {
-                        to_process_enode.push_back(current);
-                    }
-                }
-
-                if (!valid)
-                    break;
-
-                std::vector<uint32_t> new_to_process;
-                new_to_process.reserve(node.children.size());
-                for (uint32_t child : node.children)
-                {
-                    uint32_t childEClass = egraph.find(child);
-                    if (selection_map.find(childEClass) == selection_map.end())
-                    {
-                        new_to_process.push_back(childEClass);
-                    }
-                }
-                to_process.insert(to_process.begin(), new_to_process.begin(), new_to_process.end());
-            }
+            const std::unordered_map<uint32_t, uint32_t> &selection_map = extractor.getNextSelection();
 
             if (valid)
             {
@@ -1999,7 +1908,7 @@ private:
             }
         }
 
-        if (best_cost == INF)
+        if (best_cost == TGConstants::INF)
         {
             Error::throw_err("[Planner.extractBest] no valid extraction found under given constraints. try running bench");
         }
