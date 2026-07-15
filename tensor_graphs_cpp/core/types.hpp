@@ -167,12 +167,18 @@ inline constexpr bool isAtomic(OpType type)
     return type != OpType::FUSED;
 }
 
-enum class Backend : uint32_t
+enum class MemoryType : uint32_t
 {
     STORAGE,
+    RAM,
+    VRAM,
+    _COUNT
+};
+
+enum class EngineType : uint32_t
+{
     CPU,
-    CUDA,
-    OPENCL,
+    GPU,
     _COUNT
 };
 

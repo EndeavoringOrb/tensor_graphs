@@ -374,14 +374,14 @@ int main(int argc, char *argv[])
     // Memory manager (shared across all compiled sessions)
     // -----------------------------------------------------------------------
     // TODO: make this and get_default_buffer_sizes load from some common place
-    std::unordered_map<Backend, uint64_t> bufferSizes = {
-        {Backend::CPU, 16ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<MemoryType, uint64_t> bufferSizes = {
+        {MemoryType::RAM, 16ULL * 1024 * 1024 * 1024}};
 #ifdef USE_CUDA
-    bufferSizes[Backend::CUDA] = 16ULL * 1024 * 1024 * 1024;
+    bufferSizes[MemoryType::VRAM] = 16ULL * 1024 * 1024 * 1024;
 #endif
     if (HardwareCaps::get().has_opencl)
     {
-        bufferSizes[Backend::OPENCL] = 1ULL * 1024 * 1024 * 1024;
+        bufferSizes[MemoryType::VRAM] = 1ULL * 1024 * 1024 * 1024;
     }
     MemoryManager mem(bufferSizes);
 

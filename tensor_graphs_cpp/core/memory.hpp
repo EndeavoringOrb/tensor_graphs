@@ -138,7 +138,7 @@ struct MemBlock
 
 struct DeviceBuffer
 {
-    Backend backend;
+    MemoryType mem_type;
     std::vector<uint8_t> cpu_arena;
     uint8_t *arena_ptr = nullptr;
     cl_mem arena_ptr_cl_mem = nullptr;
@@ -524,12 +524,12 @@ struct DeviceBuffer
 
 struct MemoryManager
 {
-    std::unordered_map<Backend, DeviceBuffer> buffers;
+    std::unordered_map<MemoryType, DeviceBuffer> buffers;
     std::unordered_map<uint32_t, uint32_t> aliasMap;
     std::unordered_map<uint32_t, uint32_t> aliasRefCounts;
     std::unordered_map<uint32_t, StorageType> aliasStorageTypes;
 
-    MemoryManager(std::unordered_map<Backend, uint64_t> bufferSizes)
+    MemoryManager(std::unordered_map<MemoryType, uint64_t> bufferSizes)
     {
         buffers.reserve(bufferSizes.size());
         for (auto &bufSize : bufferSizes)
