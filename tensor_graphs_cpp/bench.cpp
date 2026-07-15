@@ -32,6 +32,7 @@ int main(int argc, char *argv[])
     ArgParser parser("bench", "Benchmark registered kernels.");
     parser.add_option({"--skip", "-s"}, "Number of kernels to skip.", "0");
     parser.add_flag({"--list", "-l"}, "Only list the configurations, do not benchmark.");
+    parser.add_option({"--cache"}, "Path to cache file. If provided, benchmark only configurations from this cache.", "");
     parser.add_positional("targetKernel", "Bench only kernels whose name contain this string.", "");
 
     if (!parser.parse(argc, argv))
@@ -41,6 +42,7 @@ int main(int argc, char *argv[])
 
     int skipCount = std::stoi(parser.get_option("--skip"));
     bool listOnly = parser.get_flag("--list");
+    std::string cachePath = parser.get_option("--cache");
     std::string targetKernel = parser.get_positional("targetKernel");
 
     std::filesystem::create_directories("benchmarks");
@@ -69,22 +71,41 @@ int main(int argc, char *argv[])
         }
     }
 
-    std::ifstream callsFile(callsPath, std::ios::binary);
-    if (!callsFile.is_open())
-    {
-        std::cerr << "No calls file found at " << callsPath << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference pass first." << std::endl;
-        return 0;
-    }
-
     std::vector<Record> toBenchmark;
     std::unordered_set<std::string> seenCalls;
 
-    BinaryReader br(callsFile);
-    while (callsFile.peek() != EOF)
+    std::vector<Record> candidates;
+    if (!cachePath.empty())
     {
-        Record r;
-        br.read(r);
+        auto recordsByUid = getRecordsFromCache(cachePath);
+        for (auto &kv : recordsByUid)
+        {
+            for (auto &r : kv.second)
+            {
+                candidates.push_back(std::move(r));
+            }
+        }
+    }
+    else
+    {
+        std::ifstream callsFile(callsPath, std::ios::binary);
+        if (!callsFile.is_open())
+        {
+            std::cerr << "No calls file found at " << callsPath << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference pass first." << std::endl;
+            return 0;
+        }
 
+        BinaryReader br(callsFile);
+        while (callsFile.peek() != EOF)
+        {
+            Record r;
+            br.read(r);
+            candidates.push_back(std::move(r));
+        }
+    }
+
+    for (Record &r : candidates)
+    {
         r.runTime = 0.0f;
         r.buildContextId = BUILD_CONTEXT_ID;
         std::string key = serializeToString(r);

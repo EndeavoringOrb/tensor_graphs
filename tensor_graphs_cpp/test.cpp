@@ -974,23 +974,6 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
     }
 }
 
-std::unordered_map<uint64_t, std::vector<Record>> loadCallRecords(const std::string &path)
-{
-    std::unordered_map<uint64_t, std::vector<Record>> records;
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open())
-        return records;
-
-    BinaryReader br(file);
-    while (file.peek() != EOF)
-    {
-        Record r;
-        br.read(r);
-        records[r.kernelUid].push_back(std::move(r));
-    }
-    return records;
-}
-
 void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 {
     std::cout << "\n========================================" << std::endl;
@@ -1158,105 +1141,6 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
     std::cout << "Python Reference Tests Passed: " << passed << "/" << total << std::endl;
     std::cout << "----------------------\n"
               << std::endl;
-}
-
-// TODO: this is sort of redundant with Session::loadCache
-std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
-{
-    std::unordered_map<uint64_t, std::vector<Record>> recordsByUid;
-    std::unordered_set<std::string> seen;
-
-    std::ifstream file(cachePath, std::ios::binary);
-    if (!file.is_open())
-    {
-        std::cerr << "Warning: Could not open cache file: " << cachePath << std::endl;
-        return recordsByUid;
-    }
-
-    BinaryReader br(file);
-    while (file.peek() != EOF)
-    {
-        uint8_t type;
-        br.read(type);
-
-        if (type == 0) // Metadata
-        {
-            uint32_t version, cachedRootId;
-            std::unordered_map<uint32_t, Backend> tempSelected;
-            br.read(version);
-            br.read(cachedRootId);
-            br.read(tempSelected);
-        }
-        else if (type == 1) // Compiled Bucket
-        {
-            CompiledGraph cg;
-            br.read(cg);
-
-            for (const auto &inst : cg.instructions)
-            {
-                if (inst.fullKernelId == 0)
-                    continue;
-
-                Record r;
-                r.kernelUid = inst.fullKernelId;
-                r.buildContextId = BUILD_CONTEXT_ID;
-                r.hwTag = HW_TAG;
-                r.runTime = 0.0f;
-
-                const TensorNode &outNode = cg.nodesMap.at(inst.nodeId);
-                r.outputShapes.push_back(outNode.getShape());
-                r.outputStrides.push_back(outNode.strides);
-                r.outputDTypes.push_back(outNode.dtype);
-                r.backends.push_back(outNode.backend);
-
-                for (uint32_t inId : inst.inputNodeIds)
-                {
-                    const TensorNode &inNode = cg.nodesMap.at(inId);
-                    r.inputShapes.push_back(inNode.getShape());
-                    r.inputStrides.push_back(inNode.strides);
-                    r.inputDTypes.push_back(inNode.dtype);
-                    r.inputBackends.push_back({inNode.backend});
-
-                    uint32_t logicalId = cg.getLogicalId(inId);
-                    if (cg.constantStaging.count(logicalId))
-                    {
-                        r.inputConstants.push_back(*cg.constantStaging.at(logicalId));
-                    }
-                    else if (cg.constantStaging.count(inId))
-                    {
-                        r.inputConstants.push_back(*cg.constantStaging.at(inId));
-                    }
-                    else
-                    {
-                        r.inputConstants.push_back({});
-                    }
-                }
-
-                std::string sig = serializeToString(r);
-                if (seen.insert(sig).second)
-                {
-                    recordsByUid[r.kernelUid].push_back(r);
-                }
-            }
-        }
-        else if (type == 2) // Constants
-        {
-            uint32_t count;
-            br.read(count);
-            for (uint32_t i = 0; i < count; ++i)
-            {
-                uint32_t n;
-                std::vector<uint8_t> d;
-                br.read(n);
-                br.read(d);
-            }
-        }
-        else
-        {
-            break;
-        }
-    }
-    return recordsByUid;
 }
 
 int main(int argc, char *argv[])
