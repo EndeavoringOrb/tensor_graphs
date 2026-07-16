@@ -37,3 +37,5 @@ MemorySpace, HandleType. MemorySpace has no type, just an idx
 dgx spark: memory spaces {0 storage, 1 memory}, handle types {storage, c++, cuda}
 laptop: memory spaces {0 storage, 1 memory}, handle types {storage, c++, opencl}
 device buffer one per handle type, add op for transfer mem on the same space between handle types
+
+add TRANSFER op that transfers between handle types on the same memory space
