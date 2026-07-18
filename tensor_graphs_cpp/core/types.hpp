@@ -147,7 +147,7 @@ enum class OpType : uint32_t
     TRIU,
     GATHER,
     FILL,
-    COPY_TO,
+    COPY_TO, // Copy to another MemorySpace on the same HandleType
     IM2COL,
     CONTIGUOUS,
     SCATTER,
@@ -158,6 +158,7 @@ enum class OpType : uint32_t
     AND,
     OR,
     NOT,
+    TRANSFER, // Transfer between HandleType
 
     FUSED
 };
@@ -167,20 +168,70 @@ inline constexpr bool isAtomic(OpType type)
     return type != OpType::FUSED;
 }
 
-enum class MemoryType : uint32_t
+using MemorySpace = uint32_t;
+
+enum class HandleType : uint32_t
 {
     STORAGE,
-    RAM,
-    VRAM,
-    _COUNT
+    CPP,
+    CUDA,
+    OPENCL
 };
 
 enum class EngineType : uint32_t
 {
     CPU,
-    GPU,
-    _COUNT
+    CUDA_GPU,
+    QUALCOMM_IGPU
 };
+
+struct Engine {
+    EngineType type;
+    uint32_t idx;
+};
+
+constexpr uint32_t toMask(HandleType handle) {
+    return 1u << static_cast<uint32_t>(handle);
+}
+
+template <typename... Args>
+constexpr uint32_t makeMask(Args... args) {
+    return (toMask(args) | ...);
+}
+
+struct EngineSupport {
+    uint32_t allowed_inputs;
+    uint32_t allowed_outputs;
+
+    constexpr bool supports_input(HandleType h) const {
+        return (allowed_inputs & toMask(h)) != 0;
+    }
+    
+    constexpr bool supports_output(HandleType h) const {
+        return (allowed_outputs & toMask(h)) != 0;
+    }
+};
+
+constexpr EngineSupport getEngineSupport(EngineType type) {
+    switch (type) {
+        case EngineType::CPU:
+            return {
+                makeMask(HandleType::STORAGE, HandleType::CPP),
+                makeMask(HandleType::STORAGE, HandleType::CPP)
+            };
+        case EngineType::CUDA_GPU:
+            return {
+                makeMask(HandleType::CUDA),
+                makeMask(HandleType::CUDA)
+            };
+        case EngineType::QUALCOMM_IGPU:
+            return {
+                makeMask(HandleType::OPENCL),
+                makeMask(HandleType::OPENCL)
+            };
+    }
+    return {0, 0};
+}
 
 enum class StorageType : uint32_t
 {
@@ -392,15 +443,16 @@ public:
     std::vector<uint32_t> parentIds;
     std::vector<uint64_t> strides;
     uint64_t viewOffset = 0;
-    Backend backend = Backend::CPU;
+    HandleType handleType = HandleType::CPP;
+    MemorySpace memorySpace = 0;
     StorageType storageType = StorageType::TRANSIENT;
     std::string contentHash;
     std::string debugOrigin;
 
     TensorNode() {}
 
-    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "", std::string _debugOrigin = "")
-        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), backend(_backend), storageType(_storageType), contentHash(_contentHash), debugOrigin(_debugOrigin)
+    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, HandleType _handleType = HandleType::CPP, MemorySpace _memorySpace = 1, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "", std::string _debugOrigin = "")
+        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), handleType(_handleType), memorySpace(_memorySpace), storageType(_storageType), contentHash(_contentHash), debugOrigin(_debugOrigin)
     {
         if (strides.empty())
         {
@@ -583,6 +635,8 @@ inline std::string toString(OpType op) // TODO: make build.py check that each op
         return "OR";
     case OpType::NOT:
         return "NOT";
+    case OpType::TRANSFER:
+        return "TRANSFER";
     case OpType::FUSED:
         return "FUSED";
     default:
@@ -590,20 +644,35 @@ inline std::string toString(OpType op) // TODO: make build.py check that each op
     }
 }
 
-inline std::string toString(Backend backend) // TODO: make build.py check that each backend has a case here
+inline std::string toString(HandleType handle)
 {
-    switch (backend)
+    switch (handle)
     {
-    case Backend::STORAGE:
+    case HandleType::STORAGE:
         return "STORAGE";
-    case Backend::CPU:
-        return "CPU";
-    case Backend::CUDA:
+    case HandleType::CPP:
+        return "CPP";
+    case HandleType::CUDA:
         return "CUDA";
-    case Backend::OPENCL:
+    case HandleType::OPENCL:
         return "OPENCL";
     default:
-        return "UNKNOWN_BACKEND";
+        return "UNKNOWN_HANDLE";
+    }
+}
+
+inline std::string toString(EngineType engine)
+{
+    switch (engine)
+    {
+    case EngineType::CPU:
+        return "CPU";
+    case EngineType::CUDA_GPU:
+        return "CUDA_GPU";
+    case EngineType::QUALCOMM_IGPU:
+        return "QUALCOMM_IGPU";
+    default:
+        return "UNKNOWN_ENGINE";
     }
 }
 
@@ -624,7 +693,8 @@ inline std::string toString(StorageType storage)
 
 inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << toString(dtype); }
 inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toString(op); }
-inline std::ostream &operator<<(std::ostream &os, Backend backend) { return os << toString(backend); }
+inline std::ostream &operator<<(std::ostream &os, HandleType handle) { return os << toString(handle); }
+inline std::ostream &operator<<(std::ostream &os, EngineType engine) { return os << toString(engine); }
 inline std::ostream &operator<<(std::ostream &os, StorageType storage) { return os << toString(storage); }
 
 class SHA256
@@ -769,7 +839,9 @@ struct OpInstruction
     std::vector<uint32_t> inputNodeIds;
     int32_t inplaceInputIndex = -1; // -1 if not inplace
     int32_t viewInputIndex = -1;    // -1 if not view
-    Backend backend;
+    HandleType handleType;
+    MemorySpace memorySpace;
+    EngineType engine;
     StorageType outputStorageType = StorageType::TRANSIENT;
 };
 
@@ -999,7 +1071,8 @@ inline void tg_serialize(BinaryWriter &bw, const TensorNode &val)
     bw.write(val.getShape());
     bw.write(val.strides);
     bw.write(val.viewOffset);
-    bw.write(val.backend);
+    bw.write(val.handleType);
+    bw.write(val.memorySpace);
     bw.write(val.storageType);
     bw.write(val.contentHash);
     bw.write(val.debugOrigin);
@@ -1017,7 +1090,8 @@ inline void tg_deserialize(BinaryReader &br, TensorNode &val)
     val.setShape(shape);
     br.read(val.strides);
     br.read(val.viewOffset);
-    br.read(val.backend);
+    br.read(val.handleType);
+    br.read(val.memorySpace);
     br.read(val.storageType);
     br.read(val.contentHash);
     br.read(val.debugOrigin);
@@ -1032,7 +1106,9 @@ inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
     bw.write(val.inputNodeIds);
     bw.write(val.inplaceInputIndex);
     bw.write(val.viewInputIndex);
-    bw.write(val.backend);
+    bw.write(val.handleType);
+    bw.write(val.memorySpace);
+    bw.write(val.engine);
     bw.write(val.outputStorageType);
 }
 inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
@@ -1044,45 +1120,8 @@ inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
     br.read(val.inputNodeIds);
     br.read(val.inplaceInputIndex);
     br.read(val.viewInputIndex);
-    br.read(val.backend);
+    br.read(val.handleType);
+    br.read(val.memorySpace);
+    br.read(val.engine);
     br.read(val.outputStorageType);
-}
-
-inline void tg_serialize(BinaryWriter &bw, const CompiledGraph &val)
-{
-    bw.write(val.bucket);
-    bw.write(val.instructions);
-    bw.write(val.refCounts);
-    bw.write(val.nodesMap);
-    bw.write(val.nodeCosts);
-    bw.write(val.physicalToLogicalNodeMap);
-
-    uint32_t constSize = static_cast<uint32_t>(val.constantStaging.size());
-    bw.write(constSize);
-    for (const auto &pair : val.constantStaging)
-    {
-        bw.write(pair.first);
-        bw.write(*pair.second);
-    }
-}
-inline void tg_deserialize(BinaryReader &br, CompiledGraph &val)
-{
-    br.read(val.bucket);
-    br.read(val.instructions);
-    br.read(val.refCounts);
-    br.read(val.nodesMap);
-    br.read(val.nodeCosts);
-    br.read(val.physicalToLogicalNodeMap);
-
-    uint32_t constSize;
-    br.read(constSize);
-    val.constantStaging.clear();
-    for (uint32_t i = 0; i < constSize; ++i)
-    {
-        uint32_t k;
-        br.read(k);
-        std::vector<uint8_t> v;
-        br.read(v);
-        val.constantStaging[k] = std::make_shared<std::vector<uint8_t>>(std::move(v));
-    }
 }

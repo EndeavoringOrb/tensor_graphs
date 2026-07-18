@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Engine Scheduler Viz</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Task Dispatch Visualizer</h1>
+        
+        <div class="controls">
+            <select id="graphSelect">
+                {% for name in graph_names %}
+                <option value="{{ name }}">{{ name }}</option>
+                {% endfor %}
+            </select>
+            <button id="loadBtn">Load Graph</button>
+            <span id="status"></span>
+        </div>
+
+        <div id="navigation" class="hidden">
+            <button id="prevBtn">← Previous Order</button>
+            <span id="orderInfo">Order 0 of 0</span>
+            <button id="nextBtn">Next Order →</button>
+            <p><strong>Total Cost: </strong> <span id="totalCost">0</span></p>
+        </div>
+
+        <div id="vizContainer">
+            <!-- Timeline rows will be injected here -->
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

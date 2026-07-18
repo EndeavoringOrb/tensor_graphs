@@ -39,6 +39,7 @@ OP_TYPES = [
     "AND",
     "OR",
     "NOT",
+    "TRANSFER",
     "FUSED",
 ]
 
