@@ -397,25 +397,25 @@ inline std::string toStringHex(uint64_t val)
 }
 
 // Topological sort of graph nodes from given roots
-inline std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph)
+inline std::vector<LogicalId> topologicalSort(const std::vector<LogicalId> &roots, const Graph &graph)
 {
-    std::vector<uint32_t> order;
-    std::unordered_set<uint32_t> visited;
-    auto visit = [&](auto &self, uint32_t node) -> void
+    std::vector<LogicalId> order;
+    std::unordered_set<LogicalId> visited;
+    auto visit = [&](auto &self, LogicalId node) -> void
     {
         if (visited.count(node))
             return;
         visited.insert(node);
         if (graph.hasNode(node))
         {
-            for (uint32_t pid : graph.getNode(node).parentIds)
+            for (LogicalId pid : graph.getNode(node).parentIds)
             {
                 self(self, pid);
             }
         }
         order.push_back(node);
     };
-    for (uint32_t root : roots)
+    for (LogicalId root : roots)
     {
         visit(visit, root);
     }

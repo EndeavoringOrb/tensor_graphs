@@ -11,8 +11,8 @@ inline bool matchSliceView(const std::vector<TensorNode> &inputs, const TensorNo
 
 inline void inferViewSlice(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
 {
-    auto starts = getConstantInt32(inputs[1].id, graph);
-    auto steps = getConstantInt32(inputs[3].id, graph);
+    auto starts = graph.getConstantInt32(inputs[1].id);
+    auto steps = graph.getConstantInt32(inputs[3].id);
 
     node.strides.resize(inputs[0].strides.size());
     uint64_t offset = inputs[0].viewOffset;

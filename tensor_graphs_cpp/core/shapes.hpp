@@ -30,201 +30,6 @@ inline uint64_t flatIndexFromCoords(const std::vector<uint32_t> &coords, const s
     return flatIndex;
 }
 
-inline bool evaluateInt32TensorForPlanning(uint32_t nodeId, const Graph &graph, std::vector<int32_t> &outValues)
-{
-    if (!graph.hasNode(nodeId))
-        return false;
-
-    const TensorNode &node = graph.getNode(nodeId);
-    if (node.dtype != DType::INT32)
-        return false;
-
-    switch (node.opType)
-    {
-    case OpType::INPUT:
-    {
-        auto it = graph.constantStaging.find(nodeId);
-        if (it == graph.constantStaging.end())
-            return false;
-        const auto &data = it->second;
-        if (data->size() % sizeof(int32_t) != 0)
-            return false;
-        outValues.resize(data->size() / sizeof(int32_t));
-        std::memcpy(outValues.data(), data->data(), data->size());
-        return true;
-    }
-    case OpType::COPY_TO:
-    case OpType::CONTIGUOUS:
-    case OpType::CAST:
-    case OpType::RESHAPE:
-        return evaluateInt32TensorForPlanning(node.parentIds[0], graph, outValues);
-    case OpType::ARANGE:
-    {
-        std::vector<int32_t> startVals, stopVals, stepVals;
-        if (!evaluateInt32TensorForPlanning(node.parentIds[0], graph, startVals) ||
-            !evaluateInt32TensorForPlanning(node.parentIds[1], graph, stopVals) ||
-            !evaluateInt32TensorForPlanning(node.parentIds[2], graph, stepVals) ||
-            startVals.empty() || stopVals.empty() || stepVals.empty())
-        {
-            return false;
-        }
-
-        int32_t start = startVals[0];
-        int32_t stop = stopVals[0];
-        int32_t step = stepVals[0];
-        if (step == 0)
-            return false;
-
-        outValues.clear();
-        if (step > 0)
-        {
-            for (int32_t v = start; v < stop; v += step)
-                outValues.push_back(v);
-        }
-        else
-        {
-            for (int32_t v = start; v > stop; v += step)
-                outValues.push_back(v);
-        }
-        return true;
-    }
-    case OpType::FILL:
-    {
-        std::vector<int32_t> valueVals;
-        if (!evaluateInt32TensorForPlanning(node.parentIds[0], graph, valueVals) || valueVals.empty())
-            return false;
-        outValues.assign(static_cast<size_t>(countElements(node)), valueVals[0]);
-        return true;
-    }
-    case OpType::PERMUTE:
-    {
-        std::vector<int32_t> parentValues;
-        if (!evaluateInt32TensorForPlanning(node.parentIds[0], graph, parentValues))
-            return false;
-        const auto &parentShape = graph.getNode(node.parentIds[0]).getShape();
-        auto dims = getConstantInt32(node.parentIds[1], graph);
-        if (dims.size() != node.getShape().size())
-            return false;
-
-        outValues.resize(static_cast<size_t>(countElements(node)));
-        for (uint64_t outFlat = 0; outFlat < outValues.size(); ++outFlat)
-        {
-            auto outCoords = coordsFromFlatIndex(outFlat, node.getShape());
-            std::vector<uint32_t> inCoords(parentShape.size(), 0);
-            for (size_t i = 0; i < dims.size(); ++i)
-                inCoords[static_cast<size_t>(dims[i])] = outCoords[i];
-            outValues[static_cast<size_t>(outFlat)] = parentValues[static_cast<size_t>(flatIndexFromCoords(inCoords, parentShape))];
-        }
-        return true;
-    }
-    case OpType::SLICE:
-    {
-        std::vector<int32_t> parentValues;
-        if (!evaluateInt32TensorForPlanning(node.parentIds[0], graph, parentValues))
-            return false;
-        const auto &parentShape = graph.getNode(node.parentIds[0]).getShape();
-        auto starts = getConstantInt32(node.parentIds[1], graph);
-        auto ends = getConstantInt32(node.parentIds[2], graph);
-        auto steps = getConstantInt32(node.parentIds[3], graph);
-
-        outValues.resize(static_cast<size_t>(countElements(node)));
-        for (uint64_t outFlat = 0; outFlat < outValues.size(); ++outFlat)
-        {
-            auto outCoords = coordsFromFlatIndex(outFlat, node.getShape());
-            std::vector<uint32_t> inCoords(parentShape.size(), 0);
-            for (size_t d = 0; d < parentShape.size(); ++d)
-            {
-                int32_t start = d < starts.size() ? starts[d] : 0;
-                int32_t end = d < ends.size() ? ends[d] : static_cast<int32_t>(parentShape[d]);
-                int32_t step = d < steps.size() ? steps[d] : 1;
-                if (step <= 0)
-                    return false;
-                if (start < 0)
-                    start += static_cast<int32_t>(parentShape[d]);
-                if (end < 0)
-                    end += static_cast<int32_t>(parentShape[d]);
-                start = std::clamp<int32_t>(start, 0, static_cast<int32_t>(parentShape[d]));
-                end = std::clamp<int32_t>(end, 0, static_cast<int32_t>(parentShape[d]));
-                (void)end;
-                inCoords[d] = static_cast<uint32_t>(start + static_cast<int32_t>(outCoords[d]) * step);
-            }
-            outValues[static_cast<size_t>(outFlat)] = parentValues[static_cast<size_t>(flatIndexFromCoords(inCoords, parentShape))];
-        }
-        return true;
-    }
-    case OpType::CONCAT:
-    {
-        int32_t axis = getConstantInt32(node.parentIds.back(), graph)[0];
-        if (axis < 0)
-            axis += static_cast<int32_t>(node.getShape().size());
-        if (axis < 0 || static_cast<size_t>(axis) >= node.getShape().size())
-            return false;
-
-        std::vector<std::vector<int32_t>> parentValues(node.parentIds.size() - 1);
-        for (size_t i = 0; i + 1 < node.parentIds.size(); ++i)
-        {
-            if (!evaluateInt32TensorForPlanning(node.parentIds[i], graph, parentValues[i]))
-                return false;
-        }
-
-        outValues.resize(static_cast<size_t>(countElements(node)));
-        std::vector<uint32_t> offsets;
-        offsets.reserve(node.parentIds.size() - 1);
-        uint32_t currentOffset = 0;
-        for (size_t i = 0; i + 1 < node.parentIds.size(); ++i)
-        {
-            offsets.push_back(currentOffset);
-            currentOffset += graph.getNode(node.parentIds[i]).getShape()[static_cast<size_t>(axis)];
-        }
-
-        for (uint64_t outFlat = 0; outFlat < outValues.size(); ++outFlat)
-        {
-            auto outCoords = coordsFromFlatIndex(outFlat, node.getShape());
-            uint32_t parentAxisCoord = outCoords[static_cast<size_t>(axis)];
-            size_t parentIndex = 0;
-            for (; parentIndex < offsets.size(); ++parentIndex)
-            {
-                uint32_t parentAxisExtent = graph.getNode(node.parentIds[parentIndex]).getShape()[static_cast<size_t>(axis)];
-                if (parentAxisCoord < offsets[parentIndex] + parentAxisExtent)
-                    break;
-            }
-            if (parentIndex >= offsets.size())
-                return false;
-
-            auto inCoords = outCoords;
-            inCoords[static_cast<size_t>(axis)] = parentAxisCoord - offsets[parentIndex];
-            outValues[static_cast<size_t>(outFlat)] = parentValues[parentIndex][static_cast<size_t>(flatIndexFromCoords(inCoords, graph.getNode(node.parentIds[parentIndex]).getShape()))];
-        }
-        return true;
-    }
-    case OpType::REPEAT:
-    {
-        std::vector<int32_t> parentValues;
-        if (!evaluateInt32TensorForPlanning(node.parentIds[0], graph, parentValues))
-            return false;
-        const auto &parentShape = graph.getNode(node.parentIds[0]).getShape();
-        int32_t repeats = getConstantInt32(node.parentIds[1], graph)[0];
-        int32_t axis = getConstantInt32(node.parentIds[2], graph)[0];
-        if (axis < 0)
-            axis += static_cast<int32_t>(parentShape.size());
-        if (repeats <= 0 || axis < 0 || static_cast<size_t>(axis) >= parentShape.size())
-            return false;
-
-        outValues.resize(static_cast<size_t>(countElements(node)));
-        for (uint64_t outFlat = 0; outFlat < outValues.size(); ++outFlat)
-        {
-            auto outCoords = coordsFromFlatIndex(outFlat, node.getShape());
-            auto inCoords = outCoords;
-            inCoords[static_cast<size_t>(axis)] = outCoords[static_cast<size_t>(axis)] / static_cast<uint32_t>(repeats);
-            outValues[static_cast<size_t>(outFlat)] = parentValues[static_cast<size_t>(flatIndexFromCoords(inCoords, parentShape))];
-        }
-        return true;
-    }
-    default:
-        return false;
-    }
-}
-
 inline std::vector<uint32_t> broadcastShapes(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b)
 {
     int rankA = a.size();
@@ -411,7 +216,7 @@ inline Region mapSliceRegionBackward(const Region &region, const std::vector<uin
 
 struct ShapePropagator
 {
-    void inferShapeRecursive(uint32_t nodeId, Graph &graph)
+    void inferShapeRecursive(LogicalId nodeId, Graph &graph)
     {
         if (!graph.hasNode(nodeId))
             return;
@@ -422,7 +227,7 @@ struct ShapePropagator
         if (graph.getNode(nodeId).opType == OpType::INPUT)
             return;
 
-        for (uint32_t pid : graph.getNode(nodeId).parentIds)
+        for (LogicalId pid : graph.getNode(nodeId).parentIds)
         {
             inferShapeRecursive(pid, graph);
         }
@@ -430,7 +235,7 @@ struct ShapePropagator
         inferShape(nodeId, graph);
     }
 
-    void inferShape(uint32_t nodeId, Graph &graph)
+    void inferShape(LogicalId nodeId, Graph &graph)
     {
         if (!graph.hasNode(nodeId))
             return;
@@ -473,7 +278,7 @@ struct ShapePropagator
             if (r0 != r1)
             {
                 std::stringstream ss;
-                ss << "[ShapePropagator.inferShape] nodeId=" + std::to_string(nodeId) + " DOT requires equal ranks. Got " << r0 << " (" + toString(s0) + ") and " << r1
+                ss << "[ShapePropagator.inferShape] nodeId=" + toString(nodeId) + " DOT requires equal ranks. Got " << r0 << " (" + toString(s0) + ") and " << r1
                    << " (" + toString(s1) + "). Implicit broadcasting is disabled; use explicit reshape to align ranks.";
                 Error::throw_err(ss.str());
             }
@@ -521,14 +326,13 @@ struct ShapePropagator
         {
             graph.getNode(nodeId).setShape(graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape());
             graph.getNode(nodeId).strides = graph.getNode(graph.getNode(nodeId).parentIds[0]).strides;
-            graph.getNode(nodeId).viewOffset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
             break;
         }
         case OpType::SUM:
         case OpType::MAX:
         {
             auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape();
-            auto axis_vec = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph);
+            auto axis_vec = graph.getConstantInt32(graph.getNode(nodeId).parentIds[1]);
             int32_t axis = axis_vec[0];
             if (axis < 0)
                 axis += s0.size();
@@ -547,7 +351,7 @@ struct ShapePropagator
         case OpType::RESHAPE:
         {
             auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape();
-            auto target_dims = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph);
+            auto target_dims = graph.getConstantInt32(graph.getNode(nodeId).parentIds[1]);
             uint64_t total_vol = countElements(s0);
             uint64_t known_vol = 1;
             for (size_t i = 0; i < target_dims.size(); ++i)
@@ -564,13 +368,12 @@ struct ShapePropagator
                     out_shape[i] = target_dims[i];
             }
             graph.getNode(nodeId).setShape(out_shape);
-            graph.getNode(nodeId).viewOffset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
             break;
         }
         case OpType::PERMUTE:
         {
             auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape();
-            auto dims = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph);
+            auto dims = graph.getConstantInt32(graph.getNode(nodeId).parentIds[1]);
             std::vector<uint32_t> out_shape(dims.size());
             for (size_t i = 0; i < dims.size(); ++i)
             {
@@ -583,7 +386,6 @@ struct ShapePropagator
             {
                 graph.getNode(nodeId).strides[i] = parentStrides[dims[i]];
             }
-            graph.getNode(nodeId).viewOffset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
             break;
         }
         case OpType::GATHER:
@@ -600,8 +402,8 @@ struct ShapePropagator
         }
         case OpType::CONCAT:
         {
-            uint32_t axis_id = graph.getNode(nodeId).parentIds.back();
-            auto axis_vec = getConstantInt32(axis_id, graph);
+            LogicalId axis_id = graph.getNode(nodeId).parentIds.back();
+            auto axis_vec = graph.getConstantInt32(axis_id);
             int32_t axis = axis_vec[0];
             auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape();
             if (axis < 0)
@@ -621,8 +423,8 @@ struct ShapePropagator
         case OpType::REPEAT:
         {
             auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape();
-            auto repeats = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph)[0];
-            auto axis = getConstantInt32(graph.getNode(nodeId).parentIds[2], graph)[0];
+            auto repeats = graph.getConstantInt32(graph.getNode(nodeId).parentIds[1])[0];
+            auto axis = graph.getConstantInt32(graph.getNode(nodeId).parentIds[2])[0];
             if (axis < 0)
                 axis += s0.size();
             std::vector<uint32_t> out_shape = s0;
@@ -638,12 +440,11 @@ struct ShapePropagator
                     graph.getNode(nodeId).strides[d] = 0;
                 }
             }
-            graph.getNode(nodeId).viewOffset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
             break;
         }
         case OpType::FILL:
         {
-            auto target_dims = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph);
+            auto target_dims = graph.getConstantInt32(graph.getNode(nodeId).parentIds[1]);
             std::vector<uint32_t> out_shape(target_dims.size());
             for (size_t i = 0; i < target_dims.size(); ++i)
             {
@@ -655,9 +456,9 @@ struct ShapePropagator
         case OpType::IM2COL:
         {
             auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape(); // N, C, H, W
-            uint32_t k = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph)[0];
-            uint32_t s = getConstantInt32(graph.getNode(nodeId).parentIds[2], graph)[0];
-            uint32_t p = getConstantInt32(graph.getNode(nodeId).parentIds[3], graph)[0];
+            uint32_t k = graph.getConstantInt32(graph.getNode(nodeId).parentIds[1])[0];
+            uint32_t s = graph.getConstantInt32(graph.getNode(nodeId).parentIds[2])[0];
+            uint32_t p = graph.getConstantInt32(graph.getNode(nodeId).parentIds[3])[0];
             uint32_t H = s0[2];
             uint32_t W = s0[3];
             uint32_t H_out = (H + 2 * p - k) / s + 1;
@@ -668,9 +469,9 @@ struct ShapePropagator
         case OpType::SLICE:
         {
             auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape();
-            auto starts = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph);
-            auto ends = getConstantInt32(graph.getNode(nodeId).parentIds[2], graph);
-            auto steps = getConstantInt32(graph.getNode(nodeId).parentIds[3], graph);
+            auto starts = graph.getConstantInt32(graph.getNode(nodeId).parentIds[1]);
+            auto ends = graph.getConstantInt32(graph.getNode(nodeId).parentIds[2]);
+            auto steps = graph.getConstantInt32(graph.getNode(nodeId).parentIds[3]);
             std::vector<uint32_t> out_shape(s0.size());
             for (size_t i = 0; i < s0.size(); ++i)
             {
@@ -696,7 +497,6 @@ struct ShapePropagator
             graph.getNode(nodeId).setShape(out_shape);
 
             auto parentStrides = graph.getNode(graph.getNode(nodeId).parentIds[0]).strides;
-            uint64_t offset = graph.getNode(graph.getNode(nodeId).parentIds[0]).viewOffset;
             for (size_t i = 0; i < s0.size(); ++i)
             {
                 int32_t start = i < starts.size() ? starts[i] : 0;
@@ -704,29 +504,27 @@ struct ShapePropagator
                 if (start < 0)
                     start += s0[i];
                 start = std::clamp<int32_t>(start, 0, s0[i]);
-                offset += start * parentStrides[i];
                 graph.getNode(nodeId).strides[i] = parentStrides[i] * step;
             }
-            graph.getNode(nodeId).viewOffset = offset;
             break;
         }
         case OpType::ARANGE:
         {
-            int32_t start = getConstantInt32(graph.getNode(nodeId).parentIds[0], graph)[0];
-            int32_t stop = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph)[0];
-            int32_t step = getConstantInt32(graph.getNode(nodeId).parentIds[2], graph)[0];
+            int32_t start = graph.getConstantInt32(graph.getNode(nodeId).parentIds[0])[0];
+            int32_t stop = graph.getConstantInt32(graph.getNode(nodeId).parentIds[1])[0];
+            int32_t step = graph.getConstantInt32(graph.getNode(nodeId).parentIds[2])[0];
             graph.getNode(nodeId).setShape({(uint32_t)std::max(0, (stop - start + step - 1) / step)});
             break;
         }
         case OpType::ARGMAX:
         {
             auto s0 = graph.getNode(graph.getNode(nodeId).parentIds[0]).getShape();
-            auto axis_vec = getConstantInt32(graph.getNode(nodeId).parentIds[1], graph);
+            auto axis_vec = graph.getConstantInt32(graph.getNode(nodeId).parentIds[1]);
             int32_t axis = axis_vec[0];
             if (axis < 0)
                 axis += s0.size();
 
-            auto k_vec = getConstantInt32(graph.getNode(nodeId).parentIds[2], graph);
+            auto k_vec = graph.getConstantInt32(graph.getNode(nodeId).parentIds[2]);
             int32_t k = k_vec[0];
 
             std::vector<uint32_t> new_shape;
@@ -1076,7 +874,7 @@ struct ShapePropagator
             return {};
 
         const auto &sA = graph.getNode(node.parentIds[0]).getShape();
-        int32_t axis = getConstantInt32(node.parentIds[1], graph)[0];
+        int32_t axis = graph.getConstantInt32(node.parentIds[1])[0];
         if (axis < 0)
             axis += sA.size();
 
@@ -1113,7 +911,7 @@ struct ShapePropagator
             return {{}, {}};
 
         const auto &sA = graph.getNode(node.parentIds[0]).getShape();
-        int32_t axis = getConstantInt32(node.parentIds[1], graph)[0];
+        int32_t axis = graph.getConstantInt32(node.parentIds[1])[0];
         if (axis < 0)
             axis += sA.size();
 
@@ -1150,7 +948,7 @@ struct ShapePropagator
         if (rA.empty())
             return {};
 
-        auto dims = getConstantInt32(node.parentIds[1], graph);
+        auto dims = graph.getConstantInt32(node.parentIds[1]);
 
         std::vector<Region> outBoxes;
         for (const auto &reg : rA)
@@ -1170,7 +968,7 @@ struct ShapePropagator
         if (outputRegions.empty())
             return {{}, {}};
 
-        auto dims = getConstantInt32(node.parentIds[1], graph);
+        auto dims = graph.getConstantInt32(node.parentIds[1]);
         std::vector<int32_t> invDims(dims.size());
         for (size_t i = 0; i < dims.size(); ++i)
         {
@@ -1275,9 +1073,9 @@ struct ShapePropagator
         std::vector<Region> dataBoxes;
         std::vector<Region> idxBoxes;
 
-        std::vector<int32_t> idxValues;
-        bool exactIdxValues = evaluateInt32TensorForPlanning(node.parentIds[1], graph, idxValues) &&
-                              countElements(idxShape) == idxValues.size();
+        std::vector<int32_t> idxValues = graph.getConstantInt32(node.parentIds[1]);
+        
+        bool exactIdxValues = countElements(idxShape) == idxValues.size();
 
         for (const auto &outReg : outputRegions)
         {
@@ -1372,7 +1170,7 @@ struct ShapePropagator
         if (allClean)
             return {};
 
-        int32_t axis = getConstantInt32(node.parentIds.back(), graph)[0];
+        int32_t axis = graph.getConstantInt32(node.parentIds.back())[0];
         uint32_t rank = node.getShape().size();
         if (axis < 0)
             axis += rank;
@@ -1405,7 +1203,7 @@ struct ShapePropagator
         if (outputRegions.empty())
             return res;
 
-        int32_t axis = getConstantInt32(node.parentIds.back(), graph)[0];
+        int32_t axis = graph.getConstantInt32(node.parentIds.back())[0];
         uint32_t rank = node.getShape().size();
         if (axis < 0)
             axis += rank;
@@ -1448,8 +1246,8 @@ struct ShapePropagator
 
         const auto &sA = graph.getNode(node.parentIds[0]).getShape();
 
-        int32_t repeats = getConstantInt32(node.parentIds[1], graph)[0];
-        int32_t axis = getConstantInt32(node.parentIds[2], graph)[0];
+        int32_t repeats = graph.getConstantInt32(node.parentIds[1])[0];
+        int32_t axis = graph.getConstantInt32(node.parentIds[2])[0];
         if (axis < 0)
             axis += sA.size();
 
@@ -1471,8 +1269,8 @@ struct ShapePropagator
             return {{}, {}, {}};
 
         const auto &sA = graph.getNode(node.parentIds[0]).getShape();
-        int32_t repeats = getConstantInt32(node.parentIds[1], graph)[0];
-        int32_t axis = getConstantInt32(node.parentIds[2], graph)[0];
+        int32_t repeats = graph.getConstantInt32(node.parentIds[1])[0];
+        int32_t axis = graph.getConstantInt32(node.parentIds[2])[0];
         if (axis < 0)
             axis += sA.size();
 
@@ -1495,9 +1293,9 @@ struct ShapePropagator
             return {};
 
         const auto &shape = graph.getNode(node.parentIds[0]).getShape();
-        auto starts = getConstantInt32(node.parentIds[1], graph);
-        auto ends = getConstantInt32(node.parentIds[2], graph);
-        auto steps = getConstantInt32(node.parentIds[3], graph);
+        auto starts = graph.getConstantInt32(node.parentIds[1]);
+        auto ends = graph.getConstantInt32(node.parentIds[2]);
+        auto steps = graph.getConstantInt32(node.parentIds[3]);
 
         std::vector<Region> outBoxes;
         for (const auto &region : rA)
@@ -1511,9 +1309,9 @@ struct ShapePropagator
             return {{}, {}, {}, {}};
 
         const auto &shape = graph.getNode(node.parentIds[0]).getShape();
-        auto starts = getConstantInt32(node.parentIds[1], graph);
-        auto ends = getConstantInt32(node.parentIds[2], graph);
-        auto steps = getConstantInt32(node.parentIds[3], graph);
+        auto starts = graph.getConstantInt32(node.parentIds[1]);
+        auto ends = graph.getConstantInt32(node.parentIds[2]);
+        auto steps = graph.getConstantInt32(node.parentIds[3]);
 
         std::vector<Region> inBoxes;
         for (const auto &region : outputRegions)
@@ -1530,9 +1328,9 @@ struct ShapePropagator
             return {};
 
         const auto &targetShape = graph.getNode(node.parentIds[0]).getShape();
-        auto starts = getConstantInt32(node.parentIds[2], graph);
-        auto ends = getConstantInt32(node.parentIds[3], graph);
-        auto steps = getConstantInt32(node.parentIds[4], graph);
+        auto starts = graph.getConstantInt32(node.parentIds[2]);
+        auto ends = graph.getConstantInt32(node.parentIds[3]);
+        auto steps = graph.getConstantInt32(node.parentIds[4]);
 
         std::vector<Region> outBoxes;
         for (const auto &region : targetRegions)
@@ -1548,9 +1346,9 @@ struct ShapePropagator
             return {{}, {}, {}, {}, {}};
 
         const auto &targetShape = graph.getNode(node.parentIds[0]).getShape();
-        auto starts = getConstantInt32(node.parentIds[2], graph);
-        auto ends = getConstantInt32(node.parentIds[3], graph);
-        auto steps = getConstantInt32(node.parentIds[4], graph);
+        auto starts = graph.getConstantInt32(node.parentIds[2]);
+        auto ends = graph.getConstantInt32(node.parentIds[3]);
+        auto steps = graph.getConstantInt32(node.parentIds[4]);
 
         std::vector<Region> targetBoxes;
         std::vector<Region> updateBoxes;
@@ -1565,7 +1363,7 @@ struct ShapePropagator
 
     std::vector<Region> forward(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
     {
-        for (uint32_t pid : node.parentIds)
+        for (LogicalId pid : node.parentIds)
         {
             if (!graph.hasNode(pid))
             {
@@ -1617,11 +1415,11 @@ struct ShapePropagator
                 return {};
 
             const auto &sA = graph.getNode(node.parentIds[0]).getShape();
-            int32_t axis = getConstantInt32(node.parentIds[1], graph)[0];
+            int32_t axis = graph.getConstantInt32(node.parentIds[1])[0];
             if (axis < 0)
                 axis += sA.size();
 
-            int32_t k = getConstantInt32(node.parentIds[2], graph)[0];
+            int32_t k = graph.getConstantInt32(node.parentIds[2])[0];
 
             std::vector<Region> outBoxes;
             for (const auto &inReg : rA)
@@ -1709,7 +1507,7 @@ struct ShapePropagator
                 return res;
 
             const auto &sA = graph.getNode(node.parentIds[0]).getShape();
-            int32_t axis = getConstantInt32(node.parentIds[1], graph)[0];
+            int32_t axis = graph.getConstantInt32(node.parentIds[1])[0];
             if (axis < 0)
                 axis += sA.size();
 

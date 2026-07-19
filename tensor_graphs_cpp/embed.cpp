@@ -194,7 +194,7 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
 
     cs.patch_input_id = cs.graph->input(
         inShape,
-        DType::FLOAT32, {}, StorageType::PERSISTENT);
+        DType::FLOAT32, {});
 
     JinaV5OmniNanoRetrievalModel model(*cs.cfg, *cs.graph, mem, weights_path);
     cs.root_id = model.build_graph(cs.patch_input_id);

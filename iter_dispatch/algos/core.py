@@ -54,10 +54,12 @@ class EngineType(
     CPU = 0
     QUALCOMM_IGPU = 1
 
+
 @dataclass(frozen=True)
 class Engine:  # for cost estimation
     idx: int  # global engine idx. i.e. cpu=0, gpu0=1, gpu1=2
     engine_type: EngineType
+
 
 @dataclass(frozen=True)
 class MemSpace:  # an allocated buffer of memory
@@ -92,6 +94,7 @@ op_costs = {
 def does_engine_support_mem_space(engine: Engine, mem_space: MemSpace):
     return mem_space in engine_capabilities[engine]
 
+
 @dataclass
 class Node:
     name: str
@@ -116,6 +119,7 @@ class Node:
 
     def __hash__(self):
         return hash(self.name)
+
 
 @dataclass
 class Buffer:

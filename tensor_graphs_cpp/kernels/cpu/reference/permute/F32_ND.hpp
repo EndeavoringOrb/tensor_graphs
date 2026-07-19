@@ -16,7 +16,7 @@ inline bool matchPermuteView(const std::vector<TensorNode> &inputs, const Tensor
 
 inline void inferViewPermute(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
 {
-    auto dims = getConstantInt32(inputs[1].id, graph);
+    auto dims = graph.getConstantInt32(inputs[1].id);
 
     node.strides.resize(dims.size());
     for (size_t i = 0; i < dims.size(); ++i)

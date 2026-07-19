@@ -199,7 +199,7 @@ void runShapePropagationTests()
     };
     auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
     {
-        return graph.input(shape, DType::FLOAT32, {}, StorageType::PERSISTENT);
+        return graph.input(shape, DType::FLOAT32, {});
     };
     {
         Graph graph;

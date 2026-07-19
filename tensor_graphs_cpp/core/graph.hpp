@@ -11,41 +11,74 @@
 
 struct MemoryManager;
 
-struct IdAllocator
+struct LogicalIdAllocator
 {
-    uint32_t nextId = 0;
-    uint32_t allocate() { return nextId++; }
+    LogicalId nextId{0};
+    LogicalId allocate() { return nextId++; }
+};
+
+enum class InputDataType : uint32_t
+{
+    STORAGE,
+    CONSTANT,
+    RUNTIME
 };
 
 struct Graph
 {
-    std::unordered_map<uint32_t, TensorNode> nodes;
-    std::shared_ptr<IdAllocator> allocator;
+    std::unordered_map<LogicalId, TensorNode> nodes;
+    std::shared_ptr<LogicalIdAllocator> allocator;
 
-    std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
+    std::unordered_map<LogicalId, InputDataType> input_data_types;
+    std::unordered_map<LogicalId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
-    Graph() : allocator(std::make_shared<IdAllocator>()) {}
+    Graph() : allocator(std::make_shared<LogicalIdAllocator>()) {}
 
-    bool hasNode(uint32_t id) const
+    bool hasNode(LogicalId id) const
     {
         return nodes.find(id) != nodes.end();
     }
 
-    TensorNode &getNode(uint32_t id)
+    TensorNode &getNode(LogicalId id)
     {
         return nodes.at(id);
     }
 
-    const TensorNode &getNode(uint32_t id) const
+    const TensorNode &getNode(LogicalId id) const
     {
         return nodes.at(id);
     }
 
-    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {}, Backend _backend = Backend::CPU, StorageType _storageType = StorageType::TRANSIENT, std::string _contentHash = "", std::source_location loc = std::source_location::current())
+    const InputDataType getInputDataType(LogicalId id) const
     {
-        uint32_t id = allocator->allocate();
+        return input_data_types.at(id);
+    }
+
+    inline std::vector<int32_t> getConstantInt32(LogicalId id) const
+    {
+        if (constantStaging.count(id))
+        {
+            const auto &data = *constantStaging.at(id);
+            const auto &node = getNode(id);
+            uint64_t numElements = countElements(node.getShape());
+            std::vector<int32_t> res(numElements);
+            const int32_t *src = reinterpret_cast<const int32_t *>(data.data());
+            for (uint64_t i = 0; i < numElements; ++i)
+            {
+                res[i] = src[getStridedIndex(i, node.getShape(), node.strides)]; // TODO: does this need getStridedIndex?
+            }
+            return res;
+        }
+        std::stringstream ss;
+        ss << "Expected constant for shape inference but not found in staging. Node ID: " << id;
+        Error::throw_err(ss.str());
+    }
+
+    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {}, std::string _contentHash = "", std::source_location loc = std::source_location::current())
+    {
+        LogicalId id = allocator->allocate();
         std::string origin = std::string(loc.file_name()) + ":" + std::to_string(loc.line());
-        nodes[id] = TensorNode(id, _opType, _opName, _dtype, _parentIds, _shape, _strides, _backend, _storageType, _contentHash, origin);
+        nodes[id] = TensorNode(id, _opType, _opName, _dtype, _parentIds, _shape, _strides, _contentHash, origin);
         return nodes[id];
     }
 
@@ -56,12 +89,14 @@ struct Graph
         SHA256 sha;
         sha.update(static_cast<const uint8_t *>(dataPtr), sizeBytes);
 
-        TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, {}, Backend::CPU, StorageType::PERSISTENT, sha.digest(), loc);
+        TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, {}, sha.digest(), loc);
         uint32_t id = node.id;
 
         auto buffer = std::make_shared<std::vector<uint8_t>>(sizeBytes);
         std::memcpy(buffer->data(), dataPtr, sizeBytes);
         constantStaging[id] = buffer;
+
+        input_data_types[id] = InputDataType::CONSTANT;
 
         return id;
     }
@@ -77,23 +112,25 @@ struct Graph
         sha.update(path + "::" + name);
 
         const auto &meta = FileRegistry::get().getMetadata(path, name);
-        TensorNode &node = allocateNode(OpType::INPUT, name, meta.dtype, {}, meta.shape, {}, Backend::STORAGE, StorageType::PERSISTENT, sha.digest(), loc);
+        TensorNode &node = allocateNode(OpType::INPUT, name, meta.dtype, {}, meta.shape, {}, sha.digest(), loc);
         FileRegistry::get().registerNode(node.id, path, name);
-        TensorNode &copyNode = allocateNode(OpType::COPY_TO, "", meta.dtype, {node.id}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
 
-        return copyNode.id;
+        input_data_types[node.id] = InputDataType::STORAGE;
+
+        return node.id;
     }
 
-    uint32_t input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {}, StorageType storageType = StorageType::PERSISTENT, std::source_location loc = std::source_location::current())
+    uint32_t input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {}, std::source_location loc = std::source_location::current())
     {
-        TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, Backend::CPU, storageType, "", loc);
+        TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, "", loc);
+        input_data_types[node.id] = InputDataType::RUNTIME;
         return node.id;
     }
 
     uint32_t contiguous(uint32_t id0, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::CONTIGUOUS, "", dtype, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
+        TensorNode &node = allocateNode(OpType::CONTIGUOUS, "", dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
 
@@ -106,7 +143,7 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
-        TensorNode &node = allocateNode(OpType::ADD, "", dtype, {id0, id1}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
+        TensorNode &node = allocateNode(OpType::ADD, "", dtype, {id0, id1}, {}, {}, "", loc);
         return node.id;
     }
 
@@ -524,26 +561,6 @@ struct Graph
         return node.id;
     }
 };
-
-inline std::vector<int32_t> getConstantInt32(uint32_t id, const Graph &graph)
-{
-    if (graph.constantStaging.count(id))
-    {
-        const auto &data = *graph.constantStaging.at(id);
-        const auto &node = graph.getNode(id);
-        uint64_t numElements = countElements(node.getShape());
-        std::vector<int32_t> res(numElements);
-        const int32_t *src = reinterpret_cast<const int32_t *>(data.data()) + node.viewOffset;
-        for (uint64_t i = 0; i < numElements; ++i)
-        {
-            res[i] = src[getStridedIndex(i, node.getShape(), node.strides)];
-        }
-        return res;
-    }
-    std::stringstream ss;
-    ss << "Expected constant for shape inference but not found in staging. Node ID: " << id;
-    Error::throw_err(ss.str());
-}
 
 inline bool isIsomorphic(const Graph &g1, uint32_t root1, const Graph &g2, uint32_t root2)
 {

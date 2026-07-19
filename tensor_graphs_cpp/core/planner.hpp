@@ -75,10 +75,11 @@ void propagateDirtyRegionsAtomic(
     }
 }
 
-class Planner
+struct Planner
 {
-private:
     uint32_t egraph_dump_counter_ = 0;
+    CostModel &costModel;
+    std::unordered_map<uint32_t, uint64_t> mem_caps;
 
     void dumpEGraphBinary(const EGraph &egraph, uint32_t rootEClassId)
     {
@@ -169,9 +170,9 @@ private:
 
         uint32_t num_constants = static_cast<uint32_t>(egraph.constantStaging.size());
         out.write(reinterpret_cast<const char *>(&num_constants), 4);
-        for (const auto &[eclassId, data_ptr] : egraph.constantStaging)
+        for (const auto &[e_class_id, data_ptr] : egraph.constantStaging)
         {
-            uint32_t canonId = eclassId;
+            uint32_t canonId = e_class_id;
             out.write(reinterpret_cast<const char *>(&canonId), 4);
             const auto &data = *data_ptr;
             uint64_t data_size = static_cast<uint64_t>(data.size());
@@ -196,9 +197,6 @@ private:
         float totalCost = std::numeric_limits<float>::infinity();
     };
 
-    CostModel &costModel;
-    std::unordered_map<MemorySpace, uint64_t> maxMemoryBySpace;
-
     uint64_t getMemoryLimit(MemorySpace space) const
     {
         auto it = maxMemoryBySpace.find(space);
@@ -207,27 +205,13 @@ private:
         return std::numeric_limits<uint64_t>::max();
     }
 
-    void inferShapes(const std::vector<uint32_t> &topo, Graph &graph)
+    void inferShapes(const std::vector<LogicalId> &topo, Graph &graph)
     {
         ShapePropagator propagator;
-        for (uint32_t nodeId : topo)
+        for (LogicalId nodeId : topo)
         {
             propagator.inferShape(nodeId, graph);
         }
-    }
-
-    std::unordered_map<uint32_t, uint32_t> computeRefCounts(const std::vector<uint32_t> &topo, uint32_t rootId, const Graph &graph) const
-    {
-        std::unordered_map<uint32_t, uint32_t> refCounts;
-        for (uint32_t nodeId : topo)
-        {
-            for (uint32_t pid : graph.getNode(nodeId).parentIds)
-            {
-                refCounts[pid]++;
-            }
-        }
-        refCounts[rootId] = std::max<uint32_t>(1, refCounts[rootId]);
-        return refCounts;
     }
 
     void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical, bool injected, bool allowPushDownOnProtected = false, Repo *repo = nullptr)
@@ -320,13 +304,14 @@ private:
     };
 
 private:
-    struct SimNode {
-        uint32_t eclassId;
+    struct SimNode
+    {
+        uint32_t e_class_id;
         uint32_t enodeId;
         float cost;
         Backend engine;
-        std::vector<uint32_t> deps; 
-        std::vector<uint32_t> consumers; 
+        std::vector<uint32_t> deps;
+        std::vector<uint32_t> consumers;
         float upward_rank = 0.0f;
         float start_time = 0.0f;
         float end_time = 0.0f;
@@ -340,21 +325,23 @@ private:
         uint64_t view_offset = 0;
     };
 
-    struct AllocResult {
+    struct AllocResult
+    {
         bool fits = true;
         uint32_t oomEClassId = UINT32_MAX;
         std::vector<bool> oomLiveAllocated;
-        std::unordered_map<uint32_t, uint64_t> offsets; 
-        std::unordered_map<uint32_t, uint64_t> peak_mem; 
+        std::unordered_map<uint32_t, uint64_t> offsets;
+        std::unordered_map<uint32_t, uint64_t> peak_mem;
     };
 
-    struct MemBlockSim {
+    struct MemBlockSim
+    {
         uint64_t size = 0;
         float start_time = 0.0f;
         float end_time = 0.0f;
         uint32_t space = 0;
         bool is_persistent = false;
-        std::unordered_map<uint32_t, uint64_t> node_offsets; 
+        std::unordered_map<uint32_t, uint64_t> node_offsets;
         uint64_t base_offset = 0;
         std::vector<uint32_t> member_eclasses;
     };
@@ -365,16 +352,17 @@ private:
         const std::vector<ENodeInfo> &enodeInfos,
         const PrecompData &precomp,
         const std::vector<uint32_t> &topo_order,
-        std::unordered_map<uint32_t, SimNode>& simNodesOut) const
+        std::unordered_map<uint32_t, SimNode> &simNodesOut) const
     {
-        for (uint32_t eclassId : topo_order) {
-            uint32_t sel = selection_map.at(eclassId);
-            uint32_t enodeId = egraph.getEClass(eclassId).enodes[sel];
-            const ENode& enode = egraph.getENodes()[enodeId];
-            const ENodeInfo& info = enodeInfos[enodeId];
+        for (uint32_t e_class_id : topo_order)
+        {
+            uint32_t sel = selection_map.at(e_class_id);
+            uint32_t enodeId = egraph.getEClass(e_class_id).enodes[sel];
+            const ENode &enode = egraph.getENodes()[enodeId];
+            const ENodeInfo &info = enodeInfos[enodeId];
 
             SimNode sn;
-            sn.eclassId = eclassId;
+            sn.e_class_id = e_class_id;
             sn.enodeId = enodeId;
             sn.cost = info.cost;
             sn.engine = enode.backend;
@@ -384,43 +372,52 @@ private:
             sn.inplace_idx = info.inplace_idx;
             sn.size_bytes = info.memSizes.count(enode.backend) ? info.memSizes.at(enode.backend) : 0;
             sn.memory_space = getMemorySpace(enode.backend);
-            sn.is_persistent = precomp.is_eclass_persistent[eclassId];
+            sn.is_persistent = precomp.is_eclass_persistent[e_class_id];
             sn.op_type = enode.opType;
             sn.view_offset = enode.viewOffset * getDTypeSize(enode.dtype);
 
-            simNodesOut[eclassId] = sn;
+            simNodesOut[e_class_id] = sn;
         }
 
-        for (auto& kv : simNodesOut) {
-            for (uint32_t dep : kv.second.deps) {
-                if (simNodesOut.count(dep)) {
+        for (auto &kv : simNodesOut)
+        {
+            for (uint32_t dep : kv.second.deps)
+            {
+                if (simNodesOut.count(dep))
+                {
                     simNodesOut[dep].consumers.push_back(kv.first);
                 }
             }
         }
 
-        for (auto it = topo_order.rbegin(); it != topo_order.rend(); ++it) {
-            SimNode& sn = simNodesOut[*it];
+        for (auto it = topo_order.rbegin(); it != topo_order.rend(); ++it)
+        {
+            SimNode &sn = simNodesOut[*it];
             float max_child_rank = 0.0f;
-            for (uint32_t c : sn.consumers) {
+            for (uint32_t c : sn.consumers)
+            {
                 max_child_rank = std::max(max_child_rank, simNodesOut[c].upward_rank);
             }
             sn.upward_rank = sn.cost + max_child_rank;
         }
 
         std::unordered_map<uint32_t, int> in_degree;
-        for (uint32_t eclassId : topo_order) {
-            in_degree[eclassId] = simNodesOut[eclassId].deps.size();
+        for (uint32_t e_class_id : topo_order)
+        {
+            in_degree[e_class_id] = simNodesOut[e_class_id].deps.size();
         }
 
-        auto cmp = [&](uint32_t a, uint32_t b) {
+        auto cmp = [&](uint32_t a, uint32_t b)
+        {
             return simNodesOut[a].upward_rank < simNodesOut[b].upward_rank;
         };
         std::priority_queue<uint32_t, std::vector<uint32_t>, decltype(cmp)> ready_queue(cmp);
 
-        for (uint32_t eclassId : topo_order) {
-            if (in_degree[eclassId] == 0) {
-                ready_queue.push(eclassId);
+        for (uint32_t e_class_id : topo_order)
+        {
+            if (in_degree[e_class_id] == 0)
+            {
+                ready_queue.push(e_class_id);
             }
         }
 
@@ -428,13 +425,15 @@ private:
         std::unordered_map<uint32_t, float> node_finish_time;
         float total_makespan = 0.0f;
 
-        while (!ready_queue.empty()) {
+        while (!ready_queue.empty())
+        {
             uint32_t curr = ready_queue.top();
             ready_queue.pop();
-            SimNode& sn = simNodesOut[curr];
+            SimNode &sn = simNodesOut[curr];
 
             float earliest_start = 0.0f;
-            for (uint32_t dep : sn.deps) {
+            for (uint32_t dep : sn.deps)
+            {
                 earliest_start = std::max(earliest_start, node_finish_time[dep]);
             }
 
@@ -446,9 +445,11 @@ private:
             node_finish_time[curr] = sn.end_time;
             total_makespan = std::max(total_makespan, sn.end_time);
 
-            for (uint32_t c : sn.consumers) {
+            for (uint32_t c : sn.consumers)
+            {
                 in_degree[c]--;
-                if (in_degree[c] == 0) {
+                if (in_degree[c] == 0)
+                {
                     ready_queue.push(c);
                 }
             }
@@ -458,9 +459,9 @@ private:
     }
 
     AllocResult allocateStaticMemory(
-        std::unordered_map<uint32_t, SimNode>& simNodes,
-        const std::vector<uint32_t>& topo_order,
-        const std::unordered_map<Backend, uint64_t>& maxMemoryByBackend,
+        std::unordered_map<uint32_t, SimNode> &simNodes,
+        const std::vector<uint32_t> &topo_order,
+        const std::unordered_map<Backend, uint64_t> &maxMemoryByBackend,
         size_t numClasses,
         uint64_t alignment = 256) const
     {
@@ -471,150 +472,197 @@ private:
         std::unordered_map<uint32_t, MemBlockSim> blocks;
 
         // Phase 1: Alias Resolution & Lifetime Analysis
-        for (uint32_t eclassId : topo_order) {
-            SimNode& node = simNodes[eclassId];
-            
+        for (uint32_t e_class_id : topo_order)
+        {
+            SimNode &node = simNodes[e_class_id];
+
             float end_time = node.end_time;
-            for (uint32_t c : node.consumers) {
+            for (uint32_t c : node.consumers)
+            {
                 end_time = std::max(end_time, simNodes[c].end_time);
             }
 
-            if (node.is_inplace || node.is_view) {
+            if (node.is_inplace || node.is_view)
+            {
                 uint32_t parent = node.deps.empty() ? UINT32_MAX : node.deps[node.is_inplace ? node.inplace_idx : 0];
-                if (parent != UINT32_MAX && node_to_block.count(parent)) {
+                if (parent != UINT32_MAX && node_to_block.count(parent))
+                {
                     uint32_t block_id = node_to_block[parent];
                     blocks[block_id].end_time = std::max(blocks[block_id].end_time, end_time);
                     uint64_t required_size = node.view_offset + node.size_bytes;
                     blocks[block_id].size = std::max(blocks[block_id].size, required_size);
-                    node_to_block[eclassId] = block_id;
-                    blocks[block_id].node_offsets[eclassId] = node.view_offset;
-                    blocks[block_id].member_eclasses.push_back(eclassId);
+                    node_to_block[e_class_id] = block_id;
+                    blocks[block_id].node_offsets[e_class_id] = node.view_offset;
+                    blocks[block_id].member_eclasses.push_back(e_class_id);
                     continue;
                 }
-            } else if ((node.op_type == OpType::COPY_TO || node.op_type == OpType::TRANSFER) && !node.deps.empty()) {
+            }
+            else if ((node.op_type == OpType::COPY_TO || node.op_type == OpType::TRANSFER) && !node.deps.empty())
+            {
                 uint32_t parent = node.deps[0];
-                if (simNodes.count(parent) && simNodes[parent].memory_space == node.memory_space) {
+                if (simNodes.count(parent) && simNodes[parent].memory_space == node.memory_space)
+                {
                     uint32_t block_id = node_to_block[parent];
                     blocks[block_id].end_time = std::max(blocks[block_id].end_time, end_time);
-                    node_to_block[eclassId] = block_id;
-                    blocks[block_id].node_offsets[eclassId] = 0;
-                    blocks[block_id].member_eclasses.push_back(eclassId);
+                    node_to_block[e_class_id] = block_id;
+                    blocks[block_id].node_offsets[e_class_id] = 0;
+                    blocks[block_id].member_eclasses.push_back(e_class_id);
                     continue;
                 }
             }
 
-            uint32_t block_id = eclassId;
+            uint32_t block_id = e_class_id;
             MemBlockSim b;
             b.size = node.size_bytes;
             b.start_time = node.start_time;
             b.end_time = end_time;
             b.space = node.memory_space;
             b.is_persistent = node.is_persistent;
-            b.node_offsets[eclassId] = 0;
-            b.member_eclasses.push_back(eclassId);
+            b.node_offsets[e_class_id] = 0;
+            b.member_eclasses.push_back(e_class_id);
             blocks[block_id] = b;
-            node_to_block[eclassId] = block_id;
+            node_to_block[e_class_id] = block_id;
         }
 
-        struct FreeBlock { uint64_t offset; uint64_t size; };
-        struct ActiveAlloc { float end_time; uint64_t offset; uint64_t size; std::vector<uint32_t> members; };
+        struct FreeBlock
+        {
+            uint64_t offset;
+            uint64_t size;
+        };
+        struct ActiveAlloc
+        {
+            float end_time;
+            uint64_t offset;
+            uint64_t size;
+            std::vector<uint32_t> members;
+        };
 
         std::unordered_map<uint32_t, std::vector<uint32_t>> blocks_by_space;
-        for (auto& kv : blocks) {
+        for (auto &kv : blocks)
+        {
             blocks_by_space[kv.second.space].push_back(kv.first);
         }
 
         // Phase 2: Interval Graph Allocation
-        for (auto& kv : blocks_by_space) {
+        for (auto &kv : blocks_by_space)
+        {
             uint32_t space = kv.first;
-            std::vector<uint32_t>& space_block_ids = kv.second;
+            std::vector<uint32_t> &space_block_ids = kv.second;
 
             uint64_t persistent_offset = 0;
             std::vector<uint32_t> transient_blocks;
 
-            for (uint32_t b_id : space_block_ids) {
-                if (blocks[b_id].is_persistent) {
+            for (uint32_t b_id : space_block_ids)
+            {
+                if (blocks[b_id].is_persistent)
+                {
                     blocks[b_id].base_offset = persistent_offset;
                     persistent_offset += (blocks[b_id].size + alignment - 1) & ~(alignment - 1);
-                } else {
+                }
+                else
+                {
                     transient_blocks.push_back(b_id);
                 }
             }
 
-            std::sort(transient_blocks.begin(), transient_blocks.end(), [&](uint32_t a, uint32_t b) {
-                return blocks[a].start_time < blocks[b].start_time;
-            });
+            std::sort(transient_blocks.begin(), transient_blocks.end(), [&](uint32_t a, uint32_t b)
+                      { return blocks[a].start_time < blocks[b].start_time; });
 
             std::vector<FreeBlock> free_list;
             std::vector<ActiveAlloc> active_allocs;
             uint64_t peak_mem = persistent_offset;
 
-            auto insert_free = [&](uint64_t off, uint64_t sz) {
+            auto insert_free = [&](uint64_t off, uint64_t sz)
+            {
                 free_list.push_back({off, sz});
-                std::sort(free_list.begin(), free_list.end(), [](const FreeBlock& a, const FreeBlock& b){ return a.offset < b.offset; });
+                std::sort(free_list.begin(), free_list.end(), [](const FreeBlock &a, const FreeBlock &b)
+                          { return a.offset < b.offset; });
                 std::vector<FreeBlock> merged;
-                for (auto& fb : free_list) {
-                    if (merged.empty()) merged.push_back(fb);
-                    else if (merged.back().offset + merged.back().size == fb.offset) {
+                for (auto &fb : free_list)
+                {
+                    if (merged.empty())
+                        merged.push_back(fb);
+                    else if (merged.back().offset + merged.back().size == fb.offset)
+                    {
                         merged.back().size += fb.size;
-                    } else {
+                    }
+                    else
+                    {
                         merged.push_back(fb);
                     }
                 }
                 free_list = std::move(merged);
             };
 
-            for (uint32_t b_id : transient_blocks) {
-                MemBlockSim& b = blocks[b_id];
+            for (uint32_t b_id : transient_blocks)
+            {
+                MemBlockSim &b = blocks[b_id];
                 float current_time = b.start_time;
 
                 std::vector<ActiveAlloc> still_active;
-                for (auto& alloc : active_allocs) {
-                    if (alloc.end_time <= current_time) {
+                for (auto &alloc : active_allocs)
+                {
+                    if (alloc.end_time <= current_time)
+                    {
                         insert_free(alloc.offset, alloc.size);
-                    } else {
+                    }
+                    else
+                    {
                         still_active.push_back(alloc);
                     }
                 }
                 active_allocs = std::move(still_active);
 
                 uint64_t required_size = (b.size + alignment - 1) & ~(alignment - 1);
-                if (required_size == 0) required_size = alignment;
+                if (required_size == 0)
+                    required_size = alignment;
 
                 int best_idx = -1;
                 uint64_t best_size = UINT64_MAX;
 
-                for (size_t i = 0; i < free_list.size(); ++i) {
-                    if (free_list[i].size >= required_size && free_list[i].size < best_size) {
+                for (size_t i = 0; i < free_list.size(); ++i)
+                {
+                    if (free_list[i].size >= required_size && free_list[i].size < best_size)
+                    {
                         best_idx = (int)i;
                         best_size = free_list[i].size;
                     }
                 }
 
-                if (best_idx != -1) {
+                if (best_idx != -1)
+                {
                     b.base_offset = free_list[best_idx].offset;
                     free_list[best_idx].offset += required_size;
                     free_list[best_idx].size -= required_size;
-                    if (free_list[best_idx].size == 0) {
+                    if (free_list[best_idx].size == 0)
+                    {
                         free_list.erase(free_list.begin() + best_idx);
                     }
-                } else {
+                }
+                else
+                {
                     b.base_offset = peak_mem;
                     peak_mem += required_size;
 
                     uint64_t limit = UINT64_MAX;
-                    for (const auto& limit_kv : maxMemoryByBackend) {
-                        if (getMemorySpace(limit_kv.first) == space) {
+                    for (const auto &limit_kv : maxMemoryByBackend)
+                    {
+                        if (getMemorySpace(limit_kv.first) == space)
+                        {
                             limit = std::min(limit, limit_kv.second);
                         }
                     }
-                    if (peak_mem > limit) {
+                    if (peak_mem > limit)
+                    {
                         result.fits = false;
                         result.oomEClassId = b_id;
-                        for (auto& alloc : active_allocs) {
-                            for (uint32_t mbr : alloc.members) result.oomLiveAllocated[mbr] = true;
+                        for (auto &alloc : active_allocs)
+                        {
+                            for (uint32_t mbr : alloc.members)
+                                result.oomLiveAllocated[mbr] = true;
                         }
-                        for (uint32_t mbr : b.member_eclasses) result.oomLiveAllocated[mbr] = true;
+                        for (uint32_t mbr : b.member_eclasses)
+                            result.oomLiveAllocated[mbr] = true;
                         return result;
                     }
                 }
@@ -624,35 +672,36 @@ private:
             result.peak_mem[space] = peak_mem;
         }
 
-        for (uint32_t eclassId : topo_order) {
-            uint32_t b_id = node_to_block[eclassId];
-            result.offsets[eclassId] = blocks[b_id].base_offset + blocks[b_id].node_offsets[eclassId];
+        for (uint32_t e_class_id : topo_order)
+        {
+            uint32_t b_id = node_to_block[e_class_id];
+            result.offsets[e_class_id] = blocks[b_id].base_offset + blocks[b_id].node_offsets[e_class_id];
         }
 
         return result;
     }
 
     void visitTopoFast(
-        uint32_t eclassId,
+        uint32_t e_class_id,
         const EGraph &egraph,
         const std::unordered_map<uint32_t, uint32_t> &selection_map,
         const PrecompData &precomp,
         std::vector<bool> &visited_classes,
         std::vector<uint32_t> &topo_order) const
     {
-        eclassId = egraph.findConst(eclassId);
-        if (visited_classes[eclassId])
+        e_class_id = egraph.findConst(e_class_id);
+        if (visited_classes[e_class_id])
             return;
-        visited_classes[eclassId] = true;
+        visited_classes[e_class_id] = true;
 
-        auto choiceIt = selection_map.find(eclassId);
+        auto choiceIt = selection_map.find(e_class_id);
         if (choiceIt == selection_map.end())
             return;
 
-        uint32_t enode_id = egraph.getEClass(eclassId).enodes[choiceIt->second];
+        uint32_t enode_id = egraph.getEClass(e_class_id).enodes[choiceIt->second];
         for (uint32_t child : precomp.enode_canon_children[enode_id])
             visitTopoFast(child, egraph, selection_map, precomp, visited_classes, topo_order);
-        topo_order.push_back(eclassId);
+        topo_order.push_back(e_class_id);
     }
 
     bool validateInplaceSchedulesFast(
@@ -823,8 +872,8 @@ private:
                 info.cost = 0.0f;
                 if (strictCache && (enode.leafId & 0x80000000))
                 {
-                    uint32_t eclassId = egraph.getENodeEClass(i);
-                    uint32_t canonId = egraph.findConst(eclassId);
+                    uint32_t e_class_id = egraph.getENodeEClass(i);
+                    uint32_t canonId = egraph.findConst(e_class_id);
                     uint32_t logicalId = eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : UINT32_MAX;
                     if (logicalId == UINT32_MAX || cachedNodes.find(logicalId) == cachedNodes.end())
                     {
@@ -992,11 +1041,11 @@ private:
         size_t totalPruned = 0;
         for (size_t i = 0; i < egraph.getClasses().size(); ++i)
         {
-            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-            if (eclassId != i)
+            uint32_t e_class_id = egraph.find(static_cast<uint32_t>(i));
+            if (e_class_id != i)
                 continue;
 
-            EClass &cls = egraph.getEClass(eclassId);
+            EClass &cls = egraph.getEClass(e_class_id);
             std::vector<uint32_t> validEnodes;
             validEnodes.reserve(cls.enodes.size());
 
@@ -1095,8 +1144,8 @@ private:
         std::vector<uint32_t> classToBitIdx(numClasses, UINT32_MAX);
         for (size_t i = 0; i < numClasses; ++i)
         {
-            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-            if (eclassId == i)
+            uint32_t e_class_id = egraph.find(static_cast<uint32_t>(i));
+            if (e_class_id == i)
             {
                 classToBitIdx[i] = static_cast<uint32_t>(canonicalClasses.size());
                 canonicalClasses.push_back(i);
@@ -1106,17 +1155,17 @@ private:
         const size_t numCanonical = canonicalClasses.size();
         const size_t bitWords = numCanonical == 0 ? 0 : (numCanonical + 63) >> 6;
 
-        auto bitTest = [&](const std::vector<uint64_t> &bits, uint32_t eclassId) -> bool
+        auto bitTest = [&](const std::vector<uint64_t> &bits, uint32_t e_class_id) -> bool
         {
-            uint32_t idx = classToBitIdx[eclassId];
+            uint32_t idx = classToBitIdx[e_class_id];
             if (idx == UINT32_MAX || bits.empty())
                 return false;
             return (bits[idx >> 6] >> (idx & 63)) & 1ULL;
         };
 
-        auto bitSet = [&](std::vector<uint64_t> &bits, uint32_t eclassId)
+        auto bitSet = [&](std::vector<uint64_t> &bits, uint32_t e_class_id)
         {
-            uint32_t idx = classToBitIdx[eclassId];
+            uint32_t idx = classToBitIdx[e_class_id];
             if (idx != UINT32_MAX && !bits.empty())
             {
                 bits[idx >> 6] |= (1ULL << (idx & 63));
@@ -1141,18 +1190,18 @@ private:
         std::vector<std::vector<uint32_t>> parentMap(numClasses);
         for (size_t i = 0; i < numClasses; ++i)
         {
-            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-            if (eclassId != i)
+            uint32_t e_class_id = egraph.find(static_cast<uint32_t>(i));
+            if (e_class_id != i)
                 continue;
 
-            const EClass &cls = egraph.getEClass(eclassId);
+            const EClass &cls = egraph.getEClass(e_class_id);
             for (uint32_t enodeId : cls.enodes)
             {
                 const ENode &enode = egraph.getENodes()[enodeId];
                 for (uint32_t child : enode.children)
                 {
                     uint32_t childEClass = egraph.find(child);
-                    parentMap[childEClass].push_back(eclassId);
+                    parentMap[childEClass].push_back(e_class_id);
                 }
             }
         }
@@ -1172,11 +1221,11 @@ private:
 
         for (size_t i = 0; i < numClasses; ++i)
         {
-            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-            if (eclassId == i)
+            uint32_t e_class_id = egraph.find(static_cast<uint32_t>(i));
+            if (e_class_id == i)
             {
-                worklist.push_back(eclassId);
-                inQueue[eclassId] = true;
+                worklist.push_back(e_class_id);
+                inQueue[e_class_id] = true;
             }
         }
 
@@ -1186,11 +1235,11 @@ private:
         ProgressTimer optTimer(0, "calculating optimistic cost");
         while (!worklist.empty())
         {
-            for (uint32_t eclassId : worklist)
+            for (uint32_t e_class_id : worklist)
             {
-                inQueue[eclassId] = false;
+                inQueue[e_class_id] = false;
 
-                const EClass &cls = egraph.getEClass(eclassId);
+                const EClass &cls = egraph.getEClass(e_class_id);
                 OptSummary best;
                 best.coveredBits.assign(bitWords, 0);
 
@@ -1204,7 +1253,7 @@ private:
                     float candidateCost = info.cost;
                     bool candidateValid = true;
 
-                    bitSet(candidateBits, eclassId);
+                    bitSet(candidateBits, e_class_id);
 
                     const ENode &enode = egraph.getENodes()[enodeId];
 
@@ -1219,7 +1268,7 @@ private:
 
                     for (uint32_t childEClass : childEClasses)
                     {
-                        if (childEClass == eclassId)
+                        if (childEClass == e_class_id)
                         {
                             candidateValid = false;
                             break;
@@ -1232,7 +1281,7 @@ private:
                             break;
                         }
 
-                        if (bitTest(childOpt.coveredBits, eclassId))
+                        if (bitTest(childOpt.coveredBits, e_class_id))
                         {
                             candidateValid = false;
                             break;
@@ -1290,13 +1339,13 @@ private:
                 if (!best.valid)
                     continue;
 
-                if (!opt[eclassId].valid ||
-                    best.cost < opt[eclassId].cost - EPS ||
-                    (std::abs(best.cost - opt[eclassId].cost) <= EPS && best.chosenEnode < opt[eclassId].chosenEnode))
+                if (!opt[e_class_id].valid ||
+                    best.cost < opt[e_class_id].cost - EPS ||
+                    (std::abs(best.cost - opt[e_class_id].cost) <= EPS && best.chosenEnode < opt[e_class_id].chosenEnode))
                 {
-                    opt[eclassId] = std::move(best);
+                    opt[e_class_id] = std::move(best);
 
-                    for (uint32_t parentId : parentMap[eclassId])
+                    for (uint32_t parentId : parentMap[e_class_id])
                     {
                         if (!inQueue[parentId])
                         {
@@ -1315,21 +1364,21 @@ private:
         std::vector<float> eclassMinCost(numClasses, TGConstants::INF);
         for (size_t i = 0; i < numClasses; ++i)
         {
-            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-            if (eclassId == i && opt[eclassId].valid)
+            uint32_t e_class_id = egraph.find(static_cast<uint32_t>(i));
+            if (e_class_id == i && opt[e_class_id].valid)
             {
-                eclassMinCost[eclassId] = opt[eclassId].cost;
+                eclassMinCost[e_class_id] = opt[e_class_id].cost;
             }
         }
 
         std::vector<uint64_t> tempBits(bitWords, 0);
         for (size_t i = 0; i < numClasses; ++i)
         {
-            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-            if (eclassId != i)
+            uint32_t e_class_id = egraph.find(static_cast<uint32_t>(i));
+            if (e_class_id != i)
                 continue;
 
-            const EClass &cls = egraph.getEClass(eclassId);
+            const EClass &cls = egraph.getEClass(e_class_id);
             for (uint32_t enodeId : cls.enodes)
             {
                 const ENodeInfo &info = enodeInfos[enodeId];
@@ -1340,7 +1389,7 @@ private:
                 }
 
                 std::fill(tempBits.begin(), tempBits.end(), 0);
-                bitSet(tempBits, eclassId);
+                bitSet(tempBits, e_class_id);
 
                 float total = info.cost;
                 bool valid = true;
@@ -1358,7 +1407,7 @@ private:
 
                 for (uint32_t childEClass : childEClasses)
                 {
-                    if (childEClass == eclassId)
+                    if (childEClass == e_class_id)
                     {
                         valid = false;
                         break;
@@ -1368,7 +1417,7 @@ private:
                         valid = false;
                         break;
                     }
-                    if (bitTest(opt[childEClass].coveredBits, eclassId))
+                    if (bitTest(opt[childEClass].coveredBits, e_class_id))
                     {
                         valid = false;
                         break;
@@ -1412,11 +1461,11 @@ private:
 
         for (size_t i = 0; i < numClasses; ++i)
         {
-            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-            if (eclassId != i)
+            uint32_t e_class_id = egraph.find(static_cast<uint32_t>(i));
+            if (e_class_id != i)
                 continue;
 
-            EClass &cls = egraph.getEClass(eclassId);
+            EClass &cls = egraph.getEClass(e_class_id);
             std::sort(cls.enodes.begin(), cls.enodes.end(),
                       [&](uint32_t a, uint32_t b)
                       {
@@ -1447,17 +1496,17 @@ private:
         precomp.is_eclass_cached.assign(numClasses, false);
         for (size_t i = 0; i < numClasses; ++i)
         {
-            uint32_t eclassId = egraph.find(static_cast<uint32_t>(i));
-            if (eclassId == i)
+            uint32_t e_class_id = egraph.find(static_cast<uint32_t>(i));
+            if (e_class_id == i)
             {
-                uint32_t logicalId = eclassToLogical.count(eclassId) ? eclassToLogical.at(eclassId) : UINT32_MAX;
+                uint32_t logicalId = eclassToLogical.count(e_class_id) ? eclassToLogical.at(e_class_id) : UINT32_MAX;
                 if (logicalId != UINT32_MAX && graph.hasNode(logicalId) && graph.getNode(logicalId).storageType == StorageType::PERSISTENT)
-                    precomp.is_eclass_persistent[eclassId] = true;
-                if (egraph.constantStaging.count(eclassId))
-                    precomp.is_eclass_persistent[eclassId] = true;
+                    precomp.is_eclass_persistent[e_class_id] = true;
+                if (egraph.constantStaging.count(e_class_id))
+                    precomp.is_eclass_persistent[e_class_id] = true;
 
                 if (logicalId != UINT32_MAX && cachedNodes.count(logicalId))
-                    precomp.is_eclass_cached[eclassId] = true;
+                    precomp.is_eclass_cached[e_class_id] = true;
             }
         }
 
@@ -1584,20 +1633,27 @@ private:
             {
                 std::unordered_map<uint32_t, SimNode> simNodes;
                 current_cost = simulateExecutionTime(egraph, selection_map, enodeInfos, precomp, topo_order, simNodes);
-                
+
                 AllocResult alloc_res = allocateStaticMemory(simNodes, topo_order, maxMemoryByBackend, egraph.getClasses().size());
-                
-                if (!alloc_res.fits) {
+
+                if (!alloc_res.fits)
+                {
                     valid = false;
                     reason = "OOM";
                     oomEClassId = alloc_res.oomEClassId;
                     oomLiveAllocated = alloc_res.oomLiveAllocated;
-                } else {
-                    for (const auto& kv : alloc_res.peak_mem) {
+                }
+                else
+                {
+                    for (const auto &kv : alloc_res.peak_mem)
+                    {
                         Backend rep_b = Backend::CPU;
-                        if (kv.first == 0) rep_b = Backend::STORAGE;
-                        else if (kv.first == 2) rep_b = Backend::CUDA;
-                        else if (kv.first == 3) rep_b = Backend::OPENCL;
+                        if (kv.first == 0)
+                            rep_b = Backend::STORAGE;
+                        else if (kv.first == 2)
+                            rep_b = Backend::CUDA;
+                        else if (kv.first == 3)
+                            rep_b = Backend::OPENCL;
                         peak[rep_b] = kv.second;
                     }
 
@@ -1672,8 +1728,8 @@ private:
                 // Scan path to find first node that is actually live in memory and has alternative kernel paths to try
                 for (int i = 0; i < path.size(); i++)
                 {
-                    uint32_t eclassId = path[i];
-                    uint32_t canon = egraph.findConst(eclassId);
+                    uint32_t e_class_id = path[i];
+                    uint32_t canon = egraph.findConst(e_class_id);
 
                     if (canon < oomLiveAllocated.size() && oomLiveAllocated[canon])
                     {
@@ -1938,49 +1994,49 @@ private:
 
         std::vector<uint32_t> topo;
         std::unordered_set<uint32_t> visited_classes;
-        std::function<void(uint32_t)> visit = [&](uint32_t eclassId)
+        std::function<void(uint32_t)> visit = [&](uint32_t e_class_id)
         {
-            eclassId = egraph.find(eclassId);
-            if (visited_classes.count(eclassId))
+            e_class_id = egraph.find(e_class_id);
+            if (visited_classes.count(e_class_id))
                 return;
-            visited_classes.insert(eclassId);
+            visited_classes.insert(e_class_id);
 
-            auto choiceIt = extraction.choiceByEClass.find(eclassId);
+            auto choiceIt = extraction.choiceByEClass.find(e_class_id);
             if (choiceIt == extraction.choiceByEClass.end() || !choiceIt->second.valid)
                 return;
 
             const ENode &enode = egraph.getENodes()[choiceIt->second.enodeId];
             for (uint32_t child : enode.children)
                 visit(child);
-            topo.push_back(eclassId);
+            topo.push_back(e_class_id);
         };
 
         uint32_t rootEClassId = egraph.find(nodeToEClass.at(rootId));
         visit(rootEClassId);
 
         std::unordered_map<uint32_t, uint32_t> eclassToPhys;
-        for (uint32_t eclassId : topo)
+        for (uint32_t e_class_id : topo)
         {
-            eclassToPhys[eclassId] = GlobalNextPhysId++;
+            eclassToPhys[e_class_id] = GlobalNextPhysId++;
         }
 
         std::unordered_map<uint32_t, uint32_t> lastPhysIdForLogical;
-        for (uint32_t eclassId : topo)
+        for (uint32_t e_class_id : topo)
         {
-            uint32_t logicalId = eclassToLogical.count(eclassId) ? eclassToLogical.at(eclassId) : UINT32_MAX;
+            uint32_t logicalId = eclassToLogical.count(e_class_id) ? eclassToLogical.at(e_class_id) : UINT32_MAX;
             if (logicalId != UINT32_MAX)
             {
-                lastPhysIdForLogical[logicalId] = eclassToPhys[eclassId];
+                lastPhysIdForLogical[logicalId] = eclassToPhys[e_class_id];
             }
         }
 
-        for (uint32_t eclassId : topo)
+        for (uint32_t e_class_id : topo)
         {
-            const ExtractChoice &choice = extraction.choiceByEClass.at(eclassId);
+            const ExtractChoice &choice = extraction.choiceByEClass.at(e_class_id);
             const ENode &enode = egraph.getENodes()[choice.enodeId];
-            uint32_t logicalId = eclassToLogical.count(eclassId) ? eclassToLogical.at(eclassId) : UINT32_MAX;
+            uint32_t logicalId = eclassToLogical.count(e_class_id) ? eclassToLogical.at(e_class_id) : UINT32_MAX;
 
-            uint32_t physId = eclassToPhys[eclassId];
+            uint32_t physId = eclassToPhys[e_class_id];
 
             TensorNode tNode;
             tNode.id = physId;
@@ -1999,7 +2055,8 @@ private:
             inst.nodeId = physId;
             inst.logicalNodeId = logicalId;
             inst.inputNodeIds = tNode.parentIds;
-            inst.backend = enode.backend;
+            inst.mem_space = enode.mem_space;
+            inst.engine = enode.engine;
             inst.fullKernelId = enode.kernelUid;
 
             if (enode.kernelUid != 0)
@@ -2009,27 +2066,19 @@ private:
                 inst.viewInputIndex = kEntry.isView ? 0 : -1;
             }
 
-            tNode.storageType = StorageType::TRANSIENT;
             if (logicalId != UINT32_MAX)
             {
                 if (graph.hasNode(logicalId))
                 {
-                    tNode.storageType = graph.getNode(logicalId).storageType;
                     tNode.debugOrigin = graph.getNode(logicalId).debugOrigin;
                 }
-                if (cachedNodes.count(logicalId) && (physId == lastPhysIdForLogical[logicalId] || tNode.opType == OpType::INPUT || tNode.opType == OpType::CACHE))
-                {
-                    tNode.storageType = StorageType::PINNED;
-                }
             }
 
-            if (egraph.constantStaging.count(eclassId))
+            if (egraph.constantStaging.count(e_class_id))
             {
-                tNode.storageType = StorageType::PERSISTENT;
-                compiled.constantStaging[physId] = egraph.constantStaging.at(eclassId);
+                compiled.constantStaging[physId] = egraph.constantStaging.at(e_class_id);
             }
 
-            inst.outputStorageType = tNode.storageType;
             if (enode.opType != OpType::INPUT && enode.opType != OpType::CACHE)
             {
                 compiled.instructions.push_back(inst);
@@ -2071,41 +2120,49 @@ private:
     struct BaseEGraphState
     {
         EGraph egraph;
-        std::unordered_map<uint32_t, uint32_t> nodeToEClass;
-        std::unordered_map<uint32_t, uint32_t> eclassToLogical;
+        std::unordered_map<LogicalId, EClassId> nodeToEClass;
+        std::unordered_map<EClassId, LogicalId> eclassToLogical;
     };
 
     BaseEGraphState baseState;
     bool baseStateInitialized = false;
 
-    void initBaseEGraph(uint32_t rootId, const Graph &graph, bool doSaturate, Repo *repo = nullptr)
+    // Initialize baseState.egraph from graph
+    void initBaseEGraph(LogicalId rootId, Graph &graph, bool doSaturate, Repo *repo = nullptr)
     {
         if (baseStateInitialized)
             return;
 
-        std::vector<uint32_t> topo = topologicalSort({rootId}, graph);
+        std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
 
-        Graph tempGraph = graph;
-        inferShapes(topo, tempGraph);
+        inferShapes(topo, graph);
 
-        auto refCounts = computeRefCounts(topo, rootId, tempGraph);
-        baseState.nodeToEClass.reserve(tempGraph.nodes.size());
+        baseState.nodeToEClass.reserve(graph.nodes.size());
 
-        for (uint32_t nodeId : topo)
+        MemSpace storage = MemSpace(0, HandleType::STORAGE);
+        MemSpace ram = MemSpace(1, HandleType::CPP);
+        Engine cpu = Engine(0, EngineType::CPU);
+
+        for (LogicalId nodeId : topo)
         {
-            TensorNode &node = tempGraph.getNode(nodeId);
-            uint32_t eclassId = baseState.egraph.addEClass(node.getShape(), node.strides, node.viewOffset, node.dtype, node.backend);
-            baseState.nodeToEClass[nodeId] = eclassId;
-            if (tempGraph.constantStaging.count(nodeId))
+            TensorNode &node = graph.getNode(nodeId);
+            MemSpace mem_space = ram;
+            if (node.opType == OpType::INPUT && graph.getInputDataType(nodeId) == InputDataType::STORAGE)
             {
-                baseState.egraph.constantStaging[eclassId] = tempGraph.constantStaging.at(nodeId);
+                mem_space = storage;
+            }
+            EClassId e_class_id = baseState.egraph.addEClass(node.getShape(), node.strides, node.dtype, mem_space);
+            baseState.nodeToEClass[nodeId] = e_class_id;
+            if (graph.constantStaging.count(nodeId))
+            {
+                baseState.egraph.constantStaging[e_class_id] = graph.constantStaging.at(nodeId);
             }
         }
 
-        for (uint32_t nodeId : topo)
+        for (LogicalId nodeId : topo)
         {
-            const TensorNode &node = tempGraph.getNode(nodeId);
-            uint32_t eclassId = baseState.nodeToEClass[nodeId];
+            const TensorNode &node = graph.getNode(nodeId);
+            EClassId e_class_id = baseState.nodeToEClass[nodeId];
 
             if (node.opType == OpType::INPUT)
             {
@@ -2113,30 +2170,34 @@ private:
                 enode.kernelUid = 0;
                 enode.opType = node.opType;
                 enode.opName = node.opName;
-                for (uint32_t pid : node.parentIds)
+                for (LogicalId pid : node.parentIds)
                     enode.children.push_back(baseState.nodeToEClass[pid]);
                 enode.shape = node.getShape();
                 enode.strides = node.strides;
-                enode.viewOffset = node.viewOffset;
                 enode.dtype = node.dtype;
-                enode.backend = node.backend;
-                enode.leafId = node.id;
-                baseState.egraph.addENode(eclassId, enode);
+                enode.mem_space = graph.getInputDataType(nodeId) == InputDataType::STORAGE ? storage : ram;
+                enode.engine = cpu;
+                enode.leafId = nodeId;
+                baseState.egraph.addENode(e_class_id, enode);
                 continue;
             }
 
             std::vector<TensorNode> inputs;
-            for (uint32_t pid : node.parentIds)
-                inputs.push_back(tempGraph.getNode(pid));
+            std::vector<MemSpace> input_mem_spaces;
+            for (LogicalId pid : node.parentIds)
+            {
+                inputs.push_back(graph.getNode(pid));
+                input_mem_spaces.push_back(graph.getInputDataType(pid) == InputDataType::STORAGE ? storage : ram);
+            }
 
-            std::vector<uint64_t> refs = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, node.backend, inputs, node, true);
+            std::vector<KernelId> refs = KernelRegistry::get().findMatchingKernels(
+                node.opType, node.opName, true, inputs, node, ram, {cpu}, );
 
             if (refs.size() == 0)
             {
-                Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels to init EClass " + std::to_string(eclassId) + " " + toString(baseState.egraph.getEClass(eclassId)) + "\nNode " + toString(node, tempGraph));
+                Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels to init EClass " + toString(e_class_id) + " " + toString(baseState.egraph.getEClass(e_class_id)) + "\nNode " + toString(node, graph));
             }
-            for (uint64_t uid : refs)
+            for (KernelId uid : refs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
                 ENode enode;
@@ -2160,7 +2221,7 @@ private:
                     enode.viewOffset = 0;
                 }
 
-                baseState.egraph.addENode(eclassId, enode);
+                baseState.egraph.addENode(e_class_id, enode);
             }
         }
 
@@ -2662,12 +2723,11 @@ private:
         return injected;
     }
 
-public:
-    Planner(CostModel &costModel, std::unordered_map<Backend, uint64_t> maxMemoryByBackend = {})
-        : costModel(costModel), maxMemoryByBackend(std::move(maxMemoryByBackend)) {}
+    Planner(CostModel &costModel, std::unordered_map<uint32_t, uint64_t> &mem_caps)
+        : costModel(costModel), mem_caps(mem_caps) {}
 
     CompiledGraph plan(
-        uint32_t rootId,
+        LogicalId rootId,
         const Graph &graph,
         const Bucket &bucket,
         const std::unordered_map<uint32_t, Backend> &cachedNodes,
@@ -2675,11 +2735,8 @@ public:
         bool strictCache = false,
         Repo *repo = nullptr)
     {
-        // Early static baseline validation
-        auto baseline = computeStaticBaseline(graph, cachedNodes);
-        validateStaticBaseline(baseline);
-
-        initBaseEGraph(rootId, graph, doSaturate, repo);
+        Graph tempGraph = graph;
+        initBaseEGraph(rootId, tempGraph, doSaturate, repo);
 
         EGraph egraph = baseState.egraph;
         auto eclassToLogical = baseState.eclassToLogical;
@@ -2816,8 +2873,8 @@ public:
             changed = false;
             for (const auto &cls : egraph.getClasses())
             {
-                uint32_t eclassId = egraph.find(cls.id);
-                if (immutable_eclasses.count(eclassId))
+                uint32_t e_class_id = egraph.find(cls.id);
+                if (immutable_eclasses.count(e_class_id))
                     continue;
 
                 for (uint32_t enodeId : cls.enodes)
@@ -2831,7 +2888,7 @@ public:
                             uint32_t parentEclass = egraph.find(enode.children[0]);
                             if (immutable_eclasses.count(parentEclass))
                             {
-                                immutable_eclasses.insert(eclassId);
+                                immutable_eclasses.insert(e_class_id);
                                 changed = true;
                                 break;
                             }

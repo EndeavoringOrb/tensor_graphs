@@ -40,7 +40,7 @@ def ascend(remaining: set[Node], ordered: list[Node], selection_map: dict[int, i
     remaining.add(ordered.pop())
 
 
-def iter_dispatch_orders(nodes: list[Node]): # TODO: apply minimalloc to this too?
+def iter_dispatch_orders(nodes: list[Node]):  # TODO: apply minimalloc to this too?
     validate(nodes)
     remaining = set(nodes)
     ordered = []

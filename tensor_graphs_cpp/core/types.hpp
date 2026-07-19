@@ -51,6 +51,38 @@ namespace Error
     }
 }
 
+struct LogicalId
+{
+    uint32_t value = UINT32_MAX;
+
+    auto operator<=>(const LogicalId &) const = default;
+
+    LogicalId operator++(int)
+    {
+        LogicalId temp = *this;
+        ++value;
+        return temp;
+    }
+};
+
+struct PhysicalId
+{
+    uint32_t value = UINT32_MAX;
+    auto operator<=>(const PhysicalId &) const = default;
+};
+
+struct EClassId
+{
+    uint32_t value = UINT32_MAX;
+    auto operator<=>(const EClassId &) const = default;
+};
+
+struct KernelId
+{
+    uint32_t value = UINT32_MAX;
+    auto operator<=>(const KernelId &) const = default;
+};
+
 inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
 {
     uint64_t stridedIndex = 0;
@@ -147,7 +179,7 @@ enum class OpType : uint32_t
     TRIU,
     GATHER,
     FILL,
-    COPY_TO, // Copy to another MemorySpace on the same HandleType
+    COPY_TO, // Copy to another mem idx on the same HandleType
     IM2COL,
     CONTIGUOUS,
     SCATTER,
@@ -158,7 +190,7 @@ enum class OpType : uint32_t
     AND,
     OR,
     NOT,
-    TRANSFER, // Transfer between HandleType
+    TRANSFER, // Transfer between HandleType on the same mem idx
 
     FUSED
 };
@@ -168,76 +200,42 @@ inline constexpr bool isAtomic(OpType type)
     return type != OpType::FUSED;
 }
 
-using MemorySpace = uint32_t;
-
 enum class HandleType : uint32_t
 {
     STORAGE,
     CPP,
-    CUDA,
-    OPENCL
+    OPENCL,
+    CUDA
 };
 
 enum class EngineType : uint32_t
 {
     CPU,
-    CUDA_GPU,
-    QUALCOMM_IGPU
+    QUALCOMM_IGPU,
+    CUDA_GPU
 };
 
-struct Engine {
-    EngineType type;
-    uint32_t idx;
-};
-
-constexpr uint32_t toMask(HandleType handle) {
-    return 1u << static_cast<uint32_t>(handle);
-}
-
-template <typename... Args>
-constexpr uint32_t makeMask(Args... args) {
-    return (toMask(args) | ...);
-}
-
-struct EngineSupport {
-    uint32_t allowed_inputs;
-    uint32_t allowed_outputs;
-
-    constexpr bool supports_input(HandleType h) const {
-        return (allowed_inputs & toMask(h)) != 0;
-    }
-    
-    constexpr bool supports_output(HandleType h) const {
-        return (allowed_outputs & toMask(h)) != 0;
-    }
-};
-
-constexpr EngineSupport getEngineSupport(EngineType type) {
-    switch (type) {
-        case EngineType::CPU:
-            return {
-                makeMask(HandleType::STORAGE, HandleType::CPP),
-                makeMask(HandleType::STORAGE, HandleType::CPP)
-            };
-        case EngineType::CUDA_GPU:
-            return {
-                makeMask(HandleType::CUDA),
-                makeMask(HandleType::CUDA)
-            };
-        case EngineType::QUALCOMM_IGPU:
-            return {
-                makeMask(HandleType::OPENCL),
-                makeMask(HandleType::OPENCL)
-            };
-    }
-    return {0, 0};
-}
-
-enum class StorageType : uint32_t
+struct MemSpace
 {
-    TRANSIENT,
-    PERSISTENT,
-    PINNED // TODO: change to CACHE? or merge with PERSISTENT if OpType::CACHE is enough to differentiate?
+    uint32_t idx;
+    HandleType type;
+
+    bool operator==(const MemSpace &other) const
+    {
+        return idx == other.idx && type == other.type;
+    }
+};
+
+struct Engine
+{
+    uint32_t idx;
+    EngineType type;
+    std::unordered_set<MemSpace> supported;
+
+    bool operator==(const Engine &other) const
+    {
+        return idx == other.idx && type == other.type;
+    }
 };
 
 struct TensorGraphError : public std::runtime_error
@@ -436,23 +434,19 @@ private:
     std::vector<uint32_t> shape;
 
 public:
-    uint32_t id;
+    LogicalId id;
     OpType opType;
     std::string opName; // Used if opType == OpType::FUSED
     DType dtype;
-    std::vector<uint32_t> parentIds;
+    std::vector<LogicalId> parentIds;
     std::vector<uint64_t> strides;
-    uint64_t viewOffset = 0;
-    HandleType handleType = HandleType::CPP;
-    MemorySpace memorySpace = 0;
-    StorageType storageType = StorageType::TRANSIENT;
     std::string contentHash;
     std::string debugOrigin;
 
     TensorNode() {}
 
-    TensorNode(uint32_t _id, OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, HandleType _handleType = HandleType::CPP, MemorySpace _memorySpace = 1, StorageType _storageType = StorageType::PERSISTENT, std::string _contentHash = "", std::string _debugOrigin = "")
-        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), handleType(_handleType), memorySpace(_memorySpace), storageType(_storageType), contentHash(_contentHash), debugOrigin(_debugOrigin)
+    TensorNode(LogicalId _id, OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, std::string _contentHash = "", std::string _debugOrigin = "")
+        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), contentHash(_contentHash), debugOrigin(_debugOrigin)
     {
         if (strides.empty())
         {
@@ -676,26 +670,23 @@ inline std::string toString(EngineType engine)
     }
 }
 
-inline std::string toString(StorageType storage)
+inline std::string toString(LogicalId id)
 {
-    switch (storage)
-    {
-    case StorageType::TRANSIENT:
-        return "TRANSIENT";
-    case StorageType::PERSISTENT:
-        return "PERSISTENT";
-    case StorageType::PINNED:
-        return "PINNED";
-    default:
-        return "UNKNOWN_STORAGE";
-    }
+    return "LogicalId(" + std::to_string(id.value) + ")";
 }
 
+inline std::string toString(PhysicalId id)
+{
+    return "PhysicalId(" + std::to_string(id.value) + ")";
+}
+
+// Stream operators
+inline std::ostream &operator<<(std::ostream &os, LogicalId id) { return os << toString(id); }
+inline std::ostream &operator<<(std::ostream &os, PhysicalId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << toString(dtype); }
 inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toString(op); }
 inline std::ostream &operator<<(std::ostream &os, HandleType handle) { return os << toString(handle); }
 inline std::ostream &operator<<(std::ostream &os, EngineType engine) { return os << toString(engine); }
-inline std::ostream &operator<<(std::ostream &os, StorageType storage) { return os << toString(storage); }
 
 class SHA256
 {
@@ -839,10 +830,8 @@ struct OpInstruction
     std::vector<uint32_t> inputNodeIds;
     int32_t inplaceInputIndex = -1; // -1 if not inplace
     int32_t viewInputIndex = -1;    // -1 if not view
-    HandleType handleType;
-    MemorySpace memorySpace;
-    EngineType engine;
-    StorageType outputStorageType = StorageType::TRANSIENT;
+    MemSpace mem_space;
+    Engine engine;
 };
 
 struct Bucket
@@ -1070,10 +1059,6 @@ inline void tg_serialize(BinaryWriter &bw, const TensorNode &val)
     bw.write(val.parentIds);
     bw.write(val.getShape());
     bw.write(val.strides);
-    bw.write(val.viewOffset);
-    bw.write(val.handleType);
-    bw.write(val.memorySpace);
-    bw.write(val.storageType);
     bw.write(val.contentHash);
     bw.write(val.debugOrigin);
 }
@@ -1089,10 +1074,6 @@ inline void tg_deserialize(BinaryReader &br, TensorNode &val)
     br.read(shape);
     val.setShape(shape);
     br.read(val.strides);
-    br.read(val.viewOffset);
-    br.read(val.handleType);
-    br.read(val.memorySpace);
-    br.read(val.storageType);
     br.read(val.contentHash);
     br.read(val.debugOrigin);
 }
@@ -1106,10 +1087,8 @@ inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
     bw.write(val.inputNodeIds);
     bw.write(val.inplaceInputIndex);
     bw.write(val.viewInputIndex);
-    bw.write(val.handleType);
-    bw.write(val.memorySpace);
+    bw.write(val.mem_space);
     bw.write(val.engine);
-    bw.write(val.outputStorageType);
 }
 inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
 {
@@ -1120,8 +1099,6 @@ inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
     br.read(val.inputNodeIds);
     br.read(val.inplaceInputIndex);
     br.read(val.viewInputIndex);
-    br.read(val.handleType);
-    br.read(val.memorySpace);
+    br.read(val.mem_space);
     br.read(val.engine);
-    br.read(val.outputStorageType);
 }

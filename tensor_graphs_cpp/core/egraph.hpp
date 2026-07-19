@@ -16,14 +16,14 @@ struct ENode
     uint64_t kernelUid = 0;
     OpType opType = OpType::INPUT;
     std::string opName;
-    std::vector<uint32_t> children; // list of child eclass ids
-    uint32_t leafId = UINT32_MAX;
+    std::vector<EClassId> children; // list of child eclass ids
+    LogicalId leafId;
 
     std::vector<uint32_t> shape;
     std::vector<uint64_t> strides;
-    uint64_t viewOffset = 0;
-    DType dtype = DType::FLOAT32;
-    Backend backend = Backend::CPU;
+    DType dtype;
+    MemSpace mem_space;
+    Engine engine;
 
     // Precomputed structural signature used by hashcons buckets.
     uint64_t sig = 0;
@@ -33,9 +33,9 @@ struct ENode
         return kernelUid == other.kernelUid &&
                opType == other.opType &&
                leafId == other.leafId &&
-               viewOffset == other.viewOffset &&
                dtype == other.dtype &&
-               backend == other.backend &&
+               mem_space == other.mem_space &&
+               engine == other.engine &&
                opName == other.opName &&
                children == other.children &&
                shape == other.shape &&
@@ -45,20 +45,29 @@ struct ENode
 
 struct EClass
 {
-    uint32_t id = 0;
+    EClassId id;
     std::vector<uint32_t> enodes;
     std::vector<uint32_t> shape;
     std::vector<uint64_t> strides;
-    uint64_t viewOffset = 0;
-    DType dtype = DType::FLOAT32;
-    Backend backend = Backend::CPU;
+    DType dtype;
+    MemSpace mem_space;
 };
 
-class EGraph
+struct EGraph
 {
-public:
+    std::vector<EClass> classes;
+    std::vector<ENode> enodes;
+    std::vector<EClassId> parent;
+    std::vector<uint32_t> ufSize;
+
+    // signature -> candidate enode ids
+    std::unordered_map<uint64_t, std::vector<uint32_t>> hashcons;
+
+    // Dense enodeId -> e_class_id mapping.
+    std::vector<uint32_t> nodeToEClass;
+
     uint32_t nextLeafId = 0;
-    std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
+    std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
     // Hash map for fast constant lookup: data hash -> list of class ids
     std::unordered_map<uint64_t, std::vector<uint32_t>> constantHashIndex;
@@ -128,21 +137,19 @@ public:
         return getOrAddConstant(shape, strides, dtype, backend, bytes);
     }
 
-    uint32_t addEClass(const std::vector<uint32_t> &shape,
+    EClassId addEClass(const std::vector<uint32_t> &shape,
                        const std::vector<uint64_t> &strides,
-                       uint64_t viewOffset,
                        DType dtype,
-                       Backend backend)
+                       MemSpace mem_space)
     {
-        uint32_t id = static_cast<uint32_t>(classes.size());
+        EClassId id{classes.size()};
 
         EClass c;
         c.id = id;
         c.shape = shape;
         c.strides = strides;
-        c.viewOffset = viewOffset;
         c.dtype = dtype;
-        c.backend = backend;
+        c.mem_space = mem_space;
 
         classes.push_back(std::move(c));
         parent.push_back(id);
@@ -150,9 +157,9 @@ public:
         return id;
     }
 
-    uint32_t addENode(uint32_t eclassId, ENode node)
+    uint32_t addENode(EClassId e_class_id, ENode node)
     {
-        uint32_t canonical = find(eclassId);
+        uint32_t canonical = find(e_class_id);
 
         for (uint32_t &child : node.children)
         {
@@ -188,29 +195,29 @@ public:
         return canonical;
     }
 
-    uint32_t find(uint32_t id)
+    EClassId find(EClassId id)
     {
-        uint32_t root = id;
-        while (parent[root] != root)
+        EClassId root = id;
+        while (parent[root.value] != root)
         {
-            root = parent[root];
+            root = parent[root.value];
         }
 
-        while (parent[id] != id)
+        while (parent[id.value] != id)
         {
-            uint32_t p = parent[id];
-            parent[id] = root;
+            EClassId p = parent[id.value];
+            parent[id.value] = root;
             id = p;
         }
 
         return root;
     }
 
-    uint32_t findConst(uint32_t id) const
+    EClassId findConst(EClassId id) const
     {
-        while (parent[id] != id)
+        while (parent[id.value] != id)
         {
-            id = parent[id];
+            id = parent[id.value];
         }
         return id;
     }
@@ -333,8 +340,8 @@ public:
     const std::vector<EClass> &getClasses() const { return classes; }
     const std::vector<ENode> &getENodes() const { return enodes; }
 
-    EClass &getEClass(uint32_t id) { return classes[find(id)]; }
-    const EClass &getEClass(uint32_t id) const { return classes[findConst(id)]; }
+    EClass &getEClass(EClassId id) { return classes[find(id)]; }
+    const EClass &getEClass(EClassId id) const { return classes[findConst(id)]; }
 
     uint32_t getENodeEClass(uint32_t enodeId) const
     {
@@ -437,18 +444,6 @@ private:
             constantHashIndex[h].push_back(canonicalId);
         }
     }
-
-private:
-    std::vector<EClass> classes;
-    std::vector<ENode> enodes;
-    std::vector<uint32_t> parent;
-    std::vector<uint32_t> ufSize;
-
-    // signature -> candidate enode ids
-    std::unordered_map<uint64_t, std::vector<uint32_t>> hashcons;
-
-    // Dense enodeId -> eclassId mapping.
-    std::vector<uint32_t> nodeToEClass;
 };
 
 inline bool isContiguous(const EClass &eclass)
@@ -552,7 +547,8 @@ inline std::string toString(const ENode &node, const EGraph &egraph, const std::
                 ss << " -> (Canonical: " << canonicalId << ")";
             }
 
-            ss << "\n" << toString(childCls);
+            ss << "\n"
+               << toString(childCls);
         }
     }
     return ss.str();
