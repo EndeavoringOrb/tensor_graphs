@@ -145,6 +145,12 @@ struct EClassId
     auto operator<=>(const EClassId &) const = default;
 };
 
+struct ENodeId
+{
+    uint32_t value = UINT32_MAX;
+    auto operator<=>(const ENodeId &) const = default;
+};
+
 struct KernelId
 {
     uint32_t value = UINT32_MAX;

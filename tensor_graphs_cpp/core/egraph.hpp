@@ -84,7 +84,7 @@ private:
 struct EClass
 {
     EClassId id;
-    std::vector<uint32_t> enodes;
+    std::vector<ENodeId> enodes;
     std::vector<uint32_t> shape;
     std::vector<uint64_t> strides;
     DType dtype;
@@ -377,6 +377,7 @@ struct EGraph
 
     const std::vector<EClass> &getClasses() const { return classes; }
     const std::vector<ENode> &getENodes() const { return enodes; }
+    const ENode &getENode(ENodeId id) const {return enodes[id.value];}
 
     EClass &getEClass(EClassId id) { return classes[find(id)]; }
     const EClass &getEClass(EClassId id) const { return classes[findConst(id)]; }
