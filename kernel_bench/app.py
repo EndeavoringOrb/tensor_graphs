@@ -1,7 +1,5 @@
 # File: kernel_bench/app.py
 from flask import Flask, jsonify, request, render_template
-import os
-import json
 import re
 import struct
 from datetime import datetime, timezone
@@ -195,9 +193,9 @@ def get_analyze():
         cache_paths = [PROJECT_ROOT / "dirty_region_caches" / f"{target_model}-cpp.bin"]
     elif target_model == "flux-klein-4b":
         cache_paths = [
-            PROJECT_ROOT / "dirty_region_caches" / f"flux-text.bin",
-            PROJECT_ROOT / "dirty_region_caches" / f"flux-trans.bin",
-            PROJECT_ROOT / "dirty_region_caches" / f"flux-vae.bin",
+            PROJECT_ROOT / "dirty_region_caches" / "flux-text.bin",
+            PROJECT_ROOT / "dirty_region_caches" / "flux-trans.bin",
+            PROJECT_ROOT / "dirty_region_caches" / "flux-vae.bin",
         ]
     else:
         return jsonify({"error": f'Unrecognized target model "{target_model}"'}), 404

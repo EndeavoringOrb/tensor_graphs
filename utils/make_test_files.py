@@ -1,5 +1,4 @@
 import os
-import struct
 import torch
 import torch.nn.functional as F
 import shutil

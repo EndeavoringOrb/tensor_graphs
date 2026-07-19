@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from flask import Flask, jsonify, request, render_template
 
-from utils.binary import load_cache_file, OP_TYPES, DTYPES, BACKENDS, STORAGE_TYPES
+from utils.binary import load_cache_file
 
 app = Flask(__name__)
 

@@ -14,7 +14,7 @@ class Op(Enum):
 
 class Handle(
     Enum
-):  # for determining if kernel can be used. the thing that distinguishes a handle is the read/write api.
+):  # for determining if a kernel can be used. the thing that distinguishes a handle is the read/write api.
     STORAGE = 0  # file descriptors
     CPP = 1  # pointers
     OPENCL = 2  # cl_mem??
@@ -56,6 +56,19 @@ class MemSpace:  # an allocated buffer of memory
         self.handle_type = handle_type
 
 
+# system with disk, cpu, discrete gpu
+cpu = Engine(0, EngineType.CPU)
+gpu = Engine(1, EngineType.QUALCOMM_IGPU)
+storage = MemSpace(0, Handle.STORAGE)
+ram_cpu = MemSpace(1, Handle.CPP)
+ram_cpu_opencl = MemSpace(1, Handle.OPENCL)
+ram_gpu = MemSpace(2, Handle.OPENCL)
+
+engine_capabilities = {
+    cpu: {storage, ram_cpu, ram_cpu_opencl},
+    gpu: {ram_gpu, ram_cpu_opencl},
+}
+
 op_costs = {
     Op.INPUT: 0,
     Op.ADD: 1,
@@ -67,12 +80,17 @@ op_costs = {
 }
 
 
+def does_engine_support_mem_space(engine: Engine, mem_space: MemSpace):
+    return mem_space in engine_capabilities[engine]
+
+
 class Node:
     name: str
     op: Op
     children: list[str]
     mem_space: MemSpace
     engine: Engine
+    size: int
 
     def __init__(
         self,
@@ -81,12 +99,14 @@ class Node:
         children: list[str],
         mem_space: MemSpace,
         engine: Engine,
+        size: int,
     ) -> None:
         self.name = name
         self.op = op
         self.children = children
         self.mem_space = mem_space
         self.engine = engine
+        self.size = size
 
     def __eq__(self, other):
         if isinstance(other, Node):
@@ -193,7 +213,7 @@ def get_schedule(ordered: list[Node]):
 
 def get_count(graph: list[Node]):
     total_orders = 0
-    best_cost = int("inf")
+    best_cost = float("inf")
     for ordered in iter_dispatch_orders(graph):
         schedule = get_schedule(ordered)
         final_cost = schedule[-1]["end"]
@@ -203,33 +223,38 @@ def get_count(graph: list[Node]):
     return total_orders, best_cost
 
 
+def validate(graph: list[Node]):
+    for node in graph:
+        assert does_engine_support_mem_space(node.engine, node.mem_space)
+        for child in node.children:
+            child_node = get_node(graph, child)
+            assert does_engine_support_mem_space(node.engine, child_node.mem_space)
+
+
+graphs = {
+    "cpu a+b": [
+        Node("0", Op.ADD, ["1", "2"], ram_cpu, cpu, 1),
+        Node("1", Op.COPYTO, ["a"], ram_cpu, cpu, 1),
+        Node("2", Op.COPYTO, ["b"], ram_cpu, cpu, 1),
+        Node("a", Op.INPUT, [], storage, cpu, 1),
+        Node("b", Op.INPUT, [], storage, cpu, 1),
+    ],
+    "cpu,gpu (a^2 + b^2)": [
+        Node("0", Op.ADD, ["1", "2"], ram_cpu, cpu, 1),
+        Node("1", Op.SQRT, ["3"], ram_cpu, cpu, 1),
+        Node("3", Op.COPYTO, ["a"], ram_cpu, cpu, 1),
+        Node("a", Op.INPUT, [], storage, cpu, 1),
+        Node("2", Op.COPYTO, ["4"], ram_cpu, cpu, 1),
+        Node("4", Op.COPYTO, ["5"], ram_cpu_opencl, gpu, 1),
+        Node("5", Op.SQRT, ["6"], ram_gpu, gpu, 1),
+        Node("6", Op.COPYTO, ["7"], ram_gpu, gpu, 1),
+        Node("7", Op.COPYTO, ["8"], ram_cpu_opencl, cpu, 1),
+        Node("8", Op.COPYTO, ["b"], ram_cpu, cpu, 1),
+        Node("b", Op.INPUT, [], storage, cpu, 1),
+    ],
+}
 if __name__ == "__main__":
-    cpu = Engine(0, EngineType.CPU)
-    gpu = Engine(1, EngineType.QUALCOMM_IGPU)
-    storage = MemSpace(0, Handle.STORAGE)
-    ram_cpu = MemSpace(1, Handle.CPP)
-    ram_gpu = MemSpace(2, Handle.OPENCL)
-
-    graphs = {
-        "cpu a+b": [
-            Node("0", Op.ADD, ["1", "2"], ram_cpu, cpu),
-            Node("1", Op.COPYTO, ["a"], ram_cpu, cpu),
-            Node("2", Op.COPYTO, ["b"], ram_cpu, cpu),
-            Node("a", Op.INPUT, [], storage, cpu),
-            Node("b", Op.INPUT, [], storage, cpu),
-        ],
-        "cpu,gpu (a^2 + b^2)": [  # for this example, assume no shared mem
-            Node("0", Op.ADD, ["1", "2"], ram_cpu, cpu),
-            Node("1", Op.SQRT, ["3"], ram_cpu, cpu),
-            Node("3", Op.COPYTO, ["a"], ram_cpu, cpu),
-            Node("a", Op.INPUT, [], storage, cpu),
-            Node("2", Op.COPYTO, ["4"], ram_cpu, cpu),
-            Node("4", Op.SQRT, ["5"], ram_gpu, gpu),
-            Node("5", Op.COPYTO, ["b"], ram_gpu, cpu),
-            Node("b", Op.INPUT, [], storage, cpu),
-        ],
-    }
-
     for name, graph in graphs.items():
+        validate(graph)
         total_orders, best_cost = get_count(graph)
         print(f"({name}) # Orders: {total_orders}, Best Cost: {best_cost}")

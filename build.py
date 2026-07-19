@@ -352,7 +352,7 @@ def generate_kernel_includes(core_seed):
                 )
                 f.write(f'#include "{inc_path}"\n\n')
 
-            f.write(f"// --- Clean up macros ---\n")
+            f.write("// --- Clean up macros ---\n")
             for macro in REGISTER_MACROS:
                 f.write(f"#undef {macro}\n")
 
@@ -504,7 +504,7 @@ def compile_project(targets=None):
         return result
 
     if USE_CUDA:
-        console.print(f"\n[bold blue]Compiling CUDA Kernels...[/bold blue]")
+        console.print("\n[bold blue]Compiling CUDA Kernels...[/bold blue]")
         cuda_src = str(GENERATED_DIR / "cuda_kernels.gen.cu")
         cmd = [nvcc] + nvcc_flags + ["-c", cuda_src, "-o", cuda_obj]
 
@@ -520,7 +520,7 @@ def compile_project(targets=None):
         else:
             console.print(
                 Panel(
-                    f"[green]No output[/green]",
+                    "[green]No output[/green]",
                     title="[bold green]BUILD SUCCESS[/bold green]",
                     border_style="green",
                 )
@@ -556,7 +556,7 @@ def compile_project(targets=None):
         else:
             console.print(
                 Panel(
-                    f"[green]No output[/green]",
+                    "[green]No output[/green]",
                     title="[bold green]BUILD SUCCESS[/bold green]",
                     border_style="green",
                 )

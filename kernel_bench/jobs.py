@@ -22,9 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 from utils.binary import (
     BinaryReader,
-    load_records_file,
     load_cache_file,
-    get_record_identity,
 )
 
 TIMEOUTS = {

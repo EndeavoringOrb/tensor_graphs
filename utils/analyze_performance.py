@@ -239,7 +239,7 @@ if __name__ == "__main__":
             if num_buckets == 0:
                 print(f"No compiled buckets found in {args.graph}.")
             elif num_buckets == 1:
-                print(f"Available bucket index: 0 (total 1 bucket)")
+                print("Available bucket index: 0 (total 1 bucket)")
             else:
                 print(
                     f"Available bucket range: 0 to {num_buckets - 1} (total {num_buckets} buckets)"
