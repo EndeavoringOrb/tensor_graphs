@@ -40,7 +40,7 @@ def ascend(remaining: set[Node], ordered: list[Node], selection_map: dict[int, i
     remaining.add(ordered.pop())
 
 
-def iter_dispatch_orders(nodes: list[Node]):
+def iter_dispatch_orders(nodes: list[Node]): # TODO: apply minimalloc to this too?
     validate(nodes)
     remaining = set(nodes)
     ordered = []
@@ -78,98 +78,24 @@ def get_node(nodes: list[Node], name: str):
 
 graphs = {
     "cpu a+b": [
-        Node(
-            name="0",
-            op=Op.ADD,
-            children=["1", "2"],
-            mem_space=ram_cpu,
-            engine=cpu,
-            size=1,
-        ),
-        Node(
-            name="1",
-            op=Op.COPYTO,
-            children=["a"],
-            mem_space=ram_cpu,
-            engine=cpu,
-            size=1,
-        ),
-        Node(
-            name="2",
-            op=Op.COPYTO,
-            children=["b"],
-            mem_space=ram_cpu,
-            engine=cpu,
-            size=1,
-        ),
-        Node(name="a", op=Op.INPUT, children=[], mem_space=storage, engine=cpu, size=1),
-        Node(name="b", op=Op.INPUT, children=[], mem_space=storage, engine=cpu, size=1),
+        Node("0", Op.ADD, ["1", "2"], ram_cpu, cpu, 1),
+        Node("1", Op.COPYTO, ["a"], ram_cpu, cpu, 1),
+        Node("2", Op.COPYTO, ["b"], ram_cpu, cpu, 1),
+        Node("a", Op.INPUT, [], storage, cpu, 1),
+        Node("b", Op.INPUT, [], storage, cpu, 1),
     ],
     "cpu,gpu (a^2 + b^2)": [
-        Node(
-            name="0",
-            op=Op.ADD,
-            children=["1", "2"],
-            mem_space=ram_cpu,
-            engine=cpu,
-            size=1,
-        ),
-        Node(
-            name="1", op=Op.SQRT, children=["3"], mem_space=ram_cpu, engine=cpu, size=1
-        ),
-        Node(
-            name="3",
-            op=Op.COPYTO,
-            children=["a"],
-            mem_space=ram_cpu,
-            engine=cpu,
-            size=1,
-        ),
-        Node(name="a", op=Op.INPUT, children=[], mem_space=storage, engine=cpu, size=1),
-        Node(
-            name="2",
-            op=Op.COPYTO,
-            children=["4"],
-            mem_space=ram_cpu,
-            engine=cpu,
-            size=1,
-        ),
-        Node(
-            name="4",
-            op=Op.COPYTO,
-            children=["5"],
-            mem_space=ram_cpu_opencl,
-            engine=gpu,
-            size=1,
-        ),
-        Node(
-            name="5", op=Op.SQRT, children=["6"], mem_space=ram_gpu, engine=gpu, size=1
-        ),
-        Node(
-            name="6",
-            op=Op.COPYTO,
-            children=["7"],
-            mem_space=ram_gpu,
-            engine=gpu,
-            size=1,
-        ),
-        Node(
-            name="7",
-            op=Op.COPYTO,
-            children=["8"],
-            mem_space=ram_cpu_opencl,
-            engine=cpu,
-            size=1,
-        ),
-        Node(
-            name="8",
-            op=Op.COPYTO,
-            children=["b"],
-            mem_space=ram_cpu,
-            engine=cpu,
-            size=1,
-        ),
-        Node(name="b", op=Op.INPUT, children=[], mem_space=storage, engine=cpu, size=1),
+        Node("0", Op.ADD, ["1", "2"], ram_cpu, cpu, 1),
+        Node("1", Op.SQRT, ["3"], ram_cpu, cpu, 1),
+        Node("3", Op.COPYTO, ["a"], ram_cpu, cpu, 1),
+        Node("a", Op.INPUT, [], storage, cpu, 1),
+        Node("2", Op.TRANSFER, ["4"], ram_cpu, cpu, 1),
+        Node("4", Op.COPYTO, ["5"], ram_cpu_opencl, gpu, 1),
+        Node("5", Op.SQRT, ["6"], ram_gpu, gpu, 1),
+        Node("6", Op.COPYTO, ["7"], ram_gpu, gpu, 1),
+        Node("7", Op.TRANSFER, ["8"], ram_cpu_opencl, cpu, 1),
+        Node("8", Op.COPYTO, ["b"], ram_cpu, cpu, 1),
+        Node("b", Op.INPUT, [], storage, cpu, 1),
     ],
 }
 

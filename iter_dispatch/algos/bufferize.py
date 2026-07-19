@@ -30,7 +30,7 @@ def get_deaths(ordered: list[Node]):
         for j in range(i + 1, len(ordered)):
             other_node = ordered[j]
             if node in other_node.children:
-                node.death = max(node.death, other_node.birth)
+                node.death = max(node.death, other_node.birth + other_node.cost)
 
 
 # simplest possible buffer assignment

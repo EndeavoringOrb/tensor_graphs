@@ -25,7 +25,6 @@ def get_graph_data(name):
         return "Not found", 404
 
     all_orders = []
-    # Capacity matches the logic in malloc.py
     mem_cap = {1: 1024, 2: 1024}
 
     for ordered in iter_dispatch_orders(graph):
@@ -38,15 +37,24 @@ def get_graph_data(name):
         fresh_buffers = [
             Buffer(b.idx, b.mem_space, b.size, b.start, b.end) for b in buffers
         ]
-        allocated_buffers = malloc(mem_cap, fresh_buffers, [])
-        print(f"Allocated {len(allocated_buffers)}/{len(buffers)}")
+
+        # Group buffers by mem_space.idx before calling malloc
+        buf_by_mem_idx = defaultdict(list)
+        for buf in fresh_buffers:
+            buf.idx = len(buf_by_mem_idx[buf.mem_space.idx])
+            buf_by_mem_idx[buf.mem_space.idx].append(buf)
+
+        # Allocate memory separately for each memory space index
+        allocated_buffers = []
+        for mem_idx, bufs in buf_by_mem_idx.items():
+            cap = mem_cap.get(mem_idx, None)
+            allocated_for_space = malloc(cap, bufs, [])
+            allocated_buffers.extend(allocated_for_space)
 
         all_orders.append(
             {
                 "ordered": [node_adapter.dump_json(node).decode() for node in ordered],
-                "buffers": [
-                    buffer_adapter.dump_json(buf).decode() for buf in buffers
-                ],
+                "buffers": [buffer_adapter.dump_json(buf).decode() for buf in buffers],
                 "allocated": [
                     buffer_adapter.dump_json(buf).decode() for buf in allocated_buffers
                 ],
