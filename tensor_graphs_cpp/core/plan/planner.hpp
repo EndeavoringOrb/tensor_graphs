@@ -7,7 +7,9 @@
 #include "core/shapes.hpp"
 #include "core/misc.hpp"
 #include "core/egraph.hpp"
-#include "core/extractor.hpp"
+#include "core/plan/extractor.hpp"
+#include "core/plan/validators/cycle.hpp"
+#include "core/plan/validators/cycle.hpp"
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -197,14 +199,6 @@ struct Planner
         float totalCost = std::numeric_limits<float>::infinity();
     };
 
-    uint64_t getMemoryLimit(MemorySpace space) const
-    {
-        auto it = maxMemoryBySpace.find(space);
-        if (it != maxMemoryBySpace.end())
-            return it->second;
-        return std::numeric_limits<uint64_t>::max();
-    }
-
     void inferShapes(const std::vector<LogicalId> &topo, Graph &graph)
     {
         ShapePropagator propagator;
@@ -277,184 +271,9 @@ struct Planner
                   << std::flush;
     }
 
-    std::unordered_map<uint32_t, uint32_t> build_ref_counts(const EGraph &egraph, const std::unordered_map<uint32_t, uint32_t> &selection_map, uint32_t root) const
-    {
-        std::unordered_map<uint32_t, uint32_t> ref;
-        for (const auto &kv : selection_map)
-        {
-            uint32_t eclass = kv.first;
-            uint32_t sel = kv.second;
-            const ENode &node = egraph.getENodes()[egraph.getEClass(eclass).enodes[sel]];
-            for (uint32_t c : node.children)
-            {
-                ref[c]++;
-            }
-        }
-        ref[root]++;
-        return ref;
-    }
-
-    struct PrecompData
-    {
-        std::vector<bool> is_eclass_persistent;
-        std::vector<bool> is_eclass_cached;
-        std::vector<std::vector<uint32_t>> enode_canon_children;
-        uint64_t static_baseline_arr[static_cast<size_t>(Backend::_COUNT)];
-        uint64_t mem_limits_arr[static_cast<size_t>(Backend::_COUNT)];
-    };
-
 private:
-    void visitTopoFast(
-        uint32_t e_class_id,
-        const EGraph &egraph,
-        const std::unordered_map<uint32_t, uint32_t> &selection_map,
-        const PrecompData &precomp,
-        std::vector<bool> &visited_classes,
-        std::vector<uint32_t> &topo_order) const
-    {
-        e_class_id = egraph.findConst(e_class_id);
-        if (visited_classes[e_class_id])
-            return;
-        visited_classes[e_class_id] = true;
-
-        auto choiceIt = selection_map.find(e_class_id);
-        if (choiceIt == selection_map.end())
-            return;
-
-        uint32_t enode_id = egraph.getEClass(e_class_id).enodes[choiceIt->second];
-        for (uint32_t child : precomp.enode_canon_children[enode_id])
-            visitTopoFast(child, egraph, selection_map, precomp, visited_classes, topo_order);
-        topo_order.push_back(e_class_id);
-    }
-
-    bool validateInplaceSchedulesFast(
-        const EGraph &egraph,
-        const std::unordered_map<uint32_t, uint32_t> &selection_map,
-        const std::vector<ENodeInfo> &enodeInfos,
-        uint32_t rootEClassId,
-        const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
-        const PrecompData &precomp,
-        std::vector<uint32_t> &topo_order,
-        std::vector<bool> &val_visited_classes,
-        std::vector<uint32_t> &val_overwritten,
-        std::vector<uint32_t> &val_mem_root,
-        std::string &outReason,
-        uint32_t &conflictEClass1,
-        uint32_t &conflictEClass2) const
-    {
-        topo_order.clear();
-        std::fill(val_visited_classes.begin(), val_visited_classes.end(), false);
-        visitTopoFast(rootEClassId, egraph, selection_map, precomp, val_visited_classes, topo_order);
-
-        std::fill(val_overwritten.begin(), val_overwritten.end(), UINT32_MAX);
-        std::unordered_map<uint32_t, uint32_t> overwritten_logical;
-        for (size_t i = 0; i < egraph.getClasses().size(); ++i)
-            val_mem_root[i] = static_cast<uint32_t>(i);
-
-        for (uint32_t eclass : topo_order)
-        {
-            uint32_t sel = selection_map.at(eclass);
-            uint32_t enodeId = egraph.getEClass(eclass).enodes[sel];
-            const ENodeInfo &info = enodeInfos[enodeId];
-
-            if (info.isView && !precomp.enode_canon_children[enodeId].empty())
-            {
-                uint32_t child_eclass = precomp.enode_canon_children[enodeId][0];
-                val_mem_root[eclass] = val_mem_root[child_eclass];
-            }
-
-            for (uint32_t child_eclass : precomp.enode_canon_children[enodeId])
-            {
-                uint32_t child_root = val_mem_root[child_eclass];
-
-                if (val_overwritten[child_root] != UINT32_MAX)
-                {
-                    outReason = "inplace " + std::to_string(child_root);
-                    conflictEClass1 = val_overwritten[child_root];
-                    conflictEClass2 = eclass;
-                    return false;
-                }
-
-                uint32_t logicalId = eclassToLogical.count(child_root) ? eclassToLogical.at(child_root) : UINT32_MAX;
-                if (logicalId != UINT32_MAX && overwritten_logical.count(logicalId))
-                {
-                    if (overwritten_logical[logicalId] != child_root)
-                    {
-                        outReason = "inplace_logical " + std::to_string(logicalId);
-                        conflictEClass1 = overwritten_logical[logicalId];
-                        conflictEClass2 = eclass;
-                        return false;
-                    }
-                }
-            }
-
-            if (info.inplace)
-            {
-                uint32_t inplace_child = precomp.enode_canon_children[enodeId][info.inplace_idx];
-                uint32_t child_root = val_mem_root[inplace_child];
-                val_overwritten[child_root] = eclass;
-
-                uint32_t logicalId = eclassToLogical.count(child_root) ? eclassToLogical.at(child_root) : UINT32_MAX;
-                if (logicalId != UINT32_MAX)
-                {
-                    overwritten_logical[logicalId] = eclass;
-                }
-            }
-        }
-        return true;
-    }
-
-    bool detectCycles(..., std::string &reason)
-    {
-        std::fill(indegree.begin(), indegree.end(), 0);
-        for (const auto &kv : selection_map)
-        {
-            uint32_t sel = kv.second;
-            uint32_t enode_id = egraph.getEClass(kv.first).enodes[sel];
-            for (uint32_t child : precomp.enode_canon_children[enode_id])
-            {
-                indegree[child]++;
-            }
-        }
-
-        zero_indegree.clear();
-        for (const auto &kv : selection_map)
-        {
-            if (indegree[kv.first] == 0)
-            {
-                zero_indegree.push_back(kv.first);
-            }
-        }
-
-        uint32_t processed = 0;
-        while (!zero_indegree.empty())
-        {
-            uint32_t curr = zero_indegree.back();
-            zero_indegree.pop_back();
-            processed++;
-
-            uint32_t sel = selection_map[curr];
-            uint32_t enode_id = egraph.getEClass(curr).enodes[sel];
-            for (uint32_t canonChild : precomp.enode_canon_children[enode_id])
-            {
-                indegree[canonChild]--;
-                if (indegree[canonChild] == 0)
-                {
-                    zero_indegree.push_back(canonChild);
-                }
-            }
-        }
-
-        if (processed < selection_map.size())
-        {
-            valid = false;
-            reason = "cycle";
-        }
-    }
-
     ExtractionResult extractBest(const uint32_t rootId, const Graph &graph, EGraph &egraph,
                                  const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-                                 const std::unordered_map<Backend, uint64_t> &maxMemoryByBackend,
                                  const std::unordered_map<uint32_t, Backend> &cachedNodes,
                                  const std::unordered_map<uint32_t, uint32_t> &eclassToLogical,
                                  const std::unordered_set<uint32_t> &immutable_eclasses,
@@ -1162,45 +981,6 @@ private:
             Error::throw_err("[Planner.extractBest] cannot have inf root cost");
         }
 
-        PrecompData precomp;
-        precomp.is_eclass_persistent.assign(numClasses, false);
-        precomp.is_eclass_cached.assign(numClasses, false);
-        for (size_t i = 0; i < numClasses; ++i)
-        {
-            uint32_t e_class_id = egraph.find(static_cast<uint32_t>(i));
-            if (e_class_id == i)
-            {
-                uint32_t logicalId = eclassToLogical.count(e_class_id) ? eclassToLogical.at(e_class_id) : UINT32_MAX;
-                if (logicalId != UINT32_MAX && graph.hasNode(logicalId) && graph.getNode(logicalId).storageType == StorageType::PERSISTENT)
-                    precomp.is_eclass_persistent[e_class_id] = true;
-                if (egraph.constantStaging.count(e_class_id))
-                    precomp.is_eclass_persistent[e_class_id] = true;
-
-                if (logicalId != UINT32_MAX && cachedNodes.count(logicalId))
-                    precomp.is_eclass_cached[e_class_id] = true;
-            }
-        }
-
-        auto baseline_map = computeStaticBaseline(graph, cachedNodes);
-        for (int i = 0; i < (uint32_t)Backend::_COUNT; ++i)
-        {
-            precomp.static_baseline_arr[i] = 0;
-            precomp.mem_limits_arr[i] = std::numeric_limits<uint64_t>::max();
-        }
-        for (const auto &kv : baseline_map)
-            precomp.static_baseline_arr[(uint32_t)kv.first] = kv.second;
-        for (const auto &kv : maxMemoryByBackend)
-            precomp.mem_limits_arr[(uint32_t)kv.first] = kv.second;
-
-        precomp.enode_canon_children.resize(egraph.getENodes().size());
-        for (size_t i = 0; i < egraph.getENodes().size(); ++i)
-        {
-            for (uint32_t c : egraph.getENodes()[i].children)
-            {
-                precomp.enode_canon_children[i].push_back(egraph.findConst(c));
-            }
-        }
-
         std::vector<uint32_t> ref_counts(numClasses, 0);
         std::vector<bool> processed_mem(numClasses, false);
         std::vector<uint32_t> sim_aliasMap(numClasses, UINT32_MAX);
@@ -1216,7 +996,9 @@ private:
         std::vector<uint32_t> zero_indegree;
         zero_indegree.reserve(numClasses);
 
-        Extractor extractor = Extractor(enodeInfos);
+        Extractor extractor = Extractor(numClasses);
+        extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
+        extractor.registerValidator(std::make_unique<MemValidator>(egraph));
 
         float best_cost = TGConstants::INF;
         std::unordered_map<uint32_t, uint32_t> best_selection_map;
@@ -1237,156 +1019,26 @@ private:
             loopTimer.reset();
             timer.tick();
 
-            const std::unordered_map<uint32_t, uint32_t> &selection_map = extractor.getNextSelection();
+            const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.getNextSelection();
 
-            // detect cycles
-            bool valid = detectCycles(...);
+            bool valid = extractor.validate(selection_map, reason);
 
-            if (valid)
+            if (!valid)
             {
-                // iter_dispatch_orders
-                //   bufferize
-                //   malloc
-                if (stopOnFirstValid)
-                {
-                    break;
-                }
+                std::cout << "[Planner.extractBest] [iter "
+                          << std::to_string(max_iters - remaining_iters)
+                          << "] invalid reason: " << reason << std::endl;
             }
 
             if (extractor.to_process_enode.empty())
                 break; // Finished going through all graphs contained in egraph
 
-            uint32_t target_backtrack_eclass = UINT32_MAX;
-            if (!valid && reason == "cycle")
+            if (!valid)
             {
-                // Compute SCCs of the selection-induced subgraph using Tarjan's algorithm.
-                // For each SCC of size > 1 (or size == 1 with a self-loop, i.e. a true cycle):
-                //   collect members that are in `path` and have >= 1 alternative.
-                // Among all such members across all non-trivial SCCs, pick the one
-                // with the smallest path index. That's the backtrack target.
-
-                int best_backtrack_idx = std::numeric_limits<int>::max();
-                std::vector<int> path_idx(numClasses, -1);
-                for (int i = 0; i < (int)path.size(); ++i)
-                {
-                    path_idx[egraph.findConst(path[i])] = i;
-                }
-
-                std::vector<int> disc(numClasses, -1);
-                std::vector<int> low(numClasses, -1);
-                std::vector<bool> onStack(numClasses, false);
-                std::vector<uint32_t> st;
-                int time_counter = 0;
-
-                std::function<void(uint32_t)> tarjan = [&](uint32_t u)
-                {
-                    disc[u] = low[u] = time_counter++;
-                    st.push_back(u);
-                    onStack[u] = true;
-
-                    auto it = selection_map.find(u);
-                    if (it != selection_map.end())
-                    {
-                        uint32_t sel = it->second;
-                        uint32_t enode_id = egraph.getEClass(u).enodes[sel];
-                        for (uint32_t v : precomp.enode_canon_children[enode_id])
-                        {
-                            if (selection_map.find(v) != selection_map.end())
-                            {
-                                if (disc[v] == -1)
-                                {
-                                    tarjan(v);
-                                    low[u] = std::min(low[u], low[v]);
-                                }
-                                else if (onStack[v])
-                                {
-                                    low[u] = std::min(low[u], disc[v]);
-                                }
-                            }
-                        }
-                    }
-
-                    if (low[u] == disc[u])
-                    {
-                        std::vector<uint32_t> scc;
-                        while (true)
-                        {
-                            uint32_t v = st.back();
-                            st.pop_back();
-                            onStack[v] = false;
-                            scc.push_back(v);
-                            if (u == v)
-                                break;
-                        }
-
-                        bool is_cycle = false;
-                        if (scc.size() > 1)
-                        {
-                            is_cycle = true;
-                        }
-                        else if (scc.size() == 1)
-                        {
-                            uint32_t v = scc[0];
-                            auto itv = selection_map.find(v);
-                            if (itv != selection_map.end())
-                            {
-                                uint32_t sel = itv->second;
-                                uint32_t enode_id = egraph.getEClass(v).enodes[sel];
-                                for (uint32_t child : precomp.enode_canon_children[enode_id])
-                                {
-                                    if (child == v)
-                                    {
-                                        is_cycle = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        if (is_cycle)
-                        {
-                            for (uint32_t v : scc)
-                            {
-                                if (path_idx[v] != -1)
-                                {
-                                    auto choiceIt = selection_map.find(v);
-                                    if (choiceIt != selection_map.end())
-                                    {
-                                        uint32_t sel = choiceIt->second;
-                                        const auto &enodes = egraph.getEClass(v).enodes;
-                                        if (sel + 1 < enodes.size())
-                                        {
-                                            if (path_idx[v] < best_backtrack_idx)
-                                            {
-                                                best_backtrack_idx = path_idx[v];
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                };
-
-                for (const auto &kv : selection_map)
-                {
-                    if (disc[kv.first] == -1)
-                    {
-                        tarjan(kv.first);
-                    }
-                }
-
-                if (best_backtrack_idx != std::numeric_limits<int>::max())
-                {
-                    target_backtrack_eclass = path[best_backtrack_idx];
-                    std::cout << "[Planner.extractBest] cycle: backtracking to eclass "
-                              << std::to_string(target_backtrack_eclass)
-                              << " (path index " << best_backtrack_idx << " of " << path.size() << ")"
-                              << std::endl;
-                }
+                extractor.backtrack(reason);
             }
 
-            extractor.ascend(enodeInfos, target_backtrack_eclass);
+            extractor.ascend(enodeInfos);
         }
 
         if (best_cost == TGConstants::INF)
@@ -2304,7 +1956,7 @@ private:
             }
         }
 
-        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, maxMemoryByBackend, cachedNodes, eclassToLogical, immutable_eclasses, true, strictCache);
+        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, mem_caps, cachedNodes, eclassToLogical, immutable_eclasses, true, strictCache);
         return buildCompiledGraph(
             rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes, eclassToLogical);
     }
