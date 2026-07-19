@@ -59,7 +59,7 @@ inline std::string computeGraphHash(const Graph &graph, const std::vector<uint32
             sha.update(":");
             sha.update(n.contentHash);
         }
-        for (uint32_t pid : n.parentIds)
+        for (uint32_t pid : n.child_ids)
         {
             sha.update(":");
             sha.update(hashNode(pid));

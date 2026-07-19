@@ -237,7 +237,7 @@ def get_analyze():
                         op_type_stats[op_name] += runtime
                         input_shapes = [
                             nodes[str(pid)]["shape"] if str(pid) in nodes else []
-                            for pid in node["parentIds"]
+                            for pid in node["child_ids"]
                         ]
 
                         debug_origin = node.get("debugOrigin", "UNKNOWN")

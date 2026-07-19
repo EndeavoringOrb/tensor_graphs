@@ -165,7 +165,7 @@ struct KernelEntry
     MatchFunc match;
     KernelFunc run;
     ReferenceFactory refFactory;
-    bool inplace;
+    std::vector<uint32_t> safe_inplace_idxs;
     bool isView;
     bool isReference;
     InferViewFunc inferView;
@@ -317,7 +317,7 @@ public:
                 if (pNode.opType == entry.opType)
                 {
                     patternMatches = true;
-                    for (uint32_t pid : pNode.parentIds)
+                    for (uint32_t pid : pNode.child_ids)
                     {
                         if (patternGraph.getNode(pid).opType != OpType::INPUT &&
                             patternGraph.getNode(pid).opType != OpType::ARANGE &&
@@ -368,7 +368,7 @@ public:
     void registerKernel(KernelId uid, OpType op, const std::string &opName,
                         uint32_t min_num_inputs, uint32_t max_num_inputs,
                         MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
-                        bool inplace, bool isView, bool isReference, InferViewFunc inferView,
+                        const std::vector<uint32_t> &safe_inplace_idxs, bool isView, bool isReference, InferViewFunc inferView,
                         const MemSpace output_mem_space,    // mem space for output
                         const std::vector<Engine> &engines, // which engines this kernel blocks while running
                         const std::vector<DType> &dtypes = {},
@@ -391,7 +391,7 @@ public:
             Error::throw_err("contiguous.size() != min_num_inputs");
         }
 
-        entries.emplace(uid, KernelEntry{uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory, inplace, isView, isReference, inferView, output_mem_space, engines, dtypes, dummyShapes, contiguous, input_mem_spaces});
+        entries.emplace(uid, KernelEntry{uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory, safe_inplace_idxs, isView, isReference, inferView, output_mem_space, engines, dtypes, dummyShapes, contiguous, input_mem_spaces});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, min_num_inputs, max_num_inputs, refFactory, dtypes, dummyShapes);
@@ -422,7 +422,7 @@ public:
         return matches;
     }
 
-    const KernelEntry &getKernel(uint64_t uid) const
+    const KernelEntry &getKernel(KernelId uid) const
     {
         auto it = entries.find(uid);
         if (it != entries.end())
@@ -430,13 +430,13 @@ public:
         Error::throw_err("Invalid kernel UID " + std::to_string(uid));
     }
 
-    bool hasKernel(uint64_t uid) const
+    bool hasKernel(KernelId uid) const
     {
         return entries.find(uid) != entries.end();
     }
 
 private:
-    std::unordered_map<uint64_t, KernelEntry> entries;
+    std::unordered_map<KernelId, KernelEntry> entries;
     bool referenceOnlyMode = false;
 };
 
@@ -445,7 +445,7 @@ struct KernelRegistrar
     KernelRegistrar(KernelId uid, OpType op, const std::string &opName,
                     uint32_t min_num_inputs, uint32_t max_num_inputs,
                     MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
-                    bool inplace, bool isView, bool isReference, InferViewFunc inferView,
+                    const std::vector<uint32_t> &safe_inplace_idxs, bool isView, bool isReference, InferViewFunc inferView,
                     const MemSpace output_mem_space,    // mem space for output
                     const std::vector<Engine> &engines, // which engines this kernel blocks while running
                     const std::vector<DType> &dtypes = {},
@@ -454,7 +454,7 @@ struct KernelRegistrar
                     const std::vector<MemSpace> &input_mem_spaces = {} // mem space for each input
     )
     {
-        KernelRegistry::get().registerKernel(uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory, inplace, isView, isReference, inferView, output_mem_space, engines, dtypes, dummyShapes, contiguous, input_mem_spaces);
+        KernelRegistry::get().registerKernel(uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory, safe_inplace_idxs, isView, isReference, inferView, output_mem_space, engines, dtypes, dummyShapes, contiguous, input_mem_spaces);
     }
 };
 
@@ -469,9 +469,6 @@ struct KernelRegistrar
 #ifndef REGISTER_KERNEL
 #define REGISTER_KERNEL(opName, n_min, n_max, match, run, refFactory, ...)
 #endif
-#ifndef REGISTER_KERNEL_INPLACE
-#define REGISTER_KERNEL_INPLACE(opName, n_min, n_max, match, run, refFactory, ...)
-#endif
 #ifndef REGISTER_KERNEL_VIEW
 #define REGISTER_KERNEL_VIEW(opName, n_min, n_max, match, ref, inferView, ...)
 #endif
@@ -484,9 +481,6 @@ struct KernelRegistrar
 
 #define REGISTER_KERNEL_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...) \
     static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory, false, false, false, nullptr, __VA_ARGS__)
-
-#define REGISTER_KERNEL_INPLACE_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...) \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory, true, false, false, nullptr, __VA_ARGS__)
 
 #define REGISTER_KERNEL_VIEW_INTERNAL(uid, opName, n_min, n_max, match, refFactory, inferView, ...) \
     static KernelRegistrar _registrar_fused_##inferView(uid, OpType::FUSED, opName, n_min, n_max, match, nullptr, refFactory, false, true, false, inferView, __VA_ARGS__)

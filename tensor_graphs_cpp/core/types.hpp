@@ -65,10 +65,78 @@ struct LogicalId
     }
 };
 
+class LogicalIdAllocator
+{
+public:
+    LogicalIdAllocator(const LogicalIdAllocator &) = delete;
+    LogicalIdAllocator &operator=(const LogicalIdAllocator &) = delete;
+    LogicalIdAllocator(LogicalIdAllocator &&) = delete;
+    LogicalIdAllocator &operator=(LogicalIdAllocator &&) = delete;
+
+    static LogicalId allocate()
+    {
+        return instance()._allocate();
+    }
+
+private:
+    LogicalIdAllocator() = default;
+    ~LogicalIdAllocator() = default;
+
+    static LogicalIdAllocator &instance()
+    {
+        static LogicalIdAllocator allocator;
+        return allocator;
+    }
+
+    LogicalId _allocate()
+    {
+        return nextId++;
+    }
+
+    LogicalId nextId{0};
+};
+
 struct PhysicalId
 {
     uint32_t value = UINT32_MAX;
     auto operator<=>(const PhysicalId &) const = default;
+    PhysicalId operator++(int)
+    {
+        PhysicalId temp = *this;
+        ++value;
+        return temp;
+    }
+};
+
+class PhysicalIdAllocator
+{
+public:
+    PhysicalIdAllocator(const PhysicalIdAllocator &) = delete;
+    PhysicalIdAllocator &operator=(const PhysicalIdAllocator &) = delete;
+    PhysicalIdAllocator(PhysicalIdAllocator &&) = delete;
+    PhysicalIdAllocator &operator=(PhysicalIdAllocator &&) = delete;
+
+    static PhysicalId allocate()
+    {
+        return instance()._allocate();
+    }
+
+private:
+    PhysicalIdAllocator() = default;
+    ~PhysicalIdAllocator() = default;
+
+    static PhysicalIdAllocator &instance()
+    {
+        static PhysicalIdAllocator allocator;
+        return allocator;
+    }
+
+    PhysicalId _allocate()
+    {
+        return nextValue++;
+    }
+
+    PhysicalId nextValue{0};
 };
 
 struct EClassId
@@ -438,15 +506,15 @@ public:
     OpType opType;
     std::string opName; // Used if opType == OpType::FUSED
     DType dtype;
-    std::vector<LogicalId> parentIds;
+    std::vector<LogicalId> child_ids;
     std::vector<uint64_t> strides;
     std::string contentHash;
     std::string debugOrigin;
 
     TensorNode() {}
 
-    TensorNode(LogicalId _id, OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _parentIds, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, std::string _contentHash = "", std::string _debugOrigin = "")
-        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), parentIds(_parentIds), shape(_shape), strides(_strides), contentHash(_contentHash), debugOrigin(_debugOrigin)
+    TensorNode(LogicalId _id, OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _child_ids, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, std::string _contentHash = "", std::string _debugOrigin = "")
+        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), child_ids(_child_ids), shape(_shape), strides(_strides), contentHash(_contentHash), debugOrigin(_debugOrigin)
     {
         if (strides.empty())
         {
@@ -678,6 +746,11 @@ inline std::string toString(LogicalId id)
 inline std::string toString(PhysicalId id)
 {
     return "PhysicalId(" + std::to_string(id.value) + ")";
+}
+
+inline std::string toString(KernelId id)
+{
+    return "KernelId(" + std::to_string(id.value) + ")";
 }
 
 // Stream operators
@@ -1002,7 +1075,7 @@ struct CompiledGraph
         {
             TensorNode &node = pair.second;
             node.id = mapId(node.id);
-            for (auto &pId : node.parentIds)
+            for (auto &pId : node.child_ids)
             {
                 pId = mapId(pId);
             }
@@ -1056,7 +1129,7 @@ inline void tg_serialize(BinaryWriter &bw, const TensorNode &val)
     bw.write(val.opType);
     bw.write(val.opName);
     bw.write(val.dtype);
-    bw.write(val.parentIds);
+    bw.write(val.child_ids);
     bw.write(val.getShape());
     bw.write(val.strides);
     bw.write(val.contentHash);
@@ -1069,7 +1142,7 @@ inline void tg_deserialize(BinaryReader &br, TensorNode &val)
     br.read(val.opType);
     br.read(val.opName);
     br.read(val.dtype);
-    br.read(val.parentIds);
+    br.read(val.child_ids);
     std::vector<uint32_t> shape;
     br.read(shape);
     val.setShape(shape);

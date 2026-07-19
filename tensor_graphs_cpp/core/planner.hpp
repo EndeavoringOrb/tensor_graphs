@@ -40,7 +40,7 @@ void propagateDirtyRegionsAtomic(
 
         std::vector<std::vector<Region>> parentRegions;
         bool anyParentDirty = false;
-        for (uint32_t pid : node.parentIds)
+        for (uint32_t pid : node.child_ids)
         {
             auto it = dirtyOutputRegions.find(pid);
             if (it != dirtyOutputRegions.end() && !it->second.empty())
@@ -867,10 +867,10 @@ private:
                 }
             }
 
-            if (enode.opType == OpType::INPUT || enode.opType == OpType::CACHE)
+            if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
             {
                 info.cost = 0.0f;
-                if (strictCache && (enode.leafId & 0x80000000))
+                if (strictCache && enode.getOpType() == OpType::CACHE)
                 {
                     uint32_t e_class_id = egraph.getENodeEClass(i);
                     uint32_t canonId = egraph.findConst(e_class_id);
@@ -948,9 +948,9 @@ private:
                                         pGraph->getNode(curr).opType == OpType::RESHAPE ||
                                         pGraph->getNode(curr).opType == OpType::PERMUTE))
                                 {
-                                    if (pGraph->getNode(curr).parentIds.empty())
+                                    if (pGraph->getNode(curr).child_ids.empty())
                                         break;
-                                    curr = pGraph->getNode(curr).parentIds[0];
+                                    curr = pGraph->getNode(curr).child_ids[0];
                                 }
                                 for (size_t k = 0; k < pInputs.size(); ++k)
                                 {
@@ -963,11 +963,11 @@ private:
                             for (const auto &pair : pGraph->nodes)
                             {
                                 const TensorNode &n = pair.second;
-                                for (size_t p_idx = 0; p_idx < n.parentIds.size(); ++p_idx)
+                                for (size_t p_idx = 0; p_idx < n.child_ids.size(); ++p_idx)
                                 {
-                                    if (isConstantNeeded(n.opType, p_idx, n.parentIds.size()))
+                                    if (isConstantNeeded(n.opType, p_idx, n.child_ids.size()))
                                     {
-                                        int inputIdx = traceToInputIdx(n.parentIds[p_idx]);
+                                        int inputIdx = traceToInputIdx(n.child_ids[p_idx]);
                                         if (kernel.isVariadic)
                                         {
                                             if (inputIdx == (int)kernel.numInputs - 1 && j == enode.children.size() - 1)
@@ -2047,14 +2047,14 @@ private:
             tNode.strides = enode.strides;
             tNode.viewOffset = enode.viewOffset;
             tNode.backend = enode.backend;
-            tNode.parentIds.reserve(enode.children.size());
+            tNode.child_ids.reserve(enode.children.size());
             for (uint32_t c : enode.children)
-                tNode.parentIds.push_back(eclassToPhys[egraph.find(c)]);
+                tNode.child_ids.push_back(eclassToPhys[egraph.find(c)]);
 
             OpInstruction inst;
             inst.nodeId = physId;
             inst.logicalNodeId = logicalId;
-            inst.inputNodeIds = tNode.parentIds;
+            inst.inputNodeIds = tNode.child_ids;
             inst.mem_space = enode.mem_space;
             inst.engine = enode.engine;
             inst.fullKernelId = enode.kernelUid;
@@ -2128,12 +2128,10 @@ private:
     bool baseStateInitialized = false;
 
     // Initialize baseState.egraph from graph
-    void initBaseEGraph(LogicalId rootId, Graph &graph, bool doSaturate, Repo *repo = nullptr)
+    void initBaseEGraph(LogicalId rootId, Graph &graph, const std::vector<LogicalId> &topo, Repo *repo = nullptr)
     {
         if (baseStateInitialized)
             return;
-
-        std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
 
         inferShapes(topo, graph);
 
@@ -2170,7 +2168,7 @@ private:
                 enode.kernelUid = 0;
                 enode.opType = node.opType;
                 enode.opName = node.opName;
-                for (LogicalId pid : node.parentIds)
+                for (LogicalId pid : node.child_ids)
                     enode.children.push_back(baseState.nodeToEClass[pid]);
                 enode.shape = node.getShape();
                 enode.strides = node.strides;
@@ -2184,7 +2182,7 @@ private:
 
             std::vector<TensorNode> inputs;
             std::vector<MemSpace> input_mem_spaces;
-            for (LogicalId pid : node.parentIds)
+            for (LogicalId pid : node.child_ids)
             {
                 inputs.push_back(graph.getNode(pid));
                 input_mem_spaces.push_back(graph.getInputDataType(pid) == InputDataType::STORAGE ? storage : ram);
@@ -2200,36 +2198,26 @@ private:
             for (KernelId uid : refs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
-                ENode enode;
-                enode.kernelUid = uid;
-                enode.opType = node.opType;
-                enode.opName = node.opName;
-                for (uint32_t pid : node.parentIds)
-                    enode.children.push_back(baseState.nodeToEClass[pid]);
-                enode.shape = node.getShape();
-                enode.dtype = node.dtype;
-                enode.backend = node.backend;
-
+                std::vector<EClassId> children;
+                for (LogicalId pid : node.child_ids)
+                    children.push_back(baseState.nodeToEClass[pid]);
+                std::vector<uint64_t> strides;
                 if (kernel.isView)
                 {
-                    enode.strides = node.strides;
-                    enode.viewOffset = node.viewOffset;
+                    strides = node.strides;
                 }
                 else
                 {
-                    enode.strides = calcContiguousStrides(node.getShape());
-                    enode.viewOffset = 0;
+                    strides = calcContiguousStrides(node.getShape());
                 }
-
+                ENode enode = ENode(uid, node.opType, node.opName, children, node.getShape(), strides, node.dtype, ram, cpu);
                 baseState.egraph.addENode(e_class_id, enode);
             }
         }
 
         for (const auto &kv : baseState.nodeToEClass)
         {
-            uint32_t physId = kv.first;
-            uint32_t ecl = baseState.egraph.find(kv.second);
-            baseState.eclassToLogical[ecl] = physId;
+            baseState.eclassToLogical[baseState.egraph.find(kv.second)] = kv.first;
         }
 
         baseStateInitialized = true;
@@ -2402,9 +2390,9 @@ private:
                 std::vector<uint32_t> slicedInputs;
                 std::vector<TensorNode> dummyInputNodes;
 
-                for (size_t p_idx = 0; p_idx < sourceNode.parentIds.size(); ++p_idx)
+                for (size_t p_idx = 0; p_idx < sourceNode.child_ids.size(); ++p_idx)
                 {
-                    uint32_t parentLogicalId = sourceNode.parentIds[p_idx];
+                    uint32_t parentLogicalId = sourceNode.child_ids[p_idx];
                     uint32_t E_parent = egraph.find(nodeToEClass.at(parentLogicalId));
                     const EClass &pClass = egraph.getEClass(E_parent);
 
@@ -2735,36 +2723,24 @@ private:
         bool strictCache = false,
         Repo *repo = nullptr)
     {
+        std::vector<uint32_t> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
-        initBaseEGraph(rootId, tempGraph, doSaturate, repo);
+        initBaseEGraph(rootId, tempGraph, topo, repo);
 
         EGraph egraph = baseState.egraph;
         auto eclassToLogical = baseState.eclassToLogical;
 
-        std::unordered_map<uint32_t, uint32_t> canonToLogical;
-        canonToLogical.reserve(eclassToLogical.size());
-        for (const auto &kv : eclassToLogical)
-        {
-            canonToLogical[egraph.find(kv.first)] = kv.second;
-        }
-        eclassToLogical = canonToLogical;
-
         std::unordered_map<uint32_t, bool> logicalDirty;
-        std::vector<uint32_t> topo = topologicalSort({rootId}, graph);
         for (uint32_t nodeId : topo)
         {
             if (bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty())
             {
                 logicalDirty[nodeId] = true;
             }
-            else if (graph.getNode(nodeId).opType == OpType::INPUT)
-            {
-                logicalDirty[nodeId] = false;
-            }
             else
             {
                 bool isDirty = false;
-                for (uint32_t pid : graph.getNode(nodeId).parentIds)
+                for (uint32_t pid : graph.getNode(nodeId).child_ids)
                 {
                     if (logicalDirty[pid])
                     {
@@ -2776,6 +2752,8 @@ private:
             }
         }
 
+        // Add cache enodes
+        Engine cpu = Engine(0, EngineType::CPU);
         for (const auto &cls : egraph.getClasses())
         {
             uint32_t canonId = egraph.find(cls.id);
@@ -2805,7 +2783,7 @@ private:
 
             if (logicalId != UINT32_MAX && !logicalDirty[logicalId])
             {
-                ENode cacheNode;
+                ENode cacheNode = ENode(0, OpType::CACHE, "", {}, cls.shape, cs.strides, cls.dtype, cls.mem_space, cpu, PhysicalIdAllocator::allocate(), );
                 cacheNode.kernelUid = 0;
                 cacheNode.opType = OpType::CACHE;
                 cacheNode.shape = cls.shape;

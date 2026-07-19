@@ -6,10 +6,10 @@ needed[rootId] = root dirty region
 updateNeeded(nodeId,Graph graph, ShapeProp prop,<uint32_t, std::vector<Region>> needed)
   node = graph.getNode(nodeId)
   parentNeeded = prop.backward(needed[nodeId])
-  for i in range(node.parentIds):
+  for i in range(node.child_ids):
     currentNeeded = needed.find or []
-    needed[node.parentIds[i]] = mergeRegions(currentNeeded, parentNeeded[i]) // iterative per-dimension interval coalescing (group-by-other-dims + merge-1D)
-    updateNeeded(node.parentIds[i],graph,prop,needed)
+    needed[node.child_ids[i]] = mergeRegions(currentNeeded, parentNeeded[i]) // iterative per-dimension interval coalescing (group-by-other-dims + merge-1D)
+    updateNeeded(node.child_ids[i],graph,prop,needed)
 
 merge examples:
 f([(0,2),(2,4)]) -> [(0,4)]

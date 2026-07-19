@@ -393,7 +393,7 @@ std::vector<float> executeReferenceGraph(
         std::vector<const void *> inputPtrs;
         std::vector<TensorView> inputViews;
         std::vector<TensorNode> inputNodes;
-        for (uint32_t pid : node.parentIds)
+        for (uint32_t pid : node.child_ids)
         {
             auto resultIt = results.find(pid);
             if (resultIt == results.end())
@@ -448,7 +448,7 @@ std::vector<float> executeReferenceGraph(
         {
             TensorNode dummyOutNode = node;
             kernel.inferView(dummyOutNode, inputNodes, graph);
-            uint32_t parentId = node.parentIds[0];
+            uint32_t parentId = node.child_ids[0];
             results[nodeId] = results[parentId];
             chosenOutView.strides = dummyOutNode.strides;
             chosenOutView.baseOffset = dummyOutNode.viewOffset * elemSize;
@@ -634,9 +634,9 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                         tempGraph.getNode(curr).opType == OpType::PERMUTE ||
                         tempGraph.getNode(curr).opType == OpType::COPY_TO))
                 {
-                    if (tempGraph.getNode(curr).parentIds.empty())
+                    if (tempGraph.getNode(curr).child_ids.empty())
                         break;
-                    curr = tempGraph.getNode(curr).parentIds[0];
+                    curr = tempGraph.getNode(curr).child_ids[0];
                 }
                 for (size_t i = 0; i < kernel.numInputs; ++i)
                 {
@@ -648,9 +648,9 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
 
             auto checkParam = [&](size_t parentIdx, const std::vector<int32_t> &defaultVals)
             {
-                if (parentIdx < n.parentIds.size())
+                if (parentIdx < n.child_ids.size())
                 {
-                    int inputIdx = traceToInputIdx(n.parentIds[parentIdx]);
+                    int inputIdx = traceToInputIdx(n.child_ids[parentIdx]);
                     if (inputIdx >= 0)
                     {
                         isConstantParam[inputIdx] = true;
@@ -670,7 +670,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             else if (n.opType == OpType::RESHAPE)
             {
                 std::vector<int32_t> shapeVals;
-                int srcIdx = traceToInputIdx(n.parentIds[0]);
+                int srcIdx = traceToInputIdx(n.child_ids[0]);
                 if (srcIdx >= 0)
                 {
                     for (auto s : kernel.dummyShapes[srcIdx])
@@ -683,7 +683,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             else if (n.opType == OpType::PERMUTE)
             {
                 std::vector<int32_t> perm;
-                int srcIdx = traceToInputIdx(n.parentIds[0]);
+                int srcIdx = traceToInputIdx(n.child_ids[0]);
                 if (srcIdx >= 0)
                 {
                     size_t rank = kernel.dummyShapes[srcIdx].size();
@@ -699,7 +699,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             else if (n.opType == OpType::SLICE)
             {
                 std::vector<int32_t> starts, ends, steps;
-                int srcIdx = traceToInputIdx(n.parentIds[0]);
+                int srcIdx = traceToInputIdx(n.child_ids[0]);
                 if (srcIdx >= 0)
                 {
                     for (auto s : kernel.dummyShapes[srcIdx])
@@ -722,7 +722,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             else if (n.opType == OpType::SCATTER)
             {
                 std::vector<int32_t> starts, ends, steps;
-                int srcIdx = traceToInputIdx(n.parentIds[0]); // Target tensor
+                int srcIdx = traceToInputIdx(n.child_ids[0]); // Target tensor
                 if (srcIdx >= 0)
                 {
                     for (auto s : kernel.dummyShapes[srcIdx])
@@ -748,7 +748,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             }
             else if (n.opType == OpType::CONCAT)
             {
-                checkParam(n.parentIds.size() - 1, {0});
+                checkParam(n.child_ids.size() - 1, {0});
             }
             else if (n.opType == OpType::TRIU)
             {

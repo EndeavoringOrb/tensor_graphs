@@ -39,7 +39,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
         else
         {
             bool all_clean = true;
-            for (uint32_t pid : node.parentIds)
+            for (uint32_t pid : node.child_ids)
             {
                 if (!is_clean[pid])
                 {
@@ -117,7 +117,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
         std::vector<const void *> inputPtrs;
         std::vector<TensorView> inputViews;
         std::vector<TensorNode> inputNodes;
-        for (uint32_t pid : node.parentIds)
+        for (uint32_t pid : node.child_ids)
         {
             if (results.find(pid) == results.end())
             {
@@ -158,7 +158,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
         {
             TensorNode dummyOutNode = node;
             kernel.inferView(dummyOutNode, inputNodes, graph);
-            uint32_t parentId = node.parentIds[0];
+            uint32_t parentId = node.child_ids[0];
             results[nodeId] = results[parentId];
             chosenOutView.strides = dummyOutNode.strides;
             chosenOutView.baseOffset = dummyOutNode.viewOffset * elemSize;

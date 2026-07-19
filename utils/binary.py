@@ -213,7 +213,7 @@ class BinaryReader:
             "opType": to_op_type(self.read_u32()),
             "opName": self.read_string(),
             "dtype": self.read_dtype(),
-            "parentIds": self.read_vector(self.read_u32),
+            "child_ids": self.read_vector(self.read_u32),
             "shape": self.read_vector(self.read_u32),
             "strides": self.read_vector(self.read_u64),
             "viewOffset": self.read_u64(),

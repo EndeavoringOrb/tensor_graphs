@@ -11,12 +11,6 @@
 
 struct MemoryManager;
 
-struct LogicalIdAllocator
-{
-    LogicalId nextId{0};
-    LogicalId allocate() { return nextId++; }
-};
-
 enum class InputDataType : uint32_t
 {
     STORAGE,
@@ -74,11 +68,11 @@ struct Graph
         Error::throw_err(ss.str());
     }
 
-    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _parentIds, std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {}, std::string _contentHash = "", std::source_location loc = std::source_location::current())
+    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<uint32_t> _child_ids, std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {}, std::string _contentHash = "", std::source_location loc = std::source_location::current())
     {
         LogicalId id = allocator->allocate();
         std::string origin = std::string(loc.file_name()) + ":" + std::to_string(loc.line());
-        nodes[id] = TensorNode(id, _opType, _opName, _dtype, _parentIds, _shape, _strides, _contentHash, origin);
+        nodes[id] = TensorNode(id, _opType, _opName, _dtype, _child_ids, _shape, _strides, _contentHash, origin);
         return nodes[id];
     }
 
@@ -583,12 +577,12 @@ inline bool isIsomorphic(const Graph &g1, uint32_t root1, const Graph &g2, uint3
         return true;
     }
 
-    if (n1.parentIds.size() != n2.parentIds.size())
+    if (n1.child_ids.size() != n2.child_ids.size())
         return false;
 
-    for (size_t i = 0; i < n1.parentIds.size(); ++i)
+    for (size_t i = 0; i < n1.child_ids.size(); ++i)
     {
-        if (!isIsomorphic(g1, n1.parentIds[i], g2, n2.parentIds[i]))
+        if (!isIsomorphic(g1, n1.child_ids[i], g2, n2.child_ids[i]))
             return false;
     }
 

@@ -11,22 +11,33 @@
 #include <utility>
 #include <vector>
 
-struct ENode
+class ENode
 {
-    uint64_t kernelUid = 0;
-    OpType opType = OpType::INPUT;
-    std::string opName;
-    std::vector<EClassId> children; // list of child eclass ids
-    LogicalId leafId;
-
-    std::vector<uint32_t> shape;
-    std::vector<uint64_t> strides;
-    DType dtype;
-    MemSpace mem_space;
-    Engine engine;
-
-    // Precomputed structural signature used by hashcons buckets.
-    uint64_t sig = 0;
+public:
+    ENode(KernelId kernelUid,
+          OpType opType,
+          std::string opName,
+          std::vector<EClassId> children,
+          std::vector<uint32_t> shape,
+          std::vector<uint64_t> strides,
+          DType dtype,
+          MemSpace mem_space,
+          Engine engine,
+          LogicalId leafId = {UINT32_MAX},
+          uint64_t sig = 0)
+        : kernelUid(kernelUid),
+          opType(opType),
+          opName(std::move(opName)),
+          children(std::move(children)),
+          shape(std::move(shape)),
+          strides(std::move(strides)),
+          dtype(dtype),
+          mem_space(mem_space),
+          engine(engine),
+          leafId(leafId),
+          sig(sig)
+    {
+    }
 
     bool operator==(const ENode &other) const
     {
@@ -41,6 +52,33 @@ struct ENode
                shape == other.shape &&
                strides == other.strides;
     }
+
+    // Getters for accessing the private fields
+    KernelId getKernelUid() const { return kernelUid; }
+    OpType getOpType() const { return opType; }
+    const std::string &getOpName() const { return opName; }
+    const std::vector<EClassId> &getChildren() const { return children; }
+    const std::vector<uint32_t> &getShape() const { return shape; }
+    const std::vector<uint64_t> &getStrides() const { return strides; }
+    DType getDType() const { return dtype; }
+    MemSpace getMemSpace() const { return mem_space; }
+    Engine getEngine() const { return engine; }
+    LogicalId getLeafId() const { return leafId; }
+    uint64_t getSig() const { return sig; }
+
+private:
+    KernelId kernelUid;
+    OpType opType;
+    std::string opName;
+    std::vector<EClassId> children; // list of child eclass ids
+    std::vector<uint32_t> shape;
+    std::vector<uint64_t> strides;
+    DType dtype;
+    MemSpace mem_space;
+    Engine engine;
+    LogicalId leafId;
+
+    uint64_t sig; // Precomputed structural signature used by hashcons buckets.
 };
 
 struct EClass

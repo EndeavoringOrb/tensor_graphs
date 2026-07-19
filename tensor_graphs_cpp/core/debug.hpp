@@ -342,8 +342,8 @@ namespace Debug
                     {
                         std::cout << "    [" << i << "] ";
 
-                        if (i < node.parentIds.size()) {
-                            std::cout << "id=" << node.parentIds[i];
+                        if (i < node.child_ids.size()) {
+                            std::cout << "id=" << node.child_ids[i];
                         }
 
                         if (i < ctx.inputs.size())

@@ -47,7 +47,7 @@ private:
         uint32_t w_id = weight(w_name);
 
         // Use the original INPUT node's shape directly since CAST doesn't inherit it during build time
-        std::vector<uint32_t> w_shape = g.getNode(g.getNode(w_id).parentIds[0]).getShape();
+        std::vector<uint32_t> w_shape = g.getNode(g.getNode(w_id).child_ids[0]).getShape();
         int C_out = (int)w_shape[0];
         int K = 0;
         if (w_shape.size() == 4)

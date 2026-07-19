@@ -93,17 +93,17 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
        << prefix << "  Strides:    " << toString(node.strides) << "\n"
        << prefix << "  Backend:    " << node.backend << "\n"
        << prefix << "  Contiguous: " << (isContiguous(node) ? "true" : "false") << "\n"
-       << prefix << "  Parents (" << node.parentIds.size() << "):";
+       << prefix << "  Parents (" << node.child_ids.size() << "):";
 
-    if (node.parentIds.empty())
+    if (node.child_ids.empty())
     {
         ss << " None";
     }
     else
     {
-        for (size_t i = 0; i < node.parentIds.size(); ++i)
+        for (size_t i = 0; i < node.child_ids.size(); ++i)
         {
-            uint32_t pid = node.parentIds[i];
+            uint32_t pid = node.child_ids[i];
             if (graph.hasNode(pid))
             {
                 const auto &parent = graph.getNode(pid);
@@ -408,7 +408,7 @@ inline std::vector<LogicalId> topologicalSort(const std::vector<LogicalId> &root
         visited.insert(node);
         if (graph.hasNode(node))
         {
-            for (LogicalId pid : graph.getNode(node).parentIds)
+            for (LogicalId pid : graph.getNode(node).child_ids)
             {
                 self(self, pid);
             }

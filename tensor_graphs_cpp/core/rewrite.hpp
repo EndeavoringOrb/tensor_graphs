@@ -474,28 +474,28 @@ struct FusionRule : public Rule
         }
     }
 
-    void addFusedNode(RuleCtx &ctx, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &parentIds, uint32_t eNodeIdx) const
+    void addFusedNode(RuleCtx &ctx, const KernelEntry &kernel, Backend targetBackend, const std::vector<uint32_t> &child_ids, uint32_t eNodeIdx) const
     {
         EGraph &egraph = ctx.egraph;
         std::vector<uint32_t> adaptedParents;
-        if (!kernel.isVariadic && parentIds.size() != kernel.numInputs)
+        if (!kernel.isVariadic && child_ids.size() != kernel.numInputs)
         {
-            Error::throw_err("[addFusedNode] parentIds.size() != kernel.numInputs. Info:\n  Kernel: " + kernel.opName + "\n" +
-                             "  Parent IDs: " + std::to_string(parentIds.size()) + "\n" +
+            Error::throw_err("[addFusedNode] child_ids.size() != kernel.numInputs. Info:\n  Kernel: " + kernel.opName + "\n" +
+                             "  Parent IDs: " + std::to_string(child_ids.size()) + "\n" +
                              "  Kernel Num Inputs: " + std::to_string(kernel.numInputs) + "\n");
         }
-        if (kernel.isVariadic && parentIds.size() < 2)
+        if (kernel.isVariadic && child_ids.size() < 2)
         {
-            Error::throw_err("[addFusedNode] variadic kernel requires at least 2 parentIds. Info:\n  Kernel: " + kernel.opName + "\n" +
-                             "  Parent IDs: " + std::to_string(parentIds.size()) + "\n");
+            Error::throw_err("[addFusedNode] variadic kernel requires at least 2 child_ids. Info:\n  Kernel: " + kernel.opName + "\n" +
+                             "  Parent IDs: " + std::to_string(child_ids.size()) + "\n");
         }
 
-        for (size_t i = 0; i < parentIds.size(); ++i)
+        for (size_t i = 0; i < child_ids.size(); ++i)
         {
-            uint32_t pid = parentIds[i];
+            uint32_t pid = child_ids[i];
             const EClass parent = egraph.getEClass(pid);
 
-            size_t ruleIdx = kernel.isVariadic ? (i == parentIds.size() - 1 ? 1 : 0) : i;
+            size_t ruleIdx = kernel.isVariadic ? (i == child_ids.size() - 1 ? 1 : 0) : i;
 
             Backend expectedBackend = kernel.inputBackends[ruleIdx][0];
             bool foundBackend = false;
@@ -692,15 +692,15 @@ struct FusionRule : public Rule
             }
         }
 
-        if (eNode.opType == OpType::CONCAT && eNode.children.size() != pNode.parentIds.size())
+        if (eNode.opType == OpType::CONCAT && eNode.children.size() != pNode.child_ids.size())
         {
-            if (pNode.parentIds.size() < 2)
+            if (pNode.child_ids.size() < 2)
                 return false;
             if (eNode.children.size() < 2)
                 return false;
 
             if (!matchPatternClass(eNode.children.back(), egraph,
-                                   pNode.parentIds.back(), pattern, binding, protectedEClasses, true))
+                                   pNode.child_ids.back(), pattern, binding, protectedEClasses, true))
                 return false;
 
             bool firstTensor = true;
@@ -709,7 +709,7 @@ struct FusionRule : public Rule
                 if (firstTensor)
                 {
                     if (!matchPatternClass(eNode.children[i], egraph,
-                                           pNode.parentIds[0], pattern, binding, protectedEClasses, false))
+                                           pNode.child_ids[0], pattern, binding, protectedEClasses, false))
                         return false;
                     firstTensor = false;
                 }
@@ -724,13 +724,13 @@ struct FusionRule : public Rule
             return true;
         }
 
-        if (eNode.children.size() != pNode.parentIds.size())
+        if (eNode.children.size() != pNode.child_ids.size())
             return false;
 
         for (size_t i = 0; i < eNode.children.size(); ++i)
         {
             bool childIgnoreConst = isStructuralConstant(eNode.opType, i, eNode.children.size());
-            if (!matchPatternClass(eNode.children[i], egraph, pNode.parentIds[i], pattern, binding, protectedEClasses, childIgnoreConst))
+            if (!matchPatternClass(eNode.children[i], egraph, pNode.child_ids[i], pattern, binding, protectedEClasses, childIgnoreConst))
             {
                 return false;
             }
