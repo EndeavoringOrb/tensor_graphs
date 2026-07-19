@@ -34,7 +34,89 @@ async function loadGraphData(name) {
         const resp = await fetch(`/api/graph/${encodeURIComponent(name)}`);
         const data = await resp.json();
 
-        currentGraphOrders = data.orders;
+        // Map the serialized JSON strings from the new API format into JS objects
+        currentGraphOrders = data.orders.map(orderObj => {
+            const parsedNodes = orderObj.ordered.map(str => JSON.parse(str));
+            const parsedBuffers = orderObj.buffers.map(str => JSON.parse(str));
+            const parsedAllocated = orderObj.allocated.map(str => JSON.parse(str));
+
+            // Reconstruct buffer-to-node association to resolve node names for allocations
+            const bufferIdxToNode = {};
+            let bufferCount = 0;
+            parsedNodes.forEach(node => {
+                const isStorage = node.mem_space &&
+                    node.mem_space.idx === 0 &&
+                    (node.mem_space.handle_type === 'Handle.STORAGE' || node.mem_space.handle_type === 0);
+                if (isStorage) {
+                    return;
+                }
+                bufferIdxToNode[bufferCount] = node;
+                bufferCount++;
+            });
+
+            // Map parsed nodes to scheduled tasks
+            const schedule = parsedNodes.map(node => {
+                const opName = node.op ? node.op.replace('Op.', '') : 'INPUT';
+                const engineKey = node.engine ? `Engine(idx=${node.engine.idx}, engine_type=${node.engine.engine_type})` : 'Engine(idx=0, engine_type=EngineType.CPU)';
+                return {
+                    name: node.name,
+                    op: opName,
+                    start: node.birth,
+                    end: node.birth + node.cost,
+                    duration: node.cost,
+                    engine: engineKey,
+                    size: node.size
+                };
+            });
+
+            // Map parsed buffers to the raw buffer structure
+            const buffers = parsedBuffers.map(buf => {
+                const node = bufferIdxToNode[buf.idx];
+                const nodeName = node ? node.name : `Buf ${buf.idx}`;
+                const opName = node ? node.op.replace('Op.', '') : 'INPUT';
+                const memSpaceIdx = buf.mem_space ? buf.mem_space.idx : 0;
+                const memSpaceHandle = buf.mem_space && buf.mem_space.handle_type ? buf.mem_space.handle_type.replace('Handle.', '') : '';
+
+                return {
+                    idx: buf.idx,
+                    node_name: nodeName,
+                    op: opName,
+                    start: buf.start,
+                    end: buf.end,
+                    offset: buf.offset,
+                    size: buf.size,
+                    mem_space_idx: memSpaceIdx,
+                    mem_space_handle: memSpaceHandle
+                };
+            });
+
+            // Map parsed allocated buffers to the allocated block structure
+            const allocated = parsedAllocated.map(buf => {
+                const node = bufferIdxToNode[buf.idx];
+                const nodeName = node ? node.name : `Buf ${buf.idx}`;
+                const opName = node ? node.op.replace('Op.', '') : 'INPUT';
+                const memSpaceIdx = buf.mem_space ? buf.mem_space.idx : 0;
+                const memSpaceHandle = buf.mem_space && buf.mem_space.handle_type ? buf.mem_space.handle_type.replace('Handle.', '') : '';
+
+                return {
+                    idx: buf.idx,
+                    node_name: nodeName,
+                    op: opName,
+                    start: buf.start,
+                    end: buf.end,
+                    offset: buf.offset,
+                    size: buf.size,
+                    mem_space_idx: memSpaceIdx,
+                    mem_space_handle: memSpaceHandle
+                };
+            });
+
+            return {
+                schedule: schedule,
+                buffers: buffers,
+                allocated: allocated
+            };
+        });
 
         // Show control panels
         graphStatsPanel.classList.remove('hidden');
@@ -62,6 +144,7 @@ selectOrderA.addEventListener('change', (e) => {
     renderComparison();
 });
 
+// Select order dropdown event listeners
 selectOrderB.addEventListener('change', (e) => {
     orderBIndex = parseInt(e.target.value);
     updateCostBadges();
@@ -134,8 +217,9 @@ function calculateStats() {
     let minIdx = 0;
     let maxIdx = 0;
 
-    currentGraphOrders.forEach((order, idx) => {
-        const cost = order.length > 0 ? Math.max(...order.map(t => t.end)) : 0;
+    currentGraphOrders.forEach((orderObj, idx) => {
+        const schedule = orderObj.schedule;
+        const cost = schedule.length > 0 ? Math.max(...schedule.map(t => t.end)) : 0;
         if (cost < minCost) {
             minCost = cost;
             minIdx = idx;
@@ -168,8 +252,9 @@ function populateDropdowns(defaultA, defaultB) {
     selectOrderA.innerHTML = '';
     selectOrderB.innerHTML = '';
 
-    currentGraphOrders.forEach((order, idx) => {
-        const cost = order.length > 0 ? Math.max(...order.map(t => t.end)) : 0;
+    currentGraphOrders.forEach((orderObj, idx) => {
+        const schedule = orderObj.schedule;
+        const cost = schedule.length > 0 ? Math.max(...schedule.map(t => t.end)) : 0;
 
         const optionA = document.createElement('option');
         optionA.value = idx;
@@ -195,11 +280,14 @@ function updateCostBadges() {
     const costAElement = document.getElementById('totalCostA');
     const costBElement = document.getElementById('totalCostB');
 
-    const orderA = currentGraphOrders[orderAIndex];
-    const orderB = currentGraphOrders[orderBIndex];
+    const orderAObj = currentGraphOrders[orderAIndex];
+    const orderBObj = currentGraphOrders[orderBIndex];
 
-    const costA = orderA && orderA.length > 0 ? Math.max(...orderA.map(t => t.end)) : 0;
-    const costB = orderB && orderB.length > 0 ? Math.max(...orderB.map(t => t.end)) : 0;
+    const scheduleA = orderAObj ? orderAObj.schedule : [];
+    const scheduleB = orderBObj ? orderBObj.schedule : [];
+
+    const costA = scheduleA && scheduleA.length > 0 ? Math.max(...scheduleA.map(t => t.end)) : 0;
+    const costB = scheduleB && scheduleB.length > 0 ? Math.max(...scheduleB.map(t => t.end)) : 0;
 
     costAElement.textContent = costA;
     costBElement.textContent = costB;
@@ -221,16 +309,23 @@ function updateButtonStates() {
 function renderComparison() {
     vizContainer.innerHTML = '';
 
-    const orderA = currentGraphOrders[orderAIndex];
-    const orderB = currentGraphOrders[orderBIndex];
+    const orderAObj = currentGraphOrders[orderAIndex];
+    const orderBObj = currentGraphOrders[orderBIndex];
 
-    if (!orderA || !orderB) return;
+    if (!orderAObj || !orderBObj) return;
 
     updateButtonStates();
 
+    const scheduleA = orderAObj.schedule;
+    const scheduleB = orderBObj.schedule;
+    const buffersA = orderAObj.buffers;
+    const buffersB = orderBObj.buffers;
+    const allocatedA = orderAObj.allocated;
+    const allocatedB = orderBObj.allocated;
+
     // Determine the common timeline scale max value across both schedules
-    const maxTimeA = orderA.length > 0 ? Math.max(...orderA.map(t => t.end)) : 0;
-    const maxTimeB = orderB.length > 0 ? Math.max(...orderB.map(t => t.end)) : 0;
+    const maxTimeA = scheduleA.length > 0 ? Math.max(...scheduleA.map(t => t.end)) : 0;
+    const maxTimeB = scheduleB.length > 0 ? Math.max(...scheduleB.map(t => t.end)) : 0;
     const commonMaxTime = Math.max(maxTimeA, maxTimeB, 1);
 
     // Pixel scaling factor
@@ -239,7 +334,7 @@ function renderComparison() {
     // Render Schedule A Block
     const blockA = document.createElement('div');
     blockA.className = 'schedule-block schedule-block-a';
-    renderScheduleInto(blockA, orderA, orderAIndex, commonMaxTime, scale, 'A');
+    renderScheduleInto(blockA, scheduleA, buffersA, allocatedA, orderAIndex, commonMaxTime, scale, 'A');
     vizContainer.appendChild(blockA);
 
     // Separator line
@@ -250,14 +345,17 @@ function renderComparison() {
     // Render Schedule B Block
     const blockB = document.createElement('div');
     blockB.className = 'schedule-block schedule-block-b';
-    renderScheduleInto(blockB, orderB, orderBIndex, commonMaxTime, scale, 'B');
+    renderScheduleInto(blockB, scheduleB, buffersB, allocatedB, orderBIndex, commonMaxTime, scale, 'B');
     vizContainer.appendChild(blockB);
 }
 
 /**
- * Injects ruler, grids, and timeline lanes for a specific schedule into a container.
+ * Injects ruler, grids, timeline lanes, and malloc memory blocks into a container.
  */
-function renderScheduleInto(container, order, orderIndex, maxTime, scale, blockLabel) {
+function renderScheduleInto(container, order, buffers, allocated, orderIndex, maxTime, scale, blockLabel) {
+    // Calculate the physical layout width needed for the timeline
+    const timelineWidthStr = (maxTime * scale) + 'px';
+
     // Block Title Row
     const headerRow = document.createElement('div');
     headerRow.className = 'schedule-block-header';
@@ -304,6 +402,8 @@ function renderScheduleInto(container, order, orderIndex, maxTime, scale, blockL
 
     const rulerTicks = document.createElement('div');
     rulerTicks.className = 'ruler-ticks';
+    rulerTicks.style.width = timelineWidthStr;
+    rulerTicks.style.flexShrink = '0';
 
     // Scale boundaries depending on time sizes
     const tickInterval = maxTime > 30 ? 5 : (maxTime > 15 ? 2 : 1);
@@ -355,6 +455,8 @@ function renderScheduleInto(container, order, orderIndex, maxTime, scale, blockL
 
         const timeline = document.createElement('div');
         timeline.className = 'timeline';
+        timeline.style.width = timelineWidthStr;
+        timeline.style.flexShrink = '0';
 
         const engineTasks = order.filter(t => t.engine === engName);
         engineTasks.forEach(task => {
@@ -391,6 +493,177 @@ function renderScheduleInto(container, order, orderIndex, maxTime, scale, blockL
         blockBody.appendChild(row);
     });
 
+    // 4. Populate Logical Memory Tracks (lifetimes)
+    if (buffers && buffers.length > 0) {
+        // Section Header for logical lifetimes
+        const memSectionHeader = document.createElement('div');
+        memSectionHeader.className = 'mem-section-header';
+        memSectionHeader.innerHTML = '<span>Logical Buffer Lifetimes (Active Spans)</span>';
+        blockBody.appendChild(memSectionHeader);
+
+        // Group by memory space index
+        const memSpaces = [...new Set(buffers.map(b => b.mem_space_idx))].sort();
+
+        memSpaces.forEach(memIdx => {
+            const spaceBuffers = buffers.filter(b => b.mem_space_idx === memIdx);
+
+            const row = document.createElement('div');
+            row.className = 'mem-row';
+
+            const label = document.createElement('div');
+            label.className = 'mem-label';
+
+            const spaceName = memIdx === 1 ? 'CPU Memory' : (memIdx === 2 ? 'GPU Memory' : `Mem Space ${memIdx}`);
+            const handleName = spaceBuffers.length > 0 ? spaceBuffers[0].mem_space_handle : '';
+
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = spaceName;
+            const subSpan = document.createElement('span');
+            subSpan.className = 'mem-type-badge';
+            subSpan.textContent = `Handle: ${handleName}`;
+
+            label.appendChild(nameSpan);
+            label.appendChild(subSpan);
+
+            const memTimeline = document.createElement('div');
+            memTimeline.className = 'mem-timeline';
+            memTimeline.style.width = timelineWidthStr;
+            memTimeline.style.flexShrink = '0';
+
+            const numBufs = spaceBuffers.length;
+            spaceBuffers.forEach((buf, bIdx) => {
+                const bar = document.createElement('div');
+                bar.className = `mem-buffer-bar op-${buf.op}`;
+
+                const barWidth = (buf.end - buf.start) * scale;
+                const offsetLeft = buf.start * scale;
+
+                bar.style.left = offsetLeft + 'px';
+                bar.style.width = barWidth + 'px';
+
+                // Stacking them vertically based on count
+                const pctHeight = 100 / numBufs;
+                const pctBottom = bIdx * pctHeight;
+
+                bar.style.height = `calc(${pctHeight}% - 4px)`;
+                bar.style.bottom = `calc(${pctBottom}% + 2px)`;
+
+                bar.innerHTML = `<span class="mem-buffer-label">${buf.node_name}</span>`;
+                bar.title = `Buffer ${buf.idx} (${buf.node_name}): Active ${buf.start}-${buf.end}, Size: ${buf.size}`;
+
+                bar.addEventListener('mouseenter', () => {
+                    showMemInspector(buf, spaceName, handleName);
+                });
+                bar.addEventListener('mouseleave', () => {
+                    hideInspector();
+                });
+
+                memTimeline.appendChild(bar);
+            });
+
+            row.appendChild(label);
+            row.appendChild(memTimeline);
+            blockBody.appendChild(row);
+        });
+    }
+
+    // 5. Populate Physical Memory Tracks (allocated offsets)
+    // Section Header for physical allocation layout
+    const physSectionHeader = document.createElement('div');
+    physSectionHeader.className = 'mem-section-header';
+    physSectionHeader.innerHTML = '<span>Physical Memory Allocation Layout (malloc offsets)</span>';
+    blockBody.appendChild(physSectionHeader);
+
+    if (allocated && allocated.length > 0) {
+        const memSpaces = [...new Set(allocated.map(b => b.mem_space_idx))].sort();
+
+        memSpaces.forEach(memIdx => {
+            const spaceBuffers = allocated.filter(b => b.mem_space_idx === memIdx);
+
+            const row = document.createElement('div');
+            row.className = 'mem-row';
+
+            const label = document.createElement('div');
+            label.className = 'mem-label';
+
+            const spaceName = memIdx === 1 ? 'CPU Memory' : (memIdx === 2 ? 'GPU Memory' : `Mem Space ${memIdx}`);
+            const handleName = spaceBuffers.length > 0 ? spaceBuffers[0].mem_space_handle : '';
+
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = spaceName;
+            const subSpan = document.createElement('span');
+            subSpan.className = 'mem-type-badge';
+            subSpan.textContent = `Handle: ${handleName}`;
+
+            label.appendChild(nameSpan);
+            label.appendChild(subSpan);
+
+            const memTimeline = document.createElement('div');
+            memTimeline.className = 'mem-timeline';
+            memTimeline.style.width = timelineWidthStr;
+            memTimeline.style.flexShrink = '0';
+
+            // Calculate dynamic Y scaling boundary (max offset + size)
+            const maxOffsetAndSize = Math.max(...spaceBuffers.map(b => b.offset + b.size), 1);
+
+            // Draw Y-axis guideline gridlines and numeric step ticks
+            for (let y = 0; y <= maxOffsetAndSize; y++) {
+                const line = document.createElement('div');
+                line.className = 'mem-offset-gridline';
+                line.style.bottom = `${(y / maxOffsetAndSize) * 100}%`;
+                memTimeline.appendChild(line);
+
+                if (y < maxOffsetAndSize) {
+                    const tickText = document.createElement('span');
+                    tickText.className = 'mem-offset-tick-text';
+                    tickText.textContent = `O: ${y}`;
+                    tickText.style.bottom = `${(y / maxOffsetAndSize) * 100 + 1}%`;
+                    memTimeline.appendChild(tickText);
+                }
+            }
+
+            // Draw buffers inside 2D space
+            spaceBuffers.forEach(buf => {
+                const bar = document.createElement('div');
+                bar.className = `mem-buffer-bar op-${buf.op}`;
+
+                const barWidth = (buf.end - buf.start) * scale;
+                const offsetLeft = buf.start * scale;
+
+                bar.style.left = offsetLeft + 'px';
+                bar.style.width = barWidth + 'px';
+
+                // Percentage height & vertical positioning
+                const pctHeight = (buf.size / maxOffsetAndSize) * 100;
+                const pctBottom = (buf.offset / maxOffsetAndSize) * 100;
+
+                bar.style.height = `calc(${pctHeight}% - 4px)`;
+                bar.style.bottom = `calc(${pctBottom}% + 2px)`;
+
+                bar.innerHTML = `<span class="mem-buffer-label">${buf.node_name}</span>`;
+                bar.title = `Buffer ${buf.idx} (${buf.node_name}): Active ${buf.start}-${buf.end}, Offset: ${buf.offset}, Size: ${buf.size}`;
+
+                bar.addEventListener('mouseenter', () => {
+                    showMemInspector(buf, spaceName, handleName);
+                });
+                bar.addEventListener('mouseleave', () => {
+                    hideInspector();
+                });
+
+                memTimeline.appendChild(bar);
+            });
+
+            row.appendChild(label);
+            row.appendChild(memTimeline);
+            blockBody.appendChild(row);
+        });
+    } else {
+        const emptyMsg = document.createElement('div');
+        emptyMsg.className = 'empty-schedule-msg';
+        emptyMsg.textContent = 'No memory layout was successfully allocated (Allocated 0 buffers).';
+        blockBody.appendChild(emptyMsg);
+    }
+
     container.appendChild(blockBody);
 }
 
@@ -405,6 +678,19 @@ function showInspector(task, engineDetails) {
     inspectEngine.textContent = `${engineDetails.name} (${engineDetails.sub})`;
     inspectInterval.textContent = `${task.start} → ${task.end}`;
     inspectDuration.textContent = `${task.duration} unit${task.duration !== 1 ? 's' : ''}`;
+}
+
+function showMemInspector(buf, spaceName, handleName) {
+    detailsPanel.classList.remove('hidden');
+
+    inspectOp.className = 'inspect-badge';
+    inspectOp.classList.add(`op-${buf.op}`);
+    inspectOp.textContent = buf.op;
+
+    inspectName.textContent = `Buffer: ${buf.node_name}`;
+    inspectEngine.textContent = `${spaceName} (${handleName})`;
+    inspectInterval.textContent = `Active: ${buf.start} → ${buf.end}`;
+    inspectDuration.textContent = `Offset: ${buf.offset} | Size: ${buf.size}`;
 }
 
 function hideInspector() {

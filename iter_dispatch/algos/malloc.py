@@ -1,6 +1,5 @@
 from .iter_dispatch import (
     iter_dispatch_orders,
-    get_schedule,
     graphs,
 )
 from .bufferize import Buffer, bufferize, overlaps
@@ -31,24 +30,25 @@ def malloc(mem_cap, unallocated: list[Buffer], allocated: list[Buffer]):
             continue  # exceeds mem cap
         buf = unallocated[i]
         buf.offset = offset_i
-        allocated = malloc(
+        res = malloc(
             mem_cap,
             [unallocated[j] for j in range(len(unallocated)) if j != i],
             allocated + [buf],
         )
-        if len(allocated) != 0:
-            return allocated
+        if len(res) != 0:
+            return res
     return []
 
 
 if __name__ == "__main__":
+    # 1=cpu, 2=gpu, storage no limit because we don't write to storage
     mem_cap = {
         1: 1024,
         2: 1024,
-    }  # 1=cpu, 2=gpu, storage no limit because we don't write to storage
+    }
+
     for name, graph in graphs.items():
         for ordered in iter_dispatch_orders(graph):
-            schedule = get_schedule(ordered)
-            buffers, node_to_buffer = bufferize(ordered, schedule)
+            buffers, node_to_buffer = bufferize(ordered)
             allocated = malloc(mem_cap, buffers, [])
             print(f"({name}) allocated: {allocated}")
