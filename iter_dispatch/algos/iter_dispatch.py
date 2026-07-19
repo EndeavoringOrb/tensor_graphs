@@ -62,7 +62,7 @@ op_costs = {
     Op.MUL: 2,
     Op.COPYTO: 10,
     Op.TRANSFER: 1,
-    (Op.SQRT, EngineType.CPU): 10,
+    Op.SQRT: 10,
     (Op.SQRT, EngineType.QUALCOMM_IGPU): 1,
 }
 
@@ -101,8 +101,8 @@ class Node:
     def __str__(self) -> str:
         return f"Node('{self.name}',{self.op})"
 
-    def cost(self) -> int | None:
-        return op_costs.get((self.op, self.engine.engine_type), op_costs.get(self.op))
+    def cost(self) -> int:
+        return op_costs.get((self.op, self.engine.engine_type), op_costs[self.op])
 
 
 def get_ready(remaining: set[Node]):
@@ -173,12 +173,10 @@ def get_schedule(ordered: list[Node]):
             child_finish = engine_finish[child_engine]
             children_finish = max(children_finish, child_finish)
         node_cost = node.cost()
-        assert node_cost is not None
         node_finish = node_cost + max(
             children_finish, engine_finish.get(node.engine, 0)
         )
         engine_finish[node.engine] = node_finish
-        # print(f"cost after {node}: {', '.join(f"{k}: {v}" for k, v in engine_finish.items())}")
         schedule.append(
             {
                 "name": node.name,
@@ -195,14 +193,15 @@ def get_schedule(ordered: list[Node]):
 
 def get_count(graph: list[Node]):
     total_orders = 0
-    best_cost = None
-    for i, ordered in enumerate(iter_dispatch_orders(graph)):
+    best_cost = int("inf")
+    for ordered in iter_dispatch_orders(graph):
         schedule = get_schedule(ordered)
         final_cost = schedule[-1]["end"]
-        best_cost = final_cost if (best_cost is None or final_cost < best_cost) else best_cost
+        best_cost = min(best_cost, final_cost)
         total_orders += 1
 
     return total_orders, best_cost
+
 
 if __name__ == "__main__":
     cpu = Engine(0, EngineType.CPU)

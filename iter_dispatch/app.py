@@ -1,5 +1,5 @@
 from flask import Flask, render_template, jsonify
-from iter_dispatch.versions.iter_dispatch import (
+from algos.iter_dispatch import (
     Engine,
     EngineType,
     MemSpace,
