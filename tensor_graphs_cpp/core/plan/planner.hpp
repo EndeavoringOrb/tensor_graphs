@@ -1026,11 +1026,6 @@ private:
         EClassId E_L = egraph.find(nodeToEClass.at(logicalId));
         const TensorNode &sourceNode = graph.getNode(logicalId);
 
-        if (sourceNode.opType == OpType::INPUT)
-        {
-            return injected;
-        }
-
         bool isFullRegion = false;
         if (regions.size() == 1)
         {
@@ -1055,7 +1050,10 @@ private:
             return injected;
         }
 
-        MemSpace target_mem_space = MemSpace(1, HandleType::CPP);
+        MemSpace ram = MemSpace{1, HandleType::CPP};
+        Engine cpu = Engine{0, EngineType::CPU};
+
+        MemSpace target_mem_space = ram;
         auto it = cachedNodes.find(logicalId);
         if (it != cachedNodes.end())
         {
@@ -1069,9 +1067,8 @@ private:
         const EClass lClass = egraph.getEClass(E_L);
 
         EClassId E_Cache = egraph.addEClass(lClass.shape, lClass.strides, lClass.dtype, target_mem_space);
-        ENode cacheNode = ENode(KernelId{0}, OpType::CACHE, "", {}, lClass.shape, lClass.strides, lClass.dtype, lClass.mem_space, {Engine(0, EngineType::CPU)});
+        ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, lClass.shape, lClass.strides, lClass.dtype, target_mem_space, {cpu});
         egraph.addENode(E_Cache, cacheNode);
-        
 
         eclassToLogical[E_Cache] = logicalId;
         EClassId current_E = E_Cache;
@@ -1108,7 +1105,6 @@ private:
 
             if (sourceNode.opType == OpType::INPUT)
             {
-                const EClass &lClass = egraph.getEClass(E_L);
                 std::vector<uint64_t> sliceStrides = lClass.strides;
 
                 for (size_t d = 0; d < starts.size(); ++d)
@@ -1133,21 +1129,21 @@ private:
                 dIns[2].dtype = DType::INT32;
                 dIns[3].setShape({(uint32_t)steps.size()});
                 dIns[3].dtype = DType::INT32;
-                MemSpace ram = MemSpace(1, HandleType::CPP);
-                std::vector<MemSpace> input_mem_spaces = {ram, ram, ram, ram};
 
-                auto sliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", dIns, dOut, lClass.mem_space, {Engine(0, EngineType::CPU)}, input_mem_spaces, true);
+                std::vector<MemSpace> input_mem_spaces = {lClass.mem_space, ram, ram, ram};
+
+                auto sliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", dIns, dOut, lClass.mem_space, {cpu}, input_mem_spaces, true);
                 for (KernelId kid : sliceRefs)
                 {
-                    const auto &kernel = KernelRegistry::get().getKernel(kid);
-                    ENode sliceNode = ENode(kid, OpType::SLICE, "", {E_L, startsId, endsId, stepsId}, partialShape, sliceStrides, lClass.dtype, lClass.mem_space, {Engine(0, EngineType::CPU)});
+                    ENode sliceNode(kid, OpType::SLICE, "", {E_L, startsId, endsId, stepsId}, partialShape, sliceStrides, lClass.dtype, lClass.mem_space, {cpu});
                     egraph.addENode(slicedEClass, sliceNode);
                 }
             }
             else
             {
-                std::vector<uint32_t> slicedInputs;
+                std::vector<EClassId> slicedInputs;
                 std::vector<TensorNode> dummyInputNodes;
+                std::vector<MemSpace> dummyInputMemSpaces;
 
                 for (size_t p_idx = 0; p_idx < sourceNode.child_ids.size(); ++p_idx)
                 {
@@ -1179,7 +1175,6 @@ private:
                     EClassId pStepsId = addConst(pSteps);
 
                     std::vector<uint64_t> pSliceStrides = pClass.strides;
-
                     for (size_t d = 0; d < pStarts.size(); ++d)
                     {
                         int32_t start = pStarts[d];
@@ -1188,89 +1183,51 @@ private:
                         pSliceStrides[d] *= pSteps[d];
                     }
 
-                    uint32_t pSliceEClass = egraph.addEClass(pPartialShape, pSliceStrides, pSliceViewOffset, pClass.dtype, pClass.backend);
-                    ENode pSliceNode;
-                    pSliceNode.opType = OpType::SLICE;
-                    pSliceNode.children = {E_parent, pStartsId, pEndsId, pStepsId};
-                    pSliceNode.shape = pPartialShape;
-                    pSliceNode.strides = pSliceStrides;
-                    pSliceNode.viewOffset = pSliceViewOffset;
-                    pSliceNode.dtype = pClass.dtype;
-                    pSliceNode.backend = pClass.backend;
+                    EClassId pSliceEClass = egraph.addEClass(pPartialShape, pSliceStrides, pClass.dtype, pClass.mem_space);
 
                     TensorNode pOut;
                     pOut.setShape(pPartialShape);
-                    pOut.dtype = pSliceNode.dtype;
-                    pOut.backend = pSliceNode.backend;
+                    pOut.dtype = pClass.dtype;
+
                     std::vector<TensorNode> pIns(4);
                     pIns[0].setShape(pClass.shape);
-                    pIns[0].dtype = pSliceNode.dtype;
-                    pIns[0].backend = pSliceNode.backend;
+                    pIns[0].dtype = pClass.dtype;
                     pIns[1].setShape({(uint32_t)pStarts.size()});
                     pIns[1].dtype = DType::INT32;
-                    pIns[1].backend = Backend::CPU;
                     pIns[2].setShape({(uint32_t)pEnds.size()});
                     pIns[2].dtype = DType::INT32;
-                    pIns[2].backend = Backend::CPU;
                     pIns[3].setShape({(uint32_t)pSteps.size()});
                     pIns[3].dtype = DType::INT32;
-                    pIns[3].backend = Backend::CPU;
 
-                    auto pSliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", pSliceNode.backend, pIns, pOut, true);
-                    for (uint64_t uid : pSliceRefs)
+                    std::vector<MemSpace> pSliceInputMemSpaces = {pClass.mem_space, ram, ram, ram};
+                    auto pSliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", pIns, pOut, pClass.mem_space, {cpu}, pSliceInputMemSpaces, true);
+
+                    for (KernelId uid : pSliceRefs)
                     {
                         const auto &kernel = KernelRegistry::get().getKernel(uid);
-                        ENode sn = pSliceNode;
-                        sn.kernelId = uid;
-                        if (kernel.is_view)
-                        {
-                            sn.strides = pSliceStrides;
-                            sn.viewOffset = pSliceViewOffset;
-                        }
-                        else
-                        {
-                            sn.strides = calcContiguousStrides(pPartialShape);
-                            sn.viewOffset = 0;
-                        }
+                        std::vector<uint64_t> strides = kernel.is_view ? pSliceStrides : calcContiguousStrides(pPartialShape);
+                        ENode sn(uid, OpType::SLICE, "", {E_parent, pStartsId, pEndsId, pStepsId}, pPartialShape, strides, pClass.dtype, pClass.mem_space, {cpu});
                         egraph.addENode(pSliceEClass, sn);
                     }
 
-                    uint32_t pContigEClass = egraph.addEClass(pPartialShape, calcContiguousStrides(pPartialShape), 0, pSliceNode.dtype, pSliceNode.backend);
-                    ENode pContigNode;
-                    pContigNode.opType = OpType::CONTIGUOUS;
-                    pContigNode.children = {pSliceEClass};
-                    pContigNode.shape = pPartialShape;
-                    pContigNode.strides = calcContiguousStrides(pPartialShape);
-                    pContigNode.dtype = pSliceNode.dtype;
-                    pContigNode.backend = pSliceNode.backend;
+                    EClassId pContigEClass = egraph.addEClass(pPartialShape, calcContiguousStrides(pPartialShape), pClass.dtype, pClass.mem_space);
 
                     TensorNode cOut;
                     cOut.setShape(pPartialShape);
-                    cOut.dtype = pSliceNode.dtype;
-                    cOut.backend = pSliceNode.backend;
-                    cOut.strides = pContigNode.strides;
+                    cOut.dtype = pClass.dtype;
+                    cOut.strides = calcContiguousStrides(pPartialShape);
+
                     TensorNode cIn;
                     cIn.setShape(pPartialShape);
-                    cIn.dtype = pSliceNode.dtype;
-                    cIn.backend = pSliceNode.backend;
+                    cIn.dtype = pClass.dtype;
                     cIn.strides = pSliceStrides;
 
-                    auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", pContigNode.backend, {cIn}, cOut, true);
-                    for (uint64_t uid : contigRefs)
+                    auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", {cIn}, cOut, pClass.mem_space, {cpu}, {pClass.mem_space}, true);
+                    for (KernelId uid : contigRefs)
                     {
                         const auto &kernel = KernelRegistry::get().getKernel(uid);
-                        ENode cn = pContigNode;
-                        cn.kernelId = uid;
-                        if (kernel.is_view)
-                        {
-                            cn.strides = pSliceStrides;
-                            cn.viewOffset = pSliceViewOffset;
-                        }
-                        else
-                        {
-                            cn.strides = calcContiguousStrides(pPartialShape);
-                            cn.viewOffset = 0;
-                        }
+                        std::vector<uint64_t> strides = kernel.is_view ? pSliceStrides : calcContiguousStrides(pPartialShape);
+                        ENode cn(uid, OpType::CONTIGUOUS, "", {pSliceEClass}, pPartialShape, strides, pClass.dtype, pClass.mem_space, {cpu});
                         egraph.addENode(pContigEClass, cn);
                     }
 
@@ -1279,131 +1236,80 @@ private:
                     TensorNode dummyIn;
                     dummyIn.opType = OpType::INPUT;
                     dummyIn.setShape(pPartialShape);
-                    dummyIn.dtype = pSliceNode.dtype;
-                    dummyIn.backend = pSliceNode.backend;
-                    dummyIn.strides = pContigNode.strides;
-                    dummyIn.viewOffset = 0;
+                    dummyIn.dtype = pClass.dtype;
+                    dummyIn.strides = calcContiguousStrides(pPartialShape);
                     dummyInputNodes.push_back(dummyIn);
+                    dummyInputMemSpaces.push_back(pClass.mem_space);
                 }
-
-                ENode opSlicedNode;
-                opSlicedNode.opType = sourceNode.opType;
-                opSlicedNode.opName = sourceNode.opName;
-                opSlicedNode.children = slicedInputs;
-                opSlicedNode.shape = partialShape;
-                opSlicedNode.strides = calcContiguousStrides(partialShape);
-                opSlicedNode.viewOffset = 0;
-                opSlicedNode.dtype = sourceNode.dtype;
-                opSlicedNode.backend = sourceNode.backend;
 
                 TensorNode dummyOut;
                 dummyOut.opType = sourceNode.opType;
                 dummyOut.opName = sourceNode.opName;
                 dummyOut.setShape(partialShape);
                 dummyOut.dtype = sourceNode.dtype;
-                dummyOut.backend = sourceNode.backend;
-                dummyOut.strides = opSlicedNode.strides;
+                dummyOut.strides = calcContiguousStrides(partialShape);
 
-                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName, sourceNode.backend, dummyInputNodes, dummyOut, true);
+                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName, dummyInputNodes, dummyOut, target_mem_space, {cpu}, dummyInputMemSpaces, true);
                 if (opRefs.size() == 0)
                 {
-                    Error::throw_err("[Planner.injectPartialPath] couldn't find any slice kernels");
+                    Error::throw_err("[Planner.injectPartialPath] couldn't find any slice kernels for op " + toString(sourceNode.opType));
                 }
-                slicedEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), 0, sourceNode.dtype, sourceNode.backend);
-                for (uint64_t uid : opRefs)
+
+                slicedEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space);
+                for (KernelId uid : opRefs)
                 {
-                    ENode sn = opSlicedNode;
-                    sn.kernelId = uid;
+                    ENode sn(uid, sourceNode.opType, sourceNode.opName, slicedInputs, partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space, {cpu});
                     egraph.addENode(slicedEClass, sn);
                 }
             }
 
-            uint32_t contigEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), 0, sourceNode.dtype, targetBackend);
-            ENode contigNode;
-            contigNode.opType = OpType::CONTIGUOUS;
-            contigNode.children = {slicedEClass};
-            contigNode.shape = partialShape;
-            contigNode.strides = calcContiguousStrides(partialShape);
-            contigNode.dtype = sourceNode.dtype;
-            contigNode.backend = targetBackend;
+            EClassId contigEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space);
 
             TensorNode cOut;
             cOut.setShape(partialShape);
             cOut.dtype = sourceNode.dtype;
-            cOut.backend = targetBackend;
-            cOut.strides = contigNode.strides;
+            cOut.strides = calcContiguousStrides(partialShape);
+
             TensorNode cIn;
             cIn.setShape(partialShape);
             cIn.dtype = sourceNode.dtype;
-            cIn.backend = sourceNode.backend;
             cIn.strides = calcContiguousStrides(partialShape);
 
-            auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", contigNode.backend, {cIn}, cOut, true);
-            for (uint64_t uid : contigRefs)
+            auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", {cIn}, cOut, target_mem_space, {cpu}, {target_mem_space}, true);
+            for (KernelId uid : contigRefs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
-                ENode cn = contigNode;
-                cn.kernelId = uid;
-                if (kernel.is_view)
-                {
-                    cn.strides = cIn.strides;
-                    cn.viewOffset = 0;
-                }
-                else
-                {
-                    cn.strides = calcContiguousStrides(partialShape);
-                    cn.viewOffset = 0;
-                }
+                std::vector<uint64_t> strides = kernel.is_view ? cIn.strides : calcContiguousStrides(partialShape);
+                ENode cn(uid, OpType::CONTIGUOUS, "", {slicedEClass}, partialShape, strides, sourceNode.dtype, target_mem_space, {cpu});
                 egraph.addENode(contigEClass, cn);
             }
 
-            uint32_t scatterEClass = egraph.addEClass(lClass.shape, lClass.strides, lClass.viewOffset, lClass.dtype, targetBackend);
-            ENode scatterNode;
-            scatterNode.opType = OpType::SCATTER;
-            scatterNode.children = {current_E, contigEClass, startsId, endsId, stepsId};
-            scatterNode.shape = lClass.shape;
-            scatterNode.strides = lClass.strides;
-            scatterNode.viewOffset = lClass.viewOffset;
-            scatterNode.dtype = lClass.dtype;
-            scatterNode.backend = targetBackend;
+            EClassId scatterEClass = egraph.addEClass(lClass.shape, lClass.strides, lClass.dtype, target_mem_space);
 
             TensorNode sOut;
-            sOut.setShape(scatterNode.shape);
-            sOut.dtype = scatterNode.dtype;
-            sOut.backend = scatterNode.backend;
+            sOut.setShape(lClass.shape);
+            sOut.dtype = lClass.dtype;
+
             std::vector<TensorNode> sIns(5);
             sIns[0].setShape(egraph.getEClass(current_E).shape);
-            sIns[0].dtype = scatterNode.dtype;
-            sIns[0].backend = scatterNode.backend;
+            sIns[0].dtype = lClass.dtype;
             sIns[1].setShape(partialShape);
-            sIns[1].dtype = scatterNode.dtype;
-            sIns[1].backend = scatterNode.backend;
+            sIns[1].dtype = lClass.dtype;
             sIns[2].setShape({(uint32_t)starts.size()});
             sIns[2].dtype = DType::INT32;
-            sIns[2].backend = Backend::CPU;
             sIns[3].setShape({(uint32_t)ends.size()});
             sIns[3].dtype = DType::INT32;
-            sIns[3].backend = Backend::CPU;
             sIns[4].setShape({(uint32_t)steps.size()});
             sIns[4].dtype = DType::INT32;
-            sIns[4].backend = Backend::CPU;
 
-            auto scatterRefs = KernelRegistry::get().findMatchingKernels(OpType::SCATTER, "", scatterNode.backend, sIns, sOut, true);
-            for (uint64_t uid : scatterRefs)
+            std::vector<MemSpace> scatterInputSpaces = {target_mem_space, target_mem_space, ram, ram, ram};
+
+            auto scatterRefs = KernelRegistry::get().findMatchingKernels(OpType::SCATTER, "", sIns, sOut, target_mem_space, {cpu}, scatterInputSpaces, true);
+            for (KernelId uid : scatterRefs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
-                ENode sn = scatterNode;
-                sn.kernelId = uid;
-                if (kernel.is_view || kernel.inplace)
-                {
-                    sn.strides = lClass.strides;
-                    sn.viewOffset = lClass.viewOffset;
-                }
-                else
-                {
-                    sn.strides = calcContiguousStrides(scatterNode.shape);
-                    sn.viewOffset = 0;
-                }
+                std::vector<uint64_t> strides = (kernel.is_view) ? lClass.strides : calcContiguousStrides(lClass.shape); // TODO check inplace based on bufferization stuff
+                ENode sn(uid, OpType::SCATTER, "", {current_E, contigEClass, startsId, endsId, stepsId}, lClass.shape, strides, lClass.dtype, target_mem_space, {cpu});
                 egraph.addENode(scatterEClass, sn);
             }
 
@@ -1412,7 +1318,8 @@ private:
 
         egraph.merge(E_L, current_E);
         eclassToLogical[egraph.find(E_L)] = logicalId;
-        return true;
+        injected = true;
+        return injected;
     }
 
     bool injectInputPartialPaths(

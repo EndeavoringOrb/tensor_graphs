@@ -50,7 +50,7 @@ public:
                engines == other.engines;
     }
 
-    // Getters for accessing the private fields
+    // Read-only getters
     KernelId getKernelId() const { return kernelId; }
     OpType getOpType() const { return opType; }
     const std::string &getOpName() const { return opName; }
@@ -61,6 +61,10 @@ public:
     MemSpace getMemSpace() const { return mem_space; }
     std::vector<Engine> getEngines() const { return engines; }
     uint64_t getSig() const { return sig; }
+
+    // Setters
+    void setChildren(std::vector<EClassId> newChildren) { children = std::move(newChildren); }
+    void setSig(uint64_t newSig) { sig = newSig; }
 
 private:
     KernelId kernelId;
@@ -94,7 +98,7 @@ struct EGraph
     std::vector<uint32_t> ufSize;
 
     // signature -> candidate enode ids
-    std::unordered_map<uint64_t, std::vector<uint32_t>> hashcons;
+    std::unordered_map<uint64_t, std::vector<ENodeId>> hashcons;
 
     // Dense enodeId -> e_class_id mapping.
     std::vector<EClassId> nodeToEClass;
@@ -182,36 +186,39 @@ struct EGraph
         return id;
     }
 
-    uint32_t addENode(EClassId e_class_id, ENode node)
+    EClassId addENode(EClassId e_class_id, ENode node)
     {
         EClassId canonical = find(e_class_id);
 
-        for (EClassId &child : node.getChildren())
+        // Retrieve a local copy of children, update them, and apply them back via setter
+        std::vector<EClassId> updatedChildren = node.getChildren();
+        for (EClassId &child : updatedChildren)
         {
             child = find(child);
         }
+        node.setChildren(std::move(updatedChildren));
 
-        node.sig = computeSignature(node);
+        node.setSig(computeSignature(node));
 
-        auto it = hashcons.find(node.sig);
+        auto it = hashcons.find(node.getSig());
         if (it != hashcons.end())
         {
-            for (uint32_t otherEnodeId : it->second)
+            for (ENodeId otherEnodeId : it->second)
             {
-                const ENode &other = enodes[otherEnodeId];
+                const ENode &other = enodes[otherEnodeId.value];
                 if (node == other)
                 {
-                    merge(canonical, nodeToEClass[otherEnodeId]);
+                    merge(canonical, nodeToEClass[otherEnodeId.value]);
                     return find(canonical);
                 }
             }
         }
 
-        uint32_t enodeId = static_cast<uint32_t>(enodes.size());
+        ENodeId enodeId = ENodeId{(uint32_t)enodes.size()};
         enodes.push_back(std::move(node));
-        classes[canonical].enodes.push_back(enodeId);
+        classes[canonical.value].enodes.push_back(enodeId);
         nodeToEClass.push_back(canonical);
-        hashcons[enodes[enodeId].sig].push_back(enodeId);
+        hashcons[enodes[enodeId.value].getSig()].push_back(enodeId);
         return canonical;
     }
 
@@ -242,15 +249,15 @@ struct EGraph
         return id;
     }
 
-    void merge(uint32_t a, uint32_t b)
+    void merge(EClassId a, EClassId b)
     {
-        uint32_t ra = find(a);
-        uint32_t rb = find(b);
+        EClassId ra = find(a);
+        EClassId rb = find(b);
         if (ra == rb)
             return;
 
         // Union by size.
-        if (ufSize[ra] < ufSize[rb])
+        if (ufSize[ra.value] < ufSize[rb.value])
             std::swap(ra, rb);
 
 #ifdef DEBUG
@@ -276,8 +283,8 @@ struct EGraph
         }
 #endif
 
-        parent[rb] = ra;
-        ufSize[ra] += ufSize[rb];
+        parent[rb.value] = ra;
+        ufSize[ra.value] += ufSize[rb.value];
 
         // Move constant staging from rb to ra to avoid losing constants
         auto itB = constantStaging.find(rb);
@@ -290,13 +297,13 @@ struct EGraph
             constantStaging.erase(itB);
         }
 
-        classes[ra].enodes.reserve(classes[ra].enodes.size() + classes[rb].enodes.size());
-        for (uint32_t enodeId : classes[rb].enodes)
+        classes[ra.value].enodes.reserve(classes[ra.value].enodes.size() + classes[rb.value].enodes.size());
+        for (ENodeId enodeId : classes[rb.value].enodes)
         {
-            classes[ra].enodes.push_back(enodeId);
-            nodeToEClass[enodeId] = ra;
+            classes[ra.value].enodes.push_back(enodeId);
+            nodeToEClass[enodeId.value] = ra;
         }
-        classes[rb].enodes.clear();
+        classes[rb.value].enodes.clear();
     }
 
     void rebuild()
@@ -359,7 +366,7 @@ struct EGraph
 
     const std::vector<EClass> &getClasses() const { return classes; }
     const std::vector<ENode> &getENodes() const { return enodes; }
-    const ENode &getENode(ENodeId id) const {return enodes[id.value];}
+    const ENode &getENode(ENodeId id) const { return enodes[id.value]; }
 
     EClass &getEClass(EClassId id) { return classes[find(id)]; }
     const EClass &getEClass(EClassId id) const { return classes[findConst(id)]; }
