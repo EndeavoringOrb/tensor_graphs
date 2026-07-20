@@ -3,7 +3,7 @@
 #include "core/graph.hpp"
 #include "core/memory.hpp"
 #include "core/cost_model.hpp"
-#include "core/planner.hpp"
+#include "core/plan/planner.hpp"
 #include "core/executor.hpp"
 #include "core/shapes.hpp"
 #include "core/repo.hpp"

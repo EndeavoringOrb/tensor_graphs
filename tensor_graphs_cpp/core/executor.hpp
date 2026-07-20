@@ -2,7 +2,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
-#include "core/planner.hpp"
+#include "core/plan/planner.hpp"
 #include "core/memory.hpp"
 #include "core/kernels.hpp"
 #include "core/debug.hpp"

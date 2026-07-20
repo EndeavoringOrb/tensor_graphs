@@ -32,7 +32,7 @@ public:
           strides(std::move(strides)),
           dtype(dtype),
           mem_space(mem_space),
-          engines(engines),
+          engines(std::move(engines)),
           sig(sig)
     {
     }
@@ -104,7 +104,7 @@ struct EGraph
     std::vector<EClassId> nodeToEClass;
 
     uint32_t nextLeafId = 0;
-    std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
+    std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>, EClassIdHash> constantStaging;
 
     // Hash map for fast constant lookup: data hash -> list of class ids
     std::unordered_map<uint64_t, std::vector<EClassId>> constantHashIndex;
@@ -147,8 +147,8 @@ struct EGraph
             }
         }
 
-        EClassId cls = addEClass(shape, strides, dtype, MemSpace(1, HandleType::CPP));
-        ENode n = ENode(KernelId{0}, OpType::INPUT, "", {}, shape, strides, dtype, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)});
+        EClassId cls = addEClass(shape, strides, dtype, MemSpace{1, HandleType::CPP});
+        ENode n = ENode(KernelId{0}, OpType::INPUT, "", {}, shape, strides, dtype, MemSpace{1, HandleType::CPP}, {Engine{0, EngineType::CPU}});
         addENode(cls, n);
         constantStaging[cls] = std::make_shared<std::vector<uint8_t>>(data);
         constantHashIndex[dataHash].push_back(cls);
@@ -171,7 +171,7 @@ struct EGraph
                        DType dtype,
                        MemSpace mem_space)
     {
-        EClassId id{classes.size()};
+        EClassId id{(uint32_t)classes.size()};
 
         EClass c;
         c.id = id;
@@ -261,25 +261,21 @@ struct EGraph
             std::swap(ra, rb);
 
 #ifdef DEBUG
-        if (classes[ra].shape != classes[rb].shape)
+        if (classes[ra.value].shape != classes[rb.value].shape)
         {
-            Error::throw_err("EClass merge shape mismatch: " + toString(classes[ra].shape) + ", " + toString(classes[rb].shape));
+            Error::throw_err("EClass merge shape mismatch: " + toString(classes[ra.value].shape) + ", " + toString(classes[rb.value].shape));
         }
-        if (classes[ra].strides != classes[rb].strides)
+        if (classes[ra.value].strides != classes[rb.value].strides)
         {
-            Error::throw_err("EClass merge strides mismatch: " + toString(classes[ra].strides) + ", " + toString(classes[rb].strides));
+            Error::throw_err("EClass merge strides mismatch: " + toString(classes[ra.value].strides) + ", " + toString(classes[rb.value].strides));
         }
-        if (classes[ra].viewOffset != classes[rb].viewOffset)
+        if (classes[ra.value].dtype != classes[rb.value].dtype)
         {
-            Error::throw_err("EClass merge viewOffset mismatch: " + std::to_string(classes[ra].viewOffset) + ", " + std::to_string(classes[rb].viewOffset));
+            Error::throw_err("EClass merge dtype mismatch");
         }
-        if (classes[ra].dtype != classes[rb].dtype)
+        if (!(classes[ra.value].mem_space == classes[rb.value].mem_space))
         {
-            Error::throw_err("EClass merge dtype mismatch: " + (std::string)toString(classes[ra].dtype) + ", " + toString(classes[rb].dtype));
-        }
-        if (classes[ra].backend != classes[rb].backend)
-        {
-            Error::throw_err("EClass merge backend mismatch: " + (std::string)toString(classes[ra].backend) + ", " + toString(classes[rb].backend));
+            Error::throw_err("EClass merge mem_space mismatch");
         }
 #endif
 
@@ -308,40 +304,46 @@ struct EGraph
 
     void rebuild()
     {
-        std::unordered_map<uint64_t, std::vector<uint32_t>> newHash;
+        std::unordered_map<uint64_t, std::vector<ENodeId>> newHash;
         newHash.reserve(enodes.size() * 2);
         uint32_t nDupes = 0;
 
         for (uint32_t i = 0, n = static_cast<uint32_t>(enodes.size()); i < n; ++i)
         {
             ENode &node = enodes[i];
+            ENodeId currentEnodeId{i};
 
             bool childrenChanged = false;
-            for (uint32_t &child : node.children)
+            std::vector<EClassId> updatedChildren = node.getChildren();
+            for (EClassId &child : updatedChildren)
             {
-                uint32_t c = find(child);
+                EClassId c = find(child);
                 if (c != child)
                 {
                     child = c;
                     childrenChanged = true;
                 }
             }
-
-            uint32_t cls = find(nodeToEClass[i]);
-            nodeToEClass[i] = cls;
-
-            if (childrenChanged || node.sig == 0)
+            if (childrenChanged)
             {
-                node.sig = computeSignature(node);
+                node.setChildren(std::move(updatedChildren));
             }
 
-            auto &bucket = newHash[node.sig];
+            EClassId cls = find(nodeToEClass[i]);
+            nodeToEClass[i] = cls;
+
+            if (childrenChanged || node.getSig() == 0)
+            {
+                node.setSig(computeSignature(node));
+            }
+
+            auto &bucket = newHash[node.getSig()];
             bool merged = false;
 
-            for (uint32_t otherEnodeId : bucket)
+            for (ENodeId otherEnodeId : bucket)
             {
-                const uint32_t otherCls = find(nodeToEClass[otherEnodeId]);
-                if (node == enodes[otherEnodeId])
+                const EClassId otherCls = find(nodeToEClass[otherEnodeId.value]);
+                if (node == enodes[otherEnodeId.value])
                 {
                     nDupes++;
                     merge(otherCls, cls);
@@ -353,7 +355,7 @@ struct EGraph
 
             if (!merged)
             {
-                bucket.push_back(i);
+                bucket.push_back(currentEnodeId);
             }
         }
         std::cout << "[EGraph.rebuild] Found " << nDupes << " duplicate enodes" << std::endl;
@@ -368,8 +370,8 @@ struct EGraph
     const std::vector<ENode> &getENodes() const { return enodes; }
     const ENode &getENode(ENodeId id) const { return enodes[id.value]; }
 
-    EClass &getEClass(EClassId id) { return classes[find(id)]; }
-    const EClass &getEClass(EClassId id) const { return classes[findConst(id)]; }
+    EClass &getEClass(EClassId id) { return classes[find(id).value]; }
+    const EClass &getEClass(EClassId id) const { return classes[findConst(id).value]; }
 
     EClassId getENodeEClass(ENodeId enodeId) const
     {
@@ -397,24 +399,31 @@ private:
 
     static uint64_t computeSignature(const ENode &node) noexcept
     {
-        uint64_t h = mix64(node.kernelId);
+        uint64_t h = mix64(node.getKernelId().value);
 
-        hashCombine(h, static_cast<uint64_t>(node.opType));
-        if (!node.opName.empty())
-            hashCombine(h, hashString(node.opName));
+        hashCombine(h, static_cast<uint64_t>(node.getOpType()));
+        if (!node.getOpName().empty())
+            hashCombine(h, hashString(node.getOpName()));
 
-        for (uint32_t c : node.children)
-            hashCombine(h, static_cast<uint64_t>(c));
+        for (EClassId c : node.getChildren())
+            hashCombine(h, static_cast<uint64_t>(c.value));
 
-        for (uint32_t s : node.shape)
+        for (uint32_t s : node.getShape())
             hashCombine(h, static_cast<uint64_t>(s));
 
-        for (uint64_t s : node.strides)
+        for (uint64_t s : node.getStrides())
             hashCombine(h, s);
 
-        hashCombine(h, node.viewOffset);
-        hashCombine(h, static_cast<uint64_t>(node.dtype));
-        hashCombine(h, static_cast<uint64_t>(node.backend));
+        hashCombine(h, static_cast<uint64_t>(node.getDType()));
+
+        hashCombine(h, static_cast<uint64_t>(node.getMemSpace().idx));
+        hashCombine(h, static_cast<uint64_t>(node.getMemSpace().type));
+
+        for (const Engine &e : node.getEngines())
+        {
+            hashCombine(h, static_cast<uint64_t>(e.idx));
+            hashCombine(h, static_cast<uint64_t>(e.type));
+        }
 
         return h;
     }
@@ -425,7 +434,6 @@ private:
                                         const std::vector<uint8_t> &data) noexcept
     {
         uint64_t h = static_cast<uint64_t>(dtype);
-        hashCombine(h, static_cast<uint64_t>(backend));
 
         for (uint32_t s : shape)
             hashCombine(h, static_cast<uint64_t>(s));
@@ -461,7 +469,7 @@ private:
         constantHashIndex.clear();
         for (const auto &kv : constantStaging)
         {
-            uint32_t canonicalId = find(kv.first);
+            EClassId canonicalId = find(kv.first);
             if (canonicalId != kv.first)
                 continue; // Skip non-canonical entries (data was moved during merge)
 
@@ -481,21 +489,21 @@ inline std::string toString(const ENode &node)
 {
     std::stringstream ss;
     ss << "ENode {\n"
-       << "  KernelUID:  0x" << std::hex << node.kernelId << std::dec << "\n"
-       << "  OpType:     " << toString(node.opType) << "\n"
-       << "  OpName:     " << (node.opName.empty() ? "N/A" : node.opName) << "\n"
+       << "  KernelUID:  0x" << std::hex << node.getKernelId().value << std::dec << "\n"
+       << "  OpType:     " << toString(node.getOpType()) << "\n"
+       << "  OpName:     " << (node.getOpName().empty() ? "N/A" : node.getOpName()) << "\n"
        << "  Children:   [";
-    for (size_t i = 0; i < node.children.size(); ++i)
+    const auto &children = node.getChildren();
+    for (size_t i = 0; i < children.size(); ++i)
     {
-        ss << node.children[i] << (i == node.children.size() - 1 ? "" : ", ");
+        ss << children[i].value << (i == children.size() - 1 ? "" : ", ");
     }
     ss << "]\n"
-       << "  Shape:      " << ::toString(node.shape) << "\n"
-       << "  Strides:    " << ::toString(node.strides) << "\n"
-       << "  ViewOffset: " << node.viewOffset << "\n"
-       << "  DType:      " << ::toString(node.dtype) << "\n"
-       << "  Backend:    " << ::toString(node.backend) << "\n"
-       << "  Signature:  0x" << std::hex << node.sig << std::dec << "\n"
+       << "  Shape:      " << ::toString(node.getShape()) << "\n"
+       << "  Strides:    " << ::toString(node.getStrides()) << "\n"
+       << "  DType:      " << ::toString(node.getDType()) << "\n"
+       << "  MemSpace:   " << node.getMemSpace().idx << "\n"
+       << "  Signature:  0x" << std::hex << node.getSig() << std::dec << "\n"
        << "}";
     return ss.str();
 }
@@ -504,17 +512,16 @@ inline std::string toString(const EClass &cls, const std::string &prefix = "")
 {
     std::stringstream ss;
     ss << prefix << "EClass\n"
-       << prefix << "  ID:         " << cls.id << "\n"
+       << prefix << "  ID:         " << cls.id.value << "\n"
        << prefix << "  Shape:      " << ::toString(cls.shape) << "\n"
        << prefix << "  Strides:    " << ::toString(cls.strides) << "\n"
-       << prefix << "  ViewOffset: " << cls.viewOffset << "\n"
        << prefix << "  DType:      " << ::toString(cls.dtype) << "\n"
-       << prefix << "  Backend:    " << ::toString(cls.backend) << "\n"
+       << prefix << "  MemSpace:   " << cls.mem_space.idx << "\n"
        << prefix << "  ENodes:     [";
 
     for (size_t i = 0; i < cls.enodes.size(); ++i)
     {
-        ss << cls.enodes[i] << (i == cls.enodes.size() - 1 ? "" : ", ");
+        ss << cls.enodes[i].value << (i == cls.enodes.size() - 1 ? "" : ", ");
     }
     ss << "]";
     return ss.str();
@@ -525,50 +532,50 @@ inline std::ostream &operator<<(std::ostream &os, const EClass &cls) { return os
 inline std::string toString(const ENode &node, const EGraph &egraph, const std::string &prefix = "")
 {
     std::stringstream ss;
-    ss << prefix << "ENode [" << toString(node.opType);
-    if (!node.opName.empty())
+    ss << prefix << "ENode [" << toString(node.getOpType());
+    if (!node.getOpName().empty())
     {
-        ss << " (" << node.opName << ")";
+        ss << " (" << node.getOpName() << ")";
     }
     ss << "]\n"
-       << prefix << "  DType:      " << toString(node.dtype) << "\n"
-       << prefix << "  Shape:      " << toString(node.shape) << "\n"
-       << prefix << "  Strides:    " << toString(node.strides) << "\n"
-       << prefix << "  Backend:    " << toString(node.backend) << "\n"
-       << prefix << "  ViewOffset: " << node.viewOffset << "\n"
-       << prefix << "  Signature:  0x" << std::hex << node.sig << std::dec << "\n";
+       << prefix << "  DType:      " << toString(node.getDType()) << "\n"
+       << prefix << "  Shape:      " << toString(node.getShape()) << "\n"
+       << prefix << "  Strides:    " << toString(node.getStrides()) << "\n"
+       << prefix << "  MemSpace:   " << node.getMemSpace().idx << "\n"
+       << prefix << "  Signature:  0x" << std::hex << node.getSig() << std::dec << "\n";
 
-    if (node.kernelId != 0)
+    if (node.getKernelId().value != 0 && node.getKernelId().value != UINT32_MAX)
     {
-        ss << prefix << "  KernelUID:  0x" << std::hex << node.kernelId << std::dec << "\n";
+        ss << prefix << "  KernelUID:  0x" << std::hex << node.getKernelId().value << std::dec << "\n";
     }
 
-    ss << prefix << "  Children (" << node.children.size() << "):";
+    const auto &children = node.getChildren();
+    ss << prefix << "  Children (" << children.size() << "):";
 
-    if (node.children.empty())
+    if (children.empty())
     {
         ss << " None";
     }
     else
     {
-        for (size_t i = 0; i < node.children.size(); ++i)
+        for (size_t i = 0; i < children.size(); ++i)
         {
-            uint32_t childClassId = node.children[i];
+            uint32_t childClassId = children[i].value;
             // Resolve the canonical EClass from the graph
-            const EClass &childCls = egraph.getEClass(childClassId);
+            const EClass &childCls = egraph.getEClass(EClassId{childClassId});
 
             ss << "\n"
                << prefix << "    [" << i << "] EClass " << childClassId;
 
             // If the ID we have isn't the canonical one, note the redirect
-            uint32_t canonicalId = egraph.findConst(childClassId);
+            uint32_t canonicalId = egraph.findConst(EClassId{childClassId}).value;
             if (childClassId != canonicalId)
             {
                 ss << " -> (Canonical: " << canonicalId << ")";
             }
 
             ss << "\n"
-               << toString(childCls);
+               << toString(childCls, prefix + "    ");
         }
     }
     return ss.str();

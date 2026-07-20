@@ -775,7 +775,7 @@ struct InfinityDomination : public Rule
 
     uint32_t addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
     {
-        return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, Backend::CPU, vals);
+        return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
     }
 
     void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
