@@ -373,15 +373,14 @@ int main(int argc, char *argv[])
     // -----------------------------------------------------------------------
     // Memory manager (shared across all compiled sessions)
     // -----------------------------------------------------------------------
-    // TODO: make this and get_default_buffer_sizes load from some common place
-    std::unordered_map<MemoryType, uint64_t> bufferSizes = {
-        {MemoryType::RAM, 16ULL * 1024 * 1024 * 1024}};
+    // TODO: make this and getDefaultBufferSizes load from some common place
+    std::unordered_map<MemSpace, uint64_t, MemSpaceHash> bufferSizes = {
+    {MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
 #ifdef USE_CUDA
-    bufferSizes[MemoryType::VRAM] = 16ULL * 1024 * 1024 * 1024;
+    bufferSizes[MemSpace{2, HandleType::CUDA}] = 16ULL * 1024 * 1024 * 1024;
 #endif
-    if (HardwareCaps::get().has_opencl)
-    {
-        bufferSizes[MemoryType::VRAM] = 1ULL * 1024 * 1024 * 1024;
+    if (HardwareCaps::get().has_opencl) {
+        bufferSizes[MemSpace{3, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
     }
     MemoryManager mem(bufferSizes);
 
@@ -514,9 +513,7 @@ int main(int argc, char *argv[])
                                           cs.patch_input);
 
                 // 3. Write input and run
-                cs.session->memManager.write(Backend::CPU, cs.patch_input_id,
-                                             cs.patch_input.data(),
-                                             cs.patch_input.size() * sizeof(float));
+                cs.session->writeInput(cs.patch_input_id, cs.patch_input.data(), cs.patch_input.size() * sizeof(float));
 
                 // Use the incremental bucket if we have already loaded the static weights on the first run
                 Bucket b;
@@ -654,9 +651,7 @@ int main(int argc, char *argv[])
 
         // Run
         std::cout << "Running inference..." << std::endl;
-        cs.session->memManager.write(Backend::CPU, cs.patch_input_id,
-                                     cs.patch_input.data(),
-                                     cs.patch_input.size() * sizeof(float));
+        cs.session->writeInput(cs.patch_input_id, cs.patch_input.data(), cs.patch_input.size() * sizeof(float));
 
         auto start = std::chrono::high_resolution_clock::now();
 

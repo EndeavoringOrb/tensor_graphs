@@ -26,17 +26,6 @@
 #include "core/plan/validators/validator.hpp"
 #include "core/common/constants.hpp"
 
-
-struct ParallelBuffer
-{
-    uint32_t idx = 0;    // index within its mem_space group
-    MemSpace mem_space;  // which physical memory this buffer lives in
-    uint64_t size = 0;   // bytes
-    float start = 0.0f;  // birth time (parallel schedule)
-    float end = 0.0f;    // death time (parallel schedule)
-    int64_t offset = -1; // assigned byte offset, -1 = unallocated
-};
-
 // Interval overlap test
 bool overlapsBuf(const ParallelBuffer &a, const ParallelBuffer &b)
 {
@@ -128,6 +117,7 @@ static void get_deaths(
     }
 }
 
+// Search for bufferize() function and update its loop
 static std::vector<ParallelBuffer> bufferize(
     const std::vector<EClassId> &ordered,
     const EGraph &egraph,
@@ -150,10 +140,11 @@ static std::vector<ParallelBuffer> bufferize(
         const ENode &node = egraph.getENode(enode_id);
 
         if (node.getMemSpace().type == HandleType::STORAGE)
-            continue; // we don't control storage
+            continue;
 
         ParallelBuffer buf;
         buf.idx = static_cast<uint32_t>(buffers.size());
+        buf.eclass_val = eclass.value;
         buf.mem_space = node.getMemSpace();
         buf.size = getSizeBytes(node.getShape(), node.getDType());
         buf.start = birth_times.at(eclass);

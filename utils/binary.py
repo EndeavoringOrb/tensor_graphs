@@ -249,7 +249,6 @@ class BinaryReader:
             return {
                 "bucket": bucket,
                 "instructions": instructions,
-                "refCounts": ref_counts,
                 "nodesMap": nodes_map,
                 "nodeCosts": node_costs,
                 "physicalToLogicalNodeMap": physical_to_logical,
@@ -262,7 +261,6 @@ class BinaryReader:
             return {
                 "bucket": bucket,
                 "instructions": instructions,
-                "refCounts": ref_counts,
                 "nodesMap": nodes_map,
                 "nodeCosts": node_costs,
                 "physicalToLogicalNodeMap": physical_to_logical,

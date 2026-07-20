@@ -223,8 +223,8 @@ def generate_kernel_includes(core_seed):
     for root, _, files in os.walk(KERNELS_DIR):
         for f in files:
             path = Path(root) / f
+            validate_kernel_match_logic(path)
             rel_path = path.relative_to(ROOT_DIR)
-            validate_kernel_match_logic(rel_path)
 
             if f.endswith(".hpp"):
                 file_content_hash = get_file_hash(path)

@@ -868,28 +868,93 @@ private:
             eclassToPhys[e_class_id] = allocator->allocate();
         }
 
+        std::vector<ENodeInfo> dummyInfos(egraph.getENodes().size());
+        std::unordered_map<EClassId, uint32_t> selMap;
+        for (const auto &kv : extraction.choiceByEClass)
+        {
+            dummyInfos[kv.second.enodeId.value].cost = kv.second.cost;
+            const EClass &cls = egraph.getEClass(kv.first);
+            for (uint32_t i = 0; i < cls.enodes.size(); ++i)
+            {
+                if (cls.enodes[i] == kv.second.enodeId)
+                {
+                    selMap[kv.first] = i;
+                    break;
+                }
+            }
+        }
+
+        std::unordered_map<uint32_t, float> engine_finish;
+        std::vector<ParallelBuffer> buffers = bufferize(topo, egraph, selMap, dummyInfos, engine_finish);
+
+        std::unordered_map<uint32_t, std::vector<ParallelBuffer>> buf_by_mem_idx;
+        for (auto &buf : buffers)
+        {
+            buf_by_mem_idx[buf.mem_space.idx].push_back(buf);
+        }
+
+        std::unordered_map<uint32_t, ParallelBuffer> final_allocs;
+        for (auto &kv : buf_by_mem_idx)
+        {
+            std::vector<ParallelBuffer> allocated;
+            uint64_t cap = mem_caps.count(kv.first) ? mem_caps.at(kv.first) : std::numeric_limits<uint64_t>::max();
+            if (!malloc_recursive(cap, kv.second, allocated))
+            {
+                Error::throw_err("Failed to allocate memory in buildCompiledGraph!");
+            }
+            for (const auto &buf : allocated)
+            {
+                final_allocs[buf.eclass_val] = buf;
+            }
+        }
+
         for (EClassId e_class_id : topo)
         {
             const ExtractChoice &choice = extraction.choiceByEClass.at(e_class_id);
             const ENode &enode = egraph.getENode(choice.enodeId);
             LogicalId logicalId = eclassToLogical.count(e_class_id) ? eclassToLogical.at(e_class_id) : LogicalId{UINT32_MAX};
-
             PhysicalId physId = eclassToPhys[e_class_id];
 
             OpInstruction inst;
-            inst.physId = physId;
-            inst.logicalNodeId = logicalId;
-            inst.kernelId = enode.getKernelId();
+            inst.nodeId = physId.value;
+            inst.logicalNodeId = logicalId.value;
+            inst.fullKernelId = enode.getKernelId().value;
             inst.inputNodeIds.reserve(enode.getChildren().size());
             for (EClassId c : enode.getChildren())
-                inst.inputNodeIds.push_back(eclassToPhys[egraph.find(c)]);
-            inst.mem_space = enode.getMemSpace();
-            inst.engines = enode.getEngines();
+            {
+                inst.inputNodeIds.push_back(eclassToPhys[egraph.find(c)].value);
+            }
+
+            if (final_allocs.count(e_class_id.value))
+            {
+                inst.outBuffer = final_allocs[e_class_id.value];
+            }
+            else
+            {
+                inst.outBuffer.offset = -1;
+                inst.outBuffer.mem_space = enode.getMemSpace();
+            }
+
+            for (EClassId c : enode.getChildren())
+            {
+                EClassId cc = egraph.findConst(c);
+                if (final_allocs.count(cc.value))
+                {
+                    inst.inBuffers.push_back(final_allocs[cc.value]);
+                }
+                else
+                {
+                    ParallelBuffer pb;
+                    pb.offset = -1;
+                    pb.mem_space = egraph.getEClass(cc).mem_space;
+                    inst.inBuffers.push_back(pb);
+                }
+            }
 
             if (enode.getKernelId() != KernelId{0})
             {
                 const KernelEntry &kEntry = KernelRegistry::get().getKernel(enode.getKernelId());
-                inst.inplace_idx = kEntry.is_view ? 0 : -1; // TODO: bufferizer should be in charge of determining inplace idx based on KernelEntry save_inplace_idxs
+                inst.inplaceInputIndex = kEntry.is_view ? 0 : -1;
             }
 
             if (logicalId != LogicalId{UINT32_MAX} && graph.hasNode(logicalId))
@@ -899,7 +964,7 @@ private:
 
             if (egraph.constantStaging.count(e_class_id))
             {
-                compiled.constantStaging[physId] = egraph.constantStaging.at(e_class_id);
+                compiled.constantStaging[physId.value] = egraph.constantStaging.at(e_class_id);
             }
 
             if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE)
@@ -907,8 +972,20 @@ private:
                 compiled.instructions.push_back(inst);
             }
 
-            compiled.nodeCosts[physId] = choice.cost;
-            compiled.physicalToLogicalNodeMap[physId] = logicalId;
+            compiled.nodeCosts[physId.value] = choice.cost;
+            compiled.physicalToLogicalNodeMap[physId.value] = logicalId.value;
+
+            TensorNode compiledNode;
+            compiledNode.id = physId;
+            compiledNode.opType = enode.getOpType();
+            compiledNode.opName = enode.getOpName();
+            compiledNode.dtype = enode.getDType();
+            for (EClassId c : enode.getChildren())
+                compiledNode.child_ids.push_back(eclassToPhys[egraph.find(c)]);
+            compiledNode.setShape(enode.getShape());
+            compiledNode.strides = enode.getStrides();
+            compiledNode.backend = enode.getBackend();
+            compiled.nodesMap[physId.value] = compiledNode;
         }
 
         return compiled;

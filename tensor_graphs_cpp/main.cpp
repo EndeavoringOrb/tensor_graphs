@@ -41,15 +41,15 @@
 
 namespace fs = std::filesystem;
 
-std::unordered_map<Backend, uint64_t> get_default_buffer_sizes()
+std::unordered_map<MemSpace, uint64_t, MemSpaceHash> getDefaultBufferSizes()
 {
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 24ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<MemSpace, uint64_t, MemSpaceHash> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
 #ifdef USE_CUDA
-    bufferSizes[Backend::CUDA] = 24ULL * 1024 * 1024 * 1024;
+    bufferSizes[MemSpace{2, HandleType::CUDA}] = 24ULL * 1024 * 1024 * 1024;
 #endif
     if (HardwareCaps::get().has_opencl)
     {
-        bufferSizes[Backend::OPENCL] = 1ULL * 1024 * 1024 * 1024;
+        bufferSizes[MemSpace{3, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
     }
     return bufferSizes;
 }
@@ -102,7 +102,7 @@ void run_autoregressive_llm(
 {
     KernelRegistry::get().setReferenceOnly(refOnly);
     std::vector<uint32_t> tokens = initial_tokens;
-    auto bufferSizes = get_default_buffer_sizes();
+    auto bufferSizes = getDefaultBufferSizes();
     MemoryManager mem(bufferSizes);
     Graph g;
     if (activeGraphOut)
@@ -151,7 +151,7 @@ void run_autoregressive_llm(
         for (size_t i = 0; i < tokens.size(); ++i)
             input_data[i] = (int32_t)tokens[i];
 
-        session.memManager.write(Backend::CPU, inputIdsId, input_data.data(), input_data.size() * sizeof(int32_t));
+        session.writeInput(inputIdsId, input_data.data(), input_data.size() * sizeof(int32_t));
 
         Bucket b;
         if (step != 0)
@@ -221,7 +221,7 @@ void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool d
 {
     KernelRegistry::get().setReferenceOnly(refOnly);
     FluxConfig cfg;
-    auto bufferSizes = get_default_buffer_sizes();
+    auto bufferSizes = getDefaultBufferSizes();
     MemoryManager mem(bufferSizes);
     Graph g;
     if (activeGraphOut)
@@ -263,7 +263,7 @@ void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool d
 
     std::cout << "Executing Text Encoder..." << std::endl;
     std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);
-    sess_text.memManager.write(Backend::CPU, in_ids, input_ids.data(), input_ids.size() * sizeof(int32_t));
+    sess_text.writeInput(in_ids, input_ids.data(), input_ids.size() * sizeof(int32_t));
     const float *text_emb_ptr = static_cast<const float *>(sess_text.run({}, debugCb, doSaturate));
 
     std::vector<float> text_emb_buf;
@@ -288,11 +288,11 @@ void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool d
     {
         float t_curr = schedule[i], dt = schedule[i + 1] - t_curr;
 
-        sess_trans.memManager.write(Backend::CPU, in_latent, z.data(), z.size() * sizeof(float));
-        sess_trans.memManager.write(Backend::CPU, in_txt_emb, text_emb.data(), text_emb.size() * sizeof(float));
-        sess_trans.memManager.write(Backend::CPU, in_t, &t_curr, sizeof(float));
-        sess_trans.memManager.write(Backend::CPU, in_cos, rope_cos.data(), rope_cos.size() * sizeof(float));
-        sess_trans.memManager.write(Backend::CPU, in_sin, rope_sin.data(), rope_sin.size() * sizeof(float));
+        sess_trans.writeInput(in_latent, z.data(), z.size() * sizeof(float));
+        sess_trans.writeInput(in_txt_emb, text_emb.data(), text_emb.size() * sizeof(float));
+        sess_trans.writeInput(in_t, &t_curr, sizeof(float));
+        sess_trans.writeInput(in_cos, rope_cos.data(), rope_cos.size() * sizeof(float));
+        sess_trans.writeInput(in_sin, rope_sin.data(), rope_sin.size() * sizeof(float));
 
         Bucket b; // TODO: proper bucket to avoid weight loads?
         const float *v_ptr = static_cast<const float *>(sess_trans.run(b, debugCb, doSaturate));
@@ -307,7 +307,7 @@ void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool d
     }
 
     std::cout << "Executing VAE Decoder..." << std::endl;
-    sess_vae.memManager.write(Backend::CPU, in_vae_latent, z.data(), z.size() * sizeof(float));
+    sess_vae.writeInput(in_vae_latent, z.data(), z.size() * sizeof(float));
     const float *img_ptr = static_cast<const float *>(sess_vae.run({}, debugCb, doSaturate));
 
     std::vector<float> img_buf;

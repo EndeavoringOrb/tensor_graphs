@@ -221,69 +221,34 @@ struct Session
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
         memManager.init();
 
-        std::unordered_set<uint32_t> countSet;
-        for (const CompiledGraph &g : cachedGraphs)
-        {
-            for (const auto &nodePair : g.nodesMap)
-            {
-                const TensorNode &node = nodePair.second;
-
-                uint32_t logicalId = g.getLogicalId(node.id);
-
-                if ((node.opType == OpType::INPUT || node.opType == OpType::CACHE) && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
-                {
-                    uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : node.id;
-                    countSet.insert(memId);
-                }
-            }
-        }
-
-        ProgressTimer timer(countSet.size(), "");
-        std::unordered_set<uint32_t> materialized;
         std::unordered_set<uint32_t> written;
-
         for (const CompiledGraph &g : cachedGraphs)
         {
-            for (const auto &nodePair : g.nodesMap)
+            for (const auto &inst : g.instructions)
             {
-                const TensorNode &node = nodePair.second;
-                uint32_t physId = node.id;
-                uint32_t logicalId = g.getLogicalId(physId);
-
-                if ((node.opType == OpType::INPUT || node.opType == OpType::CACHE) && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
-                {
-                    uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : physId;
-
-                    uint64_t sizeBytes = countElements(node.getShape()) * getDTypeSize(node.dtype);
-
-                    if (materialized.insert(memId).second)
-                    {
-                        timer.tick();
-                        if (node.backend != Backend::STORAGE)
-                        {
-                            uint64_t offset = memManager.allocate(node.backend, memId, sizeBytes, node.storageType);
-                        }
-                    }
-
-                    if (written.find(memId) == written.end())
-                    {
-                        if (logicalId != UINT32_MAX && graph.constantStaging.count(logicalId))
-                        {
-                            memManager.write(node.backend, memId, graph.constantStaging.at(logicalId)->data(), sizeBytes);
-                            written.insert(memId);
-                        }
-                        else if (g.constantStaging.count(physId))
-                        {
-                            memManager.write(node.backend, memId, g.constantStaging.at(physId)->data(), sizeBytes);
-                            written.insert(memId);
-                        }
+                if (inst.logicalNodeId != UINT32_MAX && graph.constantStaging.count(inst.logicalNodeId)) {
+                    if (written.insert(inst.logicalNodeId).second) {
+                        uint64_t sizeBytes = countElements(graph.getNode(inst.logicalNodeId).getShape()) * getDTypeSize(graph.getNode(inst.logicalNodeId).dtype);
+                        memManager.write(inst.outBuffer.mem_space, inst.outBuffer.offset, graph.constantStaging.at(inst.logicalNodeId)->data(), sizeBytes);
                     }
                 }
             }
         }
-
+        
         executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
+    }
+
+    void writeInput(uint32_t logicalId, const void* data, uint64_t size) {
+        for (const CompiledGraph& g : cachedGraphs) {
+            for (const auto& inst : g.instructions) {
+                if (inst.logicalNodeId == logicalId) {
+                    memManager.write(inst.outBuffer.mem_space, inst.outBuffer.offset, data, size);
+                    return;
+                }
+            }
+        }
+        Error::throw_err("Logical Node ID not found in compiled instructions during Session::writeInput");
     }
 
     const void *run(Bucket bucket = {}, Debug::Callback debugCallback = nullptr,
@@ -311,24 +276,12 @@ struct Session
         }
 
         const uint32_t graphIdx = getBestGraphIdx(bucket);
-        std::cout << "[Session.run] chose graph: " << std::to_string(graphIdx) << std::endl;
-
-        ProgressTimer runTimer(0, "", true);
         executor->run(cachedGraphs[graphIdx], debugCallback);
-        double elapsed = runTimer.getElapsed();
-        std::cout << "[Session.run] execution finished in " << std::to_string(elapsed * 1000) << "ms" << std::endl;
 
-        const OpInstruction &lastInst = cachedGraphs[graphIdx].instructions[cachedGraphs[graphIdx].instructions.size() - 1];
-        Backend backend = lastInst.backend;
-        uint32_t outLogicalId = cachedGraphs[graphIdx].getLogicalId(lastInst.nodeId);
-        if (!memManager.has(backend, outLogicalId))
-        {
-            Error::throw_err("[Session.run] execution output nodeId " + std::to_string(outLogicalId) + " not found in memory");
-        }
-        TensorView view = memManager.getView(cachedGraphs[graphIdx].nodesMap.at(lastInst.nodeId), outLogicalId);
-        std::cout << "final output view: " << toString(view) << "\n"
-                  << std::flush;
-        return memManager.buffers.at(backend).arena_ptr + view.baseOffset;
+        const OpInstruction &lastInst = cachedGraphs[graphIdx].instructions.back();
+        DeviceBuffer* buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
+        const TensorNode& node = cachedGraphs[graphIdx].nodesMap.at(lastInst.nodeId);
+        return buf->getBasePtr() + lastInst.outBuffer.offset + (node.viewOffset * getDTypeSize(node.dtype));
     }
 
     void ensureCacheCoverage(bool doSaturate)

@@ -215,7 +215,7 @@ private:
     // -------------------------------------------------------------------------
     // Weight loading
     // -------------------------------------------------------------------------
-    uint32_t weight(const std::string &name)
+    LogicalId weight(const std::string &name)
     {
         uint32_t raw_weight = g.weight(w_path, name);
         return g.cast(raw_weight, DType::FLOAT32);
@@ -224,7 +224,7 @@ private:
     // -------------------------------------------------------------------------
     // Shape / repeat helpers
     // -------------------------------------------------------------------------
-    uint32_t repeat_ax(uint32_t id, uint32_t repeats, uint32_t axis)
+    LogicalId repeat_ax(uint32_t id, uint32_t repeats, uint32_t axis)
     {
         if (repeats <= 1)
             return id;
@@ -1027,28 +1027,28 @@ public:
     // Input  : patch_input  shape (1, num_patches, patch_dim) = (1, 1024, 1536)
     //          — produced by embed.cpp's Qwen2VL-style preprocessor.
     // Output : L2-normalised 768-dim embedding, shape (1, 768).
-    uint32_t build_graph(uint32_t patch_input)
+    LogicalId build_graph(LogicalId patch_input)
     {
         // ---- 1. Vision tower (Qwen3VL) -------------------------------------
         // (1, 1024, 1536) → patch_embed + pos_embed → 12 blocks → (1, 1024, 768)
-        uint32_t patch_feats = vit_encoder(patch_input);
+        LogicalId patch_feats = vit_encoder(patch_input);
 
         // ---- 2. Merger (PretrainedMerger) ----------------------------------
         // LayerNorm(768, eps=1e-6) on patch features
-        uint32_t ln_patches = layer_norm(patch_feats,
+        LogicalId ln_patches = layer_norm(patch_feats,
                                          "merger.norm.weight", "merger.norm.bias",
                                          cfg.num_patches, cfg.vision_hidden_size);
 
         // Reshape (1, num_patches, 768) → (1, grid_h, grid_w, 768)
         int32_t sh4_grid[] = {1, (int32_t)cfg.grid_h, (int32_t)cfg.grid_w, (int32_t)cfg.vision_hidden_size};
-        uint32_t grid = g.reshape(ln_patches, g.constant({4}, sh4_grid, DType::INT32));
+        LogicalId grid = g.reshape(ln_patches, g.constant({4}, sh4_grid, DType::INT32));
 
         // Split into 2×2 blocks: (1, merged_h, 2, merged_w, 2, 768)
         int32_t sh6_split[] = {1,
                                (int32_t)cfg.merged_grid_h, (int32_t)cfg.spatial_merge_size,
                                (int32_t)cfg.merged_grid_w, (int32_t)cfg.spatial_merge_size,
                                (int32_t)cfg.vision_hidden_size};
-        uint32_t split = g.reshape(grid, g.constant({6}, sh6_split, DType::INT32));
+        LogicalId split = g.reshape(grid, g.constant({6}, sh6_split, DType::INT32));
 
         // Permute so the 2×2 block dims are adjacent: (1, merged_h, merged_w, 2, 2, 768)
         int32_t perm6[] = {0, 1, 3, 2, 4, 5};

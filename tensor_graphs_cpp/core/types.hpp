@@ -171,6 +171,40 @@ struct KernelIdHash
     }
 };
 
+struct ParallelBuffer
+{
+    uint32_t idx = 0;    // index within its mem_space group
+    uint32_t eclass_val = UINT32_MAX;
+    MemSpace mem_space;  // which physical memory this buffer lives in
+    uint64_t size = 0;   // bytes
+    float start = 0.0f;  // birth time (parallel schedule)
+    float end = 0.0f;    // death time (parallel schedule)
+    int64_t offset = -1; // assigned byte offset, -1 = unallocated
+};
+
+inline void tg_serialize(BinaryWriter &bw, const ParallelBuffer &val) {
+    bw.write(val.idx);
+    bw.write(val.eclass_val);
+    bw.write(val.mem_space.idx);
+    bw.write(static_cast<uint32_t>(val.mem_space.type));
+    bw.write(val.size);
+    bw.write(val.start);
+    bw.write(val.end);
+    bw.write(val.offset);
+}
+inline void tg_deserialize(BinaryReader &br, ParallelBuffer &val) {
+    br.read(val.idx);
+    br.read(val.eclass_val);
+    br.read(val.mem_space.idx);
+    uint32_t type;
+    br.read(type);
+    val.mem_space.type = static_cast<HandleType>(type);
+    br.read(val.size);
+    br.read(val.start);
+    br.read(val.end);
+    br.read(val.offset);
+}
+
 inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
 {
     uint64_t stridedIndex = 0;
@@ -311,6 +345,14 @@ struct MemSpace
     bool operator==(const MemSpace &other) const
     {
         return idx == other.idx && type == other.type;
+    }
+};
+
+struct MemSpaceHash
+{
+    std::size_t operator()(const MemSpace &ms) const
+    {
+        return std::hash<uint32_t>()(ms.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
     }
 };
 
@@ -926,13 +968,14 @@ public:
 
 struct OpInstruction
 {
-    PhysicalId physId;
-    LogicalId logicalNodeId;
-    KernelId kernelId;
-    std::vector<PhysicalId> inputNodeIds;
-    int32_t inplace_idx = -1; // -1 if not inplace/view
-    MemSpace mem_space;
-    std::vector<Engine> engines;
+    uint32_t nodeId;
+    uint32_t logicalNodeId;
+    uint64_t fullKernelId;
+    std::vector<uint32_t> inputNodeIds;
+    int32_t inplaceInputIndex = -1; 
+    int32_t viewInputIndex = -1;
+    ParallelBuffer outBuffer;
+    std::vector<ParallelBuffer> inBuffers;
     std::string debugOrigin;
 };
 
@@ -1173,23 +1216,26 @@ inline void tg_deserialize(BinaryReader &br, TensorNode &val)
 
 inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
 {
-    bw.write(val.physId);
+    bw.write(val.nodeId);
     bw.write(val.logicalNodeId);
-    bw.write(val.kernelId);
+    bw.write(val.fullKernelId);
     bw.write(val.inputNodeIds);
     bw.write(val.inplaceInputIndex);
     bw.write(val.viewInputIndex);
-    bw.write(val.mem_space);
-    bw.write(val.engine);
+    bw.write(val.outBuffer);
+    bw.write(val.inBuffers);
+    bw.write(val.debugOrigin);
 }
+
 inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
 {
-    br.read(val.physId);
+    br.read(val.nodeId);
     br.read(val.logicalNodeId);
-    br.read(val.kernelId);
+    br.read(val.fullKernelId);
     br.read(val.inputNodeIds);
     br.read(val.inplaceInputIndex);
     br.read(val.viewInputIndex);
-    br.read(val.mem_space);
-    br.read(val.engine);
+    br.read(val.outBuffer);
+    br.read(val.inBuffers);
+    br.read(val.debugOrigin);
 }
