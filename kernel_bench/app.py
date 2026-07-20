@@ -156,12 +156,12 @@ def get_read_benchmarks():
             if r is None:
                 break
 
-            uid = str(r.get("kernelUid", ""))
+            uid = str(r.get("kernelId", ""))
             opname = uid_map.get(
-                uid, uid_map.get(hex(r.get("kernelUid", 0)), r.get("opName", "UNKNOWN"))
+                uid, uid_map.get(hex(r.get("kernelId", 0)), r.get("opName", "UNKNOWN"))
             )
             r["opName"] = opname
-            r["kernelUid"] = hex(r["kernelUid"])
+            r["kernelId"] = hex(r["kernelId"])
 
             shapes = str(r.get("outputShapes", [])) + str(r.get("inputShapes", []))
             if op_filter:

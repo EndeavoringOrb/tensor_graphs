@@ -18,8 +18,6 @@
 #include "core/serialization.hpp"
 using json = nlohmann::json;
 
-inline uint32_t GlobalNextPhysId = 0x80000000;
-
 // TODO: os & architecture detection should be in hardware.hpp and types should include hardware.hpp
 // --- OS Detection ---
 #if defined(_WIN32) || defined(_WIN64)
@@ -145,6 +143,14 @@ struct EClassId
     auto operator<=>(const EClassId &) const = default;
 };
 
+struct EClassIdHash
+{
+    std::size_t operator()(const EClassId &id) const
+    {
+        return std::hash<uint32_t>()(id.value);
+    }
+};
+
 struct ENodeId
 {
     uint32_t value = UINT32_MAX;
@@ -153,8 +159,16 @@ struct ENodeId
 
 struct KernelId
 {
-    uint32_t value = UINT32_MAX;
+    uint64_t value = UINT32_MAX;
     auto operator<=>(const KernelId &) const = default;
+};
+
+struct KernelIdHash
+{
+    std::size_t operator()(const KernelId &id) const
+    {
+        return std::hash<uint64_t>()(id.value);
+    }
 };
 
 inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
@@ -759,6 +773,16 @@ inline std::string toString(KernelId id)
     return "KernelId(" + std::to_string(id.value) + ")";
 }
 
+inline std::string toString(EClassId id)
+{
+    return "EClassId(" + std::to_string(id.value) + ")";
+}
+
+inline std::string toString(ENodeId id)
+{
+    return "ENodeId(" + std::to_string(id.value) + ")";
+}
+
 // Stream operators
 inline std::ostream &operator<<(std::ostream &os, LogicalId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, PhysicalId id) { return os << toString(id); }
@@ -902,15 +926,14 @@ public:
 
 struct OpInstruction
 {
-    uint32_t nodeId;
-    uint32_t logicalNodeId = UINT32_MAX;
-    uint64_t fullKernelId = 0;
-    std::vector<uint64_t> cachedKernelIds;
-    std::vector<uint32_t> inputNodeIds;
-    int32_t inplaceInputIndex = -1; // -1 if not inplace
-    int32_t viewInputIndex = -1;    // -1 if not view
+    PhysicalId physId;
+    LogicalId logicalNodeId;
+    KernelId kernelId;
+    std::vector<PhysicalId> inputNodeIds;
+    int32_t inplace_idx = -1; // -1 if not inplace/view
     MemSpace mem_space;
-    Engine engine;
+    std::vector<Engine> engines;
+    std::string debugOrigin;
 };
 
 struct Bucket
@@ -1016,13 +1039,11 @@ struct CompiledGraph
 {
     Bucket bucket;
     std::vector<OpInstruction> instructions;
-    std::unordered_map<uint32_t, uint32_t> refCounts;
-    std::unordered_map<uint32_t, TensorNode> nodesMap;
-    std::unordered_map<uint32_t, float> nodeCosts;
+    std::unordered_map<PhysicalId, float> nodeCosts;
     // Canonical direction:
     // compiled physical node id -> original logical node id.
-    std::unordered_map<uint32_t, uint32_t> physicalToLogicalNodeMap;
-    std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
+    std::unordered_map<PhysicalId, LogicalId> physicalToLogicalNodeMap;
+    std::unordered_map<PhysicalId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
     float cost() const
     {
@@ -1159,10 +1180,9 @@ inline void tg_deserialize(BinaryReader &br, TensorNode &val)
 
 inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
 {
-    bw.write(val.nodeId);
+    bw.write(val.physId);
     bw.write(val.logicalNodeId);
-    bw.write(val.fullKernelId);
-    bw.write(val.cachedKernelIds);
+    bw.write(val.kernelId);
     bw.write(val.inputNodeIds);
     bw.write(val.inplaceInputIndex);
     bw.write(val.viewInputIndex);
@@ -1171,10 +1191,9 @@ inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
 }
 inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
 {
-    br.read(val.nodeId);
+    br.read(val.physId);
     br.read(val.logicalNodeId);
-    br.read(val.fullKernelId);
-    br.read(val.cachedKernelIds);
+    br.read(val.kernelId);
     br.read(val.inputNodeIds);
     br.read(val.inplaceInputIndex);
     br.read(val.viewInputIndex);

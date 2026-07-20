@@ -2,6 +2,7 @@
 #pragma once
 #include "core/types.hpp"
 #include "core/graph.hpp"
+#include "core/egraph.hpp"
 #include "core/timer.hpp"
 #include <unordered_set>
 

@@ -101,8 +101,8 @@ def main():
 
     filtered = []
     for r in records:
-        uid = str(r["kernelUid"])
-        name = uid_map.get(uid, uid_map.get(hex(r["kernelUid"]), None))
+        uid = str(r["kernelId"])
+        name = uid_map.get(uid, uid_map.get(hex(r["kernelId"]), None))
         if not name:
             continue
 
@@ -124,7 +124,7 @@ def main():
     backends_map = ["STORAGE", "CPU", "CUDA"]
 
     for i, (name, r) in enumerate(filtered):
-        uid = hex(r["kernelUid"])
+        uid = hex(r["kernelId"])
         b_list = [
             backends_map[b] if b < len(backends_map) else "???"
             for b in r.get("backends", [])

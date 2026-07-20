@@ -154,7 +154,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
         uint64_t chosenKernelUid = refs_c.front();
         const KernelEntry &kernel = KernelRegistry::get().getKernel(chosenKernelUid);
 
-        if (kernel.isView)
+        if (kernel.is_view)
         {
             TensorNode dummyOutNode = node;
             kernel.inferView(dummyOutNode, inputNodes, graph);

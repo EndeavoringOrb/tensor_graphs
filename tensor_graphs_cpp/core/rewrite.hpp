@@ -41,7 +41,7 @@ struct Rule
     virtual void apply(uint32_t eNodeIdx, RuleCtx &ctx) = 0;
 };
 
-inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint32_t> &children, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &st, uint64_t viewOffset, DType dtype, Backend backend, uint32_t targetEClass = UINT32_MAX, uint32_t leafId = UINT32_MAX)
+inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint32_t> &children, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &st, uint64_t viewOffset, DType dtype, Backend backend, uint32_t targetEClass = UINT32_MAX)
 {
     uint32_t cls = (targetEClass == UINT32_MAX) ? egraph.addEClass(shape, st, viewOffset, dtype, backend) : targetEClass;
 
@@ -190,16 +190,15 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
         {
             const auto &kernel = KernelRegistry::get().getKernel(uid);
             ENode n;
-            n.kernelUid = uid;
+            n.kernelId = uid;
             n.opType = op;
             n.opName = kernel.opName;
             n.children = children;
             n.shape = shape;
             n.dtype = dtype;
             n.backend = backend;
-            n.leafId = leafId;
 
-            if (kernel.isView || kernel.inplace || op == OpType::COPY_TO)
+            if (kernel.is_view || kernel.inplace || op == OpType::COPY_TO)
             {
                 n.strides = st;
                 n.viewOffset = viewOffset;
@@ -233,14 +232,13 @@ inline uint32_t createCacheInputNode(EGraph &egraph, uint32_t sourceClassId, uin
 
     uint32_t op_cache = egraph.addEClass(srcClass.shape, srcClass.strides, srcClass.viewOffset, srcClass.dtype, srcClass.backend);
     ENode cacheNode;
-    cacheNode.kernelUid = 0;
+    cacheNode.kernelId = 0;
     cacheNode.opType = OpType::CACHE;
     cacheNode.shape = srcClass.shape;
     cacheNode.strides = srcClass.strides;
     cacheNode.viewOffset = srcClass.viewOffset;
     cacheNode.dtype = srcClass.dtype;
     cacheNode.backend = srcClass.backend;
-    cacheNode.leafId = partialPathId;
     op_cache = egraph.addENode(op_cache, cacheNode);
 
     uint32_t srcLogicalId = UINT32_MAX;
@@ -540,13 +538,13 @@ struct FusionRule : public Rule
         uint32_t e_class_id = egraph.getENodeEClass(eNodeIdx);
 
         ENode enode;
-        enode.kernelUid = kernel.uid;
+        enode.kernelId = kernel.uid;
         enode.opType = kernel.opType;
         enode.opName = kernel.opName;
         enode.children = adaptedParents;
         enode.shape = oldENode.shape;
 
-        if (kernel.isView)
+        if (kernel.is_view)
         {
             enode.strides = oldENode.strides;
             enode.viewOffset = oldENode.viewOffset;

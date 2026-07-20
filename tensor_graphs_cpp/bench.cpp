@@ -92,9 +92,9 @@ int main(int argc, char *argv[])
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
         {
             seenCalls.insert(key);
-            if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
+            if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelId))
             {
-                const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
+                const auto &kernel = KernelRegistry::get().getKernel(r.kernelId);
                 std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
 
                 if (!targetKernel.empty() && name.find(targetKernel) == std::string::npos)
@@ -115,7 +115,7 @@ int main(int argc, char *argv[])
     {
         Record &r = toBenchmark[i];
         float cost = costModel.estimateCost(
-            r.kernelUid, r.outputShapes[0], r.outputStrides[0], r.outputDTypes[0],
+            r.kernelId, r.outputShapes[0], r.outputStrides[0], r.outputDTypes[0],
             r.inputShapes, r.inputStrides, r.inputDTypes, r.inputConstants);
         r.runTime = std::isinf(cost) ? -1.0f : cost;
     }
@@ -126,8 +126,8 @@ int main(int argc, char *argv[])
         float costB = rb.runTime;
 
         if (std::abs(costA - costB) < 1e-7) {
-            bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
-            bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
+            bool isRefA = KernelRegistry::get().getKernel(ra.kernelId).isReference;
+            bool isRefB = KernelRegistry::get().getKernel(rb.kernelId).isReference;
             if (isRefA != isRefB) return !isRefA;
 
             auto getVolume = [](const Record& r) {
@@ -159,8 +159,8 @@ int main(int argc, char *argv[])
     for (size_t i = startIdx; i < toBenchmark.size(); ++i)
     {
         Record &r = toBenchmark[i];
-        uint64_t kernelUid = r.kernelUid;
-        const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
+        uint64_t kernelId = r.kernelId;
+        const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelId);
 
         std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "][";
         for (size_t bidx = 0; bidx < kernel.backends.size(); ++bidx)
@@ -170,7 +170,7 @@ int main(int argc, char *argv[])
             std::cout << toString(kernel.backends[bidx]);
         }
         std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                  << " (0x" << std::hex << kernelUid << std::dec << ")"
+                  << " (0x" << std::hex << kernelId << std::dec << ")"
                   << " est " << std::to_string(r.runTime) << " ms\n";
 
         for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
@@ -224,7 +224,7 @@ int main(int argc, char *argv[])
 
             if (!kernel.matches(dummyInputs, dummyOutput))
             {
-                std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelUid << "): record fails matches() validity check." << std::endl;
+                std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelId << "): record fails matches() validity check." << std::endl;
                 continue;
             }
 
@@ -234,7 +234,7 @@ int main(int argc, char *argv[])
             std::cout << "  Benchmarking..." << std::flush;
 
             // Warmup
-            if (!kernel.isView)
+            if (!kernel.is_view)
             {
                 pk.updateStorageContext(kernel, r, 0);
                 pk.run(kernel);
@@ -246,13 +246,13 @@ int main(int argc, char *argv[])
             latencies.reserve(iters);
             for (int it = 0; it < iters; ++it)
             {
-                if (!kernel.isView)
+                if (!kernel.is_view)
                 {
                     pk.updateStorageContext(kernel, r, it + 1);
                 }
 
                 auto iterStart = std::chrono::high_resolution_clock::now();
-                if (!kernel.isView)
+                if (!kernel.is_view)
                 {
                     pk.run(kernel);
                 }
@@ -294,7 +294,7 @@ int main(int argc, char *argv[])
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Failed to benchmark kernel " << kernelUid << ": " << e.what() << std::endl;
+            std::cerr << "Failed to benchmark kernel " << kernelId << ": " << e.what() << std::endl;
         }
     }
 

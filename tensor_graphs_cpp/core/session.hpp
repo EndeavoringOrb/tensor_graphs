@@ -499,12 +499,6 @@ struct Session
                         valid = false;
                         break;
                     }
-                    for (uint64_t kid : inst.cachedKernelIds)
-                        if (kid == 0 || !KernelRegistry::get().hasKernel(kid))
-                        {
-                            valid = false;
-                            break;
-                        }
                     if (!valid)
                         break;
                 }

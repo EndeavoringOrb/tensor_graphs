@@ -27,10 +27,8 @@
 struct ENodeInfo
 {
     float cost;
-    std::unordered_map<uint32_t, uint64_t> mem_sizes;
     bool inplace;
     int32_t inplace_idx;
-    bool is_scatter;
     bool is_view;
 };
 
@@ -146,45 +144,46 @@ public:
             std::vector<int> disc(numClasses, -1);
             std::vector<int> low(numClasses, -1);
             std::vector<bool> onStack(numClasses, false);
-            std::vector<uint32_t> st;
+            std::vector<EClassId> st;
             int time_counter = 0;
 
-            std::function<void(uint32_t)> tarjan = [&](uint32_t u)
+            std::function<void(EClassId)> tarjan = [&](EClassId u)
             {
-                disc[u] = low[u] = time_counter++;
+                disc[u.value] = low[u.value] = time_counter++;
                 st.push_back(u);
-                onStack[u] = true;
+                onStack[u.value] = true;
 
                 auto it = selection_map.find(u);
                 if (it != selection_map.end())
                 {
                     uint32_t sel = it->second;
-                    uint32_t enode_id = egraph.getEClass(u).enodes[sel];
-                    for (uint32_t v : precomp.enode_canon_children[enode_id])
+                    ENodeId enode_id = egraph.getEClass(u).enodes[sel];
+                    for (EClassId v : egraph.getENode(enode_id).getChildren())
                     {
+                        v = egraph.findConst(v);
                         if (selection_map.find(v) != selection_map.end())
                         {
-                            if (disc[v] == -1)
+                            if (disc[v.value] == -1)
                             {
                                 tarjan(v);
-                                low[u] = std::min(low[u], low[v]);
+                                low[u.value] = std::min(low[u.value], low[v.value]);
                             }
-                            else if (onStack[v])
+                            else if (onStack[v.value])
                             {
-                                low[u] = std::min(low[u], disc[v]);
+                                low[u.value] = std::min(low[u.value], disc[v.value]);
                             }
                         }
                     }
                 }
 
-                if (low[u] == disc[u])
+                if (low[u.value] == disc[u.value])
                 {
-                    std::vector<uint32_t> scc;
+                    std::vector<EClassId> scc;
                     while (true)
                     {
-                        uint32_t v = st.back();
+                        EClassId v = st.back();
                         st.pop_back();
-                        onStack[v] = false;
+                        onStack[v.value] = false;
                         scc.push_back(v);
                         if (u == v)
                             break;
@@ -197,14 +196,15 @@ public:
                     }
                     else if (scc.size() == 1)
                     {
-                        uint32_t v = scc[0];
+                        EClassId v = scc[0];
                         auto itv = selection_map.find(v);
                         if (itv != selection_map.end())
                         {
                             uint32_t sel = itv->second;
-                            uint32_t enode_id = egraph.getEClass(v).enodes[sel];
-                            for (uint32_t child : precomp.enode_canon_children[enode_id])
+                            ENodeId enode_id = egraph.getEClass(v).enodes[sel];
+                            for (EClassId child : egraph.getENode(enode_id).getChildren())
                             {
+                                child = egraph.findConst(child);
                                 if (child == v)
                                 {
                                     is_cycle = true;
@@ -216,9 +216,9 @@ public:
 
                     if (is_cycle)
                     {
-                        for (uint32_t v : scc)
+                        for (EClassId v : scc)
                         {
-                            if (path_idx[v] != -1)
+                            if (path_idx[v.value] != -1)
                             {
                                 auto choiceIt = selection_map.find(v);
                                 if (choiceIt != selection_map.end())
@@ -227,9 +227,9 @@ public:
                                     const auto &enodes = egraph.getEClass(v).enodes;
                                     if (sel + 1 < enodes.size())
                                     {
-                                        if (path_idx[v] < best_backtrack_idx)
+                                        if (path_idx[v.value] < best_backtrack_idx)
                                         {
-                                            best_backtrack_idx = path_idx[v];
+                                            best_backtrack_idx = path_idx[v.value];
                                         }
                                     }
                                 }
@@ -241,7 +241,7 @@ public:
 
             for (const auto &kv : selection_map)
             {
-                if (disc[kv.first] == -1)
+                if (disc[kv.first.value] == -1)
                 {
                     tarjan(kv.first);
                 }
@@ -251,7 +251,7 @@ public:
             {
                 target_backtrack_eclass = path[best_backtrack_idx];
                 std::cout << "[Planner.extractBest] cycle: backtracking to eclass "
-                          << std::to_string(target_backtrack_eclass)
+                          << toString(target_backtrack_eclass)
                           << " (path index " << best_backtrack_idx << " of " << path.size() << ")"
                           << std::endl;
             }

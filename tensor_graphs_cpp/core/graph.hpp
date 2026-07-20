@@ -76,7 +76,7 @@ struct Graph
         return nodes[id];
     }
 
-    uint32_t constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype, std::source_location loc = std::source_location::current())
+    LogicalId constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype, std::source_location loc = std::source_location::current())
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
 
@@ -84,7 +84,7 @@ struct Graph
         sha.update(static_cast<const uint8_t *>(dataPtr), sizeBytes);
 
         TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, {}, sha.digest(), loc);
-        uint32_t id = node.id;
+        LogicalId id = node.id;
 
         auto buffer = std::make_shared<std::vector<uint8_t>>(sizeBytes);
         std::memcpy(buffer->data(), dataPtr, sizeBytes);
@@ -95,7 +95,7 @@ struct Graph
         return id;
     }
 
-    uint32_t weight(const std::string &path, const std::string &name, std::source_location loc = std::source_location::current())
+    LogicalId weight(const std::string &path, const std::string &name, std::source_location loc = std::source_location::current())
     {
         if (!FileRegistry::get().hasTensor(path, name))
         {
@@ -114,21 +114,21 @@ struct Graph
         return node.id;
     }
 
-    uint32_t input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {}, std::source_location loc = std::source_location::current())
+    LogicalId input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {}, std::source_location loc = std::source_location::current())
     {
         TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, "", loc);
         input_data_types[node.id] = InputDataType::RUNTIME;
         return node.id;
     }
 
-    uint32_t contiguous(uint32_t id0, std::source_location loc = std::source_location::current())
+    LogicalId contiguous(uint32_t id0, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::CONTIGUOUS, "", dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
 
-    uint32_t add(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    LogicalId add(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {

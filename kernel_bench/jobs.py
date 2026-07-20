@@ -191,7 +191,7 @@ def get_benchmark_scores(uid_str):
             r = br.read_record()
             if r is None:
                 break
-            if r["kernelUid"] == target_uid:
+            if r["kernelId"] == target_uid:
                 scores.append(r["runTime"])
     return scores
 
@@ -304,7 +304,7 @@ def run_worker():
                         r = br.read_record()
                         if r is None:
                             break
-                        if r["kernelUid"] == uid_int:
+                        if r["kernelId"] == uid_int:
                             matched = True
                             break
             print(f"[JOB {job_id}] UID Match Result: {matched}")

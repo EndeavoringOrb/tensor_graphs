@@ -301,7 +301,7 @@ public:
 
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.fullKernelId);
 
-            if (!kernel.isView)
+            if (!kernel.is_view)
             {
                 // ProgressTimer kernelTimer(0, "", true);
                 kernel.run(ctx);

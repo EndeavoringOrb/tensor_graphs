@@ -57,8 +57,8 @@ class BinaryReader:
         return self.read_u32()
 
     def read_record(self):
-        kernelUid = self.read_u64()
-        if kernelUid is None:
+        kernelId = self.read_u64()
+        if kernelId is None:
             return None
 
         self.read_u64()  # buildContextId
@@ -74,7 +74,7 @@ class BinaryReader:
         self.read_vector(lambda: self.read_vector(self.read_backend))  # inputBackends
         self.read_float()  # runTime
 
-        return kernelUid
+        return kernelId
 
 
 def get_registered_kernels(header_path):

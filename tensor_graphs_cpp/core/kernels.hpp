@@ -39,7 +39,7 @@ struct KernelContext
 
 using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
 using KernelFunc = void (*)(const KernelContext &ctx);
-using ReferenceFactory = uint32_t (*)(const std::vector<uint32_t> &inputs, Graph &graph);
+using ReferenceFactory = LogicalId (*)(const std::vector<LogicalId> &inputs, Graph &graph);
 using InferViewFunc = void (*)(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph);
 
 struct ReferenceGraphEntry
@@ -90,7 +90,7 @@ struct PatternCacheKey
     OpType pOpType;
     std::string pOpName;
     Backend backend;
-    bool referenceOnly;
+    bool reference_only;
     bool ignoreInputBackends;
     bool ignoreInputContig;
 
@@ -100,7 +100,7 @@ struct PatternCacheKey
     bool operator==(const PatternCacheKey &o) const
     {
         if (pOpType != o.pOpType || pOpName != o.pOpName || backend != o.backend ||
-            referenceOnly != o.referenceOnly || ignoreInputBackends != o.ignoreInputBackends ||
+            reference_only != o.reference_only || ignoreInputBackends != o.ignoreInputBackends ||
             ignoreInputContig != o.ignoreInputContig)
             return false;
         if (inputs.size() != o.inputs.size())
@@ -131,7 +131,7 @@ struct PatternCacheKeyHash
         if (!k.pOpName.empty())
             combine(std::hash<std::string>()(k.pOpName));
         combine((size_t)k.backend);
-        combine(k.referenceOnly);
+        combine(k.reference_only);
         combine(k.ignoreInputBackends);
         combine(k.ignoreInputContig);
         for (const auto &in : k.inputs)
@@ -166,7 +166,7 @@ struct KernelEntry
     KernelFunc run;
     ReferenceFactory refFactory;
     std::vector<uint32_t> safe_inplace_idxs;
-    bool isView;
+    bool is_view;
     bool isReference;
     InferViewFunc inferView;
     MemSpace output_mem_space;
@@ -284,18 +284,18 @@ public:
 
     mutable std::unordered_map<PatternCacheKey, std::vector<uint64_t>, PatternCacheKeyHash> patternCache;
 
-    void setReferenceOnly(bool refOnly) { referenceOnlyMode = refOnly; }
+    void setReferenceOnly(bool refOnly) { reference_only_mode = refOnly; }
     const std::unordered_map<KernelId, KernelEntry> &getAllKernels() const { return entries; }
 
     std::vector<KernelId> _findMatchingKernelsByPattern(
         const Graph &patternGraph, uint32_t patternRootId, Backend backend,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
+        bool reference_only = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
     {
         std::vector<KernelId> matches;
         for (const auto &[uid, entry] : entries)
         {
-            if ((referenceOnlyMode || referenceOnly) && !entry.isReference)
+            if ((reference_only_mode || reference_only) && !entry.isReference)
                 continue;
 
             bool patternMatches = false;
@@ -344,12 +344,12 @@ public:
     std::vector<KernelId> findMatchingKernelsByPattern(
         const Graph &patternGraph, uint32_t patternRootId, Backend backend,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool referenceOnly = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
+        bool reference_only = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
     {
         const TensorNode &rootNode = patternGraph.getNode(patternRootId);
         PatternCacheKey key{
             rootNode.opType, rootNode.opName, backend,
-            referenceOnly, ignoreInputBackends, ignoreInputContig,
+            reference_only, ignoreInputBackends, ignoreInputContig,
             inputs, output};
 
         auto it = patternCache.find(key);
@@ -359,7 +359,7 @@ public:
         }
 
         std::vector<KernelId> matches = _findMatchingKernelsByPattern(
-            patternGraph, patternRootId, backend, inputs, output, referenceOnly, ignoreInputBackends, ignoreInputContig);
+            patternGraph, patternRootId, backend, inputs, output, reference_only, ignoreInputBackends, ignoreInputContig);
 
         patternCache[key] = matches;
         return matches;
@@ -368,7 +368,7 @@ public:
     void registerKernel(KernelId uid, OpType op, const std::string &opName,
                         uint32_t min_num_inputs, uint32_t max_num_inputs,
                         MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
-                        const std::vector<uint32_t> &safe_inplace_idxs, bool isView, bool isReference, InferViewFunc inferView,
+                        const std::vector<uint32_t> &safe_inplace_idxs, bool is_view, bool isReference, InferViewFunc inferView,
                         const MemSpace output_mem_space,    // mem space for output
                         const std::vector<Engine> &engines, // which engines this kernel blocks while running
                         const std::vector<DType> &dtypes = {},
@@ -391,7 +391,7 @@ public:
             Error::throw_err("contiguous.size() != min_num_inputs");
         }
 
-        entries.emplace(uid, KernelEntry{uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory, safe_inplace_idxs, isView, isReference, inferView, output_mem_space, engines, dtypes, dummyShapes, contiguous, input_mem_spaces});
+        entries.emplace(uid, KernelEntry{uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory, safe_inplace_idxs, is_view, isReference, inferView, output_mem_space, engines, dtypes, dummyShapes, contiguous, input_mem_spaces});
         if (refFactory && op == OpType::FUSED)
         {
             ReferenceGraphRegistry::get().registerFactory(opName, min_num_inputs, max_num_inputs, refFactory, dtypes, dummyShapes);
@@ -399,15 +399,15 @@ public:
     }
 
     std::vector<KernelId> findMatchingKernels(
-        OpType op, const std::string &opName, bool referenceOnly = false,
+        OpType op, const std::string &opName,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        MemSpace &_output_mem_space, std::vector<Engine> &_engines, std::vector<MemSpace> &_input_mem_spaces,
-        bool ignore_input_mem_spaces = false, bool ignoreInputContig = false) const
+        const MemSpace &_output_mem_space, const std::vector<Engine> &_engines, const std::vector<MemSpace> &_input_mem_spaces,
+        bool reference_only = false, bool ignore_input_mem_spaces = false, bool ignoreInputContig = false) const
     {
         std::vector<KernelId> matches;
         for (const auto &[uid, entry] : entries)
         {
-            if ((referenceOnlyMode || referenceOnly) && !entry.isReference)
+            if ((reference_only_mode || reference_only) && !entry.isReference)
                 continue;
             if (entry.opType != op)
                 continue;
@@ -437,7 +437,7 @@ public:
 
 private:
     std::unordered_map<KernelId, KernelEntry> entries;
-    bool referenceOnlyMode = false;
+    bool reference_only_mode = false;
 };
 
 struct KernelRegistrar
@@ -445,7 +445,7 @@ struct KernelRegistrar
     KernelRegistrar(KernelId uid, OpType op, const std::string &opName,
                     uint32_t min_num_inputs, uint32_t max_num_inputs,
                     MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
-                    const std::vector<uint32_t> &safe_inplace_idxs, bool isView, bool isReference, InferViewFunc inferView,
+                    const std::vector<uint32_t> &safe_inplace_idxs, bool is_view, bool isReference, InferViewFunc inferView,
                     const MemSpace output_mem_space,    // mem space for output
                     const std::vector<Engine> &engines, // which engines this kernel blocks while running
                     const std::vector<DType> &dtypes = {},
@@ -454,7 +454,7 @@ struct KernelRegistrar
                     const std::vector<MemSpace> &input_mem_spaces = {} // mem space for each input
     )
     {
-        KernelRegistry::get().registerKernel(uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory, safe_inplace_idxs, isView, isReference, inferView, output_mem_space, engines, dtypes, dummyShapes, contiguous, input_mem_spaces);
+        KernelRegistry::get().registerKernel(uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory, safe_inplace_idxs, is_view, isReference, inferView, output_mem_space, engines, dtypes, dummyShapes, contiguous, input_mem_spaces);
     }
 };
 

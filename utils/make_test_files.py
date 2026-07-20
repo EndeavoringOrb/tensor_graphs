@@ -157,7 +157,7 @@ for i, (op, inputs, output) in enumerate(tests):
     os.makedirs(test_dir, exist_ok=True)
 
     record = {
-        "kernelUid": OP_TYPES.index(op),
+        "kernelId": OP_TYPES.index(op),
         "buildContextId": 0,
         "hwTag": "",
         "inputShapes": [list(inp.shape) for inp in inputs],

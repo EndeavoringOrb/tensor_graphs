@@ -140,8 +140,8 @@ class BinaryReader:
         return {read_key(): read_val() for _ in range(size)}
 
     def read_record(self):
-        kernelUid = self.read_u64()
-        if kernelUid is None:
+        kernelId = self.read_u64()
+        if kernelId is None:
             return None
         buildContextId = self.read_u64()
         hwTag = self.read_string()
@@ -162,7 +162,7 @@ class BinaryReader:
         runTime = self.read_float()
 
         return {
-            "kernelUid": kernelUid,
+            "kernelId": kernelId,
             "outputShapes": outputShapes,
             "outputStrides": outputStrides,
             "runTime": runTime,
@@ -196,8 +196,7 @@ class BinaryReader:
         return {
             "nodeId": self.read_u32(),
             "logicalNodeId": self.read_u32(),
-            "fullKernelId": self.read_u64(),
-            "cachedKernelIds": self.read_vector(self.read_u64),
+            "kernelId": self.read_u64(),
             "inputNodeIds": self.read_vector(self.read_u32),
             "inplaceInputIndex": self.read_i32(),
             "viewInputIndex": self.read_i32(),
@@ -301,7 +300,7 @@ class BinaryWriter:
             write_func(x)
 
     def write_record(self, r):
-        self.write_u64(r["kernelUid"])
+        self.write_u64(r["kernelId"])
         self.write_u64(r["buildContextId"])
         self.write_string(r["hwTag"])
         self.write_vector(
@@ -395,7 +394,7 @@ def get_record_identity(r):
     Matches the logic used in C++ CostModel::estimateCost.
     """
     return (
-        r["kernelUid"],
+        r["kernelId"],
         tuple(tuple(s) for s in r["inputShapes"]),
         tuple(tuple(s) for s in r["inputStrides"]),
         tuple(r["inputDTypes"]),

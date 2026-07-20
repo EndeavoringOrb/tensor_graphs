@@ -293,7 +293,7 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
                 Error::throw_err("[createStorageInputs] got 0 bytes for file size");
             }
 
-            std::string path = "benchmarks/dummy_storage_" + std::to_string(sf.fds.size()) + "_" + std::to_string(r.kernelUid) + "_run_" + std::to_string(runIdx) + ".bin";
+            std::string path = "benchmarks/dummy_storage_" + std::to_string(sf.fds.size()) + "_" + std::to_string(r.kernelId) + "_run_" + std::to_string(runIdx) + ".bin";
             std::ofstream out(path, std::ios::binary | std::ios::trunc);
             if (!out.is_open())
             {

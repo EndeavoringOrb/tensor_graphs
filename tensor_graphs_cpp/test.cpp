@@ -444,7 +444,7 @@ std::vector<float> executeReferenceGraph(
         }
 
         const KernelEntry &kernel = KernelRegistry::get().getKernel(chosenKernelUid);
-        if (kernel.isView)
+        if (kernel.is_view)
         {
             TensorNode dummyOutNode = node;
             kernel.inferView(dummyOutNode, inputNodes, graph);
@@ -528,7 +528,7 @@ std::vector<float> executeFusedKernel(
     }
 
     Record r;
-    r.kernelUid = kernel.uid;
+    r.kernelId = kernel.uid;
     r.outputShapes.push_back(outShape);
     r.outputStrides.push_back(outStrides);
     r.outputDTypes.push_back(outDType);
@@ -567,7 +567,7 @@ std::vector<float> executeFusedKernel(
     outView.baseOffset = 0;
     outView.dtype = outDType;
 
-    if (kernel.isView && !pk.inputBuffers.empty() && kernel.inferView)
+    if (kernel.is_view && !pk.inputBuffers.empty() && kernel.inferView)
     {
         std::vector<TensorNode> dummyInputs(inputData.size());
         for (size_t i = 0; i < inputData.size(); ++i)
@@ -986,7 +986,7 @@ std::unordered_map<uint64_t, std::vector<Record>> loadCallRecords(const std::str
     {
         Record r;
         br.read(r);
-        records[r.kernelUid].push_back(std::move(r));
+        records[r.kernelId].push_back(std::move(r));
     }
     return records;
 }
@@ -1026,7 +1026,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         BinaryReader br(infoFile);
         Record rec;
         br.read(rec);
-        OpType opType = static_cast<OpType>(rec.kernelUid);
+        OpType opType = static_cast<OpType>(rec.kernelId);
 
         SafetensorsLoader loader(dataPath);
         std::vector<std::vector<uint8_t>> inputData;
@@ -1091,7 +1091,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             Error::throw_err("[runPythonTests] Expected 1 kernel match, got " + std::to_string(matches.size()));
         }
         const KernelEntry &kernel = KernelRegistry::get().getKernel(matches.front());
-        if (kernel.isView)
+        if (kernel.is_view)
         {
             TensorNode dummyOutNode = outNode;
             for (size_t k = 0; k < dummyInputNodes.size(); ++k)
@@ -1198,7 +1198,7 @@ std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std:
                     continue;
 
                 Record r;
-                r.kernelUid = inst.fullKernelId;
+                r.kernelId = inst.fullKernelId;
                 r.buildContextId = BUILD_CONTEXT_ID;
                 r.hwTag = HW_TAG;
                 r.runTime = 0.0f;
@@ -1235,7 +1235,7 @@ std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std:
                 std::string sig = serializeToString(r);
                 if (seen.insert(sig).second)
                 {
-                    recordsByUid[r.kernelUid].push_back(r);
+                    recordsByUid[r.kernelId].push_back(r);
                 }
             }
         }

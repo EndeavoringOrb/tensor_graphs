@@ -14,7 +14,7 @@
 class ENode
 {
 public:
-    ENode(KernelId kernelUid,
+    ENode(KernelId kernelId,
           OpType opType,
           std::string opName,
           std::vector<EClassId> children,
@@ -22,10 +22,9 @@ public:
           std::vector<uint64_t> strides,
           DType dtype,
           MemSpace mem_space,
-          Engine engine,
-          LogicalId leafId = {UINT32_MAX},
+          std::vector<Engine> engines,
           uint64_t sig = 0)
-        : kernelUid(kernelUid),
+        : kernelId(kernelId),
           opType(opType),
           opName(std::move(opName)),
           children(std::move(children)),
@@ -33,28 +32,26 @@ public:
           strides(std::move(strides)),
           dtype(dtype),
           mem_space(mem_space),
-          engine(engine),
-          leafId(leafId),
+          engines(engines),
           sig(sig)
     {
     }
 
     bool operator==(const ENode &other) const
     {
-        return kernelUid == other.kernelUid &&
+        return kernelId == other.kernelId &&
                opType == other.opType &&
-               leafId == other.leafId &&
-               dtype == other.dtype &&
-               mem_space == other.mem_space &&
-               engine == other.engine &&
                opName == other.opName &&
                children == other.children &&
                shape == other.shape &&
-               strides == other.strides;
+               strides == other.strides &&
+               dtype == other.dtype &&
+               mem_space == other.mem_space &&
+               engines == other.engines;
     }
 
     // Getters for accessing the private fields
-    KernelId getKernelUid() const { return kernelUid; }
+    KernelId getKernelId() const { return kernelId; }
     OpType getOpType() const { return opType; }
     const std::string &getOpName() const { return opName; }
     const std::vector<EClassId> &getChildren() const { return children; }
@@ -62,12 +59,11 @@ public:
     const std::vector<uint64_t> &getStrides() const { return strides; }
     DType getDType() const { return dtype; }
     MemSpace getMemSpace() const { return mem_space; }
-    Engine getEngine() const { return engine; }
-    LogicalId getLeafId() const { return leafId; }
+    std::vector<Engine> getEngines() const { return engines; }
     uint64_t getSig() const { return sig; }
 
 private:
-    KernelId kernelUid;
+    KernelId kernelId;
     OpType opType;
     std::string opName;
     std::vector<EClassId> children; // list of child eclass ids
@@ -75,8 +71,7 @@ private:
     std::vector<uint64_t> strides;
     DType dtype;
     MemSpace mem_space;
-    Engine engine;
-    LogicalId leafId;
+    std::vector<Engine> engines;
 
     uint64_t sig; // Precomputed structural signature used by hashcons buckets.
 };
@@ -102,13 +97,13 @@ struct EGraph
     std::unordered_map<uint64_t, std::vector<uint32_t>> hashcons;
 
     // Dense enodeId -> e_class_id mapping.
-    std::vector<uint32_t> nodeToEClass;
+    std::vector<EClassId> nodeToEClass;
 
     uint32_t nextLeafId = 0;
     std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
     // Hash map for fast constant lookup: data hash -> list of class ids
-    std::unordered_map<uint64_t, std::vector<uint32_t>> constantHashIndex;
+    std::unordered_map<uint64_t, std::vector<EClassId>> constantHashIndex;
 
     void reserve(size_t classCap, size_t nodeCap)
     {
@@ -121,26 +116,25 @@ struct EGraph
         hashcons.reserve(nodeCap * 2);
     }
 
-    uint32_t getOrAddConstant(const std::vector<uint32_t> &shape,
+    EClassId getOrAddConstant(const std::vector<uint32_t> &shape,
                               const std::vector<uint64_t> &strides,
                               DType dtype,
-                              Backend backend,
                               const std::vector<uint8_t> &data)
     {
-        uint64_t dataHash = computeConstantHash(shape, strides, dtype, backend, data);
+        uint64_t dataHash = computeConstantHash(shape, strides, dtype, data);
 
         auto it = constantHashIndex.find(dataHash);
         if (it != constantHashIndex.end())
         {
-            for (uint32_t candidateClsId : it->second)
+            for (EClassId candidateClsId : it->second)
             {
-                uint32_t clsId = find(candidateClsId);
+                EClassId clsId = find(candidateClsId);
                 auto stagingIt = constantStaging.find(clsId);
                 if (stagingIt == constantStaging.end())
                     continue;
 
                 const EClass &cls = getEClass(clsId);
-                if (cls.dtype == dtype && cls.backend == backend &&
+                if (cls.dtype == dtype &&
                     cls.shape == shape && cls.strides == strides &&
                     *stagingIt->second == data)
                 {
@@ -149,14 +143,8 @@ struct EGraph
             }
         }
 
-        uint32_t cls = addEClass(shape, strides, 0, dtype, backend);
-        ENode n;
-        n.kernelUid = 0;
-        n.opType = OpType::INPUT;
-        n.dtype = dtype;
-        n.shape = shape;
-        n.strides = strides;
-        n.backend = backend;
+        EClassId cls = addEClass(shape, strides, dtype, MemSpace(1, HandleType::CPP));
+        ENode n = ENode(KernelId{0}, OpType::INPUT, "", {}, shape, strides, dtype, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)});
         addENode(cls, n);
         constantStaging[cls] = std::make_shared<std::vector<uint8_t>>(data);
         constantHashIndex[dataHash].push_back(cls);
@@ -164,15 +152,14 @@ struct EGraph
     }
 
     template <typename T>
-    uint32_t getOrAddConstantData(const std::vector<uint32_t> &shape,
+    EClassId getOrAddConstantData(const std::vector<uint32_t> &shape,
                                   DType dtype,
-                                  Backend backend,
                                   const std::vector<T> &vals)
     {
         std::vector<uint64_t> strides = calcContiguousStrides(shape);
         std::vector<uint8_t> bytes(vals.size() * sizeof(T));
         std::memcpy(bytes.data(), vals.data(), bytes.size());
-        return getOrAddConstant(shape, strides, dtype, backend, bytes);
+        return getOrAddConstant(shape, strides, dtype, bytes);
     }
 
     EClassId addEClass(const std::vector<uint32_t> &shape,
@@ -202,11 +189,6 @@ struct EGraph
         for (uint32_t &child : node.children)
         {
             child = find(child);
-        }
-
-        if (node.opType == OpType::INPUT && node.leafId == UINT32_MAX)
-        {
-            node.leafId = nextLeafId++;
         }
 
         node.sig = computeSignature(node);
@@ -382,9 +364,9 @@ struct EGraph
     EClass &getEClass(EClassId id) { return classes[find(id)]; }
     const EClass &getEClass(EClassId id) const { return classes[findConst(id)]; }
 
-    uint32_t getENodeEClass(uint32_t enodeId) const
+    EClassId getENodeEClass(ENodeId enodeId) const
     {
-        return nodeToEClass[enodeId];
+        return nodeToEClass[enodeId.value];
     }
 
 private:
@@ -408,12 +390,11 @@ private:
 
     static uint64_t computeSignature(const ENode &node) noexcept
     {
-        uint64_t h = mix64(node.kernelUid);
+        uint64_t h = mix64(node.kernelId);
 
         hashCombine(h, static_cast<uint64_t>(node.opType));
         if (!node.opName.empty())
             hashCombine(h, hashString(node.opName));
-        hashCombine(h, static_cast<uint64_t>(node.leafId));
 
         for (uint32_t c : node.children)
             hashCombine(h, static_cast<uint64_t>(c));
@@ -434,7 +415,6 @@ private:
     static uint64_t computeConstantHash(const std::vector<uint32_t> &shape,
                                         const std::vector<uint64_t> &strides,
                                         DType dtype,
-                                        Backend backend,
                                         const std::vector<uint8_t> &data) noexcept
     {
         uint64_t h = static_cast<uint64_t>(dtype);
@@ -479,7 +459,7 @@ private:
                 continue; // Skip non-canonical entries (data was moved during merge)
 
             const EClass &cls = getEClass(canonicalId);
-            uint64_t h = computeConstantHash(cls.shape, cls.strides, cls.dtype, cls.backend, *kv.second);
+            uint64_t h = computeConstantHash(cls.shape, cls.strides, cls.dtype, *kv.second);
             constantHashIndex[h].push_back(canonicalId);
         }
     }
@@ -494,7 +474,7 @@ inline std::string toString(const ENode &node)
 {
     std::stringstream ss;
     ss << "ENode {\n"
-       << "  KernelUID:  0x" << std::hex << node.kernelUid << std::dec << "\n"
+       << "  KernelUID:  0x" << std::hex << node.kernelId << std::dec << "\n"
        << "  OpType:     " << toString(node.opType) << "\n"
        << "  OpName:     " << (node.opName.empty() ? "N/A" : node.opName) << "\n"
        << "  Children:   [";
@@ -503,7 +483,6 @@ inline std::string toString(const ENode &node)
         ss << node.children[i] << (i == node.children.size() - 1 ? "" : ", ");
     }
     ss << "]\n"
-       << "  LeafID:     " << (node.leafId == UINT32_MAX ? "N/A" : std::to_string(node.leafId)) << "\n"
        << "  Shape:      " << ::toString(node.shape) << "\n"
        << "  Strides:    " << ::toString(node.strides) << "\n"
        << "  ViewOffset: " << node.viewOffset << "\n"
@@ -552,14 +531,9 @@ inline std::string toString(const ENode &node, const EGraph &egraph, const std::
        << prefix << "  ViewOffset: " << node.viewOffset << "\n"
        << prefix << "  Signature:  0x" << std::hex << node.sig << std::dec << "\n";
 
-    if (node.leafId != UINT32_MAX)
+    if (node.kernelId != 0)
     {
-        ss << prefix << "  LeafID:     " << node.leafId << "\n";
-    }
-
-    if (node.kernelUid != 0)
-    {
-        ss << prefix << "  KernelUID:  0x" << std::hex << node.kernelUid << std::dec << "\n";
+        ss << prefix << "  KernelUID:  0x" << std::hex << node.kernelId << std::dec << "\n";
     }
 
     ss << prefix << "  Children (" << node.children.size() << "):";
