@@ -938,7 +938,7 @@ struct OpInstruction
 
 struct Bucket
 {
-    std::unordered_map<uint32_t, std::vector<Region>> inputDirtyRegions;
+    std::unordered_map<LogicalId, std::vector<Region>> inputDirtyRegions;
     std::vector<Region> outputNeededRegion;
 };
 
@@ -971,7 +971,7 @@ inline void tg_deserialize(BinaryReader &br, Bucket &val)
     br.read(constSize);
     for (int i = 0; i < constSize; i++)
     {
-        uint32_t first;
+        LogicalId first;
         br.read(first);
         uint32_t size;
         br.read(size);
@@ -1055,7 +1055,7 @@ struct CompiledGraph
         return sum;
     }
 
-    const uint32_t getLogicalId(uint32_t id) const
+    const uint32_t getLogicalId(PhysicalId id) const
     {
         auto it = physicalToLogicalNodeMap.find(id);
         return it != physicalToLogicalNodeMap.end() ? it->second : id;
@@ -1089,13 +1089,6 @@ struct CompiledGraph
                 inId = mapId(inId);
             }
         }
-
-        std::unordered_map<uint32_t, uint32_t> newRefCounts;
-        for (const auto &pair : refCounts)
-        {
-            newRefCounts[mapId(pair.first)] = pair.second;
-        }
-        refCounts = std::move(newRefCounts);
 
         std::unordered_map<uint32_t, TensorNode> newNodesMap;
         for (auto &pair : nodesMap)

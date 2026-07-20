@@ -12,12 +12,12 @@
 #include <algorithm>
 #include <cstring>
 
-inline bool isEClassProtected(uint32_t e_class_id, const std::unordered_set<uint32_t> &protectedEClasses, const EGraph &egraph)
+inline bool isEClassProtected(EClassId e_class_id, const std::unordered_set<EClassId> &protectedEClasses, const EGraph &egraph)
 {
-    uint32_t canon = egraph.findConst(e_class_id);
+    EClassId canon = egraph.findConst(e_class_id);
     if (protectedEClasses.count(canon))
         return true;
-    for (uint32_t id : protectedEClasses)
+    for (EClassId id : protectedEClasses)
     {
         if (egraph.findConst(id) == canon)
             return true;
@@ -28,8 +28,8 @@ inline bool isEClassProtected(uint32_t e_class_id, const std::unordered_set<uint
 struct RuleCtx
 {
     EGraph &egraph;
-    const std::unordered_set<uint32_t> &protectedEClasses;
-    std::unordered_map<uint32_t, uint32_t> &eclassToLogical;
+    const std::unordered_set<EClassId> &protectedEClasses;
+    std::unordered_map<EClassId, LogicalId> &eclassToLogical;
     Repo *repo;
 };
 
@@ -50,8 +50,6 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
     outNode.dtype = dtype;
     outNode.setShape(shape);
     outNode.strides = st;
-    outNode.viewOffset = viewOffset;
-    outNode.backend = backend;
 
     std::vector<TensorNode> inNodes;
     for (uint32_t c : children)
@@ -62,18 +60,16 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
         in.dtype = childCls.dtype;
         in.setShape(childCls.shape);
         in.strides = childCls.strides;
-        in.viewOffset = childCls.viewOffset;
-        in.backend = childCls.backend;
         inNodes.push_back(in);
     }
 
     Graph pGraph;
-    std::vector<uint32_t> pInputs;
+    std::vector<LogicalId> pInputs;
     for (auto &in : inNodes)
     {
         pInputs.push_back(pGraph.input(in.getShape(), in.dtype));
     }
-    uint32_t pRoot = UINT32_MAX;
+    LogicalId pRoot;
     if (op == OpType::SLICE)
         pRoot = pGraph.slice(pInputs[0], pInputs[1], pInputs[2], pInputs[3]);
     else if (op == OpType::CONTIGUOUS)

@@ -52,7 +52,7 @@ inline std::vector<EClassId> topologicalSort(const EClassId &root, const EGraph 
         if (choiceIt == choiceByEClass.end() || !choiceIt->second.valid)
             return;
 
-        const ENode &enode = egraph.getENodes()[choiceIt->second.enodeId];
+        const ENode &enode = egraph.getENode(choiceIt->second.enodeId);
         for (EClassId child : enode.getChildren())
             visit(child);
         topo.push_back(e_class_id);
@@ -62,110 +62,8 @@ inline std::vector<EClassId> topologicalSort(const EClassId &root, const EGraph 
 
 struct Planner
 {
-    uint32_t egraph_dump_counter_ = 0;
     CostModel &costModel;
     std::unordered_map<uint32_t, uint64_t> mem_caps; // mem_idx -> max memory
-
-    void dumpEGraphBinary(const EGraph &egraph, uint32_t rootEClassId)
-    {
-        const std::string dir = "egraph_viewer/egraphs";
-        std::filesystem::create_directories(dir);
-
-        std::string path;
-        while (true)
-        {
-            path = dir + "/" + std::to_string(egraph_dump_counter_) + ".bin";
-            egraph_dump_counter_++;
-            if (!std::filesystem::exists(path))
-                break;
-        }
-
-        std::ofstream out(path, std::ios::binary);
-        if (!out)
-        {
-            std::cerr << "[Planner.dumpEGraphBinary] Failed to open " << path << " for writing." << std::endl;
-            return;
-        }
-
-        const auto &classes = egraph.getClasses();
-        const auto &enodes = egraph.getENodes();
-
-        uint32_t num_classes = static_cast<uint32_t>(classes.size());
-        uint32_t num_enodes = static_cast<uint32_t>(enodes.size());
-
-        out.write(reinterpret_cast<const char *>(&num_classes), 4);
-        out.write(reinterpret_cast<const char *>(&num_enodes), 4);
-        out.write(reinterpret_cast<const char *>(&rootEClassId), 4);
-
-        for (const auto &cls : classes)
-        {
-            out.write(reinterpret_cast<const char *>(&cls.id), 4);
-            uint32_t s_size = static_cast<uint32_t>(cls.shape.size());
-            out.write(reinterpret_cast<const char *>(&s_size), 4);
-            if (s_size > 0)
-                out.write(reinterpret_cast<const char *>(cls.shape.data()), s_size * 4);
-
-            uint32_t st_size = static_cast<uint32_t>(cls.strides.size());
-            out.write(reinterpret_cast<const char *>(&st_size), 4);
-            if (st_size > 0)
-                out.write(reinterpret_cast<const char *>(cls.strides.data()), st_size * 8);
-
-            out.write(reinterpret_cast<const char *>(&cls.viewOffset), 8);
-            out.write(reinterpret_cast<const char *>(&cls.dtype), 4);
-            out.write(reinterpret_cast<const char *>(&cls.backend), 4);
-
-            uint32_t e_size = static_cast<uint32_t>(cls.enodes.size());
-            out.write(reinterpret_cast<const char *>(&e_size), 4);
-            if (e_size > 0)
-                out.write(reinterpret_cast<const char *>(cls.enodes.data()), e_size * 4);
-        }
-
-        for (const auto &enode : enodes)
-        {
-            out.write(reinterpret_cast<const char *>(&enode.kernelId), 8);
-            uint32_t op_type = static_cast<uint32_t>(enode.opType);
-            out.write(reinterpret_cast<const char *>(&op_type), 4);
-            uint32_t n_len = static_cast<uint32_t>(enode.opName.length());
-            out.write(reinterpret_cast<const char *>(&n_len), 4);
-            if (n_len > 0)
-                out.write(enode.opName.c_str(), n_len);
-
-            uint32_t c_size = static_cast<uint32_t>(enode.children.size());
-            out.write(reinterpret_cast<const char *>(&c_size), 4);
-            if (c_size > 0)
-                out.write(reinterpret_cast<const char *>(enode.children.data()), c_size * 4);
-
-            uint32_t s_size = static_cast<uint32_t>(enode.shape.size());
-            out.write(reinterpret_cast<const char *>(&s_size), 4);
-            if (s_size > 0)
-                out.write(reinterpret_cast<const char *>(enode.shape.data()), s_size * 4);
-
-            uint32_t st_size = static_cast<uint32_t>(enode.strides.size());
-            out.write(reinterpret_cast<const char *>(&st_size), 4);
-            if (st_size > 0)
-                out.write(reinterpret_cast<const char *>(enode.strides.data()), st_size * 8);
-
-            out.write(reinterpret_cast<const char *>(&enode.viewOffset), 8);
-            out.write(reinterpret_cast<const char *>(&enode.dtype), 4);
-            out.write(reinterpret_cast<const char *>(&enode.backend), 4);
-            out.write(reinterpret_cast<const char *>(&enode.sig), 8);
-        }
-
-        uint32_t num_constants = static_cast<uint32_t>(egraph.constantStaging.size());
-        out.write(reinterpret_cast<const char *>(&num_constants), 4);
-        for (const auto &[e_class_id, data_ptr] : egraph.constantStaging)
-        {
-            uint32_t canonId = e_class_id;
-            out.write(reinterpret_cast<const char *>(&canonId), 4);
-            const auto &data = *data_ptr;
-            uint64_t data_size = static_cast<uint64_t>(data.size());
-            out.write(reinterpret_cast<const char *>(&data_size), 8);
-            out.write(reinterpret_cast<const char *>(data.data()), data_size);
-        }
-
-        out.close();
-        std::cout << "[Planner.dumpEGraphBinary] Dumped EGraph to " << path << std::endl;
-    }
 
     void inferShapes(const std::vector<LogicalId> &topo, Graph &graph)
     {
@@ -176,7 +74,7 @@ struct Planner
         }
     }
 
-    void saturate(EGraph &egraph, const std::unordered_set<uint32_t> &protectedEClasses, std::unordered_map<uint32_t, uint32_t> &eclassToLogical, bool injected, bool allowPushDownOnProtected = false, Repo *repo = nullptr)
+    void saturate(EGraph &egraph, const std::unordered_set<EClassId> &protectedEClasses, std::unordered_map<EClassId, LogicalId> &eclassToLogical, bool injected, bool allowPushDownOnProtected = false, Repo *repo = nullptr)
     {
         RuleCtx ctx{egraph, protectedEClasses, eclassToLogical, repo};
         std::vector<std::unique_ptr<Rule>> rules;
@@ -1080,7 +978,7 @@ private:
             }
 
             std::vector<KernelId> refs = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, true, inputs, node, ram, {cpu}, input_mem_spaces);
+                node.opType, node.opName, inputs, node, ram, {cpu}, input_mem_spaces, true);
 
             if (refs.size() == 0)
             {
@@ -1253,8 +1151,8 @@ private:
 
                 for (size_t p_idx = 0; p_idx < sourceNode.child_ids.size(); ++p_idx)
                 {
-                    uint32_t parentLogicalId = sourceNode.child_ids[p_idx];
-                    uint32_t E_parent = egraph.find(nodeToEClass.at(parentLogicalId));
+                    LogicalId parentLogicalId = sourceNode.child_ids[p_idx];
+                    EClassId E_parent = egraph.find(nodeToEClass.at(parentLogicalId));
                     const EClass &pClass = egraph.getEClass(E_parent);
 
                     std::vector<Region> inputSliceRegions = dirtyInputRegions[p_idx];
@@ -1276,19 +1174,17 @@ private:
                         pSteps.push_back(1);
                     }
 
-                    uint32_t pStartsId = addConst(pStarts);
-                    uint32_t pEndsId = addConst(pEnds);
-                    uint32_t pStepsId = addConst(pSteps);
+                    EClassId pStartsId = addConst(pStarts);
+                    EClassId pEndsId = addConst(pEnds);
+                    EClassId pStepsId = addConst(pSteps);
 
                     std::vector<uint64_t> pSliceStrides = pClass.strides;
-                    uint64_t pSliceViewOffset = pClass.viewOffset;
 
                     for (size_t d = 0; d < pStarts.size(); ++d)
                     {
                         int32_t start = pStarts[d];
                         if (start < 0)
                             start += pClass.shape[d];
-                        pSliceViewOffset += start * pSliceStrides[d];
                         pSliceStrides[d] *= pSteps[d];
                     }
 
@@ -1522,15 +1418,15 @@ private:
     bool injectInputPartialPaths(
         EGraph &egraph,
         const Graph &graph,
-        const std::unordered_map<uint32_t, std::vector<Region>> &dirtyOutputRegions,
-        const std::unordered_map<uint32_t, Backend> &cachedNodes,
-        const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-        std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
+        const std::unordered_map<LogicalId, std::vector<Region>> &dirtyOutputRegions,
+        const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+        const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
+        std::unordered_map<EClassId, LogicalId> &eclassToLogical)
     {
         bool injected = false;
         for (const auto &kv : dirtyOutputRegions)
         {
-            uint32_t nodeId = kv.first;
+            LogicalId nodeId = kv.first;
             if (!graph.hasNode(nodeId))
                 continue;
 
@@ -1553,11 +1449,11 @@ private:
     bool injectOutputPartialPaths(
         EGraph &egraph,
         const Graph &graph,
-        uint32_t rootId,
+        LogicalId rootId,
         const std::vector<Region> &outputNeeded,
-        const std::unordered_map<uint32_t, Backend> &cachedNodes,
-        const std::unordered_map<uint32_t, uint32_t> &nodeToEClass,
-        std::unordered_map<uint32_t, uint32_t> &eclassToLogical)
+        const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+        const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
+        std::unordered_map<EClassId, LogicalId> &eclassToLogical)
     {
         bool injected = false;
         if (!outputNeeded.empty())
@@ -1578,20 +1474,20 @@ private:
         LogicalId rootId,
         const Graph &graph,
         const Bucket &bucket,
-        const std::unordered_map<uint32_t, Backend> &cachedNodes,
+        const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
         bool doSaturate = true,
         bool strictCache = false,
         Repo *repo = nullptr)
     {
-        std::vector<uint32_t> topo = topologicalSort({rootId}, graph);
+        std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
         initBaseEGraph(rootId, tempGraph, topo, repo);
 
         EGraph egraph = baseState.egraph;
         auto eclassToLogical = baseState.eclassToLogical;
 
-        std::unordered_map<uint32_t, bool> logicalDirty;
-        for (uint32_t nodeId : topo)
+        std::unordered_map<LogicalId, bool> logicalDirty;
+        for (LogicalId nodeId : topo)
         {
             if (bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty())
             {
@@ -1600,7 +1496,7 @@ private:
             else
             {
                 bool isDirty = false;
-                for (uint32_t pid : graph.getNode(nodeId).child_ids)
+                for (LogicalId pid : graph.getNode(nodeId).child_ids)
                 {
                     if (logicalDirty[pid])
                     {
@@ -1616,7 +1512,7 @@ private:
         Engine cpu = Engine(0, EngineType::CPU);
         for (const auto &cls : egraph.getClasses())
         {
-            uint32_t canonId = egraph.find(cls.id);
+            EClassId canonId = egraph.find(cls.id);
             if (canonId != cls.id)
                 continue;
             if (strictCache)
@@ -1628,37 +1524,30 @@ private:
             }
             for (int i = 0; i < cls.enodes.size(); i++)
             {
-                if (egraph.getENodes()[cls.enodes[i]].opType == OpType::CACHE)
+                if (egraph.getENode(cls.enodes[i]).getOpType() == OpType::CACHE)
                 {
                     continue;
                 }
             }
 
-            uint32_t logicalId = UINT32_MAX;
+            LogicalId logicalId;
             auto it = eclassToLogical.find(canonId);
             if (it != eclassToLogical.end())
             {
                 logicalId = it->second;
             }
 
-            if (logicalId != UINT32_MAX && !logicalDirty[logicalId])
+            if (logicalId != LogicalId{UINT32_MAX} && !logicalDirty[logicalId])
             {
-                ENode cacheNode = ENode(0, OpType::CACHE, "", {}, cls.shape, cs.strides, cls.dtype, cls.mem_space, cpu, PhysicalIdAllocator::allocate(), );
-                cacheNode.kernelId = 0;
-                cacheNode.opType = OpType::CACHE;
-                cacheNode.shape = cls.shape;
-                cacheNode.strides = cls.strides;
-                cacheNode.viewOffset = cls.viewOffset;
-                cacheNode.dtype = cls.dtype;
-                cacheNode.backend = cls.backend;
+                ENode cacheNode = ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype, cls.mem_space, {cpu});
                 egraph.addENode(canonId, cacheNode);
             }
         }
 
-        std::unordered_set<uint32_t> protectedEClasses;
+        std::unordered_set<EClassId> protectedEClasses;
         for (const auto &kv : cachedNodes)
         {
-            uint32_t logicalId = kv.first;
+            LogicalId logicalId = kv.first;
             protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
         }
 
@@ -1674,24 +1563,14 @@ private:
         bool injected = dirtyInjected || neededInjected;
         std::cout << "Injected: " << injected << std::endl;
 
-#ifdef DEBUG
-        auto rootIt = baseState.nodeToEClass.find(rootId);
-        if (rootIt == baseState.nodeToEClass.end())
-        {
-            Error::throw_err("[Planner.plan] Root node missing from baseState.nodeToEClass.");
-        }
-        uint32_t rootEClassId = egraph.find(rootIt->second);
-        dumpEGraphBinary(egraph, rootEClassId);
-#endif
-
-        std::unordered_map<uint32_t, uint32_t> updatedEClassToLogical;
+        std::unordered_map<EClassId, LogicalId> updatedEClassToLogical;
         for (const auto &kv : eclassToLogical)
         {
             updatedEClassToLogical[egraph.find(kv.first)] = kv.second;
         }
         eclassToLogical = std::move(updatedEClassToLogical);
 
-        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, mem_caps, cachedNodes, eclassToLogical, true, strictCache);
+        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical, true, strictCache);
         return buildCompiledGraph(
             rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes, eclassToLogical);
     }

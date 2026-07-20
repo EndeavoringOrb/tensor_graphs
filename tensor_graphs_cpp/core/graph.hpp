@@ -154,7 +154,7 @@ struct Graph
         return node.id;
     }
 
-    uint32_t div(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    LogicalId div(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -167,7 +167,7 @@ struct Graph
         return node.id;
     }
 
-    uint32_t dot(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    LogicalId dot(LogicalId id0, LogicalId id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -180,28 +180,28 @@ struct Graph
         return node.id;
     }
 
-    uint32_t sin(uint32_t id0, std::source_location loc = std::source_location::current())
+    LogicalId sin(uint32_t id0, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::SIN, "", dtype, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t cos(uint32_t id0, std::source_location loc = std::source_location::current())
+    LogicalId cos(uint32_t id0, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::COS, "", dtype, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t neg(uint32_t id0, std::source_location loc = std::source_location::current())
+    LogicalId neg(uint32_t id0, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::NEGATE, "", dtype, {id0}, {}, {}, Backend::CPU, StorageType::TRANSIENT, "", loc);
         return node.id;
     }
 
-    uint32_t pow(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    LogicalId pow(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
@@ -214,7 +214,7 @@ struct Graph
         return node.id;
     }
 
-    uint32_t sum(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    LogicalId sum(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -227,7 +227,7 @@ struct Graph
         return node.id;
     }
 
-    uint32_t max(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    LogicalId max(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -240,7 +240,7 @@ struct Graph
         return node.id;
     }
 
-    uint32_t reshape(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    LogicalId reshape(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -253,7 +253,7 @@ struct Graph
         return node.id;
     }
 
-    uint32_t permute(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
+    LogicalId permute(uint32_t id0, uint32_t id1, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -266,7 +266,7 @@ struct Graph
         return node.id;
     }
 
-    uint32_t slice(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3, std::source_location loc = std::source_location::current())
+    LogicalId slice(uint32_t id0, uint32_t id1, uint32_t id2, uint32_t id3, std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {

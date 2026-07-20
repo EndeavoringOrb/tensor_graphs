@@ -184,9 +184,9 @@ struct EGraph
 
     uint32_t addENode(EClassId e_class_id, ENode node)
     {
-        uint32_t canonical = find(e_class_id);
+        EClassId canonical = find(e_class_id);
 
-        for (uint32_t &child : node.children)
+        for (EClassId &child : node.getChildren())
         {
             child = find(child);
         }
