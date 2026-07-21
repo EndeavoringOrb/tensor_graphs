@@ -174,8 +174,7 @@ struct KernelEntry
 
     // Abstracted validity check
     bool matches(const std::vector<TensorNode> &inputs, const TensorNode &output,
-                 MemSpace &_output_mem_space, std::vector<Engine> &_engines, std::vector<MemSpace> &_input_mem_spaces,
-                 bool ignore_input_mem_spaces = false, bool ignoreInputContig = false) const
+                 bool ignoreInputContig = false) const
     {
         // 1. Check number of inputs
         if (inputs.size() < min_num_inputs || inputs.size() > max_num_inputs)
@@ -183,26 +182,7 @@ struct KernelEntry
             return false;
         }
 
-        // 2. Check input mem spaces
-        if (!ignore_input_mem_spaces)
-        {
-            for (uint32_t i = 0; i < min_num_inputs; ++i)
-            {
-                if (_input_mem_spaces[i] != input_mem_spaces[i])
-                {
-                    return false;
-                }
-            }
-            for (uint32_t i = min_num_inputs; i < std::min(max_num_inputs, (uint32_t)_input_mem_spaces.size()); ++i)
-            {
-                if (_input_mem_spaces[i] != input_mem_spaces[min_num_inputs - 1])
-                {
-                    return false;
-                }
-            }
-        }
-
-        // 3. Check input contiguity
+        // 2. Check input contiguity
         if (!ignoreInputContig)
         {
             for (size_t i = 0; i < inputs.size(); ++i)
@@ -293,10 +273,7 @@ public:
             if (!patternMatches)
                 continue;
 
-            MemSpace dummyMemSpace{0, HandleType::CPP};
-            std::vector<Engine> dummyEngines;
-            std::vector<MemSpace> dummyInputMemSpaces;
-            if (!entry.matches(inputs, output, dummyMemSpace, dummyEngines, dummyInputMemSpaces, true, ignoreInputContig))
+            if (!entry.matches(inputs, output, ignoreInputContig))
                 continue;
 
             matches.push_back(entry.uid);
@@ -364,8 +341,7 @@ public:
     std::vector<KernelId> findMatchingKernels(
         OpType op, const std::string &opName,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        const MemSpace &_output_mem_space, const std::vector<Engine> &_engines, const std::vector<MemSpace> &_input_mem_spaces,
-        bool reference_only = false, bool ignore_input_mem_spaces = false, bool ignoreInputContig = false) const
+        bool reference_only = false, bool ignoreInputContig = false) const
     {
         std::vector<KernelId> matches;
         for (const auto &[uid, entry] : entries)
@@ -377,7 +353,7 @@ public:
             if (op == OpType::FUSED && entry.opName != opName)
                 continue;
 
-            if (!entry.matches(inputs, output, _output_mem_space, _engines, _input_mem_spaces, ignore_input_mem_spaces, ignoreInputContig))
+            if (!entry.matches(inputs, output, ignoreInputContig))
                 continue;
 
             matches.push_back(entry.uid);
@@ -390,7 +366,7 @@ public:
         auto it = entries.find(uid);
         if (it != entries.end())
             return it->second;
-        Error::throw_err("Invalid kernel UID " + std::to_string(uid));
+        Error::throw_err("Invalid kernel UID " + toString(uid));
     }
 
     bool hasKernel(KernelId uid) const

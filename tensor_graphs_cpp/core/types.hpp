@@ -658,6 +658,19 @@ inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape, DType dtype)
     return countElements(shape) * getDTypeSize(dtype);
 }
 
+template <typename T>
+inline std::string toString(const std::vector<T> &vec)
+{
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < vec.size(); ++i)
+    {
+        ss << vec[i] << (i == vec.size() - 1 ? "" : ", ");
+    }
+    ss << "]";
+    return ss.str();
+}
+
 inline std::string toString(DType dtype)
 {
     switch (dtype)
