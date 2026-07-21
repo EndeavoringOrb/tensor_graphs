@@ -89,32 +89,26 @@ struct PatternCacheKey
 {
     OpType pOpType;
     std::string pOpName;
-    Backend backend;
     bool reference_only;
-    bool ignoreInputBackends;
-    bool ignoreInputContig;
 
     std::vector<TensorNode> inputs;
     TensorNode output;
 
     bool operator==(const PatternCacheKey &o) const
     {
-        if (pOpType != o.pOpType || pOpName != o.pOpName || backend != o.backend ||
-            reference_only != o.reference_only || ignoreInputBackends != o.ignoreInputBackends ||
-            ignoreInputContig != o.ignoreInputContig)
+        if (pOpType != o.pOpType || pOpName != o.pOpName ||
+            reference_only != o.reference_only)
             return false;
         if (inputs.size() != o.inputs.size())
             return false;
         for (size_t i = 0; i < inputs.size(); ++i)
         {
-            if (inputs[i].dtype != o.inputs[i].dtype || inputs[i].backend != o.inputs[i].backend ||
-                inputs[i].getShape() != o.inputs[i].getShape() || inputs[i].strides != o.inputs[i].strides ||
-                inputs[i].viewOffset != o.inputs[i].viewOffset)
+            if (inputs[i].dtype != o.inputs[i].dtype ||
+                inputs[i].getShape() != o.inputs[i].getShape() || inputs[i].strides != o.inputs[i].strides)
                 return false;
         }
-        if (output.dtype != o.output.dtype || output.backend != o.output.backend ||
-            output.getShape() != o.output.getShape() || output.strides != o.output.strides ||
-            output.viewOffset != o.output.viewOffset)
+        if (output.dtype != o.output.dtype ||
+            output.getShape() != o.output.getShape() || output.strides != o.output.strides)
             return false;
         return true;
     }
@@ -130,27 +124,20 @@ struct PatternCacheKeyHash
         combine((size_t)k.pOpType);
         if (!k.pOpName.empty())
             combine(std::hash<std::string>()(k.pOpName));
-        combine((size_t)k.backend);
         combine(k.reference_only);
-        combine(k.ignoreInputBackends);
-        combine(k.ignoreInputContig);
         for (const auto &in : k.inputs)
         {
             combine((size_t)in.dtype);
-            combine((size_t)in.backend);
             for (auto s : in.getShape())
                 combine(s);
             for (auto s : in.strides)
                 combine(s);
-            combine((size_t)in.viewOffset);
         }
         combine((size_t)k.output.dtype);
-        combine((size_t)k.output.backend);
         for (auto s : k.output.getShape())
             combine(s);
         for (auto s : k.output.strides)
             combine(s);
-        combine((size_t)k.output.viewOffset);
         return h;
     }
 };
@@ -220,7 +207,7 @@ struct KernelEntry
         {
             for (size_t i = 0; i < inputs.size(); ++i)
             {
-                size_t ruleIdx = isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
+                size_t ruleIdx = std::min(i, requiresContiguous.size() - 1);
                 if (requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
                     return false;
             }
@@ -231,40 +218,13 @@ struct KernelEntry
         {
             for (size_t i = 0; i < inputs.size(); ++i)
             {
-                size_t ruleIdx = isVariadic ? (i == inputs.size() - 1 ? 1 : 0) : i;
-                if (ruleIdx < dtypes.size() && inputs[i].dtype != dtypes[ruleIdx])
+                size_t ruleIdx = std::min(i, dtypes.size() - 1);
+                if (inputs[i].dtype != dtypes[ruleIdx])
                     return false;
             }
         }
 
-        // 5. Output backend check
-        bool backendFound = false;
-        for (Backend b : backends)
-        {
-            if (b == output.backend)
-            {
-                backendFound = true;
-                break;
-            }
-        }
-        if (!backendFound)
-            return false;
-
-        // 6. Inplace checks assume input and output are on the same backend
-        if (inplace && numInputs > 0 && !inputs.empty())
-        {
-            if (inputs[0].backend != output.backend)
-                return false;
-        }
-
-        // 7. Inplace safety check: prevent mutating persistent memory (weights)
-        if (inplace && !inputs.empty())
-        {
-            if (inputs[0].storageType == StorageType::PERSISTENT)
-                return false;
-        }
-
-        // 8. Call custom match function
+        // 5. Call custom match function
         if (match)
         {
             return match(inputs, output);
@@ -288,9 +248,9 @@ public:
     const std::unordered_map<KernelId, KernelEntry> &getAllKernels() const { return entries; }
 
     std::vector<KernelId> _findMatchingKernelsByPattern(
-        const Graph &patternGraph, uint32_t patternRootId, Backend backend,
+        const Graph &patternGraph, LogicalId patternRootId,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool reference_only = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
+        bool reference_only = false, bool ignoreInputContig = false) const
     {
         std::vector<KernelId> matches;
         for (const auto &[uid, entry] : entries)
@@ -304,10 +264,10 @@ public:
                 if (entry.refFactory)
                 {
                     Graph kGraph;
-                    std::vector<uint32_t> kInputs;
-                    for (size_t i = 0; i < entry.numInputs; ++i)
+                    std::vector<LogicalId> kInputs;
+                    for (size_t i = 0; i < entry.min_num_inputs; ++i)
                         kInputs.push_back(kGraph.input(entry.dummyShapes[i], entry.dtypes[i]));
-                    uint32_t kRootId = entry.refFactory(kInputs, kGraph);
+                    LogicalId kRootId = entry.refFactory(kInputs, kGraph);
                     patternMatches = isIsomorphic(patternGraph, patternRootId, kGraph, kRootId);
                 }
             }
@@ -317,7 +277,7 @@ public:
                 if (pNode.opType == entry.opType)
                 {
                     patternMatches = true;
-                    for (uint32_t pid : pNode.child_ids)
+                    for (LogicalId pid : pNode.child_ids)
                     {
                         if (patternGraph.getNode(pid).opType != OpType::INPUT &&
                             patternGraph.getNode(pid).opType != OpType::ARANGE &&
@@ -333,7 +293,10 @@ public:
             if (!patternMatches)
                 continue;
 
-            if (!entry.matches(inputs, output, ignoreInputBackends, ignoreInputContig))
+            MemSpace dummyMemSpace{0, HandleType::CPP};
+            std::vector<Engine> dummyEngines;
+            std::vector<MemSpace> dummyInputMemSpaces;
+            if (!entry.matches(inputs, output, dummyMemSpace, dummyEngines, dummyInputMemSpaces, true, ignoreInputContig))
                 continue;
 
             matches.push_back(entry.uid);
@@ -342,14 +305,14 @@ public:
     }
 
     std::vector<KernelId> findMatchingKernelsByPattern(
-        const Graph &patternGraph, uint32_t patternRootId, Backend backend,
+        const Graph &patternGraph, LogicalId patternRootId,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool reference_only = false, bool ignoreInputBackends = false, bool ignoreInputContig = false) const
+        bool reference_only = false, bool ignoreInputContig = false) const
     {
         const TensorNode &rootNode = patternGraph.getNode(patternRootId);
         PatternCacheKey key{
-            rootNode.opType, rootNode.opName, backend,
-            reference_only, ignoreInputBackends, ignoreInputContig,
+            rootNode.opType, rootNode.opName,
+            reference_only,
             inputs, output};
 
         auto it = patternCache.find(key);
@@ -359,7 +322,7 @@ public:
         }
 
         std::vector<KernelId> matches = _findMatchingKernelsByPattern(
-            patternGraph, patternRootId, backend, inputs, output, reference_only, ignoreInputBackends, ignoreInputContig);
+            patternGraph, patternRootId, inputs, output, reference_only, ignoreInputContig);
 
         patternCache[key] = matches;
         return matches;

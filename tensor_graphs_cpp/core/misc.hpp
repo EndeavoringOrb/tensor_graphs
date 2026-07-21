@@ -74,9 +74,7 @@ inline std::string toString(const TensorNode &node, const std::string &prefix = 
        << prefix << "  DType:        " << toString(node.dtype) << "\n"
        << prefix << "  Shape:        " << toString(node.getShape()) << "\n"
        << prefix << "  Strides:      " << toString(node.strides) << "\n"
-       << prefix << "  Backend:      " << node.backend << "\n"
-       << prefix << "  Contiguous:   " << (isContiguous(node) ? "true" : "false") << "\n"
-       << prefix << "  Storage Type: " << toString(node.storageType);
+       << prefix << "  Contiguous:   " << (isContiguous(node) ? "true" : "false") << "\n";
     return ss.str();
 }
 
@@ -92,7 +90,6 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
        << prefix << "  DType:      " << toString(node.dtype) << "\n"
        << prefix << "  Shape:      " << toString(node.getShape()) << "\n"
        << prefix << "  Strides:    " << toString(node.strides) << "\n"
-       << prefix << "  Backend:    " << node.backend << "\n"
        << prefix << "  Contiguous: " << (isContiguous(node) ? "true" : "false") << "\n"
        << prefix << "  Parents (" << node.child_ids.size() << "):";
 
@@ -104,19 +101,19 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
     {
         for (size_t i = 0; i < node.child_ids.size(); ++i)
         {
-            uint32_t pid = node.child_ids[i];
+            LogicalId pid = node.child_ids[i];
             if (graph.hasNode(pid))
             {
                 const auto &parent = graph.getNode(pid);
                 ss << "\n"
-                   << prefix << "    [" << i << "] Parent ID " << pid
+                   << prefix << "    [" << i << "] Parent ID " << pid.value
                    << "\n"
                    << toString(parent, (std::string) "    ");
             }
             else
             {
                 ss << "\n"
-                   << prefix << "[" << i << "] Parent ID " << pid << " [OUT OF BOUNDS/NOT FOUND]";
+                   << prefix << "[" << i << "] Parent ID " << pid.value << " [OUT OF BOUNDS/NOT FOUND]";
             }
         }
     }
@@ -156,8 +153,7 @@ inline std::string toString(const OpInstruction &inst)
        << "  Node ID: " << inst.nodeId << "\n"
        << "  Full Kernel ID: " << inst.fullKernelId << "\n"
        << "  Input Node IDs: " << toString(inst.inputNodeIds) << "\n"
-       << "  Inplace Input Index: " << inst.inplaceInputIndex << "\n"
-       << "  Backend: " << inst.backend << "\n";
+       << "  Inplace Input Index: " << inst.inplaceInputIndex << "\n";
     return ss.str();
 }
 
@@ -374,20 +370,6 @@ inline std::vector<Region> intersectRegionLists(const std::vector<Region> &list1
     }
     // Clean up overlapping results
     return mergeRegions(intersections);
-}
-
-inline std::string toString(const std::unordered_map<Backend, uint64_t> &map)
-{
-    std::stringstream ss;
-    ss << "{";
-    for (auto it = map.begin(); it != map.end(); ++it)
-    {
-        ss << toString(it->first) << ": " << it->second << " bytes";
-        if (std::next(it) != map.end())
-            ss << ", ";
-    }
-    ss << "}";
-    return ss.str();
 }
 
 inline std::string toStringHex(uint64_t val)

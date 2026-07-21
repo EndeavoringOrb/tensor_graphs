@@ -1,5 +1,6 @@
 #pragma once
 #include <unordered_map>
+#include <unordered_set>
 #include <stdexcept>
 #include <iostream>
 #include <cstdint>
@@ -171,6 +172,52 @@ struct KernelIdHash
     }
 };
 
+enum class HandleType : uint32_t
+{
+    STORAGE,
+    CPP,
+    OPENCL,
+    CUDA
+};
+
+enum class EngineType : uint32_t
+{
+    CPU,
+    QUALCOMM_IGPU,
+    CUDA_GPU
+};
+
+struct MemSpace
+{
+    uint32_t idx;
+    HandleType type;
+
+    bool operator==(const MemSpace &other) const
+    {
+        return idx == other.idx && type == other.type;
+    }
+};
+
+struct MemSpaceHash
+{
+    std::size_t operator()(const MemSpace &ms) const
+    {
+        return std::hash<uint32_t>()(ms.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
+    }
+};
+
+struct Engine
+{
+    uint32_t idx;
+    EngineType type;
+    std::unordered_set<MemSpace> supported;
+
+    bool operator==(const Engine &other) const
+    {
+        return idx == other.idx && type == other.type;
+    }
+};
+
 struct ParallelBuffer
 {
     uint32_t idx = 0;    // index within its mem_space group
@@ -321,52 +368,6 @@ inline constexpr bool isAtomic(OpType type)
 {
     return type != OpType::FUSED;
 }
-
-enum class HandleType : uint32_t
-{
-    STORAGE,
-    CPP,
-    OPENCL,
-    CUDA
-};
-
-enum class EngineType : uint32_t
-{
-    CPU,
-    QUALCOMM_IGPU,
-    CUDA_GPU
-};
-
-struct MemSpace
-{
-    uint32_t idx;
-    HandleType type;
-
-    bool operator==(const MemSpace &other) const
-    {
-        return idx == other.idx && type == other.type;
-    }
-};
-
-struct MemSpaceHash
-{
-    std::size_t operator()(const MemSpace &ms) const
-    {
-        return std::hash<uint32_t>()(ms.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
-    }
-};
-
-struct Engine
-{
-    uint32_t idx;
-    EngineType type;
-    std::unordered_set<MemSpace> supported;
-
-    bool operator==(const Engine &other) const
-    {
-        return idx == other.idx && type == other.type;
-    }
-};
 
 struct TensorGraphError : public std::runtime_error
 {
@@ -1098,74 +1099,14 @@ struct CompiledGraph
         return sum;
     }
 
-    const uint32_t getLogicalId(PhysicalId id) const
+    // TODO: refactor into `bool hasLogicalId` and `LogicalId getLogicalId`. getLogicalId should throw error if physicalToLogicalNodeMap doesn't have physical id
+    LogicalId getLogicalId(PhysicalId id) const
     {
         auto it = physicalToLogicalNodeMap.find(id);
-        return it != physicalToLogicalNodeMap.end() ? it->second : id;
-    }
-
-    void remapPhysIds()
-    {
-        std::unordered_map<uint32_t, uint32_t> oldToNew;
-        for (const auto &pair : nodesMap)
-        {
-            if (pair.first >= 0x80000000)
-            {
-                oldToNew[pair.first] = GlobalNextPhysId++;
-            }
-        }
-
-        if (oldToNew.empty())
-            return;
-
-        auto mapId = [&](uint32_t id)
-        {
-            auto it = oldToNew.find(id);
-            return it != oldToNew.end() ? it->second : id;
-        };
-
-        for (auto &inst : instructions)
-        {
-            inst.nodeId = mapId(inst.nodeId);
-            for (auto &inId : inst.inputNodeIds)
-            {
-                inId = mapId(inId);
-            }
-        }
-
-        std::unordered_map<uint32_t, TensorNode> newNodesMap;
-        for (auto &pair : nodesMap)
-        {
-            TensorNode &node = pair.second;
-            node.id = mapId(node.id);
-            for (auto &pId : node.child_ids)
-            {
-                pId = mapId(pId);
-            }
-            newNodesMap[node.id] = std::move(node);
-        }
-        nodesMap = std::move(newNodesMap);
-
-        std::unordered_map<uint32_t, float> newNodeCosts;
-        for (const auto &pair : nodeCosts)
-        {
-            newNodeCosts[mapId(pair.first)] = pair.second;
-        }
-        nodeCosts = std::move(newNodeCosts);
-
-        std::unordered_map<uint32_t, uint32_t> newPhysToLog;
-        for (const auto &pair : physicalToLogicalNodeMap)
-        {
-            newPhysToLog[mapId(pair.first)] = pair.second;
-        }
-        physicalToLogicalNodeMap = std::move(newPhysToLog);
-
-        std::unordered_map<uint32_t, std::shared_ptr<std::vector<uint8_t>>> newConst;
-        for (auto &pair : constantStaging)
-        {
-            newConst[mapId(pair.first)] = std::move(pair.second);
-        }
-        constantStaging = std::move(newConst);
+        if (it != physicalToLogicalNodeMap.end())
+            return it->second;
+        // If not mapped, the PhysicalId value is the same as the LogicalId value
+        return LogicalId{id.value};
     }
 };
 
