@@ -41,9 +41,13 @@ struct Rule
     virtual void apply(uint32_t eNodeIdx, RuleCtx &ctx) = 0;
 };
 
-inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint32_t> &children, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &st, uint64_t viewOffset, DType dtype, Backend backend, uint32_t targetEClass = UINT32_MAX)
+inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint32_t> &children, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &st, DType dtype, MemSpace mem_space, EClassId targetEClass = EClassId())
 {
-    uint32_t cls = (targetEClass == UINT32_MAX) ? egraph.addEClass(shape, st, viewOffset, dtype, backend) : targetEClass;
+    EClassId cls;
+    if (targetEClass != cls)
+    {
+        cls = egraph.addEClass(shape, st, dtype, mem_space);
+    }
 
     TensorNode outNode;
     outNode.opType = op;
@@ -93,7 +97,7 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
     else if (op == OpType::DOT)
         pRoot = pGraph.dot(pInputs[0], pInputs[1]);
     else if (op == OpType::COPY_TO)
-        pRoot = pGraph.copyto(pInputs[0], backend);
+        pRoot = pGraph._copyto(pInputs[0]);
     else if (op == OpType::SCATTER)
         pRoot = pGraph.scatter(pInputs[0], pInputs[1], pInputs[2], pInputs[3], pInputs[4]);
     else if (op == OpType::RESHAPE)
@@ -102,7 +106,7 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
         pRoot = pGraph.permute(pInputs[0], pInputs[1]);
     else if (op == OpType::CONCAT)
     {
-        std::vector<uint32_t> concatIns;
+        std::vector<LogicalId> concatIns;
         for (size_t i = 0; i < pInputs.size() - 1; ++i)
             concatIns.push_back(pInputs[i]);
         pRoot = pGraph.concat(concatIns, pInputs.back());
@@ -135,9 +139,9 @@ inline uint32_t addOpToEGraph(EGraph &egraph, OpType op, const std::vector<uint3
     else if (op == OpType::NOT)
         pRoot = pGraph.logical_not(pInputs[0]);
 
-    if (pRoot != UINT32_MAX)
+    if (pRoot != LogicalId())
     {
-        auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, backend, inNodes, outNode, false);
+        auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, inNodes, outNode, false);
         if (matches.empty())
         {
             std::stringstream ss;

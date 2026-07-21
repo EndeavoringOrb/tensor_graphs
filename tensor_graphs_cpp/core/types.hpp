@@ -144,14 +144,6 @@ struct EClassId
     auto operator<=>(const EClassId &) const = default;
 };
 
-struct EClassIdHash
-{
-    std::size_t operator()(const EClassId &id) const
-    {
-        return std::hash<uint32_t>()(id.value);
-    }
-};
-
 struct ENodeId
 {
     uint32_t value = UINT32_MAX;
@@ -162,14 +154,6 @@ struct KernelId
 {
     uint64_t value = UINT32_MAX;
     auto operator<=>(const KernelId &) const = default;
-};
-
-struct KernelIdHash
-{
-    std::size_t operator()(const KernelId &id) const
-    {
-        return std::hash<uint64_t>()(id.value);
-    }
 };
 
 enum class HandleType : uint32_t
@@ -198,13 +182,45 @@ struct MemSpace
     }
 };
 
-struct MemSpaceHash
+namespace std
 {
-    std::size_t operator()(const MemSpace &ms) const
+    template <>
+    struct hash<EClassId>
     {
-        return std::hash<uint32_t>()(ms.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
-    }
-};
+        std::size_t operator()(const EClassId &id) const noexcept
+        {
+            return std::hash<uint32_t>()(id.value);
+        }
+    };
+
+    template <>
+    struct hash<ENodeId>
+    {
+        std::size_t operator()(const ENodeId &id) const noexcept
+        {
+            return std::hash<uint32_t>()(id.value);
+        }
+    };
+
+    template <>
+    struct hash<KernelId>
+    {
+        std::size_t operator()(const KernelId &id) const noexcept
+        {
+            return std::hash<uint64_t>()(id.value);
+        }
+    };
+
+    template <>
+    struct hash<MemSpace>
+    {
+        uint64_t operator()(const MemSpace &ms) const noexcept
+        {
+            return std::hash<uint32_t>()(ms.idx) ^
+                   (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
+        }
+    };
+}
 
 struct Engine
 {
@@ -220,7 +236,7 @@ struct Engine
 
 struct ParallelBuffer
 {
-    uint32_t idx = 0;    // index within its mem_space group
+    uint32_t idx = 0; // index within its mem_space group
     uint32_t eclass_val = UINT32_MAX;
     MemSpace mem_space;  // which physical memory this buffer lives in
     uint64_t size = 0;   // bytes
@@ -229,7 +245,8 @@ struct ParallelBuffer
     int64_t offset = -1; // assigned byte offset, -1 = unallocated
 };
 
-inline void tg_serialize(BinaryWriter &bw, const ParallelBuffer &val) {
+inline void tg_serialize(BinaryWriter &bw, const ParallelBuffer &val)
+{
     bw.write(val.idx);
     bw.write(val.eclass_val);
     bw.write(val.mem_space.idx);
@@ -239,7 +256,8 @@ inline void tg_serialize(BinaryWriter &bw, const ParallelBuffer &val) {
     bw.write(val.end);
     bw.write(val.offset);
 }
-inline void tg_deserialize(BinaryReader &br, ParallelBuffer &val) {
+inline void tg_deserialize(BinaryReader &br, ParallelBuffer &val)
+{
     br.read(val.idx);
     br.read(val.eclass_val);
     br.read(val.mem_space.idx);
@@ -986,7 +1004,7 @@ struct OpInstruction
     uint32_t logicalNodeId;
     uint64_t fullKernelId;
     std::vector<uint32_t> inputNodeIds;
-    int32_t inplaceInputIndex = -1; 
+    int32_t inplaceInputIndex = -1;
     int32_t viewInputIndex = -1;
     ParallelBuffer outBuffer;
     std::vector<ParallelBuffer> inBuffers;

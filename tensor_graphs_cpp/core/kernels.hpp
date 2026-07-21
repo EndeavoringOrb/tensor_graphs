@@ -90,6 +90,10 @@ struct PatternCacheKey
     OpType pOpType;
     std::string pOpName;
     bool reference_only;
+    bool ignore_output_mem_space;
+    bool ignore_input_mem_spaces;
+    MemSpace output_mem_space;
+    std::vector<MemSpace> input_mem_spaces;
 
     std::vector<TensorNode> inputs;
     TensorNode output;
@@ -101,9 +105,11 @@ struct PatternCacheKey
             return false;
         if (inputs.size() != o.inputs.size())
             return false;
+        if (!ignore_output_mem_space && output_mem_space != o.output_mem_space)
+            return false;
         for (size_t i = 0; i < inputs.size(); ++i)
         {
-            if (inputs[i].dtype != o.inputs[i].dtype ||
+            if ((!ignore_input_mem_spaces && input_mem_spaces[i] != o.input_mem_spaces[i]) || inputs[i].dtype != o.inputs[i].dtype ||
                 inputs[i].getShape() != o.inputs[i].getShape() || inputs[i].strides != o.inputs[i].strides)
                 return false;
         }
@@ -125,8 +131,15 @@ struct PatternCacheKeyHash
         if (!k.pOpName.empty())
             combine(std::hash<std::string>()(k.pOpName));
         combine(k.reference_only);
-        for (const auto &in : k.inputs)
+        combine(k.ignore_output_mem_space);
+        combine(k.ignore_input_mem_spaces);
+        if (!k.ignore_output_mem_space)
+            combine(k.output_mem_space);
+        for (uint32_t i = 0; i < k.inputs.size(); ++i)
         {
+            if (!k.ignore_input_mem_spaces)
+                combine(k.input_mem_spaces[i]);
+            auto &in = k.inputs[i];
             combine((size_t)in.dtype);
             for (auto s : in.getShape())
                 combine(s);
@@ -222,7 +235,7 @@ public:
         return instance;
     }
 
-    mutable std::unordered_map<PatternCacheKey, std::vector<uint64_t>, PatternCacheKeyHash> patternCache;
+    mutable std::unordered_map<PatternCacheKey, std::vector<KernelId>, PatternCacheKeyHash> patternCache;
 
     void setReferenceOnly(bool refOnly) { reference_only_mode = refOnly; }
     const std::unordered_map<KernelId, KernelEntry> &getAllKernels() const { return entries; }

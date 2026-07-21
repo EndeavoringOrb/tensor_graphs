@@ -121,6 +121,11 @@ struct Graph
         return node.id;
     }
 
+    LogicalId _copyto(LogicalId id0, std::source_location loc = std::source_location::current()) {
+        TensorNode &node = allocateNode(OpType::COPY_TO, "", getNode(id0).dtype, {id0}, {}, {}, "", loc);
+        return node.id;
+    }
+
     LogicalId contiguous(LogicalId id0, std::source_location loc = std::source_location::current())
     {
         DType dtype = getNode(id0).dtype;
