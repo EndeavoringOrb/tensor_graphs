@@ -23,6 +23,7 @@
 #include <sstream>
 #include <fstream>
 #include <filesystem>
+#include <queue>
 
 struct ExtractChoice
 {
@@ -64,6 +65,74 @@ struct Planner
 {
     CostModel &costModel;
     std::unordered_map<uint32_t, uint64_t> mem_caps; // mem_idx -> max memory
+
+    std::vector<MemSpace> findMemSpacePath(MemSpace src, MemSpace dst, const TensorNode &node, Engine engine)
+    {
+        if (src == dst)
+            return {src};
+
+        std::unordered_map<MemSpace, std::vector<MemSpace>> adj;
+        for (const auto &[uid, k] : KernelRegistry::get().getAllKernels())
+        {
+            if (k.opType == OpType::COPY_TO && k.input_mem_spaces.size() == 1)
+            {
+                adj[k.input_mem_spaces[0]].push_back(k.output_mem_space);
+            }
+        }
+
+        std::unordered_map<MemSpace, MemSpace> parent;
+        std::queue<MemSpace> q;
+        std::unordered_set<MemSpace> visited;
+
+        q.push(src);
+        visited.insert(src);
+
+        bool found = false;
+        std::cout << "findMemSpacePath" << std::endl;
+        while (!q.empty())
+        {
+            MemSpace curr = q.front();
+            q.pop();
+            std::cout << curr << std::endl;
+
+            if (curr == dst)
+            {
+                found = true;
+                break;
+            }
+
+            for (MemSpace next : adj[curr])
+            {
+                if (visited.find(next) == visited.end())
+                {
+                    TensorNode dummyIn = node;
+                    TensorNode dummyOut = node;
+                    auto refs = KernelRegistry::get().findMatchingKernels(
+                        OpType::COPY_TO, "", {dummyIn}, dummyOut, false, next, {curr}, {engine}, false, false, false, true);
+                    if (!refs.empty())
+                    {
+                        visited.insert(next);
+                        parent[next] = curr;
+                        q.push(next);
+                    }
+                }
+            }
+        }
+
+        if (!found)
+            return {};
+
+        std::vector<MemSpace> path;
+        MemSpace curr = dst;
+        while (!(curr == src))
+        {
+            path.push_back(curr);
+            curr = parent[curr];
+        }
+        path.push_back(src);
+        std::reverse(path.begin(), path.end());
+        return path;
+    }
 
     void inferShapes(const std::vector<LogicalId> &topo, Graph &graph)
     {
@@ -997,9 +1066,9 @@ struct Planner
 
         baseState.nodeToEClass.reserve(graph.nodes.size());
 
-        MemSpace storage = MemSpace(0, HandleType::STORAGE);
-        MemSpace ram = MemSpace(1, HandleType::CPP);
-        Engine cpu = Engine(0, EngineType::CPU);
+        MemSpace storage = MemSpace{0, HandleType::STORAGE};
+        MemSpace ram = MemSpace{1, HandleType::CPP};
+        Engine cpu = Engine{0, EngineType::CPU};
 
         for (LogicalId nodeId : topo)
         {
@@ -1026,7 +1095,7 @@ struct Planner
             {
                 std::vector<EClassId> children;
                 for (LogicalId pid : node.child_ids)
-                    children.push_back(baseState.nodeToEClass[pid]);
+                    children.push_back(baseState.egraph.findConst(baseState.nodeToEClass[pid]));
                 ENode enode = ENode(KernelId{0}, node.opType, node.opName, children, node.getShape(), node.strides, node.dtype, graph.getInputDataType(nodeId) == InputDataType::STORAGE ? storage : ram, {cpu});
                 baseState.egraph.addENode(e_class_id, enode);
                 continue;
@@ -1037,22 +1106,90 @@ struct Planner
             for (LogicalId pid : node.child_ids)
             {
                 inputs.push_back(graph.getNode(pid));
-                input_mem_spaces.push_back(graph.getInputDataType(pid) == InputDataType::STORAGE ? storage : ram);
+                EClassId pid_eclass = baseState.egraph.findConst(baseState.nodeToEClass[pid]);
+                input_mem_spaces.push_back(baseState.egraph.getEClass(pid_eclass).mem_space);
             }
 
             std::vector<KernelId> refs = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, inputs, node, true, ram, input_mem_spaces, {cpu});
+                node.opType, node.opName, inputs, node, true, ram, input_mem_spaces, {cpu}, false, true, false, true);
 
             if (refs.size() == 0)
             {
                 Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels to init EClass " + toString(e_class_id) + " " + toString(baseState.egraph.getEClass(e_class_id)) + "\nNode " + toString(node, graph));
             }
+
+            bool any_success = false;
             for (KernelId uid : refs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
+
+                bool path_exists = true;
                 std::vector<EClassId> children;
-                for (LogicalId pid : node.child_ids)
-                    children.push_back(baseState.nodeToEClass[pid]);
+
+                for (uint64_t i = 0; i < node.child_ids.size(); ++i)
+                {
+                    LogicalId pid = node.child_ids[i];
+                    EClassId p_eclass = baseState.egraph.findConst(baseState.nodeToEClass[pid]);
+                    MemSpace src_ms = input_mem_spaces[i];
+
+                    uint64_t ruleIdx = i;
+                    if (kernel.min_num_inputs != kernel.max_num_inputs)
+                    {
+                        ruleIdx = (i == node.child_ids.size() - 1) ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1) : 0;
+                    }
+                    MemSpace dst_ms = ram;
+                    if (!kernel.input_mem_spaces.empty() && ruleIdx < kernel.input_mem_spaces.size())
+                    {
+                        dst_ms = kernel.input_mem_spaces[ruleIdx];
+                    }
+
+                    bool requires_contig = false;
+                    if (ruleIdx < kernel.requiresContiguous.size())
+                    {
+                        requires_contig = kernel.requiresContiguous[ruleIdx];
+                    }
+
+                    if (src_ms == dst_ms)
+                    {
+                        EClassId curr_eclass = p_eclass;
+                        EClass curr_cls = baseState.egraph.getEClass(curr_eclass);
+                        if (requires_contig && !isContiguous(curr_cls))
+                        {
+                            curr_eclass = addOpToEGraph(baseState.egraph, OpType::CONTIGUOUS, {curr_eclass}, curr_cls.shape, calcContiguousStrides(curr_cls.shape), curr_cls.dtype, curr_cls.mem_space);
+                        }
+                        children.push_back(curr_eclass);
+                    }
+                    else
+                    {
+                        std::vector<MemSpace> path = findMemSpacePath(src_ms, dst_ms, inputs[i], cpu);
+                        if (path.empty())
+                        {
+                            path_exists = false;
+                            break;
+                        }
+
+                        EClassId curr_eclass = p_eclass;
+                        EClass curr_cls = baseState.egraph.getEClass(curr_eclass);
+
+                        if (!isContiguous(curr_cls))
+                        {
+                            curr_eclass = addOpToEGraph(baseState.egraph, OpType::CONTIGUOUS, {curr_eclass}, curr_cls.shape, calcContiguousStrides(curr_cls.shape), curr_cls.dtype, curr_cls.mem_space);
+                            curr_cls = baseState.egraph.getEClass(baseState.egraph.findConst(curr_eclass));
+                        }
+
+                        for (uint64_t p_idx = 1; p_idx < path.size(); ++p_idx)
+                        {
+                            MemSpace next_ms = path[p_idx];
+                            curr_eclass = addOpToEGraph(baseState.egraph, OpType::COPY_TO, {curr_eclass}, curr_cls.shape, curr_cls.strides, curr_cls.dtype, next_ms);
+                        }
+                        children.push_back(curr_eclass);
+                    }
+                }
+
+                if (!path_exists)
+                    continue;
+                any_success = true;
+
                 std::vector<uint64_t> strides;
                 if (kernel.is_view)
                 {
@@ -1065,11 +1202,16 @@ struct Planner
                 ENode enode = ENode(uid, node.opType, node.opName, children, node.getShape(), strides, node.dtype, ram, {cpu});
                 baseState.egraph.addENode(e_class_id, enode);
             }
+
+            if (!any_success)
+            {
+                Error::throw_err("[Planner.initBaseEGraph] found kernels, but could not route memory spaces to satisfy input constraints for node " + toString(nodeId) + "\n" + toString(node, graph));
+            }
         }
 
         for (const auto &kv : baseState.nodeToEClass)
         {
-            baseState.eclassToLogical[baseState.egraph.find(kv.second)] = kv.first;
+            baseState.eclassToLogical[baseState.egraph.findConst(kv.second)] = kv.first;
         }
 
         baseStateInitialized = true;
@@ -1479,7 +1621,7 @@ struct Planner
         }
 
         // Add cache enodes
-        Engine cpu = Engine(0, EngineType::CPU);
+        Engine cpu = Engine{0, EngineType::CPU};
         for (const auto &cls : egraph.getClasses())
         {
             EClassId canonId = egraph.find(cls.id);

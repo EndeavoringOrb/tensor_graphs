@@ -144,7 +144,7 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
 
     if (pRoot != LogicalId())
     {
-        auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, inNodes, outNode, false, mem_space, input_mem_spaces);
+        auto matches = KernelRegistry::get().findMatchingKernelsByPattern(pGraph, pRoot, inNodes, outNode, false, mem_space, input_mem_spaces, {}, false, false, true);
         if (matches.empty())
         {
             std::stringstream ss;

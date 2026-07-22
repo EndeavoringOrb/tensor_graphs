@@ -70,4 +70,4 @@ REGISTER_REF_KERNEL(OpType::COPY_TO, 1, 1, matchCopyTo_STORAGE_CPU, runCopyTo_ST
     {DType::ANY},
     {{8, 32}},
     {true},
-    {{MemSpace(1, HandleType::STORAGE)}});
+    {{MemSpace(0, HandleType::STORAGE)}});

@@ -1018,7 +1018,6 @@ inline std::string toString(ENodeId id)
     return "ENodeId(" + std::to_string(id.value) + ")";
 }
 
-// Stream operators
 inline std::ostream &operator<<(std::ostream &os, LogicalId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, PhysicalId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, KernelId id) { return os << toString(id); }
@@ -1026,8 +1025,25 @@ inline std::ostream &operator<<(std::ostream &os, EClassId id) { return os << to
 inline std::ostream &operator<<(std::ostream &os, ENodeId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << toString(dtype); }
 inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toString(op); }
-inline std::ostream &operator<<(std::ostream &os, HandleType handle) { return os << toString(handle); }
-inline std::ostream &operator<<(std::ostream &os, EngineType engine) { return os << toString(engine); }
+inline std::ostream &operator<<(std::ostream &os, HandleType handle_type) { return os << toString(handle_type); }
+inline std::ostream &operator<<(std::ostream &os, EngineType engine_type) { return os << toString(engine_type); }
+
+std::string toString(const MemSpace &mem_space)
+{
+    std::stringstream ss;
+    ss << "MemSpace(idx=" << mem_space.idx << ", type=" << mem_space.type << ")";
+    return ss.str();
+}
+
+std::string toString(const Engine &engine)
+{
+    std::stringstream ss;
+    ss << "Engine(idx=" << engine.idx << ", type=" << engine.type << ")";
+    return ss.str();
+}
+
+inline std::ostream &operator<<(std::ostream &os, MemSpace mem_space) { return os << toString(mem_space); }
+inline std::ostream &operator<<(std::ostream &os, Engine engine) { return os << toString(engine); }
 
 class SHA256
 {

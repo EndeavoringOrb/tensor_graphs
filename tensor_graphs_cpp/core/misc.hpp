@@ -6,11 +6,7 @@
 #include "core/timer.hpp"
 #include <unordered_set>
 
-std::string toString(const MemSpace &mem_space) {
-    std::stringstream ss;
-    ss << "MemSpace(idx=" << mem_space.idx << ", type=" << mem_space.type << ")";
-    return ss.str();
-}
+
 
 inline std::string toString(const std::vector<uint32_t> &shape)
 {
