@@ -222,9 +222,9 @@ namespace std
     };
 
     template <>
-    struct hash<PatternCacheKey>
+    struct hash<GraphPatternCacheKey>
     {
-        uint64_t operator()(const PatternCacheKey &k) const noexcept
+        uint64_t operator()(const GraphPatternCacheKey &k) const noexcept
         {
             uint64_t h = 0;
             auto combine = [&](uint64_t val)
@@ -1047,7 +1047,7 @@ struct OpInstruction
     PhysicalId nodeId;
     LogicalId logicalNodeId;
     KernelId fullKernelId;
-    std::vector<uint32_t> inputNodeIds;
+    std::vector<PhysicalId> inputNodeIds;
     int32_t inplaceInputIndex = -1;
     int32_t viewInputIndex = -1;
     ParallelBuffer outBuffer;

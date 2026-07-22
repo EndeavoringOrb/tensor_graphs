@@ -85,7 +85,7 @@ private:
     std::unordered_map<std::string, ReferenceGraphEntry> factories;
 };
 
-struct PatternCacheKey
+struct GraphPatternCacheKey
 {
     OpType pOpType;
     std::string pOpName;
@@ -98,7 +98,7 @@ struct PatternCacheKey
     std::vector<TensorNode> inputs;
     TensorNode output;
 
-    bool operator==(const PatternCacheKey &o) const
+    bool operator==(const GraphPatternCacheKey &o) const
     {
         if (pOpType != o.pOpType || pOpName != o.pOpName ||
             reference_only != o.reference_only)
@@ -152,6 +152,8 @@ struct KernelEntry
 
     // Abstracted validity check
     bool matches(const std::vector<TensorNode> &inputs, const TensorNode &output,
+                 MemSpace output_mem_space, std::vector<MemSpace> input_mem_spaces,
+                 bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false,
                  bool ignore_input_contig = false) const
     {
         // 1. Check number of inputs
@@ -168,6 +170,27 @@ struct KernelEntry
                 uint64_t ruleIdx = std::min(i, requiresContiguous.size() - 1);
                 if (requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
                     return false;
+            }
+        }
+
+        // 3. Check memory spaces
+        if (!ignore_output_mem_space)
+        {
+            if (this->output_mem_space != output_mem_space)
+            {
+                return false;
+            }
+        }
+
+        if (!ignore_input_mem_spaces && !this->input_mem_spaces.empty())
+        {
+            for (uint64_t i = 0; i < inputs.size(); ++i)
+            {
+                uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(this->input_mem_spaces.size() - 1));
+                if (input_mem_spaces[ruleIdx] != this->input_mem_spaces[ruleIdx])
+                {
+                    return false;
+                }
             }
         }
 
@@ -200,7 +223,7 @@ public:
         return instance;
     }
 
-    mutable std::unordered_map<PatternCacheKey, std::vector<KernelId>> patternCache;
+    mutable std::unordered_map<GraphPatternCacheKey, std::vector<KernelId>> patternCache;
 
     void setReferenceOnly(bool refOnly) { reference_only_mode = refOnly; }
     const std::unordered_map<KernelId, KernelEntry> &getAllKernels() const { return entries; }
@@ -251,7 +274,7 @@ public:
             if (!patternMatches)
                 continue;
 
-            if (!entry.matches(inputs, output, ignore_input_contig))
+            if (!entry.matches(inputs, output, output_mem_space, input_mem_spaces, ignore_output_mem_space, ignore_input_mem_spaces, ignore_input_contig))
                 continue;
 
             matches.push_back(entry.uid);
@@ -266,7 +289,7 @@ public:
         bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false, bool ignore_input_contig = false) const
     {
         const TensorNode &rootNode = patternGraph.getNode(patternRootId);
-        PatternCacheKey key{
+        GraphPatternCacheKey key{
             rootNode.opType, rootNode.opName,
             reference_only, ignore_output_mem_space, ignore_input_mem_spaces,
             output_mem_space, input_mem_spaces, inputs, output};
@@ -320,7 +343,8 @@ public:
     std::vector<KernelId> findMatchingKernels(
         OpType op, const std::string &opName,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool reference_only = false, bool ignore_input_contig = false) const
+        bool reference_only = false, MemSpace output_mem_space, std::vector<MemSpace> input_mem_spaces,
+        bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false, bool ignore_input_contig = false) const
     {
         std::vector<KernelId> matches;
         for (const auto &[uid, entry] : entries)
@@ -329,10 +353,10 @@ public:
                 continue;
             if (entry.opType != op)
                 continue;
-            if (op == OpType::FUSED && entry.opName != opName)
+            if (entry.opName != opName)
                 continue;
 
-            if (!entry.matches(inputs, output, ignore_input_contig))
+            if (!entry.matches(inputs, output, output_mem_space, input_mem_spaces, ignore_output_mem_space, ignore_input_mem_spaces, ignore_input_contig))
                 continue;
 
             matches.push_back(entry.uid);

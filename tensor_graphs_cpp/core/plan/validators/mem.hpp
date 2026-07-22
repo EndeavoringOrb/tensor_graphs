@@ -40,7 +40,7 @@ void get_births(
     const EGraph &egraph,
     const std::unordered_map<EClassId, uint32_t> &selection_map,
     const std::vector<ENodeInfo> &enodeInfos,
-    std::unordered_map<EClassId, float, EClassIdHash> &birth_times,
+    std::unordered_map<EClassId, float> &birth_times,
     std::unordered_map<uint32_t, float> &engine_finish)
 {
     for (EClassId eclass : ordered)
@@ -50,6 +50,7 @@ void get_births(
         const ENode &node = egraph.getENode(enode_id);
         float cost = enodeInfos[enode_id.value].cost;
 
+        // 1. Calculate max finish time among all child engines
         float children_finish = 0.0f;
         for (EClassId child : node.getChildren())
         {
@@ -57,21 +58,34 @@ void get_births(
             uint32_t child_sel = selection_map.at(child);
             ENodeId child_enode_id = egraph.getEClass(child).enodes[child_sel];
             const ENode &child_node = egraph.getENode(child_enode_id);
-            uint32_t child_engine = child_node.getEngine().idx;
 
-            auto it = engine_finish.find(child_engine);
-            float child_finish = (it != engine_finish.end()) ? it->second : 0.0f;
-            children_finish = std::max(children_finish, child_finish);
+            for (const auto &engine : child_node.getEngines())
+            {
+                auto it = engine_finish.find(engine.idx);
+                float child_finish = (it != engine_finish.end()) ? it->second : 0.0f;
+                children_finish = std::max(children_finish, child_finish);
+            }
         }
 
+        // 2. Calculate when all engines required by the current node become free
         float engine_free = 0.0f;
-        auto it = engine_finish.find(node.getEngine().idx);
-        if (it != engine_finish.end())
-            engine_free = it->second;
+        for (const auto &engine : node.getEngines())
+        {
+            auto it = engine_finish.find(engine.idx);
+            if (it != engine_finish.end())
+            {
+                engine_free = std::max(engine_free, it->second);
+            }
+        }
 
+        // 3. Compute birth time and update finish times for all node engines
         float birth = std::max(children_finish, engine_free);
         birth_times[eclass] = birth;
-        engine_finish[node.getEngine().idx] = birth + cost;
+
+        for (const auto &engine : node.getEngines())
+        {
+            engine_finish[engine.idx] = birth + cost;
+        }
     }
 }
 
@@ -80,8 +94,8 @@ static void get_deaths(
     const EGraph &egraph,
     const std::unordered_map<EClassId, uint32_t> &selection_map,
     const std::vector<ENodeInfo> &enodeInfos,
-    const std::unordered_map<EClassId, float, EClassIdHash> &birth_times,
-    std::unordered_map<EClassId, float, EClassIdHash> &death_times)
+    const std::unordered_map<EClassId, float> &birth_times,
+    std::unordered_map<EClassId, float> &death_times)
 {
     for (uint64_t i = 0; i < ordered.size(); ++i)
     {
@@ -125,8 +139,8 @@ static std::vector<ParallelBuffer> bufferize(
     const std::vector<ENodeInfo> &enodeInfos,
     std::unordered_map<uint32_t, float> &engine_finish_out)
 {
-    std::unordered_map<EClassId, float, EClassIdHash> birth_times;
-    std::unordered_map<EClassId, float, EClassIdHash> death_times;
+    std::unordered_map<EClassId, float> birth_times;
+    std::unordered_map<EClassId, float> death_times;
 
     get_births(ordered, egraph, selection_map, enodeInfos, birth_times, engine_finish_out);
     get_deaths(ordered, egraph, selection_map, enodeInfos, birth_times, death_times);
@@ -238,7 +252,7 @@ struct MemValidator : public ISelectionValidator
     bool stopOnFirstValid;
 
     // Iteration State
-    std::unordered_set<EClassId, EClassIdHash> remaining;
+    std::unordered_set<EClassId> remaining;
     std::vector<EClassId> ordered;
     std::unordered_map<uint32_t, uint32_t> selection_at_pos;
     bool is_done = false;

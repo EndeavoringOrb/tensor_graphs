@@ -117,7 +117,7 @@ struct CostModel
     {
         uint64_t operator()(const ModelKey &k) const
         {
-            return KernelIdHash()(k.kernelId) ^ (std::hash<uint64_t>()(k.numInputs) << 1);
+            return std::hash<KernelId>()(k.kernelId) ^ (std::hash<uint64_t>()(k.numInputs) << 1);
         }
     };
 

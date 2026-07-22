@@ -916,13 +916,13 @@ private:
             PhysicalId physId = eclassToPhys[e_class_id];
 
             OpInstruction inst;
-            inst.nodeId = physId.value;
-            inst.logicalNodeId = logicalId.value;
-            inst.fullKernelId = enode.getKernelId().value;
+            inst.nodeId = physId;
+            inst.logicalNodeId = logicalId;
+            inst.fullKernelId = enode.getKernelId();
             inst.inputNodeIds.reserve(enode.getChildren().size());
             for (EClassId c : enode.getChildren())
             {
-                inst.inputNodeIds.push_back(eclassToPhys[egraph.find(c)].value);
+                inst.inputNodeIds.push_back(eclassToPhys[egraph.find(c)]);
             }
 
             if (final_allocs.count(e_class_id.value))
@@ -1043,7 +1043,7 @@ private:
             }
 
             std::vector<KernelId> refs = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, inputs, node, ram, {cpu}, input_mem_spaces, true);
+                node.opType, node.opName, inputs, node, true, ram, input_mem_spaces, {cpu});
 
             if (refs.size() == 0)
             {
@@ -1168,7 +1168,7 @@ private:
 
             EClassId slicedEClass;
 
-            if (sourceNode.getOpType()== OpType::INPUT)
+            if (sourceNode.opType == OpType::INPUT)
             {
                 std::vector<uint64_t> sliceStrides = lClass.strides;
 
@@ -1308,22 +1308,22 @@ private:
                 }
 
                 TensorNode dummyOut;
-                dummyOut.opType = sourceNode.getOpType();
+                dummyOut.opType = sourceNode.opType;
                 dummyOut.opName = sourceNode.opName;
                 dummyOut.setShape(partialShape);
                 dummyOut.dtype = sourceNode.dtype;
                 dummyOut.strides = calcContiguousStrides(partialShape);
 
-                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.getOpType(), sourceNode.opName, dummyInputNodes, dummyOut, target_mem_space, {cpu}, dummyInputMemSpaces, true);
+                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName, dummyInputNodes, dummyOut, target_mem_space, {cpu}, dummyInputMemSpaces, true);
                 if (opRefs.size() == 0)
                 {
-                    Error::throw_err("[Planner.injectPartialPath] couldn't find any slice kernels for op " + toString(sourceNode.getOpType()));
+                    Error::throw_err("[Planner.injectPartialPath] couldn't find any slice kernels for op " + toString(sourceNode.opType));
                 }
 
                 slicedEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space);
                 for (KernelId uid : opRefs)
                 {
-                    ENode sn(uid, sourceNode.getOpType(), sourceNode.opName, slicedInputs, partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space, {cpu});
+                    ENode sn(uid, sourceNode.opType, sourceNode.opName, slicedInputs, partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space, {cpu});
                     egraph.addENode(slicedEClass, sn);
                 }
             }
