@@ -309,12 +309,12 @@ struct OpenCLBuffer : public DeviceBuffer
         ctx.inputs.push_back(arena_ptr + v.baseOffset);
         ctx.fd.push_back(-1);
 
-        size_t size = countElements(view) * getDTypeSize(view.dtype);
+        uint64_t size = countElements(view) * getDTypeSize(view.dtype);
         if (size == 0)
             size = 1;
 
         cl_mem buf = nullptr;
-        for (size_t i = 0; i < ctx.cl_inputs.size(); i++)
+        for (uint64_t i = 0; i < ctx.cl_inputs.size(); i++)
         {
             if (ctx.inputs[i] == (arena_ptr + v.baseOffset) && ctx.cl_inputs[i] != nullptr)
             {
@@ -342,12 +342,12 @@ struct OpenCLBuffer : public DeviceBuffer
         ctx.outViews.push_back(v);
         ctx.outputs.push_back(arena_ptr + v.baseOffset);
 
-        size_t size = countElements(view) * getDTypeSize(view.dtype);
+        uint64_t size = countElements(view) * getDTypeSize(view.dtype);
         if (size == 0)
             size = 1;
 
         cl_mem buf = nullptr;
-        for (size_t i = 0; i < ctx.cl_inputs.size(); i++)
+        for (uint64_t i = 0; i < ctx.cl_inputs.size(); i++)
         {
             if (ctx.inputs[i] == (arena_ptr + v.baseOffset) && ctx.cl_inputs[i] != nullptr)
             {
@@ -388,7 +388,7 @@ struct MemoryManager
 {
     std::vector<std::unique_ptr<DeviceBuffer>> buffers;
 
-    MemoryManager(std::unordered_map<MemSpace, uint64_t, MemSpaceHash> bufferSizes)
+    MemoryManager(std::unordered_map<MemSpace, uint64_t> bufferSizes)
     {
         for (auto &pair : bufferSizes)
         {
@@ -449,10 +449,10 @@ struct MemoryManager
         return nullptr;
     }
 
-    std::unordered_map<MemSpace, uint64_t, MemSpaceHash> getBufferSizes() const
+    std::unordered_map<MemSpace, uint64_t> getBufferSizes() const
     {
-        std::unordered_map<MemSpace, uint64_t, MemSpaceHash> sizes;
-        for (size_t i = 0; i < buffers.size(); ++i)
+        std::unordered_map<MemSpace, uint64_t> sizes;
+        for (uint64_t i = 0; i < buffers.size(); ++i)
         {
             if (buffers[i])
                 sizes[buffers[i]->mem_space] = buffers[i]->sizeBytes;

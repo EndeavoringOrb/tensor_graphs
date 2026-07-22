@@ -23,7 +23,7 @@ inline void runGatherBF16(const KernelContext &ctx)
 
     uint32_t vocabSize = dataShape[0];
     uint64_t rowSize = 1;
-    for (size_t i = 1; i < dataShape.size(); ++i)
+    for (uint64_t i = 1; i < dataShape.size(); ++i)
         rowSize *= dataShape[i];
 
     uint64_t numIndices = countElements(idxShape);

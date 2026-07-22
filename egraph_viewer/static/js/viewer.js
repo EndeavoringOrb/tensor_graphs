@@ -385,14 +385,14 @@ class EGraphViewer {
         } else {
             this.focusedEnodes.forEach(enode => {
                 const isSelected = selectedEnodeId === enode.id;
-                const childrenStr = JSON.stringify(enode.children);
+                const childrenStr = JSON.stringify(enode.getChildren());
                 html += `
                     <div class="enode-item ${isSelected ? 'selected' : ''}"
                          onclick="viewer.selectEnode(${this.focusedEclass}, ${enode.id}, ${childrenStr})">
                         <span class="dot ${isSelected ? 'selected' : 'enode'}"></span>
                         <span class="enode-id">EN${enode.id}</span>
                         <span class="op-name">${enode.op_name}</span>
-                        <span class="child-count">${enode.children.length}↓</span>
+                        <span class="child-count">${enode.getChildren().length}↓</span>
                     </div>
                 `;
             });

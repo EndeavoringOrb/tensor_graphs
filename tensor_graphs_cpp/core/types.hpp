@@ -187,7 +187,7 @@ namespace std
     template <>
     struct hash<EClassId>
     {
-        std::size_t operator()(const EClassId &id) const noexcept
+        std::uint64_t operator()(const EClassId &id) const noexcept
         {
             return std::hash<uint32_t>()(id.value);
         }
@@ -196,7 +196,7 @@ namespace std
     template <>
     struct hash<ENodeId>
     {
-        std::size_t operator()(const ENodeId &id) const noexcept
+        std::uint64_t operator()(const ENodeId &id) const noexcept
         {
             return std::hash<uint32_t>()(id.value);
         }
@@ -205,7 +205,7 @@ namespace std
     template <>
     struct hash<KernelId>
     {
-        std::size_t operator()(const KernelId &id) const noexcept
+        std::uint64_t operator()(const KernelId &id) const noexcept
         {
             return std::hash<uint64_t>()(id.value);
         }
@@ -218,6 +218,47 @@ namespace std
         {
             return std::hash<uint32_t>()(ms.idx) ^
                    (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
+        }
+    };
+
+    template <>
+    struct hash<PatternCacheKey>
+    {
+        uint64_t operator()(const PatternCacheKey &k) const noexcept
+        {
+            uint64_t h = 0;
+            auto combine = [&](uint64_t val)
+            { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
+            
+            combine(static_cast<uint64_t>(k.pOpType));
+            if (!k.pOpName.empty())
+                combine(std::hash<std::string>()(k.pOpName));
+            combine(static_cast<uint64_t>(k.reference_only));
+            combine(static_cast<uint64_t>(k.ignore_output_mem_space));
+            combine(static_cast<uint64_t>(k.ignore_input_mem_spaces));
+            
+            if (!k.ignore_output_mem_space)
+                combine(std::hash<MemSpace>()(k.output_mem_space));
+            
+            for (uint64_t i = 0; i < k.inputs.size(); ++i)
+            {
+                if (!k.ignore_input_mem_spaces)
+                    combine(std::hash<MemSpace>()(k.input_mem_spaces[i]));
+                auto &in = k.inputs[i];
+                combine(static_cast<uint64_t>(in.dtype));
+                for (auto s : in.getShape())
+                    combine(static_cast<uint64_t>(s));
+                for (auto s : in.strides)
+                    combine(static_cast<uint64_t>(s));
+            }
+            
+            combine(static_cast<uint64_t>(k.output.dtype));
+            for (auto s : k.output.getShape())
+                combine(static_cast<uint64_t>(s));
+            for (auto s : k.output.strides)
+                combine(static_cast<uint64_t>(s));
+            
+            return h;
         }
     };
 }
@@ -397,10 +438,10 @@ struct ViewOpValidationError : public TensorGraphError
     uint32_t nodeId = 0;
     OpType opType;
     std::vector<uint32_t> shape;
-    size_t dimIndex;
+    uint64_t dimIndex;
 
     ViewOpValidationError(const std::string &msg, uint32_t nid, OpType op,
-                          const std::vector<uint32_t> &s, size_t dim = 0)
+                          const std::vector<uint32_t> &s, uint64_t dim = 0)
         : TensorGraphError(msg), nodeId(nid), opType(op), shape(s), dimIndex(dim) {}
 };
 
@@ -513,7 +554,7 @@ inline std::string encodeRegion(const Region &r)
 {
     std::stringstream ss;
     ss << "(";
-    for (size_t i = 0; i < r.region.size(); ++i)
+    for (uint64_t i = 0; i < r.region.size(); ++i)
     {
         if (i > 0)
             ss << ",";
@@ -529,7 +570,7 @@ inline std::vector<Region> normalizeRegions(std::vector<Region> regions)
               {
                   if (a.region.size() != b.region.size())
                       return a.region.size() < b.region.size();
-                  for (size_t i = 0; i < a.region.size(); ++i)
+                  for (uint64_t i = 0; i < a.region.size(); ++i)
                   {
                       if (a.region[i].start != b.region[i].start)
                           return a.region[i].start < b.region[i].start;
@@ -681,7 +722,7 @@ inline std::string toString(const std::vector<T> &vec)
 {
     std::stringstream ss;
     ss << "[";
-    for (size_t i = 0; i < vec.size(); ++i)
+    for (uint64_t i = 0; i < vec.size(); ++i)
     {
         ss << vec[i] << (i == vec.size() - 1 ? "" : ", ");
     }
@@ -860,6 +901,9 @@ inline std::string toString(ENodeId id)
 // Stream operators
 inline std::ostream &operator<<(std::ostream &os, LogicalId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, PhysicalId id) { return os << toString(id); }
+inline std::ostream &operator<<(std::ostream &os, KernelId id) { return os << toString(id); }
+inline std::ostream &operator<<(std::ostream &os, EClassId id) { return os << toString(id); }
+inline std::ostream &operator<<(std::ostream &os, ENodeId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << toString(dtype); }
 inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toString(op); }
 inline std::ostream &operator<<(std::ostream &os, HandleType handle) { return os << toString(handle); }
@@ -944,9 +988,9 @@ public:
         bitlen = 0;
     }
 
-    void update(const uint8_t *msg, size_t length)
+    void update(const uint8_t *msg, uint64_t length)
     {
-        for (size_t i = 0; i < length; i++)
+        for (uint64_t i = 0; i < length; i++)
         {
             data[datalen++] = msg[i];
             if (datalen == 64)

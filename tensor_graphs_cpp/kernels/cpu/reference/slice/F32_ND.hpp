@@ -17,7 +17,7 @@ inline void inferViewSlice(TensorNode &node, const std::vector<TensorNode> &inpu
     node.strides.resize(inputs[0].strides.size());
     uint64_t offset = inputs[0].viewOffset;
 
-    for (size_t i = 0; i < inputs[0].strides.size(); ++i)
+    for (uint64_t i = 0; i < inputs[0].strides.size(); ++i)
     {
         int32_t start = i < starts.size() ? starts[i] : 0;
         int32_t step = i < steps.size() ? steps[i] : 1;

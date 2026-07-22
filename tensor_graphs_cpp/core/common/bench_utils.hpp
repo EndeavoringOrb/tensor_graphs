@@ -273,9 +273,9 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
     StorageFiles sf;
     std::vector<char> dummyBuf(1024 * 1024, 0);
 
-    for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+    for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
     {
-        size_t ruleIdx = idx;
+        uint64_t ruleIdx = idx;
         if (kernel.isVariadic)
         {
             ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
@@ -377,10 +377,10 @@ struct PreparedKernel
         outPtrs.assign(r.outputShapes.size(), nullptr);
         outViews.resize(r.outputShapes.size());
 
-        for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+        for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
         {
             uint64_t maxIndex = 0;
-            for (size_t d = 0; d < r.inputShapes[idx].size(); ++d)
+            for (uint64_t d = 0; d < r.inputShapes[idx].size(); ++d)
             {
                 if (r.inputShapes[idx][d] > 0)
                 {
@@ -393,7 +393,7 @@ struct PreparedKernel
                 elements = 1;
             uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
 
-            size_t ruleIdx = idx;
+            uint64_t ruleIdx = idx;
             if (kernel.isVariadic)
             {
                 ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
@@ -417,7 +417,7 @@ struct PreparedKernel
                 if (r.inputDTypes[idx] == DType::FLOAT32)
                 {
                     float *fptr = reinterpret_cast<float *>(inputBuffers[idx].hostData.data());
-                    for (size_t k = 0; k < elements; ++k)
+                    for (uint64_t k = 0; k < elements; ++k)
                         fptr[k] = 1.0f;
                 }
                 else if (r.inputDTypes[idx] == DType::INT32)
@@ -429,10 +429,10 @@ struct PreparedKernel
                             r.inputShapes[0].size() == r.outputShapes[0].size() && elements == r.inputShapes[0].size())
                         {
                             std::vector<bool> used(elements, false);
-                            for (size_t k = 0; k < elements; ++k)
+                            for (uint64_t k = 0; k < elements; ++k)
                             {
-                                size_t found_d = k;
-                                for (size_t d = 0; d < elements; ++d)
+                                uint64_t found_d = k;
+                                for (uint64_t d = 0; d < elements; ++d)
                                 {
                                     if (!used[d] && r.inputShapes[0][d] == r.outputShapes[0][k])
                                     {
@@ -446,7 +446,7 @@ struct PreparedKernel
                         }
                         else
                         {
-                            for (size_t k = 0; k < elements; ++k)
+                            for (uint64_t k = 0; k < elements; ++k)
                                 iptr[k] = k;
                         }
                     }
@@ -457,7 +457,7 @@ struct PreparedKernel
                             int32_t concat_axis = -1;
                             if (!r.inputShapes.empty() && !r.outputShapes.empty())
                             {
-                                for (size_t d = 0; d < r.outputShapes[0].size(); ++d)
+                                for (uint64_t d = 0; d < r.outputShapes[0].size(); ++d)
                                 {
                                     if (r.outputShapes[0][d] != r.inputShapes[0][d])
                                     {
@@ -468,25 +468,25 @@ struct PreparedKernel
                             }
                             if (concat_axis == -1)
                                 concat_axis = 0;
-                            for (size_t k = 0; k < elements; ++k)
+                            for (uint64_t k = 0; k < elements; ++k)
                                 iptr[k] = concat_axis;
                         }
                         else
                         {
-                            for (size_t k = 0; k < elements; ++k)
+                            for (uint64_t k = 0; k < elements; ++k)
                                 iptr[k] = 1;
                         }
                     }
                     else
                     {
-                        for (size_t k = 0; k < elements; ++k)
+                        for (uint64_t k = 0; k < elements; ++k)
                             iptr[k] = 1;
                     }
                 }
                 else if (r.inputDTypes[idx] == DType::BF16)
                 {
                     uint16_t *bptr = reinterpret_cast<uint16_t *>(inputBuffers[idx].hostData.data());
-                    for (size_t k = 0; k < elements; ++k)
+                    for (uint64_t k = 0; k < elements; ++k)
                         bptr[k] = 0x3F80;
                 }
                 else
@@ -504,10 +504,10 @@ struct PreparedKernel
             inViews[idx].dtype = r.inputDTypes[idx];
         }
 
-        for (size_t idx = 0; idx < r.outputShapes.size(); ++idx)
+        for (uint64_t idx = 0; idx < r.outputShapes.size(); ++idx)
         {
             uint64_t maxIndex = 0;
-            for (size_t d = 0; d < r.outputShapes[idx].size(); ++d)
+            for (uint64_t d = 0; d < r.outputShapes[idx].size(); ++d)
             {
                 if (r.outputShapes[idx][d] > 0)
                 {
@@ -543,11 +543,11 @@ struct PreparedKernel
         ctx.outViews = outViews;
         ctx.fd.assign(inPtrs.size(), -1);
 
-        for (size_t idx = 0; idx < inputBuffers.size(); ++idx)
+        for (uint64_t idx = 0; idx < inputBuffers.size(); ++idx)
         {
             ctx.cl_inputs.push_back(inputBuffers[idx].clMem);
         }
-        for (size_t idx = 0; idx < outputBuffers.size(); ++idx)
+        for (uint64_t idx = 0; idx < outputBuffers.size(); ++idx)
         {
             ctx.cl_outputs.push_back(outputBuffers[idx].clMem);
         }
@@ -562,10 +562,10 @@ struct PreparedKernel
     void updateStorageContext(const KernelEntry &kernel, const Record &r, int runIdx)
     {
         sf = createStorageInputs(r, kernel, runIdx, &inputBuffers);
-        size_t storageInIdx = 0;
-        for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+        uint64_t storageInIdx = 0;
+        for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
         {
-            size_t ruleIdx = idx;
+            uint64_t ruleIdx = idx;
             if (kernel.isVariadic)
             {
                 ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;

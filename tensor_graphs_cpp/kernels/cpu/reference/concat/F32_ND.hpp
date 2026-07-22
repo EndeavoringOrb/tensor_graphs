@@ -25,7 +25,7 @@ inline void runConcatF32_ND(const KernelContext &ctx)
 
     // Calculate the starting offset along the 'axis' for each input tensor
     std::vector<uint32_t> axis_offsets(ctx.inputs.size(), 0);
-    for (size_t n = 0; n < ctx.inputs.size() - 1; ++n)
+    for (uint64_t n = 0; n < ctx.inputs.size() - 1; ++n)
     {
         axis_offsets[n + 1] = axis_offsets[n] + ctx.inViews[n].getShape()[axis];
     }
@@ -39,7 +39,7 @@ inline void runConcatF32_ND(const KernelContext &ctx)
         uint32_t axis_coord = coords[axis];
 
         // 2. Find which source tensor 'n' this element belongs to
-        size_t n = 0;
+        uint64_t n = 0;
         // Search for n such that axis_offsets[n] <= axis_coord < axis_offsets[n+1]
         // data tensors are in indices 0 to inputs.size() - 2
         while (n < ctx.inputs.size() - 2 && axis_coord >= axis_offsets[n + 1])

@@ -104,12 +104,32 @@ struct EGraph
     std::vector<EClassId> nodeToEClass;
 
     uint32_t nextLeafId = 0;
-    std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>, EClassIdHash> constantStaging;
+    std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
     // Hash map for fast constant lookup: data hash -> list of class ids
     std::unordered_map<uint64_t, std::vector<EClassId>> constantHashIndex;
 
-    void reserve(size_t classCap, size_t nodeCap)
+    inline std::vector<int32_t> getConstantInt32(EClassId id) const
+    {
+        if (constantStaging.count(id))
+        {
+            const auto &data = *constantStaging.at(id);
+            const auto &e_class = getEClass(id);
+            uint64_t numElements = countElements(e_class.shape);
+            std::vector<int32_t> res(numElements);
+            const int32_t *src = reinterpret_cast<const int32_t *>(data.data());
+            for (uint64_t i = 0; i < numElements; ++i)
+            {
+                res[i] = src[getStridedIndex(i, e_class.shape, e_class.strides)]; // TODO: does this need getStridedIndex?
+            }
+            return res;
+        }
+        std::stringstream ss;
+        ss << "Expected constant for shape inference but not found in staging. Node ID: " << id;
+        Error::throw_err(ss.str());
+    }
+
+    void reserve(uint64_t classCap, uint64_t nodeCap)
     {
         classes.reserve(classCap);
         parent.reserve(classCap);
@@ -443,8 +463,8 @@ private:
 
         // Hash the data bytes efficiently - process 8 bytes at a time
         const uint8_t *ptr = data.data();
-        size_t len = data.size();
-        size_t i = 0;
+        uint64_t len = data.size();
+        uint64_t i = 0;
 
         for (; i + 8 <= len; i += 8)
         {
@@ -494,7 +514,7 @@ inline std::string toString(const ENode &node)
        << "  OpName:     " << (node.getOpName().empty() ? "N/A" : node.getOpName()) << "\n"
        << "  Children:   [";
     const auto &children = node.getChildren();
-    for (size_t i = 0; i < children.size(); ++i)
+    for (uint64_t i = 0; i < children.size(); ++i)
     {
         ss << children[i].value << (i == children.size() - 1 ? "" : ", ");
     }
@@ -519,7 +539,7 @@ inline std::string toString(const EClass &cls, const std::string &prefix = "")
        << prefix << "  MemSpace:   " << cls.mem_space.idx << "\n"
        << prefix << "  ENodes:     [";
 
-    for (size_t i = 0; i < cls.enodes.size(); ++i)
+    for (uint64_t i = 0; i < cls.enodes.size(); ++i)
     {
         ss << cls.enodes[i].value << (i == cls.enodes.size() - 1 ? "" : ", ");
     }
@@ -558,7 +578,7 @@ inline std::string toString(const ENode &node, const EGraph &egraph, const std::
     }
     else
     {
-        for (size_t i = 0; i < children.size(); ++i)
+        for (uint64_t i = 0; i < children.size(); ++i)
         {
             uint32_t childClassId = children[i].value;
             // Resolve the canonical EClass from the graph

@@ -16,7 +16,7 @@ namespace OpenCL
         cl_device_id device = OpenCLState::get().device;
 
         const char *src_ptr = source.c_str();
-        size_t src_len = source.length();
+        uint64_t src_len = source.length();
 
         cl_int err;
         cl_program program = clCreateProgramWithSource(ctx, 1, &src_ptr, &src_len, &err);
@@ -28,7 +28,7 @@ namespace OpenCL
         err = clBuildProgram(program, 1, &device, "-cl-std=CL2.0", nullptr, nullptr);
         if (err != CL_SUCCESS)
         {
-            size_t log_size;
+            uint64_t log_size;
             clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
             std::string build_log(log_size, '\0');
             clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, log_size, &build_log[0], nullptr);

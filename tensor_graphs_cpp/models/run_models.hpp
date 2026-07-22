@@ -118,7 +118,7 @@ void compute_rope_cpu(int txt_seq, int img_h, int img_w, int head_dim, float the
     }
 }
 
-std::vector<int32_t> load_tokens_from_file(const std::string &filename, size_t txt_seq)
+std::vector<int32_t> load_tokens_from_file(const std::string &filename, uint64_t txt_seq)
 {
     // 1. Initialize vector with the padding value 151643
     std::vector<int32_t> input_ids(txt_seq, 151643);
@@ -131,7 +131,7 @@ std::vector<int32_t> load_tokens_from_file(const std::string &filename, size_t t
     }
 
     std::string part;
-    size_t count = 0;
+    uint64_t count = 0;
 
     // 2. Read from file using ',' as the delimiter
     // Note: This also stops if we reach the txt_seq limit

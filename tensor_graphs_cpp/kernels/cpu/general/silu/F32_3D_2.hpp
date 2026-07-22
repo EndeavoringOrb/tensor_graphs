@@ -60,7 +60,7 @@ inline uint32_t ref_silu_broadcast_scalar_2(Graph &g, uint32_t scalar_id, const 
 {
     std::vector<int32_t> ones(target_shape.size(), 1);
     uint32_t out = g.reshape(scalar_id, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
-    for (size_t i = 0; i < target_shape.size(); ++i)
+    for (uint64_t i = 0; i < target_shape.size(); ++i)
     {
         if (target_shape[i] > 1)
         {

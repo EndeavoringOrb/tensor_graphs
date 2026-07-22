@@ -16,7 +16,7 @@ struct SafetensorsTensorMetadata
     std::vector<uint32_t> shape;
     uint64_t dataOffsetStart;
     uint64_t dataOffsetEnd;
-    size_t fileIndex; // Index into the files vector
+    uint64_t fileIndex; // Index into the files vector
 
     uint64_t sizeBytes() const
     {
@@ -55,7 +55,7 @@ public:
             filepaths.push_back(path);
         }
 
-        for (size_t i = 0; i < filepaths.size(); ++i)
+        for (uint64_t i = 0; i < filepaths.size(); ++i)
         {
             loadFile(filepaths[i], i);
         }
@@ -116,7 +116,7 @@ private:
     std::vector<FileInfo> files;
     std::unordered_map<std::string, SafetensorsTensorMetadata> metadata;
 
-    void loadFile(const std::string &filepath, size_t fileIdx)
+    void loadFile(const std::string &filepath, uint64_t fileIdx)
     {
         std::ifstream file(filepath, std::ios::binary);
         if (!file.is_open())

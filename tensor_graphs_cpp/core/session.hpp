@@ -28,7 +28,7 @@ static std::string encodeCacheKey(
     std::sort(ids.begin(), ids.end());
 
     std::stringstream ss;
-    for (size_t i = 0; i < ids.size(); ++i)
+    for (uint64_t i = 0; i < ids.size(); ++i)
     {
         if (i > 0)
             ss << ";";
@@ -36,7 +36,7 @@ static std::string encodeCacheKey(
 
         const auto &regions = inputRegions.at(ids[i]);
         const std::vector<Region> canonicalRegions = normalizeRegions(regions);
-        for (size_t r = 0; r < canonicalRegions.size(); ++r)
+        for (uint64_t r = 0; r < canonicalRegions.size(); ++r)
         {
             if (r > 0)
                 ss << ",";
@@ -296,7 +296,7 @@ struct Session
 
         if (!disableCaching)
         {
-            for (size_t i = 0; i < manualBuckets.size(); ++i)
+            for (uint64_t i = 0; i < manualBuckets.size(); ++i)
             {
                 const Bucket &bucket = manualBuckets[i];
 
@@ -323,7 +323,7 @@ struct Session
         }
 
         std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size() << " protected eclasses..." << std::endl;
-        for (size_t i = 0; i < manualBuckets.size(); ++i)
+        for (uint64_t i = 0; i < manualBuckets.size(); ++i)
         {
             const Bucket &bucket = manualBuckets[i];
             CompiledGraph plan = planner.plan(

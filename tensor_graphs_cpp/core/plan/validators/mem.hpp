@@ -83,7 +83,7 @@ static void get_deaths(
     const std::unordered_map<EClassId, float, EClassIdHash> &birth_times,
     std::unordered_map<EClassId, float, EClassIdHash> &death_times)
 {
-    for (size_t i = 0; i < ordered.size(); ++i)
+    for (uint64_t i = 0; i < ordered.size(); ++i)
     {
         EClassId node_eclass = ordered[i];
         uint32_t sel = selection_map.at(node_eclass);
@@ -91,7 +91,7 @@ static void get_deaths(
         float cost = enodeInfos[enode_id.value].cost;
 
         float death = birth_times.at(node_eclass) + cost;
-        for (size_t j = i + 1; j < ordered.size(); ++j)
+        for (uint64_t j = i + 1; j < ordered.size(); ++j)
         {
             EClassId other_eclass = ordered[j];
             uint32_t other_sel = selection_map.at(other_eclass);
@@ -166,10 +166,10 @@ static bool malloc_recursive(
     auto get_min_height = [&]() -> int64_t
     {
         int64_t min_height = std::numeric_limits<int64_t>::max();
-        for (size_t i = 0; i < unallocated.size(); ++i)
+        for (uint64_t i = 0; i < unallocated.size(); ++i)
         {
             int64_t offset_max = 0;
-            for (size_t j = 0; j < allocated.size(); ++j)
+            for (uint64_t j = 0; j < allocated.size(); ++j)
             {
                 if (overlapsBuf(unallocated[i], allocated[j]))
                     offset_max = std::max(offset_max,
@@ -181,11 +181,11 @@ static bool malloc_recursive(
         return min_height;
     };
 
-    for (size_t i = 0; i < unallocated.size(); ++i)
+    for (uint64_t i = 0; i < unallocated.size(); ++i)
     {
         int64_t offset_i = 0;
         int64_t offset_max = 0;
-        for (size_t j = 0; j < allocated.size(); ++j)
+        for (uint64_t j = 0; j < allocated.size(); ++j)
         {
             if (overlapsBuf(unallocated[i], allocated[j]))
                 offset_i = std::max(offset_i,
@@ -196,7 +196,7 @@ static bool malloc_recursive(
             continue; // offset non-monotonic
 
         uint32_t idx_max = 0;
-        for (size_t j = 0; j < allocated.size(); ++j)
+        for (uint64_t j = 0; j < allocated.size(); ++j)
         {
             if (allocated[j].offset == offset_i)
                 idx_max = std::max(idx_max, allocated[j].idx);
@@ -217,7 +217,7 @@ static bool malloc_recursive(
 
         std::vector<ParallelBuffer> new_unallocated;
         new_unallocated.reserve(unallocated.size() - 1);
-        for (size_t j = 0; j < unallocated.size(); ++j)
+        for (uint64_t j = 0; j < unallocated.size(); ++j)
             if (j != i)
                 new_unallocated.push_back(unallocated[j]);
 

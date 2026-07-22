@@ -19,7 +19,7 @@ inline void runCopy_OpenCL_CPU(const KernelContext &ctx)
 
     uint64_t numElements = countElements(ctx.inViews[0].getShape());
     uint64_t elemSize = getDTypeSize(ctx.inViews[0].dtype);
-    size_t size_bytes = numElements * elemSize;
+    uint64_t size_bytes = numElements * elemSize;
 
     if (size_bytes == 0)
         return;

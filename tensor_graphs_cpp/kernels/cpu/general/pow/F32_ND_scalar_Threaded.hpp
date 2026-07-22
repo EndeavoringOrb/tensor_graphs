@@ -58,7 +58,7 @@ inline uint32_t refFactoryPowND_Scalar_Threaded(const std::vector<uint32_t> &inp
     uint32_t reshaped = graph.reshape(idScalar, graph.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
 
     uint32_t out = reshaped;
-    for (size_t i = 0; i < shapeND.size(); ++i)
+    for (uint64_t i = 0; i < shapeND.size(); ++i)
     {
         if (shapeND[i] > 1)
         {

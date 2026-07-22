@@ -60,12 +60,12 @@ inline bool matchGatherStreamingStorageSorted(
 // Positional disk read helper
 // ---------------------------------------------------------------------------
 static inline bool gather_sorted_readFromFileAtOffset(
-    int fd, uint64_t offset, void *buf, size_t bytes)
+    int fd, uint64_t offset, void *buf, uint64_t bytes)
 {
     if (bytes == 0)
         return true;
     uint8_t *p = static_cast<uint8_t *>(buf);
-    size_t remaining = bytes;
+    uint64_t remaining = bytes;
     uint64_t cur = offset;
 
 #ifdef TG_OS_WINDOWS
@@ -78,7 +78,7 @@ static inline bool gather_sorted_readFromFileAtOffset(
         ov.Offset = static_cast<DWORD>(cur & 0xFFFFFFFFull);
         ov.OffsetHigh = static_cast<DWORD>((cur >> 32) & 0xFFFFFFFFull);
         DWORD toRead = static_cast<DWORD>(
-            std::min<size_t>(remaining, 0x40000000ull));
+            std::min<uint64_t>(remaining, 0x40000000ull));
         DWORD bytesRead = 0;
         if (!ReadFile(hFile, p, toRead, &bytesRead, &ov))
             return false;
@@ -92,12 +92,12 @@ static inline bool gather_sorted_readFromFileAtOffset(
 #else
     while (remaining > 0)
     {
-        ssize_t n = pread(fd, p, remaining, cur);
+        suint64_t n = pread(fd, p, remaining, cur);
         if (n <= 0)
             return false;
         p += n;
         cur += n;
-        remaining -= static_cast<size_t>(n);
+        remaining -= static_cast<uint64_t>(n);
     }
     return true;
 #endif
@@ -117,7 +117,7 @@ inline void runGatherStreamingStorageSorted(const KernelContext &ctx)
 
     uint32_t vocabSize = dataShape[0];
     uint64_t rowSize = 1;
-    for (size_t i = 1; i < dataShape.size(); ++i)
+    for (uint64_t i = 1; i < dataShape.size(); ++i)
         rowSize *= dataShape[i];
 
     uint64_t numIndices = countElements(idxShape);

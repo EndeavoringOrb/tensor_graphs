@@ -8,7 +8,7 @@ inline bool matchRepeatView(const std::vector<TensorNode> &inputs, const TensorN
     // Inputs: Data (0), Repeats (1), Axis (2)
 
     // Strides can only natively represent repeating a dimension if it originally had size 1.
-    for (size_t d = 0; d < inputs[0].getShape().size(); ++d)
+    for (uint64_t d = 0; d < inputs[0].getShape().size(); ++d)
     {
         if (inputs[0].getShape()[d] != output.getShape()[d])
         {
@@ -23,7 +23,7 @@ inline void inferViewRepeat(TensorNode &node, const std::vector<TensorNode> &inp
 {
     node.strides = inputs[0].strides;
 
-    for (size_t d = 0; d < node.getShape().size(); ++d)
+    for (uint64_t d = 0; d < node.getShape().size(); ++d)
     {
         if (inputs[0].getShape()[d] != node.getShape()[d])
         {

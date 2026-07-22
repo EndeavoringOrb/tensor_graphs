@@ -72,7 +72,7 @@ public:
         for (const auto &opt : ordered_options)
         {
             std::string names_str = "";
-            for (size_t i = 0; i < opt.all_names.size(); ++i)
+            for (uint64_t i = 0; i < opt.all_names.size(); ++i)
             {
                 if (i > 0)
                     names_str += ", ";
@@ -122,8 +122,8 @@ public:
             }
         }
 
-        size_t positional_idx = 0;
-        for (size_t i = 0; i < args.size(); ++i)
+        uint64_t positional_idx = 0;
+        for (uint64_t i = 0; i < args.size(); ++i)
         {
             const std::string &arg = args[i];
             if (arg.rfind("-", 0) == 0)

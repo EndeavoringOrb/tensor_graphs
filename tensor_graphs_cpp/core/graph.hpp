@@ -576,7 +576,7 @@ inline bool isIsomorphic(const Graph &g1, LogicalId root1, const Graph &g2, Logi
     if (n1.child_ids.size() != n2.child_ids.size())
         return false;
 
-    for (size_t i = 0; i < n1.child_ids.size(); ++i)
+    for (uint64_t i = 0; i < n1.child_ids.size(); ++i)
     {
         if (!isIsomorphic(g1, n1.child_ids[i], g2, n2.child_ids[i]))
             return false;

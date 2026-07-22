@@ -94,7 +94,7 @@ inline uint32_t ref_swiglu_broadcast_scalar_Inplace(Graph &g, uint32_t scalar_id
 {
     std::vector<int32_t> ones(target_shape.size(), 1);
     uint32_t out = g.reshape(scalar_id, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
-    for (size_t i = 0; i < target_shape.size(); ++i)
+    for (uint64_t i = 0; i < target_shape.size(); ++i)
     {
         if (target_shape[i] > 1)
         {

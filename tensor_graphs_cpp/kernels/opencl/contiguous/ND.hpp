@@ -57,8 +57,8 @@ inline void runContiguous_OpenCL_ND(const KernelContext &ctx)
     clSetKernelArg(k, 3, sizeof(uint64_t), &elemSize);
     clSetKernelArg(k, 4, sizeof(ContiguousParamsOpenCL), &p);
 
-    size_t local_work_size = 256;
-    size_t global_work_size = ((numElements + local_work_size - 1) / local_work_size) * local_work_size;
+    uint64_t local_work_size = 256;
+    uint64_t global_work_size = ((numElements + local_work_size - 1) / local_work_size) * local_work_size;
 
     cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0, nullptr, nullptr);
     if (err != CL_SUCCESS)

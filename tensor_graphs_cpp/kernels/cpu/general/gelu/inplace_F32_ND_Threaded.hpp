@@ -50,7 +50,7 @@ inline uint32_t refFactoryGelu_Threaded(const std::vector<uint32_t> &inputs, Gra
     
     auto bcast = [&](float val) {
         uint32_t out = graph.reshape(graph.constant({1}, &val, DType::FLOAT32), ones_shape);
-        for (size_t i = 0; i < target_shape.size(); ++i) {
+        for (uint64_t i = 0; i < target_shape.size(); ++i) {
             if (target_shape[i] > 1) {
                 int32_t rep = (int32_t)target_shape[i];
                 int32_t axis = (int32_t)i;

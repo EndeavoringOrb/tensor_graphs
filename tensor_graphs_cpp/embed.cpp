@@ -225,8 +225,8 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
 
     // Pre-allocate reusable staging buffers for this image size so the polling
     // loop doesn't allocate/free on every single image.
-    cs.norm_image.assign((size_t)IN_CHANNELS * width * height, 0.0f);
-    cs.patch_input.assign((size_t)1 * num_patches * PATCH_DIM, 0.0f);
+    cs.norm_image.assign((uint64_t)IN_CHANNELS * width * height, 0.0f);
+    cs.patch_input.assign((uint64_t)1 * num_patches * PATCH_DIM, 0.0f);
 }
 
 static void build_patch_input_inplace(const std::vector<float> &norm_image,
@@ -238,7 +238,7 @@ static void build_patch_input_inplace(const std::vector<float> &norm_image,
     int num_patches = grid_h * grid_w;
 
     if ((int)patch_input.size() != 1 * num_patches * PATCH_DIM)
-        patch_input.assign((size_t)1 * num_patches * PATCH_DIM, 0.0f);
+        patch_input.assign((uint64_t)1 * num_patches * PATCH_DIM, 0.0f);
 
     // Per-patch flat layout: c * (T * P * Q) + t * (P * Q) + p * Q + q  ← (C, T, P, Q)
     // The HF processor flattens patches as (C, T, P, Q), matching the layout expected
@@ -294,7 +294,7 @@ static void normalize_image_inplace(const uint8_t *pixel_data,
                                     std::vector<float> &norm_image)
 {
     if ((int)norm_image.size() != IN_CHANNELS * width * height)
-        norm_image.assign((size_t)IN_CHANNELS * width * height, 0.0f);
+        norm_image.assign((uint64_t)IN_CHANNELS * width * height, 0.0f);
 
     for (int c = 0; c < IN_CHANNELS; ++c)
     {

@@ -39,7 +39,7 @@ inline void runConcatF32_CUDA_ND(const KernelContext &ctx) {
     uint64_t c_offset = 0;
     int blockSize = 256;
 
-    for (size_t n = 0; n < ctx.inputs.size() - 1; ++n) {
+    for (uint64_t n = 0; n < ctx.inputs.size() - 1; ++n) {
         const float *A = static_cast<const float *>(ctx.inputs[n]);
         uint64_t C_in = ctx.inViews[n].getShape()[axis];
         uint64_t total = O * C_in * I;

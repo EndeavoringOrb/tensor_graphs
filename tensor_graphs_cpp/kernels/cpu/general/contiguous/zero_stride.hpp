@@ -39,7 +39,7 @@ inline bool matchZeroStrideBroadcast_ND(const std::vector<TensorNode> &inputs, c
     // Strict Match: Only triggers if the first stride is 1 and ALL subsequent strides are 0.
     if (strides[0] != 1)
         return false;
-    for (size_t i = 1; i < strides.size(); ++i)
+    for (uint64_t i = 1; i < strides.size(); ++i)
     {
         if (strides[i] != 0)
             return false;
@@ -67,7 +67,7 @@ inline void runZeroStrideBroadcast_ND(const KernelContext &ctx)
     // but the inner dimensions repeatedly read the EXACT same memory location.
     const uint64_t outer_elements = shape[0];
     uint64_t inner_elements = 1;
-    for (size_t i = 1; i < shape.size(); ++i)
+    for (uint64_t i = 1; i < shape.size(); ++i)
     {
         inner_elements *= shape[i];
     }

@@ -13,8 +13,8 @@ struct ProgressTimer
     clock::time_point start;
     clock::time_point last_print;
 
-    size_t total;
-    size_t current = 0;
+    uint64_t total;
+    uint64_t current = 0;
 
     double minInterval; // seconds
     std::string label;
@@ -22,7 +22,7 @@ struct ProgressTimer
     bool has_total;
     bool disable;
 
-    ProgressTimer(size_t total_ = 0, std::string label_ = "", bool disable_ = false, double minInterval_ = 2)
+    ProgressTimer(uint64_t total_ = 0, std::string label_ = "", bool disable_ = false, double minInterval_ = 2)
         : start(clock::now()),
           last_print(start),
           total(total_),
@@ -39,7 +39,7 @@ struct ProgressTimer
         has_total = total > 0;
     }
 
-    inline void tick(size_t increment = 1)
+    inline void tick(uint64_t increment = 1)
     {
         if (disable)
             return;
@@ -119,8 +119,8 @@ struct ProgressTimer
 
 struct ProgressTimer
 {
-    ProgressTimer(size_t, const char * = "", double = 0.0) {}
-    inline void tick(size_t = 1) {}
+    ProgressTimer(uint64_t, const char * = "", double = 0.0) {}
+    inline void tick(uint64_t = 1) {}
 };
 
 #endif

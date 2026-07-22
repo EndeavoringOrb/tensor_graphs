@@ -158,12 +158,12 @@ inline bool matchFusedProjStreamingStorage(
 // same translation unit via cpu_kernels.gen.hpp)
 // ---------------------------------------------------------------------------
 static inline bool fusedProj_readFromFileAtOffset(
-    int fd, uint64_t offset, void *buf, size_t bytes)
+    int fd, uint64_t offset, void *buf, uint64_t bytes)
 {
     if (bytes == 0)
         return true;
     uint8_t *p = static_cast<uint8_t *>(buf);
-    size_t remaining = bytes;
+    uint64_t remaining = bytes;
     uint64_t cur = offset;
 
 #ifdef TG_OS_WINDOWS
@@ -176,7 +176,7 @@ static inline bool fusedProj_readFromFileAtOffset(
         ov.Offset = static_cast<DWORD>(cur & 0xFFFFFFFFull);
         ov.OffsetHigh = static_cast<DWORD>((cur >> 32) & 0xFFFFFFFFull);
         DWORD toRead = static_cast<DWORD>(
-            std::min<size_t>(remaining, 0x40000000ull));
+            std::min<uint64_t>(remaining, 0x40000000ull));
         DWORD bytesRead = 0;
         if (!ReadFile(hFile, p, toRead, &bytesRead, &ov))
             return false;
@@ -190,12 +190,12 @@ static inline bool fusedProj_readFromFileAtOffset(
 #else
     while (remaining > 0)
     {
-        ssize_t n = pread(fd, p, remaining, cur);
+        suint64_t n = pread(fd, p, remaining, cur);
         if (n <= 0)
             return false;
         p += n;
         cur += n;
-        remaining -= static_cast<size_t>(n);
+        remaining -= static_cast<uint64_t>(n);
     }
     return true;
 #endif
@@ -407,7 +407,7 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
     // Allocate once, reuse for all threads (read-only after conversion).
     // Store as uint16_t to match the existing codebase convention (avoids
     // dependence on the bfloat16_t typedef for storage).
-    std::vector<uint16_t> X_bf16(static_cast<size_t>(S) * K);
+    std::vector<uint16_t> X_bf16(static_cast<uint64_t>(S) * K);
     {
         const float *x_src = X;
         uint16_t *x_dst = X_bf16.data();
@@ -461,11 +461,11 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
         if (W_total_bytes <= SMALL_W_THRESHOLD)
         {
             // ----- All-at-once path: read full N-range into per-thread buffer -----
-            std::vector<uint16_t> w_buf(static_cast<size_t>(n_range) * K);
+            std::vector<uint16_t> w_buf(static_cast<uint64_t>(n_range) * K);
             if (!fusedProj_readFromFileAtOffset(fd, my_W_offset,
                                                 w_buf.data(), my_W_bytes))
             {
-                std::memset(w_buf.data(), 0, static_cast<size_t>(my_W_bytes));
+                std::memset(w_buf.data(), 0, static_cast<uint64_t>(my_W_bytes));
             }
 
             fusedProj_computeTile(
@@ -486,7 +486,7 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
             const uint32_t chunk_rows = std::max(1u, static_cast<uint32_t>(
                                                          STREAM_CHUNK_BYTES / (static_cast<uint64_t>(K) * sizeof(uint16_t))));
 
-            std::vector<uint16_t> w_buf(static_cast<size_t>(chunk_rows) * K);
+            std::vector<uint16_t> w_buf(static_cast<uint64_t>(chunk_rows) * K);
 
             for (uint32_t chunk_start = n_start; chunk_start < n_end; chunk_start += chunk_rows)
             {
@@ -498,7 +498,7 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
                 if (!fusedProj_readFromFileAtOffset(fd, chunk_off,
                                                     w_buf.data(), chunk_bytes))
                 {
-                    std::memset(w_buf.data(), 0, static_cast<size_t>(chunk_bytes));
+                    std::memset(w_buf.data(), 0, static_cast<uint64_t>(chunk_bytes));
                 }
 
                 // Compute Out[0..S, chunk_start..chunk_end] using this chunk.

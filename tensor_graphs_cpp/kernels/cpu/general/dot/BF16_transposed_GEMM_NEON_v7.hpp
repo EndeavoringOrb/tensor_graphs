@@ -143,7 +143,7 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
     // vcvtq_high_bf16_f32 converts the high 4 fp32 lanes to 4 bf16
     // Both use RNE rounding (vs v6's truncation via vshrn).
     // ============================================================
-    std::vector<uint16_t> X_packed((size_t)M_main * K_main);
+    std::vector<uint16_t> X_packed((uint64_t)M_main * K_main);
 
     {
         uint32_t nt = std::min(num_threads, M_panels);
@@ -173,21 +173,21 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
 
                 for (uint32_t mp = s; mp < e; ++mp) {
                     uint16_t *dst = X_packed.data() +
-                                    (size_t)mp * MR * K_main;
+                                    (uint64_t)mp * MR * K_main;
                     uint32_t m0 = mp * MR;
 
                     for (uint32_t kq = 0; kq < K_quads; ++kq) {
                         uint32_t k = kq * KR;
 
                         // Load 8 fp32 rows × 4 K-elements = 8 float32x4_t
-                        float32x4_t r0 = vld1q_f32(X + (size_t)(m0 + 0) * K + k);
-                        float32x4_t r1 = vld1q_f32(X + (size_t)(m0 + 1) * K + k);
-                        float32x4_t r2 = vld1q_f32(X + (size_t)(m0 + 2) * K + k);
-                        float32x4_t r3 = vld1q_f32(X + (size_t)(m0 + 3) * K + k);
-                        float32x4_t r4 = vld1q_f32(X + (size_t)(m0 + 4) * K + k);
-                        float32x4_t r5 = vld1q_f32(X + (size_t)(m0 + 5) * K + k);
-                        float32x4_t r6 = vld1q_f32(X + (size_t)(m0 + 6) * K + k);
-                        float32x4_t r7 = vld1q_f32(X + (size_t)(m0 + 7) * K + k);
+                        float32x4_t r0 = vld1q_f32(X + (uint64_t)(m0 + 0) * K + k);
+                        float32x4_t r1 = vld1q_f32(X + (uint64_t)(m0 + 1) * K + k);
+                        float32x4_t r2 = vld1q_f32(X + (uint64_t)(m0 + 2) * K + k);
+                        float32x4_t r3 = vld1q_f32(X + (uint64_t)(m0 + 3) * K + k);
+                        float32x4_t r4 = vld1q_f32(X + (uint64_t)(m0 + 4) * K + k);
+                        float32x4_t r5 = vld1q_f32(X + (uint64_t)(m0 + 5) * K + k);
+                        float32x4_t r6 = vld1q_f32(X + (uint64_t)(m0 + 6) * K + k);
+                        float32x4_t r7 = vld1q_f32(X + (uint64_t)(m0 + 7) * K + k);
 
                         // RNE fp32 -> bf16 conversion (portable vshrn-based)
                         // Each vshrn_n_u32 narrows 4 uint32 -> 4 uint16 by
@@ -243,7 +243,7 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
 
             workers.emplace_back([=, &X_packed]()
                                  {
-                std::vector<uint16_t> W_panel((size_t)K_main * NR);
+                std::vector<uint16_t> W_panel((uint64_t)K_main * NR);
 
                 for (uint32_t np = s; np < e; ++np) {
                     uint32_t n0 = np * NR;
@@ -255,14 +255,14 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
                         for (uint32_t bi = 0; bi < NR / 2; ++bi) {
                             uint32_t n = n0 + bi * 2;
                             // W is [N, K], pack 4 K-elements x 2 N-rows
-                            wp[0] = W[(size_t)n     * K + k];
-                            wp[1] = W[(size_t)n     * K + k + 1];
-                            wp[2] = W[(size_t)n     * K + k + 2];
-                            wp[3] = W[(size_t)n     * K + k + 3];
-                            wp[4] = W[(size_t)(n+1) * K + k];
-                            wp[5] = W[(size_t)(n+1) * K + k + 1];
-                            wp[6] = W[(size_t)(n+1) * K + k + 2];
-                            wp[7] = W[(size_t)(n+1) * K + k + 3];
+                            wp[0] = W[(uint64_t)n     * K + k];
+                            wp[1] = W[(uint64_t)n     * K + k + 1];
+                            wp[2] = W[(uint64_t)n     * K + k + 2];
+                            wp[3] = W[(uint64_t)n     * K + k + 3];
+                            wp[4] = W[(uint64_t)(n+1) * K + k];
+                            wp[5] = W[(uint64_t)(n+1) * K + k + 1];
+                            wp[6] = W[(uint64_t)(n+1) * K + k + 2];
+                            wp[7] = W[(uint64_t)(n+1) * K + k + 3];
                             wp += 8;
                         }
                     }
@@ -271,7 +271,7 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
                         uint32_t m_base = mp * MR;
 
                         const uint16_t *A_ptr = X_packed.data() +
-                                                (size_t)mp * MR * K_main;
+                                                (uint64_t)mp * MR * K_main;
                         const uint16_t *B_ptr = W_panel.data();
 
                         // 8x8 = 8 rows x 2 col-pairs of 4 fp32 accumulators
@@ -359,10 +359,10 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
                             float32x4_t row1_a = vcombine_f32(vget_high_f32(v0), vget_high_f32(v1));
                             float32x4_t row1_b = vcombine_f32(vget_high_f32(v2), vget_high_f32(v3));
 
-                            vst1q_f32(O + (size_t)r0     * N + n0,     row0_a);
-                            vst1q_f32(O + (size_t)r0     * N + n0 + 4, row0_b);
-                            vst1q_f32(O + (size_t)(r0+1) * N + n0,     row1_a);
-                            vst1q_f32(O + (size_t)(r0+1) * N + n0 + 4, row1_b);
+                            vst1q_f32(O + (uint64_t)r0     * N + n0,     row0_a);
+                            vst1q_f32(O + (uint64_t)r0     * N + n0 + 4, row0_b);
+                            vst1q_f32(O + (uint64_t)(r0+1) * N + n0,     row1_a);
+                            vst1q_f32(O + (uint64_t)(r0+1) * N + n0 + 4, row1_b);
                         };
                         store_pair(0, c00, c01, c10, c11);  // rows 0-1 x cols 0-7
                         store_pair(1, c20, c21, c30, c31);  // rows 2-3 x cols 0-7
@@ -398,13 +398,13 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
         for (uint32_t n = 0; n < N; ++n)
         {
             float sum = 0.0f;
-            const uint16_t *w_row = W + (size_t)n * K;
-            const float *x_row = X + (size_t)b * S * K + (size_t)s * K;
+            const uint16_t *w_row = W + (uint64_t)n * K;
+            const float *x_row = X + (uint64_t)b * S * K + (uint64_t)s * K;
             for (uint32_t k = 0; k < K; ++k)
             {
                 sum += x_row[k] * bf16_to_f32(w_row[k]);
             }
-            O[(size_t)b * S * N + (size_t)s * N + n] = sum;
+            O[(uint64_t)b * S * N + (uint64_t)s * N + n] = sum;
         }
     }
 
@@ -415,13 +415,13 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
         for (uint32_t n = N_main; n < N; ++n)
         {
             float sum = 0.0f;
-            const uint16_t *w_row = W + (size_t)n * K;
-            const float *x_row = X + (size_t)b * S * K + (size_t)s * K;
+            const uint16_t *w_row = W + (uint64_t)n * K;
+            const float *x_row = X + (uint64_t)b * S * K + (uint64_t)s * K;
             for (uint32_t k = 0; k < K; ++k)
             {
                 sum += x_row[k] * bf16_to_f32(w_row[k]);
             }
-            O[(size_t)b * S * N + (size_t)s * N + n] = sum;
+            O[(uint64_t)b * S * N + (uint64_t)s * N + n] = sum;
         }
     }
 
@@ -433,14 +433,14 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
             uint32_t b = m / S, s = m % S;
             for (uint32_t n = 0; n < N_main; ++n)
             {
-                float sum = O[(size_t)b * S * N + (size_t)s * N + n];
-                const uint16_t *w_row = W + (size_t)n * K;
-                const float *x_row = X + (size_t)b * S * K + (size_t)s * K;
+                float sum = O[(uint64_t)b * S * N + (uint64_t)s * N + n];
+                const uint16_t *w_row = W + (uint64_t)n * K;
+                const float *x_row = X + (uint64_t)b * S * K + (uint64_t)s * K;
                 for (uint32_t k = K_main; k < K; ++k)
                 {
                     sum += x_row[k] * bf16_to_f32(w_row[k]);
                 }
-                O[(size_t)b * S * N + (size_t)s * N + n] = sum;
+                O[(uint64_t)b * S * N + (uint64_t)s * N + n] = sum;
             }
         }
     }

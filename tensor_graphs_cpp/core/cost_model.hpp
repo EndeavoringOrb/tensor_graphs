@@ -106,7 +106,7 @@ struct CostModel
     struct ModelKey
     {
         KernelId kernelId;
-        size_t numInputs;
+        uint64_t numInputs;
         bool operator==(const ModelKey &o) const
         {
             return kernelId == o.kernelId && numInputs == o.numInputs;
@@ -115,9 +115,9 @@ struct CostModel
 
     struct ModelKeyHash
     {
-        size_t operator()(const ModelKey &k) const
+        uint64_t operator()(const ModelKey &k) const
         {
-            return KernelIdHash()(k.kernelId) ^ (std::hash<size_t>()(k.numInputs) << 1);
+            return KernelIdHash()(k.kernelId) ^ (std::hash<uint64_t>()(k.numInputs) << 1);
         }
     };
 
@@ -219,7 +219,7 @@ struct CostModel
             if (valid && weights.size() == features.size())
             {
                 double y = 0.0;
-                for (size_t i = 0; i < weights.size(); ++i)
+                for (uint64_t i = 0; i < weights.size(); ++i)
                 {
                     double val = features[i];
                     if (scale[i] > 0)
@@ -237,7 +237,7 @@ struct CostModel
 
     std::unordered_map<KernelId, std::vector<Record>> records;
     std::unordered_map<ModelKey, LinearModel, ModelKeyHash> models;
-    std::unordered_set<size_t> loggedCalls;
+    std::unordered_set<uint64_t> loggedCalls;
     std::ofstream callFile;
     std::mutex logMtx;
     bool doneWarning = false;
@@ -293,7 +293,7 @@ struct CostModel
         r.runTime = 0.0f;
 
         std::string callStr = serializeToString(r);
-        size_t callHash = std::hash<std::string>{}(callStr);
+        uint64_t callHash = std::hash<std::string>{}(callStr);
 
         std::lock_guard<std::mutex> lock(logMtx);
         if (loggedCalls.find(callHash) == loggedCalls.end())
@@ -329,7 +329,7 @@ struct CostModel
         features.push_back(inElements);
 
         // Expand per input details
-        for (size_t i = 0; i < inShapes.size(); ++i)
+        for (uint64_t i = 0; i < inShapes.size(); ++i)
         {
             double elements = static_cast<double>(countElements(inShapes[i]));
             double bytes = elements * getDTypeSize(inDTypes[i]);

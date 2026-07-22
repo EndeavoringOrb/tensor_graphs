@@ -35,7 +35,7 @@ inline void runCopyTo_CUDA_CPU(const KernelContext &ctx)
 
     uint64_t numElements = countElements(ctx.inViews[0].getShape());
     uint64_t elemSize = getDTypeSize(ctx.inViews[0].dtype);
-    size_t bytes = numElements * elemSize;
+    uint64_t bytes = numElements * elemSize;
 
     cudaError_t err = cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
     if (err != cudaSuccess)

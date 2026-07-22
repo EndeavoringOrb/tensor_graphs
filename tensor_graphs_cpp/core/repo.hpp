@@ -12,7 +12,7 @@
 
 struct RefMetaEntry
 {
-    uint32_t logicalId;
+    LogicalId logicalId;
     uint64_t offset;
     uint64_t sizeBytes;
     DType dtype;
@@ -37,10 +37,10 @@ inline void tg_deserialize(BinaryReader &br, RefMetaEntry &val)
     br.read(val.shape);
 }
 
-inline std::string computeGraphHash(const Graph &graph, const std::vector<uint32_t> &rootIds)
+inline std::string computeGraphHash(const Graph &graph, const std::vector<LogicalId> &rootIds)
 {
-    std::unordered_map<uint32_t, std::string> memo;
-    std::function<std::string(uint32_t)> hashNode = [&](uint32_t id)
+    std::unordered_map<LogicalId, std::string> memo;
+    std::function<std::string(LogicalId)> hashNode = [&](LogicalId id)
     {
         if (memo.count(id))
             return memo[id];
@@ -54,12 +54,12 @@ inline std::string computeGraphHash(const Graph &graph, const std::vector<uint32
         }
         sha.update(":");
         sha.update(toString(n.dtype));
-        if (n.opType == OpType::INPUT && n.storageType == StorageType::PERSISTENT && n.backend == Backend::CPU && graph.constantStaging.count(id))
+        if (graph.constantStaging.count(id))
         {
             sha.update(":");
             sha.update(n.contentHash);
         }
-        for (uint32_t pid : n.child_ids)
+        for (LogicalId pid : n.child_ids)
         {
             sha.update(":");
             sha.update(hashNode(pid));
@@ -69,7 +69,7 @@ inline std::string computeGraphHash(const Graph &graph, const std::vector<uint32
     };
 
     SHA256 finalSha;
-    for (uint32_t r : rootIds)
+    for (LogicalId r : rootIds)
     {
         finalSha.update(hashNode(r));
     }
@@ -81,7 +81,7 @@ class Repo
     std::string metaPath;
     std::string dataPath;
     std::string graphHash;
-    std::unordered_map<uint32_t, RefMetaEntry> entries;
+    std::unordered_map<LogicalId, RefMetaEntry> entries;
     std::ofstream dataOut;
     std::ofstream metaOut;
     mutable std::ifstream dataIn;
@@ -143,12 +143,12 @@ public:
 
     bool isValid() const { return valid; }
 
-    bool has(uint32_t logicalId) const
+    bool has(LogicalId logicalId) const
     {
         return entries.count(logicalId) > 0;
     }
 
-    std::vector<uint8_t> read(uint32_t logicalId) const
+    std::vector<uint8_t> read(LogicalId logicalId) const
     {
         if (!has(logicalId))
             return {};
@@ -159,7 +159,7 @@ public:
         return data;
     }
 
-    void write(uint32_t logicalId, const TensorNode &node, const void *data, uint64_t sizeBytes)
+    void write(LogicalId logicalId, const TensorNode &node, const void *data, uint64_t sizeBytes)
     {
         if (readOnly || !valid)
             return;

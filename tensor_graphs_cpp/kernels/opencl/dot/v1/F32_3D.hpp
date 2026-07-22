@@ -38,11 +38,11 @@ inline void runDotF32_3D_OpenCL_v1(const KernelContext &ctx)
     clSetKernelArg(k, 5, sizeof(uint64_t), &K);
     clSetKernelArg(k, 6, sizeof(uint64_t), &N);
 
-    size_t local_work_size[3] = {16, 16, 1};
-    size_t global_work_size[3] = {
+    uint64_t local_work_size[3] = {16, 16, 1};
+    uint64_t global_work_size[3] = {
         ((N + local_work_size[0] - 1) / local_work_size[0]) * local_work_size[0],
         ((M + local_work_size[1] - 1) / local_work_size[1]) * local_work_size[1],
-        (size_t)B_count};
+        (uint64_t)B_count};
 
     cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 3, nullptr, global_work_size, local_work_size, 0, nullptr, nullptr);
     if (err != CL_SUCCESS)

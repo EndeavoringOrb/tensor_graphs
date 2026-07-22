@@ -164,12 +164,12 @@ inline bool matchMoETopKFusedGEMM_StreamingStorage_v2(
 // Portable positional disk read (renamed to avoid ODR collision with v1)
 // ---------------------------------------------------------------------------
 static inline bool moeTopK_v2_readFromFileAtOffset(
-    int fd, uint64_t offset, void *buf, size_t bytes)
+    int fd, uint64_t offset, void *buf, uint64_t bytes)
 {
     if (bytes == 0)
         return true;
     uint8_t *p = static_cast<uint8_t *>(buf);
-    size_t remaining = bytes;
+    uint64_t remaining = bytes;
     uint64_t cur = offset;
 
 #ifdef TG_OS_WINDOWS
@@ -182,7 +182,7 @@ static inline bool moeTopK_v2_readFromFileAtOffset(
         ov.Offset = static_cast<DWORD>(cur & 0xFFFFFFFFull);
         ov.OffsetHigh = static_cast<DWORD>((cur >> 32) & 0xFFFFFFFFull);
         DWORD toRead = static_cast<DWORD>(
-            std::min<size_t>(remaining, 0x40000000ull));
+            std::min<uint64_t>(remaining, 0x40000000ull));
         DWORD bytesRead = 0;
         if (!ReadFile(hFile, p, toRead, &bytesRead, &ov))
             return false;
@@ -196,12 +196,12 @@ static inline bool moeTopK_v2_readFromFileAtOffset(
 #else
     while (remaining > 0)
     {
-        ssize_t n = pread(fd, p, remaining, cur);
+        suint64_t n = pread(fd, p, remaining, cur);
         if (n <= 0)
             return false;
         p += n;
         cur += n;
-        remaining -= static_cast<size_t>(n);
+        remaining -= static_cast<uint64_t>(n);
     }
     return true;
 #endif
@@ -375,7 +375,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
     const uint64_t dn_expert_bytes = static_cast<uint64_t>(H) * I * sizeof(uint16_t);
 
     // Zero the output
-    std::memset(Out, 0, static_cast<size_t>(S) * H * sizeof(float));
+    std::memset(Out, 0, static_cast<uint64_t>(S) * H * sizeof(float));
 
     // -------- Phase 0: Convert X fp32 -> bf16 (once per token) --------
     //
@@ -383,7 +383,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
     // Reused across ALL experts and ALL output rows — pays for itself many
     // times over by avoiding repeated fp32 reads in the GEMM inner loop.
     // Stored as uint16_t to match the existing codebase convention.
-    std::vector<uint16_t> X_bf16(static_cast<size_t>(S) * H);
+    std::vector<uint16_t> X_bf16(static_cast<uint64_t>(S) * H);
     {
         const float *x_src = X;
         uint16_t *x_dst = X_bf16.data();
@@ -440,7 +440,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
         num_threads = 1;
 
     std::vector<std::vector<float>> thread_acc(num_threads,
-                                               std::vector<float>(static_cast<size_t>(S) * H, 0.0f));
+                                               std::vector<float>(static_cast<uint64_t>(S) * H, 0.0f));
 
     auto worker = [&](uint32_t tid, uint32_t start, uint32_t end)
     {
@@ -609,7 +609,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
     {
         // Single-thread: just memcpy the accumulator (no reduction needed)
         std::memcpy(Out, thread_acc[0].data(),
-                    static_cast<size_t>(S) * H * sizeof(float));
+                    static_cast<uint64_t>(S) * H * sizeof(float));
     }
 }
 

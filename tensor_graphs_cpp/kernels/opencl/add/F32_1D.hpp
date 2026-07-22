@@ -26,8 +26,8 @@ inline void runAddF32_OpenCL_1D(const KernelContext &ctx)
     OpenCL::setArgBuffer(k, 2, ctx.cl_outputs[0]);
     clSetKernelArg(k, 3, sizeof(uint64_t), &n);
 
-    size_t local_work_size = 256;
-    size_t global_work_size = ((n + local_work_size - 1) / local_work_size) * local_work_size;
+    uint64_t local_work_size = 256;
+    uint64_t global_work_size = ((n + local_work_size - 1) / local_work_size) * local_work_size;
     cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0, nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Add_F32_1D");

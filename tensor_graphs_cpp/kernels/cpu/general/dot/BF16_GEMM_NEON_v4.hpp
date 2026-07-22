@@ -74,7 +74,7 @@ inline void runBF16GEMM_NEON_v4(const KernelContext &ctx)
     // ====== Pack X into BFMMLA-friendly layout (once) ======
     // For each M-panel (8 rows): [K_quads][4 a-vecs][8 bf16]
     //   a-vec[ai] = [X(m+2ai,k..k+3), X(m+2ai+1,k..k+3)]   (truncate f32->bf16)
-    std::vector<uint16_t> X_packed((size_t)M_main * K_main);
+    std::vector<uint16_t> X_packed((uint64_t)M_main * K_main);
     {
         uint32_t nt = std::min(num_threads, M_panels);
         std::vector<std::thread> packers;
@@ -85,13 +85,13 @@ inline void runBF16GEMM_NEON_v4(const KernelContext &ctx)
             if (s >= e) break;
             packers.emplace_back([=, &X_packed]() {
                 for (uint32_t mp = s; mp < e; ++mp) {
-                    uint16_t* dst = X_packed.data() + (size_t)mp * MR * K_main;
+                    uint16_t* dst = X_packed.data() + (uint64_t)mp * MR * K_main;
                     uint32_t m0 = mp * MR;
                     for (uint32_t kq = 0; kq < K_quads; ++kq) {
                         uint32_t k = kq * KR;
                         for (uint32_t ai = 0; ai < MR / 2; ++ai) {
-                            float32x4_t r0 = vld1q_f32(X + (size_t)(m0 + ai*2)     * K + k);
-                            float32x4_t r1 = vld1q_f32(X + (size_t)(m0 + ai*2 + 1) * K + k);
+                            float32x4_t r0 = vld1q_f32(X + (uint64_t)(m0 + ai*2)     * K + k);
+                            float32x4_t r1 = vld1q_f32(X + (uint64_t)(m0 + ai*2 + 1) * K + k);
                             uint16x4_t b0 = vshrn_n_u32(vreinterpretq_u32_f32(r0), 16);
                             uint16x4_t b1 = vshrn_n_u32(vreinterpretq_u32_f32(r1), 16);
                             vst1q_u16(dst, vcombine_u16(b0, b1));
@@ -116,7 +116,7 @@ inline void runBF16GEMM_NEON_v4(const KernelContext &ctx)
             uint32_t e = std::min(s + per, N_panels);
             if (s >= e) break;
             workers.emplace_back([=, &X_packed]() {
-                std::vector<uint16_t> W_panel((size_t)K_main * NR); // ~48 KB, fits L1
+                std::vector<uint16_t> W_panel((uint64_t)K_main * NR); // ~48 KB, fits L1
 
                 for (uint32_t np = s; np < e; ++np) {
                     uint32_t n0 = np * NR;
@@ -128,21 +128,21 @@ inline void runBF16GEMM_NEON_v4(const KernelContext &ctx)
                         uint32_t k = kq * KR;
                         for (uint32_t bi = 0; bi < NR / 2; ++bi) {
                             uint32_t n = n0 + bi * 2;
-                            wp[0] = W[(size_t)k     * N + n];
-                            wp[1] = W[(size_t)(k+1) * N + n];
-                            wp[2] = W[(size_t)(k+2) * N + n];
-                            wp[3] = W[(size_t)(k+3) * N + n];
-                            wp[4] = W[(size_t)k     * N + n + 1];
-                            wp[5] = W[(size_t)(k+1) * N + n + 1];
-                            wp[6] = W[(size_t)(k+2) * N + n + 1];
-                            wp[7] = W[(size_t)(k+3) * N + n + 1];
+                            wp[0] = W[(uint64_t)k     * N + n];
+                            wp[1] = W[(uint64_t)(k+1) * N + n];
+                            wp[2] = W[(uint64_t)(k+2) * N + n];
+                            wp[3] = W[(uint64_t)(k+3) * N + n];
+                            wp[4] = W[(uint64_t)k     * N + n + 1];
+                            wp[5] = W[(uint64_t)(k+1) * N + n + 1];
+                            wp[6] = W[(uint64_t)(k+2) * N + n + 1];
+                            wp[7] = W[(uint64_t)(k+3) * N + n + 1];
                             wp += 8;
                         }
                     }
 
                     for (uint32_t mp = 0; mp < M_panels; ++mp) {
                         uint32_t m_base = mp * MR;
-                        const uint16_t* A_ptr = X_packed.data() + (size_t)mp * MR * K_main;
+                        const uint16_t* A_ptr = X_packed.data() + (uint64_t)mp * MR * K_main;
                         const uint16_t* B_ptr = W_panel.data();
 
                         // 16 fp32x4 accumulators -> 8x8 output tile (each holds 2x2 chunk)
@@ -187,10 +187,10 @@ inline void runBF16GEMM_NEON_v4(const KernelContext &ctx)
                             float32x4_t row0_b = vcombine_f32(vget_low_f32(v2),  vget_low_f32(v3));
                             float32x4_t row1_a = vcombine_f32(vget_high_f32(v0), vget_high_f32(v1));
                             float32x4_t row1_b = vcombine_f32(vget_high_f32(v2), vget_high_f32(v3));
-                            vst1q_f32(Out + (size_t)r0     * N + n0,     row0_a);
-                            vst1q_f32(Out + (size_t)r0     * N + n0 + 4, row0_b);
-                            vst1q_f32(Out + (size_t)(r0+1) * N + n0,     row1_a);
-                            vst1q_f32(Out + (size_t)(r0+1) * N + n0 + 4, row1_b);
+                            vst1q_f32(Out + (uint64_t)r0     * N + n0,     row0_a);
+                            vst1q_f32(Out + (uint64_t)r0     * N + n0 + 4, row0_b);
+                            vst1q_f32(Out + (uint64_t)(r0+1) * N + n0,     row1_a);
+                            vst1q_f32(Out + (uint64_t)(r0+1) * N + n0 + 4, row1_b);
                         };
 
                         store_pair(0, c00, c01, c02, c03);

@@ -50,7 +50,7 @@ namespace Debug
         if (node.backend == Backend::CUDA)
         {
             uint64_t maxOffset = 0;
-            for (size_t i = 0; i < view.getShape().size(); ++i)
+            for (uint64_t i = 0; i < view.getShape().size(); ++i)
             {
                 if (view.getShape()[i] > 0)
                 {
@@ -288,7 +288,7 @@ namespace Debug
                     refInFile.seekg(entry.fileOffset, std::ios::beg);
                     refInFile.read(reinterpret_cast<char *>(refData.data()), entry.numElements * sizeof(float));
 
-                    for (size_t i = 0; i < refData.size(); ++i)
+                    for (uint64_t i = 0; i < refData.size(); ++i)
                     {
                         float diff = std::abs(refData[i] - optData[i]);
                         if (std::isnan(diff))
@@ -334,11 +334,11 @@ namespace Debug
                           << "\n";
 
                 // Print detailed information for all input-related buffers
-                size_t maxInputs = std::max({ctx.inputs.size(), ctx.inViews.size(), ctx.fd.size(), ctx.cl_inputs.size()});
+                uint64_t maxInputs = std::max({ctx.inputs.size(), ctx.inViews.size(), ctx.fd.size(), ctx.cl_inputs.size()});
                 if (maxInputs > 0)
                 {
                     std::cout << "  Inputs:\n";
-                    for (size_t i = 0; i < maxInputs; ++i)
+                    for (uint64_t i = 0; i < maxInputs; ++i)
                     {
                         std::cout << "    [" << i << "] ";
 
@@ -372,11 +372,11 @@ namespace Debug
                 }
 
                 // Print detailed information for all output-related buffers
-                size_t maxOutputs = std::max({ctx.outputs.size(), ctx.outViews.size(), ctx.cl_outputs.size()});
+                uint64_t maxOutputs = std::max({ctx.outputs.size(), ctx.outViews.size(), ctx.cl_outputs.size()});
                 if (maxOutputs > 0)
                 {
                     std::cout << "  Outputs:\n";
-                    for (size_t i = 0; i < maxOutputs; ++i)
+                    for (uint64_t i = 0; i < maxOutputs; ++i)
                     {
                         std::cout << "    [" << i << "] ";
                         if (i < ctx.outputs.size())

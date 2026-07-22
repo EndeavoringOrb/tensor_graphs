@@ -39,7 +39,7 @@ inline void runConcatF32_Fast(const KernelContext &ctx)
             uint32_t o_end = std::min(o_start + chunk, (uint32_t)outer);
             for (uint32_t o = o_start; o < o_end; ++o) {
                 uint64_t out_axis_offset = 0;
-                for (size_t n = 0; n < ctx.inputs.size() - 1; ++n) {
+                for (uint64_t n = 0; n < ctx.inputs.size() - 1; ++n) {
                     uint32_t axis_dim = ctx.inViews[n].getShape()[axis];
                     const float *src = static_cast<const float *>(ctx.inputs[n]) + (o * axis_dim * inner);
                     float *dst = out_ptr + (o * out_shape[axis] * inner) + (out_axis_offset * inner);

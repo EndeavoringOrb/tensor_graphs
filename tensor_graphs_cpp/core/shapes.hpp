@@ -10,10 +10,10 @@ inline std::vector<uint32_t> coordsFromFlatIndex(uint64_t flatIndex, const std::
     uint64_t temp = flatIndex;
     for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
     {
-        if (shape[static_cast<size_t>(i)] == 0)
+        if (shape[static_cast<uint64_t>(i)] == 0)
             return coords;
-        coords[static_cast<size_t>(i)] = static_cast<uint32_t>(temp % shape[static_cast<size_t>(i)]);
-        temp /= shape[static_cast<size_t>(i)];
+        coords[static_cast<uint64_t>(i)] = static_cast<uint32_t>(temp % shape[static_cast<uint64_t>(i)]);
+        temp /= shape[static_cast<uint64_t>(i)];
     }
     return coords;
 }
@@ -24,8 +24,8 @@ inline uint64_t flatIndexFromCoords(const std::vector<uint32_t> &coords, const s
     uint64_t stride = 1;
     for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i)
     {
-        flatIndex += static_cast<uint64_t>(coords[static_cast<size_t>(i)]) * stride;
-        stride *= shape[static_cast<size_t>(i)];
+        flatIndex += static_cast<uint64_t>(coords[static_cast<uint64_t>(i)]) * stride;
+        stride *= shape[static_cast<uint64_t>(i)];
     }
     return flatIndex;
 }
@@ -77,7 +77,7 @@ inline void getFlatBounds(const Region &region, const std::vector<uint32_t> &sha
     }
     flat_start = 0;
     uint64_t flat_stop_minus_1 = 0;
-    for (size_t i = 0; i < region.region.size(); ++i)
+    for (uint64_t i = 0; i < region.region.size(); ++i)
     {
         flat_start += region.region[i].start * strides[i];
         flat_stop_minus_1 += (region.region[i].stop - 1) * strides[i];
@@ -103,7 +103,7 @@ inline Region unravelFlatBounds(uint64_t flat_start, uint64_t flat_stop, const s
 
     Region region;
     bool found_diff = false;
-    for (size_t i = 0; i < shape.size(); ++i)
+    for (uint64_t i = 0; i < shape.size(); ++i)
     {
         if (found_diff)
         {
@@ -147,7 +147,7 @@ inline Region mapSliceRegionForward(const Region &region, const std::vector<uint
                                     const std::vector<int32_t> &steps)
 {
     Region out;
-    for (size_t d = 0; d < shape.size(); ++d)
+    for (uint64_t d = 0; d < shape.size(); ++d)
     {
         int32_t start = d < starts.size() ? starts[d] : 0;
         int32_t end = d < ends.size() ? ends[d] : static_cast<int32_t>(shape[d]);
@@ -192,7 +192,7 @@ inline Region mapSliceRegionBackward(const Region &region, const std::vector<uin
                                      const std::vector<int32_t> &steps)
 {
     Region out;
-    for (size_t d = 0; d < shape.size(); ++d)
+    for (uint64_t d = 0; d < shape.size(); ++d)
     {
         int32_t start = d < starts.size() ? starts[d] : 0;
         int32_t end = d < ends.size() ? ends[d] : static_cast<int32_t>(shape[d]);
@@ -272,8 +272,8 @@ struct ShapePropagator
         {
             const auto &s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             const auto &s1 = graph.getNode(graph.getNode(nodeId).child_ids[1]).getShape();
-            size_t r0 = s0.size();
-            size_t r1 = s1.size();
+            uint64_t r0 = s0.size();
+            uint64_t r1 = s1.size();
 
             if (r0 != r1)
             {
@@ -338,9 +338,9 @@ struct ShapePropagator
                 axis += s0.size();
 
             std::vector<uint32_t> new_shape;
-            for (size_t i = 0; i < s0.size(); ++i)
+            for (uint64_t i = 0; i < s0.size(); ++i)
             {
-                if (i == (size_t)axis)
+                if (i == (uint64_t)axis)
                     new_shape.push_back(1);
                 else
                     new_shape.push_back(s0[i]);
@@ -354,13 +354,13 @@ struct ShapePropagator
             auto target_dims = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1]);
             uint64_t total_vol = countElements(s0);
             uint64_t known_vol = 1;
-            for (size_t i = 0; i < target_dims.size(); ++i)
+            for (uint64_t i = 0; i < target_dims.size(); ++i)
             {
                 if (target_dims[i] != -1)
                     known_vol *= target_dims[i];
             }
             std::vector<uint32_t> out_shape(target_dims.size());
-            for (size_t i = 0; i < target_dims.size(); ++i)
+            for (uint64_t i = 0; i < target_dims.size(); ++i)
             {
                 if (target_dims[i] == -1)
                     out_shape[i] = total_vol / known_vol;
@@ -375,14 +375,14 @@ struct ShapePropagator
             auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             auto dims = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1]);
             std::vector<uint32_t> out_shape(dims.size());
-            for (size_t i = 0; i < dims.size(); ++i)
+            for (uint64_t i = 0; i < dims.size(); ++i)
             {
                 out_shape[i] = s0[dims[i]];
             }
             graph.getNode(nodeId).setShape(out_shape);
 
             auto parentStrides = graph.getNode(graph.getNode(nodeId).child_ids[0]).strides;
-            for (size_t i = 0; i < dims.size(); ++i)
+            for (uint64_t i = 0; i < dims.size(); ++i)
             {
                 graph.getNode(nodeId).strides[i] = parentStrides[dims[i]];
             }
@@ -393,7 +393,7 @@ struct ShapePropagator
             auto data_shape = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             auto idx_shape = graph.getNode(graph.getNode(nodeId).child_ids[1]).getShape();
             std::vector<uint32_t> out_shape = idx_shape;
-            for (size_t i = 1; i < data_shape.size(); ++i)
+            for (uint64_t i = 1; i < data_shape.size(); ++i)
             {
                 out_shape.push_back(data_shape[i]);
             }
@@ -411,7 +411,7 @@ struct ShapePropagator
 
             std::vector<uint32_t> out_shape = s0;
             uint32_t total_dim = s0[axis];
-            for (size_t i = 1; i < graph.getNode(nodeId).child_ids.size() - 1; ++i)
+            for (uint64_t i = 1; i < graph.getNode(nodeId).child_ids.size() - 1; ++i)
             {
                 auto si = graph.getNode(graph.getNode(nodeId).child_ids[i]).getShape();
                 total_dim += si[axis];
@@ -433,7 +433,7 @@ struct ShapePropagator
 
             auto parentStrides = graph.getNode(graph.getNode(nodeId).child_ids[0]).strides;
             graph.getNode(nodeId).strides = parentStrides;
-            for (size_t d = 0; d < out_shape.size(); ++d)
+            for (uint64_t d = 0; d < out_shape.size(); ++d)
             {
                 if (s0[d] != out_shape[d])
                 {
@@ -446,7 +446,7 @@ struct ShapePropagator
         {
             auto target_dims = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1]);
             std::vector<uint32_t> out_shape(target_dims.size());
-            for (size_t i = 0; i < target_dims.size(); ++i)
+            for (uint64_t i = 0; i < target_dims.size(); ++i)
             {
                 out_shape[i] = target_dims[i];
             }
@@ -473,7 +473,7 @@ struct ShapePropagator
             auto ends = graph.getConstantInt32(graph.getNode(nodeId).child_ids[2]);
             auto steps = graph.getConstantInt32(graph.getNode(nodeId).child_ids[3]);
             std::vector<uint32_t> out_shape(s0.size());
-            for (size_t i = 0; i < s0.size(); ++i)
+            for (uint64_t i = 0; i < s0.size(); ++i)
             {
                 int32_t start = i < starts.size() ? starts[i] : 0;
                 int32_t end = i < ends.size() ? ends[i] : s0[i];
@@ -497,7 +497,7 @@ struct ShapePropagator
             graph.getNode(nodeId).setShape(out_shape);
 
             auto parentStrides = graph.getNode(graph.getNode(nodeId).child_ids[0]).strides;
-            for (size_t i = 0; i < s0.size(); ++i)
+            for (uint64_t i = 0; i < s0.size(); ++i)
             {
                 int32_t start = i < starts.size() ? starts[i] : 0;
                 int32_t step = i < steps.size() ? steps[i] : 1;
@@ -528,9 +528,9 @@ struct ShapePropagator
             int32_t k = k_vec[0];
 
             std::vector<uint32_t> new_shape;
-            for (size_t i = 0; i < s0.size(); ++i)
+            for (uint64_t i = 0; i < s0.size(); ++i)
             {
-                if (i == (size_t)axis)
+                if (i == (uint64_t)axis)
                     new_shape.push_back((uint32_t)k);
                 else
                     new_shape.push_back(s0[i]);
@@ -581,7 +581,7 @@ struct ShapePropagator
     std::vector<std::vector<Region>> backwardElementwise(const TensorNode &node, const std::vector<Region> &outputRegions)
     {
         std::vector<std::vector<Region>> inputRegions(node.child_ids.size());
-        for (size_t i = 0; i < node.child_ids.size(); ++i)
+        for (uint64_t i = 0; i < node.child_ids.size(); ++i)
         {
             inputRegions[i] = mergeRegions(outputRegions);
         }
@@ -603,7 +603,7 @@ struct ShapePropagator
         std::vector<std::vector<Region>> res(node.child_ids.size());
         if (outputRegions.empty())
             return res;
-        for (size_t i = 0; i < node.child_ids.size(); ++i)
+        for (uint64_t i = 0; i < node.child_ids.size(); ++i)
         {
             res[i] = makeFull(graph.getNode(node.child_ids[i]).getShape());
         }
@@ -768,7 +768,7 @@ struct ShapePropagator
 
             uint64_t new_vol = 1;
             Region exact_box;
-            for (size_t d = 0; d < outShape.size(); ++d)
+            for (uint64_t d = 0; d < outShape.size(); ++d)
             {
                 exact_box.region.push_back({min_coords[d], max_coords[d] + 1});
                 new_vol *= (max_coords[d] + 1 - min_coords[d]);
@@ -847,7 +847,7 @@ struct ShapePropagator
 
             uint64_t new_vol = 1;
             Region exact_box;
-            for (size_t d = 0; d < sA.size(); ++d)
+            for (uint64_t d = 0; d < sA.size(); ++d)
             {
                 exact_box.region.push_back({min_coords[d], max_coords[d] + 1});
                 new_vol *= (max_coords[d] + 1 - min_coords[d]);
@@ -882,7 +882,7 @@ struct ShapePropagator
         for (const auto &inReg : rA)
         {
             Region outBox;
-            for (size_t d = 0; d < sA.size(); ++d)
+            for (uint64_t d = 0; d < sA.size(); ++d)
             {
                 if ((int32_t)d == axis)
                 {
@@ -919,7 +919,7 @@ struct ShapePropagator
         for (const auto &outReg : outputRegions)
         {
             Region inBox;
-            for (size_t d = 0; d < sA.size(); ++d)
+            for (uint64_t d = 0; d < sA.size(); ++d)
             {
                 if ((int32_t)d == axis)
                 {
@@ -970,7 +970,7 @@ struct ShapePropagator
 
         auto dims = graph.getConstantInt32(node.child_ids[1]);
         std::vector<int32_t> invDims(dims.size());
-        for (size_t i = 0; i < dims.size(); ++i)
+        for (uint64_t i = 0; i < dims.size(); ++i)
         {
             invDims[dims[i]] = i;
         }
@@ -1117,7 +1117,7 @@ struct ShapePropagator
                 if (idxFlat >= idxValues.size())
                     continue;
 
-                int32_t idxValue = idxValues[static_cast<size_t>(idxFlat)];
+                int32_t idxValue = idxValues[static_cast<uint64_t>(idxFlat)];
                 if (idxValue < 0 || static_cast<uint32_t>(idxValue) >= dataShape[0])
                     continue;
 
@@ -1159,7 +1159,7 @@ struct ShapePropagator
     std::vector<Region> forwardConcat(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
     {
         bool allClean = true;
-        for (size_t i = 0; i < parentRegions.size() - 1; ++i)
+        for (uint64_t i = 0; i < parentRegions.size() - 1; ++i)
         {
             if (!parentRegions[i].empty())
             {
@@ -1177,14 +1177,14 @@ struct ShapePropagator
         std::vector<Region> outBoxes;
 
         uint32_t current_offset = 0;
-        for (size_t i = 0; i < node.child_ids.size() - 1; ++i)
+        for (uint64_t i = 0; i < node.child_ids.size() - 1; ++i)
         {
             const auto &pShape = graph.getNode(node.child_ids[i]).getShape();
             const auto &pReg = parentRegions[i];
             for (const auto &region : pReg)
             {
                 Region shifted = region;
-                if (shifted.region.size() > static_cast<size_t>(axis))
+                if (shifted.region.size() > static_cast<uint64_t>(axis))
                 {
                     shifted.region[axis].start += current_offset;
                     shifted.region[axis].stop += current_offset;
@@ -1209,7 +1209,7 @@ struct ShapePropagator
             axis += rank;
 
         uint32_t current_offset = 0;
-        for (size_t i = 0; i < node.child_ids.size() - 1; ++i)
+        for (uint64_t i = 0; i < node.child_ids.size() - 1; ++i)
         {
             const auto &pShape = graph.getNode(node.child_ids[i]).getShape();
             uint32_t in_dim = pShape[axis];
@@ -1218,7 +1218,7 @@ struct ShapePropagator
             std::vector<Region> inBoxes;
             for (const auto &outReg : outputRegions)
             {
-                if (outReg.region.size() <= static_cast<size_t>(axis))
+                if (outReg.region.size() <= static_cast<uint64_t>(axis))
                     continue;
                 uint32_t ov_start = std::max(outReg.region[axis].start, current_offset);
                 uint32_t ov_stop = std::min(outReg.region[axis].stop, in_end);
@@ -1425,7 +1425,7 @@ struct ShapePropagator
             for (const auto &inReg : rA)
             {
                 Region outBox;
-                for (size_t d = 0; d < sA.size(); ++d)
+                for (uint64_t d = 0; d < sA.size(); ++d)
                 {
                     if ((int32_t)d == axis)
                     {
@@ -1515,7 +1515,7 @@ struct ShapePropagator
             for (const auto &outReg : outputRegions)
             {
                 Region inBox;
-                for (size_t d = 0; d < sA.size(); ++d)
+                for (uint64_t d = 0; d < sA.size(); ++d)
                 {
                     if ((int32_t)d == axis)
                     {

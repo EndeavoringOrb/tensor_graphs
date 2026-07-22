@@ -22,7 +22,7 @@ public:
         disableTimer = false;
 #endif
         ProgressTimer timer(nInst, "running ", disableTimer);
-        for (size_t idx = 0; idx < nInst; ++idx)
+        for (uint64_t idx = 0; idx < nInst; ++idx)
         {
             const OpInstruction &inst = compiled.instructions[idx];
 
@@ -34,7 +34,7 @@ public:
 
             KernelContext ctx;
 
-            for (size_t i = 0; i < inst.inputNodeIds.size(); ++i) {
+            for (uint64_t i = 0; i < inst.inputNodeIds.size(); ++i) {
                 const TensorNode &inNode = compiled.nodesMap.at(inst.inputNodeIds[i]);
                 const ParallelBuffer &inBuf = inst.inBuffers[i];
                 DeviceBuffer* inBufObj = memManager.getBuffer(inBuf.mem_space);

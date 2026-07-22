@@ -6,11 +6,17 @@
 #include "core/timer.hpp"
 #include <unordered_set>
 
+std::string toString(const MemSpace &mem_space) {
+    std::stringstream ss;
+    ss << "MemSpace(idx=" << mem_space.idx << ", type=" << mem_space.type << ")";
+    return ss.str();
+}
+
 inline std::string toString(const std::vector<uint32_t> &shape)
 {
     std::stringstream ss;
     ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
+    for (uint64_t i = 0; i < shape.size(); ++i)
     {
         if (i > 0)
             ss << ", ";
@@ -24,7 +30,7 @@ inline std::string toString(const std::vector<int32_t> &shape)
 {
     std::stringstream ss;
     ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
+    for (uint64_t i = 0; i < shape.size(); ++i)
     {
         if (i > 0)
             ss << ", ";
@@ -38,7 +44,7 @@ inline std::string toString(const std::vector<uint64_t> &shape)
 {
     std::stringstream ss;
     ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
+    for (uint64_t i = 0; i < shape.size(); ++i)
     {
         if (i > 0)
             ss << ", ";
@@ -52,7 +58,7 @@ inline std::string toString(const std::vector<int64_t> &shape)
 {
     std::stringstream ss;
     ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
+    for (uint64_t i = 0; i < shape.size(); ++i)
     {
         if (i > 0)
             ss << ", ";
@@ -99,7 +105,7 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
     }
     else
     {
-        for (size_t i = 0; i < node.child_ids.size(); ++i)
+        for (uint64_t i = 0; i < node.child_ids.size(); ++i)
         {
             LogicalId pid = node.child_ids[i];
             if (graph.hasNode(pid))
@@ -181,7 +187,7 @@ inline Region intersectRegions(const Region &r1, const Region &r2)
         return Region(); // Rank mismatch
 
     Region result;
-    for (size_t i = 0; i < r1.region.size(); ++i)
+    for (uint64_t i = 0; i < r1.region.size(); ++i)
     {
         result.region.push_back(intersectDims(r1.region[i], r2.region[i]));
     }
@@ -192,7 +198,7 @@ inline bool regionsMatch(const Region &r1, const Region &r2)
 {
     if (r1.region.size() != r2.region.size())
         return false;
-    for (size_t i = 0; i < r1.region.size(); ++i)
+    for (uint64_t i = 0; i < r1.region.size(); ++i)
     {
         if (r1.region[i].start != r2.region[i].start ||
             r1.region[i].stop != r2.region[i].stop)
@@ -212,7 +218,7 @@ inline bool coversRegion(const Region &outer, const Region &inner)
 {
     if (outer.region.size() != inner.region.size())
         return false;
-    for (size_t i = 0; i < outer.region.size(); i++)
+    for (uint64_t i = 0; i < outer.region.size(); i++)
     {
         if (!coversDim(outer.region[i], inner.region[i]))
             return false;
@@ -247,10 +253,10 @@ inline bool intervalsOverlapOrAdjacent(const Dim &a, const Dim &b)
     return a.stop >= b.start && b.stop >= a.start;
 }
 
-inline std::string regionGroupKeyExcludingDim(const Region &region, size_t excludeDim)
+inline std::string regionGroupKeyExcludingDim(const Region &region, uint64_t excludeDim)
 {
     std::stringstream ss;
-    for (size_t i = 0; i < region.region.size(); ++i)
+    for (uint64_t i = 0; i < region.region.size(); ++i)
     {
         if (i == excludeDim)
             continue;
@@ -259,7 +265,7 @@ inline std::string regionGroupKeyExcludingDim(const Region &region, size_t exclu
     return ss.str();
 }
 
-inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regions, size_t mergeDim)
+inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regions, uint64_t mergeDim)
 {
     if (regions.empty())
         return {};
@@ -278,7 +284,7 @@ inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regio
                   {
                       if (a.region.size() != b.region.size())
                           return a.region.size() < b.region.size();
-                      for (size_t i = 0; i < a.region.size(); ++i)
+                      for (uint64_t i = 0; i < a.region.size(); ++i)
                       {
                           if (i == mergeDim)
                               continue;
@@ -292,7 +298,7 @@ inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regio
                       return a.region[mergeDim].stop < b.region[mergeDim].stop; });
 
         Region current = group.front();
-        for (size_t i = 1; i < group.size(); ++i)
+        for (uint64_t i = 1; i < group.size(); ++i)
         {
             if (intervalsOverlapOrAdjacent(current.region[mergeDim], group[i].region[mergeDim]))
             {
@@ -419,12 +425,12 @@ inline TensorView makeView(const TensorNode &node)
     return view;
 }
 
-inline size_t getRequiredBufferSize(const TensorView &view)
+inline uint64_t getRequiredBufferSize(const TensorView &view)
 {
     if (view.getShape().empty())
         return 1;
-    size_t maxOffset = 0;
-    for (size_t i = 0; i < view.getShape().size(); ++i)
+    uint64_t maxOffset = 0;
+    for (uint64_t i = 0; i < view.getShape().size(); ++i)
     {
         if (view.getShape()[i] > 0)
         {

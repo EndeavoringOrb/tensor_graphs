@@ -140,7 +140,7 @@ int main(int argc, char *argv[])
         }
         return costA < costB; });
 
-    size_t startIdx = (skipCount > (int)toBenchmark.size()) ? toBenchmark.size() : (size_t)std::max(0, skipCount);
+    uint64_t startIdx = (skipCount > (int)toBenchmark.size()) ? toBenchmark.size() : (uint64_t)std::max(0, skipCount);
 
     if (startIdx > 0)
     {
@@ -156,14 +156,14 @@ int main(int argc, char *argv[])
     }
     BinaryWriter bw(outFile);
 
-    for (size_t i = startIdx; i < toBenchmark.size(); ++i)
+    for (uint64_t i = startIdx; i < toBenchmark.size(); ++i)
     {
         Record &r = toBenchmark[i];
         uint64_t kernelId = r.kernelId;
         const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelId);
 
         std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "][";
-        for (size_t bidx = 0; bidx < kernel.backends.size(); ++bidx)
+        for (uint64_t bidx = 0; bidx < kernel.backends.size(); ++bidx)
         {
             if (bidx > 0)
                 std::cout << ",";
@@ -173,14 +173,14 @@ int main(int argc, char *argv[])
                   << " (0x" << std::hex << kernelId << std::dec << ")"
                   << " est " << std::to_string(r.runTime) << " ms\n";
 
-        for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+        for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
         {
             std::cout << "  In  #" << idx << ": dtype=" << toString(r.inputDTypes[idx])
                       << ", shape=" << toString(r.inputShapes[idx])
                       << ", strides=" << toString(r.inputStrides[idx]) << "\n";
         }
 
-        for (size_t idx = 0; idx < r.outputShapes.size(); ++idx)
+        for (uint64_t idx = 0; idx < r.outputShapes.size(); ++idx)
         {
             std::cout << "  Out #" << idx << ": dtype=" << toString(r.outputDTypes[idx])
                       << ", shape=" << toString(r.outputShapes[idx])
@@ -195,14 +195,14 @@ int main(int argc, char *argv[])
         try
         {
             std::vector<TensorNode> dummyInputs(r.inputShapes.size());
-            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+            for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
                 dummyInputs[idx].setShape(r.inputShapes[idx]);
                 dummyInputs[idx].strides = r.inputStrides[idx];
                 dummyInputs[idx].dtype = r.inputDTypes[idx];
 
                 Backend b = Backend::CPU;
-                size_t ruleIdx = idx;
+                uint64_t ruleIdx = idx;
                 if (kernel.isVariadic)
                 {
                     ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;

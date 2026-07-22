@@ -82,7 +82,7 @@ struct HardwareCaps
     bool has_opencl = false; // New
     bool is_adreno = false;  // New
     std::string hw_tag;
-    size_t num_threads = 1;
+    uint64_t num_threads = 1;
 
     static HardwareCaps &get()
     {

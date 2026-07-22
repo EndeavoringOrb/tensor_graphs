@@ -176,11 +176,11 @@ inline bool matchMoETopKFusedGEMM_StreamingStorage(
 // translation unit via cpu_kernels.gen.hpp)
 // ---------------------------------------------------------------------------
 static inline bool moeTopK_readFromFileAtOffset(
-    int fd, uint64_t offset, void *buf, size_t bytes)
+    int fd, uint64_t offset, void *buf, uint64_t bytes)
 {
     if (bytes == 0) return true;
     uint8_t *p = static_cast<uint8_t *>(buf);
-    size_t remaining = bytes;
+    uint64_t remaining = bytes;
     uint64_t cur = offset;
 
 #ifdef TG_OS_WINDOWS
@@ -192,7 +192,7 @@ static inline bool moeTopK_readFromFileAtOffset(
         ov.Offset = static_cast<DWORD>(cur & 0xFFFFFFFFull);
         ov.OffsetHigh = static_cast<DWORD>((cur >> 32) & 0xFFFFFFFFull);
         DWORD toRead = static_cast<DWORD>(
-            std::min<size_t>(remaining, 0x40000000ull));
+            std::min<uint64_t>(remaining, 0x40000000ull));
         DWORD bytesRead = 0;
         if (!ReadFile(hFile, p, toRead, &bytesRead, &ov)) return false;
         if (bytesRead == 0) return false;
@@ -204,11 +204,11 @@ static inline bool moeTopK_readFromFileAtOffset(
 #else
     while (remaining > 0)
     {
-        ssize_t n = pread(fd, p, remaining, cur);
+        suint64_t n = pread(fd, p, remaining, cur);
         if (n <= 0) return false;
         p += n;
         cur += n;
-        remaining -= static_cast<size_t>(n);
+        remaining -= static_cast<uint64_t>(n);
     }
     return true;
 #endif
@@ -359,7 +359,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage(const KernelContext &ctx)
     const uint64_t dn_expert_bytes = static_cast<uint64_t>(H)  * I * sizeof(uint16_t);
 
     // Zero the output
-    std::memset(Out, 0, static_cast<size_t>(S) * H * sizeof(float));
+    std::memset(Out, 0, static_cast<uint64_t>(S) * H * sizeof(float));
 
     // --- Phase 1: Build expert -> users map + precompute prob_sum ---
     //
@@ -415,7 +415,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage(const KernelContext &ctx)
     if (num_threads == 0) num_threads = 1;
 
     std::vector<std::vector<float>> thread_acc(num_threads,
-        std::vector<float>(static_cast<size_t>(S) * H, 0.0f));
+        std::vector<float>(static_cast<uint64_t>(S) * H, 0.0f));
 
     auto worker = [&](uint32_t tid, uint32_t start, uint32_t end)
     {

@@ -107,7 +107,7 @@ struct PatternCacheKey
             return false;
         if (!ignore_output_mem_space && output_mem_space != o.output_mem_space)
             return false;
-        for (size_t i = 0; i < inputs.size(); ++i)
+        for (uint64_t i = 0; i < inputs.size(); ++i)
         {
             if ((!ignore_input_mem_spaces && input_mem_spaces[i] != o.input_mem_spaces[i]) || inputs[i].dtype != o.inputs[i].dtype ||
                 inputs[i].getShape() != o.inputs[i].getShape() || inputs[i].strides != o.inputs[i].strides)
@@ -117,41 +117,6 @@ struct PatternCacheKey
             output.getShape() != o.output.getShape() || output.strides != o.output.strides)
             return false;
         return true;
-    }
-};
-
-struct PatternCacheKeyHash
-{
-    size_t operator()(const PatternCacheKey &k) const
-    {
-        size_t h = 0;
-        auto combine = [&](size_t val)
-        { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
-        combine((size_t)k.pOpType);
-        if (!k.pOpName.empty())
-            combine(std::hash<std::string>()(k.pOpName));
-        combine(k.reference_only);
-        combine(k.ignore_output_mem_space);
-        combine(k.ignore_input_mem_spaces);
-        if (!k.ignore_output_mem_space)
-            combine(k.output_mem_space);
-        for (uint32_t i = 0; i < k.inputs.size(); ++i)
-        {
-            if (!k.ignore_input_mem_spaces)
-                combine(k.input_mem_spaces[i]);
-            auto &in = k.inputs[i];
-            combine((size_t)in.dtype);
-            for (auto s : in.getShape())
-                combine(s);
-            for (auto s : in.strides)
-                combine(s);
-        }
-        combine((size_t)k.output.dtype);
-        for (auto s : k.output.getShape())
-            combine(s);
-        for (auto s : k.output.strides)
-            combine(s);
-        return h;
     }
 };
 
@@ -187,7 +152,7 @@ struct KernelEntry
 
     // Abstracted validity check
     bool matches(const std::vector<TensorNode> &inputs, const TensorNode &output,
-                 bool ignoreInputContig = false) const
+                 bool ignore_input_contig = false) const
     {
         // 1. Check number of inputs
         if (inputs.size() < min_num_inputs || inputs.size() > max_num_inputs)
@@ -196,11 +161,11 @@ struct KernelEntry
         }
 
         // 2. Check input contiguity
-        if (!ignoreInputContig)
+        if (!ignore_input_contig)
         {
-            for (size_t i = 0; i < inputs.size(); ++i)
+            for (uint64_t i = 0; i < inputs.size(); ++i)
             {
-                size_t ruleIdx = std::min(i, requiresContiguous.size() - 1);
+                uint64_t ruleIdx = std::min(i, requiresContiguous.size() - 1);
                 if (requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
                     return false;
             }
@@ -209,9 +174,9 @@ struct KernelEntry
         // 4. Check input dtypes if registered
         if (!dtypes.empty())
         {
-            for (size_t i = 0; i < inputs.size(); ++i)
+            for (uint64_t i = 0; i < inputs.size(); ++i)
             {
-                size_t ruleIdx = std::min(i, dtypes.size() - 1);
+                uint64_t ruleIdx = std::min(i, dtypes.size() - 1);
                 if (inputs[i].dtype != dtypes[ruleIdx])
                     return false;
             }
@@ -235,7 +200,7 @@ public:
         return instance;
     }
 
-    mutable std::unordered_map<PatternCacheKey, std::vector<KernelId>, PatternCacheKeyHash> patternCache;
+    mutable std::unordered_map<PatternCacheKey, std::vector<KernelId>> patternCache;
 
     void setReferenceOnly(bool refOnly) { reference_only_mode = refOnly; }
     const std::unordered_map<KernelId, KernelEntry> &getAllKernels() const { return entries; }
@@ -243,7 +208,7 @@ public:
     std::vector<KernelId> _findMatchingKernelsByPattern(
         const Graph &patternGraph, LogicalId patternRootId,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool reference_only = false, bool ignoreInputContig = false) const
+        bool reference_only = false, bool ignore_input_contig = false) const
     {
         std::vector<KernelId> matches;
         for (const auto &[uid, entry] : entries)
@@ -258,7 +223,7 @@ public:
                 {
                     Graph kGraph;
                     std::vector<LogicalId> kInputs;
-                    for (size_t i = 0; i < entry.min_num_inputs; ++i)
+                    for (uint64_t i = 0; i < entry.min_num_inputs; ++i)
                         kInputs.push_back(kGraph.input(entry.dummyShapes[i], entry.dtypes[i]));
                     LogicalId kRootId = entry.refFactory(kInputs, kGraph);
                     patternMatches = isIsomorphic(patternGraph, patternRootId, kGraph, kRootId);
@@ -286,7 +251,7 @@ public:
             if (!patternMatches)
                 continue;
 
-            if (!entry.matches(inputs, output, ignoreInputContig))
+            if (!entry.matches(inputs, output, ignore_input_contig))
                 continue;
 
             matches.push_back(entry.uid);
@@ -297,13 +262,14 @@ public:
     std::vector<KernelId> findMatchingKernelsByPattern(
         const Graph &patternGraph, LogicalId patternRootId,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool reference_only = false, bool ignoreInputContig = false) const
+        bool reference_only = false, MemSpace output_mem_space, std::vector<MemSpace> input_mem_spaces,
+        bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false, bool ignore_input_contig = false) const
     {
         const TensorNode &rootNode = patternGraph.getNode(patternRootId);
         PatternCacheKey key{
             rootNode.opType, rootNode.opName,
-            reference_only,
-            inputs, output};
+            reference_only, ignore_output_mem_space, ignore_input_mem_spaces,
+            output_mem_space, input_mem_spaces, inputs, output};
 
         auto it = patternCache.find(key);
         if (it != patternCache.end())
@@ -312,7 +278,7 @@ public:
         }
 
         std::vector<KernelId> matches = _findMatchingKernelsByPattern(
-            patternGraph, patternRootId, inputs, output, reference_only, ignoreInputContig);
+            patternGraph, patternRootId, inputs, output, reference_only, ignore_input_contig);
 
         patternCache[key] = matches;
         return matches;
@@ -354,7 +320,7 @@ public:
     std::vector<KernelId> findMatchingKernels(
         OpType op, const std::string &opName,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool reference_only = false, bool ignoreInputContig = false) const
+        bool reference_only = false, bool ignore_input_contig = false) const
     {
         std::vector<KernelId> matches;
         for (const auto &[uid, entry] : entries)
@@ -366,7 +332,7 @@ public:
             if (op == OpType::FUSED && entry.opName != opName)
                 continue;
 
-            if (!entry.matches(inputs, output, ignoreInputContig))
+            if (!entry.matches(inputs, output, ignore_input_contig))
                 continue;
 
             matches.push_back(entry.uid);

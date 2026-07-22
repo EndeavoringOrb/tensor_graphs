@@ -89,7 +89,7 @@ struct Planner
         }
 
         std::map<std::string, uint32_t> ruleMatchCounts;
-        size_t iterations = 0;
+        uint64_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
 #ifdef DEBUG
@@ -147,7 +147,7 @@ private:
     {
         constexpr float EPS = 1e-6f;
 
-        auto isConstantNeeded = [](OpType op, size_t inputIdx, size_t numInputs) -> bool
+        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool
         {
             if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
                 return true;
@@ -233,7 +233,7 @@ private:
                     if (refEntry)
                     {
                         pGraph = std::make_unique<Graph>();
-                        for (size_t k = 0; k < kernel.min_num_inputs; ++k)
+                        for (uint64_t k = 0; k < kernel.min_num_inputs; ++k)
                         {
                             pInputs.push_back(pGraph->input(kernel.dummyShapes[k], kernel.dtypes[k]));
                         }
@@ -241,7 +241,7 @@ private:
                     }
                 }
 
-                for (size_t j = 0; j < enode.getChildren().size(); j++)
+                for (uint64_t j = 0; j < enode.getChildren().size(); j++)
                 {
                     EClassId childEClassId = enode.getChildren()[j];
                     const EClass &childCls = egraph.getEClass(egraph.find(childEClassId));
@@ -276,7 +276,7 @@ private:
                                         break;
                                     curr = pGraph->getNode(curr).child_ids[0];
                                 }
-                                for (size_t k = 0; k < pInputs.size(); ++k)
+                                for (uint64_t k = 0; k < pInputs.size(); ++k)
                                 {
                                     if (pInputs[k] == curr)
                                         return (int)k;
@@ -287,7 +287,7 @@ private:
                             for (const auto &pair : pGraph->nodes)
                             {
                                 const TensorNode &n = pair.second;
-                                for (size_t p_idx = 0; p_idx < n.child_ids.size(); ++p_idx)
+                                for (uint64_t p_idx = 0; p_idx < n.child_ids.size(); ++p_idx)
                                 {
                                     if (isConstantNeeded(n.opType, p_idx, n.child_ids.size()))
                                     {
@@ -376,14 +376,14 @@ private:
             // 2. Prune duplicated nodes to minimize search space bloat
             std::vector<ENodeId> deduped;
             deduped.reserve(validEnodes.size());
-            for (size_t idxA = 0; idxA < validEnodes.size(); ++idxA)
+            for (uint64_t idxA = 0; idxA < validEnodes.size(); ++idxA)
             {
                 ENodeId idA = validEnodes[idxA];
                 const ENode &a = egraph.getENode(idA);
                 const ENodeInfo &ia = enodeInfos[idA.value];
 
                 bool dominated = false;
-                for (size_t idxB = 0; idxB < validEnodes.size(); ++idxB) // TODO: loop from idxA+1 and check both ways
+                for (uint64_t idxB = 0; idxB < validEnodes.size(); ++idxB) // TODO: loop from idxA+1 and check both ways
                 {
                     if (idxA == idxB)
                         continue;
@@ -431,7 +431,7 @@ private:
         }
         EClassId rootEClassId = egraph.find(rootIt->second);
 
-        const size_t numClasses = egraph.getClasses().size();
+        const uint64_t numClasses = egraph.getClasses().size();
 
         std::vector<EClassId> canonicalClasses;
         std::vector<uint32_t> classToBitIdx(numClasses, UINT32_MAX);
@@ -445,8 +445,8 @@ private:
             }
         }
 
-        const size_t numCanonical = canonicalClasses.size();
-        const size_t bitWords = numCanonical == 0 ? 0 : (numCanonical + 63) >> 6;
+        const uint64_t numCanonical = canonicalClasses.size();
+        const uint64_t bitWords = numCanonical == 0 ? 0 : (numCanonical + 63) >> 6;
 
         auto bitTest = [&](const std::vector<uint64_t> &bits, EClassId e_class_id) -> bool
         {
@@ -572,7 +572,7 @@ private:
                             break;
                         }
 
-                        for (size_t w = 0; w < bitWords; ++w)
+                        for (uint64_t w = 0; w < bitWords; ++w)
                         {
                             uint64_t newBits = childOpt.coveredBits[w] & ~candidateBits[w];
                             if (!newBits)
@@ -703,7 +703,7 @@ private:
                         break;
                     }
 
-                    for (size_t w = 0; w < bitWords; ++w)
+                    for (uint64_t w = 0; w < bitWords; ++w)
                     {
                         uint64_t newBits = opt[childEClass.value].coveredBits[w] & ~tempBits[w];
                         if (!newBits)
@@ -1111,7 +1111,7 @@ private:
             if (reg.region.size() == shape.size())
             {
                 isFullRegion = true;
-                for (size_t d = 0; d < shape.size(); ++d)
+                for (uint64_t d = 0; d < shape.size(); ++d)
                 {
                     if (reg.region[d].start != 0 || reg.region[d].stop != shape[d])
                     {
@@ -1155,7 +1155,7 @@ private:
             return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
         };
 
-        for (size_t r = 0; r < regions.size(); ++r)
+        for (uint64_t r = 0; r < regions.size(); ++r)
         {
             const Region &recomputeRegion = regions[r];
 
@@ -1180,11 +1180,11 @@ private:
 
             EClassId slicedEClass;
 
-            if (sourceNode.opType == OpType::INPUT)
+            if (sourceNode.getOpType()== OpType::INPUT)
             {
                 std::vector<uint64_t> sliceStrides = lClass.strides;
 
-                for (size_t d = 0; d < starts.size(); ++d)
+                for (uint64_t d = 0; d < starts.size(); ++d)
                 {
                     int32_t start = starts[d];
                     if (start < 0)
@@ -1222,7 +1222,7 @@ private:
                 std::vector<TensorNode> dummyInputNodes;
                 std::vector<MemSpace> dummyInputMemSpaces;
 
-                for (size_t p_idx = 0; p_idx < sourceNode.child_ids.size(); ++p_idx)
+                for (uint64_t p_idx = 0; p_idx < sourceNode.child_ids.size(); ++p_idx)
                 {
                     LogicalId parentLogicalId = sourceNode.child_ids[p_idx];
                     EClassId E_parent = egraph.find(nodeToEClass.at(parentLogicalId));
@@ -1252,7 +1252,7 @@ private:
                     EClassId pStepsId = addConst(pSteps);
 
                     std::vector<uint64_t> pSliceStrides = pClass.strides;
-                    for (size_t d = 0; d < pStarts.size(); ++d)
+                    for (uint64_t d = 0; d < pStarts.size(); ++d)
                     {
                         int32_t start = pStarts[d];
                         if (start < 0)
@@ -1320,22 +1320,22 @@ private:
                 }
 
                 TensorNode dummyOut;
-                dummyOut.opType = sourceNode.opType;
+                dummyOut.opType = sourceNode.getOpType();
                 dummyOut.opName = sourceNode.opName;
                 dummyOut.setShape(partialShape);
                 dummyOut.dtype = sourceNode.dtype;
                 dummyOut.strides = calcContiguousStrides(partialShape);
 
-                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName, dummyInputNodes, dummyOut, target_mem_space, {cpu}, dummyInputMemSpaces, true);
+                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.getOpType(), sourceNode.opName, dummyInputNodes, dummyOut, target_mem_space, {cpu}, dummyInputMemSpaces, true);
                 if (opRefs.size() == 0)
                 {
-                    Error::throw_err("[Planner.injectPartialPath] couldn't find any slice kernels for op " + toString(sourceNode.opType));
+                    Error::throw_err("[Planner.injectPartialPath] couldn't find any slice kernels for op " + toString(sourceNode.getOpType()));
                 }
 
                 slicedEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space);
                 for (KernelId uid : opRefs)
                 {
-                    ENode sn(uid, sourceNode.opType, sourceNode.opName, slicedInputs, partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space, {cpu});
+                    ENode sn(uid, sourceNode.getOpType(), sourceNode.opName, slicedInputs, partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space, {cpu});
                     egraph.addENode(slicedEClass, sn);
                 }
             }

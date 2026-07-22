@@ -19,7 +19,7 @@ inline void inferViewPermute(TensorNode &node, const std::vector<TensorNode> &in
     auto dims = graph.getConstantInt32(inputs[1].id);
 
     node.strides.resize(dims.size());
-    for (size_t i = 0; i < dims.size(); ++i)
+    for (uint64_t i = 0; i < dims.size(); ++i)
     {
         node.strides[i] = inputs[0].strides[dims[i]];
     }

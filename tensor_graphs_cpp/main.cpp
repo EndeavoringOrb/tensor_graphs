@@ -54,7 +54,7 @@ std::unordered_map<MemSpace, uint64_t, MemSpaceHash> getDefaultBufferSizes()
     return bufferSizes;
 }
 
-const float *sync_output_to_host(const float *device_ptr, size_t num_elements, std::vector<float> &host_buffer)
+const float *sync_output_to_host(const float *device_ptr, uint64_t num_elements, std::vector<float> &host_buffer)
 {
     const float *output_ptr = device_ptr;
 #ifdef USE_CUDA
@@ -148,7 +148,7 @@ void run_autoregressive_llm(
             break;
 
         std::fill(input_data.begin(), input_data.end(), 0);
-        for (size_t i = 0; i < tokens.size(); ++i)
+        for (uint64_t i = 0; i < tokens.size(); ++i)
             input_data[i] = (int32_t)tokens[i];
 
         session.writeInput(inputIdsId, input_data.data(), input_data.size() * sizeof(int32_t));
@@ -168,7 +168,7 @@ void run_autoregressive_llm(
         auto end = std::chrono::high_resolution_clock::now();
         float runtimeMs = std::chrono::duration<float, std::milli>(end - start).count();
 
-        size_t num_output_elements = 1 * max_seq_len * vocab_size;
+        uint64_t num_output_elements = 1 * max_seq_len * vocab_size;
         const float *output_ptr = sync_output_to_host(device_output_ptr, num_output_elements, host_output);
 
         uint32_t last_token_pos = (uint32_t)tokens.size() - 1;
@@ -279,7 +279,7 @@ void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool d
     std::vector<float> z(1 * cfg.latent_channels * latent_h * latent_w);
     std::mt19937 gen(42);
     std::normal_distribution<float> dist(0.0f, 1.0f);
-    for (size_t j = 0; j < z.size(); ++j)
+    for (uint64_t j = 0; j < z.size(); ++j)
     {
         z[j] = dist(gen);
     }
@@ -301,7 +301,7 @@ void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool d
         const float *v_host_ptr = sync_output_to_host(v_ptr, z.size(), v_buf);
         v_ptr = v_host_ptr;
 
-        for (size_t j = 0; j < z.size(); ++j)
+        for (uint64_t j = 0; j < z.size(); ++j)
             z[j] += v_ptr[j] * dt;
         std::cout << "Step " << i + 1 << "/" << num_steps << " complete." << std::endl;
     }

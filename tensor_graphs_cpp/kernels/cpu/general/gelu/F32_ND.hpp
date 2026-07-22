@@ -38,7 +38,7 @@ inline uint32_t ref_gelu_broadcast_scalar(Graph &g, uint32_t scalar_id, const st
     uint32_t out = g.reshape(scalar_id, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
 
     // 2. Repeat for every dimension where target_shape > 1
-    for (size_t i = 0; i < target_shape.size(); ++i)
+    for (uint64_t i = 0; i < target_shape.size(); ++i)
     {
         if (target_shape[i] > 1)
         {

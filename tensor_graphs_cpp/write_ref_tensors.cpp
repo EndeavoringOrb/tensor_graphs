@@ -87,7 +87,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
         {
             TensorView view = makeView(node);
             views[nodeId] = view;
-            size_t bufElements = getRequiredBufferSize(view);
+            uint64_t bufElements = getRequiredBufferSize(view);
             results[nodeId].resize(bufElements * elemSize, 0);
 
             std::vector<uint8_t> rawBytes;
@@ -101,7 +101,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
             }
 
             uint64_t numElements = countElements(view);
-            for (size_t i = 0; i < numElements; ++i)
+            for (uint64_t i = 0; i < numElements; ++i)
             {
                 uint64_t idx = getStridedIndex(i, view.getShape(), view.strides);
                 std::memcpy(results[nodeId].data() + idx * elemSize,
@@ -167,7 +167,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
             TensorView contigView = makeView(dummyOutNode);
             std::vector<uint8_t> contigData(countElements(contigView) * elemSize);
             const uint8_t *srcData = results[parentId].data() + chosenOutView.baseOffset;
-            for (size_t i = 0; i < countElements(contigView); ++i)
+            for (uint64_t i = 0; i < countElements(contigView); ++i)
             {
                 uint64_t srcIdx = getStridedIndex(i, chosenOutView.getShape(), chosenOutView.strides);
                 std::memcpy(contigData.data() + i * elemSize, srcData + srcIdx * elemSize, elemSize);
@@ -178,7 +178,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
         }
 
         views[nodeId] = chosenOutView;
-        size_t bufElements = getRequiredBufferSize(chosenOutView);
+        uint64_t bufElements = getRequiredBufferSize(chosenOutView);
         results[nodeId].resize(bufElements * elemSize, 0);
         std::vector<void *> outputPtrs = {results[nodeId].data()};
         std::vector<TensorView> outputViews = {chosenOutView};

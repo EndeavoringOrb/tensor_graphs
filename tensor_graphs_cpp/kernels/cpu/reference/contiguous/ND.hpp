@@ -54,7 +54,7 @@ inline void runContiguous_ND(const KernelContext &ctx)
     for (uint64_t i = 0; i < totalElements; ++i)
     {
         uint64_t offset = 0;
-        for (size_t d = 0; d < coords.size(); ++d)
+        for (uint64_t d = 0; d < coords.size(); ++d)
         {
             offset += static_cast<uint64_t>(coords[d]) * strides[d];
         }

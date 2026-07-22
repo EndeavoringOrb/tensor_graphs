@@ -27,7 +27,7 @@ namespace partial_ops
                                     std::vector<uint32_t> &slice_shape)
     {
         slice_shape.resize(out_shape.size());
-        for (size_t i = 0; i < out_shape.size(); ++i)
+        for (uint64_t i = 0; i < out_shape.size(); ++i)
         {
             int32_t st = (i < starts_size) ? starts[i] : 0;
             int32_t en = (i < ends_size) ? ends[i] : (int32_t)out_shape[i];

@@ -37,7 +37,7 @@ inline uint32_t refFactoryExpND(const std::vector<uint32_t> &inputs, Graph &g) {
     std::vector<int32_t> ones(shape.size(), 1);
     uint32_t current_e = g.reshape(e_node, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
     
-    for (size_t ax = 0; ax < shape.size(); ++ax) {
+    for (uint64_t ax = 0; ax < shape.size(); ++ax) {
         if (shape[ax] > 1) {
             int32_t r = (int32_t)shape[ax];
             int32_t a = (int32_t)ax;
