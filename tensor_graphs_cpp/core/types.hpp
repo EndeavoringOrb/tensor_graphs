@@ -1044,9 +1044,9 @@ public:
 
 struct OpInstruction
 {
-    uint32_t nodeId;
-    uint32_t logicalNodeId;
-    uint64_t fullKernelId;
+    PhysicalId nodeId;
+    LogicalId logicalNodeId;
+    KernelId fullKernelId;
     std::vector<uint32_t> inputNodeIds;
     int32_t inplaceInputIndex = -1;
     int32_t viewInputIndex = -1;

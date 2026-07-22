@@ -449,13 +449,17 @@ struct MemoryManager
         return nullptr;
     }
 
-    std::unordered_map<MemSpace, uint64_t> getBufferSizes() const
+    std::unordered_map<uint32_t, uint64_t> getBufferSizes() const
     {
-        std::unordered_map<MemSpace, uint64_t> sizes;
+        std::unordered_map<uint32_t, uint64_t> sizes;
         for (uint64_t i = 0; i < buffers.size(); ++i)
         {
-            if (buffers[i])
-                sizes[buffers[i]->mem_space] = buffers[i]->sizeBytes;
+            if (buffers[i]) {
+                if (sizes.count(buffers[i]->mem_space.idx) == 0) {
+                    sizes[buffers[i]->mem_space.idx] = 0;
+                }
+                sizes[buffers[i]->mem_space.idx] += buffers[i]->sizeBytes;
+            }
         }
         return sizes;
     }

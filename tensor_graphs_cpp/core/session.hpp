@@ -55,7 +55,7 @@ struct Session
     MemoryManager &memManager;
     CostModel costModel;
     std::unique_ptr<Executor> executor;
-    uint32_t rootId;
+    LogicalId rootId;
     bool isPlanned;
     bool isCompiled;
     uint32_t nBucketSizes = 0;
@@ -129,7 +129,7 @@ struct Session
 
         bw.write<uint8_t>(2); // Constants block type
         std::unordered_set<uint32_t> neededConstants;
-        for (const CompiledGraph &g : cachedGraphs)
+        for (const CompiledGraph &g : cachedGraphs) // TODO: just loop over graph.constantStaging
         {
             for (const auto &nodePair : g.nodesMap)
             {
@@ -280,8 +280,7 @@ struct Session
 
         const OpInstruction &lastInst = cachedGraphs[graphIdx].instructions.back();
         DeviceBuffer* buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
-        const TensorNode& node = cachedGraphs[graphIdx].nodesMap.at(lastInst.nodeId);
-        return buf->getBasePtr() + lastInst.outBuffer.offset + (node.viewOffset * getDTypeSize(node.dtype));
+        return buf->getBasePtr() + lastInst.outBuffer.offset;
     }
 
     void ensureCacheCoverage(bool doSaturate)
@@ -308,7 +307,7 @@ struct Session
                     false,
                     repo);
 
-                for (const auto &pair : plan.nodesMap)
+                for (const auto &pair : plan.nodesMap) // TODO: nodesMap is deprecated, loop over plan.instructions, get kernel and check kernel opType
                 {
                     if (pair.second.opType == OpType::CACHE)
                     {

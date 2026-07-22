@@ -964,7 +964,7 @@ private:
 
             if (egraph.constantStaging.count(e_class_id))
             {
-                compiled.constantStaging[physId.value] = egraph.constantStaging.at(e_class_id);
+                compiled.constantStaging[physId] = egraph.constantStaging.at(e_class_id);
             }
 
             if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE)
@@ -972,20 +972,8 @@ private:
                 compiled.instructions.push_back(inst);
             }
 
-            compiled.nodeCosts[physId.value] = choice.cost;
-            compiled.physicalToLogicalNodeMap[physId.value] = logicalId.value;
-
-            TensorNode compiledNode;
-            compiledNode.id = physId;
-            compiledNode.opType = enode.getOpType();
-            compiledNode.opName = enode.getOpName();
-            compiledNode.dtype = enode.getDType();
-            for (EClassId c : enode.getChildren())
-                compiledNode.child_ids.push_back(eclassToPhys[egraph.find(c)]);
-            compiledNode.setShape(enode.getShape());
-            compiledNode.strides = enode.getStrides();
-            compiledNode.backend = enode.getBackend();
-            compiled.nodesMap[physId.value] = compiledNode;
+            compiled.nodeCosts[physId] = choice.cost;
+            compiled.physicalToLogicalNodeMap[physId] = logicalId;
         }
 
         return compiled;
