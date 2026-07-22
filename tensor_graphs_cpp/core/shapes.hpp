@@ -402,16 +402,16 @@ struct ShapePropagator
         }
         case OpType::CONCAT:
         {
-            LogicalId axis_id = graph.getNode(nodeId).child_ids.back();
+            LogicalId axis_id = graph.getNode(nodeId).child_ids[0];
             auto axis_vec = graph.getConstantInt32(axis_id);
             int32_t axis = axis_vec[0];
-            auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
+            auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[1]).getShape();
             if (axis < 0)
                 axis += s0.size();
 
             std::vector<uint32_t> out_shape = s0;
             uint32_t total_dim = s0[axis];
-            for (uint64_t i = 1; i < graph.getNode(nodeId).child_ids.size() - 1; ++i)
+            for (uint64_t i = 2; i < graph.getNode(nodeId).child_ids.size(); ++i)
             {
                 auto si = graph.getNode(graph.getNode(nodeId).child_ids[i]).getShape();
                 total_dim += si[axis];
@@ -1159,7 +1159,7 @@ struct ShapePropagator
     std::vector<Region> forwardConcat(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
     {
         bool allClean = true;
-        for (uint64_t i = 0; i < parentRegions.size() - 1; ++i)
+        for (uint64_t i = 1; i < parentRegions.size(); ++i)
         {
             if (!parentRegions[i].empty())
             {
@@ -1170,14 +1170,14 @@ struct ShapePropagator
         if (allClean)
             return {};
 
-        int32_t axis = graph.getConstantInt32(node.child_ids.back())[0];
+        int32_t axis = graph.getConstantInt32(node.child_ids[0])[0];
         uint32_t rank = node.getShape().size();
         if (axis < 0)
             axis += rank;
         std::vector<Region> outBoxes;
 
         uint32_t current_offset = 0;
-        for (uint64_t i = 0; i < node.child_ids.size() - 1; ++i)
+        for (uint64_t i = 1; i < node.child_ids.size(); ++i)
         {
             const auto &pShape = graph.getNode(node.child_ids[i]).getShape();
             const auto &pReg = parentRegions[i];
@@ -1203,13 +1203,13 @@ struct ShapePropagator
         if (outputRegions.empty())
             return res;
 
-        int32_t axis = graph.getConstantInt32(node.child_ids.back())[0];
+        int32_t axis = graph.getConstantInt32(node.child_ids[0])[0];
         uint32_t rank = node.getShape().size();
         if (axis < 0)
             axis += rank;
 
         uint32_t current_offset = 0;
-        for (uint64_t i = 0; i < node.child_ids.size() - 1; ++i)
+        for (uint64_t i = 1; i < node.child_ids.size(); ++i)
         {
             const auto &pShape = graph.getNode(node.child_ids[i]).getShape();
             uint32_t in_dim = pShape[axis];
@@ -1234,7 +1234,7 @@ struct ShapePropagator
             res[i] = mergeRegions(inBoxes);
             current_offset = in_end;
         }
-        res.back() = makeFull(graph.getNode(node.child_ids.back()).getShape());
+        res[0] = makeFull(graph.getNode(node.child_ids[0]).getShape());
         return res;
     }
 

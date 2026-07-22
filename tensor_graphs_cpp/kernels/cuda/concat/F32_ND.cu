@@ -25,7 +25,7 @@ inline bool matchConcatF32_CUDA_ND(const std::vector<TensorNode> &inputs, const 
 
 inline void runConcatF32_CUDA_ND(const KernelContext &ctx) {
     float *Out = static_cast<float *>(ctx.outputs[0]);
-    int32_t axis = *static_cast<const int32_t *>(ctx.inputs.back());
+    int32_t axis = *static_cast<const int32_t *>(ctx.inputs[0]);
     
     auto outShape = ctx.outViews[0].getShape();
     if (axis < 0) axis += outShape.size();
@@ -39,7 +39,7 @@ inline void runConcatF32_CUDA_ND(const KernelContext &ctx) {
     uint64_t c_offset = 0;
     int blockSize = 256;
 
-    for (uint64_t n = 0; n < ctx.inputs.size() - 1; ++n) {
+    for (uint64_t n = 1; n < ctx.inputs.size(); ++n) {
         const float *A = static_cast<const float *>(ctx.inputs[n]);
         uint64_t C_in = ctx.inViews[n].getShape()[axis];
         uint64_t total = O * C_in * I;
@@ -64,11 +64,11 @@ inline LogicalId refFactoryConcatF32_ND_CUDA(const std::vector<LogicalId> &input
     if (inputs.size() < 2)
         Error::throw_err("Concat ND requires at least 2 inputs");
 
-    std::vector<LogicalId> tensors(inputs.begin(), inputs.end() - 1);
-    LogicalId axis = inputs.back();
+    std::vector<LogicalId> tensors(inputs.begin() + 1, inputs.end());
+    LogicalId axis = inputs[0];
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Concat_F32_ND_CUDA", 2, 2, matchConcatF32_CUDA_ND, runConcatF32_CUDA_ND, refFactoryConcatF32_ND_CUDA, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{1024}, {1}}, {true, false}, {{MemSpace(1, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Concat_F32_ND_CUDA", 2, UINT32_MAX, matchConcatF32_CUDA_ND, runConcatF32_CUDA_ND, refFactoryConcatF32_ND_CUDA, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32, DType::FLOAT32}, {{1}, {1024}}, {false, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CUDA)}});
 
 #endif

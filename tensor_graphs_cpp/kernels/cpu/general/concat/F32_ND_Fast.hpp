@@ -16,7 +16,7 @@ inline bool matchConcatF32_Fast(const std::vector<TensorNode> &inputs, const Ten
 inline void runConcatF32_Fast(const KernelContext &ctx)
 {
     float *out_ptr = static_cast<float *>(ctx.outputs[0]);
-    int32_t axis = *static_cast<const int32_t *>(ctx.inputs.back());
+    int32_t axis = *static_cast<const int32_t *>(ctx.inputs[0]);
     const auto &out_shape = ctx.outViews[0].getShape();
     if (axis < 0)
         axis += out_shape.size();
@@ -39,7 +39,7 @@ inline void runConcatF32_Fast(const KernelContext &ctx)
             uint32_t o_end = std::min(o_start + chunk, (uint32_t)outer);
             for (uint32_t o = o_start; o < o_end; ++o) {
                 uint64_t out_axis_offset = 0;
-                for (uint64_t n = 0; n < ctx.inputs.size() - 1; ++n) {
+                for (uint64_t n = 1; n < ctx.inputs.size(); ++n) {
                     uint32_t axis_dim = ctx.inViews[n].getShape()[axis];
                     const float *src = static_cast<const float *>(ctx.inputs[n]) + (o * axis_dim * inner);
                     float *dst = out_ptr + (o * out_shape[axis] * inner) + (out_axis_offset * inner);
@@ -57,10 +57,10 @@ inline LogicalId refFactoryConcatF32_Fast(const std::vector<LogicalId> &inputs, 
     if (inputs.size() < 2)
         Error::throw_err("Concat Fast requires at least 2 inputs");
 
-    std::vector<LogicalId> tensors(inputs.begin(), inputs.end() - 1);
-    LogicalId axis = inputs.back();
+    std::vector<LogicalId> tensors(inputs.begin() + 1, inputs.end());
+    LogicalId axis = inputs[0];
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Concat_F32_Fast", 2, 2, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{1, 24, 1536, 128}, {1}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Concat_F32_Fast", 2, UINT32_MAX, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::INT32, DType::FLOAT32}, {{1}, {1, 24, 1536, 128}}, {false, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

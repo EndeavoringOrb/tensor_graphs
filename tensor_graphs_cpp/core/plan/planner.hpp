@@ -88,12 +88,10 @@ struct Planner
         visited.insert(src);
 
         bool found = false;
-        std::cout << "findMemSpacePath" << std::endl;
         while (!q.empty())
         {
             MemSpace curr = q.front();
             q.pop();
-            std::cout << curr << std::endl;
 
             if (curr == dst)
             {

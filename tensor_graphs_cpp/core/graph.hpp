@@ -349,8 +349,10 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(ids[0]).dtype;
-        ids.push_back(id1);
-        TensorNode &node = allocateNode(OpType::CONCAT, "", dtype, ids, {}, {}, "", loc);
+        std::vector<LogicalId> children;
+        children.push_back(id1);
+        children.insert(children.end(), ids.begin(), ids.end());
+        TensorNode &node = allocateNode(OpType::CONCAT, "", dtype, children, {}, {}, "", loc);
         return node.id;
     }
 

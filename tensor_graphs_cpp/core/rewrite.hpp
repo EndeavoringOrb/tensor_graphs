@@ -110,9 +110,9 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
     else if (op == OpType::CONCAT)
     {
         std::vector<LogicalId> concatIns;
-        for (uint64_t i = 0; i < pInputs.size() - 1; ++i)
+        for (uint64_t i = 1; i < pInputs.size(); ++i)
             concatIns.push_back(pInputs[i]);
-        pRoot = pGraph.concat(concatIns, pInputs.back());
+        pRoot = pGraph.concat(concatIns, pInputs[0]);
     }
     else if (op == OpType::REPEAT)
         pRoot = pGraph.repeat(pInputs[0], pInputs[1], pInputs[2]);
@@ -486,7 +486,7 @@ struct FusionRule : public Rule
             return true;
         if ((op == OpType::SUM || op == OpType::MAX) && inputIdx == 1)
             return true;
-        if (op == OpType::CONCAT && inputIdx == numInputs - 1)
+        if (op == OpType::CONCAT && inputIdx == 0)
             return true;
         if (op == OpType::TRIU && inputIdx == 1)
             return true;

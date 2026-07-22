@@ -514,25 +514,19 @@ std::vector<float> executeFusedKernel(
     DType outDType,
     const Graph &graph)
 {
-    if (!kernel.isVariadic && inputData.size() != kernel.numInputs)
+    if (inputData.size() < kernel.min_num_inputs || inputData.size() > kernel.max_num_inputs)
     {
-        Error::throw_err("Fused kernel " + kernel.opName + " expects " +
-                         std::to_string(kernel.numInputs) + " inputs, got " +
-                         std::to_string(inputData.size()));
+        Error::throw_err("Fused kernel " + kernel.opName + " inputs count mismatch");
     }
-    if (kernel.isVariadic && inputData.size() < kernel.numInputs)
-    {
-        Error::throw_err("Fused variadic kernel " + kernel.opName + " expects at least " +
-                         std::to_string(kernel.numInputs) + " inputs, got " +
-                         std::to_string(inputData.size()));
-    }
+    
 
     Record r;
     r.kernelId = kernel.uid;
-    r.outputShapes.push_back(outShape);
-    r.outputStrides.push_back(outStrides);
-    r.outputDTypes.push_back(outDType);
-    r.backends.push_back(kernel.backends.empty() ? Backend::CPU : kernel.backends[0]);
+    r.outputShape = outShape;
+    r.outputStrides = outStrides;
+    r.outputDType = outDType;
+    r.output_mem_space = kernel.output_mem_space;
+    r.engines = kernel.engines;
 
     for (uint64_t i = 0; i < inputIds.size(); ++i)
     {
@@ -541,17 +535,13 @@ std::vector<float> executeFusedKernel(
         r.inputStrides.push_back(node.strides.empty() ? calcContiguousStrides(node.getShape()) : node.strides);
         r.inputDTypes.push_back(node.dtype);
 
-        Backend b = node.backend;
-        uint64_t ruleIdx = i;
-        if (kernel.isVariadic)
+        MemSpace b = {1, HandleType::CPP};
+        uint64_t ruleIdx = std::min((uint64_t)i, static_cast<uint64_t>(kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1));
+        if (ruleIdx < kernel.input_mem_spaces.size())
         {
-            ruleIdx = (i == inputIds.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+            b = kernel.input_mem_spaces[ruleIdx];
         }
-        if (ruleIdx < kernel.inputBackends.size() && !kernel.inputBackends[ruleIdx].empty())
-        {
-            b = kernel.inputBackends[ruleIdx][0];
-        }
-        r.inputBackends.push_back({b});
+        r.input_mem_spaces.push_back(b);
     }
 
     PreparedKernel pk;
@@ -602,17 +592,17 @@ struct TestInputs
 TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
 {
     TestInputs result;
-    result.rawData.resize(kernel.numInputs);
-    result.inputIds.resize(kernel.numInputs);
+    result.rawData.resize(kernel.min_num_inputs);
+    result.inputIds.resize(kernel.min_num_inputs);
 
-    std::vector<bool> isConstantParam(kernel.numInputs, false);
+    std::vector<bool> isConstantParam(kernel.min_num_inputs, false);
     std::vector<std::vector<int32_t>> constantValues(kernel.numInputs);
 
     if (!kernel.isReference && kernel.refFactory)
     {
         Graph tempGraph;
         std::vector<uint32_t> tempInputs;
-        for (uint64_t i = 0; i < kernel.numInputs; ++i)
+        for (uint64_t i = 0; i < kernel.min_num_inputs; ++i)
         {
             DType d = static_cast<uint32_t>(kernel.dtypes[i]) == static_cast<uint32_t>(DType::ANY) ? DType::FLOAT32 : kernel.dtypes[i];
             tempInputs.push_back(tempGraph.input(kernel.dummyShapes[i], d));
@@ -638,7 +628,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                         break;
                     curr = tempGraph.getNode(curr).child_ids[0];
                 }
-                for (uint64_t i = 0; i < kernel.numInputs; ++i)
+                for (uint64_t i = 0; i < kernel.min_num_inputs; ++i)
                 {
                     if (tempInputs[i] == curr)
                         return (int)i;
@@ -748,7 +738,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
             }
             else if (n.opType == OpType::CONCAT)
             {
-                checkParam(n.child_ids.size() - 1, {0});
+                checkParam(0, {0});
             }
             else if (n.opType == OpType::TRIU)
             {
@@ -778,7 +768,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         }
     }
 
-    for (uint64_t i = 0; i < kernel.numInputs; ++i)
+    for (uint64_t i = 0; i < kernel.min_num_inputs; ++i)
     {
         uint32_t id = UINT32_MAX;
         DType dtype = static_cast<uint32_t>(kernel.dtypes[i]) == static_cast<uint32_t>(DType::ANY) ? DType::FLOAT32 : kernel.dtypes[i];
@@ -801,7 +791,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         }
         else
         {
-            id = graph.input(kernel.dummyShapes[i], dtype, {}, StorageType::PERSISTENT);
+            id = graph.input(kernel.dummyShapes[i], dtype, {});
             result.rawData[i].resize(sizeBytes);
             fillRandom(result.rawData[i].data(), elements, dtype);
         }
@@ -815,7 +805,7 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
 {
     try
     {
-        if (rec.inputShapes.size() != kernel.numInputs && !kernel.isVariadic)
+        if (rec.inputShapes.size() < kernel.min_num_inputs || rec.inputShapes.size() > kernel.max_num_inputs)
             return true; // Skip mismatched variadic/arity records
 
         // Build dummy nodes for validation against centralized matching logic
@@ -826,16 +816,7 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             dummyInputs[idx].strides = rec.inputStrides[idx];
             dummyInputs[idx].dtype = rec.inputDTypes[idx];
 
-            Backend b = Backend::CPU;
-            uint64_t ruleIdx = idx;
-            if (kernel.isVariadic)
-            {
-                ruleIdx = (idx == rec.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
-            }
-
-            if (!rec.inputBackends.empty() && ruleIdx < rec.inputBackends.size() && !rec.inputBackends[ruleIdx].empty())
-                b = rec.inputBackends[ruleIdx][0];
-            dummyInputs[idx].backend = b;
+            
         }
 
         TensorNode dummyOutput;
@@ -843,16 +824,14 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
         std::vector<uint64_t> outStrides;
         DType outDType = DType::FLOAT32;
 
-        if (!rec.outputShapes.empty())
+        if (!rec.outputShape.empty())
         {
-            outShape = rec.outputShapes[0];
-            outStrides = rec.outputStrides[0];
-            outDType = rec.outputDTypes[0];
-
+            outShape = rec.outputShape;
+            outStrides = rec.outputStrides;
+            outDType = rec.outputDType;
             dummyOutput.setShape(outShape);
             dummyOutput.strides = outStrides;
             dummyOutput.dtype = outDType;
-            dummyOutput.backend = rec.backends.empty() ? Backend::CPU : rec.backends[0];
         }
         else
         {
@@ -863,7 +842,6 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             dummyOutput.setShape(outShape);
             dummyOutput.strides = outStrides;
             dummyOutput.dtype = outDType;
-            dummyOutput.backend = rec.backends.empty() ? Backend::CPU : rec.backends[0];
         }
 
         if (!kernel.matches(dummyInputs, dummyOutput))
@@ -903,14 +881,14 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
                     int32_t *iptr = reinterpret_cast<int32_t *>(contiguousData.data());
                     if (kernel.opType == OpType::CONCAT || kernel.opName.find("Concat") != std::string::npos)
                     {
-                        if (i == rec.inputShapes.size() - 1)
+                        if (i == 0)
                         {
                             int32_t concat_axis = -1;
-                            if (!rec.inputShapes.empty() && !rec.outputShapes.empty())
+                            if (!rec.inputShapes.empty() && !rec.outputShape.empty() && rec.inputShapes.size() > 1)
                             {
-                                for (uint64_t d = 0; d < rec.outputShapes[0].size(); ++d)
+                                for (uint64_t d = 0; d < rec.outputShape.size(); ++d)
                                 {
-                                    if (rec.outputShapes[0][d] != rec.inputShapes[0][d])
+                                    if (rec.outputShape[d] != rec.inputShapes[1][d])
                                     {
                                         concat_axis = (int32_t)d;
                                         break;
@@ -1050,7 +1028,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             view.strides = strides;
             view.dtype = dtype;
             inViews.push_back(view);
-            TensorNode &node = dummyGraph.allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, Backend::CPU, StorageType::PERSISTENT);
+            TensorNode &node = dummyGraph.allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, "");
             dummyInputNodes.push_back(node);
             if (dtype == DType::INT32)
                 dummyGraph.constantStaging[node.id] = std::make_shared<std::vector<uint8_t>>(inputData.back());
@@ -1320,7 +1298,7 @@ int main(int argc, char *argv[])
             skipped++;
             continue;
         }
-        if (kernel.dummyShapes.size() != kernel.numInputs)
+        if (kernel.dummyShapes.size() != kernel.min_num_inputs)
         {
             std::cout << "Skipping " << kernel.opName << " (dummy shapes mismatch)" << std::endl;
             skipped++;
@@ -1339,7 +1317,7 @@ int main(int argc, char *argv[])
             uint32_t rootId = kernel.refFactory(refInputs.inputIds, refGraph);
 
             // Synchronize physical rawData with any stride changes made by refFactory
-            for (uint64_t i = 0; i < kernel.numInputs; ++i)
+            for (uint64_t i = 0; i < kernel.min_num_inputs; ++i)
             {
                 uint32_t id = refInputs.inputIds[i];
                 const TensorNode &node = refGraph.getNode(id);
