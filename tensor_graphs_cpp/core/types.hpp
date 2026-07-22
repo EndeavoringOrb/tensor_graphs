@@ -1376,3 +1376,47 @@ inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
     br.read(val.inBuffers);
     br.read(val.debugOrigin);
 }
+
+inline void tg_serialize(BinaryWriter &bw, const CompiledGraph &val)
+{
+    bw.write(val.bucket);
+    bw.write(val.nodeViews);
+    bw.write(val.instructions);
+    bw.write(val.nodeCosts);
+    bw.write(val.physicalToLogicalNodeMap);
+    uint32_t const_size = 0;
+    for (const auto &pair : val.constantStaging)
+    {
+        if (pair.second)
+            const_size++;
+    }
+    bw.write(const_size);
+    for (const auto &pair : val.constantStaging)
+    {
+        if (pair.second)
+        {
+            bw.write(pair.first);
+            bw.write(*pair.second);
+        }
+    }
+}
+
+inline void tg_deserialize(BinaryReader &br, CompiledGraph &val)
+{
+    br.read(val.bucket);
+    br.read(val.nodeViews);
+    br.read(val.instructions);
+    br.read(val.nodeCosts);
+    br.read(val.physicalToLogicalNodeMap);
+    uint32_t const_size;
+    br.read(const_size);
+    val.constantStaging.clear();
+    for (uint32_t i = 0; i < const_size; ++i)
+    {
+        PhysicalId pid;
+        br.read(pid);
+        std::vector<uint8_t> data;
+        br.read(data);
+        val.constantStaging[pid] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+    }
+}
