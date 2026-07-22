@@ -164,8 +164,8 @@ struct CompiledSession
     std::unique_ptr<Graph> graph;
     std::unique_ptr<Session> session;
     std::unique_ptr<JinaV5Config> cfg;
-    uint32_t patch_input_id = 0;
-    uint32_t root_id = 0;
+    LogicalId patch_input_id;
+    LogicalId root_id;
     int width = 0;
     int height = 0;
     bool has_run = false;
@@ -209,7 +209,7 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
                                            cache_file, 0, &repo, disable_caching);
 
     // Register a bucket where ONLY the image input is dirty (all weights are clean/static)
-    std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
+    std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
     inputDirty[cs.patch_input_id] = makeFull(inShape);
 
     std::vector<Region> outputNeeded = makeFull(outShape);
@@ -374,7 +374,7 @@ int main(int argc, char *argv[])
     // Memory manager (shared across all compiled sessions)
     // -----------------------------------------------------------------------
     // TODO: make this and getDefaultBufferSizes load from some common place
-    std::unordered_map<MemSpace, uint64_t, MemSpaceHash> bufferSizes = {
+    std::unordered_map<MemSpace, uint64_t> bufferSizes = {
     {MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
 #ifdef USE_CUDA
     bufferSizes[MemSpace{2, HandleType::CUDA}] = 16ULL * 1024 * 1024 * 1024;
@@ -523,9 +523,9 @@ int main(int argc, char *argv[])
                     b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
                 }
 
-                auto cb = [&](uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)
+                auto cb = [&](LogicalId logicalId, const KernelContext &ctx, const void *data)
                 {
-                    verifier.verify(logicalId, node, ctx, data, cs.graph.get());
+                    verifier.verify(logicalId, ctx, data, cs.graph.get());
                 };
 
                 const float *device_output_ptr = static_cast<const float *>(cs.session->run(b, cb));
@@ -655,9 +655,9 @@ int main(int argc, char *argv[])
 
         auto start = std::chrono::high_resolution_clock::now();
 
-        auto cb = [&](uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)
+        auto cb = [&](LogicalId logicalId, const KernelContext &ctx, const void *data)
         {
-            verifier.verify(logicalId, node, ctx, data, cs.graph.get());
+            verifier.verify(logicalId, ctx, data, cs.graph.get());
         };
 
         Bucket b;

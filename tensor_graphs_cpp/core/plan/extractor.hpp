@@ -23,7 +23,6 @@
 #include "core/common/constants.hpp"
 #include "core/plan/validators/validator.hpp"
 
-
 struct ENodeInfo
 {
     float cost;
@@ -121,6 +120,7 @@ public:
             }
             to_process.insert(to_process.begin(), new_to_process.begin(), new_to_process.end());
         }
+        return selection_map;
     }
 
     void backtrack(std::string reason)

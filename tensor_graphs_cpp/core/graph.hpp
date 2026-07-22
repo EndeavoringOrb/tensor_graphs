@@ -21,12 +21,11 @@ enum class InputDataType : uint32_t
 struct Graph
 {
     std::unordered_map<LogicalId, TensorNode> nodes;
-    std::shared_ptr<LogicalIdAllocator> allocator;
 
     std::unordered_map<LogicalId, InputDataType> input_data_types;
     std::unordered_map<LogicalId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
-    Graph() : allocator(std::make_shared<LogicalIdAllocator>()) {}
+    Graph() {}
 
     bool hasNode(LogicalId id) const
     {
@@ -70,7 +69,7 @@ struct Graph
 
     TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _child_ids, std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {}, std::string _contentHash = "", std::source_location loc = std::source_location::current())
     {
-        LogicalId id = allocator->allocate();
+        LogicalId id = LogicalIdAllocator::allocate();
         std::string origin = std::string(loc.file_name()) + ":" + std::to_string(loc.line());
         nodes[id] = TensorNode(id, _opType, _opName, _dtype, _child_ids, _shape, _strides, _contentHash, origin);
         return nodes[id];

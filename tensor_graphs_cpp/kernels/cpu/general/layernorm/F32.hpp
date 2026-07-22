@@ -155,13 +155,13 @@ inline LogicalId refFactoryLayerNorm(const std::vector<LogicalId> &inputs, Graph
 
     // D as float, expanded to {1, S, 1}
     float d_float = (float)D;
-    uint32_t d_node = ref_ln_expand_scalar_1S1(graph, d_float, S);
+    LogicalId d_node = ref_ln_expand_scalar_1S1(graph, d_float, S);
 
     // mean_val = sum(x, -1) / D -> {B, S, 1}
     LogicalId mean_val = graph.div(sum_x, d_node);
 
     // mean = repeat_ax(mean_val, D, 2) -> {B, S, D}
-    uint32_t mean = ref_ln_repeat_ax2(graph, mean_val, D);
+    LogicalId mean = ref_ln_repeat_ax2(graph, mean_val, D);
 
     // --- Centered ---
     // x_sub = x + neg(mean) = x - mean
@@ -185,7 +185,7 @@ inline LogicalId refFactoryLayerNorm(const std::vector<LogicalId> &inputs, Graph
 
     // std = pow(var + eps, 0.5) -> {B, S, 1}
     float half_val = 0.5f;
-    uint32_t sqrt_exp = ref_ln_expand_scalar_1S1(graph, half_val, S);
+    LogicalId sqrt_exp = ref_ln_expand_scalar_1S1(graph, half_val, S);
     LogicalId std_dev = graph.pow(var_plus_eps, sqrt_exp);
 
     // --- Inverse Std ---

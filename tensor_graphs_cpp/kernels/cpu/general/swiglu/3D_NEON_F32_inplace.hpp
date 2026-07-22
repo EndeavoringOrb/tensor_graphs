@@ -117,7 +117,7 @@ inline LogicalId refFactorySwiGLU_3D_NEON_Inplace(const std::vector<LogicalId> &
 
     // 2. exp_neg = pow(e, -x)
     float e_val = 2.7182818f;
-    uint32_t e_node = ref_swiglu_broadcast_scalar_Inplace(graph, graph.constant({1}, &e_val, DType::FLOAT32), target_shape);
+    LogicalId e_node = ref_swiglu_broadcast_scalar_Inplace(graph, graph.constant({1}, &e_val, DType::FLOAT32), target_shape);
     LogicalId exp_neg = graph.pow(e_node, neg_x);
 
     // 3. den = 1 + exp(-x)

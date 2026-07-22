@@ -37,9 +37,6 @@ inline ModelGraphRoots build_flux_graph(Graph &g, MemoryManager &mem)
     uint32_t latent_w = width / 16, latent_h = height / 16;
     uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
 
-    if (!g.allocator)
-        g.allocator = std::make_shared<IdAllocator>();
-
     FluxTextEncoder text_encoder(cfg, g, mem, "flux-klein-4b/text_encoder");
     uint32_t in_ids = g.input({1, txt_seq}, DType::INT32, {}, StorageType::PERSISTENT);
     uint32_t text_root = text_encoder.build_graph(in_ids);

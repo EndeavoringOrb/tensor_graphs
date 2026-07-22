@@ -149,7 +149,7 @@ struct Session
         manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
     }
 
-    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0, Repo *_repo = nullptr, bool _disableCaching = false)
+    Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0, Repo *_repo = nullptr, bool _disableCaching = false)
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching)
     {
         ensureOutputDirectories();

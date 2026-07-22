@@ -784,7 +784,7 @@ struct Planner
 
         Extractor extractor = Extractor(numClasses);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(egraph));
+        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, stopOnFirstValid));
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
@@ -857,14 +857,13 @@ struct Planner
         const std::unordered_map<EClassId, LogicalId> &eclassToLogical)
     {
         CompiledGraph compiled;
-        std::shared_ptr<PhysicalIdAllocator> allocator;
 
         std::vector<EClassId> topo = topologicalSort(egraph.find(nodeToEClass.at(rootId)), egraph, extraction.choiceByEClass);
 
         std::unordered_map<EClassId, PhysicalId> eclassToPhys;
         for (EClassId e_class_id : topo)
         {
-            eclassToPhys[e_class_id] = allocator->allocate();
+            eclassToPhys[e_class_id] = PhysicalIdAllocator::allocate();
         }
 
         std::vector<ENodeInfo> dummyInfos(egraph.getENodes().size());

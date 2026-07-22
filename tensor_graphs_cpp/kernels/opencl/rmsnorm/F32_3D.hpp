@@ -76,7 +76,7 @@ inline LogicalId refFactoryJinaRMSNorm_F32_3D_OpenCL(const std::vector<LogicalId
                         g.constant({1}, &ax, DType::INT32));
     };
 
-    auto expand_1d_1SD = [&](uint32_t vec) -> LogicalId
+    auto expand_1d_1SD = [&](LogicalId vec) -> LogicalId
     {
         int32_t sh[] = {1, 1, (int32_t)D};
         LogicalId out = g.reshape(vec, g.constant({3}, sh, DType::INT32));

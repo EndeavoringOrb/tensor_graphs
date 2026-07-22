@@ -15,7 +15,6 @@ inline bool matchUnifiedCopy(const std::vector<TensorNode> &inputs, const Tensor
 inline void inferViewUnified(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
 {
     node.strides = inputs[0].strides;
-    node.viewOffset = inputs[0].viewOffset;
 }
 
 inline LogicalId refFactoryUnifiedCopy(const std::vector<LogicalId> &inputs, Graph &graph)

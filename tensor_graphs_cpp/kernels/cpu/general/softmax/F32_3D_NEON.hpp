@@ -91,7 +91,7 @@ inline LogicalId refFactorySoftmax(const std::vector<LogicalId> &inputs, Graph &
     int32_t shape_3d_const[] = {1, 1, 1};
     LogicalId e_reshaped = g.reshape(e_scalar, g.constant({3}, shape_3d_const, DType::INT32));
 
-    uint32_t e_node = e_reshaped;
+    LogicalId e_node = e_reshaped;
     if (H > 1)
     {
         int32_t h_rep = (int32_t)H;

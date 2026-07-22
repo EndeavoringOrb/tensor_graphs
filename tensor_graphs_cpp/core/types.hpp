@@ -226,6 +226,24 @@ struct MemSpace
 namespace std
 {
     template <>
+    struct hash<LogicalId>
+    {
+        std::uint64_t operator()(const LogicalId &id) const noexcept
+        {
+            return std::hash<uint32_t>()(id.value);
+        }
+    };
+
+    template <>
+    struct hash<PhysicalId>
+    {
+        std::uint64_t operator()(const PhysicalId &id) const noexcept
+        {
+            return std::hash<uint32_t>()(id.value);
+        }
+    };
+
+    template <>
     struct hash<EClassId>
     {
         std::uint64_t operator()(const EClassId &id) const noexcept
@@ -468,6 +486,53 @@ namespace std
             return h;
         }
     };
+}
+
+inline void tg_serialize(BinaryWriter &bw, const LogicalId &val)
+{
+    bw.write(val.value);
+}
+inline void tg_deserialize(BinaryReader &br, LogicalId &val)
+{
+    br.read(val.value);
+}
+inline void tg_serialize(BinaryWriter &bw, const PhysicalId &val)
+{
+    bw.write(val.value);
+}
+inline void tg_deserialize(BinaryReader &br, PhysicalId &val)
+{
+    br.read(val.value);
+}
+inline void tg_serialize(BinaryWriter &bw, const KernelId &val)
+{
+    bw.write(val.value);
+}
+inline void tg_deserialize(BinaryReader &br, KernelId &val)
+{
+    br.read(val.value);
+}
+inline void tg_serialize(BinaryWriter &bw, const MemSpace &val)
+{
+    bw.write(val.idx);
+    bw.write(val.type);
+}
+inline void tg_deserialize(BinaryReader &br, MemSpace &val)
+{
+    br.read(val.idx);
+    br.read(val.type);
+}
+inline void tg_serialize(BinaryWriter &bw, const Engine &val)
+{
+    bw.write(val.idx);
+    bw.write(val.type);
+    bw.write(val.supported);
+}
+inline void tg_deserialize(BinaryReader &br, Engine &val)
+{
+    br.read(val.idx);
+    br.read(val.type);
+    br.read(val.supported);
 }
 
 inline void tg_serialize(BinaryWriter &bw, const ParallelBuffer &val)

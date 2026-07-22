@@ -239,7 +239,7 @@ inline LogicalId refFactoryJinaLayerNormWB_F32_3D(const std::vector<LogicalId> &
 
     // Helper: expand_1d_to_3d(vec, D, 1, S) → {1, S, D}
     // Mirrors JinaV5OmniNanoRetrievalModel::expand_1d_to_3d exactly.
-    auto expand_1d_1SD = [&](uint32_t vec) -> LogicalId
+    auto expand_1d_1SD = [&](LogicalId vec) -> LogicalId
     {
         int32_t sh[] = {1, 1, (int32_t)D};
         LogicalId out = g.reshape(vec, g.constant({3}, sh, DType::INT32));
@@ -263,7 +263,7 @@ inline LogicalId refFactoryJinaLayerNormWB_F32_3D(const std::vector<LogicalId> &
     float d_float = (float)D;                     // 768.0f
     LogicalId d_node = expand_scalar_1S1(d_float); // {1, S, 1}
     LogicalId mean_val = g.div(sum_x, d_node);     // {B, S, 1}
-    uint32_t mean = repeat_d_axis2(mean_val);     // {B, S, D}
+    LogicalId mean = repeat_d_axis2(mean_val);     // {B, S, D}
 
     // --- x - mean ---
     LogicalId x_sub = g.add(x_id, g.neg(mean)); // {B, S, D}
@@ -282,7 +282,7 @@ inline LogicalId refFactoryJinaLayerNormWB_F32_3D(const std::vector<LogicalId> &
     // --- inv_std = 1 / std ---
     LogicalId one_node = expand_scalar_1S1(1.0f);    // {1, S, 1}
     LogicalId inv_std = g.div(one_node, std_dev);    // {B, S, 1}
-    uint32_t inv_std_exp = repeat_d_axis2(inv_std); // {B, S, D}
+    LogicalId inv_std_exp = repeat_d_axis2(inv_std); // {B, S, D}
 
     // --- normalize ---
     LogicalId normalized = g.mul(x_sub, inv_std_exp); // {B, S, D}

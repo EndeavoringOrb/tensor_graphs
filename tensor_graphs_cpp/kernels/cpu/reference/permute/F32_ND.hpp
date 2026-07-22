@@ -23,7 +23,6 @@ inline void inferViewPermute(TensorNode &node, const std::vector<TensorNode> &in
     {
         node.strides[i] = inputs[0].strides[dims[i]];
     }
-    node.viewOffset = inputs[0].viewOffset;
 }
 
-REGISTER_REF_KERNEL_VIEW(OpType::PERMUTE, 2, 2, matchPermuteView, inferViewPermute, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY, DType::INT32}, {{1}, {1}}, {false, false}, {{MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_REF_KERNEL_VIEW(OpType::PERMUTE, 2, 2, matchPermuteView, inferViewPermute, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY, DType::INT32}, {{1}, {1}}, {false, false}, {MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP)});

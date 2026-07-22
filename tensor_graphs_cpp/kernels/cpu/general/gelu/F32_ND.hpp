@@ -57,10 +57,10 @@ inline LogicalId refFactoryGelu(const std::vector<LogicalId> &inputs, Graph &gra
 
     // Broadcast all constants to the input shape to satisfy atomic shape matching
     float c1_val = 0.044715f;
-    uint32_t c1_node = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &c1_val, DType::FLOAT32), target_shape);
+    LogicalId c1_node = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &c1_val, DType::FLOAT32), target_shape);
 
     float c2_val = 0.79788456f;
-    uint32_t c2_node = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &c2_val, DType::FLOAT32), target_shape);
+    LogicalId c2_node = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &c2_val, DType::FLOAT32), target_shape);
 
     LogicalId x_sq = graph.mul(x_id, x_id);
     LogicalId x_cube = graph.mul(x_sq, x_id);
@@ -70,13 +70,13 @@ inline LogicalId refFactoryGelu(const std::vector<LogicalId> &inputs, Graph &gra
     LogicalId term3 = graph.mul(term2, c2_node);
 
     float neg_two_val = -2.0f;
-    uint32_t neg_two = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &neg_two_val, DType::FLOAT32), target_shape);
+    LogicalId neg_two = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &neg_two_val, DType::FLOAT32), target_shape);
 
     float two_val = 2.0f;
-    uint32_t two = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &two_val, DType::FLOAT32), target_shape);
+    LogicalId two = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &two_val, DType::FLOAT32), target_shape);
 
     float e_val = 2.718281828459045f;
-    uint32_t e_node = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &e_val, DType::FLOAT32), target_shape);
+    LogicalId e_node = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &e_val, DType::FLOAT32), target_shape);
 
     float one_val = 1.0f;
     LogicalId one_node = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
@@ -93,7 +93,7 @@ inline LogicalId refFactoryGelu(const std::vector<LogicalId> &inputs, Graph &gra
     LogicalId term4 = graph.add(one_node, tanh_result);
 
     float half_val = 0.5f;
-    uint32_t half_node = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &half_val, DType::FLOAT32), target_shape);
+    LogicalId half_node = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &half_val, DType::FLOAT32), target_shape);
     LogicalId term5 = graph.mul(x_id, half_node);
 
     return graph.mul(term5, term4);
