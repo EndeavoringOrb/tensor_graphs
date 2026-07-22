@@ -301,14 +301,29 @@ struct Session
                     false,
                     repo);
 
-                for (const auto &pair : plan.nodesMap) // TODO: nodesMap is deprecated, loop over plan.instructions, get kernel and check kernel opType
+                std::unordered_set<PhysicalId> produced;
+                for (const auto &inst : plan.instructions)
                 {
-                    if (pair.second.opType == OpType::CACHE)
+                    produced.insert(inst.nodeId);
+                }
+
+                for (const auto &inst : plan.instructions)
+                {
+                    for (uint64_t k = 0; k < inst.inputNodeIds.size(); ++k)
                     {
-                        uint32_t logicalId = plan.getLogicalId(pair.first);
-                        if (logicalId != UINT32_MAX)
+                        PhysicalId inId = inst.inputNodeIds[k];
+                        if (produced.find(inId) == produced.end())
                         {
-                            protectedCachedNodes[logicalId] = pair.second.backend;
+                            LogicalId logicalId = plan.getLogicalId(inId);
+                            if (logicalId != LogicalId())
+                            {
+                                // If it's an unproduced input and not a standard graph input/constant, 
+                                // it must have been dynamically fetched from the dirty region cache.
+                                if (graph.getNode(logicalId).opType != OpType::INPUT)
+                                {
+                                    protectedCachedNodes[logicalId] = inst.inBuffers[k].mem_space;
+                                }
+                            }
                         }
                     }
                 }

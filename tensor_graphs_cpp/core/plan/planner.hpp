@@ -1438,7 +1438,7 @@ struct Planner
         return injected;
     }
 
-    Planner(CostModel &costModel, std::unordered_map<uint32_t, uint64_t> &mem_caps)
+    Planner(CostModel &costModel, const std::unordered_map<uint32_t, uint64_t> &mem_caps)
         : costModel(costModel), mem_caps(mem_caps) {}
 
     CompiledGraph plan(
