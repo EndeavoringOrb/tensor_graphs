@@ -34,7 +34,7 @@
 // =============================================================================
 struct BenchBuffer
 {
-    Backend backend = Backend::CPU;
+    MemSpace mem_space = {1, HandleType::CPP};
     uint64_t bytes = 0;
     std::vector<uint8_t> hostData;
     void *devicePtr = nullptr;
@@ -61,7 +61,7 @@ struct BenchBuffer
         if (this != &o)
         {
             free();
-            backend = o.backend;
+            mem_space = o.mem_space;
             bytes = o.bytes;
             hostData = std::move(o.hostData);
             devicePtr = o.devicePtr;
@@ -73,15 +73,15 @@ struct BenchBuffer
         return *this;
     }
 
-    void allocate(Backend b, uint64_t size)
+    void allocate(MemSpace ms, uint64_t size)
     {
         free();
-        backend = b;
+        mem_space = ms;
         bytes = size == 0 ? 1 : size;
 
         hostData.resize(bytes, 0);
 
-        if (backend == Backend::CUDA)
+        if (mem_space.type == HandleType::CUDA)
         {
 #ifdef USE_CUDA
             cudaError_t err = cudaMalloc(&devicePtr, bytes);
@@ -93,7 +93,7 @@ struct BenchBuffer
             Error::throw_err("CUDA backend requested but USE_CUDA is not defined.");
 #endif
         }
-        else if (backend == Backend::OPENCL)
+        else if (mem_space.type == HandleType::OPENCL)
         {
             OpenCLState::get().init();
             cl_context ctx = OpenCLState::get().context;
@@ -117,7 +117,7 @@ struct BenchBuffer
 
     void upload()
     {
-        if (backend == Backend::CUDA)
+        if (mem_space.type == HandleType::CUDA)
         {
 #ifdef USE_CUDA
             cudaError_t err = cudaMemcpy(devicePtr, hostData.data(), bytes, cudaMemcpyHostToDevice);
@@ -127,7 +127,7 @@ struct BenchBuffer
             }
 #endif
         }
-        else if (backend == Backend::OPENCL)
+        else if (mem_space.type == HandleType::OPENCL)
         {
             if (clMem && !hostData.empty())
             {
@@ -149,7 +149,7 @@ struct BenchBuffer
 
     void download()
     {
-        if (backend == Backend::CUDA)
+        if (mem_space.type == HandleType::CUDA)
         {
 #ifdef USE_CUDA
             cudaError_t err = cudaMemcpy(hostData.data(), devicePtr, bytes, cudaMemcpyDeviceToHost);
@@ -159,7 +159,7 @@ struct BenchBuffer
             }
 #endif
         }
-        else if (backend == Backend::OPENCL)
+        else if (mem_space.type == HandleType::OPENCL)
         {
             if (clMem && !hostData.empty())
             {
@@ -183,13 +183,13 @@ struct BenchBuffer
     {
         if (devicePtr)
         {
-            if (backend == Backend::CUDA)
+            if (mem_space.type == HandleType::CUDA)
             {
 #ifdef USE_CUDA
                 cudaFree(devicePtr);
 #endif
             }
-            else if (backend == Backend::OPENCL)
+            else if (mem_space.type == HandleType::OPENCL)
             {
                 if (clMem)
                 {
@@ -205,7 +205,7 @@ struct BenchBuffer
 
     const void *getReadPtr() const
     {
-        return (backend == Backend::STORAGE) ? nullptr : devicePtr;
+        return (mem_space.type == HandleType::STORAGE) ? nullptr : devicePtr;
     }
 
     void *getWritePtr()
@@ -266,8 +266,6 @@ struct StorageFiles
     }
 };
 
-// In tensor_graphs_cpp/core/common/bench_utils.hpp
-
 inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel, int runIdx, const std::vector<BenchBuffer> *inputBuffers = nullptr)
 {
     StorageFiles sf;
@@ -276,15 +274,15 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
     for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
     {
         uint64_t ruleIdx = idx;
-        if (kernel.isVariadic)
+        if (kernel.min_num_inputs != kernel.max_num_inputs)
         {
-            ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+            ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1) : 0;
         }
-        Backend b = Backend::CPU;
-        if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
-            b = r.inputBackends[ruleIdx][0];
+        MemSpace b = {1, HandleType::CPP};
+        if (!r.input_mem_spaces.empty() && ruleIdx < r.input_mem_spaces.size())
+            b = r.input_mem_spaces[ruleIdx];
 
-        if (b == Backend::STORAGE)
+        if (b.type == HandleType::STORAGE)
         {
             uint64_t elements = countElements(r.inputShapes[idx]);
             uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
@@ -293,7 +291,7 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
                 Error::throw_err("[createStorageInputs] got 0 bytes for file size");
             }
 
-            std::string path = "benchmarks/dummy_storage_" + std::to_string(sf.fds.size()) + "_" + std::to_string(r.kernelId) + "_run_" + std::to_string(runIdx) + ".bin";
+            std::string path = "benchmarks/dummy_storage_" + std::to_string(sf.fds.size()) + "_" + std::to_string(r.kernelId.value) + "_run_" + std::to_string(runIdx) + ".bin";
             std::ofstream out(path, std::ios::binary | std::ios::trunc);
             if (!out.is_open())
             {
@@ -335,9 +333,9 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
     return sf;
 }
 
-inline void synchronizeBackend(Backend backend)
+inline void synchronizeHandle(HandleType handle)
 {
-    if (backend == Backend::CUDA)
+    if (handle == HandleType::CUDA)
     {
 #ifdef USE_CUDA
         cudaError_t err = cudaDeviceSynchronize();
@@ -347,7 +345,7 @@ inline void synchronizeBackend(Backend backend)
         }
 #endif
     }
-    else if (backend == Backend::OPENCL)
+    else if (handle == HandleType::OPENCL)
     {
         clFinish(OpenCLState::get().queue);
     }
@@ -373,9 +371,9 @@ struct PreparedKernel
         inPtrs.assign(r.inputShapes.size(), nullptr);
         inViews.resize(r.inputShapes.size());
 
-        outputBuffers.resize(r.outputShapes.size());
-        outPtrs.assign(r.outputShapes.size(), nullptr);
-        outViews.resize(r.outputShapes.size());
+        outputBuffers.resize(1);
+        outPtrs.assign(1, nullptr);
+        outViews.resize(1);
 
         for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
         {
@@ -394,13 +392,13 @@ struct PreparedKernel
             uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
 
             uint64_t ruleIdx = idx;
-            if (kernel.isVariadic)
+            if (kernel.min_num_inputs != kernel.max_num_inputs)
             {
-                ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+                ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1) : 0;
             }
-            Backend b = Backend::CPU;
-            if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
-                b = r.inputBackends[ruleIdx][0];
+            MemSpace b = {1, HandleType::CPP};
+            if (!r.input_mem_spaces.empty() && ruleIdx < r.input_mem_spaces.size())
+                b = r.input_mem_spaces[ruleIdx];
 
             inputBuffers[idx].allocate(b, bytes);
 
@@ -425,8 +423,8 @@ struct PreparedKernel
                     int32_t *iptr = reinterpret_cast<int32_t *>(inputBuffers[idx].hostData.data());
                     if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos)
                     {
-                        if (idx == 1 && r.inputShapes.size() > 0 && r.outputShapes.size() > 0 &&
-                            r.inputShapes[0].size() == r.outputShapes[0].size() && elements == r.inputShapes[0].size())
+                        if (idx == 1 && r.inputShapes.size() > 0 &&
+                            r.inputShapes[0].size() == r.outputShape.size() && elements == r.inputShapes[0].size())
                         {
                             std::vector<bool> used(elements, false);
                             for (uint64_t k = 0; k < elements; ++k)
@@ -434,7 +432,7 @@ struct PreparedKernel
                                 uint64_t found_d = k;
                                 for (uint64_t d = 0; d < elements; ++d)
                                 {
-                                    if (!used[d] && r.inputShapes[0][d] == r.outputShapes[0][k])
+                                    if (!used[d] && r.inputShapes[0][d] == r.outputShape[k])
                                     {
                                         found_d = d;
                                         break;
@@ -455,11 +453,11 @@ struct PreparedKernel
                         if (idx == r.inputShapes.size() - 1)
                         {
                             int32_t concat_axis = -1;
-                            if (!r.inputShapes.empty() && !r.outputShapes.empty())
+                            if (!r.inputShapes.empty() && !r.outputShape.empty())
                             {
-                                for (uint64_t d = 0; d < r.outputShapes[0].size(); ++d)
+                                for (uint64_t d = 0; d < r.outputShape.size(); ++d)
                                 {
-                                    if (r.outputShapes[0][d] != r.inputShapes[0][d])
+                                    if (r.outputShape[d] != r.inputShapes[0][d])
                                     {
                                         concat_axis = (int32_t)d;
                                         break;
@@ -504,37 +502,30 @@ struct PreparedKernel
             inViews[idx].dtype = r.inputDTypes[idx];
         }
 
-        for (uint64_t idx = 0; idx < r.outputShapes.size(); ++idx)
         {
             uint64_t maxIndex = 0;
-            for (uint64_t d = 0; d < r.outputShapes[idx].size(); ++d)
+            for (uint64_t d = 0; d < r.outputShape.size(); ++d)
             {
-                if (r.outputShapes[idx][d] > 0)
+                if (r.outputShape[d] > 0)
                 {
-                    maxIndex += (r.outputShapes[idx][d] - 1) * r.outputStrides[idx][d];
+                    maxIndex += (r.outputShape[d] - 1) * r.outputStrides[d];
                 }
             }
-            uint64_t elements = r.outputShapes[idx].empty() ? 1 : maxIndex + 1;
+            uint64_t elements = r.outputShape.empty() ? 1 : maxIndex + 1;
 
             if (elements == 0)
                 elements = 1;
-            uint64_t bytes = elements * getDTypeSize(r.outputDTypes[idx]);
+            uint64_t bytes = elements * getDTypeSize(r.outputDType);
 
-            Backend outBackend = r.backends.empty() ? Backend::CPU : r.backends[0];
-            outputBuffers[idx].allocate(outBackend, bytes);
+            MemSpace outBackend = r.output_mem_space;
+            outputBuffers[0].allocate(outBackend, bytes);
 
-            if (kernel.inplace && idx == 0)
-            {
-                std::memcpy(outputBuffers[idx].hostData.data(), inputBuffers[0].hostData.data(), std::min(inputBuffers[0].bytes, outputBuffers[idx].bytes));
-                outputBuffers[idx].upload();
-            }
+            outPtrs[0] = outputBuffers[0].getWritePtr();
 
-            outPtrs[idx] = outputBuffers[idx].getWritePtr();
-
-            outViews[idx].setShape(r.outputShapes[idx]);
-            outViews[idx].strides = r.outputStrides[idx];
-            outViews[idx].offset = 0;
-            outViews[idx].dtype = r.outputDTypes[idx];
+            outViews[0].setShape(r.outputShape);
+            outViews[0].strides = r.outputStrides;
+            outViews[0].offset = 0;
+            outViews[0].dtype = r.outputDType;
         }
 
         ctx.inputs = inPtrs;
@@ -551,12 +542,6 @@ struct PreparedKernel
         {
             ctx.cl_outputs.push_back(outputBuffers[idx].clMem);
         }
-
-        if (kernel.inplace && !ctx.inputs.empty() && !ctx.outputs.empty())
-        {
-            ctx.inputs[0] = ctx.outputs[0];
-            ctx.cl_inputs[0] = ctx.cl_outputs[0];
-        }
     }
 
     void updateStorageContext(const KernelEntry &kernel, const Record &r, int runIdx)
@@ -566,15 +551,15 @@ struct PreparedKernel
         for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
         {
             uint64_t ruleIdx = idx;
-            if (kernel.isVariadic)
+            if (kernel.min_num_inputs != kernel.max_num_inputs)
             {
-                ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
+                ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1) : 0;
             }
-            Backend b = Backend::CPU;
-            if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
-                b = r.inputBackends[ruleIdx][0];
+            MemSpace b = {1, HandleType::CPP};
+            if (!r.input_mem_spaces.empty() && ruleIdx < r.input_mem_spaces.size())
+                b = r.input_mem_spaces[ruleIdx];
 
-            if (b == Backend::STORAGE)
+            if (b.type == HandleType::STORAGE)
             {
                 if (storageInIdx < sf.fds.size())
                 {
@@ -596,11 +581,11 @@ struct PreparedKernel
     {
         for (const auto &buf : inputBuffers)
         {
-            synchronizeBackend(buf.backend);
+            synchronizeHandle(buf.mem_space.type);
         }
         for (const auto &buf : outputBuffers)
         {
-            synchronizeBackend(buf.backend);
+            synchronizeHandle(buf.mem_space.type);
         }
     }
 
