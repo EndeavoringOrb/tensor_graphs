@@ -33,4 +33,4 @@ inline void inferViewRepeat(TensorNode &node, const std::vector<TensorNode> &inp
     node.viewOffset = inputs[0].viewOffset;
 }
 
-REGISTER_REF_KERNEL_VIEW(OpType::REPEAT, 3, matchRepeatView, inferViewRepeat, {Backend::CPU, Backend::CUDA}, {DType::ANY, DType::INT32, DType::INT32}, {{1}, {1}, {1}}, {false, false, false}, {{Backend::CPU, Backend::CUDA}, {Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL_VIEW(OpType::REPEAT, 3, 3, matchRepeatView, inferViewRepeat, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY, DType::INT32, DType::INT32}, {{1}, {1}, {1}}, {false, false, false}, {{MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -63,4 +63,4 @@ inline void runConcatF32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::CONCAT, 2, matchConcatF32_ND, runConcatF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {8, 32}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::CONCAT, 2, 2, matchConcatF32_ND, runConcatF32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {8, 32}}, {false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

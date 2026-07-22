@@ -123,7 +123,7 @@ inline void runDotF32_3D_Optimized(const KernelContext &ctx)
         thread.join();
 }
 
-inline uint32_t refFactoryDotF32_3D_Optimized(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryDotF32_3D_Optimized(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Dot 3D requires 2 inputs");
@@ -132,6 +132,6 @@ inline uint32_t refFactoryDotF32_3D_Optimized(const std::vector<uint32_t> &input
 }
 
 // Register as a high-performance kernel instead of a reference kernel
-REGISTER_KERNEL("Dot_F32_3D_CPU_Optimized", 2, matchDotF32_3D_Optimized, runDotF32_3D_Optimized, refFactoryDotF32_3D_Optimized, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Dot_F32_3D_CPU_Optimized", 2, 2, matchDotF32_3D_Optimized, runDotF32_3D_Optimized, refFactoryDotF32_3D_Optimized, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

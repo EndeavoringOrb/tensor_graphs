@@ -307,45 +307,39 @@ inline void runPartialBF16TransposedGEMM(const KernelContext &ctx)
         th.join();
 }
 
-inline uint32_t refFactoryPartialBF16TransposedGEMM(const std::vector<uint32_t> &inIds, Graph &graph)
+inline LogicalId refFactoryPartialBF16TransposedGEMM(const std::vector<LogicalId> &inIds, Graph &graph)
 {
     // inIds: [cache, A, W, sC, eC, tC, sA, eA, tA, sW, eW, tW]
-    uint32_t sliceA = graph.slice(inIds[1], inIds[6], inIds[7], inIds[8]);
-    uint32_t contigA = graph.contiguous(sliceA);
+    LogicalId sliceA = graph.slice(inIds[1], inIds[6], inIds[7], inIds[8]);
+    LogicalId contigA = graph.contiguous(sliceA);
 
-    uint32_t w_cast = graph.cast(inIds[2], DType::FLOAT32);
+    LogicalId w_cast = graph.cast(inIds[2], DType::FLOAT32);
     int32_t perm[] = {1, 0};
-    uint32_t w_t = graph.contiguous(graph.permute(w_cast, graph.constant({2}, perm, DType::INT32)));
+    LogicalId w_t = graph.contiguous(graph.permute(w_cast, graph.constant({2}, perm, DType::INT32)));
 
     auto w_full_shape = graph.getNode(inIds[2]).getShape();
     int32_t N_full = w_full_shape.size() > 0 ? w_full_shape[0] : 1;
     int32_t K_full = w_full_shape.size() > 1 ? w_full_shape[1] : 1;
 
     int32_t s3[] = {1, K_full, N_full};
-    uint32_t w_3d = graph.reshape(w_t, graph.constant({3}, s3, DType::INT32));
+    LogicalId w_3d = graph.reshape(w_t, graph.constant({3}, s3, DType::INT32));
 
-    uint32_t sliceW = graph.slice(w_3d, inIds[9], inIds[10], inIds[11]);
-    uint32_t contigW = graph.contiguous(sliceW);
+    LogicalId sliceW = graph.slice(w_3d, inIds[9], inIds[10], inIds[11]);
+    LogicalId contigW = graph.contiguous(sliceW);
 
-    uint32_t dot = graph.dot(contigA, contigW);
-    uint32_t contigDot = graph.contiguous(dot);
+    LogicalId dot = graph.dot(contigA, contigW);
+    LogicalId contigDot = graph.contiguous(dot);
 
     return graph.scatter(inIds[0], contigDot, inIds[3], inIds[4], inIds[5]);
 }
 
-REGISTER_KERNEL_INPLACE(
-    "Scatter_BF16_Transposed_GEMM_NEON",
-    12,
-    matchPartialBF16TransposedGEMM,
-    runPartialBF16TransposedGEMM,
-    refFactoryPartialBF16TransposedGEMM,
-    {Backend::CPU},
+REGISTER_KERNEL_INPLACE("Scatter_BF16_Transposed_GEMM_NEON", 12, 12, matchPartialBF16TransposedGEMM, runPartialBF16TransposedGEMM, refFactoryPartialBF16TransposedGEMM, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::FLOAT32, DType::FLOAT32, DType::BF16,
      DType::INT32, DType::INT32, DType::INT32,
      DType::INT32, DType::INT32, DType::INT32,
      DType::INT32, DType::INT32, DType::INT32},
     {{1, 8, 2048}, {1, 8, 2048}, {2048, 2048}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}},
     {false, false, false, false, false, false, false, false, false, false, false, false},
-    {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

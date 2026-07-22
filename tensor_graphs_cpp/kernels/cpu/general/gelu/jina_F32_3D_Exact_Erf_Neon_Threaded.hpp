@@ -303,10 +303,10 @@ inline LogicalId refFactoryJinaGeluExact_F32_3D(const std::vector<LogicalId> &in
 REGISTER_KERNEL("JinaGeluExact_F32_3D", 1, 1,
                 matchJinaGeluExact_F32_3D, runJinaGeluExact_F32_3D,
                 refFactoryJinaGeluExact_F32_3D,
-                MemSpace(1, HandleType::CPU), {Engine(0, EngineType::CPU)},
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32},
                 {{1, 1024, 3072}},
                 {true},
-                {{MemSpace(1, HandleType::CPU)}});
+                {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

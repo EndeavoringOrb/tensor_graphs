@@ -27,6 +27,6 @@ inline void runGeluF32_3D_NEON(const KernelContext &ctx)
     }
 }
 
-REGISTER_KERNEL("Gelu_3D_NEON", 1, matchGeluF32_3D_NEON, runGeluF32_3D_NEON, refFactoryGelu, {Backend::CPU}, {DType::FLOAT32}, {{1, 8, 2048}}, {true}, {{Backend::CPU}});
+REGISTER_KERNEL("Gelu_3D_NEON", 1, 1, matchGeluF32_3D_NEON, runGeluF32_3D_NEON, refFactoryGelu, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 8, 2048}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

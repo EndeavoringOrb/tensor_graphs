@@ -298,7 +298,7 @@ inline void runDotF32_3D_N64(const KernelContext &ctx)
         thread.join();
 }
 
-inline uint32_t refFactoryDotF32_3D_N64(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryDotF32_3D_N64(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Dot 3D requires 2 inputs");
@@ -306,16 +306,10 @@ inline uint32_t refFactoryDotF32_3D_N64(const std::vector<uint32_t> &inputs, Gra
     return graph.dot(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL(
-    "Dot_F32_3D_CPU_Neon_N64",
-    2,
-    matchDotF32_3D_N64,
-    runDotF32_3D_N64,
-    refFactoryDotF32_3D_N64,
-    {Backend::CPU},
+REGISTER_KERNEL("Dot_F32_3D_CPU_Neon_N64", 2, 2, matchDotF32_3D_N64, runDotF32_3D_N64, refFactoryDotF32_3D_N64, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::FLOAT32, DType::FLOAT32},
     {{1, 8, 8}, {1, 8, 64}},
     {true, true},
-    {{Backend::CPU}, {Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

@@ -218,33 +218,27 @@ inline void runScatterDotF32_3D_Optimized_Inplace(const KernelContext &ctx)
         th.join();
 }
 
-inline uint32_t refFactoryScatterDotF32_3D_Optimized_Inplace(const std::vector<uint32_t> &inIds, Graph &graph)
+inline LogicalId refFactoryScatterDotF32_3D_Optimized_Inplace(const std::vector<LogicalId> &inIds, Graph &graph)
 {
     // inIds: [cache, A, B, sS, eS, tS, sA, eA, tA, sB, eB, tB]
-    uint32_t sliceA = graph.slice(inIds[1], inIds[6], inIds[7], inIds[8]);
-    uint32_t sliceB = graph.slice(inIds[2], inIds[9], inIds[10], inIds[11]);
+    LogicalId sliceA = graph.slice(inIds[1], inIds[6], inIds[7], inIds[8]);
+    LogicalId sliceB = graph.slice(inIds[2], inIds[9], inIds[10], inIds[11]);
 
-    uint32_t contigA = graph.contiguous(sliceA);
-    uint32_t contigB = graph.contiguous(sliceB);
+    LogicalId contigA = graph.contiguous(sliceA);
+    LogicalId contigB = graph.contiguous(sliceB);
 
-    uint32_t dot = graph.dot(contigA, contigB);
-    uint32_t contigDot = graph.contiguous(dot);
+    LogicalId dot = graph.dot(contigA, contigB);
+    LogicalId contigDot = graph.contiguous(dot);
 
     return graph.scatter(inIds[0], contigDot, inIds[3], inIds[4], inIds[5]);
 }
 
-REGISTER_KERNEL_INPLACE(
-    "Scatter_Dot_F32_3D_CPU_Optimized_inplace",
-    12,
-    matchScatterDotF32_3D_Optimized_Inplace,
-    runScatterDotF32_3D_Optimized_Inplace,
-    refFactoryScatterDotF32_3D_Optimized_Inplace,
-    {Backend::CPU},
+REGISTER_KERNEL_INPLACE("Scatter_Dot_F32_3D_CPU_Optimized_inplace", 12, 12, matchScatterDotF32_3D_Optimized_Inplace, runScatterDotF32_3D_Optimized_Inplace, refFactoryScatterDotF32_3D_Optimized_Inplace, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32,
      DType::INT32, DType::INT32, DType::INT32,
      DType::INT32, DType::INT32, DType::INT32,
      DType::INT32, DType::INT32, DType::INT32},
     {{1, 4, 8}, {1, 4, 8}, {1, 8, 8}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}},
     {false, false, false, false, false, false, false, false, false, false, false, false},
-    {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif // TG_HAS_NEON

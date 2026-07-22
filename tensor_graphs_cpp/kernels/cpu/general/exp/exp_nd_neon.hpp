@@ -28,14 +28,14 @@ inline void runExpND_NEON(const KernelContext &ctx) {
     for (auto &w : workers) w.join();
 }
 
-inline uint32_t refFactoryExpND(const std::vector<uint32_t> &inputs, Graph &g) {
-    uint32_t x = inputs[0];
+inline LogicalId refFactoryExpND(const std::vector<LogicalId> &inputs, Graph &g) {
+    LogicalId x = inputs[0];
     auto shape = g.getNode(x).getShape();
     float e_val = 2.7182818f;
-    uint32_t e_node = g.constant({1}, &e_val, DType::FLOAT32);
+    LogicalId e_node = g.constant({1}, &e_val, DType::FLOAT32);
     
     std::vector<int32_t> ones(shape.size(), 1);
-    uint32_t current_e = g.reshape(e_node, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
+    LogicalId current_e = g.reshape(e_node, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
     
     for (uint64_t ax = 0; ax < shape.size(); ++ax) {
         if (shape[ax] > 1) {
@@ -47,4 +47,4 @@ inline uint32_t refFactoryExpND(const std::vector<uint32_t> &inputs, Graph &g) {
     return g.pow(current_e, x);
 }
 
-REGISTER_KERNEL("Exp_ND_NEON", 1, matchExpND_NEON, runExpND_NEON, refFactoryExpND, {Backend::CPU}, {DType::FLOAT32}, {{1, 256, 128}}, {true}, {{Backend::CPU}});
+REGISTER_KERNEL("Exp_ND_NEON", 1, 1, matchExpND_NEON, runExpND_NEON, refFactoryExpND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 256, 128}}, {true}, {{MemSpace(1, HandleType::CPP)}});

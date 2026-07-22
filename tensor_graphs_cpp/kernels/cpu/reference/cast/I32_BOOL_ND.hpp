@@ -23,5 +23,5 @@ inline void runCastI32_BOOL_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastI32_BOOL_ND, runCastI32_BOOL_ND, {Backend::CPU}, {DType::INT32}, {{8, 32}}, {true}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::CAST, 1, 1, matchCastI32_BOOL_ND, runCastI32_BOOL_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::INT32}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 

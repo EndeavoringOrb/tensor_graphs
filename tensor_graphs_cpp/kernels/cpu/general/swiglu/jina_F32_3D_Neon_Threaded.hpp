@@ -168,20 +168,20 @@ inline void runJinaSwiGLU_F32_3D(const KernelContext &ctx)
 // Reference Factory — mirrors jina's text_mlp pattern:
 //   silu_atomic(gate) * up
 // where silu_atomic uses mul(gate, -1) for negation.
-inline uint32_t refFactoryJinaSwiGLU_F32_3D(const std::vector<uint32_t> &inputs,
+inline LogicalId refFactoryJinaSwiGLU_F32_3D(const std::vector<LogicalId> &inputs,
                                             Graph &g)
 {
-    uint32_t gate_id = inputs[0];
-    uint32_t up_id = inputs[1];
+    LogicalId gate_id = inputs[0];
+    LogicalId up_id = inputs[1];
     const auto &shape = g.getNode(gate_id).getShape();
     uint32_t S = shape[1];
     uint32_t D = shape[2];
 
-    auto expand_scalar_SD = [&](float val) -> uint32_t
+    auto expand_scalar_SD = [&](float val) -> LogicalId
     {
-        uint32_t node = g.constant({1}, &val, DType::FLOAT32);
+        LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
-        uint32_t out = g.reshape(node, g.constant({3}, sh, DType::INT32));
+        LogicalId out = g.reshape(node, g.constant({3}, sh, DType::INT32));
         if (S > 1)
         {
             int32_t rep = (int32_t)S;
@@ -202,26 +202,23 @@ inline uint32_t refFactoryJinaSwiGLU_F32_3D(const std::vector<uint32_t> &inputs,
     };
 
     // --- silu_atomic(gate) ---
-    uint32_t neg_one = expand_scalar_SD(-1.0f);
-    uint32_t neg_gate = g.mul(gate_id, neg_one);
-    uint32_t e_node = expand_scalar_SD(2.718281828459045f);
-    uint32_t exp_neg = g.pow(e_node, neg_gate);
-    uint32_t one_node = expand_scalar_SD(1.0f);
-    uint32_t den = g.add(one_node, exp_neg);
-    uint32_t sig = g.div(one_node, den);
-    uint32_t gate_silu = g.mul(gate_id, sig);
+    LogicalId neg_one = expand_scalar_SD(-1.0f);
+    LogicalId neg_gate = g.mul(gate_id, neg_one);
+    LogicalId e_node = expand_scalar_SD(2.718281828459045f);
+    LogicalId exp_neg = g.pow(e_node, neg_gate);
+    LogicalId one_node = expand_scalar_SD(1.0f);
+    LogicalId den = g.add(one_node, exp_neg);
+    LogicalId sig = g.div(one_node, den);
+    LogicalId gate_silu = g.mul(gate_id, sig);
 
     // --- mul(gate_silu, up) ---
     return g.mul(gate_silu, up_id);
 }
 
-REGISTER_KERNEL("JinaSwiGLU_F32_3D", 2,
-                matchJinaSwiGLU_F32_3D, runJinaSwiGLU_F32_3D,
-                refFactoryJinaSwiGLU_F32_3D,
-                {Backend::CPU},
+REGISTER_KERNEL("JinaSwiGLU_F32_3D", 2, 2, matchJinaSwiGLU_F32_3D, runJinaSwiGLU_F32_3D, refFactoryJinaSwiGLU_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32},
                 {{1, 1024, 3072}, {1, 1024, 3072}},
                 {true, true},
-                {{Backend::CPU}, {Backend::CPU}});
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

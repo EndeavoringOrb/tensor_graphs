@@ -30,11 +30,11 @@ inline void runAddF32_3D_NEON(const KernelContext& ctx)
         out[i] = a[i] + b[i];
 }
 
-inline uint32_t refFactoryAdd3D_NEON(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryAdd3D_NEON(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.add(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Add_3D_NEON", 2, matchAddF32_3D_NEON, runAddF32_3D_NEON, refFactoryAdd3D_NEON, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 2048}, {1, 8, 2048}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Add_3D_NEON", 2, 2, matchAddF32_3D_NEON, runAddF32_3D_NEON, refFactoryAdd3D_NEON, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 2048}, {1, 8, 2048}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

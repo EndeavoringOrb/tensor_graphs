@@ -35,9 +35,9 @@ inline void runMulF32_OpenCL_1D(const KernelContext &ctx)
     clFinish(OpenCLState::get().queue);
 }
 
-inline uint32_t refFactoryMulF32_1D_OpenCL(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryMulF32_1D_OpenCL(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.mul(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Mul_F32_1D_OpenCL", 2, matchMulF32_OpenCL_1D, runMulF32_OpenCL_1D, refFactoryMulF32_1D_OpenCL, {Backend::OPENCL}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{Backend::OPENCL}, {Backend::OPENCL}});
+REGISTER_KERNEL("Mul_F32_1D_OpenCL", 2, 2, matchMulF32_OpenCL_1D, runMulF32_OpenCL_1D, refFactoryMulF32_1D_OpenCL, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});

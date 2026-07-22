@@ -48,16 +48,16 @@ inline void runPowF32_ND_Scalar_Threaded(const KernelContext &ctx)
         w.join();
 }
 
-inline uint32_t refFactoryPowND_Scalar_Threaded(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryPowND_Scalar_Threaded(const std::vector<LogicalId> &inputs, Graph &graph)
 {
-    uint32_t idND = inputs[0];
-    uint32_t idScalar = inputs[1];
+    LogicalId idND = inputs[0];
+    LogicalId idScalar = inputs[1];
     auto shapeND = graph.getNode(idND).getShape();
 
     std::vector<int32_t> ones(shapeND.size(), 1);
-    uint32_t reshaped = graph.reshape(idScalar, graph.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
+    LogicalId reshaped = graph.reshape(idScalar, graph.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
 
-    uint32_t out = reshaped;
+    LogicalId out = reshaped;
     for (uint64_t i = 0; i < shapeND.size(); ++i)
     {
         if (shapeND[i] > 1)
@@ -70,4 +70,4 @@ inline uint32_t refFactoryPowND_Scalar_Threaded(const std::vector<uint32_t> &inp
     return graph.pow(idND, out);
 }
 
-REGISTER_KERNEL("Pow_ND_Scalar_Threaded", 2, matchPowF32_ND_Scalar_Threaded, runPowF32_ND_Scalar_Threaded, refFactoryPowND_Scalar_Threaded, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{2, 128}, {1}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Pow_ND_Scalar_Threaded", 2, 2, matchPowF32_ND_Scalar_Threaded, runPowF32_ND_Scalar_Threaded, refFactoryPowND_Scalar_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{2, 128}, {1}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

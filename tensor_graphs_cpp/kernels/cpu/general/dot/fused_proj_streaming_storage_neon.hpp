@@ -12,7 +12,7 @@
 //   uint32_t weight(...) { return g.cast(g.weight(path, name), F32); }
 //   auto project = [&](suffix, in_d, out_d) {
 //       uint32_t w   = weight(...);                  // [out_d, in_d] bf16 STORAGE -> CPU fp32
-//       uint32_t w_t = g.permute(w, {1, 0});         // [in_d, out_d] fp32 CPU view
+//       LogicalId w_t = g.permute(w, {1, 0});         // [in_d, out_d] fp32 CPU view
 //       w_t          = g.contiguous(w_t);            // materialise the transpose  <-- 2nd COPY_TO
 //       return g.dot(x, g.reshape(w_t, {1, in_d, out_d}));
 //   };
@@ -643,32 +643,31 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
 //   - inputs[1]: raw_weight W [N, K] bf16 STORAGE
 //   - output:    Out [1, S, N] fp32 CPU
 // ===========================================================================
-inline uint32_t refFactoryFusedProjStreamingStorage(
-    const std::vector<uint32_t> &inputs,
+inline LogicalId refFactoryFusedProjStreamingStorage(const std::vector<LogicalId> &inputs,
     Graph &graph)
 {
     // inputs[0]: X [1, S, K] fp32 CPU
     // inputs[1]: W [N, K]    bf16 STORAGE (the raw on-disk weight node)
 
     // 1. Correctly model the COPY_TO from STORAGE to CPU bf16
-    uint32_t w_copy = graph.copyto(inputs[1], Backend::CPU);
+    LogicalId w_copy = graph._copyto(inputs[1]);
 
     // 2. Perform the CAST on the CPU node: CPU bf16 -> CPU fp32
-    uint32_t w_cast = graph.cast(w_copy, DType::FLOAT32);
+    LogicalId w_cast = graph.cast(w_copy, DType::FLOAT32);
 
     // [N, K] -> [K, N]  (this is the PERMUTE we are fusing away)
     int32_t perm[] = {1, 0};
-    uint32_t w_t = graph.permute(
+    LogicalId w_t = graph.permute(
         w_cast, graph.constant({2}, perm, DType::INT32));
 
     // materialise  (this is the CONTIGUOUS we are fusing away)
-    uint32_t w_t_contig = graph.contiguous(w_t);
+    LogicalId w_t_contig = graph.contiguous(w_t);
 
     // [K, N] -> [1, K, N]  (this is the RESHAPE we are fusing away)
     auto w_shape = graph.getNode(inputs[1]).getShape();
     int32_t s3[] = {1, static_cast<int32_t>(w_shape[1]),
                     static_cast<int32_t>(w_shape[0])};
-    uint32_t w_3d = graph.reshape(w_t_contig,
+    LogicalId w_3d = graph.reshape(w_t_contig,
                                   graph.constant({3}, s3, DType::INT32));
 
     // The actual matmul (this is the DOT we are fusing away)
@@ -685,16 +684,10 @@ inline uint32_t refFactoryFusedProjStreamingStorage(
 // Output:
 //   [0] Out — fp32, CPU,   [1, S, N]  — projection output
 // ---------------------------------------------------------------------------
-REGISTER_KERNEL(
-    "Fused_Proj_StreamingStorage_NEON",
-    2,
-    matchFusedProjStreamingStorage,
-    runFusedProjStreamingStorage,
-    refFactoryFusedProjStreamingStorage,
-    {Backend::CPU},                        // output backend
+REGISTER_KERNEL("Fused_Proj_StreamingStorage_NEON", 2, 2, matchFusedProjStreamingStorage, runFusedProjStreamingStorage, refFactoryFusedProjStreamingStorage, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},                        // output backend
     {DType::FLOAT32, DType::BF16},         // X is fp32, W is bf16
     {{1, 8, 2048}, {8192, 2048}},          // dummy shapes for the bench harness
     {true, true},                          // both inputs must be contiguous
-    {{Backend::CPU}, {Backend::STORAGE}}); // X from CPU, W directly from STORAGE
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::STORAGE)}}); // X from CPU, W directly from STORAGE
 
 #endif // TG_HAS_NEON && __ARM_FEATURE_BF16

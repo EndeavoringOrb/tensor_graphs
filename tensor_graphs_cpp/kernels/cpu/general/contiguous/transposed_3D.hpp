@@ -98,19 +98,13 @@ inline void runContiguousTransposed3D(const KernelContext &ctx)
         worker.join();
 }
 
-inline uint32_t refFactoryContiguousTransposed3D(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryContiguousTransposed3D(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.contiguous(inputs[0]);
 }
 
-REGISTER_KERNEL(
-    "Contiguous_Transposed_3D",
-    1,
-    matchContiguousTransposed3D,
-    runContiguousTransposed3D,
-    refFactoryContiguousTransposed3D,
-    {Backend::CPU},
+REGISTER_KERNEL("Contiguous_Transposed_3D", 1, 1, matchContiguousTransposed3D, runContiguousTransposed3D, refFactoryContiguousTransposed3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::FLOAT32},
     {{256, 2048, 1024}},
     {false},
-    {{Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}});

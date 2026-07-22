@@ -35,9 +35,9 @@ inline void runPowF32_OpenCL_1D(const KernelContext &ctx)
     clFinish(OpenCLState::get().queue);
 }
 
-inline uint32_t refFactoryPowF32_1D_OpenCL(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryPowF32_1D_OpenCL(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.pow(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Pow_F32_1D_OpenCL", 2, matchPowF32_OpenCL_1D, runPowF32_OpenCL_1D, refFactoryPowF32_1D_OpenCL, {Backend::OPENCL}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{Backend::OPENCL}, {Backend::OPENCL}});
+REGISTER_KERNEL("Pow_F32_1D_OpenCL", 2, 2, matchPowF32_OpenCL_1D, runPowF32_OpenCL_1D, refFactoryPowF32_1D_OpenCL, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});

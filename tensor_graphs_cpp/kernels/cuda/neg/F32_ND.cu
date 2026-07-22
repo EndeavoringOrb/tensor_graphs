@@ -48,7 +48,7 @@ inline void runNegF32_CUDA_ND(const KernelContext &ctx)
 /**
  * Reference Factory
  */
-inline uint32_t refFactoryNegF32_ND_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryNegF32_ND_CUDA(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 1)
         Error::throw_err("Negate ND requires 1 input");
@@ -56,6 +56,6 @@ inline uint32_t refFactoryNegF32_ND_CUDA(const std::vector<uint32_t> &inputs, Gr
     return graph.neg(inputs[0]);
 }
 
-REGISTER_KERNEL("Neg_F32_ND_CUDA", 1, matchNegF32_CUDA_ND, runNegF32_CUDA_ND, refFactoryNegF32_ND_CUDA, {Backend::CUDA}, {DType::FLOAT32}, {{1024}}, {true}, {{Backend::CUDA}});
+REGISTER_KERNEL("Neg_F32_ND_CUDA", 1, 1, matchNegF32_CUDA_ND, runNegF32_CUDA_ND, refFactoryNegF32_ND_CUDA, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32}, {{1024}}, {true}, {{MemSpace(1, HandleType::CUDA)}});
 
 #endif

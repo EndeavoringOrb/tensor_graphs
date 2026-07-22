@@ -49,10 +49,10 @@ inline void runSmartConcat(const KernelContext &ctx) {
     for (auto &w : workers) w.join();
 }
 
-inline uint32_t refSmartConcat(const std::vector<uint32_t> &inputs, Graph &graph) {
-    std::vector<uint32_t> tensors(inputs.begin(), inputs.end() - 1);
-    uint32_t axis = inputs.back();
+inline LogicalId refSmartConcat(const std::vector<LogicalId> &inputs, Graph &graph) {
+    std::vector<LogicalId> tensors(inputs.begin(), inputs.end() - 1);
+    LogicalId axis = inputs.back();
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Smart_Concat_F32", 2, matchSmartConcat, runSmartConcat, refSmartConcat, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{1, 32, 1, 128}, {1}}, {true, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Smart_Concat_F32", 2, 2, matchSmartConcat, runSmartConcat, refSmartConcat, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{1, 32, 1, 128}, {1}}, {true, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

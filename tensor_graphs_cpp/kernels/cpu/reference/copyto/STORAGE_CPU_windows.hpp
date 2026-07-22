@@ -66,13 +66,8 @@ inline void runCopyTo_STORAGE_CPU(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(
-    OpType::COPY_TO,
-    1,
-    matchCopyTo_STORAGE_CPU,
-    runCopyTo_STORAGE_CPU,
-    {Backend::CPU},
+REGISTER_REF_KERNEL(OpType::COPY_TO, 1, 1, matchCopyTo_STORAGE_CPU, runCopyTo_STORAGE_CPU, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::ANY},
     {{8, 32}},
     {true},
-    {{Backend::STORAGE}});
+    {{MemSpace(1, HandleType::STORAGE)}});

@@ -24,4 +24,4 @@ inline void runPowF32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::POWER, 2, matchPowF32_ND, runPowF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{8, 32}, {8, 32}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::POWER, 2, 2, matchPowF32_ND, runPowF32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{8, 32}, {8, 32}}, {false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

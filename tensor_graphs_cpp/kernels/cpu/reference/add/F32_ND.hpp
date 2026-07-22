@@ -23,4 +23,4 @@ inline void runAddF32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::ADD, 2, 2, matchAddF32_ND, runAddF32_ND, MemSpace(1, HandleType::CPU), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{8, 32}, {8, 32}}, {false, false}, {{MemSpace(1, HandleType::CPU)}, {MemSpace(1, HandleType::CPU)}});
+REGISTER_REF_KERNEL(OpType::ADD, 2, 2, matchAddF32_ND, runAddF32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{8, 32}, {8, 32}}, {false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

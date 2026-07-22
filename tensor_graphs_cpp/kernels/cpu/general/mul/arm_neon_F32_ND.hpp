@@ -77,22 +77,16 @@ inline void runMulF32_ND_NEON(const KernelContext &ctx)
         th.join();
 }
 
-inline uint32_t refFactoryMulND_NEON(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryMulND_NEON(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     // This allows the e-graph to identify this kernel as a valid implementation for MUL
     return graph.mul(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL(
-    "Mul_ND_NEON",
-    2,
-    matchMulF32_ND_NEON,
-    runMulF32_ND_NEON,
-    refFactoryMulND_NEON,
-    {Backend::CPU},
+REGISTER_KERNEL("Mul_ND_NEON", 2, 2, matchMulF32_ND_NEON, runMulF32_ND_NEON, refFactoryMulND_NEON, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::FLOAT32, DType::FLOAT32},
     {{1, 32, 512, 512}, {1, 32, 512, 512}}, // Target typical bottleneck shapes
     {true, true},
-    {{Backend::CPU}, {Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

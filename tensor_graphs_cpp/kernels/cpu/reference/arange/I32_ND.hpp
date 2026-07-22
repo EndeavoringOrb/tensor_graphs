@@ -18,4 +18,4 @@ inline void runArangeI32_ND(const KernelContext &ctx)
         out[i] = start + static_cast<int32_t>(i) * step;
 }
 
-REGISTER_REF_KERNEL(OpType::ARANGE, 3, matchArangeI32_ND, runArangeI32_ND, {Backend::CPU}, {DType::INT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}}, {false, false, false}, {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::ARANGE, 3, 3, matchArangeI32_ND, runArangeI32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::INT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}}, {false, false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

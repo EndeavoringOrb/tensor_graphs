@@ -86,4 +86,4 @@ inline void runDotF32_4D(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::DOT, 2, matchDotF32_4D, runDotF32_4D, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::DOT, 2, 2, matchDotF32_4D, runDotF32_4D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

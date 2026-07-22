@@ -69,14 +69,14 @@ inline void runContiguous_OpenCL_ND(const KernelContext &ctx)
     clFinish(OpenCLState::get().queue);
 }
 
-inline uint32_t refFactoryContiguous_OpenCL_ND(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryContiguous_OpenCL_ND(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.contiguous(inputs[0]);
 }
 
-REGISTER_KERNEL("Contiguous_OpenCL_ND", 1, matchContiguous_OpenCL_ND, runContiguous_OpenCL_ND, refFactoryContiguous_OpenCL_ND, {Backend::OPENCL},
+REGISTER_KERNEL("Contiguous_OpenCL_ND", 1, 1, matchContiguous_OpenCL_ND, runContiguous_OpenCL_ND, refFactoryContiguous_OpenCL_ND, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
                 {DType::ANY},       // Input DType
                 {{1024, 640}},      // Dummy shape
                 {false},            // Input does NOT require contiguity
-                {{Backend::OPENCL}} // Input backends
+                {{MemSpace(1, HandleType::OPENCL)}} // Input backends
 );

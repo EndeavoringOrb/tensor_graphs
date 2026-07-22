@@ -236,7 +236,7 @@ inline void runRecursiveContiguous_ND(const KernelContext &ctx)
     }
 }
 
-inline uint32_t refFactoryRecursiveContiguous_ND(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryRecursiveContiguous_ND(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 1)
         Error::throw_err("RecursiveContiguous requires exactly 1 input");
@@ -244,14 +244,8 @@ inline uint32_t refFactoryRecursiveContiguous_ND(const std::vector<uint32_t> &in
     return graph.contiguous(inputs[0]);
 }
 
-REGISTER_KERNEL(
-    "RecursiveContiguous_ND",
-    1,
-    matchRecursiveContiguous_ND,
-    runRecursiveContiguous_ND,
-    refFactoryRecursiveContiguous_ND,
-    {Backend::CPU},
+REGISTER_KERNEL("RecursiveContiguous_ND", 1, 1, matchRecursiveContiguous_ND, runRecursiveContiguous_ND, refFactoryRecursiveContiguous_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::ANY},
     {{8, 32}},
     {false},
-    {{Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}});

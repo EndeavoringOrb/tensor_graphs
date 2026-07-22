@@ -32,19 +32,19 @@ inline void runJinaGeluExact_F32_3D_OpenCL(const KernelContext &ctx)
     clFinish(OpenCLState::get().queue);
 }
 
-inline uint32_t refFactoryJinaGeluExact_F32_3D_OpenCL(const std::vector<uint32_t> &inputs,
+inline LogicalId refFactoryJinaGeluExact_F32_3D_OpenCL(const std::vector<LogicalId> &inputs,
                                                       Graph &g)
 {
-    uint32_t x_id = inputs[0];
+    LogicalId x_id = inputs[0];
     const auto &shape = g.getNode(x_id).getShape();
     uint32_t S = shape[1];
     uint32_t D = shape[2];
 
-    auto expand_scalar_SD = [&](float val) -> uint32_t
+    auto expand_scalar_SD = [&](float val) -> LogicalId
     {
-        uint32_t node = g.constant({1}, &val, DType::FLOAT32);
+        LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
-        uint32_t out = g.reshape(node, g.constant({3}, sh, DType::INT32));
+        LogicalId out = g.reshape(node, g.constant({3}, sh, DType::INT32));
         if (S > 1)
         {
             int32_t rep = (int32_t)S;
@@ -64,56 +64,53 @@ inline uint32_t refFactoryJinaGeluExact_F32_3D_OpenCL(const std::vector<uint32_t
         return out;
     };
 
-    uint32_t inv_sqrt2 = expand_scalar_SD(0.7071067811865475f);
-    uint32_t half = expand_scalar_SD(0.5f);
-    uint32_t eps_node = expand_scalar_SD(1e-12f);
-    uint32_t p_node = expand_scalar_SD(0.3275911f);
-    uint32_t one_node = expand_scalar_SD(1.0f);
-    uint32_t a1 = expand_scalar_SD(0.254829592f);
-    uint32_t a2 = expand_scalar_SD(-0.284496736f);
-    uint32_t a3 = expand_scalar_SD(1.421413741f);
-    uint32_t a4 = expand_scalar_SD(-1.453152027f);
-    uint32_t a5 = expand_scalar_SD(1.061405429f);
-    uint32_t e_node = expand_scalar_SD(2.718281828459045f);
+    LogicalId inv_sqrt2 = expand_scalar_SD(0.7071067811865475f);
+    LogicalId half = expand_scalar_SD(0.5f);
+    LogicalId eps_node = expand_scalar_SD(1e-12f);
+    LogicalId p_node = expand_scalar_SD(0.3275911f);
+    LogicalId one_node = expand_scalar_SD(1.0f);
+    LogicalId a1 = expand_scalar_SD(0.254829592f);
+    LogicalId a2 = expand_scalar_SD(-0.284496736f);
+    LogicalId a3 = expand_scalar_SD(1.421413741f);
+    LogicalId a4 = expand_scalar_SD(-1.453152027f);
+    LogicalId a5 = expand_scalar_SD(1.061405429f);
+    LogicalId e_node = expand_scalar_SD(2.718281828459045f);
 
-    uint32_t x_scaled = g.mul(x_id, inv_sqrt2);
-    uint32_t xs_sq = g.mul(x_scaled, x_scaled);
-    uint32_t abs_xs = g.pow(xs_sq, half);
-    uint32_t abs_xs_eps = g.add(abs_xs, eps_node);
-    uint32_t sign_xs = g.div(x_scaled, abs_xs_eps);
+    LogicalId x_scaled = g.mul(x_id, inv_sqrt2);
+    LogicalId xs_sq = g.mul(x_scaled, x_scaled);
+    LogicalId abs_xs = g.pow(xs_sq, half);
+    LogicalId abs_xs_eps = g.add(abs_xs, eps_node);
+    LogicalId sign_xs = g.div(x_scaled, abs_xs_eps);
 
-    uint32_t p_abs = g.mul(p_node, abs_xs);
-    uint32_t denom = g.add(one_node, p_abs);
-    uint32_t t = g.div(one_node, denom);
+    LogicalId p_abs = g.mul(p_node, abs_xs);
+    LogicalId denom = g.add(one_node, p_abs);
+    LogicalId t = g.div(one_node, denom);
 
-    uint32_t t2 = g.mul(t, t);
-    uint32_t t3 = g.mul(t2, t);
-    uint32_t t4 = g.mul(t3, t);
-    uint32_t t5 = g.mul(t4, t);
+    LogicalId t2 = g.mul(t, t);
+    LogicalId t3 = g.mul(t2, t);
+    LogicalId t4 = g.mul(t3, t);
+    LogicalId t5 = g.mul(t4, t);
 
-    uint32_t poly = g.mul(a1, t);
+    LogicalId poly = g.mul(a1, t);
     poly = g.add(poly, g.mul(a2, t2));
     poly = g.add(poly, g.mul(a3, t3));
     poly = g.add(poly, g.mul(a4, t4));
     poly = g.add(poly, g.mul(a5, t5));
 
-    uint32_t neg_xs_sq = g.neg(xs_sq);
-    uint32_t exp_neg_xs_sq = g.pow(e_node, neg_xs_sq);
+    LogicalId neg_xs_sq = g.neg(xs_sq);
+    LogicalId exp_neg_xs_sq = g.pow(e_node, neg_xs_sq);
 
-    uint32_t product = g.mul(poly, exp_neg_xs_sq);
-    uint32_t erf_pos = g.add(one_node, g.neg(product));
-    uint32_t erf_val = g.mul(sign_xs, erf_pos);
+    LogicalId product = g.mul(poly, exp_neg_xs_sq);
+    LogicalId erf_pos = g.add(one_node, g.neg(product));
+    LogicalId erf_val = g.mul(sign_xs, erf_pos);
 
-    uint32_t one_plus_erf = g.add(one_node, erf_val);
-    uint32_t half_x = g.mul(x_id, half);
+    LogicalId one_plus_erf = g.add(one_node, erf_val);
+    LogicalId half_x = g.mul(x_id, half);
     return g.mul(half_x, one_plus_erf);
 }
 
-REGISTER_KERNEL("JinaGeluExact_F32_3D_OpenCL", 1,
-                matchJinaGeluExact_F32_3D_OpenCL, runJinaGeluExact_F32_3D_OpenCL,
-                refFactoryJinaGeluExact_F32_3D_OpenCL,
-                {Backend::OPENCL},
+REGISTER_KERNEL("JinaGeluExact_F32_3D_OpenCL", 1, 1, matchJinaGeluExact_F32_3D_OpenCL, runJinaGeluExact_F32_3D_OpenCL, refFactoryJinaGeluExact_F32_3D_OpenCL, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
                 {DType::FLOAT32},
                 {{1, 1024, 3072}},
                 {true},
-                {{Backend::OPENCL}});
+                {{MemSpace(1, HandleType::OPENCL)}});

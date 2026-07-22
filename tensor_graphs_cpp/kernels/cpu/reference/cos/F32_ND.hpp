@@ -17,4 +17,4 @@ inline void runCosF32_ND(const KernelContext &ctx)
         out[i] = std::cos(in[i]);
 }
 
-REGISTER_REF_KERNEL(OpType::COS, 1, matchCosF32_ND, runCosF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {true}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::COS, 1, 1, matchCosF32_ND, runCosF32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});

@@ -116,17 +116,17 @@ inline void runContiguous_CUDA_ND(const KernelContext &ctx)
  * Reference Factory:
  * Maps this kernel to the standard graph contiguous operation.
  */
-inline uint32_t refFactoryContiguous_CUDA_ND(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryContiguous_CUDA_ND(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.contiguous(inputs[0]);
 }
 
 // Register as a named general kernel for CUDA
-REGISTER_KERNEL("Contiguous_CUDA_ND", 1, matchContiguous_CUDA_ND, runContiguous_CUDA_ND, refFactoryContiguous_CUDA_ND, {Backend::CUDA},
+REGISTER_KERNEL("Contiguous_CUDA_ND", 1, 1, matchContiguous_CUDA_ND, runContiguous_CUDA_ND, refFactoryContiguous_CUDA_ND, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)},
                 {DType::ANY},     // Input DType
                 {{1024, 640}},    // Dummy shape
                 {false},          // Input does NOT require contiguity (that's the point of this kernel)
-                {{Backend::CUDA}} // Input backends
+                {{MemSpace(1, HandleType::CUDA)}} // Input backends
 );
 
 #endif

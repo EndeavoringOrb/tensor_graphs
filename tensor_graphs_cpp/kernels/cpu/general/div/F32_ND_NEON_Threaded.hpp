@@ -38,7 +38,7 @@ inline void runDivF32_ND_Fast(const KernelContext &ctx)
         w.join();
 }
 
-inline uint32_t refFactoryDivND_Fast(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryDivND_Fast(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Div ND Fast requires exactly 2 inputs");
@@ -46,5 +46,5 @@ inline uint32_t refFactoryDivND_Fast(const std::vector<uint32_t> &inputs, Graph 
     return graph.div(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Div_ND_NEON_Threaded", 2, matchDivF32_ND_Fast, runDivF32_ND_Fast, refFactoryDivND_Fast, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 24, 1536, 1536}, {1, 24, 1536, 1536}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Div_ND_NEON_Threaded", 2, 2, matchDivF32_ND_Fast, runDivF32_ND_Fast, refFactoryDivND_Fast, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 24, 1536, 1536}, {1, 24, 1536, 1536}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

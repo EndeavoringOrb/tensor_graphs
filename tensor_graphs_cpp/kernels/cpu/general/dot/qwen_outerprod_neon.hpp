@@ -61,9 +61,9 @@ inline void runQwenOuterProd(const KernelContext &ctx)
         }
     }
 }
-inline uint32_t refQwenOuterProd(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refQwenOuterProd(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.dot(inputs[0], inputs[1]);
 }
-REGISTER_KERNEL("Qwen_OuterProd_NEON", 2, matchQwenOuterProd, runQwenOuterProd, refQwenOuterProd, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{32, 128, 1}, {32, 1, 128}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Qwen_OuterProd_NEON", 2, 2, matchQwenOuterProd, runQwenOuterProd, refQwenOuterProd, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{32, 128, 1}, {32, 1, 128}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

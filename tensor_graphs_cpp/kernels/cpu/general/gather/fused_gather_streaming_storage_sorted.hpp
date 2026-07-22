@@ -108,7 +108,7 @@ static inline bool gather_sorted_readFromFileAtOffset(
 // ---------------------------------------------------------------------------
 inline void runGatherStreamingStorageSorted(const KernelContext &ctx)
 {
-    // inputs[0] is Backend::STORAGE (nullptr). We use ctx.fd[0] to read.
+    // inputs[0] is MemSpace(1, HandleType::STORAGE) (nullptr). We use ctx.fd[0] to read.
     const int32_t *indices = static_cast<const int32_t *>(ctx.inputs[1]);
     float *out = static_cast<float *>(ctx.outputs[0]);
 
@@ -200,31 +200,24 @@ inline void runGatherStreamingStorageSorted(const KernelContext &ctx)
 // ---------------------------------------------------------------------------
 // Reference Factory
 // ---------------------------------------------------------------------------
-inline uint32_t refFactoryGatherStreamingStorageSorted(
-    const std::vector<uint32_t> &inputs,
+inline LogicalId refFactoryGatherStreamingStorageSorted(const std::vector<LogicalId> &inputs,
     Graph &graph)
 {
     // inputs[0]: raw_weight_storage (STORAGE, BF16)
     // inputs[1]: indices (CPU, INT32)
 
     // 1. COPY_TO: STORAGE BF16 -> CPU BF16
-    uint32_t w_cpu = graph.copyto(inputs[0], Backend::CPU);
+    LogicalId w_cpu = graph._copyto(inputs[0]);
 
     // 2. CAST: CPU BF16 -> CPU FLOAT32
-    uint32_t w_cast = graph.cast(w_cpu, DType::FLOAT32);
+    LogicalId w_cast = graph.cast(w_cpu, DType::FLOAT32);
 
     // 3. GATHER: CPU FLOAT32
     return graph.gather(w_cast, inputs[1]);
 }
 
-REGISTER_KERNEL(
-    "Gather_StreamingStorage_Sorted_NEON",
-    2,
-    matchGatherStreamingStorageSorted,
-    runGatherStreamingStorageSorted,
-    refFactoryGatherStreamingStorageSorted,
-    {Backend::CPU},                        // output backend
+REGISTER_KERNEL("Gather_StreamingStorage_Sorted_NEON", 2, 2, matchGatherStreamingStorageSorted, runGatherStreamingStorageSorted, refFactoryGatherStreamingStorageSorted, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},                        // output backend
     {DType::BF16, DType::INT32},           // input types: raw weight (BF16), indices (INT32)
     {{248320, 2048}, {1, 8}},              // dummy shapes
     {true, true},                          // requires contiguous inputs
-    {{Backend::STORAGE}, {Backend::CPU}}); // input placement
+    {{MemSpace(1, HandleType::STORAGE)}, {MemSpace(1, HandleType::CPP)}}); // input placement

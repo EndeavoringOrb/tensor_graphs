@@ -70,9 +70,9 @@ inline void runAddF32_3D_Broadcast0_Inplace(const KernelContext &ctx)
     for (auto &w : workers) w.join();
 }
 
-inline uint32_t refFactoryAdd3D_Broadcast0_Inplace(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryAdd3D_Broadcast0_Inplace(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.add(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL_INPLACE("Add_3D_Broadcast0_inplace", 2, matchAddF32_3D_Broadcast0_Inplace, runAddF32_3D_Broadcast0_Inplace, refFactoryAdd3D_Broadcast0_Inplace, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 2048}, {1, 8, 2048}}, {true, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL_INPLACE("Add_3D_Broadcast0_inplace", 2, 2, matchAddF32_3D_Broadcast0_Inplace, runAddF32_3D_Broadcast0_Inplace, refFactoryAdd3D_Broadcast0_Inplace, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 2048}, {1, 8, 2048}}, {true, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

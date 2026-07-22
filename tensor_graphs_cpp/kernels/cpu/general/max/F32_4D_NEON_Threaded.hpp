@@ -68,10 +68,10 @@ inline void runMaxF32_4D_Threaded(const KernelContext &ctx)
         w.join();
 }
 
-inline uint32_t refFactoryMax4D(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryMax4D(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.max(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Max_F32_4D_Threaded", 2, matchMaxF32_4D_Threaded, runMaxF32_4D_Threaded, refFactoryMax4D, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{1, 24, 1536, 1536}, {1}}, {true, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Max_F32_4D_Threaded", 2, 2, matchMaxF32_4D_Threaded, runMaxF32_4D_Threaded, refFactoryMax4D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{1, 24, 1536, 1536}, {1}}, {true, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

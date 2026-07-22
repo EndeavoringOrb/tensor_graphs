@@ -40,7 +40,7 @@ inline void runAddF32_CUDA_ND(const KernelContext &ctx) {
 /**
  * Reference Factory
  */
-inline uint32_t refFactoryAddF32_ND_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryAddF32_ND_CUDA(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Add ND requires 2 inputs");
@@ -48,6 +48,6 @@ inline uint32_t refFactoryAddF32_ND_CUDA(const std::vector<uint32_t> &inputs, Gr
     return graph.add(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Add_F32_ND_CUDA", 2, matchAddF32_CUDA_ND, runAddF32_CUDA_ND, refFactoryAddF32_ND_CUDA, {Backend::CUDA}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{Backend::CUDA}, {Backend::CUDA}});
+REGISTER_KERNEL("Add_F32_ND_CUDA", 2, 2, matchAddF32_CUDA_ND, runAddF32_CUDA_ND, refFactoryAddF32_ND_CUDA, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(1, HandleType::CUDA)}, {MemSpace(1, HandleType::CUDA)}});
 
 #endif

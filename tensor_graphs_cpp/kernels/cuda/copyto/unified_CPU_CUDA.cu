@@ -18,19 +18,17 @@ inline void inferViewUnified(TensorNode &node, const std::vector<TensorNode> &in
     node.viewOffset = inputs[0].viewOffset;
 }
 
-inline uint32_t refFactoryUnifiedCopy(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryUnifiedCopy(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     // This kernel matches a cross-backend COPY_TO. We use CUDA as the target backend
     // for the reference pattern.
-    return graph.copyto(inputs[0], Backend::CUDA);
+    return graph._copyto(inputs[0]);
 }
 
 // Registered as a View to ensure the Planner always prefers this over a copy on unified memory systems
-REGISTER_KERNEL_VIEW(
-    "UnifiedCopyTo_CPU_CUDA", 1, matchUnifiedCopy, refFactoryUnifiedCopy, inferViewUnified,
-    {Backend::CUDA},
+REGISTER_KERNEL_VIEW("UnifiedCopyTo_CPU_CUDA", 1, 1, matchUnifiedCopy, refFactoryUnifiedCopy, inferViewUnified, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::ANY},
     {{1024}},
     {false},
-    {{Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}});
 #endif

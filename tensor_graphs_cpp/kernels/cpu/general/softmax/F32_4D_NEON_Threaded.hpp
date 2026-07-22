@@ -59,22 +59,22 @@ inline void runSoftmaxF32_4D_Threaded(const KernelContext &ctx)
         w.join();
 }
 
-inline uint32_t refFactorySoftmax4D(const std::vector<uint32_t> &inputs, Graph &g)
+inline LogicalId refFactorySoftmax4D(const std::vector<LogicalId> &inputs, Graph &g)
 {
-    uint32_t x = inputs[0];
+    LogicalId x = inputs[0];
     auto s = g.getNode(x).getShape();
     int32_t ax = -1;
-    uint32_t axis_node = g.constant({1}, &ax, DType::INT32);
-    uint32_t m_rep = g.constant({1}, (int32_t *)&s[3], DType::INT32);
-    uint32_t ax_rep = g.constant({1}, (int32_t *)&ax, DType::INT32);
+    LogicalId axis_node = g.constant({1}, &ax, DType::INT32);
+    LogicalId m_rep = g.constant({1}, (int32_t *)&s[3], DType::INT32);
+    LogicalId ax_rep = g.constant({1}, (int32_t *)&ax, DType::INT32);
 
-    uint32_t max_s = g.repeat(g.max(x, axis_node), m_rep, ax_rep);
-    uint32_t shifted = g.add(x, g.neg(max_s));
+    LogicalId max_s = g.repeat(g.max(x, axis_node), m_rep, ax_rep);
+    LogicalId shifted = g.add(x, g.neg(max_s));
 
     float e_v = 2.7182818f;
-    uint32_t e_n = g.constant({1}, &e_v, DType::FLOAT32);
+    LogicalId e_n = g.constant({1}, &e_v, DType::FLOAT32);
     int32_t sh4[] = {1, 1, 1, 1};
-    uint32_t e_b = g.reshape(e_n, g.constant({4}, sh4, DType::INT32));
+    LogicalId e_b = g.reshape(e_n, g.constant({4}, sh4, DType::INT32));
     for (int i = 0; i < 4; ++i)
     {
         int32_t r = (int32_t)s[i];
@@ -83,10 +83,10 @@ inline uint32_t refFactorySoftmax4D(const std::vector<uint32_t> &inputs, Graph &
         e_b = g.repeat(e_b, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
     }
 
-    uint32_t exps = g.pow(e_b, shifted);
-    uint32_t sums = g.repeat(g.sum(exps, axis_node), m_rep, ax_rep);
+    LogicalId exps = g.pow(e_b, shifted);
+    LogicalId sums = g.repeat(g.sum(exps, axis_node), m_rep, ax_rep);
     return g.div(exps, sums);
 }
 
-REGISTER_KERNEL("Softmax_4D_Threaded", 1, matchSoftmaxF32_4D_Threaded, runSoftmaxF32_4D_Threaded, refFactorySoftmax4D, {Backend::CPU}, {DType::FLOAT32}, {{1, 24, 1536, 1536}}, {true}, {{Backend::CPU}});
+REGISTER_KERNEL("Softmax_4D_Threaded", 1, 1, matchSoftmaxF32_4D_Threaded, runSoftmaxF32_4D_Threaded, refFactorySoftmax4D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 24, 1536, 1536}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 #endif

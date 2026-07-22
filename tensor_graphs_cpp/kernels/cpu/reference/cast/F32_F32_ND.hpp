@@ -26,4 +26,4 @@ inline void runCastF32_F32_ND(const KernelContext &ctx)
     std::memcpy(dst, src, numElements * sizeof(float));
 }
 
-REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastF32_F32_ND, runCastF32_F32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {true}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::CAST, 1, 1, matchCastF32_F32_ND, runCastF32_F32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});

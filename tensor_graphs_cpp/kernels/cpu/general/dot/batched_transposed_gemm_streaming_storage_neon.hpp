@@ -490,33 +490,26 @@ inline void runBatchedTransposedGEMM_StreamingStorage(const KernelContext &ctx)
 //
 // Reconstructs: dot(X, contiguous(permute(cast(copyto(W, CPU)), [0, 2, 1])))
 // ---------------------------------------------------------------------------
-inline uint32_t refFactoryBatchedTransposedGEMM_StreamingStorage(
-    const std::vector<uint32_t> &inputs,
+inline LogicalId refFactoryBatchedTransposedGEMM_StreamingStorage(const std::vector<LogicalId> &inputs,
     Graph &graph)
 {
     // STORAGE bf16 -> CPU bf16 (this is the COPY_TO we are fusing away)
-    uint32_t copy_w = graph.copyto(inputs[1], Backend::CPU);
+    LogicalId copy_w = graph._copyto(inputs[1]);
     // CPU bf16 -> CPU fp32 (this is the CAST we are fusing away)
-    uint32_t cast_w = graph.cast(copy_w, DType::FLOAT32);
+    LogicalId cast_w = graph.cast(copy_w, DType::FLOAT32);
     // [E, O, H] -> [E, H, O]  (this is the PERMUTE+CONTIGUOUS we are fusing away)
     int32_t perm[] = {0, 2, 1};
-    uint32_t perm_w = graph.permute(
+    LogicalId perm_w = graph.permute(
         cast_w, graph.constant({3}, perm, DType::INT32));
-    uint32_t contig_w = graph.contiguous(perm_w);
+    LogicalId contig_w = graph.contiguous(perm_w);
     // The actual batched dot
     return graph.dot(inputs[0], contig_w);
 }
 
-REGISTER_KERNEL(
-    "Batched_Transposed_GEMM_StreamingStorage_NEON",
-    2,
-    matchBatchedTransposedGEMM_StreamingStorage,
-    runBatchedTransposedGEMM_StreamingStorage,
-    refFactoryBatchedTransposedGEMM_StreamingStorage,
-    {Backend::CPU},                        // output backend
+REGISTER_KERNEL("Batched_Transposed_GEMM_StreamingStorage_NEON", 2, 2, matchBatchedTransposedGEMM_StreamingStorage, runBatchedTransposedGEMM_StreamingStorage, refFactoryBatchedTransposedGEMM_StreamingStorage, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},                        // output backend
     {DType::FLOAT32, DType::BF16},         // X is fp32, W is bf16
     {{256, 8, 2048}, {256, 1024, 2048}},   // dummy shapes for the bench harness
     {true, true},                          // both inputs must be contiguous
-    {{Backend::CPU}, {Backend::STORAGE}}); // X from CPU, W directly from STORAGE
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::STORAGE)}}); // X from CPU, W directly from STORAGE
 
 #endif // TG_HAS_NEON

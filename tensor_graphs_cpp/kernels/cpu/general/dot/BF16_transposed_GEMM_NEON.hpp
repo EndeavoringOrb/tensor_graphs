@@ -65,15 +65,15 @@ inline void runBF16TransposedGEMM(const KernelContext &ctx)
         worker.join();
 }
 
-inline uint32_t refFactoryBF16TransposedGEMM(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryBF16TransposedGEMM(const std::vector<LogicalId> &inputs, Graph &graph)
 {
-    uint32_t w_cast = graph.cast(inputs[1], DType::FLOAT32);
+    LogicalId w_cast = graph.cast(inputs[1], DType::FLOAT32);
     int32_t perm[] = {1, 0};
-    uint32_t w_t = graph.contiguous(graph.permute(w_cast, graph.constant({2}, perm, DType::INT32)));
+    LogicalId w_t = graph.contiguous(graph.permute(w_cast, graph.constant({2}, perm, DType::INT32)));
     auto w_shape = graph.getNode(inputs[1]).getShape();
     int32_t s3[] = {1, (int32_t)w_shape[1], (int32_t)w_shape[0]};
     return graph.dot(inputs[0], graph.reshape(w_t, graph.constant({3}, s3, DType::INT32)));
 }
 
-REGISTER_KERNEL("BF16_Transposed_GEMM_NEON", 2, matchBF16TransposedGEMM, runBF16TransposedGEMM, refFactoryBF16TransposedGEMM, {Backend::CPU}, {DType::FLOAT32, DType::BF16}, {{1, 8, 64}, {1024, 64}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("BF16_Transposed_GEMM_NEON", 2, 2, matchBF16TransposedGEMM, runBF16TransposedGEMM, refFactoryBF16TransposedGEMM, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::BF16}, {{1, 8, 64}, {1024, 64}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

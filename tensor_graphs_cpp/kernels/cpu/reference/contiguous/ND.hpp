@@ -76,4 +76,4 @@ inline void runContiguous_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::CONTIGUOUS, 1, matchContiguous_ND, runContiguous_ND, {Backend::CPU}, {DType::ANY}, {{8, 32}}, {false}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::CONTIGUOUS, 1, 1, matchContiguous_ND, runContiguous_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {false}, {{MemSpace(1, HandleType::CPP)}});

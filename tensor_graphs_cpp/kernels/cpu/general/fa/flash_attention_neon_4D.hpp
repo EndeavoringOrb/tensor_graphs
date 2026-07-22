@@ -355,30 +355,30 @@ inline void runFlashAttentionNeon(const KernelContext &ctx)
         th.join();
 }
 
-inline uint32_t refFactoryFlashAttention4D(const std::vector<uint32_t> &inputs, Graph &g)
+inline LogicalId refFactoryFlashAttention4D(const std::vector<LogicalId> &inputs, Graph &g)
 {
-    uint32_t Q = inputs[0], K = inputs[1], V = inputs[2];
+    LogicalId Q = inputs[0], K = inputs[1], V = inputs[2];
     int32_t perm[] = {0, 1, 3, 2};
-    uint32_t K_t = g.contiguous(g.permute(K, g.constant({4}, perm, DType::INT32)));
-    uint32_t scores = g.dot(Q, K_t);
+    LogicalId K_t = g.contiguous(g.permute(K, g.constant({4}, perm, DType::INT32)));
+    LogicalId scores = g.dot(Q, K_t);
 
     int32_t axis = -1;
-    uint32_t axis_node = g.constant({1}, &axis, DType::INT32);
+    LogicalId axis_node = g.constant({1}, &axis, DType::INT32);
     auto Q_shape = g.getNode(Q).getShape();
     auto K_shape = g.getNode(K).getShape();
     std::vector<uint32_t> s_shape = {Q_shape[0], Q_shape[1], Q_shape[2], K_shape[2]};
     int32_t S_val = (int32_t)s_shape[s_shape.size() - 1];
-    uint32_t m_rep = g.constant({1}, &S_val, DType::INT32);
-    uint32_t ax_rep = g.constant({1}, &axis, DType::INT32);
+    LogicalId m_rep = g.constant({1}, &S_val, DType::INT32);
+    LogicalId ax_rep = g.constant({1}, &axis, DType::INT32);
 
-    uint32_t max_s = g.max(scores, axis_node);
-    uint32_t max_expanded = g.repeat(max_s, m_rep, ax_rep);
-    uint32_t shifted = g.add(scores, g.neg(max_expanded));
+    LogicalId max_s = g.max(scores, axis_node);
+    LogicalId max_expanded = g.repeat(max_s, m_rep, ax_rep);
+    LogicalId shifted = g.add(scores, g.neg(max_expanded));
 
     float e_v = 2.718281828459045f;
-    uint32_t e_n = g.constant({1}, &e_v, DType::FLOAT32);
+    LogicalId e_n = g.constant({1}, &e_v, DType::FLOAT32);
     int32_t sh4[] = {1, 1, 1, 1};
-    uint32_t e_b = g.reshape(e_n, g.constant({4}, sh4, DType::INT32));
+    LogicalId e_b = g.reshape(e_n, g.constant({4}, sh4, DType::INT32));
 
     for (int i = 0; i < 4; ++i)
     {
@@ -389,23 +389,17 @@ inline uint32_t refFactoryFlashAttention4D(const std::vector<uint32_t> &inputs, 
         e_b = g.repeat(e_b, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
     }
 
-    uint32_t exps = g.pow(e_b, shifted);
-    uint32_t sums = g.repeat(g.sum(exps, axis_node), m_rep, ax_rep);
-    uint32_t probs = g.div(exps, sums);
+    LogicalId exps = g.pow(e_b, shifted);
+    LogicalId sums = g.repeat(g.sum(exps, axis_node), m_rep, ax_rep);
+    LogicalId probs = g.div(exps, sums);
 
     return g.dot(probs, V);
 }
 
-REGISTER_KERNEL(
-    "Flash_Attention_Neon_Fused_4D",
-    3,
-    matchFlashAttentionNeon,
-    runFlashAttentionNeon,
-    refFactoryFlashAttention4D,
-    {Backend::CPU},
+REGISTER_KERNEL("Flash_Attention_Neon_Fused_4D", 3, 3, matchFlashAttentionNeon, runFlashAttentionNeon, refFactoryFlashAttention4D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32},
     {{1, 12, 5040, 64}, {1, 12, 5040, 64}, {1, 12, 5040, 64}},
     {true, true, true},
-    {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

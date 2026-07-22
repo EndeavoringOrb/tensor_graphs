@@ -17,4 +17,4 @@ inline void runFillF32_ND(const KernelContext &ctx)
         out[i] = val;
 }
 
-REGISTER_REF_KERNEL(OpType::FILL, 2, matchFillF32_ND, runFillF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::FILL, 2, 2, matchFillF32_ND, runFillF32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

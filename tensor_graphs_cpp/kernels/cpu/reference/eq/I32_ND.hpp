@@ -24,5 +24,5 @@ inline void runEqI32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::EQ, 2, matchEqI32_ND, runEqI32_ND, {Backend::CPU}, {DType::INT32, DType::INT32}, {{8, 32}, {8, 32}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::EQ, 2, 2, matchEqI32_ND, runEqI32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::INT32, DType::INT32}, {{8, 32}, {8, 32}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 

@@ -52,15 +52,15 @@ inline void runConcatF32_Fast(const KernelContext &ctx)
         w.join();
 }
 
-inline uint32_t refFactoryConcatF32_Fast(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryConcatF32_Fast(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() < 2)
         Error::throw_err("Concat Fast requires at least 2 inputs");
 
-    std::vector<uint32_t> tensors(inputs.begin(), inputs.end() - 1);
-    uint32_t axis = inputs.back();
+    std::vector<LogicalId> tensors(inputs.begin(), inputs.end() - 1);
+    LogicalId axis = inputs.back();
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Concat_F32_Fast", 2, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{1, 24, 1536, 128}, {1}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Concat_F32_Fast", 2, 2, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{1, 24, 1536, 128}, {1}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

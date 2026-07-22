@@ -149,13 +149,13 @@ inline void runBF16GEMM_NEON_v1(const KernelContext &ctx)
         worker.join();
 }
 
-inline uint32_t refFactoryBF16GEMM_NEON_v1(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryBF16GEMM_NEON_v1(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     // inputs[0] is X [B, M, K] (F32)
     // inputs[1] is W [1, K, N] (BF16)
-    uint32_t w_f32 = graph.cast(inputs[1], DType::FLOAT32);
+    LogicalId w_f32 = graph.cast(inputs[1], DType::FLOAT32);
     return graph.dot(inputs[0], w_f32);
 }
 
-REGISTER_KERNEL("BF16_GEMM_NEON_v1", 2, matchBF16GEMM_NEON_v1, runBF16GEMM_NEON_v1, refFactoryBF16GEMM_NEON_v1, {Backend::CPU}, {DType::FLOAT32, DType::BF16}, {{1, 8, 64}, {1, 64, 1024}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("BF16_GEMM_NEON_v1", 2, 2, matchBF16GEMM_NEON_v1, runBF16GEMM_NEON_v1, refFactoryBF16GEMM_NEON_v1, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::BF16}, {{1, 8, 64}, {1, 64, 1024}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

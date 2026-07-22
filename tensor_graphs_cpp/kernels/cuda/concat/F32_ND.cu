@@ -59,16 +59,16 @@ inline void runConcatF32_CUDA_ND(const KernelContext &ctx) {
 /**
  * Reference Factory
  */
-inline uint32_t refFactoryConcatF32_ND_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryConcatF32_ND_CUDA(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() < 2)
         Error::throw_err("Concat ND requires at least 2 inputs");
 
-    std::vector<uint32_t> tensors(inputs.begin(), inputs.end() - 1);
-    uint32_t axis = inputs.back();
+    std::vector<LogicalId> tensors(inputs.begin(), inputs.end() - 1);
+    LogicalId axis = inputs.back();
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Concat_F32_ND_CUDA", 2, matchConcatF32_CUDA_ND, runConcatF32_CUDA_ND, refFactoryConcatF32_ND_CUDA, {Backend::CUDA}, {DType::FLOAT32, DType::INT32}, {{1024}, {1}}, {true, false}, {{Backend::CUDA}, {Backend::CPU}});
+REGISTER_KERNEL("Concat_F32_ND_CUDA", 2, 2, matchConcatF32_CUDA_ND, runConcatF32_CUDA_ND, refFactoryConcatF32_ND_CUDA, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{1024}, {1}}, {true, false}, {{MemSpace(1, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

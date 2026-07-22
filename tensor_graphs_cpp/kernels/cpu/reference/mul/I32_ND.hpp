@@ -24,13 +24,8 @@ inline void runMulI32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(
-    OpType::MUL,
-    2,
-    matchMulI32_ND,
-    runMulI32_ND,
-    {Backend::CPU},
+REGISTER_REF_KERNEL(OpType::MUL, 2, 2, matchMulI32_ND, runMulI32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::INT32, DType::INT32},
     {{8, 32}, {8, 32}},
     {false, false},
-    {{Backend::CPU}, {Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

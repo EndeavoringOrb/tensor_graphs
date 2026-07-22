@@ -407,18 +407,24 @@ struct KernelRegistrar
 #ifndef REGISTER_KERNEL
 #define REGISTER_KERNEL(opName, n_min, n_max, match, run, refFactory, ...)
 #endif
+#ifndef REGISTER_KERNEL_INPLACE
+#define REGISTER_KERNEL_INPLACE(opName, n_min, n_max, match, run, refFactory, ...)
+#endif
 #ifndef REGISTER_KERNEL_VIEW
 #define REGISTER_KERNEL_VIEW(opName, n_min, n_max, match, ref, inferView, ...)
 #endif
 
 #define REGISTER_REF_KERNEL_INTERNAL(uid, op, n_min, n_max, match, run, ...) \
-    static KernelRegistrar _registrar_##run(uid, op, "", n_min, n_max, match, run, nullptr, false, false, true, nullptr, __VA_ARGS__)
+    static KernelRegistrar _registrar_##run(uid, op, "", n_min, n_max, match, run, nullptr, {}, false, true, nullptr, __VA_ARGS__)
 
 #define REGISTER_REF_KERNEL_VIEW_INTERNAL(uid, op, n_min, n_max, match, inferView, ...) \
-    static KernelRegistrar _registrar_##inferView(uid, op, "", n_min, n_max, match, nullptr, nullptr, false, true, true, inferView, __VA_ARGS__)
+    static KernelRegistrar _registrar_##inferView(uid, op, "", n_min, n_max, match, nullptr, nullptr, {}, true, true, inferView, __VA_ARGS__)
 
 #define REGISTER_KERNEL_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...) \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory, false, false, false, nullptr, __VA_ARGS__)
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory, {}, false, false, nullptr, __VA_ARGS__)
+
+#define REGISTER_KERNEL_INPLACE_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...) \
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory, {0}, false, false, nullptr, __VA_ARGS__)
 
 #define REGISTER_KERNEL_VIEW_INTERNAL(uid, opName, n_min, n_max, match, refFactory, inferView, ...) \
-    static KernelRegistrar _registrar_fused_##inferView(uid, OpType::FUSED, opName, n_min, n_max, match, nullptr, refFactory, false, true, false, inferView, __VA_ARGS__)
+    static KernelRegistrar _registrar_fused_##inferView(uid, OpType::FUSED, opName, n_min, n_max, match, nullptr, refFactory, {}, true, false, inferView, __VA_ARGS__)

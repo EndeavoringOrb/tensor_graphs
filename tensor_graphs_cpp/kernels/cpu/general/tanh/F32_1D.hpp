@@ -33,36 +33,36 @@ void runTanhF32_1D(const KernelContext &ctx)
     }
 }
 
-uint32_t refFactoryTanh(const std::vector<uint32_t> &inputs, Graph &graph)
+LogicalId refFactoryTanh(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 1)
         Error::throw_err("Tanh requires 1 input");
-    uint32_t x = inputs[0];
+    LogicalId x = inputs[0];
     uint32_t n_elements = graph.getNode(x).getShape()[0];
 
     // Create Constant 'e' as a scalar
     float e_val = 2.718281828459f;
-    uint32_t e_scalar = graph.constant({1}, &e_val, DType::FLOAT32);
+    LogicalId e_scalar = graph.constant({1}, &e_val, DType::FLOAT32);
 
     // Explicitly broadcast 'e' to match the shape of 'x' [N]
     int32_t repeats_val = (int32_t)n_elements;
     int32_t axis_val = 0;
-    uint32_t repeats_node = graph.constant({1}, &repeats_val, DType::INT32);
-    uint32_t axis_node = graph.constant({1}, &axis_val, DType::INT32);
-    uint32_t e_node = graph.repeat(e_scalar, repeats_node, axis_node);
+    LogicalId repeats_node = graph.constant({1}, &repeats_val, DType::INT32);
+    LogicalId axis_node = graph.constant({1}, &axis_val, DType::INT32);
+    LogicalId e_node = graph.repeat(e_scalar, repeats_node, axis_node);
 
     // Decompose using explicitly matched shapes
-    uint32_t exp_x = graph.pow(e_node, x);
+    LogicalId exp_x = graph.pow(e_node, x);
 
-    uint32_t neg_x = graph.neg(x);
-    uint32_t exp_neg_x = graph.pow(e_node, neg_x);
+    LogicalId neg_x = graph.neg(x);
+    LogicalId exp_neg_x = graph.pow(e_node, neg_x);
 
-    uint32_t neg_exp_neg = graph.neg(exp_neg_x);
-    uint32_t num = graph.add(exp_x, neg_exp_neg);
+    LogicalId neg_exp_neg = graph.neg(exp_neg_x);
+    LogicalId num = graph.add(exp_x, neg_exp_neg);
 
-    uint32_t den = graph.add(exp_x, exp_neg_x);
+    LogicalId den = graph.add(exp_x, exp_neg_x);
 
     return graph.div(num, den);
 }
 
-REGISTER_KERNEL("Tanh", 1, matchTanhF32_1D, runTanhF32_1D, refFactoryTanh, {Backend::CPU}, {DType::FLOAT32}, {{1}}, {true}, {{Backend::CPU}});
+REGISTER_KERNEL("Tanh", 1, 1, matchTanhF32_1D, runTanhF32_1D, refFactoryTanh, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1}}, {true}, {{MemSpace(1, HandleType::CPP)}});

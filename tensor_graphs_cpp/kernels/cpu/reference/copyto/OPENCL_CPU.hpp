@@ -40,4 +40,4 @@ inline void runCopy_OpenCL_CPU(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::COPY_TO, 1, matchCopy_OpenCL_CPU, runCopy_OpenCL_CPU, {Backend::CPU}, {DType::ANY}, {{8, 32}}, {true}, {{Backend::OPENCL}});
+REGISTER_REF_KERNEL(OpType::COPY_TO, 1, 1, matchCopy_OpenCL_CPU, runCopy_OpenCL_CPU, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::OPENCL)}});

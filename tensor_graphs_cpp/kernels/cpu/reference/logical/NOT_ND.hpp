@@ -23,5 +23,5 @@ inline void runNot_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::NOT, 1, matchNot_ND, runNot_ND, {Backend::CPU}, {DType::BOOL}, {{8, 32}}, {true}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::NOT, 1, 1, matchNot_ND, runNot_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::BOOL}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 

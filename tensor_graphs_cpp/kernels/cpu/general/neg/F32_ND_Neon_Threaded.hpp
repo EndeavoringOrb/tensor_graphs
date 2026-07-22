@@ -65,12 +65,11 @@ inline void runNegF32_ND_NEON_Threaded(const KernelContext &ctx)
 }
 
 // Reference factory: same as the reference negate - just graph.neg(x)
-inline uint32_t refFactoryNegND_NEON_Threaded(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryNegND_NEON_Threaded(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.neg(inputs[0]);
 }
 
-REGISTER_KERNEL("Neg_F32_ND_NEON_Threaded", 1, matchNegF32_ND_NEON_Threaded, runNegF32_ND_NEON_Threaded, refFactoryNegND_NEON_Threaded,
-                {Backend::CPU}, {DType::FLOAT32}, {{1536}}, {true}, {{Backend::CPU}});
+REGISTER_KERNEL("Neg_F32_ND_NEON_Threaded", 1, 1, matchNegF32_ND_NEON_Threaded, runNegF32_ND_NEON_Threaded, refFactoryNegND_NEON_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1536}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

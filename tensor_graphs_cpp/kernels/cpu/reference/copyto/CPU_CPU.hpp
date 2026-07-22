@@ -34,13 +34,8 @@ inline void runCopyTo_CPU_CPU(const KernelContext &ctx)
 }
 
 // Register the kernel for the COPY_TO operation on the CPU backend
-REGISTER_REF_KERNEL(
-    OpType::COPY_TO,
-    1,
-    matchCopyTo_CPU_CPU,
-    runCopyTo_CPU_CPU,
-    {Backend::CPU},
+REGISTER_REF_KERNEL(OpType::COPY_TO, 1, 1, matchCopyTo_CPU_CPU, runCopyTo_CPU_CPU, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::ANY},
     {{8, 32}},
     {true},
-    {{Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}});

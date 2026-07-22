@@ -102,10 +102,10 @@ inline void runSwiGLU_3D_NEON(const KernelContext &ctx)
         w.join();
 }
 
-inline uint32_t ref_swiglu_broadcast_scalar(Graph &g, uint32_t scalar_id, const std::vector<uint32_t> &target_shape)
+inline LogicalId ref_swiglu_broadcast_scalar(Graph &g, LogicalId scalar_id, const std::vector<uint32_t> &target_shape)
 {
     std::vector<int32_t> ones(target_shape.size(), 1);
-    uint32_t out = g.reshape(scalar_id, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
+    LogicalId out = g.reshape(scalar_id, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
     for (uint64_t i = 0; i < target_shape.size(); ++i)
     {
         if (target_shape[i] > 1)
@@ -118,35 +118,35 @@ inline uint32_t ref_swiglu_broadcast_scalar(Graph &g, uint32_t scalar_id, const 
     return out;
 }
 
-inline uint32_t refFactorySwiGLU_3D_NEON(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactorySwiGLU_3D_NEON(const std::vector<LogicalId> &inputs, Graph &graph)
 {
-    uint32_t gate = inputs[0];
-    uint32_t up = inputs[1];
+    LogicalId gate = inputs[0];
+    LogicalId up = inputs[1];
     const auto &target_shape = graph.getNode(gate).getShape();
 
     // 1. neg_x = -x
-    uint32_t neg_x = graph.neg(gate);
+    LogicalId neg_x = graph.neg(gate);
 
     // 2. exp_neg = pow(e, -x)
     float e_val = 2.7182818f;
     uint32_t e_node = ref_swiglu_broadcast_scalar(graph, graph.constant({1}, &e_val, DType::FLOAT32), target_shape);
-    uint32_t exp_neg = graph.pow(e_node, neg_x);
+    LogicalId exp_neg = graph.pow(e_node, neg_x);
 
     // 3. den = 1 + exp(-x)
     float one_val = 1.0f;
-    uint32_t one_node = ref_swiglu_broadcast_scalar(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
-    uint32_t den = graph.add(one_node, exp_neg);
+    LogicalId one_node = ref_swiglu_broadcast_scalar(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
+    LogicalId den = graph.add(one_node, exp_neg);
 
     // 4. sig = 1 / den
-    uint32_t sig = graph.div(one_node, den);
+    LogicalId sig = graph.div(one_node, den);
 
     // 5. silu_gate = gate * sig
-    uint32_t silu_gate = graph.mul(gate, sig);
+    LogicalId silu_gate = graph.mul(gate, sig);
 
     // 6. result = silu_gate * up
     return graph.mul(silu_gate, up);
 }
 
-REGISTER_KERNEL("SwiGLU_3D_NEON_F32", 2, matchSwiGLU_3D_NEON, runSwiGLU_3D_NEON, refFactorySwiGLU_3D_NEON, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1536, 9216}, {1, 1536, 9216}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("SwiGLU_3D_NEON_F32", 2, 2, matchSwiGLU_3D_NEON, runSwiGLU_3D_NEON, refFactorySwiGLU_3D_NEON, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1536, 9216}, {1, 1536, 9216}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

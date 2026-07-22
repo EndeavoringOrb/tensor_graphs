@@ -51,9 +51,9 @@ inline void runDotF32_3D_OpenCL_v0(const KernelContext &ctx)
     clFinish(OpenCLState::get().queue);
 }
 
-inline uint32_t refFactoryDotF32_3D_OpenCL_v0(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryDotF32_3D_OpenCL_v0(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.dot(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Dot_F32_3D_OpenCL_v0", 2, matchDotF32_3D_OpenCL_v0, runDotF32_3D_OpenCL_v0, refFactoryDotF32_3D_OpenCL_v0, {Backend::OPENCL}, {DType::FLOAT32, DType::FLOAT32}, {{1, 16, 32}, {1, 32, 16}}, {true, true}, {{Backend::OPENCL}, {Backend::OPENCL}});
+REGISTER_KERNEL("Dot_F32_3D_OpenCL_v0", 2, 2, matchDotF32_3D_OpenCL_v0, runDotF32_3D_OpenCL_v0, refFactoryDotF32_3D_OpenCL_v0, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 16, 32}, {1, 32, 16}}, {true, true}, {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});

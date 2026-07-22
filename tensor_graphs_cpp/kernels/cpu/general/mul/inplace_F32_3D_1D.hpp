@@ -31,7 +31,7 @@ inline void runMulFP32_3D_1D_Inplace(const KernelContext &ctx)
         data3D[i] *= data1D[i % D];
 }
 
-inline uint32_t refFactoryMul3D_1D_Inplace(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryMul3D_1D_Inplace(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Fused Mul 3D+1D requires 2 inputs");
@@ -40,7 +40,7 @@ inline uint32_t refFactoryMul3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     const auto &shape1D = graph.getNode(inputs[1]).getShape();
 
     int32_t reshape_dims[] = {1, 1, (int32_t)shape1D[0]};
-    uint32_t out = graph.reshape(inputs[1], graph.constant({3}, reshape_dims, DType::INT32));
+    LogicalId out = graph.reshape(inputs[1], graph.constant({3}, reshape_dims, DType::INT32));
 
     int32_t b_rep = (int32_t)shape3D[0];
     int32_t b_axis = 0;
@@ -53,4 +53,4 @@ inline uint32_t refFactoryMul3D_1D_Inplace(const std::vector<uint32_t> &inputs, 
     return graph.mul(inputs[0], out);
 }
 
-REGISTER_KERNEL_INPLACE("Mul_3D_1D_inplace", 2, matchMulFP32_3D_1D_Inplace, runMulFP32_3D_1D_Inplace, refFactoryMul3D_1D_Inplace, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL_INPLACE("Mul_3D_1D_inplace", 2, 2, matchMulFP32_3D_1D_Inplace, runMulFP32_3D_1D_Inplace, refFactoryMul3D_1D_Inplace, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

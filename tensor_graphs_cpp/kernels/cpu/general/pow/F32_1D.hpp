@@ -30,20 +30,14 @@ inline void runPowF32_1D(const KernelContext &ctx)
     }
 }
 
-inline uint32_t refFactoryPowF32_1D(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryPowF32_1D(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.pow(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL(
-    "Pow_1D",
-    2,
-    matchPowF32_1D,
-    runPowF32_1D,
-    refFactoryPowF32_1D,
-    {Backend::CPU},
+REGISTER_KERNEL("Pow_1D", 2, 2, matchPowF32_1D, runPowF32_1D, refFactoryPowF32_1D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::FLOAT32, DType::FLOAT32},
     {{2048}, {2048}},
     {true, true},
-    {{Backend::CPU}, {Backend::CPU}}
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}}
 );

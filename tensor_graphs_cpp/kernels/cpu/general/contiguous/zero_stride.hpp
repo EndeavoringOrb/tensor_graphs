@@ -201,7 +201,7 @@ inline void runZeroStrideBroadcast_ND(const KernelContext &ctx)
     }
 }
 
-inline uint32_t refFactoryZeroStrideBroadcast_ND(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryZeroStrideBroadcast_ND(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 1)
         Error::throw_err("ZeroStrideBroadcast requires exactly 1 input");
@@ -217,16 +217,10 @@ inline uint32_t refFactoryZeroStrideBroadcast_ND(const std::vector<uint32_t> &in
     return graph.contiguous(inputs[0]);
 }
 
-REGISTER_KERNEL(
-    "ZeroStrideBroadcast_ND",
-    1,
-    matchZeroStrideBroadcast_ND,
-    runZeroStrideBroadcast_ND,
-    refFactoryZeroStrideBroadcast_ND,
-    {Backend::CPU},
+REGISTER_KERNEL("ZeroStrideBroadcast_ND", 1, 1, matchZeroStrideBroadcast_ND, runZeroStrideBroadcast_ND, refFactoryZeroStrideBroadcast_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::ANY},
     {{8, 32}},
     {false},
-    {{Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

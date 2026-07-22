@@ -77,22 +77,16 @@ inline void runAddF32_ND_NEON(const KernelContext& ctx)
         th.join();
 }
 
-inline uint32_t refFactoryAddND_NEON(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryAddND_NEON(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     // This allows the e-graph to identify this kernel as a valid implementation for ADD
     return graph.add(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL(
-    "Add_ND_NEON",
-    2,
-    matchAddF32_ND_NEON,
-    runAddF32_ND_NEON,
-    refFactoryAddND_NEON,
-    {Backend::CPU},
+REGISTER_KERNEL("Add_ND_NEON", 2, 2, matchAddF32_ND_NEON, runAddF32_ND_NEON, refFactoryAddND_NEON, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::FLOAT32, DType::FLOAT32},
     {{1, 32, 512, 512}, {1, 32, 512, 512}},
     {true, true},
-    {{Backend::CPU}, {Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

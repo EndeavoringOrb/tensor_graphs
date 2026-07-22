@@ -68,23 +68,23 @@ inline void runExpF32_4D_NEON(const KernelContext &ctx)
 /**
  * Reference Factory
  * This precisely mirrors the graph structure created by:
- * uint32_t exps = g.pow(expand_scalar_to_4d(2.7182818f, 1, cfg.num_heads, L_q, total_seq_len), shifted);
+ * LogicalId exps = g.pow(expand_scalar_to_4d(2.7182818f, 1, cfg.num_heads, L_q, total_seq_len), shifted);
  */
-inline uint32_t refFactoryExp4D(const std::vector<uint32_t> &inputs, Graph &g)
+inline LogicalId refFactoryExp4D(const std::vector<LogicalId> &inputs, Graph &g)
 {
-    uint32_t x = inputs[0];
+    LogicalId x = inputs[0];
     auto shape = g.getNode(x).getShape();
 
     // 1. Create constant e
     float e_val = 2.7182818f;
-    uint32_t e_node = g.constant({1}, &e_val, DType::FLOAT32);
+    LogicalId e_node = g.constant({1}, &e_val, DType::FLOAT32);
 
     // 2. Reshape to 4D [1, 1, 1, 1]
     int32_t sh4[] = {1, 1, 1, 1};
-    uint32_t e_4d = g.reshape(e_node, g.constant({4}, sh4, DType::INT32));
+    LogicalId e_4d = g.reshape(e_node, g.constant({4}, sh4, DType::INT32));
 
     // 3. Mirror expand_scalar_to_4d repeat logic
-    uint32_t current_e = e_4d;
+    LogicalId current_e = e_4d;
     for (int ax = 0; ax < 4; ++ax)
     {
         if (shape[ax] > 1)
@@ -102,5 +102,4 @@ inline uint32_t refFactoryExp4D(const std::vector<uint32_t> &inputs, Graph &g)
 }
 
 // Register for typical FLUX Attention score shapes
-REGISTER_KERNEL("Exp_4D_NEON", 1, matchExpF32_4D_NEON, runExpF32_4D_NEON, refFactoryExp4D,
-                {Backend::CPU}, {DType::FLOAT32}, {{1, 24, 512, 1024}}, {true}, {{Backend::CPU}});
+REGISTER_KERNEL("Exp_4D_NEON", 1, 1, matchExpF32_4D_NEON, runExpF32_4D_NEON, refFactoryExp4D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 24, 512, 1024}}, {true}, {{MemSpace(1, HandleType::CPP)}});

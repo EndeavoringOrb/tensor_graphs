@@ -56,10 +56,10 @@ inline void runSiluF32_3(const KernelContext &ctx)
 // Helper: broadcast a scalar constant to match a target shape
 // Mirrors the expand_scalar_to_3d pattern used in silu_atomic
 // ---------------------------------------------------------------------------
-inline uint32_t ref_silu_broadcast_scalar_3(Graph &g, uint32_t scalar_id, const std::vector<uint32_t> &target_shape)
+inline LogicalId ref_silu_broadcast_scalar_3(Graph &g, LogicalId scalar_id, const std::vector<uint32_t> &target_shape)
 {
     std::vector<int32_t> ones(target_shape.size(), 1);
-    uint32_t out = g.reshape(scalar_id, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
+    LogicalId out = g.reshape(scalar_id, g.constant({(uint32_t)ones.size()}, ones.data(), DType::INT32));
     for (uint64_t i = 0; i < target_shape.size(); ++i)
     {
         if (target_shape[i] > 1)
@@ -83,30 +83,29 @@ inline uint32_t ref_silu_broadcast_scalar_3(Graph &g, uint32_t scalar_id, const 
 //   sig      = div(1_expanded, den)
 //   result   = mul(x, sig)
 // ---------------------------------------------------------------------------
-inline uint32_t refFactorySilu_3(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactorySilu_3(const std::vector<LogicalId> &inputs, Graph &graph)
 {
-    uint32_t x_id = inputs[0];
+    LogicalId x_id = inputs[0];
     const auto &target_shape = graph.getNode(x_id).getShape();
 
     // 1. neg_x = -x
-    uint32_t neg_x = graph.neg(x_id);
+    LogicalId neg_x = graph.neg(x_id);
 
     // 2. exp_neg = pow(e, -x)
     float e_val = 2.7182818f;
     uint32_t e_node = ref_silu_broadcast_scalar_3(graph, graph.constant({1}, &e_val, DType::FLOAT32), target_shape);
-    uint32_t exp_neg = graph.pow(e_node, neg_x);
+    LogicalId exp_neg = graph.pow(e_node, neg_x);
 
     // 3. den = 1 + exp(-x)
     float one_val = 1.0f;
-    uint32_t one_node = ref_silu_broadcast_scalar_3(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
-    uint32_t den = graph.add(one_node, exp_neg);
+    LogicalId one_node = ref_silu_broadcast_scalar_3(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
+    LogicalId den = graph.add(one_node, exp_neg);
 
     // 4. sig = 1 / den
-    uint32_t sig = graph.div(one_node, den);
+    LogicalId sig = graph.div(one_node, den);
 
     // 5. result = x * sig
     return graph.mul(x_id, sig);
 }
 
-REGISTER_KERNEL("Silu_3D_3", 1, matchSiluF32_3, runSiluF32_3, refFactorySilu_3,
-                {Backend::CPU}, {DType::FLOAT32}, {{4, 4, 2048}}, {true}, {{Backend::CPU}});
+REGISTER_KERNEL("Silu_3D_3", 1, 1, matchSiluF32_3, runSiluF32_3, refFactorySilu_3, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{4, 4, 2048}}, {true}, {{MemSpace(1, HandleType::CPP)}});

@@ -48,7 +48,7 @@ inline void runPowF32_CUDA_ND(const KernelContext &ctx)
 /**
  * Reference Factory
  */
-inline uint32_t refFactoryPowF32_ND_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryPowF32_ND_CUDA(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Pow ND requires 2 inputs");
@@ -56,6 +56,6 @@ inline uint32_t refFactoryPowF32_ND_CUDA(const std::vector<uint32_t> &inputs, Gr
     return graph.pow(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Pow_F32_ND_CUDA", 2, matchPowF32_CUDA_ND, runPowF32_CUDA_ND, refFactoryPowF32_ND_CUDA, {Backend::CUDA}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{Backend::CUDA}, {Backend::CUDA}});
+REGISTER_KERNEL("Pow_F32_ND_CUDA", 2, 2, matchPowF32_CUDA_ND, runPowF32_CUDA_ND, refFactoryPowF32_ND_CUDA, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(1, HandleType::CUDA)}, {MemSpace(1, HandleType::CUDA)}});
 
 #endif

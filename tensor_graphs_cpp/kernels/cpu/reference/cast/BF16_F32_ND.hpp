@@ -56,4 +56,4 @@ inline void runCastBF16_F32_ND(const KernelContext &ctx)
 }
 
 // Register as a CPU kernel for the CAST operation
-REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastBF16_F32_ND, runCastBF16_F32_ND, {Backend::CPU}, {DType::BF16}, {{8, 32}}, {true}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::CAST, 1, 1, matchCastBF16_F32_ND, runCastBF16_F32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::BF16}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});

@@ -114,25 +114,19 @@ inline void runBatchedTransposedGEMM(const KernelContext &ctx)
         worker.join();
 }
 
-inline uint32_t refFactoryBatchedTransposedGEMM(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryBatchedTransposedGEMM(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     // Reconstructs the unoptimized pattern: Dot(X, Contiguous(Permute(W)))
     int32_t perm[] = {0, 2, 1};
-    uint32_t perm_node = graph.constant({3}, perm, DType::INT32);
-    uint32_t transposed = graph.contiguous(graph.permute(inputs[1], perm_node));
+    LogicalId perm_node = graph.constant({3}, perm, DType::INT32);
+    LogicalId transposed = graph.contiguous(graph.permute(inputs[1], perm_node));
     return graph.dot(inputs[0], transposed);
 }
 
-REGISTER_KERNEL(
-    "Batched_Transposed_GEMM_NEON",
-    2,
-    matchBatchedTransposedGEMM,
-    runBatchedTransposedGEMM,
-    refFactoryBatchedTransposedGEMM,
-    {Backend::CPU},
+REGISTER_KERNEL("Batched_Transposed_GEMM_NEON", 2, 2, matchBatchedTransposedGEMM, runBatchedTransposedGEMM, refFactoryBatchedTransposedGEMM, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
     {DType::FLOAT32, DType::FLOAT32},
     {{256, 8, 2048}, {256, 1024, 2048}},
     {true, true},
-    {{Backend::CPU}, {Backend::CPU}});
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

@@ -30,4 +30,4 @@ inline void runNegF32_ND(const KernelContext &ctx)
 }
 
 // Register as a CPU kernel for the NEGATE operation
-REGISTER_REF_KERNEL(OpType::NEGATE, 1, matchNegF32_ND, runNegF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {false}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::NEGATE, 1, 1, matchNegF32_ND, runNegF32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{8, 32}}, {false}, {{MemSpace(1, HandleType::CPP)}});

@@ -55,7 +55,7 @@ inline void runMaxF32_CUDA_ND(const KernelContext &ctx) {
 /**
  * Reference Factory
  */
-inline uint32_t refFactoryMaxF32_ND_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryMaxF32_ND_CUDA(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Max ND requires 2 inputs");
@@ -63,6 +63,6 @@ inline uint32_t refFactoryMaxF32_ND_CUDA(const std::vector<uint32_t> &inputs, Gr
     return graph.max(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Max_F32_ND_CUDA", 2, matchMaxF32_CUDA_ND, runMaxF32_CUDA_ND, refFactoryMaxF32_ND_CUDA, {Backend::CUDA}, {DType::FLOAT32, DType::INT32}, {{1024, 1024}, {1}}, {true, false}, {{Backend::CUDA}, {Backend::CPU}});
+REGISTER_KERNEL("Max_F32_ND_CUDA", 2, 2, matchMaxF32_CUDA_ND, runMaxF32_CUDA_ND, refFactoryMaxF32_ND_CUDA, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{1024, 1024}, {1}}, {true, false}, {{MemSpace(1, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

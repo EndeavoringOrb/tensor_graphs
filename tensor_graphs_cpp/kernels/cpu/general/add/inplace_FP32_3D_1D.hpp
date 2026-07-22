@@ -31,38 +31,38 @@ inline void runAddFP32_3D_1D_Inplace(const KernelContext &ctx)
         data3D[i] += data1D[i % D];
 }
 
-inline uint32_t refFactoryAdd3D_1D_Inplace(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryAdd3D_1D_Inplace(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Fused Add 3D+1D requires 2 inputs");
 
-    uint32_t id3D = inputs[0];
-    uint32_t id1D = inputs[1];
+    LogicalId id3D = inputs[0];
+    LogicalId id1D = inputs[1];
 
     auto shape3D = graph.getNode(id3D).getShape();
     auto shape1D = graph.getNode(id1D).getShape();
 
     // 1. Reshape 1D -> [1, 1, D]
     int32_t reshape_dims[] = {1, 1, (int32_t)shape1D[0]};
-    uint32_t shape_node = graph.constant({3}, reshape_dims, DType::INT32);
-    uint32_t reshaped = graph.reshape(id1D, shape_node);
+    LogicalId shape_node = graph.constant({3}, reshape_dims, DType::INT32);
+    LogicalId reshaped = graph.reshape(id1D, shape_node);
 
     // 2. Repeat axis 0 (Batch)
     int32_t b_repeats[] = {(int32_t)shape3D[0]};
     int32_t b_axis[] = {0};
-    uint32_t rep_b = graph.constant({1}, b_repeats, DType::INT32);
-    uint32_t ax_b = graph.constant({1}, b_axis, DType::INT32);
-    uint32_t repeated_b = graph.repeat(reshaped, rep_b, ax_b);
+    LogicalId rep_b = graph.constant({1}, b_repeats, DType::INT32);
+    LogicalId ax_b = graph.constant({1}, b_axis, DType::INT32);
+    LogicalId repeated_b = graph.repeat(reshaped, rep_b, ax_b);
 
     // 3. Repeat axis 1 (Sequence)
     int32_t s_repeats[] = {(int32_t)shape3D[1]};
     int32_t s_axis[] = {1};
-    uint32_t rep_s = graph.constant({1}, s_repeats, DType::INT32);
-    uint32_t ax_s = graph.constant({1}, s_axis, DType::INT32);
-    uint32_t expanded = graph.repeat(repeated_b, rep_s, ax_s);
+    LogicalId rep_s = graph.constant({1}, s_repeats, DType::INT32);
+    LogicalId ax_s = graph.constant({1}, s_axis, DType::INT32);
+    LogicalId expanded = graph.repeat(repeated_b, rep_s, ax_s);
 
     // 4. Final Add
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL_INPLACE("Add_3D_1D_inplace", 2, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL_INPLACE("Add_3D_1D_inplace", 2, 2, matchAddFP32_3D_1D_Inplace, runAddFP32_3D_1D_Inplace, refFactoryAdd3D_1D_Inplace, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

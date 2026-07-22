@@ -47,10 +47,10 @@ inline void runGatherBF16(const KernelContext &ctx)
     }
 }
 
-inline uint32_t refFactoryGatherBF16(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryGatherBF16(const std::vector<LogicalId> &inputs, Graph &graph)
 {
-    uint32_t casted = graph.cast(inputs[0], DType::FLOAT32);
+    LogicalId casted = graph.cast(inputs[0], DType::FLOAT32);
     return graph.gather(casted, inputs[1]);
 }
 
-REGISTER_KERNEL("Gather_BF16", 2, matchGatherBF16, runGatherBF16, refFactoryGatherBF16, {Backend::CPU}, {DType::BF16, DType::INT32}, {{262144, 640}, {1, 8}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Gather_BF16", 2, 2, matchGatherBF16, runGatherBF16, refFactoryGatherBF16, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::BF16, DType::INT32}, {{262144, 640}, {1, 8}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
