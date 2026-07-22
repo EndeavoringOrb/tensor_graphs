@@ -223,6 +223,46 @@ struct MemSpace
     }
 };
 
+namespace std
+{
+    template <>
+    struct hash<EClassId>
+    {
+        std::uint64_t operator()(const EClassId &id) const noexcept
+        {
+            return std::hash<uint32_t>()(id.value);
+        }
+    };
+
+    template <>
+    struct hash<ENodeId>
+    {
+        std::uint64_t operator()(const ENodeId &id) const noexcept
+        {
+            return std::hash<uint32_t>()(id.value);
+        }
+    };
+
+    template <>
+    struct hash<KernelId>
+    {
+        std::uint64_t operator()(const KernelId &id) const noexcept
+        {
+            return std::hash<uint64_t>()(id.value);
+        }
+    };
+
+    template <>
+    struct hash<MemSpace>
+    {
+        uint64_t operator()(const MemSpace &ms) const noexcept
+        {
+            return std::hash<uint32_t>()(ms.idx) ^
+                   (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
+        }
+    };
+}
+
 struct Engine
 {
     uint32_t idx;
@@ -378,43 +418,6 @@ struct GraphPatternCacheKey
 
 namespace std
 {
-    template <>
-    struct hash<EClassId>
-    {
-        std::uint64_t operator()(const EClassId &id) const noexcept
-        {
-            return std::hash<uint32_t>()(id.value);
-        }
-    };
-
-    template <>
-    struct hash<ENodeId>
-    {
-        std::uint64_t operator()(const ENodeId &id) const noexcept
-        {
-            return std::hash<uint32_t>()(id.value);
-        }
-    };
-
-    template <>
-    struct hash<KernelId>
-    {
-        std::uint64_t operator()(const KernelId &id) const noexcept
-        {
-            return std::hash<uint64_t>()(id.value);
-        }
-    };
-
-    template <>
-    struct hash<MemSpace>
-    {
-        uint64_t operator()(const MemSpace &ms) const noexcept
-        {
-            return std::hash<uint32_t>()(ms.idx) ^
-                   (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
-        }
-    };
-
     template <>
     struct hash<GraphPatternCacheKey>
     {
@@ -717,8 +720,6 @@ inline bool isContiguous(const std::vector<uint64_t> &strides, const std::vector
     }
     return true;
 }
-
-
 
 inline bool isContiguous(const TensorNode &node)
 {

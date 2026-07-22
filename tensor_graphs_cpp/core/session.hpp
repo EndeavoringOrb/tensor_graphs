@@ -128,15 +128,9 @@ struct Session
         }
 
         bw.write<uint8_t>(2); // Constants block type
-        std::unordered_set<uint32_t> neededConstants;
-        for (const CompiledGraph &g : cachedGraphs) // TODO: just loop over graph.constantStaging
-        {
-            for (const auto &nodePair : g.nodesMap)
-            {
-                uint32_t logicalId = g.getLogicalId(nodePair.first);
-                if (logicalId != UINT32_MAX && graph.constantStaging.count(logicalId))
-                    neededConstants.insert(logicalId);
-            }
+        std::unordered_set<LogicalId> neededConstants;
+        for (const auto &pair : graph.constantStaging) {
+            neededConstants.insert(pair.first);
         }
 
         std::vector<LogicalId> orderedConstants(neededConstants.begin(), neededConstants.end());
@@ -291,7 +285,7 @@ struct Session
         std::cout << "[Session.ensureCacheCoverage] Starting iterative cache optimization..." << std::endl;
         Planner planner(costModel, memManager.getBufferSizes());
 
-        std::unordered_map<uint32_t, Backend> protectedCachedNodes;
+        std::unordered_map<LogicalId, MemSpace> protectedCachedNodes;
 
         if (!disableCaching)
         {
@@ -416,7 +410,7 @@ struct Session
         bool hasInvalidCache = false;
         std::string invalidCacheReason = "";
         std::vector<CompiledGraph> tempGraphs;
-        std::unordered_map<uint32_t, Backend> tempSelectedCachedNodes;
+        std::unordered_map<LogicalId, MemSpace> tempSelectedCachedNodes;
 
         while (file.peek() != EOF)
         {
@@ -426,7 +420,7 @@ struct Session
             if (type == 0)
             {
                 uint32_t version;
-                uint32_t cachedRootId;
+                LogicalId cachedRootId;
                 br.read(version);
                 br.read(cachedRootId);
                 br.read(tempSelectedCachedNodes);
@@ -446,7 +440,7 @@ struct Session
                 bool valid = true;
                 for (const auto &inst : cg.instructions)
                 {
-                    if (inst.fullKernelId == 0 || !KernelRegistry::get().hasKernel(inst.fullKernelId))
+                    if (inst.fullKernelId == KernelId{0} || !KernelRegistry::get().hasKernel(inst.fullKernelId))
                     {
                         valid = false;
                         break;
@@ -468,7 +462,7 @@ struct Session
                 br.read(count);
                 for (uint32_t i = 0; i < count; ++i)
                 {
-                    uint32_t nodeId;
+                    LogicalId nodeId;
                     std::vector<uint8_t> data;
                     br.read(nodeId);
                     br.read(data);
