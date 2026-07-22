@@ -15,7 +15,7 @@ struct KernelContext
     std::vector<void *> outputs;
     std::vector<TensorView> inViews;
     std::vector<TensorView> outViews;
-    std::vector<int> fd; // same number of elements as inputs/inViews, has -1 if not a file, positive number file descriptor if is a file. COPY_TO kernels that start from STORAGE should use fd + inViews baseOffset to read from file
+    std::vector<int> fd;
     std::vector<cl_mem> cl_inputs;
     std::vector<cl_mem> cl_outputs;
 
@@ -65,7 +65,6 @@ public:
         auto it = factories.find(name);
         if (it != factories.end())
         {
-            // return; // TODO: somehow check that the reference graphs are the same
             Error::throw_err("A kernel with name \"" + name + "\" is already registered.");
         }
         factories[name] = {min_num_inputs, max_num_inputs, factory, dtypes, dummyShapes};
@@ -83,41 +82,6 @@ public:
 
 private:
     std::unordered_map<std::string, ReferenceGraphEntry> factories;
-};
-
-struct GraphPatternCacheKey
-{
-    OpType pOpType;
-    std::string pOpName;
-    bool reference_only;
-    bool ignore_output_mem_space;
-    bool ignore_input_mem_spaces;
-    MemSpace output_mem_space;
-    std::vector<MemSpace> input_mem_spaces;
-
-    std::vector<TensorNode> inputs;
-    TensorNode output;
-
-    bool operator==(const GraphPatternCacheKey &o) const
-    {
-        if (pOpType != o.pOpType || pOpName != o.pOpName ||
-            reference_only != o.reference_only)
-            return false;
-        if (inputs.size() != o.inputs.size())
-            return false;
-        if (!ignore_output_mem_space && output_mem_space != o.output_mem_space)
-            return false;
-        for (uint64_t i = 0; i < inputs.size(); ++i)
-        {
-            if ((!ignore_input_mem_spaces && input_mem_spaces[i] != o.input_mem_spaces[i]) || inputs[i].dtype != o.inputs[i].dtype ||
-                inputs[i].getShape() != o.inputs[i].getShape() || inputs[i].strides != o.inputs[i].strides)
-                return false;
-        }
-        if (output.dtype != o.output.dtype ||
-            output.getShape() != o.output.getShape() || output.strides != o.output.strides)
-            return false;
-        return true;
-    }
 };
 
 struct KernelEntry
@@ -152,8 +116,12 @@ struct KernelEntry
 
     // Abstracted validity check
     bool matches(const std::vector<TensorNode> &inputs, const TensorNode &output,
-                 MemSpace output_mem_space, std::vector<MemSpace> input_mem_spaces,
-                 bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false,
+                 MemSpace output_mem_space = {},
+                 const std::vector<MemSpace> &input_mem_spaces = {},
+                 const std::vector<Engine> &engines = {},
+                 bool ignore_output_mem_space = false,
+                 bool ignore_input_mem_spaces = false,
+                 bool ignore_engines = false,
                  bool ignore_input_contig = false) const
     {
         // 1. Check number of inputs
@@ -167,13 +135,13 @@ struct KernelEntry
         {
             for (uint64_t i = 0; i < inputs.size(); ++i)
             {
-                uint64_t ruleIdx = std::min(i, requiresContiguous.size() - 1);
+                uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(requiresContiguous.size() - 1));
                 if (requiresContiguous[ruleIdx] && !isContiguous(inputs[i]))
                     return false;
             }
         }
 
-        // 3. Check memory spaces
+        // 3. Check output memory space
         if (!ignore_output_mem_space)
         {
             if (this->output_mem_space != output_mem_space)
@@ -182,30 +150,40 @@ struct KernelEntry
             }
         }
 
+        // 4. Check input memory spaces
         if (!ignore_input_mem_spaces && !this->input_mem_spaces.empty())
         {
             for (uint64_t i = 0; i < inputs.size(); ++i)
             {
                 uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(this->input_mem_spaces.size() - 1));
-                if (input_mem_spaces[ruleIdx] != this->input_mem_spaces[ruleIdx])
+                if (i >= input_mem_spaces.size() || input_mem_spaces[i] != this->input_mem_spaces[ruleIdx])
                 {
                     return false;
                 }
             }
         }
 
-        // 4. Check input dtypes if registered
+        // 5. Check engines
+        if (!ignore_engines && !this->engines.empty())
+        {
+            if (this->engines != engines)
+            {
+                return false;
+            }
+        }
+
+        // 6. Check input dtypes if registered
         if (!dtypes.empty())
         {
             for (uint64_t i = 0; i < inputs.size(); ++i)
             {
-                uint64_t ruleIdx = std::min(i, dtypes.size() - 1);
+                uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(dtypes.size() - 1));
                 if (inputs[i].dtype != dtypes[ruleIdx])
                     return false;
             }
         }
 
-        // 5. Call custom match function
+        // 7. Call custom match function
         if (match)
         {
             return match(inputs, output);
@@ -231,7 +209,14 @@ public:
     std::vector<KernelId> _findMatchingKernelsByPattern(
         const Graph &patternGraph, LogicalId patternRootId,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool reference_only = false, bool ignore_input_contig = false) const
+        bool reference_only = false,
+        MemSpace output_mem_space = {},
+        const std::vector<MemSpace> &input_mem_spaces = {},
+        const std::vector<Engine> &engines = {},
+        bool ignore_output_mem_space = false,
+        bool ignore_input_mem_spaces = false,
+        bool ignore_engines = false,
+        bool ignore_input_contig = false) const
     {
         std::vector<KernelId> matches;
         for (const auto &[uid, entry] : entries)
@@ -274,7 +259,8 @@ public:
             if (!patternMatches)
                 continue;
 
-            if (!entry.matches(inputs, output, output_mem_space, input_mem_spaces, ignore_output_mem_space, ignore_input_mem_spaces, ignore_input_contig))
+            if (!entry.matches(inputs, output, output_mem_space, input_mem_spaces, engines,
+                               ignore_output_mem_space, ignore_input_mem_spaces, ignore_engines, ignore_input_contig))
                 continue;
 
             matches.push_back(entry.uid);
@@ -285,14 +271,20 @@ public:
     std::vector<KernelId> findMatchingKernelsByPattern(
         const Graph &patternGraph, LogicalId patternRootId,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool reference_only = false, MemSpace output_mem_space, std::vector<MemSpace> input_mem_spaces,
-        bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false, bool ignore_input_contig = false) const
+        bool reference_only = false,
+        MemSpace output_mem_space = {},
+        const std::vector<MemSpace> &input_mem_spaces = {},
+        const std::vector<Engine> &engines = {},
+        bool ignore_output_mem_space = false,
+        bool ignore_input_mem_spaces = false,
+        bool ignore_engines = false,
+        bool ignore_input_contig = false) const
     {
         const TensorNode &rootNode = patternGraph.getNode(patternRootId);
         GraphPatternCacheKey key{
             rootNode.opType, rootNode.opName,
-            reference_only, ignore_output_mem_space, ignore_input_mem_spaces,
-            output_mem_space, input_mem_spaces, inputs, output};
+            reference_only, ignore_output_mem_space, ignore_input_mem_spaces, ignore_engines,
+            output_mem_space, input_mem_spaces, engines, inputs, output};
 
         auto it = patternCache.find(key);
         if (it != patternCache.end())
@@ -301,7 +293,9 @@ public:
         }
 
         std::vector<KernelId> matches = _findMatchingKernelsByPattern(
-            patternGraph, patternRootId, inputs, output, reference_only, ignore_input_contig);
+            patternGraph, patternRootId, inputs, output, reference_only,
+            output_mem_space, input_mem_spaces, engines,
+            ignore_output_mem_space, ignore_input_mem_spaces, ignore_engines, ignore_input_contig);
 
         patternCache[key] = matches;
         return matches;
@@ -311,18 +305,16 @@ public:
                         uint32_t min_num_inputs, uint32_t max_num_inputs,
                         MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
                         const std::vector<uint32_t> &safe_inplace_idxs, bool is_view, bool isReference, InferViewFunc inferView,
-                        const MemSpace output_mem_space,    // mem space for output
-                        const std::vector<Engine> &engines, // which engines this kernel blocks while running
+                        const MemSpace output_mem_space,
+                        const std::vector<Engine> &engines,
                         const std::vector<DType> &dtypes = {},
                         const std::vector<std::vector<uint32_t>> &dummyShapes = {},
                         const std::vector<bool> &contiguous = {},
-                        const std::vector<MemSpace> &input_mem_spaces = {} // mem space for each input
-    )
+                        const std::vector<MemSpace> &input_mem_spaces = {})
     {
-        // TODO: more checks here
         if (input_mem_spaces.size() != min_num_inputs)
         {
-            Error::throw_err("input_mem_spaces.size() != min_num_inputs"); // TODO: use std::source_location to point to kernel file
+            Error::throw_err("input_mem_spaces.size() != min_num_inputs");
         }
         if (dtypes.size() != min_num_inputs)
         {
@@ -343,8 +335,14 @@ public:
     std::vector<KernelId> findMatchingKernels(
         OpType op, const std::string &opName,
         const std::vector<TensorNode> &inputs, const TensorNode &output,
-        bool reference_only = false, MemSpace output_mem_space, std::vector<MemSpace> input_mem_spaces,
-        bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false, bool ignore_input_contig = false) const
+        bool reference_only = false,
+        MemSpace output_mem_space = {},
+        const std::vector<MemSpace> &input_mem_spaces = {},
+        const std::vector<Engine> &engines = {},
+        bool ignore_output_mem_space = false,
+        bool ignore_input_mem_spaces = false,
+        bool ignore_engines = false,
+        bool ignore_input_contig = false) const
     {
         std::vector<KernelId> matches;
         for (const auto &[uid, entry] : entries)
@@ -356,7 +354,8 @@ public:
             if (entry.opName != opName)
                 continue;
 
-            if (!entry.matches(inputs, output, output_mem_space, input_mem_spaces, ignore_output_mem_space, ignore_input_mem_spaces, ignore_input_contig))
+            if (!entry.matches(inputs, output, output_mem_space, input_mem_spaces, engines,
+                               ignore_output_mem_space, ignore_input_mem_spaces, ignore_engines, ignore_input_contig))
                 continue;
 
             matches.push_back(entry.uid);
@@ -388,20 +387,17 @@ struct KernelRegistrar
                     uint32_t min_num_inputs, uint32_t max_num_inputs,
                     MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
                     const std::vector<uint32_t> &safe_inplace_idxs, bool is_view, bool isReference, InferViewFunc inferView,
-                    const MemSpace output_mem_space,    // mem space for output
-                    const std::vector<Engine> &engines, // which engines this kernel blocks while running
+                    const MemSpace output_mem_space,
+                    const std::vector<Engine> &engines,
                     const std::vector<DType> &dtypes = {},
                     const std::vector<std::vector<uint32_t>> &dummyShapes = {},
                     const std::vector<bool> &contiguous = {},
-                    const std::vector<MemSpace> &input_mem_spaces = {} // mem space for each input
-    )
+                    const std::vector<MemSpace> &input_mem_spaces = {})
     {
         KernelRegistry::get().registerKernel(uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory, safe_inplace_idxs, is_view, isReference, inferView, output_mem_space, engines, dtypes, dummyShapes, contiguous, input_mem_spaces);
     }
 };
 
-// --- AUTOMATIC REGISTRATION HELPERS ---
-// These are used by kernel files. build.py injects the UID during the build process.
 #ifndef REGISTER_REF_KERNEL
 #define REGISTER_REF_KERNEL(op, n_min, n_max, match, run, ...)
 #endif

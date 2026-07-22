@@ -50,6 +50,47 @@ namespace Error
     }
 }
 
+enum class OpType : uint32_t
+{
+    INPUT,
+    CACHE,
+
+    ADD,
+    MUL,
+    DIVIDE,
+    DOT,
+    SIN,
+    COS,
+    NEGATE,
+    POWER,
+    SUM,
+    MAX,
+    RESHAPE,
+    PERMUTE,
+    SLICE,
+    CONCAT,
+    CAST,
+    REPEAT,
+    ARANGE,
+    TRIU,
+    GATHER,
+    FILL,
+    COPY_TO, // Copy to another mem idx on the same HandleType
+    IM2COL,
+    CONTIGUOUS,
+    SCATTER,
+    LOG,
+    ARGMAX,
+    LT,
+    EQ,
+    AND,
+    OR,
+    NOT,
+    TRANSFER, // Transfer between HandleType on the same mem idx
+
+    FUSED
+};
+
 struct LogicalId
 {
     uint32_t value = UINT32_MAX;
@@ -182,6 +223,159 @@ struct MemSpace
     }
 };
 
+struct Engine
+{
+    uint32_t idx;
+    EngineType type;
+    std::unordered_set<MemSpace> supported;
+
+    bool operator==(const Engine &other) const
+    {
+        return idx == other.idx && type == other.type;
+    }
+};
+
+// When you add a new DType, remember to update getDTypeSize and toString(DType dtype)
+enum class DType : uint32_t
+{
+    FLOAT32,
+    INT32,
+    INT64,
+    BF16,
+    BOOL,
+    ANY,
+    _COUNT
+};
+
+struct ParallelBuffer
+{
+    uint32_t idx = 0; // index within its mem_space group
+    uint32_t eclass_val = UINT32_MAX;
+    MemSpace mem_space;  // which physical memory this buffer lives in
+    uint64_t size = 0;   // bytes
+    float start = 0.0f;  // birth time (parallel schedule)
+    float end = 0.0f;    // death time (parallel schedule)
+    int64_t offset = -1; // assigned byte offset, -1 = unallocated
+};
+
+struct Dim
+{
+    uint32_t start;
+    uint32_t stop;
+};
+
+struct Region
+{
+    std::vector<Dim> region;
+
+    bool empty() const
+    {
+        return region.empty();
+    }
+};
+
+static std::vector<uint64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
+{
+    std::vector<uint64_t> newStrides(targetShape.size());
+    uint64_t stride = 1;
+    for (int i = static_cast<int>(targetShape.size()) - 1; i >= 0; --i)
+    {
+        newStrides[i] = stride;
+        stride *= targetShape[i];
+    }
+    return newStrides;
+}
+
+struct TensorNode
+{
+private:
+    std::vector<uint32_t> shape;
+
+public:
+    LogicalId id;
+    OpType opType;
+    std::string opName; // Used if opType == OpType::FUSED
+    DType dtype;
+    std::vector<LogicalId> child_ids;
+    std::vector<uint64_t> strides;
+    std::string contentHash;
+    std::string debugOrigin;
+
+    TensorNode() {}
+
+    TensorNode(LogicalId _id, OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _child_ids, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, std::string _contentHash = "", std::string _debugOrigin = "")
+        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), child_ids(_child_ids), shape(_shape), strides(_strides), contentHash(_contentHash), debugOrigin(_debugOrigin)
+    {
+        if (strides.empty())
+        {
+            strides = calcContiguousStrides(shape);
+        }
+    }
+
+    Region fullRegion() const
+    {
+        Region region = Region();
+        for (const uint32_t dimSize : shape)
+        {
+            region.region.push_back({0, dimSize});
+        }
+        return region;
+    }
+
+    const std::vector<uint32_t> &getShape() const
+    {
+        return shape;
+    }
+
+    void setShape(const std::vector<uint32_t> &_shape)
+    {
+        shape = _shape;
+        strides = calcContiguousStrides(_shape);
+    }
+};
+
+struct GraphPatternCacheKey
+{
+    OpType pOpType;
+    std::string pOpName;
+    bool reference_only;
+    bool ignore_output_mem_space;
+    bool ignore_input_mem_spaces;
+    bool ignore_engines;
+    MemSpace output_mem_space;
+    std::vector<MemSpace> input_mem_spaces;
+    std::vector<Engine> engines;
+
+    std::vector<TensorNode> inputs;
+    TensorNode output;
+
+    bool operator==(const GraphPatternCacheKey &o) const
+    {
+        if (pOpType != o.pOpType || pOpName != o.pOpName ||
+            reference_only != o.reference_only ||
+            ignore_output_mem_space != o.ignore_output_mem_space ||
+            ignore_input_mem_spaces != o.ignore_input_mem_spaces ||
+            ignore_engines != o.ignore_engines)
+            return false;
+        if (inputs.size() != o.inputs.size())
+            return false;
+        if (!ignore_output_mem_space && output_mem_space != o.output_mem_space)
+            return false;
+        if (!ignore_engines && engines != o.engines)
+            return false;
+        for (uint64_t i = 0; i < inputs.size(); ++i)
+        {
+            if ((!ignore_input_mem_spaces && i < input_mem_spaces.size() && i < o.input_mem_spaces.size() && input_mem_spaces[i] != o.input_mem_spaces[i]) || inputs[i].dtype != o.inputs[i].dtype ||
+                inputs[i].getShape() != o.inputs[i].getShape() || inputs[i].strides != o.inputs[i].strides)
+                return false;
+        }
+        if (output.dtype != o.output.dtype ||
+            output.getShape() != o.output.getShape() || output.strides != o.output.strides)
+            return false;
+        return true;
+    }
+};
+
 namespace std
 {
     template <>
@@ -229,20 +423,30 @@ namespace std
             uint64_t h = 0;
             auto combine = [&](uint64_t val)
             { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
-            
+
             combine(static_cast<uint64_t>(k.pOpType));
             if (!k.pOpName.empty())
                 combine(std::hash<std::string>()(k.pOpName));
             combine(static_cast<uint64_t>(k.reference_only));
             combine(static_cast<uint64_t>(k.ignore_output_mem_space));
             combine(static_cast<uint64_t>(k.ignore_input_mem_spaces));
-            
+            combine(static_cast<uint64_t>(k.ignore_engines));
+
             if (!k.ignore_output_mem_space)
                 combine(std::hash<MemSpace>()(k.output_mem_space));
-            
+
+            if (!k.ignore_engines)
+            {
+                for (const auto &eng : k.engines)
+                {
+                    combine(static_cast<uint64_t>(eng.idx));
+                    combine(static_cast<uint64_t>(eng.type));
+                }
+            }
+
             for (uint64_t i = 0; i < k.inputs.size(); ++i)
             {
-                if (!k.ignore_input_mem_spaces)
+                if (!k.ignore_input_mem_spaces && i < k.input_mem_spaces.size())
                     combine(std::hash<MemSpace>()(k.input_mem_spaces[i]));
                 auto &in = k.inputs[i];
                 combine(static_cast<uint64_t>(in.dtype));
@@ -251,40 +455,17 @@ namespace std
                 for (auto s : in.strides)
                     combine(static_cast<uint64_t>(s));
             }
-            
+
             combine(static_cast<uint64_t>(k.output.dtype));
             for (auto s : k.output.getShape())
                 combine(static_cast<uint64_t>(s));
             for (auto s : k.output.strides)
                 combine(static_cast<uint64_t>(s));
-            
+
             return h;
         }
     };
 }
-
-struct Engine
-{
-    uint32_t idx;
-    EngineType type;
-    std::unordered_set<MemSpace> supported;
-
-    bool operator==(const Engine &other) const
-    {
-        return idx == other.idx && type == other.type;
-    }
-};
-
-struct ParallelBuffer
-{
-    uint32_t idx = 0; // index within its mem_space group
-    uint32_t eclass_val = UINT32_MAX;
-    MemSpace mem_space;  // which physical memory this buffer lives in
-    uint64_t size = 0;   // bytes
-    float start = 0.0f;  // birth time (parallel schedule)
-    float end = 0.0f;    // death time (parallel schedule)
-    int64_t offset = -1; // assigned byte offset, -1 = unallocated
-};
 
 inline void tg_serialize(BinaryWriter &bw, const ParallelBuffer &val)
 {
@@ -337,18 +518,6 @@ inline uint64_t countElements(const std::vector<uint32_t> &shape)
     return count;
 }
 
-// When you add a new DType, remember to update getDTypeSize and toString(DType dtype)
-enum class DType : uint32_t
-{
-    FLOAT32,
-    INT32,
-    INT64,
-    BF16,
-    BOOL,
-    ANY,
-    _COUNT
-};
-
 inline bool operator==(DType a, DType b)
 {
     return static_cast<uint32_t>(a) == static_cast<uint32_t>(b) ||
@@ -381,47 +550,6 @@ inline uint64_t getDTypeSize(DType dtype)
         Error::throw_err("Unknown DType size");
     }
 }
-
-enum class OpType : uint32_t
-{
-    INPUT,
-    CACHE,
-
-    ADD,
-    MUL,
-    DIVIDE,
-    DOT,
-    SIN,
-    COS,
-    NEGATE,
-    POWER,
-    SUM,
-    MAX,
-    RESHAPE,
-    PERMUTE,
-    SLICE,
-    CONCAT,
-    CAST,
-    REPEAT,
-    ARANGE,
-    TRIU,
-    GATHER,
-    FILL,
-    COPY_TO, // Copy to another mem idx on the same HandleType
-    IM2COL,
-    CONTIGUOUS,
-    SCATTER,
-    LOG,
-    ARGMAX,
-    LT,
-    EQ,
-    AND,
-    OR,
-    NOT,
-    TRANSFER, // Transfer between HandleType on the same mem idx
-
-    FUSED
-};
 
 inline constexpr bool isAtomic(OpType type)
 {
@@ -475,22 +603,6 @@ struct MemoryExhaustedError : public std::runtime_error
         : std::runtime_error("Memory exhausted: requested " + std::to_string(requested) +
                              " bytes, available " + std::to_string(available) + " bytes"),
           requestedMemory(requested), availableMemory(available) {}
-};
-
-struct Dim
-{
-    uint32_t start;
-    uint32_t stop;
-};
-
-struct Region
-{
-    std::vector<Dim> region;
-
-    bool empty() const
-    {
-        return region.empty();
-    }
 };
 
 inline bool operator==(const Region &a, const Region &b)
@@ -606,65 +718,7 @@ inline bool isContiguous(const std::vector<uint64_t> &strides, const std::vector
     return true;
 }
 
-static std::vector<uint64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
-{
-    std::vector<uint64_t> newStrides(targetShape.size());
-    uint64_t stride = 1;
-    for (int i = static_cast<int>(targetShape.size()) - 1; i >= 0; --i)
-    {
-        newStrides[i] = stride;
-        stride *= targetShape[i];
-    }
-    return newStrides;
-}
 
-struct TensorNode
-{
-private:
-    std::vector<uint32_t> shape;
-
-public:
-    LogicalId id;
-    OpType opType;
-    std::string opName; // Used if opType == OpType::FUSED
-    DType dtype;
-    std::vector<LogicalId> child_ids;
-    std::vector<uint64_t> strides;
-    std::string contentHash;
-    std::string debugOrigin;
-
-    TensorNode() {}
-
-    TensorNode(LogicalId _id, OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _child_ids, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, std::string _contentHash = "", std::string _debugOrigin = "")
-        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), child_ids(_child_ids), shape(_shape), strides(_strides), contentHash(_contentHash), debugOrigin(_debugOrigin)
-    {
-        if (strides.empty())
-        {
-            strides = calcContiguousStrides(shape);
-        }
-    }
-
-    Region fullRegion() const
-    {
-        Region region = Region();
-        for (const uint32_t dimSize : shape)
-        {
-            region.region.push_back({0, dimSize});
-        }
-        return region;
-    }
-
-    const std::vector<uint32_t> &getShape() const
-    {
-        return shape;
-    }
-
-    void setShape(const std::vector<uint32_t> &_shape)
-    {
-        shape = _shape;
-        strides = calcContiguousStrides(_shape);
-    }
-};
 
 inline bool isContiguous(const TensorNode &node)
 {
@@ -682,12 +736,12 @@ private:
     std::vector<uint32_t> shape;
 
 public:
-    uint64_t baseOffset = 0;       // Offset into the MemoryManager's DeviceBuffer
+    uint64_t offset = 0;           // Offset into the MemoryManager's DeviceBuffer
     std::vector<uint64_t> strides; // Strides in terms of elements, not bytes
     DType dtype;
 
     TensorView() {}
-    TensorView(const TensorNode &node, uint64_t _baseOffset) : baseOffset(_baseOffset), shape(node.getShape()), strides(node.strides), dtype(node.dtype) {}
+    TensorView(const TensorNode &node, uint64_t _offset) : offset(_offset), shape(node.getShape()), strides(node.strides), dtype(node.dtype) {}
 
     const std::vector<uint32_t> &getShape() const
     {
@@ -1157,6 +1211,7 @@ inline bool operator==(const Bucket &a, const Bucket &b)
 struct CompiledGraph
 {
     Bucket bucket;
+    std::unordered_map<PhysicalId, TensorView> nodeViews;
     std::vector<OpInstruction> instructions;
     std::unordered_map<PhysicalId, float> nodeCosts;
     // Canonical direction:
@@ -1187,14 +1242,14 @@ struct CompiledGraph
 
 inline void tg_serialize(BinaryWriter &bw, const TensorView &val)
 {
-    bw.write(val.baseOffset);
+    bw.write(val.offset);
     bw.write(val.getShape());
     bw.write(val.strides);
     bw.write(val.dtype);
 }
 inline void tg_deserialize(BinaryReader &br, TensorView &val)
 {
-    br.read(val.baseOffset);
+    br.read(val.offset);
     std::vector<uint32_t> shape;
     br.read(shape);
     val.setShape(shape);

@@ -107,7 +107,7 @@ struct Graph
 
         const auto &meta = FileRegistry::get().getMetadata(path, name);
         TensorNode &node = allocateNode(OpType::INPUT, name, meta.dtype, {}, meta.shape, {}, sha.digest(), loc);
-        FileRegistry::get().registerNode(node.id.value, path, name);
+        FileRegistry::get().registerNode(node.id, path, name);
 
         input_data_types[node.id] = InputDataType::STORAGE;
 

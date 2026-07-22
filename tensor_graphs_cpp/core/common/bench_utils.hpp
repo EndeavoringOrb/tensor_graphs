@@ -500,7 +500,7 @@ struct PreparedKernel
 
             inViews[idx].setShape(r.inputShapes[idx]);
             inViews[idx].strides = r.inputStrides[idx];
-            inViews[idx].baseOffset = 0;
+            inViews[idx].offset = 0;
             inViews[idx].dtype = r.inputDTypes[idx];
         }
 
@@ -533,7 +533,7 @@ struct PreparedKernel
 
             outViews[idx].setShape(r.outputShapes[idx]);
             outViews[idx].strides = r.outputStrides[idx];
-            outViews[idx].baseOffset = 0;
+            outViews[idx].offset = 0;
             outViews[idx].dtype = r.outputDTypes[idx];
         }
 

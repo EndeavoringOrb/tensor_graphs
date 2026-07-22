@@ -404,7 +404,7 @@ std::vector<float> executeReferenceGraph(
             inputViews.push_back(views[pid]);
             TensorNode inNode = graph.getNode(pid);
             inNode.strides = views[pid].strides;
-            inNode.viewOffset = views[pid].baseOffset / getDTypeSize(inNode.dtype);
+            inNode.viewOffset = views[pid].offset / getDTypeSize(inNode.dtype);
             inputNodes.push_back(inNode);
         }
 
@@ -451,7 +451,7 @@ std::vector<float> executeReferenceGraph(
             uint32_t parentId = node.child_ids[0];
             results[nodeId] = results[parentId];
             chosenOutView.strides = dummyOutNode.strides;
-            chosenOutView.baseOffset = dummyOutNode.viewOffset * elemSize;
+            chosenOutView.offset = dummyOutNode.viewOffset * elemSize;
             views[nodeId] = chosenOutView;
             continue;
         }
@@ -564,7 +564,7 @@ std::vector<float> executeFusedKernel(
     TensorView outView;
     outView.setShape(outShape);
     outView.strides = outStrides.empty() ? calcContiguousStrides(outShape) : outStrides;
-    outView.baseOffset = 0;
+    outView.offset = 0;
     outView.dtype = outDType;
 
     if (kernel.is_view && !pk.inputBuffers.empty() && kernel.inferView)
@@ -576,7 +576,7 @@ std::vector<float> executeFusedKernel(
             dummyInputs[i].setShape(pk.inViews[i].getShape());
             dummyInputs[i].strides = pk.inViews[i].strides;
             dummyInputs[i].dtype = pk.inViews[i].dtype;
-            dummyInputs[i].viewOffset = pk.inViews[i].baseOffset / getDTypeSize(dummyInputs[i].dtype);
+            dummyInputs[i].viewOffset = pk.inViews[i].offset / getDTypeSize(dummyInputs[i].dtype);
         }
         TensorNode dummyOutput;
         dummyOutput.setShape(outShape);
@@ -584,12 +584,12 @@ std::vector<float> executeFusedKernel(
         kernel.inferView(dummyOutput, dummyInputs, graph);
 
         outView.strides = dummyOutput.strides;
-        outView.baseOffset = dummyOutput.viewOffset * getDTypeSize(outDType);
+        outView.offset = dummyOutput.viewOffset * getDTypeSize(outDType);
 
-        return flattenOutput(pk.inputBuffers[0].hostData.data() + outView.baseOffset, outView.getShape(), outView.strides, outView.dtype);
+        return flattenOutput(pk.inputBuffers[0].hostData.data() + outView.offset, outView.getShape(), outView.strides, outView.dtype);
     }
 
-    return flattenOutput(pk.outputBuffers[0].hostData.data() + outView.baseOffset, outView.getShape(), outView.strides, outView.dtype);
+    return flattenOutput(pk.outputBuffers[0].hostData.data() + outView.offset, outView.getShape(), outView.strides, outView.dtype);
 }
 
 struct TestInputs
@@ -1045,7 +1045,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             loader.loadTensor(tensorName, data.data(), sizeBytes);
             inputData.push_back(std::move(data));
             TensorView view;
-            view.baseOffset = 0;
+            view.offset = 0;
             view.setShape(shape);
             view.strides = strides;
             view.dtype = dtype;
@@ -1067,7 +1067,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         std::vector<uint8_t> actualData(outSizeBytes);
         std::vector<void *> outPtrs = {actualData.data()};
         TensorView outView;
-        outView.baseOffset = 0;
+        outView.offset = 0;
         outView.setShape(outShape);
         outView.strides = outStrides;
         outView.dtype = outDType;
@@ -1097,7 +1097,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             for (uint64_t k = 0; k < dummyInputNodes.size(); ++k)
             {
                 dummyInputNodes[k].strides = inViews[k].strides;
-                dummyInputNodes[k].viewOffset = inViews[k].baseOffset / getDTypeSize(dummyInputNodes[k].dtype);
+                dummyInputNodes[k].viewOffset = inViews[k].offset / getDTypeSize(dummyInputNodes[k].dtype);
             }
             kernel.inferView(dummyOutNode, dummyInputNodes, dummyGraph);
             uint64_t elements = countElements(outShape);

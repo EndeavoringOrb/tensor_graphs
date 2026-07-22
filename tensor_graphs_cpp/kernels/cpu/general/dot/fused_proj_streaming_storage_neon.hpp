@@ -397,7 +397,7 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
             "weights to this kernel.");
     }
 
-    const uint64_t fileOffset = viewW.baseOffset;
+    const uint64_t fileOffset = viewW.offset;
     const uint64_t W_total_bytes = static_cast<uint64_t>(N) * K * sizeof(uint16_t);
 
     // -------- Phase 1: Convert X fp32 -> bf16 (per-token, once) --------

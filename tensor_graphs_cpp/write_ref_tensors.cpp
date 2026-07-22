@@ -135,7 +135,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
             inputViews.push_back(views[pid]);
             TensorNode inNode = graph.getNode(pid);
             inNode.strides = views[pid].strides;
-            inNode.viewOffset = views[pid].baseOffset / getDTypeSize(inNode.dtype);
+            inNode.viewOffset = views[pid].offset / getDTypeSize(inNode.dtype);
             inputNodes.push_back(inNode);
         }
 
@@ -161,12 +161,12 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
             uint32_t parentId = node.child_ids[0];
             results[nodeId] = results[parentId];
             chosenOutView.strides = dummyOutNode.strides;
-            chosenOutView.baseOffset = dummyOutNode.viewOffset * elemSize;
+            chosenOutView.offset = dummyOutNode.viewOffset * elemSize;
             views[nodeId] = chosenOutView;
 
             TensorView contigView = makeView(dummyOutNode);
             std::vector<uint8_t> contigData(countElements(contigView) * elemSize);
-            const uint8_t *srcData = results[parentId].data() + chosenOutView.baseOffset;
+            const uint8_t *srcData = results[parentId].data() + chosenOutView.offset;
             for (uint64_t i = 0; i < countElements(contigView); ++i)
             {
                 uint64_t srcIdx = getStridedIndex(i, chosenOutView.getShape(), chosenOutView.strides);

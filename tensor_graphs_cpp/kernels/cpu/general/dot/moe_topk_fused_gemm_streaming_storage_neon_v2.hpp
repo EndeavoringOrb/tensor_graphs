@@ -369,8 +369,8 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
             "inputs for W_gu (fd[1] >= 0) and W_dn (fd[2] >= 0).");
     }
 
-    const uint64_t off_gu = viewWgu.baseOffset;
-    const uint64_t off_dn = viewWdn.baseOffset;
+    const uint64_t off_gu = viewWgu.offset;
+    const uint64_t off_dn = viewWdn.offset;
     const uint64_t gu_expert_bytes = static_cast<uint64_t>(I2) * H * sizeof(uint16_t);
     const uint64_t dn_expert_bytes = static_cast<uint64_t>(H) * I * sizeof(uint16_t);
 

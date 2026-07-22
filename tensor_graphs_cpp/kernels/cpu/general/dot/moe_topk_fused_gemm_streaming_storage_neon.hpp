@@ -353,8 +353,8 @@ inline void runMoETopKFusedGEMM_StreamingStorage(const KernelContext &ctx)
             "only route STORAGE-backed weights to this kernel.");
     }
 
-    const uint64_t off_gu = viewWgu.baseOffset;
-    const uint64_t off_dn = viewWdn.baseOffset;
+    const uint64_t off_gu = viewWgu.offset;
+    const uint64_t off_dn = viewWdn.offset;
     const uint64_t gu_expert_bytes = static_cast<uint64_t>(I2) * H * sizeof(uint16_t);
     const uint64_t dn_expert_bytes = static_cast<uint64_t>(H)  * I * sizeof(uint16_t);
 

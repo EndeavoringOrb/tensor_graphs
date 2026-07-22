@@ -17,90 +17,7 @@
 
 namespace Debug
 {
-    using Callback = std::function<void(uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)>;
-
-    inline void checkNan(const TensorNode &node, const MemoryManager &mem, const std::string &context)
-    {
-#ifndef DEBUG_CHECKNAN
-        return;
-#endif
-        // Skip checking model weights/inputs for NaNs, as they are out of our control
-        if (node.opType == OpType::INPUT)
-        {
-            return;
-        }
-
-        // INT32 and BOOL cannot represent NaNs, so we skip them
-        if (node.dtype != DType::FLOAT32 && node.dtype != DType::BF16)
-        {
-            return;
-        }
-
-        TensorView view = mem.getView(node, node.id);
-
-        auto it = mem.buffers.find(node.backend);
-        if (it == mem.buffers.end())
-            return;
-        const uint8_t *basePtr = it->second.arena_ptr + view.baseOffset;
-        if (!basePtr)
-            return;
-
-#ifdef USE_CUDA
-        std::vector<uint8_t> hostData;
-        if (node.backend == Backend::CUDA)
-        {
-            uint64_t maxOffset = 0;
-            for (uint64_t i = 0; i < view.getShape().size(); ++i)
-            {
-                if (view.getShape()[i] > 0)
-                {
-                    maxOffset += (view.getShape()[i] - 1) * view.strides[i];
-                }
-            }
-            uint64_t sizeBytes = (maxOffset + 1) * getDTypeSize(node.dtype);
-            hostData.resize(sizeBytes);
-            cudaMemcpy(hostData.data(), basePtr, sizeBytes, cudaMemcpyDeviceToHost);
-            basePtr = hostData.data();
-        }
-#endif
-
-        uint64_t numElements = countElements(node);
-
-        if (node.dtype == DType::FLOAT32)
-        {
-            const float *data = reinterpret_cast<const float *>(basePtr);
-            for (uint64_t i = 0; i < numElements; ++i)
-            {
-                uint64_t idx = getStridedIndex(i, view.getShape(), view.strides);
-                if (std::isnan(data[idx]))
-                {
-                    std::cerr << "[NaN Detection] Found NaN in node " << node.id
-                              << " (" << toString(node.opType) << (node.opType == OpType::FUSED ? " " + node.opName : "") << ")"
-                              << " during \"" << context
-                              << "\" at element index " << i << " (flat index " << idx << ")";
-                    return;
-                }
-            }
-        }
-        else if (node.dtype == DType::BF16)
-        {
-            const uint16_t *data = reinterpret_cast<const uint16_t *>(basePtr);
-            for (uint64_t i = 0; i < numElements; ++i)
-            {
-                uint64_t idx = getStridedIndex(i, view.getShape(), view.strides);
-                uint16_t bits = data[idx];
-                bool is_nan = ((bits & 0x7F80) == 0x7F80) && ((bits & 0x007F) != 0);
-                if (is_nan)
-                {
-                    std::cerr << "[NaN Detection] Found BF16 NaN in node " << node.id
-                              << " (" << toString(node.opType) << ")"
-                              << " during " << context
-                              << " at element index " << i << " (flat index " << idx << ")";
-                    return;
-                }
-            }
-        }
-    }
+    using Callback = std::function<void(LogicalId logicalId, const KernelContext &ctx, const void *data)>;
 
     struct RefIndexEntry
     {
@@ -117,7 +34,7 @@ namespace Debug
         std::ofstream refOutFile;
         std::ifstream refInFile;
         std::unordered_map<std::string, RefIndexEntry> refIndex;
-        std::unordered_map<uint32_t, int> callCounts;
+        std::unordered_map<LogicalId, int> callCounts;
         int mismatchCount = 0;
         bool initialized = false;
 
@@ -171,7 +88,7 @@ namespace Debug
 
                 while (refInFile.peek() != EOF)
                 {
-                    uint32_t logicalId;
+                    LogicalId logicalId;
                     if (!refInFile.read(reinterpret_cast<char *>(&logicalId), sizeof(logicalId)))
                         break;
 
@@ -190,7 +107,7 @@ namespace Debug
                     entry.fileOffset = refInFile.tellg();
 
                     int iter = callCounts[logicalId]++;
-                    std::string key = std::to_string(logicalId) + "_" + std::to_string(iter);
+                    std::string key = toString(logicalId) + "_" + std::to_string(iter);
                     refIndex[key] = entry;
 
                     refInFile.seekg(numElements * sizeof(float), std::ios::cur);
@@ -229,7 +146,7 @@ namespace Debug
         std::string getMode() const { return mode; }
         int getMismatchCount() const { return mismatchCount; }
 
-        void verify(uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data, Graph *graph)
+        void verify(LogicalId logicalId, const KernelContext &ctx, const void *data, Graph *graph)
         {
             if (mode == "none" || !graph)
                 return;
@@ -237,9 +154,10 @@ namespace Debug
             const TensorView &view = ctx.outViews[0];
             std::vector<float> optData = flattenOutput(data, view.getShape(), view.strides, view.dtype);
             std::string opName = "UNKNOWN";
+            TensorNode node;
             if (graph->hasNode(logicalId))
             {
-                auto node = graph->getNode(logicalId);
+                node = graph->getNode(logicalId);
                 opName = toString(node.opType);
                 if (node.opType == OpType::FUSED)
                 {
@@ -248,7 +166,7 @@ namespace Debug
             }
 
             int iter = callCounts[logicalId]++;
-            std::string key = std::to_string(logicalId) + "_" + std::to_string(iter);
+            std::string key = toString(logicalId) + "_" + std::to_string(iter);
 
             if (mode == "write")
             {
@@ -329,7 +247,7 @@ namespace Debug
                           << ", dtype=" << toString(view.dtype)
                           << ", shape=" << toString(view.getShape())
                           << ", strides=" << toString(view.strides)
-                          << ", offset=" << view.baseOffset
+                          << ", offset=" << view.offset
                           << ", debugOrigin=" << node.debugOrigin
                           << "\n";
 
@@ -357,7 +275,7 @@ namespace Debug
                             std::cout << ", dtype=" << toString(inView.dtype)
                                       << ", shape=" << toString(inView.getShape())
                                       << ", strides=" << toString(inView.strides)
-                                      << ", offset=" << inView.baseOffset;
+                                      << ", offset=" << inView.offset;
                         }
                         if (i < ctx.fd.size())
                         {
@@ -390,7 +308,7 @@ namespace Debug
                             std::cout << ", dtype=" << toString(outView.dtype)
                                       << ", shape=" << toString(outView.getShape())
                                       << ", strides=" << toString(outView.strides)
-                                      << ", offset=" << outView.baseOffset;
+                                      << ", offset=" << outView.offset;
                         }
                         if (i < ctx.cl_outputs.size())
                         {

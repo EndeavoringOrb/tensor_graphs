@@ -341,7 +341,7 @@ inline void runBatchedTransposedGEMM_StreamingStorage(const KernelContext &ctx)
             "STORAGE-backed weights to this kernel.");
     }
 
-    const uint64_t fileOffset = viewW.baseOffset; // bytes
+    const uint64_t fileOffset = viewW.offset; // bytes
     const uint64_t expertBytes = static_cast<uint64_t>(O) * H * sizeof(uint16_t);
 
     // --- Fast path: E == 1, no threading overhead ---

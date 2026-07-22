@@ -224,7 +224,7 @@ private:
     // -------------------------------------------------------------------------
     // Shape / repeat helpers
     // -------------------------------------------------------------------------
-    LogicalId repeat_ax(uint32_t id, uint32_t repeats, uint32_t axis)
+    LogicalId repeat_ax(LogicalId id, LogicalId repeats, LogicalId axis)
     {
         if (repeats <= 1)
             return id;
@@ -233,7 +233,7 @@ private:
                         g.constant({1}, &a, DType::INT32));
     }
 
-    uint32_t repeat_3d_axis(uint32_t tensor_id, uint32_t repeats, uint32_t axis)
+    LogicalId repeat_3d_axis(LogicalId tensor_id, LogicalId repeats, LogicalId axis)
     {
         if (repeats <= 1)
             return tensor_id;

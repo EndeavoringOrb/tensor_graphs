@@ -381,7 +381,7 @@ struct FusionRule : public Rule
             bool ignoreInputMemSpaces = (pattern.rootOpType != OpType::COPY_TO);
 
             std::vector<KernelId> kernelMatches = KernelRegistry::get().findMatchingKernelsByPattern(
-                pattern.graph, pattern.rootId, inputNodes, outputNode, false, matchedClass.mem_space, {}, true, ignoreInputMemSpaces, true);
+                pattern.graph, pattern.rootId, inputNodes, outputNode, false, matchedClass.mem_space, {}, {}, true, ignoreInputMemSpaces, true, true);
 
             for (KernelId uid : kernelMatches)
             {

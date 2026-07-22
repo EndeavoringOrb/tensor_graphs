@@ -137,7 +137,6 @@ struct Planner
                   << std::flush;
     }
 
-private:
     ExtractionResult extractBest(const LogicalId rootId, const Graph &graph, EGraph &egraph,
                                  const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
                                  const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
@@ -743,10 +742,10 @@ private:
         {
             EClass &cls = egraph.getEClass(e_class_id);
             std::sort(cls.enodes.begin(), cls.enodes.end(),
-                      [&](uint32_t a, uint32_t b)
+                      [&](ENodeId a, ENodeId b)
                       {
-                          float costA = optimisticEnodeDagCost[a];
-                          float costB = optimisticEnodeDagCost[b];
+                          float costA = optimisticEnodeDagCost[a.value];
+                          float costB = optimisticEnodeDagCost[b.value];
 
                           if (costA < costB)
                               return true;
@@ -1197,7 +1196,7 @@ private:
 
                 std::vector<MemSpace> input_mem_spaces = {lClass.mem_space, ram, ram, ram};
 
-                auto sliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", dIns, dOut, lClass.mem_space, {cpu}, input_mem_spaces, true);
+                auto sliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", dIns, dOut, true, lClass.mem_space, input_mem_spaces, {cpu});
                 for (KernelId kid : sliceRefs)
                 {
                     ENode sliceNode(kid, OpType::SLICE, "", {E_L, startsId, endsId, stepsId}, partialShape, sliceStrides, lClass.dtype, lClass.mem_space, {cpu});
@@ -1265,7 +1264,7 @@ private:
                     pIns[3].dtype = DType::INT32;
 
                     std::vector<MemSpace> pSliceInputMemSpaces = {pClass.mem_space, ram, ram, ram};
-                    auto pSliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", pIns, pOut, pClass.mem_space, {cpu}, pSliceInputMemSpaces, true);
+                    auto pSliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", pIns, pOut, true, pClass.mem_space, pSliceInputMemSpaces, {cpu});
 
                     for (KernelId uid : pSliceRefs)
                     {
@@ -1287,7 +1286,7 @@ private:
                     cIn.dtype = pClass.dtype;
                     cIn.strides = pSliceStrides;
 
-                    auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", {cIn}, cOut, pClass.mem_space, {cpu}, {pClass.mem_space}, true);
+                    auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", {cIn}, cOut, true, pClass.mem_space, {pClass.mem_space}, {cpu});
                     for (KernelId uid : contigRefs)
                     {
                         const auto &kernel = KernelRegistry::get().getKernel(uid);
@@ -1314,7 +1313,7 @@ private:
                 dummyOut.dtype = sourceNode.dtype;
                 dummyOut.strides = calcContiguousStrides(partialShape);
 
-                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName, dummyInputNodes, dummyOut, target_mem_space, {cpu}, dummyInputMemSpaces, true);
+                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName, dummyInputNodes, dummyOut, true, target_mem_space, dummyInputMemSpaces, {cpu});
                 if (opRefs.size() == 0)
                 {
                     Error::throw_err("[Planner.injectPartialPath] couldn't find any slice kernels for op " + toString(sourceNode.opType));
@@ -1340,7 +1339,7 @@ private:
             cIn.dtype = sourceNode.dtype;
             cIn.strides = calcContiguousStrides(partialShape);
 
-            auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", {cIn}, cOut, target_mem_space, {cpu}, {target_mem_space}, true);
+            auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", {cIn}, cOut, true, target_mem_space, {target_mem_space}, {cpu});
             for (KernelId uid : contigRefs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
@@ -1369,7 +1368,7 @@ private:
 
             std::vector<MemSpace> scatterInputSpaces = {target_mem_space, target_mem_space, ram, ram, ram};
 
-            auto scatterRefs = KernelRegistry::get().findMatchingKernels(OpType::SCATTER, "", sIns, sOut, target_mem_space, {cpu}, scatterInputSpaces, true);
+            auto scatterRefs = KernelRegistry::get().findMatchingKernels(OpType::SCATTER, "", sIns, sOut, true, target_mem_space, scatterInputSpaces, {cpu});
             for (KernelId uid : scatterRefs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);

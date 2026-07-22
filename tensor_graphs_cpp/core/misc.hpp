@@ -167,7 +167,7 @@ inline std::string toString(const TensorView &view)
 {
     std::stringstream ss;
     ss << "TensorView\n"
-       << "  baseOffset: " << view.baseOffset << "\n"
+       << "  baseOffset: " << view.offset << "\n"
        << "  shape: " << toString(view.getShape()) << "\n"
        << "  strides: " << toString(view.strides) << "\n"
        << "  dtype: " << view.dtype << "\n";
@@ -416,7 +416,7 @@ inline TensorView makeView(const TensorNode &node)
 {
     TensorView view;
     view.setShape(node.getShape());
-    view.baseOffset = 0;
+    view.offset = 0;
     view.dtype = node.dtype;
     if (!node.strides.empty())
         view.strides = node.strides;

@@ -63,7 +63,7 @@ struct Session
 
     std::string cachePath;
     std::vector<CompiledGraph> cachedGraphs;
-    std::unordered_map<uint32_t, Backend> selectedCachedNodes;
+    std::unordered_map<LogicalId, MemSpace> selectedCachedNodes;
 
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
     std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
@@ -92,9 +92,9 @@ struct Session
         }
     }
 
-    std::vector<uint32_t> collectInputNodeIds() const
+    std::vector<LogicalId> collectInputNodeIds() const
     {
-        std::vector<uint32_t> inputNodeIds;
+        std::vector<LogicalId> inputNodeIds;
         for (const auto &pair : graph.nodes)
         {
             if (pair.second.opType == OpType::INPUT)
@@ -118,7 +118,7 @@ struct Session
 
         bw.write<uint8_t>(0); // Metadata block type
         bw.write<uint32_t>(kCacheFileVersion);
-        bw.write<uint32_t>(rootId);
+        bw.write<LogicalId>(rootId);
         bw.write(selectedCachedNodes);
 
         for (const CompiledGraph &g : cachedGraphs)
@@ -139,18 +139,18 @@ struct Session
             }
         }
 
-        std::vector<uint32_t> orderedConstants(neededConstants.begin(), neededConstants.end());
+        std::vector<LogicalId> orderedConstants(neededConstants.begin(), neededConstants.end());
         std::sort(orderedConstants.begin(), orderedConstants.end());
 
         bw.write<uint32_t>(static_cast<uint32_t>(orderedConstants.size()));
-        for (uint32_t logicalId : orderedConstants)
+        for (LogicalId logicalId : orderedConstants)
         {
             bw.write(logicalId);
             bw.write(*graph.constantStaging.at(logicalId));
         }
     }
 
-    void addBucket(const std::unordered_map<uint32_t, std::vector<Region>> &inputDirtyRegions, const std::vector<Region> &outputNeededRegion)
+    void addBucket(const std::unordered_map<LogicalId, std::vector<Region>> &inputDirtyRegions, const std::vector<Region> &outputNeededRegion)
     {
         manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
     }
@@ -166,8 +166,8 @@ struct Session
     {
         Bucket bucket;
         bucket.outputNeededRegion = {makeFull(graph.getNode(rootId).getShape())};
-        std::vector<uint32_t> inputNodeIds = collectInputNodeIds();
-        for (uint32_t nodeId : inputNodeIds)
+        std::vector<LogicalId> inputNodeIds = collectInputNodeIds();
+        for (LogicalId nodeId : inputNodeIds)
         {
             bucket.inputDirtyRegions[nodeId] = {makeFull(graph.getNode(nodeId).getShape())};
         }
@@ -221,12 +221,12 @@ struct Session
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
         memManager.init();
 
-        std::unordered_set<uint32_t> written;
+        std::unordered_set<LogicalId> written;
         for (const CompiledGraph &g : cachedGraphs)
         {
             for (const auto &inst : g.instructions)
             {
-                if (inst.logicalNodeId != UINT32_MAX && graph.constantStaging.count(inst.logicalNodeId)) {
+                if (inst.logicalNodeId != LogicalId() && graph.constantStaging.count(inst.logicalNodeId)) {
                     if (written.insert(inst.logicalNodeId).second) {
                         uint64_t sizeBytes = countElements(graph.getNode(inst.logicalNodeId).getShape()) * getDTypeSize(graph.getNode(inst.logicalNodeId).dtype);
                         memManager.write(inst.outBuffer.mem_space, inst.outBuffer.offset, graph.constantStaging.at(inst.logicalNodeId)->data(), sizeBytes);
@@ -239,7 +239,7 @@ struct Session
         isCompiled = true;
     }
 
-    void writeInput(uint32_t logicalId, const void* data, uint64_t size) {
+    void writeInput(LogicalId logicalId, const void* data, uint64_t size) {
         for (const CompiledGraph& g : cachedGraphs) {
             for (const auto& inst : g.instructions) {
                 if (inst.logicalNodeId == logicalId) {
@@ -460,7 +460,6 @@ struct Session
                     invalidCacheReason = "Invalid Kernel ID";
                     break;
                 }
-                cg.remapPhysIds();
                 tempGraphs.push_back(cg);
             }
             else if (type == 2)

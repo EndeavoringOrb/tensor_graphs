@@ -50,12 +50,12 @@ protected:
 
     FluxGraphBase(Graph &graph, const std::string &path) : g(graph), w_path(path) {}
 
-    uint32_t weight(const std::string &name)
+    LogicalId weight(const std::string &name)
     {
         return g.cast(g.weight(w_path, name), DType::FLOAT32);
     }
 
-    uint32_t repeat_ax(uint32_t id, uint32_t repeats, uint32_t axis)
+    LogicalId repeat_ax(LogicalId id, LogicalId repeats, LogicalId axis)
     {
         if (repeats <= 1)
             return id;
@@ -63,18 +63,18 @@ protected:
         return g.repeat(id, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
     }
 
-    uint32_t expand_scalar_to_1d(float val, uint32_t d0)
+    LogicalId expand_scalar_to_1d(float val, LogicalId d0)
     {
-        uint32_t node = g.constant({1}, &val, DType::FLOAT32);
+        LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh1[] = {1};
         return repeat_ax(g.reshape(node, g.constant({1}, sh1, DType::INT32)), d0, 0);
     }
 
-    uint32_t expand_scalar_to_3d(float val, uint32_t d0, uint32_t d1, uint32_t d2)
+    LogicalId expand_scalar_to_3d(float val, LogicalId d0, LogicalId d1, LogicalId d2)
     {
-        uint32_t node = g.constant({1}, &val, DType::FLOAT32);
+        LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh3[] = {1, 1, 1};
-        uint32_t out = g.reshape(node, g.constant({3}, sh3, DType::INT32));
+        LogicalId out = g.reshape(node, g.constant({3}, sh3, DType::INT32));
         if (d0 > 1)
             out = repeat_ax(out, d0, 0);
         if (d1 > 1)

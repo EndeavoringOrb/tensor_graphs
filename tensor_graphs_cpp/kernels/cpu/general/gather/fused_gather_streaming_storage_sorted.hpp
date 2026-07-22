@@ -127,7 +127,7 @@ inline void runGatherStreamingStorageSorted(const KernelContext &ctx)
         Error::throw_err("Gather_StreamingStorage_Sorted_NEON: expected STORAGE input for W (fd[0] >= 0).");
     }
 
-    uint64_t fileOffset = ctx.inViews[0].baseOffset;
+    uint64_t fileOffset = ctx.inViews[0].offset;
     uint64_t rowSizeBytes = rowSize * sizeof(uint16_t);
 
     // Structure to pair indices with their original sequence offsets

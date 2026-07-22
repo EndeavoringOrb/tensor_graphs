@@ -112,8 +112,8 @@ struct DeviceBuffer
     virtual void freeArena() = 0;
     virtual void write(uint64_t offset, const void *data, uint64_t size) = 0;
 
-    virtual void setupInput(KernelContext &ctx, uint64_t offset, const TensorView &view, uint32_t logicalId) = 0;
-    virtual void setupOutput(KernelContext &ctx, uint64_t offset, const TensorView &view, uint32_t logicalId) = 0;
+    virtual void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) = 0;
+    virtual void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) = 0;
     virtual void cleanupContext(KernelContext &ctx) = 0;
     virtual uint8_t *getBasePtr() { return nullptr; }
 };
@@ -127,17 +127,17 @@ struct StorageBuffer : public DeviceBuffer
     {
         Error::throw_err("Cannot write to StorageBuffer");
     }
-    void setupInput(KernelContext &ctx, uint64_t offset, const TensorView &view, uint32_t logicalId) override
+    void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
         TensorMetadata meta = FileRegistry::get().getNodeMeta(logicalId);
         TensorView v = view;
-        v.baseOffset = meta.dataOffsetStart;
+        v.offset = meta.dataOffsetStart;
         ctx.inViews.push_back(v);
         ctx.inputs.push_back(nullptr);
         ctx.fd.push_back(FileRegistry::get().getNodeFd(logicalId));
         ctx.cl_inputs.push_back(nullptr);
     }
-    void setupOutput(KernelContext &ctx, uint64_t offset, const TensorView &view, uint32_t logicalId) override
+    void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
         Error::throw_err("Cannot use StorageBuffer as output");
     }
@@ -174,21 +174,19 @@ struct CppBuffer : public DeviceBuffer
     {
         std::memcpy(arena_ptr + offset, data, size);
     }
-    void setupInput(KernelContext &ctx, uint64_t offset, const TensorView &view, uint32_t logicalId) override
+    void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
         TensorView v = view;
-        v.baseOffset = offset + view.baseOffset;
         ctx.inViews.push_back(v);
-        ctx.inputs.push_back(arena_ptr + v.baseOffset);
+        ctx.inputs.push_back(arena_ptr + v.offset);
         ctx.fd.push_back(-1);
         ctx.cl_inputs.push_back(nullptr);
     }
-    void setupOutput(KernelContext &ctx, uint64_t offset, const TensorView &view, uint32_t logicalId) override
+    void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
         TensorView v = view;
-        v.baseOffset = offset + view.baseOffset;
         ctx.outViews.push_back(v);
-        ctx.outputs.push_back(arena_ptr + v.baseOffset);
+        ctx.outputs.push_back(arena_ptr + v.offset);
         ctx.cl_outputs.push_back(nullptr);
     }
     void cleanupContext(KernelContext &ctx) override {}
@@ -237,21 +235,19 @@ struct CudaBuffer : public DeviceBuffer
     {
         cudaMemcpy(arena_ptr + offset, data, size, cudaMemcpyHostToDevice);
     }
-    void setupInput(KernelContext &ctx, uint64_t offset, const TensorView &view, uint32_t logicalId) override
+    void setupInput(KernelContext &ctx, const TensorView &view, uint32_t logicalId) override
     {
         TensorView v = view;
-        v.baseOffset = offset + view.baseOffset;
         ctx.inViews.push_back(v);
-        ctx.inputs.push_back(arena_ptr + v.baseOffset);
+        ctx.inputs.push_back(arena_ptr + v.offset);
         ctx.fd.push_back(-1);
         ctx.cl_inputs.push_back(nullptr);
     }
-    void setupOutput(KernelContext &ctx, uint64_t offset, const TensorView &view, uint32_t logicalId) override
+    void setupOutput(KernelContext &ctx, const TensorView &view, uint32_t logicalId) override
     {
         TensorView v = view;
-        v.baseOffset = offset + view.baseOffset;
         ctx.outViews.push_back(v);
-        ctx.outputs.push_back(arena_ptr + v.baseOffset);
+        ctx.outputs.push_back(arena_ptr + v.offset);
         ctx.cl_outputs.push_back(nullptr);
     }
     void cleanupContext(KernelContext &ctx) override {}
@@ -301,12 +297,11 @@ struct OpenCLBuffer : public DeviceBuffer
     {
         std::memcpy(arena_ptr + offset, data, size);
     }
-    void setupInput(KernelContext &ctx, uint64_t offset, const TensorView &view, uint32_t logicalId) override
+    void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
         TensorView v = view;
-        v.baseOffset = offset + view.baseOffset;
         ctx.inViews.push_back(v);
-        ctx.inputs.push_back(arena_ptr + v.baseOffset);
+        ctx.inputs.push_back(arena_ptr + v.offset);
         ctx.fd.push_back(-1);
 
         uint64_t size = countElements(view) * getDTypeSize(view.dtype);
@@ -316,7 +311,7 @@ struct OpenCLBuffer : public DeviceBuffer
         cl_mem buf = nullptr;
         for (uint64_t i = 0; i < ctx.cl_inputs.size(); i++)
         {
-            if (ctx.inputs[i] == (arena_ptr + v.baseOffset) && ctx.cl_inputs[i] != nullptr)
+            if (ctx.inputs[i] == (arena_ptr + v.offset) && ctx.cl_inputs[i] != nullptr)
             {
                 buf = ctx.cl_inputs[i];
                 clRetainMemObject(buf);
@@ -326,7 +321,7 @@ struct OpenCLBuffer : public DeviceBuffer
         if (!buf)
         {
             cl_buffer_region region;
-            region.origin = v.baseOffset;
+            region.origin = v.offset;
             region.size = size;
             cl_int err;
             buf = clCreateSubBuffer(arena_ptr_cl_mem, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &err);
@@ -335,12 +330,11 @@ struct OpenCLBuffer : public DeviceBuffer
         }
         ctx.cl_inputs.push_back(buf);
     }
-    void setupOutput(KernelContext &ctx, uint64_t offset, const TensorView &view, uint32_t logicalId) override
+    void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
         TensorView v = view;
-        v.baseOffset = offset + view.baseOffset;
         ctx.outViews.push_back(v);
-        ctx.outputs.push_back(arena_ptr + v.baseOffset);
+        ctx.outputs.push_back(arena_ptr + v.offset);
 
         uint64_t size = countElements(view) * getDTypeSize(view.dtype);
         if (size == 0)
@@ -349,7 +343,7 @@ struct OpenCLBuffer : public DeviceBuffer
         cl_mem buf = nullptr;
         for (uint64_t i = 0; i < ctx.cl_inputs.size(); i++)
         {
-            if (ctx.inputs[i] == (arena_ptr + v.baseOffset) && ctx.cl_inputs[i] != nullptr)
+            if (ctx.inputs[i] == (arena_ptr + v.offset) && ctx.cl_inputs[i] != nullptr)
             {
                 buf = ctx.cl_inputs[i];
                 clRetainMemObject(buf);
@@ -359,7 +353,7 @@ struct OpenCLBuffer : public DeviceBuffer
         if (!buf)
         {
             cl_buffer_region region;
-            region.origin = v.baseOffset;
+            region.origin = v.offset;
             region.size = size;
             cl_int err;
             buf = clCreateSubBuffer(arena_ptr_cl_mem, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &err);

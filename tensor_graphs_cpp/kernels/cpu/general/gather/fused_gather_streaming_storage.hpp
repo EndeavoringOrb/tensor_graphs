@@ -125,7 +125,7 @@ inline void runGatherStreamingStorage(const KernelContext &ctx)
         Error::throw_err("Gather_StreamingStorage_NEON: expected STORAGE input for W (fd[0] >= 0).");
     }
 
-    uint64_t fileOffset = ctx.inViews[0].baseOffset;
+    uint64_t fileOffset = ctx.inViews[0].offset;
     uint64_t rowSizeBytes = rowSize * sizeof(uint16_t);
 
     // Thread-local scratchpad row buffer
