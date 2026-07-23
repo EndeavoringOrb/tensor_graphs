@@ -23,6 +23,7 @@ public:
           DType dtype,
           MemSpace mem_space,
           std::vector<Engine> engines,
+          std::string contentHash = "",
           uint64_t sig = 0)
         : kernelId(kernelId),
           opType(opType),
@@ -33,6 +34,7 @@ public:
           dtype(dtype),
           mem_space(mem_space),
           engines(std::move(engines)),
+          contentHash(std::move(contentHash)),
           sig(sig)
     {
     }
@@ -47,7 +49,8 @@ public:
                strides == other.strides &&
                dtype == other.dtype &&
                mem_space == other.mem_space &&
-               engines == other.engines;
+               engines == other.engines &&
+               contentHash == other.contentHash;
     }
 
     // Read-only getters
@@ -60,6 +63,7 @@ public:
     DType getDType() const { return dtype; }
     MemSpace getMemSpace() const { return mem_space; }
     std::vector<Engine> getEngines() const { return engines; }
+    const std::string &getContentHash() const { return contentHash; }
     uint64_t getSig() const { return sig; }
 
     // Setters
@@ -76,6 +80,7 @@ private:
     DType dtype;
     MemSpace mem_space;
     std::vector<Engine> engines;
+    std::string contentHash;
 
     uint64_t sig; // Precomputed structural signature used by hashcons buckets.
 };
@@ -168,7 +173,8 @@ struct EGraph
         }
 
         EClassId cls = addEClass(shape, strides, dtype, MemSpace{1, HandleType::CPP});
-        ENode n = ENode(KernelId{0}, OpType::INPUT, "", {}, shape, strides, dtype, MemSpace{1, HandleType::CPP}, {Engine{0, EngineType::CPU}});
+        std::string contentHash = std::to_string(dataHash);
+        ENode n = ENode(KernelId{0}, OpType::INPUT, "", {}, shape, strides, dtype, MemSpace{1, HandleType::CPP}, {Engine{0, EngineType::CPU}}, contentHash);
         addENode(cls, n);
         constantStaging[cls] = std::make_shared<std::vector<uint8_t>>(data);
         constantHashIndex[dataHash].push_back(cls);
@@ -424,6 +430,8 @@ private:
         hashCombine(h, static_cast<uint64_t>(node.getOpType()));
         if (!node.getOpName().empty())
             hashCombine(h, hashString(node.getOpName()));
+        if (!node.getContentHash().empty())
+            hashCombine(h, hashString(node.getContentHash()));
 
         for (EClassId c : node.getChildren())
             hashCombine(h, static_cast<uint64_t>(c.value));

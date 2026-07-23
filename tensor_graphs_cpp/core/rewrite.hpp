@@ -181,7 +181,7 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
 inline EClassId copyTo(EGraph &egraph, EClassId class_id, MemSpace target_mem_space)
 {
     EClassId canon = egraph.find(class_id);
-    const EClass &cls = egraph.getEClass(canon);
+    const EClass cls = egraph.getEClass(canon);
     if (cls.mem_space == target_mem_space)
         return canon;
 
@@ -251,29 +251,26 @@ struct FusionRule : public Rule
         for (const auto &pair : refGraphs)
         {
             const auto &entry = pair.second;
-            for (uint64_t j = entry.min_num_inputs; j < entry.max_num_inputs; ++j)
+            Pattern pattern;
+            pattern.opName = pair.first;
+
+            for (uint64_t i = 0; i < entry.min_num_inputs; ++i)
             {
-                Pattern pattern;
-                pattern.opName = pair.first;
-
-                for (uint64_t i = 0; i < j; ++i)
-                {
-                    LogicalId inId = pattern.graph.input(entry.dummyShapes[i], entry.dtypes[i]);
-                    pattern.variables.push_back(inId);
-                }
-                pattern.rootId = entry.factory(pattern.variables, pattern.graph);
-
-                if (disableFusion && pattern.graph.nodes.size() > j + 1)
-                {
-                    continue;
-                }
-
-                pattern.rootOpType = pattern.graph.getNode(pattern.rootId).opType;
-                pattern.dtypes = entry.dtypes;
-                pattern.dummyShapes = entry.dummyShapes;
-
-                patternsByOp[pattern.rootOpType].push_back(std::move(pattern));
+                LogicalId inId = pattern.graph.input(entry.dummyShapes[i], entry.dtypes[i]);
+                pattern.variables.push_back(inId);
             }
+            pattern.rootId = entry.factory(pattern.variables, pattern.graph);
+
+            if (disableFusion && pattern.graph.nodes.size() > entry.min_num_inputs + 1)
+            {
+                continue;
+            }
+
+            pattern.rootOpType = pattern.graph.getNode(pattern.rootId).opType;
+            pattern.dtypes = entry.dtypes;
+            pattern.dummyShapes = entry.dummyShapes;
+
+            patternsByOp[pattern.rootOpType].push_back(std::move(pattern));
         }
     }
 
@@ -326,7 +323,7 @@ struct FusionRule : public Rule
                 for (EClassId tensorEClass : match.variadicConcatTensorEClasses)
                 {
                     inputs.push_back(tensorEClass);
-                    const EClass &parent = egraph.getEClass(tensorEClass);
+                    const EClass parent = egraph.getEClass(tensorEClass);
                     TensorNode inputNode;
                     inputNode.opType = OpType::INPUT;
                     inputNode.dtype = parent.dtype;
@@ -365,7 +362,7 @@ struct FusionRule : public Rule
                 }
             }
 
-            const EClass &matchedClass = egraph.getEClass(egraph.getENodeEClass(ENodeId{eNodeIdx}));
+            const EClass matchedClass = egraph.getEClass(egraph.getENodeEClass(ENodeId{eNodeIdx}));
 
             DType outDtype = matchedClass.dtype;
             std::vector<uint32_t> outShape = matchedClass.shape;
@@ -403,7 +400,7 @@ struct FusionRule : public Rule
         for (uint64_t i = 0; i < child_ids.size(); ++i)
         {
             EClassId pid = child_ids[i];
-            const EClass &parent = egraph.getEClass(egraph.findConst(pid));
+            const EClass parent = egraph.getEClass(egraph.findConst(pid));
 
             uint64_t ruleIdx = std::min(child_ids.size(), i);
 
@@ -696,7 +693,7 @@ struct InfinityDomination : public Rule
         const auto &constData = *egraph.constantStaging.at(constClass);
         const float *data = reinterpret_cast<const float *>(constData.data());
 
-        const EClass &cClass = egraph.getEClass(constClass);
+        const EClass cClass = egraph.getEClass(constClass);
         uint64_t numElements = countElements(cClass.shape);
 
         std::vector<Region> nonInfRegions;
@@ -725,8 +722,8 @@ struct InfinityDomination : public Rule
         }
         nonInfRegions = mergeRegions(nonInfRegions);
 
-        const EClass &vClass = egraph.getEClass(varClass);
-        const EClass &outClass = egraph.getEClass(e_class_id);
+        const EClass vClass = egraph.getEClass(varClass);
+        const EClass outClass = egraph.getEClass(e_class_id);
 
         std::vector<uint64_t> contigStrides = calcContiguousStrides(outClass.shape);
 
@@ -991,7 +988,7 @@ struct SlicePushDownElementwise : public Rule
                 for (EClassId childId : opNode.getChildren())
                 {
                     EClassId canonChildId = egraph.findConst(childId);
-                    const EClass &childCls = egraph.getEClass(canonChildId);
+                    const EClass childCls = egraph.getEClass(canonChildId);
                     std::vector<uint64_t> childSliceStrides = childCls.strides;
                     std::vector<uint32_t> childShape = childCls.shape;
                     DType childDtype = childCls.dtype;
@@ -1016,7 +1013,7 @@ struct SlicePushDownElementwise : public Rule
 
                 EClassId op_cache = createCacheInputNode(egraph, srcClass, ctx.eclassToLogical);
 
-                const EClass &srcEClass = egraph.getEClass(srcClass);
+                const EClass srcEClass = egraph.getEClass(srcClass);
                 EClassId scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigSlicedOp, startsId, endsId, stepsId}, srcEClass.shape, srcEClass.strides, opNode.getDType(), opNode.getMemSpace());
 
                 egraph.merge(srcClass, scatterClass);
@@ -1250,7 +1247,7 @@ struct SlicePushDownDot : public Rule
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en, EClassId stId, EClassId enId, EClassId stepId)
                 {
                     EClassId canonId = egraph.findConst(classId);
-                    const EClass &cls = egraph.getEClass(canonId);
+                    const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;
                     DType cDtype = cls.dtype;
 
@@ -1277,7 +1274,7 @@ struct SlicePushDownDot : public Rule
 
                 EClassId op_cache = createCacheInputNode(egraph, srcClass, ctx.eclassToLogical);
 
-                const EClass &srcEClass = egraph.getEClass(srcClass);
+                const EClass srcEClass = egraph.getEClass(srcClass);
                 EClassId scatterClass = addOpToEGraph(egraph, OpType::SCATTER, {op_cache, contigSlicedOp, startsId, endsId, stepsId}, srcEClass.shape, srcEClass.strides, dotNode.getDType(), dotNode.getMemSpace());
 
                 egraph.merge(srcClass, scatterClass);
@@ -1315,8 +1312,8 @@ struct FlattenBatchDot : public Rule
 
         EClassId aClass = egraph.findConst(enode.getChildren()[0]);
         EClassId bClass = egraph.findConst(enode.getChildren()[1]);
-        const EClass &aCls = egraph.getEClass(aClass);
-        const EClass &bCls = egraph.getEClass(bClass);
+        const EClass aCls = egraph.getEClass(aClass);
+        const EClass bCls = egraph.getEClass(bClass);
 
         if (aCls.shape.size() != 4 || aCls.shape[0] != 1)
             return false;
@@ -1349,8 +1346,8 @@ struct FlattenBatchDot : public Rule
 
         EClassId aClass = egraph.findConst(dotNode.getChildren()[0]);
         EClassId bClass = egraph.findConst(dotNode.getChildren()[1]);
-        const EClass &aCls = egraph.getEClass(aClass);
-        const EClass &bCls = egraph.getEClass(bClass);
+        const EClass aCls = egraph.getEClass(aClass);
+        const EClass bCls = egraph.getEClass(bClass);
 
         std::vector<uint32_t> a3 = {aCls.shape[1], aCls.shape[2], aCls.shape[3]};
         std::vector<uint32_t> b3 = {bCls.shape[1], bCls.shape[2], bCls.shape[3]};
@@ -1373,7 +1370,7 @@ struct FlattenBatchDot : public Rule
         std::vector<uint64_t> y3_strides = calcContiguousStrides(y3);
         EClassId rY = addOpToEGraph(egraph, OpType::DOT, {rA, rB}, y3, y3_strides, dotNode.getDType(), dotNode.getMemSpace());
 
-        const EClass &outCls = egraph.getEClass(egraph.findConst(e_class_id));
+        const EClass outCls = egraph.getEClass(egraph.findConst(e_class_id));
         std::vector<int32_t> out4_int(outCls.shape.begin(), outCls.shape.end());
         EClassId out4_shape_id = addIntConst(egraph, out4_int);
         EClassId outReshape = addOpToEGraph(egraph, OpType::RESHAPE, {rY, out4_shape_id}, outCls.shape, outCls.strides, dotNode.getDType(), dotNode.getMemSpace());
@@ -1456,7 +1453,7 @@ struct FlattenElementwise : public Rule
         if (!visited.insert(eNodeIdx).second)
             return;
 
-        const EClass &outCls = egraph.getEClass(egraph.findConst(e_class_id));
+        const EClass outCls = egraph.getEClass(egraph.findConst(e_class_id));
         const std::vector<uint32_t> &outShape = outCls.shape;
 
         uint64_t total = 1;
@@ -1477,7 +1474,7 @@ struct FlattenElementwise : public Rule
         for (EClassId childId : opNode.getChildren())
         {
             EClassId canonChild = egraph.findConst(childId);
-            const EClass &childCls = egraph.getEClass(canonChild);
+            const EClass childCls = egraph.getEClass(canonChild);
             EClassId r = addOpToEGraph(egraph, OpType::RESHAPE, {canonChild, flat_shape_id}, flatShape, flatStrides, childCls.dtype, opNode.getMemSpace());
             flatChildren.push_back(r);
         }

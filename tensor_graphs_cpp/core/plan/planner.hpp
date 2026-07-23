@@ -1094,7 +1094,7 @@ struct Planner
                 std::vector<EClassId> children;
                 for (LogicalId pid : node.child_ids)
                     children.push_back(baseState.egraph.findConst(baseState.nodeToEClass[pid]));
-                ENode enode = ENode(KernelId{0}, node.opType, node.opName, children, node.getShape(), node.strides, node.dtype, graph.getInputDataType(nodeId) == InputDataType::STORAGE ? storage : ram, {cpu});
+                ENode enode = ENode(KernelId{0}, node.opType, node.opName, children, node.getShape(), node.strides, node.dtype, graph.getInputDataType(nodeId) == InputDataType::STORAGE ? storage : ram, {cpu}, node.contentHash);
                 baseState.egraph.addENode(e_class_id, enode);
                 continue;
             }
