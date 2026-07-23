@@ -194,8 +194,6 @@ inline EClassId createCacheInputNode(EGraph &egraph, EClassId sourceClassId, std
     const EClass srcClass = egraph.getEClass(canonSrcClass);
 
     EClassId op_cache = egraph.addEClass(srcClass.shape, srcClass.strides, srcClass.dtype, srcClass.mem_space);
-    ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, srcClass.shape, srcClass.strides, srcClass.dtype, srcClass.mem_space, {});
-    op_cache = egraph.addENode(op_cache, cacheNode);
 
     LogicalId srcLogicalId;
     auto it = eclassToLogical.find(canonSrcClass);
@@ -214,6 +212,9 @@ inline EClassId createCacheInputNode(EGraph &egraph, EClassId sourceClassId, std
             }
         }
     }
+
+    ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, srcClass.shape, srcClass.strides, srcClass.dtype, srcClass.mem_space, {}, toString(srcLogicalId));
+    op_cache = egraph.addENode(op_cache, cacheNode);
 
     eclassToLogical[op_cache] = srcLogicalId;
 

@@ -1270,7 +1270,7 @@ struct Planner
         const EClass lClass = egraph.getEClass(E_L);
 
         EClassId E_Cache = egraph.addEClass(lClass.shape, lClass.strides, lClass.dtype, target_mem_space);
-        ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, lClass.shape, lClass.strides, lClass.dtype, target_mem_space, {cpu});
+        ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, lClass.shape, lClass.strides, lClass.dtype, target_mem_space, {cpu}, toString(logicalId));
         egraph.addENode(E_Cache, cacheNode);
 
         eclassToLogical[E_Cache] = logicalId;
@@ -1649,7 +1649,7 @@ struct Planner
 
             if (logicalId != LogicalId{UINT32_MAX} && !logicalDirty[logicalId])
             {
-                ENode cacheNode = ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype, cls.mem_space, {cpu});
+                ENode cacheNode = ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype, cls.mem_space, {cpu}, toString(logicalId));
                 egraph.addENode(canonId, cacheNode);
             }
         }
