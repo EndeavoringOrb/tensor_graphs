@@ -289,7 +289,19 @@ struct CostModel
         const auto &entry = KernelRegistry::get().getKernel(kernelId);
         r.output_mem_space = entry.output_mem_space;
         r.engines = entry.engines;
-        r.input_mem_spaces = entry.input_mem_spaces;
+        r.input_mem_spaces.clear();
+        for (size_t i = 0; i < inShapes.size(); ++i)
+        {
+            size_t ruleIdx = std::min(i, entry.input_mem_spaces.empty() ? 0 : entry.input_mem_spaces.size() - 1);
+            if (ruleIdx < entry.input_mem_spaces.size())
+            {
+                r.input_mem_spaces.push_back(entry.input_mem_spaces[ruleIdx]);
+            }
+            else
+            {
+                r.input_mem_spaces.push_back(MemSpace{1, HandleType::CPP});
+            }
+        }
         r.runTime = 0.0f;
 
         std::string callStr = serializeToString(r);
