@@ -981,10 +981,16 @@ inline std::string toString(ENodeId id)
     return "ENodeId(" + std::to_string(id.value) + ")";
 }
 
+inline std::string toString(BufferId id)
+{
+    return "BufferId(" + std::to_string(id.value) + ")";
+}
+
 inline std::ostream &operator<<(std::ostream &os, LogicalId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, KernelId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, EClassId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, ENodeId id) { return os << toString(id); }
+inline std::ostream &operator<<(std::ostream &os, BufferId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << toString(dtype); }
 inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toString(op); }
 inline std::ostream &operator<<(std::ostream &os, HandleType handle_type) { return os << toString(handle_type); }

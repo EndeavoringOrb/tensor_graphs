@@ -192,6 +192,11 @@ static bool malloc_recursive(
         return min_height;
     };
 
+    std::cout << "\n\nalloc: ";
+    for (uint64_t i = 0; i < allocated.size(); ++i) {
+        std::cout << allocated[i].id.value << ", ";
+    }
+
     for (uint64_t i = 0; i < unallocated.size(); ++i)
     {
         int64_t offset_i = 0;
