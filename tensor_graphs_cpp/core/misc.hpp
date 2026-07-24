@@ -152,10 +152,10 @@ inline std::string toString(const OpInstruction &inst)
 {
     std::stringstream ss;
     ss << "OpInstruction\n"
-       << "  Node ID: " << inst.nodeId << "\n"
-       << "  Full Kernel ID: " << inst.fullKernelId << "\n"
-       << "  Input Node IDs: " << toString(inst.inputNodeIds) << "\n"
-       << "  Inplace Input Index: " << inst.inplaceInputIndex << "\n";
+       << "  EClass ID: " << inst.eclass_id << "\n"
+       << "  Logical ID: " << inst.logical_id << "\n"
+       << "  Kernel ID: " << inst.kernel_id << "\n";
+       // TODO: cout the rest
     return ss.str();
 }
 

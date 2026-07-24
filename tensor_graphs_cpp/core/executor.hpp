@@ -35,25 +35,33 @@ public:
 
             KernelContext ctx;
 
-            for (uint64_t i = 0; i < inst.inputNodeIds.size(); ++i)
+            for (uint64_t i = 0; i < inst.children.size(); ++i)
             {
-                const TensorView &inView = compiled.nodeViews.at(inst.inputNodeIds[i]);
+                const TensorView &inView = compiled.nodeViews.at(inst.children[i]);
                 const ParallelBuffer &inBuf = inst.inBuffers[i];
                 DeviceBuffer *inBufObj = memManager.getBuffer(inBuf.mem_space);
                 if (!inBufObj)
                     Error::throw_err("Input DeviceBuffer not found");
 
-                inBufObj->setupInput(ctx, inView, compiled.getLogicalId(inst.inputNodeIds[i]));
+                LogicalId logical_id;
+                if (compiled.has_logical_id(inst.children[i])) {
+                    logical_id = compiled.get_logical_id(inst.children[i]);
+                }
+                inBufObj->setupInput(ctx, inView, logical_id);
             }
 
-            const TensorView &outView = compiled.nodeViews.at(inst.nodeId);
+            const TensorView &outView = compiled.nodeViews.at(inst.eclass_id);
             DeviceBuffer *outBufObj = memManager.getBuffer(inst.outBuffer.mem_space);
             if (!outBufObj)
                 Error::throw_err("Output DeviceBuffer not found");
 
-            outBufObj->setupOutput(ctx, outView, compiled.getLogicalId(inst.nodeId));
+            LogicalId logical_id;
+            if (compiled.has_logical_id(inst.eclass_id)) {
+                logical_id = compiled.get_logical_id(inst.eclass_id);
+            }
+            outBufObj->setupOutput(ctx, outView, logical_id);
 
-            const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.fullKernelId);
+            const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
 
             if (!kernel.is_view && kernel.run)
             {
@@ -72,7 +80,7 @@ public:
                     cudaDeviceSynchronize();
                 }
 #endif
-                debugCallback(compiled.getLogicalId(inst.nodeId), ctx, ctx.outputs[0]);
+                debugCallback(logical_id, ctx, ctx.outputs[0]);
             }
 
             // Cleanup Context

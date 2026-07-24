@@ -91,6 +91,20 @@ enum class OpType : uint32_t
     FUSED
 };
 
+struct BufferId
+{
+    uint32_t value = UINT32_MAX;
+
+    auto operator<=>(const BufferId &) const = default;
+
+    BufferId operator++(int)
+    {
+        BufferId temp = *this;
+        ++value;
+        return temp;
+    }
+};
+
 struct LogicalId
 {
     uint32_t value = UINT32_MAX;
@@ -134,49 +148,6 @@ private:
     }
 
     LogicalId nextId{0};
-};
-
-struct PhysicalId
-{
-    uint32_t value = UINT32_MAX;
-    auto operator<=>(const PhysicalId &) const = default;
-    PhysicalId operator++(int)
-    {
-        PhysicalId temp = *this;
-        ++value;
-        return temp;
-    }
-};
-
-class PhysicalIdAllocator
-{
-public:
-    PhysicalIdAllocator(const PhysicalIdAllocator &) = delete;
-    PhysicalIdAllocator &operator=(const PhysicalIdAllocator &) = delete;
-    PhysicalIdAllocator(PhysicalIdAllocator &&) = delete;
-    PhysicalIdAllocator &operator=(PhysicalIdAllocator &&) = delete;
-
-    static PhysicalId allocate()
-    {
-        return instance()._allocate();
-    }
-
-private:
-    PhysicalIdAllocator() = default;
-    ~PhysicalIdAllocator() = default;
-
-    static PhysicalIdAllocator &instance()
-    {
-        static PhysicalIdAllocator allocator;
-        return allocator;
-    }
-
-    PhysicalId _allocate()
-    {
-        return nextValue++;
-    }
-
-    PhysicalId nextValue{0};
 };
 
 struct EClassId
@@ -229,15 +200,6 @@ namespace std
     struct hash<LogicalId>
     {
         std::uint64_t operator()(const LogicalId &id) const noexcept
-        {
-            return std::hash<uint32_t>()(id.value);
-        }
-    };
-
-    template <>
-    struct hash<PhysicalId>
-    {
-        std::uint64_t operator()(const PhysicalId &id) const noexcept
         {
             return std::hash<uint32_t>()(id.value);
         }
@@ -307,8 +269,7 @@ enum class DType : uint32_t
 
 struct ParallelBuffer
 {
-    uint32_t idx = 0; // index within its mem_space group
-    uint32_t eclass_val = UINT32_MAX;
+    BufferId id;         // unique buf id
     MemSpace mem_space;  // which physical memory this buffer lives in
     uint64_t size = 0;   // bytes
     float start = 0.0f;  // birth time (parallel schedule)
@@ -496,19 +457,27 @@ inline void tg_deserialize(BinaryReader &br, LogicalId &val)
 {
     br.read(val.value);
 }
-inline void tg_serialize(BinaryWriter &bw, const PhysicalId &val)
-{
-    bw.write(val.value);
-}
-inline void tg_deserialize(BinaryReader &br, PhysicalId &val)
-{
-    br.read(val.value);
-}
 inline void tg_serialize(BinaryWriter &bw, const KernelId &val)
 {
     bw.write(val.value);
 }
 inline void tg_deserialize(BinaryReader &br, KernelId &val)
+{
+    br.read(val.value);
+}
+inline void tg_serialize(BinaryWriter &bw, const BufferId &val)
+{
+    bw.write(val.value);
+}
+inline void tg_deserialize(BinaryReader &br, BufferId &val)
+{
+    br.read(val.value);
+}
+inline void tg_serialize(BinaryWriter &bw, const EClassId &val)
+{
+    bw.write(val.value);
+}
+inline void tg_deserialize(BinaryReader &br, EClassId &val)
 {
     br.read(val.value);
 }
@@ -537,8 +506,7 @@ inline void tg_deserialize(BinaryReader &br, Engine &val)
 
 inline void tg_serialize(BinaryWriter &bw, const ParallelBuffer &val)
 {
-    bw.write(val.idx);
-    bw.write(val.eclass_val);
+    bw.write(val.id);
     bw.write(val.mem_space.idx);
     bw.write(static_cast<uint32_t>(val.mem_space.type));
     bw.write(val.size);
@@ -548,8 +516,7 @@ inline void tg_serialize(BinaryWriter &bw, const ParallelBuffer &val)
 }
 inline void tg_deserialize(BinaryReader &br, ParallelBuffer &val)
 {
-    br.read(val.idx);
-    br.read(val.eclass_val);
+    br.read(val.id);
     br.read(val.mem_space.idx);
     uint32_t type;
     br.read(type);
@@ -807,6 +774,7 @@ public:
     DType dtype;
 
     TensorView() {}
+    TensorView(const std::vector<uint32_t> &_shape, const uint64_t _offset, const std::vector<uint64_t> &_strides, const DType &_dtype) : offset(_offset), shape(_shape), strides(_strides), dtype(_dtype) {}
     TensorView(const TensorNode &node, uint64_t _offset) : offset(_offset), shape(node.getShape()), strides(node.strides), dtype(node.dtype) {}
 
     const std::vector<uint32_t> &getShape() const
@@ -998,11 +966,6 @@ inline std::string toString(LogicalId id)
     return "LogicalId(" + std::to_string(id.value) + ")";
 }
 
-inline std::string toString(PhysicalId id)
-{
-    return "PhysicalId(" + std::to_string(id.value) + ")";
-}
-
 inline std::string toString(KernelId id)
 {
     return "KernelId(" + std::to_string(id.value) + ")";
@@ -1019,7 +982,6 @@ inline std::string toString(ENodeId id)
 }
 
 inline std::ostream &operator<<(std::ostream &os, LogicalId id) { return os << toString(id); }
-inline std::ostream &operator<<(std::ostream &os, PhysicalId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, KernelId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, EClassId id) { return os << toString(id); }
 inline std::ostream &operator<<(std::ostream &os, ENodeId id) { return os << toString(id); }
@@ -1180,12 +1142,10 @@ public:
 
 struct OpInstruction
 {
-    PhysicalId nodeId;
-    LogicalId logicalNodeId;
-    KernelId fullKernelId;
-    std::vector<PhysicalId> inputNodeIds;
-    int32_t inplaceInputIndex = -1;
-    int32_t viewInputIndex = -1;
+    EClassId eclass_id;
+    LogicalId logical_id;
+    KernelId kernel_id;
+    std::vector<EClassId> children;
     ParallelBuffer outBuffer;
     std::vector<ParallelBuffer> inBuffers;
     std::string debugOrigin;
@@ -1293,13 +1253,13 @@ inline bool operator==(const Bucket &a, const Bucket &b)
 struct CompiledGraph
 {
     Bucket bucket;
-    std::unordered_map<PhysicalId, TensorView> nodeViews;
+    std::unordered_map<EClassId, TensorView> nodeViews;
     std::vector<OpInstruction> instructions;
-    std::unordered_map<PhysicalId, float> nodeCosts;
+    std::unordered_map<EClassId, float> nodeCosts;
     // Canonical direction:
     // compiled physical node id -> original logical node id.
-    std::unordered_map<PhysicalId, LogicalId> physicalToLogicalNodeMap;
-    std::unordered_map<PhysicalId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
+    std::unordered_map<EClassId, LogicalId> eclass_to_logical;
+    std::unordered_map<EClassId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
     float cost() const
     {
@@ -1311,14 +1271,17 @@ struct CompiledGraph
         return sum;
     }
 
-    // TODO: refactor into `bool hasLogicalId` and `LogicalId getLogicalId`. getLogicalId should throw error if physicalToLogicalNodeMap doesn't have physical id
-    LogicalId getLogicalId(PhysicalId id) const
+    bool has_logical_id(EClassId eclass_id) const
     {
-        auto it = physicalToLogicalNodeMap.find(id);
-        if (it != physicalToLogicalNodeMap.end())
+        return eclass_to_logical.count(eclass_id) != 0;
+    }
+
+    LogicalId get_logical_id(EClassId eclass_id) const
+    {
+        auto it = eclass_to_logical.find(eclass_id);
+        if (it != eclass_to_logical.end())
             return it->second;
-        // If not mapped, the PhysicalId value is the same as the LogicalId value
-        return LogicalId{id.value};
+        Error::throw_err("no logical id found for eclass_id " + toString(eclass_id));
     }
 };
 
@@ -1369,12 +1332,10 @@ inline void tg_deserialize(BinaryReader &br, TensorNode &val)
 
 inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
 {
-    bw.write(val.nodeId);
-    bw.write(val.logicalNodeId);
-    bw.write(val.fullKernelId);
-    bw.write(val.inputNodeIds);
-    bw.write(val.inplaceInputIndex);
-    bw.write(val.viewInputIndex);
+    bw.write(val.eclass_id);
+    bw.write(val.logical_id);
+    bw.write(val.kernel_id);
+    bw.write(val.children);
     bw.write(val.outBuffer);
     bw.write(val.inBuffers);
     bw.write(val.debugOrigin);
@@ -1382,12 +1343,10 @@ inline void tg_serialize(BinaryWriter &bw, const OpInstruction &val)
 
 inline void tg_deserialize(BinaryReader &br, OpInstruction &val)
 {
-    br.read(val.nodeId);
-    br.read(val.logicalNodeId);
-    br.read(val.fullKernelId);
-    br.read(val.inputNodeIds);
-    br.read(val.inplaceInputIndex);
-    br.read(val.viewInputIndex);
+    br.read(val.eclass_id);
+    br.read(val.logical_id);
+    br.read(val.kernel_id);
+    br.read(val.children);
     br.read(val.outBuffer);
     br.read(val.inBuffers);
     br.read(val.debugOrigin);
@@ -1399,7 +1358,7 @@ inline void tg_serialize(BinaryWriter &bw, const CompiledGraph &val)
     bw.write(val.nodeViews);
     bw.write(val.instructions);
     bw.write(val.nodeCosts);
-    bw.write(val.physicalToLogicalNodeMap);
+    bw.write(val.eclass_to_logical);
     uint32_t const_size = 0;
     for (const auto &pair : val.constantStaging)
     {
@@ -1423,16 +1382,16 @@ inline void tg_deserialize(BinaryReader &br, CompiledGraph &val)
     br.read(val.nodeViews);
     br.read(val.instructions);
     br.read(val.nodeCosts);
-    br.read(val.physicalToLogicalNodeMap);
+    br.read(val.eclass_to_logical);
     uint32_t const_size;
     br.read(const_size);
     val.constantStaging.clear();
     for (uint32_t i = 0; i < const_size; ++i)
     {
-        PhysicalId pid;
-        br.read(pid);
+        EClassId eclass_id;
+        br.read(eclass_id);
         std::vector<uint8_t> data;
         br.read(data);
-        val.constantStaging[pid] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+        val.constantStaging[eclass_id] = std::make_shared<std::vector<uint8_t>>(std::move(data));
     }
 }

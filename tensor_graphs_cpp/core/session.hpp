@@ -220,10 +220,10 @@ struct Session
         {
             for (const auto &inst : g.instructions)
             {
-                if (inst.logicalNodeId != LogicalId() && graph.constantStaging.count(inst.logicalNodeId)) {
-                    if (written.insert(inst.logicalNodeId).second) {
-                        uint64_t sizeBytes = countElements(graph.getNode(inst.logicalNodeId).getShape()) * getDTypeSize(graph.getNode(inst.logicalNodeId).dtype);
-                        memManager.write(inst.outBuffer.mem_space, inst.outBuffer.offset, graph.constantStaging.at(inst.logicalNodeId)->data(), sizeBytes);
+                if (inst.logical_id != LogicalId() && graph.constantStaging.count(inst.logical_id)) {
+                    if (written.insert(inst.logical_id).second) {
+                        uint64_t sizeBytes = countElements(graph.getNode(inst.logical_id).getShape()) * getDTypeSize(graph.getNode(inst.logical_id).dtype);
+                        memManager.write(inst.outBuffer.mem_space, inst.outBuffer.offset, graph.constantStaging.at(inst.logical_id)->data(), sizeBytes);
                     }
                 }
             }
@@ -236,7 +236,7 @@ struct Session
     void writeInput(LogicalId logicalId, const void* data, uint64_t size) {
         for (const CompiledGraph& g : cachedGraphs) {
             for (const auto& inst : g.instructions) {
-                if (inst.logicalNodeId == logicalId) {
+                if (inst.logical_id == logicalId) {
                     memManager.write(inst.outBuffer.mem_space, inst.outBuffer.offset, data, size);
                     return;
                 }
@@ -301,29 +301,13 @@ struct Session
                     false,
                     repo);
 
-                std::unordered_set<PhysicalId> produced;
                 for (const auto &inst : plan.instructions)
                 {
-                    produced.insert(inst.nodeId);
-                }
-
-                for (const auto &inst : plan.instructions)
-                {
-                    for (uint64_t k = 0; k < inst.inputNodeIds.size(); ++k)
-                    {
-                        PhysicalId inId = inst.inputNodeIds[k];
-                        if (produced.find(inId) == produced.end())
-                        {
-                            LogicalId logicalId = plan.getLogicalId(inId);
-                            if (logicalId != LogicalId())
-                            {
-                                // If it's an unproduced input and not a standard graph input/constant, 
-                                // it must have been dynamically fetched from the dirty region cache.
-                                if (graph.getNode(logicalId).opType != OpType::INPUT)
-                                {
-                                    protectedCachedNodes[logicalId] = inst.inBuffers[k].mem_space;
-                                }
-                            }
+                    if (plan.has_logical_id(inst.eclass_id)) {
+                        LogicalId logical_id = plan.get_logical_id(inst.eclass_id);
+                        OpType op_type = graph.getNode(logical_id).opType;
+                        if (op_type == OpType::CACHE) {
+                            protectedCachedNodes[logical_id] = inst.outBuffer.mem_space;
                         }
                     }
                 }
@@ -455,7 +439,7 @@ struct Session
                 bool valid = true;
                 for (const auto &inst : cg.instructions)
                 {
-                    if (inst.fullKernelId == KernelId{0} || !KernelRegistry::get().hasKernel(inst.fullKernelId))
+                    if (inst.kernel_id == KernelId{0} || !KernelRegistry::get().hasKernel(inst.kernel_id))
                     {
                         valid = false;
                         break;

@@ -137,8 +137,10 @@ static std::vector<ParallelBuffer> bufferize(
     const EGraph &egraph,
     const std::unordered_map<EClassId, uint32_t> &selection_map,
     const std::vector<ENodeInfo> &enodeInfos,
-    std::unordered_map<uint32_t, float> &engine_finish_out)
+    std::unordered_map<uint32_t, float> &engine_finish_out,
+    std::unordered_map<EClassId, BufferId> &eclass_to_buf)
 {
+    ProgressTimer t = ProgressTimer(0, "bufferize ", false, true);
     std::unordered_map<EClassId, float> birth_times;
     std::unordered_map<EClassId, float> death_times;
 
@@ -156,14 +158,9 @@ static std::vector<ParallelBuffer> bufferize(
         if (node.getMemSpace().type == HandleType::STORAGE)
             continue;
 
-        ParallelBuffer buf;
-        buf.idx = static_cast<uint32_t>(buffers.size());
-        buf.eclass_val = eclass.value;
-        buf.mem_space = node.getMemSpace();
-        buf.size = getSizeBytes(node.getShape(), node.getDType());
-        buf.start = birth_times.at(eclass);
-        buf.end = death_times.at(eclass);
-        buf.offset = -1;
+        BufferId buf_id = BufferId{(uint32_t)buffers.size()};
+        eclass_to_buf[eclass] = buf_id;
+        ParallelBuffer buf = {buf_id, node.getMemSpace(), getSizeBytes(node.getShape(), node.getDType()), birth_times.at(eclass), death_times.at(eclass), -1};
         buffers.push_back(std::move(buf));
     }
     return buffers;
@@ -209,13 +206,13 @@ static bool malloc_recursive(
         if (offset_i < offset_max)
             continue; // offset non-monotonic
 
-        uint32_t idx_max = 0;
+        BufferId id_max = BufferId{0};
         for (uint64_t j = 0; j < allocated.size(); ++j)
         {
             if (allocated[j].offset == offset_i)
-                idx_max = std::max(idx_max, allocated[j].idx);
+                id_max = std::max(id_max, allocated[j].id);
         }
-        if (unallocated[i].idx < idx_max)
+        if (unallocated[i].id < id_max)
             continue; // index non-monotonic
 
         int64_t h_min = get_min_height();
@@ -249,210 +246,69 @@ struct MemValidator : public ISelectionValidator
     const EGraph &egraph;
     const std::vector<ENodeInfo> &enodeInfos;
     const std::unordered_map<uint32_t, uint64_t> &mem_caps;
-    bool stopOnFirstValid;
-
-    // Iteration State
-    std::unordered_set<EClassId> remaining;
-    std::vector<EClassId> ordered;
-    std::unordered_map<uint32_t, uint32_t> selection_at_pos;
-    bool is_done = false;
-    bool first_yield = true;
 
     MemValidator(const EGraph &_egraph,
                  const std::vector<ENodeInfo> &_enodeInfos,
-                 const std::unordered_map<uint32_t, uint64_t> &_mem_caps,
-                 bool _stopOnFirstValid = true)
-        : egraph(_egraph), enodeInfos(_enodeInfos), mem_caps(_mem_caps), stopOnFirstValid(_stopOnFirstValid) {}
+                 const std::unordered_map<uint32_t, uint64_t> &_mem_caps)
+        : egraph(_egraph), enodeInfos(_enodeInfos), mem_caps(_mem_caps) {}
 
-    void initOrderState(const std::unordered_map<EClassId, uint32_t> &selection_map)
+    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
+                  std::vector<ParallelBuffer> &buffers,
+                  std::unordered_map<EClassId, BufferId> &eclass_to_buf,
+                  float &cost, std::string &reason, bool &updated_buffers, bool &updated_cost) override
     {
-        remaining.clear();
-        for (const auto &kv : selection_map)
+        ProgressTimer t = ProgressTimer(0, "validate ", false, true);
+        // bufferize: parallel schedule + per-node lifetimes
+        std::unordered_map<uint32_t, float> engine_finish;
+        std::vector<ParallelBuffer> unallocated_buffers = bufferize(order, egraph, selection_map, enodeInfos, engine_finish, eclass_to_buf);
+
+        // parallel critical-path cost = max(engine_finish.values())
+        float current_cost = 0.0f;
+        for (const auto &kv : engine_finish)
         {
-            remaining.insert(kv.first);
+            current_cost = std::max(current_cost, kv.second);
         }
-        ordered.clear();
-        selection_at_pos.clear();
-        is_done = false;
-        first_yield = true;
-    }
+        cost = current_cost;
+        updated_cost = true;
 
-    std::vector<EClassId> get_ready(const std::unordered_map<EClassId, uint32_t> &selection_map)
-    {
-        std::vector<EClassId> ready;
-        for (EClassId node : remaining)
+        // group buffers by mem_space.idx
+        std::unordered_map<uint32_t, std::vector<ParallelBuffer>> buf_by_mem_idx;
+        for (auto &buf : buffers)
         {
-            uint32_t sel = selection_map.at(node);
-            ENodeId enode_id = egraph.getEClass(node).enodes[sel];
-            const ENode &enode = egraph.getENode(enode_id);
-
-            bool node_ready = true;
-            for (EClassId child : enode.getChildren())
-            {
-                EClassId canon_child = egraph.findConst(child);
-                if (remaining.find(canon_child) != remaining.end())
-                {
-                    node_ready = false;
-                    break;
-                }
-            }
-            if (node_ready)
-            {
-                ready.push_back(node);
-            }
+            if (buf.mem_space.type == HandleType::STORAGE)
+                continue;
+            buf_by_mem_idx[buf.mem_space.idx].push_back(buf);
         }
-        return ready;
-    }
 
-    bool ascend()
-    {
-        selection_at_pos.erase(static_cast<uint32_t>(ordered.size()));
-        if (ordered.empty())
-            return false;
-        EClassId last = ordered.back();
-        ordered.pop_back();
-        remaining.insert(last);
-        return true;
-    }
-
-    bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map, std::vector<EClassId> &out_order)
-    {
-        if (is_done)
-            return false;
-
-        if (!first_yield)
+        // malloc: try to assign offsets within mem_cap for each mem_idx
+        buffers.clear();
+        buffers.reserve(unallocated_buffers.size());
+        bool alloc_ok = true;
+        for (auto &kv : buf_by_mem_idx)
         {
-            if (!ascend())
+            uint32_t mem_idx = kv.first;
+            auto &bufs = kv.second;
+            uint64_t cap = mem_caps.count(mem_idx)
+                               ? mem_caps.at(mem_idx)
+                               : std::numeric_limits<uint64_t>::max();
+            std::vector<ParallelBuffer> allocated;
+            ProgressTimer t = ProgressTimer(0, "malloc_recursive mem_idx=" + std::to_string(mem_idx) + ", n_bufs=" + std::to_string(bufs.size()) + " ", false, true);
+            if (!malloc_recursive(cap, bufs, allocated))
             {
-                is_done = true;
-                return false;
+                alloc_ok = false;
+                break;
             }
+            buffers.insert(buffers.end(),
+                           std::make_move_iterator(allocated.begin()),
+                           std::make_move_iterator(allocated.end()));
         }
-        first_yield = false;
+        updated_buffers = true;
 
-        while (true)
+        if (alloc_ok)
         {
-            while (true)
-            {
-                std::vector<EClassId> ready = get_ready(selection_map);
-
-                // Safety check for dependency cycles (though CycleValidator handles most of this)
-                if (ready.empty() && !remaining.empty())
-                {
-                    is_done = true;
-                    return false;
-                }
-
-                uint32_t pos = static_cast<uint32_t>(ordered.size());
-                uint32_t choice = 0;
-                auto it = selection_at_pos.find(pos);
-                if (it != selection_at_pos.end())
-                {
-                    choice = it->second + 1;
-                }
-
-                if (choice < ready.size())
-                {
-                    selection_at_pos[pos] = choice;
-                    EClassId node = ready[choice];
-                    ordered.push_back(node);
-                    remaining.erase(node);
-                }
-                else
-                {
-                    if (ordered.empty())
-                    {
-                        is_done = true;
-                        return false;
-                    }
-                    if (!ascend())
-                    {
-                        is_done = true;
-                        return false;
-                    }
-                }
-
-                if (remaining.empty())
-                {
-                    break;
-                }
-            }
-
-            out_order = ordered;
             return true;
         }
-    }
-
-    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, std::string &reason) override
-    {
-        initOrderState(selection_map);
-
-        bool found_valid = false;
-        float best_cost = std::numeric_limits<float>::infinity();
-
-        std::vector<EClassId> current_order;
-        while (getNextDispatchOrder(selection_map, current_order))
-        {
-            // --- bufferize: parallel schedule + per-node lifetimes
-            std::unordered_map<uint32_t, float> engine_finish;
-            std::vector<ParallelBuffer> buffers = bufferize(current_order, egraph, selection_map, enodeInfos, engine_finish);
-
-            // --- parallel critical-path cost = max(engine_finish.values())
-            float current_cost = 0.0f;
-            for (const auto &kv : engine_finish)
-            {
-                current_cost = std::max(current_cost, kv.second);
-            }
-
-            // prune: worse than best known
-            if (current_cost >= best_cost)
-            {
-                continue; // try next order
-            }
-
-            // --- group buffers by mem_space.idx
-            std::unordered_map<uint32_t, std::vector<ParallelBuffer>> buf_by_mem_idx;
-            for (auto &buf : buffers)
-            {
-                buf.idx = static_cast<uint32_t>(buf_by_mem_idx[buf.mem_space.idx].size());
-                buf_by_mem_idx[buf.mem_space.idx].push_back(buf);
-            }
-
-            // --- malloc: try to assign offsets within mem_cap for each mem_idx
-            bool alloc_ok = true;
-            for (auto &kv : buf_by_mem_idx)
-            {
-                uint32_t mem_idx = kv.first;
-                auto &bufs = kv.second;
-                uint64_t cap = mem_caps.count(mem_idx)
-                                   ? mem_caps.at(mem_idx)
-                                   : std::numeric_limits<uint64_t>::max();
-                std::vector<ParallelBuffer> allocated;
-                if (!malloc_recursive(cap, bufs, allocated))
-                {
-                    alloc_ok = false;
-                    break;
-                }
-            }
-
-            if (alloc_ok)
-            {
-                best_cost = current_cost;
-                found_valid = true;
-
-                if (stopOnFirstValid)
-                {
-                    return true; // stop iterating orders, early exit
-                }
-            }
-        }
-
-        if (!found_valid)
-        {
-            reason = "OOM"; // no valid (order, allocation) pair found for this selection_map
-            return false;
-        }
-
-        return true;
+        reason = "OOM";
+        return false;
     }
 };

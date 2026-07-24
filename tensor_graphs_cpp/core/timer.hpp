@@ -21,15 +21,17 @@ struct ProgressTimer
 
     bool has_total;
     bool disable;
+    bool disable_tick;
 
-    ProgressTimer(uint64_t total_ = 0, std::string label_ = "", bool disable_ = false, double minInterval_ = 2)
+    ProgressTimer(uint64_t total_ = 0, std::string label_ = "", bool disable_ = false, bool disable_tick_ = false, double minInterval_ = 2)
         : start(clock::now()),
           last_print(start),
           total(total_),
           minInterval(minInterval_),
           label(label_),
           has_total(total_ > 0),
-          disable(disable_) {}
+          disable(disable_),
+          disable_tick(disable_tick_) {}
 
     void reset()
     {
@@ -41,7 +43,7 @@ struct ProgressTimer
 
     inline void tick(uint64_t increment = 1)
     {
-        if (disable)
+        if (disable || disable_tick)
             return;
         current += increment;
 

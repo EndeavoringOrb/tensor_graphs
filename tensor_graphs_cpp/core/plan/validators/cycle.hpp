@@ -67,8 +67,10 @@ struct CycleValidator : public ISelectionValidator
         return false;
     }
 
-    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map,
-                  std::string &reason) override
+    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
+                  std::vector<ParallelBuffer> &buffers,
+                  std::unordered_map<EClassId, BufferId> &eclass_to_buf,
+                  float &cost, std::string &reason, bool &updated_buffers, bool &updated_cost) override
     {
         return !detectCycles(selection_map, reason);
     }

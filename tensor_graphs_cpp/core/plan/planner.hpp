@@ -25,41 +25,15 @@
 #include <filesystem>
 #include <queue>
 
-struct ExtractChoice
-{
-    ENodeId enodeId;
-    float cost = std::numeric_limits<float>::infinity();
-    bool valid = false;
-};
-
 struct ExtractionResult
 {
-    std::unordered_map<EClassId, ExtractChoice> choiceByEClass;
-    float totalCost = std::numeric_limits<float>::infinity();
+    std::unordered_map<EClassId, uint32_t> selection_map;
+    std::vector<EClassId> order;
+    std::vector<ParallelBuffer> buffers;
+    std::unordered_map<EClassId, BufferId> eclass_to_buf;
+    float cost;
+    std::unordered_map<EClassId, float> eclass_to_cost;
 };
-
-inline std::vector<EClassId> topologicalSort(const EClassId &root, const EGraph &egraph, const std::unordered_map<EClassId, ExtractChoice> &choiceByEClass)
-{
-    std::vector<EClassId> topo;
-    std::unordered_set<EClassId> visited_classes;
-    std::function<void(EClassId)> visit = [&](EClassId e_class_id)
-    {
-        e_class_id = egraph.findConst(e_class_id);
-        if (visited_classes.count(e_class_id))
-            return;
-        visited_classes.insert(e_class_id);
-
-        auto choiceIt = choiceByEClass.find(e_class_id);
-        if (choiceIt == choiceByEClass.end() || !choiceIt->second.valid)
-            return;
-
-        const ENode &enode = egraph.getENode(choiceIt->second.enodeId);
-        for (EClassId child : enode.getChildren())
-            visit(child);
-        topo.push_back(e_class_id);
-    };
-    return topo;
-}
 
 struct Planner
 {
@@ -849,12 +823,15 @@ struct Planner
         std::vector<uint32_t> zero_indegree;
         zero_indegree.reserve(numClasses);
 
-        Extractor extractor = Extractor(numClasses);
+        Extractor extractor = Extractor(egraph, rootEClassId);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, stopOnFirstValid));
+        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps));
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
+        std::vector<EClassId> best_order;
+        std::vector<ParallelBuffer> best_buffers;
+        std::unordered_map<EClassId, BufferId> best_eclass_to_buf;
         std::string reason = "";
 
         int max_iters = 100000;
@@ -874,7 +851,38 @@ struct Planner
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.getNextSelection();
 
-            bool valid = extractor.validate(selection_map, reason);
+            DispatchIterator dispatch_iterator = DispatchIterator(egraph, selection_map);
+            std::vector<EClassId> order;
+            std::vector<ParallelBuffer> buffers;
+            std::unordered_map<EClassId, BufferId> eclass_to_buf;
+            float cost;
+            bool valid = false;
+            while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
+            {
+                valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, reason);
+                if (valid)
+                {
+                    if (cost < best_cost)
+                    {
+                        best_cost = cost;
+                        best_selection_map = selection_map;
+                        best_order = order;
+                        best_buffers = buffers;
+                        best_eclass_to_buf = eclass_to_buf;
+                    }
+                }
+                if (valid && stopOnFirstValid)
+                {
+                    std::cout << "cost=" << std::to_string(cost) << std::endl;
+                    break;
+                }
+            }
+            std::cout << "[Planner.extractBest] iterated " << dispatch_iterator.getIter() << " dispatch orders" << std::endl;
+
+            if (valid && stopOnFirstValid)
+            {
+                break;
+            }
 
             if (!valid)
             {
@@ -899,17 +907,12 @@ struct Planner
             Error::throw_err("[Planner.extractBest] no valid extraction found under given constraints. try running bench");
         }
 
-        ExtractionResult result;
-        result.totalCost = best_cost;
-
-        for (auto const &kv : best_selection_map)
+        std::unordered_map<EClassId, float> best_eclass_to_cost;
+        for (const auto &pair : best_selection_map)
         {
-            ExtractChoice c;
-            c.enodeId = egraph.getEClass(kv.first).enodes[kv.second];
-            c.cost = enodeInfos[c.enodeId.value].cost;
-            c.valid = true;
-            result.choiceByEClass[kv.first] = c;
+            best_eclass_to_cost[pair.first] = enodeInfos[egraph.getEClass(pair.first).enodes[best_selection_map.at(pair.first)].value].cost;
         }
+        ExtractionResult result = {best_selection_map, best_order, best_buffers, best_eclass_to_buf, best_cost, best_eclass_to_cost};
 
         return result;
     }
@@ -925,111 +928,40 @@ struct Planner
     {
         CompiledGraph compiled;
 
-        std::vector<EClassId> topo = topologicalSort(egraph.find(nodeToEClass.at(rootId)), egraph, extraction.choiceByEClass);
-
-        std::unordered_map<EClassId, PhysicalId> eclassToPhys;
-        for (EClassId e_class_id : topo)
+        for (EClassId eclass_id : extraction.order)
         {
-            eclassToPhys[e_class_id] = PhysicalIdAllocator::allocate();
-        }
-
-        std::vector<ENodeInfo> dummyInfos(egraph.getENodes().size());
-        std::unordered_map<EClassId, uint32_t> selMap;
-        for (const auto &kv : extraction.choiceByEClass)
-        {
-            dummyInfos[kv.second.enodeId.value].cost = kv.second.cost;
-            const EClass &cls = egraph.getEClass(kv.first);
-            for (uint32_t i = 0; i < cls.enodes.size(); ++i)
-            {
-                if (cls.enodes[i] == kv.second.enodeId)
-                {
-                    selMap[kv.first] = i;
-                    break;
-                }
-            }
-        }
-
-        std::unordered_map<uint32_t, float> engine_finish;
-        std::vector<ParallelBuffer> buffers = bufferize(topo, egraph, selMap, dummyInfos, engine_finish);
-
-        std::unordered_map<uint32_t, std::vector<ParallelBuffer>> buf_by_mem_idx;
-        for (auto &buf : buffers)
-        {
-            buf_by_mem_idx[buf.mem_space.idx].push_back(buf);
-        }
-
-        std::unordered_map<uint32_t, ParallelBuffer> final_allocs;
-        for (auto &kv : buf_by_mem_idx)
-        {
-            std::vector<ParallelBuffer> allocated;
-            uint64_t cap = mem_caps.count(kv.first) ? mem_caps.at(kv.first) : std::numeric_limits<uint64_t>::max();
-            if (!malloc_recursive(cap, kv.second, allocated))
-            {
-                Error::throw_err("Failed to allocate memory in buildCompiledGraph!");
-            }
-            for (const auto &buf : allocated)
-            {
-                final_allocs[buf.eclass_val] = buf;
-            }
-        }
-
-        for (EClassId e_class_id : topo)
-        {
-            const ExtractChoice &choice = extraction.choiceByEClass.at(e_class_id);
-            const ENode &enode = egraph.getENode(choice.enodeId);
-            LogicalId logicalId = eclassToLogical.count(e_class_id) ? eclassToLogical.at(e_class_id) : LogicalId{UINT32_MAX};
-            PhysicalId physId = eclassToPhys[e_class_id];
+            const ENode &enode = egraph.getENode(egraph.getEClass(eclass_id).enodes[extraction.selection_map.at(eclass_id)]);
+            LogicalId logical_id = eclassToLogical.count(eclass_id) ? eclassToLogical.at(eclass_id) : LogicalId();
 
             OpInstruction inst;
-            inst.nodeId = physId;
-            inst.logicalNodeId = logicalId;
-            inst.fullKernelId = enode.getKernelId();
-            inst.inputNodeIds.reserve(enode.getChildren().size());
-            for (EClassId c : enode.getChildren())
+            inst.eclass_id = eclass_id;
+            inst.logical_id = logical_id;
+            inst.kernel_id = enode.getKernelId();
+            inst.children = enode.getChildren();
+            inst.inBuffers.resize(inst.children.size());
+            for (uint32_t i = 0; i < extraction.buffers.size(); i++)
             {
-                inst.inputNodeIds.push_back(eclassToPhys[egraph.find(c)]);
-            }
-
-            if (final_allocs.count(e_class_id.value))
-            {
-                inst.outBuffer = final_allocs[e_class_id.value];
-            }
-            else
-            {
-                inst.outBuffer.offset = -1;
-                inst.outBuffer.mem_space = enode.getMemSpace();
-            }
-
-            for (EClassId c : enode.getChildren())
-            {
-                EClassId cc = egraph.findConst(c);
-                if (final_allocs.count(cc.value))
+                if (extraction.buffers[i].id == extraction.eclass_to_buf.at(eclass_id))
                 {
-                    inst.inBuffers.push_back(final_allocs[cc.value]);
+                    inst.outBuffer = extraction.buffers[i];
                 }
-                else
+                for (uint32_t j = 0; j < inst.children.size(); j++)
                 {
-                    ParallelBuffer pb;
-                    pb.offset = -1;
-                    pb.mem_space = egraph.getEClass(cc).mem_space;
-                    inst.inBuffers.push_back(pb);
+                    if (extraction.buffers[i].id == extraction.eclass_to_buf.at(inst.children[j]))
+                    {
+                        inst.inBuffers[j] = extraction.buffers[i];
+                    }
                 }
             }
 
-            if (enode.getKernelId() != KernelId{0})
+            if (graph.hasNode(logical_id))
             {
-                const KernelEntry &kEntry = KernelRegistry::get().getKernel(enode.getKernelId());
-                inst.inplaceInputIndex = kEntry.is_view ? 0 : -1;
+                inst.debugOrigin = graph.getNode(logical_id).debugOrigin;
             }
 
-            if (logicalId != LogicalId{UINT32_MAX} && graph.hasNode(logicalId))
+            if (egraph.constantStaging.count(eclass_id))
             {
-                inst.debugOrigin = graph.getNode(logicalId).debugOrigin;
-            }
-
-            if (egraph.constantStaging.count(e_class_id))
-            {
-                compiled.constantStaging[physId] = egraph.constantStaging.at(e_class_id);
+                compiled.constantStaging[eclass_id] = egraph.constantStaging.at(eclass_id);
             }
 
             if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE)
@@ -1037,9 +969,11 @@ struct Planner
                 compiled.instructions.push_back(inst);
             }
 
-            compiled.nodeCosts[physId] = choice.cost;
-            compiled.physicalToLogicalNodeMap[physId] = logicalId;
+            compiled.nodeViews[eclass_id] = TensorView(enode.getShape(), inst.outBuffer.offset, enode.getStrides(), enode.getDType());
         }
+
+        compiled.nodeCosts = extraction.eclass_to_cost;
+        compiled.eclass_to_logical = eclassToLogical;
 
         return compiled;
     }

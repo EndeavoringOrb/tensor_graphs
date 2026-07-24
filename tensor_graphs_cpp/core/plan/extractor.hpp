@@ -31,6 +31,149 @@ struct ENodeInfo
     bool is_view;
 };
 
+struct DispatchIterator
+{
+public:
+    DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map) : egraph(_egraph)
+    {
+        initOrderState(selection_map);
+    }
+
+    bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map, std::vector<EClassId> &out_order)
+    {
+        if (is_done)
+            return false;
+
+        if (!first_yield) // The first time we are at the root we don't want to exit
+        {
+            if (!ascend()) // If we are back at the root, we have gone through all dispatch orders
+            {
+                is_done = true;
+                return false;
+            }
+        }
+        first_yield = false;
+
+        while (true)
+        {
+            while (true)
+            {
+                std::vector<EClassId> ready = get_ready(selection_map);
+
+                // Safety check for dependency cycles (though CycleValidator handles most of this)
+                if (ready.empty() && !remaining.empty())
+                {
+                    is_done = true;
+                    return false;
+                }
+
+                uint32_t pos = static_cast<uint32_t>(ordered.size());
+                uint32_t choice = 0;
+                auto it = selection_at_pos.find(pos);
+                if (it != selection_at_pos.end())
+                {
+                    choice = it->second + 1;
+                }
+
+                if (choice < ready.size())
+                {
+                    selection_at_pos[pos] = choice;
+                    EClassId node = ready[choice];
+                    ordered.push_back(node);
+                    remaining.erase(node);
+                }
+                else
+                {
+                    if (ordered.empty())
+                    {
+                        is_done = true;
+                        return false;
+                    }
+                    if (!ascend())
+                    {
+                        is_done = true;
+                        return false;
+                    }
+                }
+
+                if (remaining.empty())
+                {
+                    break;
+                }
+            }
+
+            out_order = ordered;
+            iter++;
+            return true;
+        }
+    }
+
+    uint32_t getIter()
+    {
+        return iter;
+    }
+
+private:
+    const EGraph &egraph;
+    std::unordered_set<EClassId> remaining;
+    std::vector<EClassId> ordered;
+    std::unordered_map<uint32_t, uint32_t> selection_at_pos;
+    bool is_done = false;
+    bool first_yield = true;
+    uint32_t iter = 0;
+
+    void initOrderState(const std::unordered_map<EClassId, uint32_t> &selection_map)
+    {
+        remaining.clear();
+        for (const auto &kv : selection_map)
+        {
+            remaining.insert(kv.first);
+        }
+        ordered.clear();
+        selection_at_pos.clear();
+        is_done = false;
+        first_yield = true;
+    }
+
+    std::vector<EClassId> get_ready(const std::unordered_map<EClassId, uint32_t> &selection_map)
+    {
+        std::vector<EClassId> ready;
+        for (EClassId node : remaining)
+        {
+            uint32_t sel = selection_map.at(node);
+            ENodeId enode_id = egraph.getEClass(node).enodes[sel];
+            const ENode &enode = egraph.getENode(enode_id);
+
+            bool node_ready = true;
+            for (EClassId child : enode.getChildren())
+            {
+                EClassId canon_child = egraph.findConst(child);
+                if (remaining.find(canon_child) != remaining.end())
+                {
+                    node_ready = false;
+                    break;
+                }
+            }
+            if (node_ready)
+            {
+                ready.push_back(node);
+            }
+        }
+        return ready;
+    }
+
+    bool ascend()
+    {
+        selection_at_pos.erase(static_cast<uint32_t>(ordered.size()));
+        if (ordered.empty())
+            return false;
+        EClassId last = ordered.back();
+        ordered.pop_back();
+        remaining.insert(last);
+        return true;
+    }
+};
+
 struct Extractor
 {
 private:
@@ -38,7 +181,7 @@ private:
 
 public:
     std::unordered_map<EClassId, uint32_t> selection_map; // EClass -> ENode (idx into EClass.enodes)
-    const EGraph egraph;
+    const EGraph &egraph;
     std::vector<EClassId> path;                      // List of EClasses in selection_map, in order root -> leaves
     std::vector<EClassId> to_process;                // EClass ids to process
     std::vector<EClassId> to_process_enode;          // what does this do??? is it just used to know when we have extracted all graphs???
@@ -46,7 +189,10 @@ public:
     EClassId target_backtrack_eclass;
     uint64_t numClasses;
 
-    Extractor(uint64_t _numClasses) : numClasses(_numClasses) {}
+    bool updated_buffers = false;
+    bool updated_cost = false;
+
+    Extractor(const EGraph &_egraph, EClassId root_eclass_id) : egraph(_egraph), numClasses(_egraph.classes.size()), to_process({root_eclass_id}) {}
 
     void registerValidator(std::unique_ptr<ISelectionValidator> validator)
     {
@@ -54,14 +200,26 @@ public:
     }
 
     bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map,
+                  const std::vector<EClassId> &order,
+                  std::vector<ParallelBuffer> &buffers,
+                  std::unordered_map<EClassId, BufferId> &eclass_to_buf,
+                  float &cost,
                   std::string &reason)
     {
+        updated_buffers = false;
+        updated_cost = false;
         for (const auto &validator : validators)
         {
-            if (!validator->validate(selection_map, reason))
+            if (!validator->validate(selection_map, order, buffers, eclass_to_buf, cost, reason, updated_buffers, updated_cost))
             {
                 return false;
             }
+        }
+        if (!updated_buffers) {
+            Error::throw_err("buffers not updated during validate");
+        }
+        if (!updated_cost) {
+            Error::throw_err("cost not updated during validate");
         }
         return true;
     }
