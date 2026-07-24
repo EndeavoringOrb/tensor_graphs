@@ -1448,7 +1448,7 @@ struct FlattenElementwise : public Rule
     void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         EGraph &egraph = ctx.egraph;
-        const ENode &opNode = egraph.getENode(ENodeId{eNodeIdx});
+        const ENode opNode = egraph.getENode(ENodeId{eNodeIdx});
         EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
 
         if (!visited.insert(eNodeIdx).second)

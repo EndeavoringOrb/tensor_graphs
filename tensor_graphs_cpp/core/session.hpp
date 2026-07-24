@@ -129,7 +129,8 @@ struct Session
 
         bw.write<uint8_t>(2); // Constants block type
         std::unordered_set<LogicalId> neededConstants;
-        for (const auto &pair : graph.constantStaging) {
+        for (const auto &pair : graph.constantStaging)
+        {
             neededConstants.insert(pair.first);
         }
 
@@ -220,29 +221,39 @@ struct Session
         {
             for (const auto &inst : g.instructions)
             {
-                if (inst.logical_id != LogicalId() && graph.constantStaging.count(inst.logical_id)) {
-                    if (written.insert(inst.logical_id).second) {
+                if (inst.logical_id != LogicalId() && graph.constantStaging.count(inst.logical_id))
+                {
+                    if (written.insert(inst.logical_id).second)
+                    {
                         uint64_t sizeBytes = countElements(graph.getNode(inst.logical_id).getShape()) * getDTypeSize(graph.getNode(inst.logical_id).dtype);
                         memManager.write(inst.outBuffer.mem_space, inst.outBuffer.offset, graph.constantStaging.at(inst.logical_id)->data(), sizeBytes);
                     }
                 }
             }
         }
-        
+
         executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
     }
 
-    void writeInput(LogicalId logicalId, const void* data, uint64_t size) {
-        for (const CompiledGraph& g : cachedGraphs) {
-            for (const auto& inst : g.instructions) {
-                if (inst.logical_id == logicalId) {
-                    memManager.write(inst.outBuffer.mem_space, inst.outBuffer.offset, data, size);
-                    return;
+    void writeInput(LogicalId logicalId, const void *data, uint64_t size)
+    {
+        for (const CompiledGraph &g : cachedGraphs)
+        {
+            for (const auto &inst : g.instructions)
+            {
+                for (uint32_t i = 0; i < inst.children.size(); i++)
+                {
+                    EClassId child = inst.children[i];
+                    if (g.has_logical_id(child) && g.get_logical_id(child) == logicalId)
+                    {
+                        memManager.write(inst.inBuffers[i].mem_space, inst.inBuffers[i].offset, data, size);
+                        return;
+                    }
                 }
             }
         }
-        Error::throw_err("Logical Node ID not found in compiled instructions during Session::writeInput");
+        Error::throw_err("Logical Node ID " + toString(logicalId) + " not found in compiled instructions during Session::writeInput");
     }
 
     const void *run(Bucket bucket = {}, Debug::Callback debugCallback = nullptr,
@@ -273,7 +284,7 @@ struct Session
         executor->run(cachedGraphs[graphIdx], debugCallback);
 
         const OpInstruction &lastInst = cachedGraphs[graphIdx].instructions.back();
-        DeviceBuffer* buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
+        DeviceBuffer *buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
         return buf->getBasePtr() + lastInst.outBuffer.offset;
     }
 
@@ -303,10 +314,12 @@ struct Session
 
                 for (const auto &inst : plan.instructions)
                 {
-                    if (plan.has_logical_id(inst.eclass_id)) {
+                    if (plan.has_logical_id(inst.eclass_id))
+                    {
                         LogicalId logical_id = plan.get_logical_id(inst.eclass_id);
                         OpType op_type = graph.getNode(logical_id).opType;
-                        if (op_type == OpType::CACHE) {
+                        if (op_type == OpType::CACHE)
+                        {
                             protectedCachedNodes[logical_id] = inst.outBuffer.mem_space;
                         }
                     }

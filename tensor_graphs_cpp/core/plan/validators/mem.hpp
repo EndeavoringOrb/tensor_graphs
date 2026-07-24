@@ -273,7 +273,7 @@ struct MemValidator : public ISelectionValidator
 
         // group buffers by mem_space.idx
         std::unordered_map<uint32_t, std::vector<ParallelBuffer>> buf_by_mem_idx;
-        for (auto &buf : buffers)
+        for (auto &buf : unallocated_buffers)
         {
             if (buf.mem_space.type == HandleType::STORAGE)
                 continue;
