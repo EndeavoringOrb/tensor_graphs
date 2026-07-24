@@ -5,9 +5,8 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import math
-from collections import deque
 import malloc_rl
-from tqdm import trange
+from tqdm import trange, tqdm
 
 
 # ----------------------------------------
@@ -86,7 +85,7 @@ class SmartMallocNet(nn.Module):
 # ----------------------------------------
 class MCTSNode:
     def __init__(self, env, parent=None, action_taken=None, prior=0.0):
-        self.env = env  # MallocEnv
+        self.env = env
         self.parent = parent
         self.action_taken = action_taken
 
@@ -97,7 +96,13 @@ class MCTSNode:
         self.valid_actions = env.get_valid_actions()
         self.is_expanded = False
 
+        # New attributes to cleanly track terminal states
+        self.is_terminal = False
+        self.reward = 0.0
+
     def value(self):
+        if self.is_terminal:
+            return self.reward
         return 0 if self.visit_count == 0 else self.value_sum / self.visit_count
 
     def expand(self, action_probs):
@@ -107,12 +112,14 @@ class MCTSNode:
                 next_env = self.env.clone()
                 reward, done = next_env.step(action)
 
-                # If terminal, fake a fully explored terminal node
                 child = MCTSNode(next_env, parent=self, action_taken=action, prior=prob)
                 if done:
-                    child.is_expanded = True
-                    child.value_sum = reward * 1000  # terminal bias
-                    child.visit_count = 1000
+                    # Mark as terminal without polluting visit_count
+                    child.is_terminal = True
+                    child.reward = reward
+                    child.is_expanded = (
+                        True  # A terminal node has no children to expand
+                    )
                 self.children[action] = child
 
     def best_child(self, c_puct=1.5):
@@ -151,36 +158,44 @@ def mcts_search(root_env, model, num_simulations=50):
             search_path.append(node)
 
         # Evaluation & Expansion
-        if not node.children and not (node.visit_count >= 1000):  # not terminal
-            state_tensor = torch.tensor(
-                node.env.get_state(), dtype=torch.float32
-            ).unsqueeze(0)
-            with torch.no_grad():
+        if not node.is_terminal:
+            if not node.is_expanded:
+                state_tensor = torch.tensor(
+                    node.env.get_state(), dtype=torch.float32
+                ).unsqueeze(0)
+
                 logits, value = model(state_tensor)
 
-            # Mask invalid actions
-            logits = logits[0]
-            valid_mask = torch.tensor(node.valid_actions, dtype=torch.bool)
-            logits[~valid_mask] = -1e9
-            probs = F.softmax(logits, dim=0).cpu().numpy()
+                # Mask invalid actions
+                logits = logits[0]
+                valid_mask = torch.tensor(node.valid_actions, dtype=torch.bool)
+                logits[~valid_mask] = -1e9
+                probs = F.softmax(logits, dim=0).cpu().numpy()
 
-            node.expand(probs)
-            v = value.item()
+                node.expand(probs)
+                v = value.item()
+            else:
+                v = node.value()
         else:
-            v = node.value()  # terminal state value
+            # If the node is an exact dead-end/success, grab its real reward
+            v = node.reward
 
         # Backpropagation
         for n in reversed(search_path):
             n.value_sum += v
             n.visit_count += 1
-            v = -v  # Zero-sum assumption (or adapt logic based on pure rewards)
 
     # Return action probabilities proportional to visit counts
     visits = np.zeros(root.env.N)
     for act, child in root.children.items():
         visits[act] = child.visit_count
 
-    probs = visits / np.sum(visits)
+    visit_sum = np.sum(visits)
+    if visit_sum > 0:
+        probs = visits / visit_sum
+    else:
+        probs = np.ones(root.env.N) / root.env.N
+
     return probs
 
 
@@ -260,7 +275,7 @@ def train(model, dataset, optimizer, epochs=3, batch_size=32):
         )
 
 
-def evaluate_model(model, N=20, num_games=10, max_cap=2000, max_steps=5000):
+def evaluate_model(model, N=20, num_games=10, max_steps=5000, compare_all=True):
     model.eval()
 
     def dfs(env, use_model, steps_counter):
@@ -305,7 +320,7 @@ def evaluate_model(model, N=20, num_games=10, max_cap=2000, max_steps=5000):
 
     print(f"\n--- Evaluating Model over {num_games} games (N={N}) ---")
     for g in trange(num_games):
-        env = generate_random_env(N, max_cap)
+        env = generate_random_env(N)
 
         unguided_counter = [0]
         # We only clone here once to give both strategies the exact same starting scenario
@@ -314,20 +329,22 @@ def evaluate_model(model, N=20, num_games=10, max_cap=2000, max_steps=5000):
         guided_counter = [0]
         success_gu = dfs(env.clone(), use_model=True, steps_counter=guided_counter)
 
-        if success_un and success_gu:
+        tqdm.write(
+            f"Game {g+1}: Unguided = {unguided_counter[0]:<5} steps | Guided = {guided_counter[0]:<5} steps"
+        )
+        if (success_un and success_gu) or compare_all:
             unguided_steps.append(unguided_counter[0])
             guided_steps.append(guided_counter[0])
-            print(
-                f"Game {g+1}: Unguided = {unguided_counter[0]:<5} steps | Guided = {guided_counter[0]:<5} steps"
-            )
         else:
             failures += 1
-            print(f"Game {g+1}: OOM / No solution exists under capacity.")
+            tqdm.write(f"Game {g+1}: OOM / No solution exists under capacity.")
 
     if unguided_steps:
         avg_un = sum(unguided_steps) / len(unguided_steps)
         avg_gu = sum(guided_steps) / len(guided_steps)
-        print(f"\nResults over {len(unguided_steps)} solvable games:")
+        print(
+            f"\nResults over {len(unguided_steps)}{' solvable' if not compare_all else ''} games:"
+        )
         print(f"Average Unguided Steps: {avg_un:.1f}")
         print(f"Average Guided Steps:   {avg_gu:.1f}")
         print(f"Improvement Factor:     {avg_un / max(avg_gu, 1):.2f}x fewer steps")
@@ -339,7 +356,7 @@ if __name__ == "__main__":
         f"Initialized model with {sum(p.numel() for p in net.parameters()):,} parameters"
     )
     opt = optim.Adam(net.parameters(), lr=1e-3)
-    N = 20
+    N = 16
 
     # Simple training loop iteration
     iteration = 0
@@ -347,9 +364,9 @@ if __name__ == "__main__":
         iteration += 1
         print(f"--- Iteration {iteration} ---")
         print("Self-Playing...")
-        data = self_play(net, N=N, num_games=1000, mcts_sims=1000)
+        data = self_play(net, N=N, num_games=20, mcts_sims=1000)
 
         print("Training Network...")
-        train(net, data, opt, 10)
+        train(net, data, opt, 3)
 
         evaluate_model(net, N=N, num_games=10)

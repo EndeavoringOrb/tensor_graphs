@@ -10,6 +10,7 @@ resources/*.json
 *pack.bat
 .vscode
 flux-klein-4b
+malloc_heuristic/build
 out.log
 images
 wsl_venv
