@@ -157,7 +157,16 @@ static std::vector<ParallelBuffer> bufferize(
 
         BufferId buf_id = BufferId{(uint32_t)buffers.size()};
         eclass_to_buf[eclass] = buf_id;
-        ParallelBuffer buf = {buf_id, node.getMemSpace(), getSizeBytes(node.getShape(), node.getDType()), birth_times.at(eclass), death_times.at(eclass), -1};
+
+        uint64_t size_bytes = getSizeBytes(node.getShape(), node.getDType());
+        if (size_bytes == 0)
+        {
+            size_bytes = 1;
+        }
+        // Align to 4096 bytes to prevent OpenCL CL_MISALIGNED_SUB_BUFFER_OFFSET (-13)
+        size_bytes = (size_bytes + 4095) & ~4095ULL;
+
+        ParallelBuffer buf = {buf_id, node.getMemSpace(), size_bytes, birth_times.at(eclass), death_times.at(eclass), -1};
         buffers.push_back(std::move(buf));
     }
     return buffers;
@@ -559,7 +568,7 @@ static bool malloc_by_time_components(
     uint64_t mem_cap,
     const std::vector<ParallelBuffer> &unallocated,
     std::vector<ParallelBuffer> &allocated,
-BufferId &overflow)
+    BufferId &overflow)
 {
     if (unallocated.empty())
         return true;

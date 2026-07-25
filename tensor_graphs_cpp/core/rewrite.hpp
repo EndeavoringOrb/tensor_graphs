@@ -14,7 +14,6 @@
 #include <cstring>
 #include <functional>
 
-// Replaced findMemSpacePath with findMemSpacePaths to find ALL valid paths
 inline std::vector<std::vector<MemSpace>> findMemSpacePaths(
     MemSpace src, MemSpace dst, const TensorNode &node, const std::vector<Engine> &engines)
 {
@@ -52,7 +51,6 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(
             {
                 TensorNode dummyIn = node;
                 TensorNode dummyOut = node;
-                // Option 1: Pass ignore_engines = true so host-driven COPY_TO kernels match
                 auto refs = KernelRegistry::get().findMatchingKernels(
                     OpType::COPY_TO, "", {dummyIn}, dummyOut, false, next, {curr},
                     engines, false, false, true, true);
@@ -512,7 +510,10 @@ struct FusionRule : public Rule
             }
         }
 
-        // Now actually add the nodes to the E-Graph
+        // We make a COPY to prevent dangling references since addOpToEGraph pushes to egraph.enodes
+        const ENode oldENode = egraph.getENode(eNodeIdx);
+        EClassId e_class_id = egraph.getENodeEClass(eNodeIdx);
+
         for (uint64_t i = 0; i < child_ids.size(); ++i)
         {
             EClassId pid = child_ids[i];
@@ -559,9 +560,6 @@ struct FusionRule : public Rule
 
             adapted_children.push_back(currentPid);
         }
-
-        const ENode &oldENode = egraph.getENode(eNodeIdx);
-        EClassId e_class_id = egraph.getENodeEClass(eNodeIdx);
 
         std::vector<uint64_t> strides;
         if (kernel.is_view)
@@ -807,7 +805,8 @@ struct InfinityDomination : public Rule
         EGraph &egraph = ctx.egraph;
         visited_enodes.insert(ENodeId{eNodeIdx});
 
-        const ENode &addNode = egraph.getENode(ENodeId{eNodeIdx});
+        // COPY instead of reference to prevent UAF
+        const ENode addNode = egraph.getENode(ENodeId{eNodeIdx}); 
         EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
 
         uint32_t constIdx = isConstantFloat(addNode.getChildren()[1], ctx) ? 1 : 0;
@@ -1055,7 +1054,7 @@ struct SlicePushDownElementwise : public Rule
     void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         EGraph &egraph = ctx.egraph;
-        const ENode &contigNode = egraph.getENode(ENodeId{eNodeIdx});
+        const ENode contigNode = egraph.getENode(ENodeId{eNodeIdx});
         EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
 
         EClassId sliceClass = egraph.findConst(contigNode.getChildren()[0]);
@@ -1072,7 +1071,7 @@ struct SlicePushDownElementwise : public Rule
 
         for (ENodeId sliceNodeIdx : sliceNodes)
         {
-            const ENode &sliceNode = egraph.getENode(sliceNodeIdx);
+            const ENode sliceNode = egraph.getENode(sliceNodeIdx);
 
             EClassId srcClass = egraph.findConst(sliceNode.getChildren()[0]);
             EClassId startsId = sliceNode.getChildren()[1];
@@ -1097,7 +1096,7 @@ struct SlicePushDownElementwise : public Rule
 
             for (ENodeId srcNodeIdx : srcEnodes)
             {
-                const ENode &opNode = egraph.getENode(srcNodeIdx);
+                const ENode opNode = egraph.getENode(srcNodeIdx);
                 OpType op = opNode.getOpType();
                 if (!(op == OpType::ADD || op == OpType::MUL || op == OpType::DIVIDE || op == OpType::POWER ||
                       op == OpType::SIN || op == OpType::COS || op == OpType::NEGATE || op == OpType::CAST ||
@@ -1246,7 +1245,7 @@ struct SlicePushDownDot : public Rule
     void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         EGraph &egraph = ctx.egraph;
-        const ENode &contigNode = egraph.getENode(ENodeId{eNodeIdx});
+        const ENode contigNode = egraph.getENode(ENodeId{eNodeIdx});
         EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
 
         EClassId sliceClass = egraph.findConst(contigNode.getChildren()[0]);
@@ -1262,14 +1261,14 @@ struct SlicePushDownDot : public Rule
 
         for (ENodeId sliceNodeIdx : sliceNodes)
         {
-            const ENode &sliceNode = egraph.getENode(sliceNodeIdx);
+            const ENode sliceNode = egraph.getENode(sliceNodeIdx);
 
             EClassId srcClass = egraph.findConst(sliceNode.getChildren()[0]);
             std::vector<ENodeId> srcEnodes = egraph.getEClass(srcClass).enodes;
 
             for (ENodeId srcNodeIdx : srcEnodes)
             {
-                const ENode &dotNode = egraph.getENode(srcNodeIdx);
+                const ENode dotNode = egraph.getENode(srcNodeIdx);
                 if (dotNode.getOpType() != OpType::DOT)
                     continue;
 
@@ -1464,7 +1463,7 @@ struct FlattenBatchDot : public Rule
     void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         EGraph &egraph = ctx.egraph;
-        const ENode &dotNode = egraph.getENode(ENodeId{eNodeIdx});
+        const ENode dotNode = egraph.getENode(ENodeId{eNodeIdx});
         EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
 
         if (!visited.insert(eNodeIdx).second)
