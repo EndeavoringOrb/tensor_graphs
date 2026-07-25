@@ -294,7 +294,7 @@ struct Session
         selectedCachedNodes.clear();
 
         std::cout << "[Session.ensureCacheCoverage] Starting iterative cache optimization..." << std::endl;
-        Planner planner(costModel, memManager.getBufferSizes());
+        Planner planner(costModel, memManager.getMemCaps());
 
         std::unordered_map<LogicalId, MemSpace> protectedCachedNodes;
 

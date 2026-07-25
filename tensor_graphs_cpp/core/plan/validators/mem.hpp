@@ -630,11 +630,11 @@ struct MemValidator : public ISelectionValidator
 {
     const EGraph &egraph;
     const std::vector<ENodeInfo> &enodeInfos;
-    const std::unordered_map<uint32_t, uint64_t> &mem_caps;
+    const std::unordered_map<MemSpace, uint64_t> &mem_caps;
 
     MemValidator(const EGraph &_egraph,
                  const std::vector<ENodeInfo> &_enodeInfos,
-                 const std::unordered_map<uint32_t, uint64_t> &_mem_caps)
+                 const std::unordered_map<MemSpace, uint64_t> &_mem_caps)
         : egraph(_egraph), enodeInfos(_enodeInfos), mem_caps(_mem_caps) {}
 
     bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
@@ -656,16 +656,16 @@ struct MemValidator : public ISelectionValidator
         cost = current_cost;
         updated_cost = true;
 
-        // group buffers by mem_space.idx
-        std::unordered_map<uint32_t, std::vector<ParallelBuffer>> buf_by_mem_idx;
+        // group buffers by mem_space instead of mem_space.idx
+        std::unordered_map<MemSpace, std::vector<ParallelBuffer>> buf_by_mem_space;
         for (auto &buf : unallocated_buffers)
         {
             if (buf.mem_space.type == HandleType::STORAGE)
                 continue;
-            buf_by_mem_idx[buf.mem_space.idx].push_back(buf);
+            buf_by_mem_space[buf.mem_space].push_back(buf);
         }
 
-        // malloc: try to assign offsets within mem_cap for each mem_idx
+        // malloc: try to assign offsets within mem_cap for each mem_space
         buffers.clear();
         buffers.reserve(unallocated_buffers.size());
 
@@ -680,20 +680,22 @@ struct MemValidator : public ISelectionValidator
         }
 
         bool alloc_ok = true;
-        for (auto &kv : buf_by_mem_idx)
+
+        for (auto &kv : buf_by_mem_space)
         {
-            uint32_t mem_idx = kv.first;
+            MemSpace ms = kv.first;
             auto &bufs = kv.second;
-            uint64_t cap = mem_caps.count(mem_idx)
-                               ? mem_caps.at(mem_idx)
+            uint64_t cap = mem_caps.count(ms)
+                               ? mem_caps.at(ms)
                                : std::numeric_limits<uint64_t>::max();
             std::vector<ParallelBuffer> allocated;
-            ProgressTimer t = ProgressTimer(0, "malloc mem_idx=" + std::to_string(mem_idx) + ", n_bufs=" + std::to_string(bufs.size()) + " ", false, true);
+            ProgressTimer t2 = ProgressTimer(0, "malloc mem_space=(" + std::to_string(ms.idx) + "," + std::to_string((int)ms.type) + "), n_bufs=" + std::to_string(bufs.size()) + " ", false, true);
             if (!malloc_by_time_components(cap, bufs, allocated))
             {
                 alloc_ok = false;
                 break;
             }
+
             buffers.insert(buffers.end(),
                            std::make_move_iterator(allocated.begin()),
                            std::make_move_iterator(allocated.end()));

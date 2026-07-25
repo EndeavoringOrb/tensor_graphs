@@ -38,7 +38,7 @@ struct ExtractionResult
 struct Planner
 {
     CostModel &costModel;
-    std::unordered_map<uint32_t, uint64_t> mem_caps; // mem_idx -> max memory
+    std::unordered_map<MemSpace, uint64_t> mem_caps;
 
     void inferShapes(const std::vector<LogicalId> &topo, Graph &graph)
     {
@@ -804,10 +804,14 @@ struct Planner
                         best_buffers = buffers;
                         best_eclass_to_buf = eclass_to_buf;
                     }
+                    if (stopOnFirstValid)
+                    {
+                        std::cout << "cost=" << std::to_string(cost) << std::endl;
+                        break;
+                    }
                 }
-                if (valid && stopOnFirstValid)
+                else
                 {
-                    std::cout << "cost=" << std::to_string(cost) << std::endl;
                     break;
                 }
             }
@@ -1449,7 +1453,7 @@ struct Planner
         return injected;
     }
 
-    Planner(CostModel &costModel, const std::unordered_map<uint32_t, uint64_t> &mem_caps)
+    Planner(CostModel &costModel, const std::unordered_map<MemSpace, uint64_t> &mem_caps)
         : costModel(costModel), mem_caps(mem_caps) {}
 
     CompiledGraph plan(

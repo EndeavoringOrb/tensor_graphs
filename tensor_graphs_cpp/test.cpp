@@ -334,21 +334,21 @@ void runShapePropagationTests()
 }
 
 std::vector<float> executeReferenceGraph(
-    uint32_t rootId,
+    LogicalId rootId,
     Graph &graph,
-    const std::unordered_map<uint32_t, std::vector<uint8_t>> &rawInputData,
+    const std::unordered_map<LogicalId, std::vector<uint8_t>> &rawInputData,
     bool forceNonContiguous = false)
 {
-    std::vector<uint32_t> topo = topologicalSort({rootId}, graph);
+    std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
     ShapePropagator prop;
-    for (uint32_t nodeId : topo)
+    for (LogicalId nodeId : topo)
     {
         prop.inferShape(nodeId, graph);
     }
 
-    std::unordered_map<uint32_t, std::vector<uint8_t>> results;
-    std::unordered_map<uint32_t, TensorView> views;
-    for (uint32_t nodeId : topo)
+    std::unordered_map<LogicalId, std::vector<uint8_t>> results;
+    std::unordered_map<LogicalId, TensorView> views;
+    for (LogicalId nodeId : topo)
     {
         const TensorNode &node = graph.getNode(nodeId);
         uint64_t elemSize = getDTypeSize(node.dtype);
@@ -393,12 +393,12 @@ std::vector<float> executeReferenceGraph(
         std::vector<const void *> inputPtrs;
         std::vector<TensorView> inputViews;
         std::vector<TensorNode> inputNodes;
-        for (uint32_t pid : node.child_ids)
+        for (LogicalId pid : node.child_ids)
         {
             auto resultIt = results.find(pid);
             if (resultIt == results.end())
             {
-                Error::throw_err("Parent node " + std::to_string(pid) + " not found in results");
+                Error::throw_err("Parent node " + std::to_string(pid.value) + " not found in results");
             }
             inputPtrs.push_back(resultIt->second.data());
             inputViews.push_back(views[pid]);
@@ -418,10 +418,10 @@ std::vector<float> executeReferenceGraph(
 
         TensorNode outNodeNC = node;
         auto refs_nc = KernelRegistry::get().findMatchingKernels(
-            node.opType, node.opName, node.backend,
-            inputNodes, outNodeNC, true);
+            node.opType, node.opName,
+            inputNodes, outNodeNC, true, MemSpace{1, HandleType::CPP}, {}, {Engine{0, EngineType::CPU}}, false, true, false, true);
         TensorView chosenOutView;
-        uint64_t chosenKernelUid = 0;
+        KernelId chosenKernelUid = KernelId{0};
         if (forceNonContiguous && !refs_nc.empty())
         {
             chosenOutView = outViewNonContig;
@@ -431,11 +431,11 @@ std::vector<float> executeReferenceGraph(
         {
             TensorNode outNodeC = node;
             auto refs_c = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, node.backend,
-                inputNodes, outNodeC, true);
+                node.opType, node.opName,
+                inputNodes, outNodeC, true, MemSpace{1, HandleType::CPP}, {}, {Engine{0, EngineType::CPU}}, false, true, false, true);
             if (refs_c.empty())
             {
-                Error::throw_err("No reference kernel found for node " + std::to_string(nodeId) +
+                Error::throw_err("No reference kernel found for node " + std::to_string(nodeId.value) +
                                  " op=" + toString(node.opType) +
                                  (node.opType == OpType::FUSED ? " (" + node.opName + ")" : ""));
             }
@@ -448,7 +448,7 @@ std::vector<float> executeReferenceGraph(
         {
             TensorNode dummyOutNode = node;
             kernel.inferView(dummyOutNode, inputNodes, graph);
-            uint32_t parentId = node.child_ids[0];
+            LogicalId parentId = node.child_ids[0];
             results[nodeId] = results[parentId];
             chosenOutView.strides = dummyOutNode.strides;
             chosenOutView.offset = dummyOutNode.viewOffset * elemSize;
@@ -584,8 +584,8 @@ std::vector<float> executeFusedKernel(
 
 struct TestInputs
 {
-    std::vector<uint32_t> inputIds;
-    std::unordered_map<uint32_t, std::vector<uint8_t>> rawInputData;
+    std::vector<LogicalId> inputIds;
+    std::unordered_map<LogicalId, std::vector<uint8_t>> rawInputData;
     std::vector<std::vector<uint8_t>> rawData;
 };
 
@@ -1051,15 +1051,14 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         outView.dtype = outDType;
         std::vector<TensorView> outViews = {outView};
         TensorNode outNode;
-        outNode.id = (uint32_t)rec.inputShapes.size();
+        outNode.id = LogicalId{(uint32_t)rec.inputShapes.size()};
         outNode.dtype = outDType;
         outNode.setShape(outShape);
         outNode.strides = outStrides;
-        outNode.backend = Backend::CPU;
 
         std::cout << "Testing Python Ref " << testDir << " [" << toString(opType) << "] ... " << std::flush;
-        std::vector<uint64_t> matches = KernelRegistry::get().findMatchingKernels(
-            opType, "", Backend::CPU, dummyInputNodes, outNode, {}, true);
+        std::vector<KernelId> matches = KernelRegistry::get().findMatchingKernels(
+            opType, "", dummyInputNodes, outNode, true, MemSpace{1, HandleType::CPP}, {}, {Engine{0, EngineType::CPU}}, false, true, false, true);
         if (matches.empty())
         {
             Error::throw_err("[runPythonTests] FAILED (No reference kernel found)");
@@ -1159,8 +1158,9 @@ std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std:
 
         if (type == 0) // Metadata
         {
-            uint32_t version, cachedRootId;
-            std::unordered_map<uint32_t, Backend> tempSelected;
+            uint32_t version;
+            LogicalId cachedRootId;
+            std::unordered_map<LogicalId, MemSpace> tempSelected;
             br.read(version);
             br.read(cachedRootId);
             br.read(tempSelected);
@@ -1181,31 +1181,37 @@ std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std:
                 r.hwTag = HW_TAG;
                 r.runTime = 0.0f;
 
-                const TensorNode &outNode = cg.nodesMap.at(inst.nodeId);
-                r.outputShapes.push_back(outNode.getShape());
-                r.outputStrides.push_back(outNode.strides);
-                r.outputDTypes.push_back(outNode.dtype);
-                r.backends.push_back(outNode.backend);
+                const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
+                r.output_mem_space = kernel.output_mem_space;
+                r.engines = kernel.engines;
 
-                for (uint32_t inId : inst.inputNodeIds)
+                for (uint32_t i = 0; i < inst.children.size(); i++)
                 {
-                    const TensorNode &inNode = cg.nodesMap.at(inId);
-                    r.inputShapes.push_back(inNode.getShape());
-                    r.inputStrides.push_back(inNode.strides);
-                    r.inputDTypes.push_back(inNode.dtype);
-                    r.inputBackends.push_back({inNode.backend});
+                    EClassId inId = inst.children[i];
+                    const TensorView &inView = cg.nodeViews.at(inId);
+                    r.inputShapes.push_back(inView.getShape());
+                    r.inputStrides.push_back(inView.strides);
+                    r.inputDTypes.push_back(inView.dtype);
 
-                    uint32_t logicalId = cg.getLogicalId(inId);
-                    if (cg.constantStaging.count(logicalId))
-                    {
-                        r.inputConstants.push_back(*cg.constantStaging.at(logicalId));
+                    uint64_t ruleIdx = std::min((uint64_t)i, static_cast<uint64_t>(kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1));
+                    MemSpace ms = {1, HandleType::CPP};
+                    if (!kernel.input_mem_spaces.empty() && ruleIdx < kernel.input_mem_spaces.size()) {
+                        ms = kernel.input_mem_spaces[ruleIdx];
                     }
-                    else if (cg.constantStaging.count(inId))
-                    {
+                    r.input_mem_spaces.push_back(ms);
+
+                    if (cg.has_logical_id(inId)) {
+                        LogicalId logicalId = cg.get_logical_id(inId);
+                        if (cg.constantStaging.count(EClassId{logicalId.value})) {
+                            r.inputConstants.push_back(*cg.constantStaging.at(EClassId{logicalId.value}));
+                        } else if (cg.constantStaging.count(inId)) {
+                            r.inputConstants.push_back(*cg.constantStaging.at(inId));
+                        } else {
+                            r.inputConstants.push_back({});
+                        }
+                    } else if (cg.constantStaging.count(inId)) {
                         r.inputConstants.push_back(*cg.constantStaging.at(inId));
-                    }
-                    else
-                    {
+                    } else {
                         r.inputConstants.push_back({});
                     }
                 }

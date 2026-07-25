@@ -439,22 +439,14 @@ struct MemoryManager
         return nullptr;
     }
 
-    std::unordered_map<uint32_t, uint64_t> getBufferSizes() const
+    std::unordered_map<MemSpace, uint64_t> getMemCaps() const
     {
-        std::unordered_map<uint32_t, uint64_t> sizes;
+        std::unordered_map<MemSpace, uint64_t> sizes;
         for (const auto &pair : buffers)
         {
             if (pair.second)
             {
-                uint32_t idx = pair.first.idx;
-                if (sizes.find(idx) == sizes.end())
-                {
-                    sizes[idx] = pair.second->sizeBytes;
-                }
-                else
-                {
-                    sizes[idx] = std::max(sizes[idx], pair.second->sizeBytes);
-                }
+                sizes[pair.first] = pair.second->sizeBytes;
             }
         }
         return sizes;
