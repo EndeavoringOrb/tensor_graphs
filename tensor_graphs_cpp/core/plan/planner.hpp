@@ -789,11 +789,12 @@ struct Planner
             std::vector<EClassId> order;
             std::vector<ParallelBuffer> buffers;
             std::unordered_map<EClassId, BufferId> eclass_to_buf;
+            BufferId overflow;
             float cost;
             bool valid = false;
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
-                valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, reason);
+                valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, overflow, cost, reason);
                 if (valid)
                 {
                     if (cost < best_cost)
@@ -834,7 +835,7 @@ struct Planner
 
             if (!valid)
             {
-                extractor.backtrack(reason);
+                extractor.backtrack(reason, eclass_to_buf, overflow);
             }
 
             extractor.ascend(enodeInfos);

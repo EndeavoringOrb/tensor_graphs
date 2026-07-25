@@ -426,7 +426,9 @@ static bool malloc(
 }
 
 // 1. O(N log N) Sweep-line to check if it's mathematically impossible to fit in mem_cap
-static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t mem_cap)
+static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t mem_cap,
+                              BufferId &overflow // if failed due to mem, which buffer pushed mem over the edge
+)
 {
     if (mem_cap == std::numeric_limits<uint64_t>::max())
         return true;
@@ -437,6 +439,7 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
         int type; // 0 for end, 1 for start
         int64_t size;
         bool is_zero_duration;
+        BufferId buffer_id;
     };
 
     std::vector<Event> events;
@@ -446,12 +449,12 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
         bool is_zero = (b.start == b.end);
         if (is_zero)
         {
-            events.push_back({b.start, 1, static_cast<int64_t>(b.size), true});
+            events.push_back({b.start, 1, static_cast<int64_t>(b.size), true, b.id});
         }
         else
         {
-            events.push_back({b.start, 1, static_cast<int64_t>(b.size), false});
-            events.push_back({b.end, 0, static_cast<int64_t>(b.size), false});
+            events.push_back({b.start, 1, static_cast<int64_t>(b.size), false, b.id});
+            events.push_back({b.end, 0, static_cast<int64_t>(b.size), false, b.id});
         }
     }
 
@@ -470,13 +473,19 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
             {
                 // Zero-duration buffers only overlap with strictly active intervals
                 if (current_mem + ev.size > static_cast<int64_t>(mem_cap))
+                {
+                    overflow = ev.buffer_id;
                     return false;
+                }
             }
             else
             {
                 current_mem += ev.size;
                 if (current_mem > static_cast<int64_t>(mem_cap))
+                {
+                    overflow = ev.buffer_id;
                     return false;
+                }
             }
         }
         else
@@ -488,7 +497,9 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
 }
 
 // 2. O(N^2) Fast Heuristic Allocator: First-Fit Decreasing
-static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated, std::vector<ParallelBuffer> &allocated)
+static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated, std::vector<ParallelBuffer> &allocated,
+                         BufferId &overflow // if failed due to mem, which buffer pushed mem over the edge
+)
 {
     std::vector<ParallelBuffer> bufs = unallocated;
 
@@ -533,6 +544,7 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 
         if (mem_cap != std::numeric_limits<uint64_t>::max() && best_offset + static_cast<int64_t>(buf.size) > static_cast<int64_t>(mem_cap))
         {
+            overflow = buf.id;
             return false; // Greedy failed to fit within mem_cap
         }
 
@@ -546,7 +558,8 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 static bool malloc_by_time_components(
     uint64_t mem_cap,
     const std::vector<ParallelBuffer> &unallocated,
-    std::vector<ParallelBuffer> &allocated)
+    std::vector<ParallelBuffer> &allocated,
+BufferId &overflow)
 {
     if (unallocated.empty())
         return true;
@@ -565,14 +578,14 @@ static bool malloc_by_time_components(
             return true;
 
         // OPTIMIZATION 1: Absolute strict lower bound check
-        if (!check_peak_memory(current_comp, mem_cap))
+        if (!check_peak_memory(current_comp, mem_cap, overflow))
         {
             return false; // Mathematically impossible to fit; abort instantly
         }
 
         // OPTIMIZATION 2: Fast greedy allocator path (solves immediately most of the time)
         std::vector<ParallelBuffer> comp_allocated;
-        if (greedy_alloc(mem_cap, current_comp, comp_allocated))
+        if (greedy_alloc(mem_cap, current_comp, comp_allocated, overflow))
         {
             allocated.insert(allocated.end(), comp_allocated.begin(), comp_allocated.end());
             return true;
@@ -640,6 +653,7 @@ struct MemValidator : public ISelectionValidator
     bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
                   std::vector<ParallelBuffer> &buffers,
                   std::unordered_map<EClassId, BufferId> &eclass_to_buf,
+                  BufferId &overflow,
                   float &cost, std::string &reason, bool &updated_buffers, bool &updated_cost) override
     {
         ProgressTimer t = ProgressTimer(0, "validate ", false, true);
@@ -691,7 +705,7 @@ struct MemValidator : public ISelectionValidator
                                : std::numeric_limits<uint64_t>::max();
             std::vector<ParallelBuffer> allocated;
             ProgressTimer t2 = ProgressTimer(0, "malloc mem_space=(" + std::to_string(ms.idx) + "," + std::to_string((int)ms.type) + "), n_bufs=" + std::to_string(bufs.size()) + " ", false, true);
-            if (!malloc_by_time_components(cap, bufs, allocated))
+            if (!malloc_by_time_components(cap, bufs, allocated, overflow))
             {
                 alloc_ok = false;
                 oom_reason = "OOM:" + std::to_string(ms.idx) + ":" + std::to_string(static_cast<int>(ms.type));

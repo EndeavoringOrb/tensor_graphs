@@ -203,6 +203,7 @@ public:
                   const std::vector<EClassId> &order,
                   std::vector<ParallelBuffer> &buffers,
                   std::unordered_map<EClassId, BufferId> &eclass_to_buf,
+                  BufferId &overflow,
                   float &cost,
                   std::string &reason)
     {
@@ -210,7 +211,7 @@ public:
         updated_cost = false;
         for (const auto &validator : validators)
         {
-            if (!validator->validate(selection_map, order, buffers, eclass_to_buf, cost, reason, updated_buffers, updated_cost))
+            if (!validator->validate(selection_map, order, buffers, eclass_to_buf, overflow, cost, reason, updated_buffers, updated_cost))
             {
                 return false;
             }
@@ -283,7 +284,7 @@ public:
         return selection_map;
     }
 
-    void backtrack(std::string reason)
+    void backtrack(const std::string reason, const std::unordered_map<EClassId, BufferId> &eclass_to_buf, const BufferId overflow)
     {
         target_backtrack_eclass = EClassId{UINT32_MAX};
         int best_backtrack_idx = std::numeric_limits<int>::max();
@@ -418,65 +419,22 @@ public:
         }
         else if (reason.rfind("OOM", 0) == 0)
         {
-            // Parse optional failing MemSpace from reason ("OOM:idx:type")
-            bool has_ms = false;
-            MemSpace failed_ms{0, HandleType::STORAGE};
-            if (reason.length() > 4 && reason[3] == ':')
+            // Search path from deepest to highest for an eclass with alternatives that uses failed_ms
+            for (int i = 0; i < path.size(); i++)
             {
-                std::stringstream ss(reason.substr(4));
-                std::string idx_str, type_str;
-                if (std::getline(ss, idx_str, ':') && std::getline(ss, type_str))
-                {
-                    failed_ms.idx = static_cast<uint32_t>(std::stoul(idx_str));
-                    failed_ms.type = static_cast<HandleType>(std::stoul(type_str));
-                    has_ms = true;
-                }
-            }
+                EClassId ec = path[i];
+                auto selIt = selection_map.find(ec);
+                if (selIt == selection_map.end())
+                    continue;
 
-            if (has_ms)
-            {
-                // Search path from deepest to highest for an eclass with alternatives that uses failed_ms
-                for (int i = static_cast<int>(path.size()) - 1; i >= 0; --i)
-                {
-                    EClassId ec = path[i];
-                    auto selIt = selection_map.find(ec);
-                    if (selIt == selection_map.end())
-                        continue;
+                auto bufIt = eclass_to_buf.find(ec);
+                if (bufIt == eclass_to_buf.end())
+                    Error::throw_err("eclass has no buffer");
 
-                    uint32_t sel = selIt->second;
-                    const auto &enodes = egraph.getEClass(ec).enodes;
-                    if (sel + 1 >= enodes.size())
-                        continue; // No alternatives at this eclass
+                if (bufIt->second != overflow)
+                    continue;
 
-                    ENodeId enode_id = enodes[sel];
-                    const ENode &enode = egraph.getENode(enode_id);
-
-                    bool uses_failed_ms = (enode.getMemSpace() == failed_ms);
-                    if (!uses_failed_ms)
-                    {
-                        const EClass &cls = egraph.getEClass(ec);
-                        if (cls.mem_space == failed_ms)
-                            uses_failed_ms = true;
-                    }
-                    if (!uses_failed_ms)
-                    {
-                        for (EClassId child : enode.getChildren())
-                        {
-                            const EClass &cCls = egraph.getEClass(egraph.findConst(child));
-                            if (cCls.mem_space == failed_ms)
-                            {
-                                uses_failed_ms = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (uses_failed_ms)
-                    {
-                        best_backtrack_idx = i;
-                        break;
-                    }
-                }
+                best_backtrack_idx = std::min(best_backtrack_idx, i);
             }
 
             if (best_backtrack_idx != std::numeric_limits<int>::max())
