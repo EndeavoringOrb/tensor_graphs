@@ -384,6 +384,8 @@ struct MemoryManager
 
     MemoryManager(std::unordered_map<MemSpace, uint64_t> bufferSizes)
     {
+        buffers.resize(1);
+        buffers[0] = std::make_unique<StorageBuffer>(MemSpace{0, HandleType::STORAGE}, 0);
         for (auto &pair : bufferSizes)
         {
             MemSpace ms = pair.first;
@@ -391,6 +393,10 @@ struct MemoryManager
             if (ms.idx >= buffers.size())
             {
                 buffers.resize(ms.idx + 1);
+            }
+            else
+            {
+                Error::throw_err("multiple buffers for mem idx " + std::to_string(ms.idx));
             }
             if (ms.type == HandleType::STORAGE)
             {
@@ -448,8 +454,10 @@ struct MemoryManager
         std::unordered_map<uint32_t, uint64_t> sizes;
         for (uint64_t i = 0; i < buffers.size(); ++i)
         {
-            if (buffers[i]) {
-                if (sizes.count(buffers[i]->mem_space.idx) == 0) {
+            if (buffers[i])
+            {
+                if (sizes.count(buffers[i]->mem_space.idx) == 0)
+                {
                     sizes[buffers[i]->mem_space.idx] = 0;
                 }
                 sizes[buffers[i]->mem_space.idx] += buffers[i]->sizeBytes;

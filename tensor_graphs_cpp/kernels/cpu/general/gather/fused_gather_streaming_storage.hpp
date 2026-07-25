@@ -106,7 +106,7 @@ static inline bool gather_readFromFileAtOffset(
 // ---------------------------------------------------------------------------
 inline void runGatherStreamingStorage(const KernelContext &ctx)
 {
-    // inputs[0] is MemSpace(1, HandleType::STORAGE) (nullptr). We use ctx.fd[0] to read.
+    // inputs[0] is MemSpace(0, HandleType::STORAGE) (nullptr). We use ctx.fd[0] to read.
     const int32_t *indices = static_cast<const int32_t *>(ctx.inputs[1]);
     float *out = static_cast<float *>(ctx.outputs[0]);
 
@@ -194,4 +194,4 @@ REGISTER_KERNEL("Gather_StreamingStorage_NEON", 2, 2, matchGatherStreamingStorag
     {DType::BF16, DType::INT32},           // input types: raw weight (BF16), indices (INT32)
     {{248320, 2048}, {1, 8}},              // dummy shapes
     {true, true},                          // requires contiguous inputs
-    {{MemSpace(1, HandleType::STORAGE)}, {MemSpace(1, HandleType::CPP)}}); // input placement
+    {{MemSpace(0, HandleType::STORAGE)}, {MemSpace(1, HandleType::CPP)}}); // input placement

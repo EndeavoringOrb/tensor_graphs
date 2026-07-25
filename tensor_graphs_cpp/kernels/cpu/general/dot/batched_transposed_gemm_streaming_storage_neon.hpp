@@ -510,6 +510,6 @@ REGISTER_KERNEL("Batched_Transposed_GEMM_StreamingStorage_NEON", 2, 2, matchBatc
     {DType::FLOAT32, DType::BF16},         // X is fp32, W is bf16
     {{256, 8, 2048}, {256, 1024, 2048}},   // dummy shapes for the bench harness
     {true, true},                          // both inputs must be contiguous
-    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::STORAGE)}}); // X from CPU, W directly from STORAGE
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(0, HandleType::STORAGE)}}); // X from CPU, W directly from STORAGE
 
 #endif // TG_HAS_NEON

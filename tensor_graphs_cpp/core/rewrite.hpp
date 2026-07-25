@@ -553,7 +553,7 @@ struct FusionRule : public Rule
         const ENode &eNode = egraph.getENode(eNodeId);
         const auto &pNode = pattern.graph.getNode(patternId);
 
-        if (eNode.getOpType() == pNode.opType)
+        if (eNode.getOpType() != pNode.opType)
             return false;
         if (eNode.getOpType() == OpType::FUSED && eNode.getOpName() != pNode.opName)
             return false;

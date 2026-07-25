@@ -847,6 +847,6 @@ REGISTER_KERNEL("MoE_TopK_FusedGEMM_StreamingStorage_NEON_v2", 5, 5, matchMoETop
     {DType::FLOAT32, DType::BF16, DType::BF16, DType::FLOAT32, DType::INT32},
     {{1, 8, 2048}, {256, 1024, 2048}, {256, 2048, 512}, {1, 8, 256}, {1, 8, 8}},
     {true, true, true, true, true}, // all inputs contiguous
-    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::STORAGE)}, {MemSpace(1, HandleType::STORAGE)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+    {{MemSpace(1, HandleType::CPP)}, {MemSpace(0, HandleType::STORAGE)}, {MemSpace(0, HandleType::STORAGE)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON && __ARM_FEATURE_BF16
