@@ -375,12 +375,13 @@ int main(int argc, char *argv[])
     // -----------------------------------------------------------------------
     // TODO: make this and getDefaultBufferSizes load from some common place
     std::unordered_map<MemSpace, uint64_t> bufferSizes = {
-    {MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
+        {MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
 #ifdef USE_CUDA
     bufferSizes[MemSpace{2, HandleType::CUDA}] = 16ULL * 1024 * 1024 * 1024;
 #endif
-    if (HardwareCaps::get().has_opencl) {
-        bufferSizes[MemSpace{3, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
+    if (HardwareCaps::get().has_opencl)
+    {
+        bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
     }
     MemoryManager mem(bufferSizes);
 

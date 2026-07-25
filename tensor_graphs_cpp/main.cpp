@@ -41,15 +41,16 @@
 
 namespace fs = std::filesystem;
 
-std::unordered_map<MemSpace, uint64_t, MemSpaceHash> getDefaultBufferSizes()
+std::unordered_map<MemSpace, uint64_t> getDefaultBufferSizes()
 {
-    std::unordered_map<MemSpace, uint64_t, MemSpaceHash> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<MemSpace, uint64_t> bufferSizes = {
+        {MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
 #ifdef USE_CUDA
     bufferSizes[MemSpace{2, HandleType::CUDA}] = 24ULL * 1024 * 1024 * 1024;
 #endif
     if (HardwareCaps::get().has_opencl)
     {
-        bufferSizes[MemSpace{3, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
+        bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
     }
     return bufferSizes;
 }

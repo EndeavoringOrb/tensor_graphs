@@ -233,7 +233,7 @@ struct CudaBuffer : public DeviceBuffer
     }
     void write(uint64_t offset, const void *data, uint64_t size) override
     {
-        cudaMemcpy(arena_ptr + offset, data, size, cudaMemcpyHostToDevice);
+        Error::throw_err("writeInput is not supported on CudaBuffer");
     }
     void setupInput(KernelContext &ctx, const TensorView &view, uint32_t logicalId) override
     {
@@ -257,7 +257,6 @@ struct CudaBuffer : public DeviceBuffer
 
 struct OpenCLBuffer : public DeviceBuffer
 {
-    uint8_t *arena_ptr = nullptr;
     cl_mem arena_ptr_cl_mem = nullptr;
 
     OpenCLBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size)
@@ -274,34 +273,28 @@ struct OpenCLBuffer : public DeviceBuffer
     {
         OpenCLState::get().init();
         cl_context ctx = OpenCLState::get().context;
-        cl_command_queue queue = OpenCLState::get().queue;
         cl_int err;
-        arena_ptr_cl_mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_ALLOC_HOST_PTR, sizeBytes, nullptr, &err);
+        arena_ptr_cl_mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeBytes, nullptr, &err);
         if (err != CL_SUCCESS)
             Error::throw_err("clCreateBuffer failed");
-        arena_ptr = (uint8_t *)clEnqueueMapBuffer(queue, arena_ptr_cl_mem, CL_TRUE, CL_MAP_READ | CL_MAP_WRITE, 0, sizeBytes, 0, nullptr, nullptr, &err);
-        if (err != CL_SUCCESS)
-            Error::throw_err("clEnqueueMapBuffer failed");
     }
     void freeArena() override
     {
         if (arena_ptr_cl_mem)
         {
-            clEnqueueUnmapMemObject(OpenCLState::get().queue, arena_ptr_cl_mem, arena_ptr, 0, nullptr, nullptr);
             clReleaseMemObject(arena_ptr_cl_mem);
             arena_ptr_cl_mem = nullptr;
         }
-        arena_ptr = nullptr;
     }
     void write(uint64_t offset, const void *data, uint64_t size) override
     {
-        std::memcpy(arena_ptr + offset, data, size);
+        Error::throw_err("writeInput is not supported on OpenCLBuffer");
     }
     void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
         TensorView v = view;
         ctx.inViews.push_back(v);
-        ctx.inputs.push_back(arena_ptr + v.offset);
+        ctx.inputs.push_back(nullptr);
         ctx.fd.push_back(-1);
 
         uint64_t size = countElements(view) * getDTypeSize(view.dtype);
@@ -311,7 +304,7 @@ struct OpenCLBuffer : public DeviceBuffer
         cl_mem buf = nullptr;
         for (uint64_t i = 0; i < ctx.cl_inputs.size(); i++)
         {
-            if (ctx.inputs[i] == (arena_ptr + v.offset) && ctx.cl_inputs[i] != nullptr)
+            if (ctx.inViews[i].offset == v.offset && ctx.cl_inputs[i] != nullptr)
             {
                 buf = ctx.cl_inputs[i];
                 clRetainMemObject(buf);
@@ -334,7 +327,7 @@ struct OpenCLBuffer : public DeviceBuffer
     {
         TensorView v = view;
         ctx.outViews.push_back(v);
-        ctx.outputs.push_back(arena_ptr + v.offset);
+        ctx.outputs.push_back(nullptr);
 
         uint64_t size = countElements(view) * getDTypeSize(view.dtype);
         if (size == 0)
@@ -343,7 +336,7 @@ struct OpenCLBuffer : public DeviceBuffer
         cl_mem buf = nullptr;
         for (uint64_t i = 0; i < ctx.cl_inputs.size(); i++)
         {
-            if (ctx.inputs[i] == (arena_ptr + v.offset) && ctx.cl_inputs[i] != nullptr)
+            if (ctx.inViews[i].offset == v.offset && ctx.cl_inputs[i] != nullptr)
             {
                 buf = ctx.cl_inputs[i];
                 clRetainMemObject(buf);
@@ -375,45 +368,39 @@ struct OpenCLBuffer : public DeviceBuffer
                 clReleaseMemObject(sub);
         }
     }
-    uint8_t *getBasePtr() override { return arena_ptr; }
+    uint8_t *getBasePtr() override { return nullptr; }
 };
 
 struct MemoryManager
 {
-    std::vector<std::unique_ptr<DeviceBuffer>> buffers;
+    std::unordered_map<MemSpace, std::unique_ptr<DeviceBuffer>> buffers;
 
     MemoryManager(std::unordered_map<MemSpace, uint64_t> bufferSizes)
     {
-        buffers.resize(1);
-        buffers[0] = std::make_unique<StorageBuffer>(MemSpace{0, HandleType::STORAGE}, 0);
+        // Register default storage buffer space
+        buffers[MemSpace{0, HandleType::STORAGE}] = std::make_unique<StorageBuffer>(MemSpace{0, HandleType::STORAGE}, 0);
+
         for (auto &pair : bufferSizes)
         {
             MemSpace ms = pair.first;
             uint64_t size = pair.second;
-            if (ms.idx >= buffers.size())
-            {
-                buffers.resize(ms.idx + 1);
-            }
-            else
-            {
-                Error::throw_err("multiple buffers for mem idx " + std::to_string(ms.idx));
-            }
+
             if (ms.type == HandleType::STORAGE)
             {
-                buffers[ms.idx] = std::make_unique<StorageBuffer>(ms, size);
+                buffers[ms] = std::make_unique<StorageBuffer>(ms, size);
             }
             else if (ms.type == HandleType::CPP)
             {
-                buffers[ms.idx] = std::make_unique<CppBuffer>(ms, size);
+                buffers[ms] = std::make_unique<CppBuffer>(ms, size);
             }
             else if (ms.type == HandleType::OPENCL)
             {
-                buffers[ms.idx] = std::make_unique<OpenCLBuffer>(ms, size);
+                buffers[ms] = std::make_unique<OpenCLBuffer>(ms, size);
             }
             else if (ms.type == HandleType::CUDA)
             {
 #ifdef USE_CUDA
-                buffers[ms.idx] = std::make_unique<CudaBuffer>(ms, size);
+                buffers[ms] = std::make_unique<CudaBuffer>(ms, size);
 #else
                 Error::throw_err("CUDA requested but USE_CUDA not defined");
 #endif
@@ -423,44 +410,51 @@ struct MemoryManager
 
     void init()
     {
-        for (auto &b : buffers)
+        for (auto &pair : buffers)
         {
-            if (b)
-                b->init();
+            if (pair.second)
+                pair.second->init();
         }
     }
 
     void write(MemSpace ms, uint64_t offset, const void *data, uint64_t size)
     {
-        if (ms.idx < buffers.size() && buffers[ms.idx])
+        auto it = buffers.find(ms);
+        if (it != buffers.end() && it->second)
         {
-            buffers[ms.idx]->write(offset, data, size);
+            it->second->write(offset, data, size);
         }
         else
         {
-            Error::throw_err("Buffer not initialized for MemSpace " + std::to_string(ms.idx));
+            Error::throw_err("Buffer not initialized for MemSpace(idx=" + std::to_string(ms.idx) +
+                             ", type=" + toString(ms.type) + ")");
         }
     }
 
     DeviceBuffer *getBuffer(MemSpace ms)
     {
-        if (ms.idx < buffers.size())
-            return buffers[ms.idx].get();
+        auto it = buffers.find(ms);
+        if (it != buffers.end())
+            return it->second.get();
         return nullptr;
     }
 
     std::unordered_map<uint32_t, uint64_t> getBufferSizes() const
     {
         std::unordered_map<uint32_t, uint64_t> sizes;
-        for (uint64_t i = 0; i < buffers.size(); ++i)
+        for (const auto &pair : buffers)
         {
-            if (buffers[i])
+            if (pair.second)
             {
-                if (sizes.count(buffers[i]->mem_space.idx) == 0)
+                uint32_t idx = pair.first.idx;
+                if (sizes.find(idx) == sizes.end())
                 {
-                    sizes[buffers[i]->mem_space.idx] = 0;
+                    sizes[idx] = pair.second->sizeBytes;
                 }
-                sizes[buffers[i]->mem_space.idx] += buffers[i]->sizeBytes;
+                else
+                {
+                    sizes[idx] = std::max(sizes[idx], pair.second->sizeBytes);
+                }
             }
         }
         return sizes;
