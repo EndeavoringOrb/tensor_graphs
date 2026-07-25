@@ -937,7 +937,9 @@ struct Planner
             inst.eclass_id = eclass_id;
             inst.logical_id = logical_id;
             inst.kernel_id = enode.getKernelId();
-            inst.children = enode.getChildren();
+            for (EClassId child : enode.getChildren()) {
+                inst.children.push_back(egraph.find(child));
+            }
             inst.inBuffers.resize(inst.children.size());
             for (uint32_t i = 0; i < extraction.buffers.size(); i++)
             {
