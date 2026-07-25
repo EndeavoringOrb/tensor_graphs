@@ -768,7 +768,7 @@ struct Planner
         std::unordered_map<EClassId, BufferId> best_eclass_to_buf;
         std::string reason = "";
 
-        int max_iters = 100000;
+        int max_iters = 10'000'000;
         int remaining_iters = max_iters;
         ProgressTimer timer(max_iters, "extracting graphs ");
         ProgressTimer loopTimer(0, "", true);

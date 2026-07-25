@@ -215,10 +215,12 @@ public:
                 return false;
             }
         }
-        if (!updated_buffers) {
+        if (!updated_buffers)
+        {
             Error::throw_err("buffers not updated during validate");
         }
-        if (!updated_cost) {
+        if (!updated_cost)
+        {
             Error::throw_err("cost not updated during validate");
         }
         return true;
@@ -284,6 +286,7 @@ public:
     void backtrack(std::string reason)
     {
         target_backtrack_eclass = EClassId{UINT32_MAX};
+        int best_backtrack_idx = std::numeric_limits<int>::max();
         if (reason == "cycle")
         {
             // Compute SCCs of the selection-induced subgraph using Tarjan's algorithm.
@@ -292,7 +295,6 @@ public:
             // Among all such members across all non-trivial SCCs, pick the one
             // with the smallest path index. That's the backtrack target.
 
-            int best_backtrack_idx = std::numeric_limits<int>::max();
             std::vector<int> path_idx(numClasses, -1);
             for (int i = 0; i < (int)path.size(); ++i)
             {
@@ -409,6 +411,78 @@ public:
             {
                 target_backtrack_eclass = path[best_backtrack_idx];
                 std::cout << "[Planner.extractBest] cycle: backtracking to eclass "
+                          << toString(target_backtrack_eclass)
+                          << " (path index " << best_backtrack_idx << " of " << path.size() << ")"
+                          << std::endl;
+            }
+        }
+        else if (reason.rfind("OOM", 0) == 0)
+        {
+            // Parse optional failing MemSpace from reason ("OOM:idx:type")
+            bool has_ms = false;
+            MemSpace failed_ms{0, HandleType::STORAGE};
+            if (reason.length() > 4 && reason[3] == ':')
+            {
+                std::stringstream ss(reason.substr(4));
+                std::string idx_str, type_str;
+                if (std::getline(ss, idx_str, ':') && std::getline(ss, type_str))
+                {
+                    failed_ms.idx = static_cast<uint32_t>(std::stoul(idx_str));
+                    failed_ms.type = static_cast<HandleType>(std::stoul(type_str));
+                    has_ms = true;
+                }
+            }
+
+            if (has_ms)
+            {
+                // Search path from deepest to highest for an eclass with alternatives that uses failed_ms
+                for (int i = static_cast<int>(path.size()) - 1; i >= 0; --i)
+                {
+                    EClassId ec = path[i];
+                    auto selIt = selection_map.find(ec);
+                    if (selIt == selection_map.end())
+                        continue;
+
+                    uint32_t sel = selIt->second;
+                    const auto &enodes = egraph.getEClass(ec).enodes;
+                    if (sel + 1 >= enodes.size())
+                        continue; // No alternatives at this eclass
+
+                    ENodeId enode_id = enodes[sel];
+                    const ENode &enode = egraph.getENode(enode_id);
+
+                    bool uses_failed_ms = (enode.getMemSpace() == failed_ms);
+                    if (!uses_failed_ms)
+                    {
+                        const EClass &cls = egraph.getEClass(ec);
+                        if (cls.mem_space == failed_ms)
+                            uses_failed_ms = true;
+                    }
+                    if (!uses_failed_ms)
+                    {
+                        for (EClassId child : enode.getChildren())
+                        {
+                            const EClass &cCls = egraph.getEClass(egraph.findConst(child));
+                            if (cCls.mem_space == failed_ms)
+                            {
+                                uses_failed_ms = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (uses_failed_ms)
+                    {
+                        best_backtrack_idx = i;
+                        break;
+                    }
+                }
+            }
+
+            if (best_backtrack_idx != std::numeric_limits<int>::max())
+            {
+                target_backtrack_eclass = path[best_backtrack_idx];
+                std::cout << "[Planner.extractBest] OOM: backtracking to eclass "
                           << toString(target_backtrack_eclass)
                           << " (path index " << best_backtrack_idx << " of " << path.size() << ")"
                           << std::endl;

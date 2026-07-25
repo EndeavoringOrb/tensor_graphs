@@ -680,6 +680,7 @@ struct MemValidator : public ISelectionValidator
         }
 
         bool alloc_ok = true;
+        std::string oom_reason = "OOM";
 
         for (auto &kv : buf_by_mem_space)
         {
@@ -693,6 +694,7 @@ struct MemValidator : public ISelectionValidator
             if (!malloc_by_time_components(cap, bufs, allocated))
             {
                 alloc_ok = false;
+                oom_reason = "OOM:" + std::to_string(ms.idx) + ":" + std::to_string(static_cast<int>(ms.type));
                 break;
             }
 
@@ -706,7 +708,7 @@ struct MemValidator : public ISelectionValidator
         {
             return true;
         }
-        reason = "OOM";
+        reason = oom_reason;
         return false;
     }
 };
