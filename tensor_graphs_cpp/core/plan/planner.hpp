@@ -40,72 +40,6 @@ struct Planner
     CostModel &costModel;
     std::unordered_map<uint32_t, uint64_t> mem_caps; // mem_idx -> max memory
 
-    std::vector<MemSpace> findMemSpacePath(MemSpace src, MemSpace dst, const TensorNode &node, Engine engine)
-    {
-        if (src == dst)
-            return {src};
-
-        std::unordered_map<MemSpace, std::vector<MemSpace>> adj;
-        for (const auto &[uid, k] : KernelRegistry::get().getAllKernels())
-        {
-            if (k.opType == OpType::COPY_TO && k.input_mem_spaces.size() == 1)
-            {
-                adj[k.input_mem_spaces[0]].push_back(k.output_mem_space);
-            }
-        }
-
-        std::unordered_map<MemSpace, MemSpace> parent;
-        std::queue<MemSpace> q;
-        std::unordered_set<MemSpace> visited;
-
-        q.push(src);
-        visited.insert(src);
-
-        bool found = false;
-        while (!q.empty())
-        {
-            MemSpace curr = q.front();
-            q.pop();
-
-            if (curr == dst)
-            {
-                found = true;
-                break;
-            }
-
-            for (MemSpace next : adj[curr])
-            {
-                if (visited.find(next) == visited.end())
-                {
-                    TensorNode dummyIn = node;
-                    TensorNode dummyOut = node;
-                    auto refs = KernelRegistry::get().findMatchingKernels(
-                        OpType::COPY_TO, "", {dummyIn}, dummyOut, false, next, {curr}, {engine}, false, false, false, true);
-                    if (!refs.empty())
-                    {
-                        visited.insert(next);
-                        parent[next] = curr;
-                        q.push(next);
-                    }
-                }
-            }
-        }
-
-        if (!found)
-            return {};
-
-        std::vector<MemSpace> path;
-        MemSpace curr = dst;
-        while (!(curr == src))
-        {
-            path.push_back(curr);
-            curr = parent[curr];
-        }
-        path.push_back(src);
-        std::reverse(path.begin(), path.end());
-        return path;
-    }
-
     void inferShapes(const std::vector<LogicalId> &topo, Graph &graph)
     {
         ShapePropagator propagator;
@@ -937,7 +871,8 @@ struct Planner
             inst.eclass_id = eclass_id;
             inst.logical_id = logical_id;
             inst.kernel_id = enode.getKernelId();
-            for (EClassId child : enode.getChildren()) {
+            for (EClassId child : enode.getChildren())
+            {
                 inst.children.push_back(egraph.find(child));
             }
             inst.inBuffers.resize(inst.children.size());
@@ -1095,12 +1030,13 @@ struct Planner
                     }
                     else
                     {
-                        std::vector<MemSpace> path = findMemSpacePath(src_ms, dst_ms, inputs[i], cpu);
-                        if (path.empty())
+                        std::vector<std::vector<MemSpace>> paths = findMemSpacePaths(src_ms, dst_ms, inputs[i], {cpu});
+                        if (paths.empty())
                         {
                             path_exists = false;
                             break;
                         }
+                        const auto &path = paths[0];
 
                         EClassId curr_eclass = p_eclass;
                         EClass curr_cls = baseState.egraph.getEClass(curr_eclass);

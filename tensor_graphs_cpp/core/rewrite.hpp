@@ -12,6 +12,66 @@
 #include <string>
 #include <algorithm>
 #include <cstring>
+#include <functional>
+
+// Replaced findMemSpacePath with findMemSpacePaths to find ALL valid paths
+inline std::vector<std::vector<MemSpace>> findMemSpacePaths(
+    MemSpace src, MemSpace dst, const TensorNode &node, const std::vector<Engine> &engines)
+{
+    if (src == dst)
+        return {{src}};
+
+    std::unordered_map<MemSpace, std::vector<MemSpace>> adj;
+    for (const auto &[uid, k] : KernelRegistry::get().getAllKernels())
+    {
+        if (k.opType == OpType::COPY_TO && k.input_mem_spaces.size() == 1)
+        {
+            adj[k.input_mem_spaces[0]].push_back(k.output_mem_space);
+        }
+    }
+
+    std::vector<std::vector<MemSpace>> all_paths;
+    std::vector<MemSpace> current_path = {src};
+    std::unordered_set<MemSpace> visited = {src};
+
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
+    {
+        if (curr == dst)
+        {
+            all_paths.push_back(current_path);
+            return;
+        }
+
+        auto it = adj.find(curr);
+        if (it == adj.end())
+            return;
+
+        for (MemSpace next : it->second)
+        {
+            if (visited.find(next) == visited.end())
+            {
+                TensorNode dummyIn = node;
+                TensorNode dummyOut = node;
+                // Option 1: Pass ignore_engines = true so host-driven COPY_TO kernels match
+                auto refs = KernelRegistry::get().findMatchingKernels(
+                    OpType::COPY_TO, "", {dummyIn}, dummyOut, false, next, {curr},
+                    engines, false, false, true, true);
+
+                if (!refs.empty())
+                {
+                    visited.insert(next);
+                    current_path.push_back(next);
+                    dfs(next);
+                    current_path.pop_back();
+                    visited.erase(next);
+                }
+            }
+        }
+    };
+
+    dfs(src);
+    return all_paths;
+}
 
 inline bool isEClassProtected(EClassId e_class_id, const std::unordered_set<EClassId> &protectedEClasses, const EGraph &egraph)
 {
@@ -398,18 +458,68 @@ struct FusionRule : public Rule
             Error::throw_err("[addFusedNode] child_ids.size() < kernel.min_num_inputs || child_ids.size() > kernel.max_num_inputs");
         }
 
+        // Pre-validate that all children can be routed to the required memory spaces
+        std::vector<std::vector<std::vector<MemSpace>>> child_mem_paths(child_ids.size());
+        std::vector<bool> child_need_contig(child_ids.size(), false);
+        std::vector<bool> child_need_copy(child_ids.size(), false);
+
         for (uint64_t i = 0; i < child_ids.size(); ++i)
         {
             EClassId pid = child_ids[i];
             const EClass parent = egraph.getEClass(egraph.findConst(pid));
 
-            uint64_t ruleIdx = std::min(child_ids.size(), i);
+            uint64_t ruleIdx = i;
+            if (kernel.min_num_inputs != kernel.max_num_inputs)
+            {
+                ruleIdx = (i == child_ids.size() - 1) ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1) : 0;
+            }
 
-            MemSpace expectedMemSpace = kernel.input_mem_spaces[ruleIdx];
+            MemSpace expectedMemSpace = {1, HandleType::CPP};
+            if (!kernel.input_mem_spaces.empty() && ruleIdx < kernel.input_mem_spaces.size())
+            {
+                expectedMemSpace = kernel.input_mem_spaces[ruleIdx];
+            }
+
             bool foundMemSpace = (parent.mem_space == expectedMemSpace);
 
             bool needCopy = !foundMemSpace;
-            bool needContig = (kernel.requiresContiguous[ruleIdx] || needCopy) && !isContiguous(parent);
+            bool needContig = false;
+            if (ruleIdx < kernel.requiresContiguous.size())
+            {
+                needContig = (kernel.requiresContiguous[ruleIdx] || needCopy) && !isContiguous(parent);
+            }
+            else
+            {
+                needContig = needCopy && !isContiguous(parent);
+            }
+
+            child_need_contig[i] = needContig;
+            child_need_copy[i] = needCopy;
+
+            if (needCopy)
+            {
+                TensorNode dummyNode;
+                dummyNode.opType = OpType::INPUT;
+                dummyNode.dtype = parent.dtype;
+                dummyNode.setShape(parent.shape);
+                dummyNode.strides = parent.strides;
+
+                child_mem_paths[i] = findMemSpacePaths(parent.mem_space, expectedMemSpace, dummyNode, kernel.engines);
+                if (child_mem_paths[i].empty())
+                {
+                    return; // Cannot satisfy memory constraints, abort adding this fused node
+                }
+            }
+        }
+
+        // Now actually add the nodes to the E-Graph
+        for (uint64_t i = 0; i < child_ids.size(); ++i)
+        {
+            EClassId pid = child_ids[i];
+            const EClass parent = egraph.getEClass(egraph.findConst(pid));
+
+            bool needCopy = child_need_copy[i];
+            bool needContig = child_need_contig[i];
 
             if (!needCopy && !needContig)
             {
@@ -428,8 +538,23 @@ struct FusionRule : public Rule
 
             if (needCopy)
             {
-                currentPid = addOpToEGraph(egraph, OpType::COPY_TO, {currentPid}, currentClass.shape, currentClass.strides, currentClass.dtype, expectedMemSpace);
-                currentClass = egraph.getEClass(egraph.findConst(currentPid));
+                EClassId finalTargetClass = EClassId();
+                for (const auto &path : child_mem_paths[i])
+                {
+                    EClassId pathPid = currentPid;
+                    EClass pathClass = currentClass;
+                    for (uint64_t p_idx = 1; p_idx < path.size(); ++p_idx)
+                    {
+                        MemSpace next_ms = path[p_idx];
+                        pathPid = addOpToEGraph(egraph, OpType::COPY_TO, {pathPid}, pathClass.shape, pathClass.strides, pathClass.dtype, next_ms, (p_idx == path.size() - 1) ? finalTargetClass : EClassId());
+                        if (p_idx == path.size() - 1)
+                        {
+                            finalTargetClass = pathPid;
+                        }
+                        pathClass = egraph.getEClass(egraph.findConst(pathPid));
+                    }
+                }
+                currentPid = finalTargetClass;
             }
 
             adapted_children.push_back(currentPid);
