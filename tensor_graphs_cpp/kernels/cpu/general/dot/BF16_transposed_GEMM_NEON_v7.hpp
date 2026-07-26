@@ -1,4 +1,5 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/dot/BF16_transposed_GEMM_NEON_v7.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/dot/BF16_transposed_GEMM_NEON_v7.hpp
 //
 // BF16 Transposed GEMM, NEON v7 — BFDOT with round-to-nearest-even X cast
 // =======================================================================
@@ -16,9 +17,10 @@
 // Across the jina-v5 vision tower + text encoder, BF16 GEMM consumes ~870 ms
 // (21% of total runtime):
 //
-//   [1, 5040, 768]  x [3072, 768]  -> [1, 5040, 3072]   318 ms  (vision MLP fc1, 12x)
-//   [1, 5040, 3072] x [768, 3072]  -> [1, 5040, 768]    313 ms  (vision MLP fc2, 12x)
-//   [1, 5040, 768]  x [2304, 768]  -> [1, 5040, 2304]   239 ms  (vision QKV,      12x)
+//   [1, 5040, 768]  x [3072, 768]  -> [1, 5040, 3072]   318 ms  (vision MLP
+//   fc1, 12x) [1, 5040, 3072] x [768, 3072]  -> [1, 5040, 768]    313 ms
+//   (vision MLP fc2, 12x) [1, 5040, 768]  x [2304, 768]  -> [1, 5040, 2304] 239
+//   ms  (vision QKV,      12x)
 //   ... plus text encoder linears ...
 //
 // WHAT THIS KERNEL DOES
@@ -59,19 +61,20 @@
 //   After:  ~2300 ms   (1.8x total speedup)
 
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
-// Change this guard to `#if defined(TG_HAS_NEON) && defined(__ARM_FEATURE_BF16)`
-// to enable. Kept as TODOREMOVETHISCHECK by default so the build does not
-// silently change accuracy characteristics.
+// Change this guard to `#if defined(TG_HAS_NEON) &&
+// defined(__ARM_FEATURE_BF16)` to enable. Kept as TODOREMOVETHISCHECK by
+// default so the build does not silently change accuracy characteristics.
 #if defined(TG_HAS_NEON_TODOREMOVETHISCHECK) && defined(__ARM_FEATURE_BF16)
 
 #include <arm_neon.h>
-#include <thread>
-#include <vector>
+
 #include <algorithm>
 #include <cstring>
+#include <thread>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Match function — same shape rules as v5/v6:
@@ -80,9 +83,7 @@
 //   W : [N, K]     bf16
 //   O : [B, S, N]  fp32
 // ---------------------------------------------------------------------------
-inline bool matchBF16TransposedGEMM_v7(
-    const std::vector<TensorNode> &inputs,
-    const TensorNode &output)
+inline bool matchBF16TransposedGEMM_v7(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     auto sX = inputs[0].getShape(); // [B,S,K]
     auto sW = inputs[1].getShape(); // [N,K]
@@ -157,8 +158,7 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
             if (s >= e)
                 break;
 
-            packers.emplace_back([=, &X_packed]()
-                                 {
+            packers.emplace_back([=, &X_packed]() {
                 // RNE bias for fp32 -> bf16 conversion.
                 // Adding 0x7FFF (the bit just below the bf16 truncation point)
                 // to a non-NaN fp32 makes the subsequent truncation round to
@@ -171,12 +171,13 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
                 // but without relying on toolchain-specific intrinsic naming.
                 const uint32x4_t v_rne_bias = vdupq_n_u32(0x7FFFu);
 
-                for (uint32_t mp = s; mp < e; ++mp) {
-                    uint16_t *dst = X_packed.data() +
-                                    (uint64_t)mp * MR * K_main;
+                for (uint32_t mp = s; mp < e; ++mp)
+                {
+                    uint16_t *dst = X_packed.data() + (uint64_t)mp * MR * K_main;
                     uint32_t m0 = mp * MR;
 
-                    for (uint32_t kq = 0; kq < K_quads; ++kq) {
+                    for (uint32_t kq = 0; kq < K_quads; ++kq)
+                    {
                         uint32_t k = kq * KR;
 
                         // Load 8 fp32 rows × 4 K-elements = 8 float32x4_t
@@ -208,13 +209,14 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
 
                         // Pack 8 rows x 4 bf16 = 32 bf16 = 4x uint16x8_t.
                         // Each uint16x8_t holds 2 rows of 4 bf16.
-                        vst1q_u16(dst + 0,  vcombine_u16(b0, b1));
-                        vst1q_u16(dst + 8,  vcombine_u16(b2, b3));
+                        vst1q_u16(dst + 0, vcombine_u16(b0, b1));
+                        vst1q_u16(dst + 8, vcombine_u16(b2, b3));
                         vst1q_u16(dst + 16, vcombine_u16(b4, b5));
                         vst1q_u16(dst + 24, vcombine_u16(b6, b7));
                         dst += 32;
                     }
-                } });
+                }
+            });
         }
 
         for (auto &t : packers)
@@ -241,51 +243,54 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
             if (s >= e)
                 break;
 
-            workers.emplace_back([=, &X_packed]()
-                                 {
+            workers.emplace_back([=, &X_packed]() {
                 std::vector<uint16_t> W_panel((uint64_t)K_main * NR);
 
-                for (uint32_t np = s; np < e; ++np) {
+                for (uint32_t np = s; np < e; ++np)
+                {
                     uint32_t n0 = np * NR;
 
                     // PACK W (reorganize [N,K] -> [K_quad, NR, KR] for BFDOT)
                     uint16_t *wp = W_panel.data();
-                    for (uint32_t kq = 0; kq < K_quads; ++kq) {
+                    for (uint32_t kq = 0; kq < K_quads; ++kq)
+                    {
                         uint32_t k = kq * KR;
-                        for (uint32_t bi = 0; bi < NR / 2; ++bi) {
+                        for (uint32_t bi = 0; bi < NR / 2; ++bi)
+                        {
                             uint32_t n = n0 + bi * 2;
                             // W is [N, K], pack 4 K-elements x 2 N-rows
-                            wp[0] = W[(uint64_t)n     * K + k];
-                            wp[1] = W[(uint64_t)n     * K + k + 1];
-                            wp[2] = W[(uint64_t)n     * K + k + 2];
-                            wp[3] = W[(uint64_t)n     * K + k + 3];
-                            wp[4] = W[(uint64_t)(n+1) * K + k];
-                            wp[5] = W[(uint64_t)(n+1) * K + k + 1];
-                            wp[6] = W[(uint64_t)(n+1) * K + k + 2];
-                            wp[7] = W[(uint64_t)(n+1) * K + k + 3];
+                            wp[0] = W[(uint64_t)n * K + k];
+                            wp[1] = W[(uint64_t)n * K + k + 1];
+                            wp[2] = W[(uint64_t)n * K + k + 2];
+                            wp[3] = W[(uint64_t)n * K + k + 3];
+                            wp[4] = W[(uint64_t)(n + 1) * K + k];
+                            wp[5] = W[(uint64_t)(n + 1) * K + k + 1];
+                            wp[6] = W[(uint64_t)(n + 1) * K + k + 2];
+                            wp[7] = W[(uint64_t)(n + 1) * K + k + 3];
                             wp += 8;
                         }
                     }
 
-                    for (uint32_t mp = 0; mp < M_panels; ++mp) {
+                    for (uint32_t mp = 0; mp < M_panels; ++mp)
+                    {
                         uint32_t m_base = mp * MR;
 
-                        const uint16_t *A_ptr = X_packed.data() +
-                                                (uint64_t)mp * MR * K_main;
+                        const uint16_t *A_ptr = X_packed.data() + (uint64_t)mp * MR * K_main;
                         const uint16_t *B_ptr = W_panel.data();
 
                         // 8x8 = 8 rows x 2 col-pairs of 4 fp32 accumulators
                         // = 16 accumulator registers
-                        float32x4_t c00=vdupq_n_f32(0), c01=vdupq_n_f32(0);
-                        float32x4_t c10=vdupq_n_f32(0), c11=vdupq_n_f32(0);
-                        float32x4_t c20=vdupq_n_f32(0), c21=vdupq_n_f32(0);
-                        float32x4_t c30=vdupq_n_f32(0), c31=vdupq_n_f32(0);
-                        float32x4_t c40=vdupq_n_f32(0), c41=vdupq_n_f32(0);
-                        float32x4_t c50=vdupq_n_f32(0), c51=vdupq_n_f32(0);
-                        float32x4_t c60=vdupq_n_f32(0), c61=vdupq_n_f32(0);
-                        float32x4_t c70=vdupq_n_f32(0), c71=vdupq_n_f32(0);
+                        float32x4_t c00 = vdupq_n_f32(0), c01 = vdupq_n_f32(0);
+                        float32x4_t c10 = vdupq_n_f32(0), c11 = vdupq_n_f32(0);
+                        float32x4_t c20 = vdupq_n_f32(0), c21 = vdupq_n_f32(0);
+                        float32x4_t c30 = vdupq_n_f32(0), c31 = vdupq_n_f32(0);
+                        float32x4_t c40 = vdupq_n_f32(0), c41 = vdupq_n_f32(0);
+                        float32x4_t c50 = vdupq_n_f32(0), c51 = vdupq_n_f32(0);
+                        float32x4_t c60 = vdupq_n_f32(0), c61 = vdupq_n_f32(0);
+                        float32x4_t c70 = vdupq_n_f32(0), c71 = vdupq_n_f32(0);
 
-                        for (uint32_t kq = 0; kq < K_quads; ++kq) {
+                        for (uint32_t kq = 0; kq < K_quads; ++kq)
+                        {
                             __builtin_prefetch(A_ptr + 128);
                             __builtin_prefetch(B_ptr + 128);
 
@@ -348,28 +353,26 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
                         // gives (r0c0, r0c1, r0c2, r0c3); combine of
                         // (low(v2), low(v3)) gives (r0c4, r0c5, r0c6, r0c7).
                         // The high halves give the same for r1.
-                        auto store_pair = [&](uint32_t mi,
-                                              float32x4_t v0,
-                                              float32x4_t v1,
-                                              float32x4_t v2,
+                        auto store_pair = [&](uint32_t mi, float32x4_t v0, float32x4_t v1, float32x4_t v2,
                                               float32x4_t v3) {
                             uint32_t r0 = m_base + mi * 2;
-                            float32x4_t row0_a = vcombine_f32(vget_low_f32(v0),  vget_low_f32(v1));
-                            float32x4_t row0_b = vcombine_f32(vget_low_f32(v2),  vget_low_f32(v3));
+                            float32x4_t row0_a = vcombine_f32(vget_low_f32(v0), vget_low_f32(v1));
+                            float32x4_t row0_b = vcombine_f32(vget_low_f32(v2), vget_low_f32(v3));
                             float32x4_t row1_a = vcombine_f32(vget_high_f32(v0), vget_high_f32(v1));
                             float32x4_t row1_b = vcombine_f32(vget_high_f32(v2), vget_high_f32(v3));
 
-                            vst1q_f32(O + (uint64_t)r0     * N + n0,     row0_a);
-                            vst1q_f32(O + (uint64_t)r0     * N + n0 + 4, row0_b);
-                            vst1q_f32(O + (uint64_t)(r0+1) * N + n0,     row1_a);
-                            vst1q_f32(O + (uint64_t)(r0+1) * N + n0 + 4, row1_b);
+                            vst1q_f32(O + (uint64_t)r0 * N + n0, row0_a);
+                            vst1q_f32(O + (uint64_t)r0 * N + n0 + 4, row0_b);
+                            vst1q_f32(O + (uint64_t)(r0 + 1) * N + n0, row1_a);
+                            vst1q_f32(O + (uint64_t)(r0 + 1) * N + n0 + 4, row1_b);
                         };
-                        store_pair(0, c00, c01, c10, c11);  // rows 0-1 x cols 0-7
-                        store_pair(1, c20, c21, c30, c31);  // rows 2-3 x cols 0-7
-                        store_pair(2, c40, c41, c50, c51);  // rows 4-5 x cols 0-7
-                        store_pair(3, c60, c61, c70, c71);  // rows 6-7 x cols 0-7
+                        store_pair(0, c00, c01, c10, c11); // rows 0-1 x cols 0-7
+                        store_pair(1, c20, c21, c30, c31); // rows 2-3 x cols 0-7
+                        store_pair(2, c40, c41, c50, c51); // rows 4-5 x cols 0-7
+                        store_pair(3, c60, c61, c70, c71); // rows 6-7 x cols 0-7
                     }
-                } });
+                }
+            });
         }
 
         for (auto &w : workers)
@@ -383,8 +386,7 @@ inline void runBF16TransposedGEMM_v7(const KernelContext &ctx)
     // This is rare for the jina-v5 model (all dims are multiples of 8/4),
     // so the scalar path is intentionally simple.
     // ============================================================
-    auto bf16_to_f32 = [](uint16_t h) -> float
-    {
+    auto bf16_to_f32 = [](uint16_t h) -> float {
         uint32_t bits = (uint32_t)h << 16;
         float f;
         std::memcpy(&f, &bits, sizeof(float));
@@ -450,18 +452,15 @@ inline LogicalId refFactoryBF16TransposedGEMM_v7(const std::vector<LogicalId> &i
 {
     LogicalId w_cast = graph.cast(inputs[1], DType::FLOAT32);
     int32_t perm[] = {1, 0};
-    LogicalId w_t = graph.contiguous(graph.permute(
-        w_cast, graph.constant({2}, perm, DType::INT32)));
+    LogicalId w_t = graph.contiguous(graph.permute(w_cast, graph.constant({2}, perm, DType::INT32)));
     auto w_shape = graph.getNode(inputs[1]).getShape();
     int32_t s3[] = {1, (int32_t)w_shape[1], (int32_t)w_shape[0]};
-    return graph.dot(inputs[0],
-                     graph.reshape(w_t, graph.constant({3}, s3, DType::INT32)));
+    return graph.dot(inputs[0], graph.reshape(w_t, graph.constant({3}, s3, DType::INT32)));
 }
 
-REGISTER_KERNEL("BF16_Transposed_GEMM_NEON_v7", 2, 2, matchBF16TransposedGEMM_v7, runBF16TransposedGEMM_v7, refFactoryBF16TransposedGEMM_v7, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-    {DType::FLOAT32, DType::BF16},
-    {{1, 256, 512}, {128, 512}},
-    {true, true},
-    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("BF16_Transposed_GEMM_NEON_v7", 2, 2, matchBF16TransposedGEMM_v7, runBF16TransposedGEMM_v7,
+                refFactoryBF16TransposedGEMM_v7, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::BF16}, {{1, 256, 512}, {128, 512}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON_TODOREMOVETHISCHECK && __ARM_FEATURE_BF16

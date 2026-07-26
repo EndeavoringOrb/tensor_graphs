@@ -1,8 +1,10 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/silu/jina_F32_3D_Mul_Neg_Neon_Threaded.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/silu/jina_F32_3D_Mul_Neg_Neon_Threaded.hpp
 //
 // FUSED KERNEL: SiLU for jina-embeddings-v5-omni-nano-retrieval
 //
-// Matches the exact subgraph produced by JinaV5OmniNanoRetrievalModel::silu_atomic():
+// Matches the exact subgraph produced by
+// JinaV5OmniNanoRetrievalModel::silu_atomic():
 //
 //   neg_one  = expand_scalar_to_3d(-1.0, N, L, D)   // {1, S, D}  (note: N=1)
 //   neg_x    = mul(x, neg_one)                      = -x          // {1, S, D}
@@ -19,14 +21,16 @@
 //
 // Hardware: Qualcomm aarch64 (ARMv8.6, 12 cores, NEON FMA).
 // Value constants matched byte-for-byte: -1.0, 2.718281828459045, 1.0.
-// TODO: remove this once we have mul(x, -1) -> neg(x) rewrite rule which will match other silu kernels
+// TODO: remove this once we have mul(x, -1) -> neg(x) rewrite rule which will
+// match other silu kernels
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <cmath>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -55,8 +59,7 @@ static inline float32x4_t jina_silu_exp_neon(float32x4_t x)
     return vmulq_f32(v_poly, v_2n);
 }
 
-inline bool matchJinaSiluMulNeg_F32_3D(const std::vector<TensorNode> &inputs,
-                                       const TensorNode &output)
+inline bool matchJinaSiluMulNeg_F32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs[0].getShape().size() != 3)
         return false;
@@ -88,8 +91,7 @@ inline void runJinaSiluMulNeg_F32_3D(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint64_t start = t * chunk;
             uint64_t end = std::min(start + chunk, n);
 
@@ -152,7 +154,8 @@ inline void runJinaSiluMulNeg_F32_3D(const KernelContext &ctx)
                     r = x * ex / (1.0f + ex);
                 }
                 out[i] = r;
-            } });
+            }
+        });
     }
     for (auto &worker : workers)
         worker.join();
@@ -163,15 +166,11 @@ inline void runJinaSiluMulNeg_F32_3D(const KernelContext &ctx)
 //
 // silu_atomic decomposition:
 //   neg_one  = expand_scalar_to_3d(-1.0, 1, L, D)    // {1, S, D}
-//   neg_x    = mul(x, neg_one)                       // {1, S, D}   <-- mul, NOT neg
-//   e_node   = expand_scalar_to_3d(2.718281828459045, 1, L, D)
-//   exp_neg  = pow(e_node, neg_x)
-//   one_node = expand_scalar_to_3d(1.0, 1, L, D)
-//   den      = add(one_node, exp_neg)
-//   sig      = div(one_node, den)
-//   result   = mul(x, sig)
-inline LogicalId refFactoryJinaSiluMulNeg_F32_3D(const std::vector<LogicalId> &inputs,
-                                                Graph &g)
+//   neg_x    = mul(x, neg_one)                       // {1, S, D}   <-- mul,
+//   NOT neg e_node   = expand_scalar_to_3d(2.718281828459045, 1, L, D) exp_neg
+//   = pow(e_node, neg_x) one_node = expand_scalar_to_3d(1.0, 1, L, D) den =
+//   add(one_node, exp_neg) sig      = div(one_node, den) result   = mul(x, sig)
+inline LogicalId refFactoryJinaSiluMulNeg_F32_3D(const std::vector<LogicalId> &inputs, Graph &g)
 {
     LogicalId x_id = inputs[0];
     const auto &shape = g.getNode(x_id).getShape();
@@ -179,8 +178,7 @@ inline LogicalId refFactoryJinaSiluMulNeg_F32_3D(const std::vector<LogicalId> &i
     uint32_t D = shape[2];
 
     // Helper: expand_scalar_to_3d(val, 1, S, D) → {1, S, D}
-    auto expand_scalar_SD = [&](float val) -> LogicalId
-    {
+    auto expand_scalar_SD = [&](float val) -> LogicalId {
         LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
         LogicalId out = g.reshape(node, g.constant({3}, sh, DType::INT32));
@@ -188,17 +186,13 @@ inline LogicalId refFactoryJinaSiluMulNeg_F32_3D(const std::vector<LogicalId> &i
         {
             int32_t rep = (int32_t)S;
             int32_t ax = 1;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         if (D > 1)
         {
             int32_t rep = (int32_t)D;
             int32_t ax = 2;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         return out;
     };
@@ -228,10 +222,8 @@ inline LogicalId refFactoryJinaSiluMulNeg_F32_3D(const std::vector<LogicalId> &i
     return g.mul(x_id, sig);
 }
 
-REGISTER_KERNEL("JinaSiluMulNeg_F32_3D", 1, 1, matchJinaSiluMulNeg_F32_3D, runJinaSiluMulNeg_F32_3D, refFactoryJinaSiluMulNeg_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32},
-                {{1, 1024, 3072}},
-                {true},
-                {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("JinaSiluMulNeg_F32_3D", 1, 1, matchJinaSiluMulNeg_F32_3D, runJinaSiluMulNeg_F32_3D,
+                refFactoryJinaSiluMulNeg_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32}, {{1, 1024, 3072}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

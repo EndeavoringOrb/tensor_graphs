@@ -1,11 +1,12 @@
 // File: tensor_graphs_cpp/kernels/cpu/general/gelu/F32_3D_Threaded.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <cmath>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchGeluF32_3D_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -26,8 +27,7 @@ inline void runGeluF32_3D_Threaded(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint64_t start = t * chunk;
             uint64_t end = std::min(start + chunk, n);
             for (uint64_t i = start; i < end; ++i)
@@ -37,7 +37,8 @@ inline void runGeluF32_3D_Threaded(const KernelContext &ctx)
                 float inner = 0.79788456f * (x + 0.044715f * x3);
                 float t_val = std::tanh(inner);
                 out[i] = 0.5f * x * (1.0f + t_val);
-            } });
+            }
+        });
     }
     for (auto &w : workers)
         w.join();
@@ -65,10 +66,12 @@ inline LogicalId refFactoryGelu_3D_Threaded(const std::vector<LogicalId> &inputs
     const auto &target_shape = graph.getNode(x_id).getShape();
 
     float c1_val = 0.044715f;
-    LogicalId c1_node = ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &c1_val, DType::FLOAT32), target_shape);
+    LogicalId c1_node =
+        ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &c1_val, DType::FLOAT32), target_shape);
 
     float c2_val = 0.79788456f;
-    LogicalId c2_node = ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &c2_val, DType::FLOAT32), target_shape);
+    LogicalId c2_node =
+        ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &c2_val, DType::FLOAT32), target_shape);
 
     LogicalId x_sq = graph.mul(x_id, x_id);
     LogicalId x_cube = graph.mul(x_sq, x_id);
@@ -78,7 +81,8 @@ inline LogicalId refFactoryGelu_3D_Threaded(const std::vector<LogicalId> &inputs
     LogicalId term3 = graph.mul(term2, c2_node);
 
     float neg_two_val = -2.0f;
-    LogicalId neg_two = ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &neg_two_val, DType::FLOAT32), target_shape);
+    LogicalId neg_two =
+        ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &neg_two_val, DType::FLOAT32), target_shape);
 
     float two_val = 2.0f;
     LogicalId two = ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &two_val, DType::FLOAT32), target_shape);
@@ -87,7 +91,8 @@ inline LogicalId refFactoryGelu_3D_Threaded(const std::vector<LogicalId> &inputs
     LogicalId e_node = ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &e_val, DType::FLOAT32), target_shape);
 
     float one_val = 1.0f;
-    LogicalId one_node = ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
+    LogicalId one_node =
+        ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
 
     LogicalId neg_2x = graph.mul(term3, neg_two);
     LogicalId exp_neg_2x = graph.pow(e_node, neg_2x);
@@ -101,10 +106,13 @@ inline LogicalId refFactoryGelu_3D_Threaded(const std::vector<LogicalId> &inputs
     LogicalId term4 = graph.add(one_node, tanh_result);
 
     float half_val = 0.5f;
-    LogicalId half_node = ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &half_val, DType::FLOAT32), target_shape);
+    LogicalId half_node =
+        ref_gelu_broadcast_scalar_th1(graph, graph.constant({1}, &half_val, DType::FLOAT32), target_shape);
     LogicalId term5 = graph.mul(x_id, half_node);
 
     return graph.mul(term5, term4);
 }
 
-REGISTER_KERNEL("Gelu_3D_Threaded", 1, 1, matchGeluF32_3D_Threaded, runGeluF32_3D_Threaded, refFactoryGelu_3D_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 2048}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Gelu_3D_Threaded", 1, 1, matchGeluF32_3D_Threaded, runGeluF32_3D_Threaded, refFactoryGelu_3D_Threaded,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 2048}}, {true},
+                {{MemSpace(1, HandleType::CPP)}});

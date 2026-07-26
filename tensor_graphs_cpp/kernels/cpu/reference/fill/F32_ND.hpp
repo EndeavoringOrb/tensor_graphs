@@ -1,7 +1,7 @@
 // File: tensor_graphs_cpp/kernels/cpu/reference/fill/F32_ND.hpp
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchFillF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -17,4 +17,6 @@ inline void runFillF32_ND(const KernelContext &ctx)
         out[i] = val;
 }
 
-REGISTER_REF_KERNEL(OpType::FILL, 2, 2, matchFillF32_ND, runFillF32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_REF_KERNEL(OpType::FILL, 2, 2, matchFillF32_ND, runFillF32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{1}, {1}}, {false, false},
+                    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

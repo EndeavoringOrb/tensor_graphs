@@ -1,13 +1,14 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/loaders/loader.hpp"
-#include "core/memory.hpp"
-#include <vector>
-#include <stdexcept>
-#include <sstream>
 #include <deque>
 #include <filesystem>
 #include <source_location>
+#include <sstream>
+#include <stdexcept>
+#include <vector>
+
+#include "core/loaders/loader.hpp"
+#include "core/memory.hpp"
+#include "core/types.hpp"
 
 struct MemoryManager;
 
@@ -25,7 +26,9 @@ struct Graph
     std::unordered_map<LogicalId, InputDataType> input_data_types;
     std::unordered_map<LogicalId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
 
-    Graph() {}
+    Graph()
+    {
+    }
 
     bool hasNode(LogicalId id) const
     {
@@ -58,16 +61,21 @@ struct Graph
             const int32_t *src = reinterpret_cast<const int32_t *>(data.data());
             for (uint64_t i = 0; i < numElements; ++i)
             {
-                res[i] = src[getStridedIndex(i, node.getShape(), node.strides)]; // TODO: does this need getStridedIndex?
+                res[i] = src[getStridedIndex(i, node.getShape(),
+                                             node.strides)]; // TODO: does this need getStridedIndex?
             }
             return res;
         }
         std::stringstream ss;
-        ss << "Expected constant for shape inference but not found in staging. Node ID: " << id;
+        ss << "Expected constant for shape inference but not found in staging. "
+              "Node ID: "
+           << id;
         Error::throw_err(ss.str());
     }
 
-    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _child_ids, std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {}, std::string _contentHash = "", std::source_location loc = std::source_location::current())
+    TensorNode &allocateNode(OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _child_ids,
+                             std::vector<uint32_t> _shape = {}, std::vector<uint64_t> _strides = {},
+                             std::string _contentHash = "", std::source_location loc = std::source_location::current())
     {
         LogicalId id = LogicalIdAllocator::allocate();
         std::string origin = std::string(loc.file_name()) + ":" + std::to_string(loc.line());
@@ -75,7 +83,8 @@ struct Graph
         return nodes[id];
     }
 
-    LogicalId constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype, std::source_location loc = std::source_location::current())
+    LogicalId constant(const std::vector<uint32_t> &shape, const void *dataPtr, DType dtype,
+                       std::source_location loc = std::source_location::current())
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
 
@@ -94,7 +103,8 @@ struct Graph
         return id;
     }
 
-    LogicalId weight(const std::string &path, const std::string &name, std::source_location loc = std::source_location::current())
+    LogicalId weight(const std::string &path, const std::string &name,
+                     std::source_location loc = std::source_location::current())
     {
         if (!FileRegistry::get().hasTensor(path, name))
         {
@@ -113,14 +123,16 @@ struct Graph
         return node.id;
     }
 
-    LogicalId input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {}, std::source_location loc = std::source_location::current())
+    LogicalId input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {},
+                    std::source_location loc = std::source_location::current())
     {
         TensorNode &node = allocateNode(OpType::INPUT, "", dtype, {}, shape, strides, "", loc);
         input_data_types[node.id] = InputDataType::RUNTIME;
         return node.id;
     }
 
-    LogicalId _copyto(LogicalId id0, std::source_location loc = std::source_location::current()) {
+    LogicalId _copyto(LogicalId id0, std::source_location loc = std::source_location::current())
+    {
         TensorNode &node = allocateNode(OpType::COPY_TO, "", getNode(id0).dtype, {id0}, {}, {}, "", loc);
         return node.id;
     }
@@ -270,7 +282,8 @@ struct Graph
         return node.id;
     }
 
-    LogicalId slice(LogicalId id0, LogicalId id1, LogicalId id2, LogicalId id3, std::source_location loc = std::source_location::current())
+    LogicalId slice(LogicalId id0, LogicalId id1, LogicalId id2, LogicalId id3,
+                    std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -295,7 +308,8 @@ struct Graph
         return node.id;
     }
 
-    LogicalId scatter(LogicalId id0, LogicalId id1, LogicalId id2, LogicalId id3, LogicalId id4, std::source_location loc = std::source_location::current())
+    LogicalId scatter(LogicalId id0, LogicalId id1, LogicalId id2, LogicalId id3, LogicalId id4,
+                      std::source_location loc = std::source_location::current())
     {
         if (getNode(id2).dtype != DType::INT32)
         {
@@ -318,7 +332,8 @@ struct Graph
         if (getNode(id0).dtype != getNode(id1).dtype)
         {
             std::stringstream ss;
-            ss << "[Graph.scatter] DType mismatch between target (" << toString(getNode(id0).dtype) << ") and updates (" << toString(getNode(id1).dtype) << ")";
+            ss << "[Graph.scatter] DType mismatch between target (" << toString(getNode(id0).dtype) << ") and updates ("
+               << toString(getNode(id1).dtype) << ")";
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(id0).dtype;
@@ -326,7 +341,8 @@ struct Graph
         return node.id;
     }
 
-    LogicalId concat(std::vector<LogicalId> ids, LogicalId id1, std::source_location loc = std::source_location::current())
+    LogicalId concat(std::vector<LogicalId> ids, LogicalId id1,
+                     std::source_location loc = std::source_location::current())
     {
         if (ids.size() == 0)
         {
@@ -338,7 +354,8 @@ struct Graph
             if (getNode(ids[0]).dtype != getNode(id).dtype)
             {
                 std::stringstream ss;
-                ss << "[Graph.concat] DType mismatch between tensor 0 and tensor " << i << ": " << getNode(ids[0]).dtype << ", " << getNode(id).dtype;
+                ss << "[Graph.concat] DType mismatch between tensor 0 and tensor " << i << ": " << getNode(ids[0]).dtype
+                   << ", " << getNode(id).dtype;
                 Error::throw_err(ss.str());
             }
         }
@@ -362,7 +379,8 @@ struct Graph
         return node.id;
     }
 
-    LogicalId repeat(LogicalId id0, LogicalId repeats_id, LogicalId axis_id, std::source_location loc = std::source_location::current())
+    LogicalId repeat(LogicalId id0, LogicalId repeats_id, LogicalId axis_id,
+                     std::source_location loc = std::source_location::current())
     {
         if (getNode(repeats_id).dtype != DType::INT32)
         {
@@ -381,7 +399,8 @@ struct Graph
         return node.id;
     }
 
-    LogicalId arange(LogicalId id1, LogicalId id2, LogicalId id3, std::source_location loc = std::source_location::current())
+    LogicalId arange(LogicalId id1, LogicalId id2, LogicalId id3,
+                     std::source_location loc = std::source_location::current())
     {
         if (getNode(id1).dtype != DType::INT32)
         {
@@ -444,7 +463,8 @@ struct Graph
         return node.id;
     }
 
-    LogicalId im2col(LogicalId input_id, LogicalId kernel_size_id, LogicalId stride_id, LogicalId padding_id, std::source_location loc = std::source_location::current())
+    LogicalId im2col(LogicalId input_id, LogicalId kernel_size_id, LogicalId stride_id, LogicalId padding_id,
+                     std::source_location loc = std::source_location::current())
     {
         if (getNode(kernel_size_id).dtype != DType::INT32)
         {
@@ -465,7 +485,8 @@ struct Graph
             Error::throw_err(ss.str());
         }
         DType dtype = getNode(input_id).dtype;
-        TensorNode &node = allocateNode(OpType::IM2COL, "", dtype, {input_id, kernel_size_id, stride_id, padding_id}, {}, {}, "", loc);
+        TensorNode &node =
+            allocateNode(OpType::IM2COL, "", dtype, {input_id, kernel_size_id, stride_id, padding_id}, {}, {}, "", loc);
         return node.id;
     }
 
@@ -476,7 +497,8 @@ struct Graph
         return node.id;
     }
 
-    LogicalId argmax(LogicalId id0, LogicalId dim_id, LogicalId k_id, std::source_location loc = std::source_location::current())
+    LogicalId argmax(LogicalId id0, LogicalId dim_id, LogicalId k_id,
+                     std::source_location loc = std::source_location::current())
     {
         if (getNode(dim_id).dtype != DType::INT32)
         {
@@ -523,7 +545,8 @@ struct Graph
         if (getNode(id0).dtype != DType::BOOL || getNode(id1).dtype != DType::BOOL)
         {
             std::stringstream ss;
-            ss << "[Graph.logical_and] Inputs must be BOOL. Got " << getNode(id0).dtype << " and " << getNode(id1).dtype;
+            ss << "[Graph.logical_and] Inputs must be BOOL. Got " << getNode(id0).dtype << " and "
+               << getNode(id1).dtype;
             Error::throw_err(ss.str());
         }
         TensorNode &node = allocateNode(OpType::AND, "", DType::BOOL, {id0, id1}, {}, {}, "", loc);

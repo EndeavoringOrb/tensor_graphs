@@ -1,9 +1,10 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 #endif
@@ -38,8 +39,10 @@ inline void runAddF32_3D_Broadcast0_Inplace(const KernelContext &ctx)
 
     uint64_t mn_size = M * N;
     uint32_t num_threads = std::thread::hardware_concurrency();
-    if (num_threads == 0) num_threads = 1;
-    if (num_threads > B) num_threads = B;
+    if (num_threads == 0)
+        num_threads = 1;
+    if (num_threads > B)
+        num_threads = B;
 
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
@@ -47,7 +50,7 @@ inline void runAddF32_3D_Broadcast0_Inplace(const KernelContext &ctx)
         workers.emplace_back([=]() {
             uint32_t start_b = (B * t) / num_threads;
             uint32_t end_b = (B * (t + 1)) / num_threads;
-            
+
             for (uint32_t batch = start_b; batch < end_b; ++batch)
             {
                 float *out_batch = out + batch * mn_size;
@@ -56,7 +59,7 @@ inline void runAddF32_3D_Broadcast0_Inplace(const KernelContext &ctx)
                 for (; i + 4 <= mn_size; i += 4)
                 {
                     float32x4_t va = vld1q_f32(out_batch + i);
-                    float32x4_t vb = vld1q_f32(b + i); 
+                    float32x4_t vb = vld1q_f32(b + i);
                     vst1q_f32(out_batch + i, vaddq_f32(va, vb));
                 }
 #endif
@@ -67,7 +70,8 @@ inline void runAddF32_3D_Broadcast0_Inplace(const KernelContext &ctx)
             }
         });
     }
-    for (auto &w : workers) w.join();
+    for (auto &w : workers)
+        w.join();
 }
 
 inline LogicalId refFactoryAdd3D_Broadcast0_Inplace(const std::vector<LogicalId> &inputs, Graph &graph)
@@ -75,4 +79,8 @@ inline LogicalId refFactoryAdd3D_Broadcast0_Inplace(const std::vector<LogicalId>
     return graph.add(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL_INPLACE("Add_3D_Broadcast0_inplace", 2, 2, matchAddF32_3D_Broadcast0_Inplace, runAddF32_3D_Broadcast0_Inplace, refFactoryAdd3D_Broadcast0_Inplace, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 2048}, {1, 8, 2048}}, {true, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL_INPLACE("Add_3D_Broadcast0_inplace", 2, 2, matchAddF32_3D_Broadcast0_Inplace,
+                        runAddF32_3D_Broadcast0_Inplace, refFactoryAdd3D_Broadcast0_Inplace,
+                        MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                        {{1, 8, 2048}, {1, 8, 2048}}, {true, false},
+                        {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

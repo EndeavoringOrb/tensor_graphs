@@ -1,12 +1,14 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cstring>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 /**
  * KERNEL: GATHER F32 (Data) + I32 (Indices)
  * Performs: output = data[indices]
- * Logic: For each index in the indices tensor, copy a 'row' from the data tensor.
+ * Logic: For each index in the indices tensor, copy a 'row' from the data
+ * tensor.
  */
 
 inline bool matchGatherF32_I32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
@@ -57,4 +59,6 @@ inline void runGatherF32_I32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::GATHER, 2, 2, matchGatherF32_I32_ND, runGatherF32_I32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {8}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_REF_KERNEL(OpType::GATHER, 2, 2, matchGatherF32_I32_ND, runGatherF32_I32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {8}}, {true, true},
+                    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

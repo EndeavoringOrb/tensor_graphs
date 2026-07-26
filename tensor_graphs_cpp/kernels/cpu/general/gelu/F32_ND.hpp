@@ -1,8 +1,9 @@
 // File: tensor_graphs_cpp/kernels/cpu/general/gelu/F32_ND.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cmath>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchGeluF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -70,7 +71,8 @@ inline LogicalId refFactoryGelu(const std::vector<LogicalId> &inputs, Graph &gra
     LogicalId term3 = graph.mul(term2, c2_node);
 
     float neg_two_val = -2.0f;
-    LogicalId neg_two = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &neg_two_val, DType::FLOAT32), target_shape);
+    LogicalId neg_two =
+        ref_gelu_broadcast_scalar(graph, graph.constant({1}, &neg_two_val, DType::FLOAT32), target_shape);
 
     float two_val = 2.0f;
     LogicalId two = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &two_val, DType::FLOAT32), target_shape);
@@ -93,10 +95,13 @@ inline LogicalId refFactoryGelu(const std::vector<LogicalId> &inputs, Graph &gra
     LogicalId term4 = graph.add(one_node, tanh_result);
 
     float half_val = 0.5f;
-    LogicalId half_node = ref_gelu_broadcast_scalar(graph, graph.constant({1}, &half_val, DType::FLOAT32), target_shape);
+    LogicalId half_node =
+        ref_gelu_broadcast_scalar(graph, graph.constant({1}, &half_val, DType::FLOAT32), target_shape);
     LogicalId term5 = graph.mul(x_id, half_node);
 
     return graph.mul(term5, term4);
 }
 
-REGISTER_KERNEL("Gelu", 1, 1, matchGeluF32_ND, runGeluF32_ND, refFactoryGelu, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 2048}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Gelu", 1, 1, matchGeluF32_ND, runGeluF32_ND, refFactoryGelu, MemSpace(1, HandleType::CPP),
+                {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 2048}}, {true},
+                {{MemSpace(1, HandleType::CPP)}});

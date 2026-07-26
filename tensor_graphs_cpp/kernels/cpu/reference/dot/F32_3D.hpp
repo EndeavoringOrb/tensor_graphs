@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchDotF32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -62,7 +62,8 @@ inline void runDotF32_3D(const KernelContext &ctx)
 
                 float sum = 0.0f;
 
-                // Inner loop: simple pointer arithmetic, no expensive index recalculation
+                // Inner loop: simple pointer arithmetic, no expensive index
+                // recalculation
                 for (uint32_t k = 0; k < K; ++k)
                 {
                     sum += (*ptr_A) * (*ptr_B);
@@ -76,4 +77,6 @@ inline void runDotF32_3D(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::DOT, 2, 2, matchDotF32_3D, runDotF32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_REF_KERNEL(OpType::DOT, 2, 2, matchDotF32_3D, runDotF32_3D, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}},
+                    {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -1,10 +1,11 @@
 #pragma once
 
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <cstring>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -13,11 +14,13 @@
 /**
  * KERNEL: RecursiveContiguous_ND
  *
- * This kernel transforms a tensor with arbitrary strides into a contiguous layout.
+ * This kernel transforms a tensor with arbitrary strides into a contiguous
+ * layout.
  *
  * Optimized Implementation Details:
- * 1. Recursive Descent: Replaced the "odometer" coordinate system with recursive
- *    pointer arithmetic. This eliminates O(Rank) multiplications per block.
+ * 1. Recursive Descent: Replaced the "odometer" coordinate system with
+ * recursive pointer arithmetic. This eliminates O(Rank) multiplications per
+ * block.
  * 2. Allocation-Free: Removed std::vector<uint32_t> coords from the hot path.
  * 3. Small-Block Optimization: Uses direct assignment instead of std::memcpy
  *    when block_size == 1, bypassing memcpy's call overhead.
@@ -30,41 +33,38 @@
 namespace detail
 {
 
-    // Recursive helper to traverse the tensor dimensions and copy data
-    // shape is vector<uint32_t>, strides is vector<uint64_t> to match types.hpp
-    template <typename T>
-    void copy_recursive_fast(int dim, const T *src, T *&dst,
-                             const std::vector<uint32_t> &shape,
-                             const std::vector<uint64_t> &strides,
-                             int outer_rank, uint64_t block_size)
+// Recursive helper to traverse the tensor dimensions and copy data
+// shape is vector<uint32_t>, strides is vector<uint64_t> to match types.hpp
+template <typename T>
+void copy_recursive_fast(int dim, const T *src, T *&dst, const std::vector<uint32_t> &shape,
+                         const std::vector<uint64_t> &strides, int outer_rank, uint64_t block_size)
+{
+    // Base Case: We have reached the contiguous block
+    if (dim == outer_rank)
     {
-        // Base Case: We have reached the contiguous block
-        if (dim == outer_rank)
+        if (block_size == 1)
         {
-            if (block_size == 1)
-            {
-                *dst = *src;
-            }
-            else
-            {
-                std::memcpy(dst, src, block_size * sizeof(T));
-            }
-            dst += block_size;
-            return;
+            *dst = *src;
         }
-
-        const uint32_t dim_size = shape[dim];
-        const uint64_t dim_stride = strides[dim];
-
-        for (uint32_t i = 0; i < dim_size; ++i)
+        else
         {
-            // Advance src by the stride of the current dimension
-            // dst is passed by reference and advanced linearly by the base case
-            copy_recursive_fast<T>(dim + 1, src + (i * dim_stride), dst,
-                                   shape, strides, outer_rank, block_size);
+            std::memcpy(dst, src, block_size * sizeof(T));
         }
+        dst += block_size;
+        return;
+    }
+
+    const uint32_t dim_size = shape[dim];
+    const uint64_t dim_stride = strides[dim];
+
+    for (uint32_t i = 0; i < dim_size; ++i)
+    {
+        // Advance src by the stride of the current dimension
+        // dst is passed by reference and advanced linearly by the base case
+        copy_recursive_fast<T>(dim + 1, src + (i * dim_stride), dst, shape, strides, outer_rank, block_size);
     }
 }
+} // namespace detail
 
 inline bool matchRecursiveContiguous_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -244,8 +244,6 @@ inline LogicalId refFactoryRecursiveContiguous_ND(const std::vector<LogicalId> &
     return graph.contiguous(inputs[0]);
 }
 
-REGISTER_KERNEL("RecursiveContiguous_ND", 1, 1, matchRecursiveContiguous_ND, runRecursiveContiguous_ND, refFactoryRecursiveContiguous_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-    {DType::ANY},
-    {{8, 32}},
-    {false},
-    {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("RecursiveContiguous_ND", 1, 1, matchRecursiveContiguous_ND, runRecursiveContiguous_ND,
+                refFactoryRecursiveContiguous_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::ANY}, {{8, 32}}, {false}, {{MemSpace(1, HandleType::CPP)}});

@@ -1,15 +1,17 @@
 // File: tensor_graphs_cpp/kernels/cpu/general/scatter/inplace_F32_ND_v3.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cstring>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
 inline bool matchScatterF32_ND_Inplace_v3(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    // Ensure target (inputs[0]), updates (inputs[1]), and output have the same rank
+    // Ensure target (inputs[0]), updates (inputs[1]), and output have the same
+    // rank
     if (inputs[0].getShape().size() != inputs[1].getShape().size() ||
         inputs[0].getShape().size() != output.getShape().size())
     {
@@ -45,7 +47,8 @@ inline void runInplaceScatterF32_ND_v3(const KernelContext &ctx)
         uint64_t n_target = countElements(out_shape);
         for (uint64_t i = 0; i < n_target; ++i)
         {
-            out[getStridedIndex(i, out_shape, out_strides)] = target[getStridedIndex(i, out_shape, ctx.inViews[0].strides)];
+            out[getStridedIndex(i, out_shape, out_strides)] =
+                target[getStridedIndex(i, out_shape, ctx.inViews[0].strides)];
         }
     }
 
@@ -135,4 +138,12 @@ inline LogicalId refFactoryScatterF32_ND_Inplace_v3(const std::vector<LogicalId>
     return graph.scatter(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
 }
 
-REGISTER_KERNEL_INPLACE("SCATTER_inplace_v3", 5, 5, matchScatterF32_ND_Inplace_v3, runInplaceScatterF32_ND_v3, refFactoryScatterF32_ND_Inplace_v3, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL_INPLACE("SCATTER_inplace_v3", 5, 5, matchScatterF32_ND_Inplace_v3, runInplaceScatterF32_ND_v3,
+                        refFactoryScatterF32_ND_Inplace_v3, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                        {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32},
+                        {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false},
+                        {{MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)}});

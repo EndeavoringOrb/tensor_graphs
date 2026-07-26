@@ -1,8 +1,10 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/layernorm/jina_F32_2D_L2Norm_Neon.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/layernorm/jina_F32_2D_L2Norm_Neon.hpp
 //
 // FUSED KERNEL: L2 Normalize for jina-embeddings-v5-omni-nano-retrieval output
 //
-// Matches the subgraph produced by JinaV5OmniNanoRetrievalModel::l2_normalize():
+// Matches the subgraph produced by
+// JinaV5OmniNanoRetrievalModel::l2_normalize():
 //
 //   x_sq     = mul(x, x)                              // {1, D}
 //   sum_sq   = sum(x_sq, axis=-1)                     // {1, 1}
@@ -21,15 +23,15 @@
 // Hardware: Qualcomm aarch64 (NEON).  Single-threaded (small tensor).
 // Value constants matched byte-for-byte: 1e-12, 0.5, 1.0.
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cmath>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 
-inline bool matchJinaL2Norm_F32_2D(const std::vector<TensorNode> &inputs,
-                                   const TensorNode &output)
+inline bool matchJinaL2Norm_F32_2D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // x: 2-D [1, D]
     if (inputs[0].getShape().size() != 2)
@@ -74,9 +76,9 @@ inline void runJinaL2Norm_F32_2D(const KernelContext &ctx)
 // Reference Factory — mirrors JinaV5OmniNanoRetrievalModel::l2_normalize()
 // decomposition EXACTLY.
 //
-// Note: l2_normalize uses expand_scalar_to_2d (not _3d), creating {1, 1} shapes.
-inline LogicalId refFactoryJinaL2Norm_F32_2D(const std::vector<LogicalId> &inputs,
-                                            Graph &g)
+// Note: l2_normalize uses expand_scalar_to_2d (not _3d), creating {1, 1}
+// shapes.
+inline LogicalId refFactoryJinaL2Norm_F32_2D(const std::vector<LogicalId> &inputs, Graph &g)
 {
     LogicalId x_id = inputs[0];
     const auto &shape = g.getNode(x_id).getShape();
@@ -84,8 +86,7 @@ inline LogicalId refFactoryJinaL2Norm_F32_2D(const std::vector<LogicalId> &input
 
     // Helper: expand_scalar_to_2d(val, 1, 1) → {1, 1}
     // Mirrors JinaV5OmniNanoRetrievalModel::expand_scalar_to_2d(val, 1, 1).
-    auto expand_scalar_11 = [&](float val) -> LogicalId
-    {
+    auto expand_scalar_11 = [&](float val) -> LogicalId {
         LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1};
         return g.reshape(node, g.constant({2}, sh, DType::INT32));
@@ -113,18 +114,15 @@ inline LogicalId refFactoryJinaL2Norm_F32_2D(const std::vector<LogicalId> &input
     // inv_std_expanded = repeat(inv_std, D, axis=1)
     int32_t rep = (int32_t)D;
     int32_t ax = 1;
-    LogicalId inv_std_expanded = g.repeat(inv_std,
-                                         g.constant({1}, &rep, DType::INT32),
-                                         g.constant({1}, &ax, DType::INT32));
+    LogicalId inv_std_expanded =
+        g.repeat(inv_std, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
 
     // result = x * inv_std_expanded
     return g.mul(x_id, inv_std_expanded);
 }
 
-REGISTER_KERNEL("JinaL2Norm_F32_2D", 1, 1, matchJinaL2Norm_F32_2D, runJinaL2Norm_F32_2D, refFactoryJinaL2Norm_F32_2D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32},
-                {{1, 768}},
-                {true},
+REGISTER_KERNEL("JinaL2Norm_F32_2D", 1, 1, matchJinaL2Norm_F32_2D, runJinaL2Norm_F32_2D, refFactoryJinaL2Norm_F32_2D,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 768}}, {true},
                 {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

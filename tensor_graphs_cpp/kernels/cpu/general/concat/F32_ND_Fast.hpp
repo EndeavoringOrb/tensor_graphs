@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <cstring>
@@ -33,20 +33,22 @@ inline void runConcatF32_Fast(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t o_start = t * chunk;
             uint32_t o_end = std::min(o_start + chunk, (uint32_t)outer);
-            for (uint32_t o = o_start; o < o_end; ++o) {
+            for (uint32_t o = o_start; o < o_end; ++o)
+            {
                 uint64_t out_axis_offset = 0;
-                for (uint64_t n = 1; n < ctx.inputs.size(); ++n) {
+                for (uint64_t n = 1; n < ctx.inputs.size(); ++n)
+                {
                     uint32_t axis_dim = ctx.inViews[n].getShape()[axis];
                     const float *src = static_cast<const float *>(ctx.inputs[n]) + (o * axis_dim * inner);
                     float *dst = out_ptr + (o * out_shape[axis] * inner) + (out_axis_offset * inner);
                     std::memcpy(dst, src, axis_dim * inner * sizeof(float));
                     out_axis_offset += axis_dim;
                 }
-            } });
+            }
+        });
     }
     for (auto &w : workers)
         w.join();
@@ -62,5 +64,8 @@ inline LogicalId refFactoryConcatF32_Fast(const std::vector<LogicalId> &inputs, 
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Concat_F32_Fast", 2, UINT32_MAX, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::INT32, DType::FLOAT32}, {{1}, {1, 24, 1536, 128}}, {false, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Concat_F32_Fast", 2, UINT32_MAX, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::INT32, DType::FLOAT32},
+                {{1}, {1, 24, 1536, 128}}, {false, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

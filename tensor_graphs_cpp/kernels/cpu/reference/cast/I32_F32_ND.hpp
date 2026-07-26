@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 /**
  * KERNEL: CAST INT32 -> FLOAT32 (ND, Contiguous)
@@ -11,7 +11,6 @@
 
 inline bool matchCastI32_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-
     // Check Shape Identity
     if (inputs[0].getShape() != output.getShape())
         return false;
@@ -37,4 +36,5 @@ inline void runCastI32_F32_ND(const KernelContext &ctx)
 }
 
 // Register as a CPU kernel for the CAST operation
-REGISTER_REF_KERNEL(OpType::CAST, 1, 1, matchCastI32_F32_ND, runCastI32_F32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::INT32}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_REF_KERNEL(OpType::CAST, 1, 1, matchCastI32_F32_ND, runCastI32_F32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::INT32}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});

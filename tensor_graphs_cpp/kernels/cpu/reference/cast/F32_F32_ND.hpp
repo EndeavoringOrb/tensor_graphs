@@ -1,8 +1,9 @@
 // File: tensor_graphs_cpp/kernels/cpu/reference/cast/F32_F32_ND.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cstring>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchCastF32_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -26,4 +27,6 @@ inline void runCastF32_F32_ND(const KernelContext &ctx)
     std::memcpy(dst, src, numElements * sizeof(float));
 }
 
-REGISTER_REF_KERNEL(OpType::CAST, 1, 1, matchCastF32_F32_ND, runCastF32_F32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_REF_KERNEL(OpType::CAST, 1, 1, matchCastF32_F32_ND, runCastF32_F32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{8, 32}}, {true},
+                    {{MemSpace(1, HandleType::CPP)}});

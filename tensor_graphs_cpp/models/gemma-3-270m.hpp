@@ -1,8 +1,9 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/memory.hpp"
-#include "core/graph.hpp"
 #include <string>
+
+#include "core/graph.hpp"
+#include "core/memory.hpp"
+#include "core/types.hpp"
 
 struct Gemma3ModelConfig
 {
@@ -18,7 +19,7 @@ struct Gemma3ModelConfig
 
 class Gemma3Model
 {
-private:
+  private:
     Gemma3ModelConfig cfg;
     Graph &g;
     MemoryManager &mem;
@@ -29,8 +30,9 @@ private:
     LogicalId eps_fp32;
     LogicalId half_fp32;
 
-public:
-    Gemma3Model(Gemma3ModelConfig config, uint32_t sequence_length, Graph &graph, MemoryManager &memory, const std::string &weight_path)
+  public:
+    Gemma3Model(Gemma3ModelConfig config, uint32_t sequence_length, Graph &graph, MemoryManager &memory,
+                const std::string &weight_path)
         : cfg(config), g(graph), mem(memory), w_path(weight_path), eps(1e-6f), seq_len(sequence_length)
     {
         float one_val = 1.0f;
@@ -156,13 +158,16 @@ public:
         float h_dim_val = (float)cfg.head_dim;
         LogicalId h_dim_fp = g.constant({1}, &h_dim_val, DType::FLOAT32);
         int32_t shape_1d[] = {(int32_t)(cfg.head_dim / 2)};
-        LogicalId h_dim_fp_1d = g.repeat(h_dim_fp, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
+        LogicalId h_dim_fp_1d =
+            g.repeat(h_dim_fp, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
         LogicalId exponent = g.div(indices, h_dim_fp_1d);
         float theta_val = 10000.0f;
         LogicalId theta = g.constant({1}, &theta_val, DType::FLOAT32);
-        LogicalId theta_1d = g.repeat(theta, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
+        LogicalId theta_1d =
+            g.repeat(theta, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
         LogicalId base_to_exponent = g.pow(theta_1d, exponent);
-        LogicalId one_1d = g.repeat(one_fp32, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
+        LogicalId one_1d =
+            g.repeat(one_fp32, g.constant({1}, shape_1d, DType::INT32), g.constant({1}, &start_val, DType::INT32));
         LogicalId inv_freq = g.div(one_1d, base_to_exponent);
 
         int32_t pos_stop_val = seq_len;
@@ -194,12 +199,14 @@ public:
         int32_t starts1[] = {0, 0, 0};
         int32_t ends1[] = {(int32_t)n_groups, (int32_t)seq_len, (int32_t)cfg.head_dim / 2};
         int32_t steps1[] = {1, 1, 1};
-        LogicalId x1 = g.slice(x_id, g.constant({3}, starts1, DType::INT32), g.constant({3}, ends1, DType::INT32), g.constant({3}, steps1, DType::INT32));
+        LogicalId x1 = g.slice(x_id, g.constant({3}, starts1, DType::INT32), g.constant({3}, ends1, DType::INT32),
+                               g.constant({3}, steps1, DType::INT32));
         x1 = g.contiguous(x1);
 
         int32_t starts2[] = {0, 0, (int32_t)cfg.head_dim / 2};
         int32_t ends2[] = {(int32_t)n_groups, (int32_t)seq_len, (int32_t)cfg.head_dim};
-        LogicalId x2 = g.slice(x_id, g.constant({3}, starts2, DType::INT32), g.constant({3}, ends2, DType::INT32), g.constant({3}, steps1, DType::INT32));
+        LogicalId x2 = g.slice(x_id, g.constant({3}, starts2, DType::INT32), g.constant({3}, ends2, DType::INT32),
+                               g.constant({3}, steps1, DType::INT32));
         LogicalId neg_x2 = g.neg(x2);
         int32_t axis = 2;
         LogicalId rotated = g.concat({neg_x2, x1}, g.constant({1}, &axis, DType::INT32));
@@ -229,13 +236,13 @@ public:
         return g.reshape(scaled_mask, g.constant({3}, final_shape, DType::INT32));
     }
 
-    std::tuple<LogicalId, LogicalId, LogicalId> attention_qkv_atomic(LogicalId x, const std::string &prefix, LogicalId rope_cos, LogicalId rope_sin)
+    std::tuple<LogicalId, LogicalId, LogicalId> attention_qkv_atomic(LogicalId x, const std::string &prefix,
+                                                                     LogicalId rope_cos, LogicalId rope_sin)
     {
         int32_t perm_dims[] = {1, 0};
         LogicalId dims_node = g.constant({2}, perm_dims, DType::INT32);
 
-        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
-        {
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d) {
             LogicalId w = weight(w_path, prefix + suffix);
             LogicalId w_t = g.permute(w, dims_node);
             w_t = g.contiguous(w_t);
@@ -290,14 +297,16 @@ public:
         return std::make_tuple(g.contiguous(q), g.contiguous(k), g.contiguous(v));
     }
 
-    LogicalId attention_output_atomic(std::tuple<LogicalId, LogicalId, LogicalId> qkv, const std::string &prefix, LogicalId mask_id)
+    LogicalId attention_output_atomic(std::tuple<LogicalId, LogicalId, LogicalId> qkv, const std::string &prefix,
+                                      LogicalId mask_id)
     {
         LogicalId q = std::get<0>(qkv);
         LogicalId k = std::get<1>(qkv);
         LogicalId v = std::get<2>(qkv);
 
         float scale_val = 1.0f / std::sqrt((float)cfg.query_pre_attn_scalar);
-        LogicalId scale_node = expand_scalar_to_3d(g.constant({1}, &scale_val, DType::FLOAT32), cfg.n_heads, seq_len, cfg.head_dim);
+        LogicalId scale_node =
+            expand_scalar_to_3d(g.constant({1}, &scale_val, DType::FLOAT32), cfg.n_heads, seq_len, cfg.head_dim);
         LogicalId scaled_q = g.mul(q, scale_node);
 
         int32_t perm_k[] = {0, 2, 1};
@@ -348,8 +357,7 @@ public:
         int32_t perm_dims[] = {1, 0};
         LogicalId p_node = g.constant({2}, perm_dims, DType::INT32);
 
-        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
-        {
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d) {
             LogicalId w = weight(w_path, prefix + suffix);
             LogicalId w_t = g.permute(w, p_node);
             w_t = g.contiguous(w_t);
@@ -373,7 +381,8 @@ public:
         LogicalId w_emb = weight(w_path, "model.embed_tokens.weight");
         LogicalId x = g.gather(w_emb, input_ids_id);
         float scale_val = std::sqrt((float)cfg.emb_dim);
-        LogicalId scale_node = expand_scalar_to_3d(g.constant({1}, &scale_val, DType::FLOAT32), 1, seq_len, cfg.emb_dim);
+        LogicalId scale_node =
+            expand_scalar_to_3d(g.constant({1}, &scale_val, DType::FLOAT32), 1, seq_len, cfg.emb_dim);
         x = g.mul(x, scale_node);
 
         auto rope = compute_rope();

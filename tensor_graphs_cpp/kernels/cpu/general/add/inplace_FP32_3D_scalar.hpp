@@ -1,8 +1,9 @@
 // File: tensor_graphs_cpp/kernels/cpu/general/add/inplace_FP32_3D_scalar.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <vector>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchAddFP32_3D_Scalar_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -64,4 +65,7 @@ inline LogicalId refFactoryAdd3D_Scalar_Inplace(const std::vector<LogicalId> &in
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL_INPLACE("Add_3D_Scalar_inplace", 2, 2, matchAddFP32_3D_Scalar_Inplace, runAddFP32_3D_Scalar_Inplace, refFactoryAdd3D_Scalar_Inplace, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL_INPLACE("Add_3D_Scalar_inplace", 2, 2, matchAddFP32_3D_Scalar_Inplace, runAddFP32_3D_Scalar_Inplace,
+                        refFactoryAdd3D_Scalar_Inplace, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                        {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true},
+                        {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

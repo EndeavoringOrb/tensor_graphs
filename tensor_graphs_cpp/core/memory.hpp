@@ -1,15 +1,16 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/hardware.hpp"
-#include "core/kernels.hpp"
-#include <vector>
-#include <unordered_map>
-#include <cstring>
-#include <stdexcept>
-#include <iostream>
-#include <mutex>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <mutex>
+#include <stdexcept>
+#include <unordered_map>
+#include <vector>
+
+#include "core/hardware.hpp"
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -88,7 +89,10 @@ struct InterruptManager
         std::cerr << "\n[TensorGraph] Caught interrupt signal (" << signum << "). Cleaning up..." << std::endl;
         g_interrupted = 1;
     }
-    static bool isInterrupted() { return g_interrupted != 0; }
+    static bool isInterrupted()
+    {
+        return g_interrupted != 0;
+    }
     static void hook()
     {
         static bool hooked = false;
@@ -105,7 +109,9 @@ struct DeviceBuffer
     MemSpace mem_space;
     uint64_t sizeBytes;
 
-    DeviceBuffer(MemSpace ms, uint64_t size) : mem_space(ms), sizeBytes((size + 4095) & ~4095ULL) {}
+    DeviceBuffer(MemSpace ms, uint64_t size) : mem_space(ms), sizeBytes((size + 4095) & ~4095ULL)
+    {
+    }
     virtual ~DeviceBuffer() = default;
 
     virtual void init() = 0;
@@ -115,14 +121,23 @@ struct DeviceBuffer
     virtual void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) = 0;
     virtual void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) = 0;
     virtual void cleanupContext(KernelContext &ctx) = 0;
-    virtual uint8_t *getBasePtr() { return nullptr; }
+    virtual uint8_t *getBasePtr()
+    {
+        return nullptr;
+    }
 };
 
 struct StorageBuffer : public DeviceBuffer
 {
-    StorageBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size) {}
-    void init() override {}
-    void freeArena() override {}
+    StorageBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size)
+    {
+    }
+    void init() override
+    {
+    }
+    void freeArena() override
+    {
+    }
     void write(uint64_t offset, const void *data, uint64_t size) override
     {
         Error::throw_err("Cannot write to StorageBuffer");
@@ -141,7 +156,9 @@ struct StorageBuffer : public DeviceBuffer
     {
         Error::throw_err("Cannot use StorageBuffer as output");
     }
-    void cleanupContext(KernelContext &ctx) override {}
+    void cleanupContext(KernelContext &ctx) override
+    {
+    }
 };
 
 struct CppBuffer : public DeviceBuffer
@@ -189,8 +206,13 @@ struct CppBuffer : public DeviceBuffer
         ctx.outputs.push_back(arena_ptr + v.offset);
         ctx.cl_outputs.push_back(nullptr);
     }
-    void cleanupContext(KernelContext &ctx) override {}
-    uint8_t *getBasePtr() override { return arena_ptr; }
+    void cleanupContext(KernelContext &ctx) override
+    {
+    }
+    uint8_t *getBasePtr() override
+    {
+        return arena_ptr;
+    }
 };
 
 #ifdef USE_CUDA
@@ -250,8 +272,13 @@ struct CudaBuffer : public DeviceBuffer
         ctx.outputs.push_back(arena_ptr + v.offset);
         ctx.cl_outputs.push_back(nullptr);
     }
-    void cleanupContext(KernelContext &ctx) override {}
-    uint8_t *getBasePtr() override { return arena_ptr; }
+    void cleanupContext(KernelContext &ctx) override
+    {
+    }
+    uint8_t *getBasePtr() override
+    {
+        return arena_ptr;
+    }
 };
 #endif
 
@@ -368,7 +395,10 @@ struct OpenCLBuffer : public DeviceBuffer
                 clReleaseMemObject(sub);
         }
     }
-    uint8_t *getBasePtr() override { return nullptr; }
+    uint8_t *getBasePtr() override
+    {
+        return nullptr;
+    }
 };
 
 struct MemoryManager
@@ -378,7 +408,8 @@ struct MemoryManager
     MemoryManager(std::unordered_map<MemSpace, uint64_t> bufferSizes)
     {
         // Register default storage buffer space
-        buffers[MemSpace{0, HandleType::STORAGE}] = std::make_unique<StorageBuffer>(MemSpace{0, HandleType::STORAGE}, 0);
+        buffers[MemSpace{0, HandleType::STORAGE}] =
+            std::make_unique<StorageBuffer>(MemSpace{0, HandleType::STORAGE}, 0);
 
         for (auto &pair : bufferSizes)
         {

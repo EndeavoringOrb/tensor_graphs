@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 
@@ -84,5 +84,7 @@ inline LogicalId refQwenVecMat(const std::vector<LogicalId> &inputs, Graph &grap
 {
     return graph.dot(inputs[0], inputs[1]);
 }
-REGISTER_KERNEL("Qwen_VecMat_NEON", 2, 2, matchQwenVecMat, runQwenVecMat, refQwenVecMat, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{32, 1, 128}, {32, 128, 128}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Qwen_VecMat_NEON", 2, 2, matchQwenVecMat, runQwenVecMat, refQwenVecMat, MemSpace(1, HandleType::CPP),
+                {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{32, 1, 128}, {32, 128, 128}},
+                {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

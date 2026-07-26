@@ -1,12 +1,14 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cstring>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 /**
  * KERNEL: CONTIGUOUS (Generic ND)
  * Purpose: Ensures the tensor is contiguous in memory.
- * Operation: Copies data from a potentially strided source to a contiguous destination.
+ * Operation: Copies data from a potentially strided source to a contiguous
+ * destination.
  */
 
 inline bool matchContiguous_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
@@ -19,8 +21,8 @@ inline bool matchContiguous_ND(const std::vector<TensorNode> &inputs, const Tens
     if (in.getShape() != output.getShape())
         return false;
 
-    // Input must not be contiguous (otherwise this kernel is redundant, though technically valid)
-    // Output must be contiguous
+    // Input must not be contiguous (otherwise this kernel is redundant, though
+    // technically valid) Output must be contiguous
     if (!isContiguous(output))
         return false;
 
@@ -76,4 +78,5 @@ inline void runContiguous_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::CONTIGUOUS, 1, 1, matchContiguous_ND, runContiguous_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {false}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_REF_KERNEL(OpType::CONTIGUOUS, 1, 1, matchContiguous_ND, runContiguous_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {false}, {{MemSpace(1, HandleType::CPP)}});

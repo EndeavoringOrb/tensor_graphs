@@ -1,12 +1,13 @@
 #pragma once
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 #include "core/loaders/base_loader.hpp"
 #include "core/types.hpp"
-#include <filesystem>
-#include <vector>
-#include <fstream>
-#include <unordered_map>
-#include <string>
-#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -26,7 +27,7 @@ struct SafetensorsTensorMetadata
 
 class SafetensorsLoader : public ModelLoader
 {
-public:
+  public:
     SafetensorsLoader(const std::string &path)
     {
         std::vector<std::string> filepaths;
@@ -92,7 +93,10 @@ public:
         const auto &meta = it->second;
         if (meta.sizeBytes() > destSize)
         {
-            Error::throw_err("[SafetensorsLoader.loadTensor] Destination buffer too small for tensor '" + name + "' (dst=" + std::to_string(destSize) + "), (tensor_size=" + std::to_string(meta.sizeBytes()) + ")");
+            Error::throw_err("[SafetensorsLoader.loadTensor] Destination buffer too "
+                             "small for tensor '" +
+                             name + "' (dst=" + std::to_string(destSize) +
+                             "), (tensor_size=" + std::to_string(meta.sizeBytes()) + ")");
         }
 
         const std::string &fname = files[meta.fileIndex].path;
@@ -106,7 +110,7 @@ public:
         file.read(reinterpret_cast<char *>(dest), meta.sizeBytes());
     }
 
-private:
+  private:
     struct FileInfo
     {
         std::string path;

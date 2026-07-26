@@ -1,19 +1,22 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/gelu/jina_F32_3D_Exact_Erf_Neon_Threaded.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/gelu/jina_F32_3D_Exact_Erf_Neon_Threaded.hpp
 //
 // FUSED KERNEL: Exact-erf GELU for jina-embeddings-v5-omni-nano-retrieval
 //
-// Matches the exact subgraph produced by JinaV5OmniNanoRetrievalModel::gelu_exact():
+// Matches the exact subgraph produced by
+// JinaV5OmniNanoRetrievalModel::gelu_exact():
 //
 //   gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
 //
 // where erf is the Abramowitz-Stegun approximation:
 //   t = 1 / (1 + p * |z|),  p = 0.3275911
-//   erf(z) = sign(z) * (1 - (a1*t + a2*t^2 + a3*t^3 + a4*t^4 + a5*t^5) * exp(-z^2))
+//   erf(z) = sign(z) * (1 - (a1*t + a2*t^2 + a3*t^3 + a4*t^4 + a5*t^5) *
+//   exp(-z^2))
 //
-// The model's decomposed form creates ~30+ intermediate tensors of size (1, S, D),
-// each requiring a full memory pass.  For S=4320, D=3072 (vision MLP), that's
-// ~30 * 53 MB = 1.6 GB of intermediate traffic per call.  This fused kernel
-// reads the input once and writes the output once — a >10× reduction in
+// The model's decomposed form creates ~30+ intermediate tensors of size (1, S,
+// D), each requiring a full memory pass.  For S=4320, D=3072 (vision MLP),
+// that's ~30 * 53 MB = 1.6 GB of intermediate traffic per call.  This fused
+// kernel reads the input once and writes the output once — a >10× reduction in
 // memory traffic.
 //
 // Hardware: Qualcomm aarch64 (ARMv8.6, 12 cores, NEON FMA).
@@ -21,12 +24,13 @@
 // 0.3275911, 1.0, 0.254829592, -0.284496736, 1.421413741, -1.453152027,
 // 1.061405429, 2.718281828459045.
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <cmath>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -103,8 +107,7 @@ static inline float32x4_t jina_gelu_erf_neon(float32x4_t z)
 // ---------------------------------------------------------------------------
 // Match: 1 input (x 3-D), output contiguous.
 // ---------------------------------------------------------------------------
-inline bool matchJinaGeluExact_F32_3D(const std::vector<TensorNode> &inputs,
-                                      const TensorNode &output)
+inline bool matchJinaGeluExact_F32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs[0].getShape().size() != 3)
         return false;
@@ -135,8 +138,7 @@ inline void runJinaGeluExact_F32_3D(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint64_t start = t * chunk;
             uint64_t end = std::min(start + chunk, n);
 
@@ -189,11 +191,13 @@ inline void runJinaGeluExact_F32_3D(const KernelContext &ctx)
                 // Scalar erf using the same AS approximation
                 float az = std::fabs(z);
                 float t = 1.0f / (1.0f + 0.3275911f * az);
-                float poly = t * (0.254829592f + t * (-0.284496736f + t * (1.421413741f + t * (-1.453152027f + t * 1.061405429f))));
+                float poly = t * (0.254829592f +
+                                  t * (-0.284496736f + t * (1.421413741f + t * (-1.453152027f + t * 1.061405429f))));
                 float erf_pos = 1.0f - poly * std::exp(-z * z);
                 float erf_val = (z >= 0.0f) ? erf_pos : -erf_pos;
                 out[i] = 0.5f * x * (1.0f + erf_val);
-            } });
+            }
+        });
     }
     for (auto &worker : workers)
         worker.join();
@@ -206,8 +210,7 @@ inline void runJinaGeluExact_F32_3D(const KernelContext &ctx)
 // Each expand_scalar_to_3d(val, 1, S, D) creates:
 //   const(val) → reshape({1,1,1}) → repeat(axis=1, S) → repeat(axis=2, D)
 // ---------------------------------------------------------------------------
-inline LogicalId refFactoryJinaGeluExact_F32_3D(const std::vector<LogicalId> &inputs,
-                                               Graph &g)
+inline LogicalId refFactoryJinaGeluExact_F32_3D(const std::vector<LogicalId> &inputs, Graph &g)
 {
     LogicalId x_id = inputs[0];
     const auto &shape = g.getNode(x_id).getShape();
@@ -215,8 +218,7 @@ inline LogicalId refFactoryJinaGeluExact_F32_3D(const std::vector<LogicalId> &in
     uint32_t D = shape[2];
 
     // Helper: expand_scalar_to_3d(val, 1, S, D) → {1, S, D}
-    auto expand_scalar_SD = [&](float val) -> LogicalId
-    {
+    auto expand_scalar_SD = [&](float val) -> LogicalId {
         LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
         LogicalId out = g.reshape(node, g.constant({3}, sh, DType::INT32));
@@ -224,17 +226,13 @@ inline LogicalId refFactoryJinaGeluExact_F32_3D(const std::vector<LogicalId> &in
         {
             int32_t rep = (int32_t)S;
             int32_t ax = 1;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         if (D > 1)
         {
             int32_t rep = (int32_t)D;
             int32_t ax = 2;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         return out;
     };
@@ -300,13 +298,8 @@ inline LogicalId refFactoryJinaGeluExact_F32_3D(const std::vector<LogicalId> &in
     return g.mul(half_x, one_plus_erf);
 }
 
-REGISTER_KERNEL("JinaGeluExact_F32_3D", 1, 1,
-                matchJinaGeluExact_F32_3D, runJinaGeluExact_F32_3D,
-                refFactoryJinaGeluExact_F32_3D,
-                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32},
-                {{1, 1024, 3072}},
-                {true},
-                {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("JinaGeluExact_F32_3D", 1, 1, matchJinaGeluExact_F32_3D, runJinaGeluExact_F32_3D,
+                refFactoryJinaGeluExact_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32}, {{1, 1024, 3072}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

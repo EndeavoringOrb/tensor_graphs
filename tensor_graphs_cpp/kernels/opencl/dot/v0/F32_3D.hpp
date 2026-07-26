@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #include "kernels/opencl/opencl_utils.hpp"
 
 inline bool matchDotF32_3D_OpenCL_v0(const std::vector<TensorNode> &inputs, const TensorNode &output)
@@ -39,12 +39,12 @@ inline void runDotF32_3D_OpenCL_v0(const KernelContext &ctx)
     clSetKernelArg(k, 6, sizeof(uint64_t), &N);
 
     uint64_t local_work_size[3] = {16, 16, 1};
-    uint64_t global_work_size[3] = {
-        ((N + local_work_size[0] - 1) / local_work_size[0]) * local_work_size[0],
-        ((M + local_work_size[1] - 1) / local_work_size[1]) * local_work_size[1],
-        (uint64_t)B_count};
+    uint64_t global_work_size[3] = {((N + local_work_size[0] - 1) / local_work_size[0]) * local_work_size[0],
+                                    ((M + local_work_size[1] - 1) / local_work_size[1]) * local_work_size[1],
+                                    (uint64_t)B_count};
 
-    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 3, nullptr, global_work_size, local_work_size, 0, nullptr, nullptr);
+    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 3, nullptr, global_work_size, local_work_size, 0,
+                                        nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Dot_F32_3D_v0");
 
@@ -56,4 +56,7 @@ inline LogicalId refFactoryDotF32_3D_OpenCL_v0(const std::vector<LogicalId> &inp
     return graph.dot(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Dot_F32_3D_OpenCL_v0", 2, 2, matchDotF32_3D_OpenCL_v0, runDotF32_3D_OpenCL_v0, refFactoryDotF32_3D_OpenCL_v0, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 16, 32}, {1, 32, 16}}, {true, true}, {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});
+REGISTER_KERNEL("Dot_F32_3D_OpenCL_v0", 2, 2, matchDotF32_3D_OpenCL_v0, runDotF32_3D_OpenCL_v0,
+                refFactoryDotF32_3D_OpenCL_v0, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{1, 16, 32}, {1, 32, 16}}, {true, true},
+                {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});

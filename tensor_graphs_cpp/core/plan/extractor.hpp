@@ -1,27 +1,28 @@
 #pragma once
-#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
-#include <algorithm>
-#include <memory>
-#include <functional>
-#include <cmath>
-#include <limits>
-#include <stdexcept>
-#include <iostream>
-#include <sstream>
-#include <fstream>
-#include <filesystem>
-#include "core/types.hpp"
-#include "core/graph.hpp"
+#include <vector>
+
+#include "core/common/constants.hpp"
 #include "core/cost_model.hpp"
+#include "core/egraph.hpp"
+#include "core/graph.hpp"
 #include "core/kernels.hpp"
+#include "core/misc.hpp"
+#include "core/plan/validators/validator.hpp"
 #include "core/rewrite.hpp"
 #include "core/shapes.hpp"
-#include "core/misc.hpp"
-#include "core/egraph.hpp"
-#include "core/common/constants.hpp"
-#include "core/plan/validators/validator.hpp"
+#include "core/types.hpp"
 
 struct ENodeInfo
 {
@@ -33,20 +34,24 @@ struct ENodeInfo
 
 struct DispatchIterator
 {
-public:
-    DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map) : egraph(_egraph)
+  public:
+    DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map)
+        : egraph(_egraph)
     {
         initOrderState(selection_map);
     }
 
-    bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map, std::vector<EClassId> &out_order)
+    bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
+                              std::vector<EClassId> &out_order)
     {
         if (is_done)
             return false;
 
-        if (!first_yield) // The first time we are at the root we don't want to exit
+        if (!first_yield) // The first time we are at the root we don't want to
+                          // exit
         {
-            if (!ascend()) // If we are back at the root, we have gone through all dispatch orders
+            if (!ascend()) // If we are back at the root, we have gone through all
+                           // dispatch orders
             {
                 is_done = true;
                 return false;
@@ -60,7 +65,8 @@ public:
             {
                 std::vector<EClassId> ready = get_ready(selection_map);
 
-                // Safety check for dependency cycles (though CycleValidator handles most of this)
+                // Safety check for dependency cycles (though CycleValidator handles
+                // most of this)
                 if (ready.empty() && !remaining.empty())
                 {
                     is_done = true;
@@ -113,7 +119,7 @@ public:
         return iter;
     }
 
-private:
+  private:
     const EGraph &egraph;
     std::unordered_set<EClassId> remaining;
     std::vector<EClassId> ordered;
@@ -176,42 +182,44 @@ private:
 
 struct Extractor
 {
-private:
+  private:
     std::vector<std::unique_ptr<ISelectionValidator>> validators;
 
-public:
+  public:
     std::unordered_map<EClassId, uint32_t> selection_map; // EClass -> ENode (idx into EClass.enodes)
     const EGraph &egraph;
     std::vector<EClassId> path;                      // List of EClasses in selection_map, in order root -> leaves
     std::vector<EClassId> to_process;                // EClass ids to process
-    std::vector<EClassId> to_process_enode;          // what does this do??? is it just used to know when we have extracted all graphs???
-    std::unordered_map<EClassId, uint32_t> next_sel; // EClass -> ENode idx, what enode should we move to next time we encounter this eclass
+    std::vector<EClassId> to_process_enode;          // what does this do??? is it just used to know when we
+                                                     // have extracted all graphs???
+    std::unordered_map<EClassId, uint32_t> next_sel; // EClass -> ENode idx, what enode should we move to next time
+                                                     // we encounter this eclass
     EClassId target_backtrack_eclass;
     uint64_t numClasses;
 
     bool updated_buffers = false;
     bool updated_cost = false;
 
-    Extractor(const EGraph &_egraph, EClassId root_eclass_id) : egraph(_egraph), numClasses(_egraph.classes.size()), to_process({root_eclass_id}) {}
+    Extractor(const EGraph &_egraph, EClassId root_eclass_id)
+        : egraph(_egraph), numClasses(_egraph.classes.size()), to_process({root_eclass_id})
+    {
+    }
 
     void registerValidator(std::unique_ptr<ISelectionValidator> validator)
     {
         validators.push_back(std::move(validator));
     }
 
-    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map,
-                  const std::vector<EClassId> &order,
-                  std::vector<ParallelBuffer> &buffers,
-                  std::unordered_map<EClassId, BufferId> &eclass_to_buf,
-                  BufferId &overflow,
-                  float &cost,
-                  std::string &reason)
+    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
+                  std::vector<ParallelBuffer> &buffers, std::unordered_map<EClassId, BufferId> &eclass_to_buf,
+                  BufferId &overflow, float &cost, std::string &reason)
     {
         updated_buffers = false;
         updated_cost = false;
         for (const auto &validator : validators)
         {
-            if (!validator->validate(selection_map, order, buffers, eclass_to_buf, overflow, cost, reason, updated_buffers, updated_cost))
+            if (!validator->validate(selection_map, order, buffers, eclass_to_buf, overflow, cost, reason,
+                                     updated_buffers, updated_cost))
             {
                 return false;
             }
@@ -284,14 +292,16 @@ public:
         return selection_map;
     }
 
-    void backtrack(const std::string reason, const std::unordered_map<EClassId, BufferId> &eclass_to_buf, const BufferId overflow)
+    void backtrack(const std::string reason, const std::unordered_map<EClassId, BufferId> &eclass_to_buf,
+                   const BufferId overflow)
     {
         target_backtrack_eclass = EClassId{UINT32_MAX};
         int best_backtrack_idx = std::numeric_limits<int>::max();
         if (reason == "cycle")
         {
-            // Compute SCCs of the selection-induced subgraph using Tarjan's algorithm.
-            // For each SCC of size > 1 (or size == 1 with a self-loop, i.e. a true cycle):
+            // Compute SCCs of the selection-induced subgraph using Tarjan's
+            // algorithm. For each SCC of size > 1 (or size == 1 with a self-loop,
+            // i.e. a true cycle):
             //   collect members that are in `path` and have >= 1 alternative.
             // Among all such members across all non-trivial SCCs, pick the one
             // with the smallest path index. That's the backtrack target.
@@ -308,8 +318,7 @@ public:
             std::vector<EClassId> st;
             int time_counter = 0;
 
-            std::function<void(EClassId)> tarjan = [&](EClassId u)
-            {
+            std::function<void(EClassId)> tarjan = [&](EClassId u) {
                 disc[u.value] = low[u.value] = time_counter++;
                 st.push_back(u);
                 onStack[u.value] = true;
@@ -411,15 +420,14 @@ public:
             if (best_backtrack_idx != std::numeric_limits<int>::max())
             {
                 target_backtrack_eclass = path[best_backtrack_idx];
-                std::cout << "[Planner.extractBest] cycle: backtracking to eclass "
-                          << toString(target_backtrack_eclass)
-                          << " (path index " << best_backtrack_idx << " of " << path.size() << ")"
-                          << std::endl;
+                std::cout << "[Planner.extractBest] cycle: backtracking to eclass " << toString(target_backtrack_eclass)
+                          << " (path index " << best_backtrack_idx << " of " << path.size() << ")" << std::endl;
             }
         }
         else if (reason.rfind("OOM", 0) == 0)
         {
-            // Search path from deepest to highest for an eclass with alternatives that uses failed_ms
+            // Search path from deepest to highest for an eclass with alternatives
+            // that uses failed_ms
             for (int i = 0; i < path.size(); i++)
             {
                 EClassId ec = path[i];
@@ -440,10 +448,8 @@ public:
             if (best_backtrack_idx != std::numeric_limits<int>::max())
             {
                 target_backtrack_eclass = path[best_backtrack_idx];
-                std::cout << "[Planner.extractBest] OOM: backtracking to eclass "
-                          << toString(target_backtrack_eclass)
-                          << " (path index " << best_backtrack_idx << " of " << path.size() << ")"
-                          << std::endl;
+                std::cout << "[Planner.extractBest] OOM: backtracking to eclass " << toString(target_backtrack_eclass)
+                          << " (path index " << best_backtrack_idx << " of " << path.size() << ")" << std::endl;
             }
         }
     }

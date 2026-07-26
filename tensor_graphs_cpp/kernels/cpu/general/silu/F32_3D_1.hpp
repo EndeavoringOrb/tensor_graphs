@@ -1,7 +1,8 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cmath>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 // =============================================================================
 // FUSED KERNEL: SiLU (Sigmoid Linear Unit) F32
@@ -108,4 +109,6 @@ inline LogicalId refFactorySilu(const std::vector<LogicalId> &inputs, Graph &gra
     return graph.mul(x_id, sig);
 }
 
-REGISTER_KERNEL("Silu_3D_1", 1, 1, matchSiluF32, runSiluF32, refFactorySilu, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 2048}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Silu_3D_1", 1, 1, matchSiluF32, runSiluF32, refFactorySilu, MemSpace(1, HandleType::CPP),
+                {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 2048}}, {true},
+                {{MemSpace(1, HandleType::CPP)}});

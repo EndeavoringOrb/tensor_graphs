@@ -1,9 +1,10 @@
 // File: tensor_graphs_cpp/kernels/cpu/reference/concat/F32_ND.hpp
 #pragma once
-#include "core/types.hpp"
+#include <cstring>
+
 #include "core/kernels.hpp"
 #include "core/shapes.hpp"
-#include <cstring>
+#include "core/types.hpp"
 
 inline bool matchConcatF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -56,11 +57,14 @@ inline void runConcatF32_ND(const KernelContext &ctx)
 
         // 5. Use strides to find actual physical memory locations
         uint64_t out_phys_idx = getStridedIndex(i, outShape, outStrides);
-        uint64_t in_phys_idx = getStridedIndex(local_flat_idx, ctx.inViews[n + 1].getShape(), ctx.inViews[n + 1].strides);
+        uint64_t in_phys_idx =
+            getStridedIndex(local_flat_idx, ctx.inViews[n + 1].getShape(), ctx.inViews[n + 1].strides);
 
         const float *in_ptr = static_cast<const float *>(ctx.inputs[n + 1]);
         out[out_phys_idx] = in_ptr[in_phys_idx];
     }
 }
 
-REGISTER_REF_KERNEL(OpType::CONCAT, 2, UINT32_MAX, matchConcatF32_ND, runConcatF32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::INT32, DType::FLOAT32}, {{1}, {8, 32}}, {false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_REF_KERNEL(OpType::CONCAT, 2, UINT32_MAX, matchConcatF32_ND, runConcatF32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::INT32, DType::FLOAT32}, {{1}, {8, 32}}, {false, false},
+                    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

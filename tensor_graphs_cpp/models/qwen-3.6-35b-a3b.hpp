@@ -1,12 +1,14 @@
 // File: tensor_graphs_cpp/models/qwen-3.6-35b-a3b.hpp
-// ref: https://github.com/huggingface/transformers/blob/1048e9af78a6045444244412dfe216ba5810e7fb/src/transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py
+// ref:
+// https://github.com/huggingface/transformers/blob/1048e9af78a6045444244412dfe216ba5810e7fb/src/transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py
 #pragma once
-#include "core/types.hpp"
-#include "core/memory.hpp"
-#include "core/graph.hpp"
+#include <cmath>
 #include <string>
 #include <tuple>
-#include <cmath>
+
+#include "core/graph.hpp"
+#include "core/memory.hpp"
+#include "core/types.hpp"
 
 struct Qwen3_6_35B_A3B_Config
 {
@@ -42,7 +44,7 @@ struct Qwen3_6_35B_A3B_Config
 
 class Qwen3_6_35B_A3B_Model
 {
-private:
+  private:
     Qwen3_6_35B_A3B_Config cfg;
     Graph &g;
     MemoryManager &mem;
@@ -61,8 +63,9 @@ private:
         return g.repeat(id, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
     }
 
-public:
-    Qwen3_6_35B_A3B_Model(Qwen3_6_35B_A3B_Config config, uint32_t sequence_length, Graph &graph, MemoryManager &memory, const std::string &weight_path)
+  public:
+    Qwen3_6_35B_A3B_Model(Qwen3_6_35B_A3B_Config config, uint32_t sequence_length, Graph &graph, MemoryManager &memory,
+                          const std::string &weight_path)
         : cfg(config), g(graph), mem(memory), w_path(weight_path), eps(1e-6f), seq_len(sequence_length)
     {
         float one_val = 1.0f;
@@ -227,7 +230,8 @@ public:
         LogicalId x_norm = g.mul(x_id, inv_std_expanded);
         LogicalId weight_expanded = expand_1d_to_3d(weight_id, dim_size, dim0, seq_len);
 
-        // Qwen3.5 MoE / Qwen2 RMSNorm adds 1.0 to the weights (which are initialized to 0)
+        // Qwen3.5 MoE / Qwen2 RMSNorm adds 1.0 to the weights (which are
+        // initialized to 0)
         LogicalId one_full = expand_scalar_to_3d(one_fp32, dim0, seq_len, dim_size);
         LogicalId weight_plus_one = g.add(weight_expanded, one_full);
 
@@ -278,24 +282,21 @@ public:
         float rope_dim_f = (float)cfg.rope_dim;
         LogicalId rope_dim_fp = g.constant({1}, &rope_dim_f, DType::FLOAT32);
         int32_t rep32[] = {half_dim_i};
-        LogicalId rope_dim_fp_1d = g.repeat(rope_dim_fp,
-                                           g.constant({1}, rep32, DType::INT32),
-                                           g.constant({1}, &zero, DType::INT32));
+        LogicalId rope_dim_fp_1d =
+            g.repeat(rope_dim_fp, g.constant({1}, rep32, DType::INT32), g.constant({1}, &zero, DType::INT32));
 
         LogicalId exponent = g.div(indices, rope_dim_fp_1d);
 
         float theta_val = cfg.rope_theta;
         LogicalId theta = g.constant({1}, &theta_val, DType::FLOAT32);
-        LogicalId theta_1d = g.repeat(theta,
-                                     g.constant({1}, rep32, DType::INT32),
-                                     g.constant({1}, &zero, DType::INT32));
+        LogicalId theta_1d =
+            g.repeat(theta, g.constant({1}, rep32, DType::INT32), g.constant({1}, &zero, DType::INT32));
         LogicalId base_to_exponent = g.pow(theta_1d, exponent);
 
         float one_val = 1.0f;
         LogicalId one_node = g.constant({1}, &one_val, DType::FLOAT32);
-        LogicalId one_1d = g.repeat(one_node,
-                                   g.constant({1}, rep32, DType::INT32),
-                                   g.constant({1}, &zero, DType::INT32));
+        LogicalId one_1d =
+            g.repeat(one_node, g.constant({1}, rep32, DType::INT32), g.constant({1}, &zero, DType::INT32));
         LogicalId inv_freq = g.div(one_1d, base_to_exponent); // [32]
 
         // -------- 2. Build the three M-RoPE position axes --------
@@ -309,14 +310,14 @@ public:
         LogicalId w_pos = g.fill(one_node, seq_shape_node);
 
         // -------- 3. Compute full 32-element angles for T, H, W --------
-        auto outer_full = [&](LogicalId pos_1d) -> LogicalId
-        {
+        auto outer_full = [&](LogicalId pos_1d) -> LogicalId {
             // [seq_len] → [1, seq_len, 1], repeat on axis 2 → [1, seq_len, half_dim]
             int32_t pos_shape[] = {1, seq_len_i, 1};
             LogicalId pos_col = g.reshape(pos_1d, g.constant({3}, pos_shape, DType::INT32));
             LogicalId pos_expanded = repeat_3d_axis(pos_col, half_dim_i, 2);
 
-            // [half_dim] → [1, 1, half_dim], repeat on axis 1 → [1, seq_len, half_dim]
+            // [half_dim] → [1, 1, half_dim], repeat on axis 1 → [1, seq_len,
+            // half_dim]
             int32_t freq_shape[] = {1, 1, half_dim_i};
             LogicalId freq_row = g.reshape(inv_freq, g.constant({3}, freq_shape, DType::INT32));
             LogicalId freq_expanded = repeat_3d_axis(freq_row, seq_len_i, 1);
@@ -354,7 +355,8 @@ public:
             interleaved_slices.push_back(slice_i);
         }
 
-        // -------- 5. Concatenate interleaved elements along the channel axis --------
+        // -------- 5. Concatenate interleaved elements along the channel axis
+        // --------
         int32_t ax2_concat = 2;
         LogicalId angles_half = g.concat(interleaved_slices, g.constant({1}, &ax2_concat, DType::INT32));
 
@@ -369,8 +371,7 @@ public:
         return {cos_out, sin_out};
     }
 
-    LogicalId apply_rope(LogicalId x_id, LogicalId cos_id, LogicalId sin_id,
-                        uint32_t n_groups, uint32_t head_dim)
+    LogicalId apply_rope(LogicalId x_id, LogicalId cos_id, LogicalId sin_id, uint32_t n_groups, uint32_t head_dim)
     {
         uint32_t rope_dim = cfg.rope_dim; // 64
         uint32_t half_dim = rope_dim / 2; // 32
@@ -386,29 +387,24 @@ public:
         // -------- 1. Slice out the rotary portion of x --------
         int32_t starts_rope[] = {0, 0, 0};
         int32_t ends_rope[] = {n_groups_i, seq_len_i, rope_dim_i};
-        LogicalId x_rope = g.contiguous(g.slice(x_id,
-                                               g.constant({3}, starts_rope, DType::INT32),
-                                               g.constant({3}, ends_rope, DType::INT32),
-                                               steps_111_node));
+        LogicalId x_rope = g.contiguous(g.slice(x_id, g.constant({3}, starts_rope, DType::INT32),
+                                                g.constant({3}, ends_rope, DType::INT32), steps_111_node));
 
         // -------- 2. Slice x_rope into first and second half elements --------
         // x_first = x_rope[..., :32]
         int32_t starts_first[] = {0, 0, 0};
         int32_t ends_first[] = {n_groups_i, seq_len_i, half_dim_i};
-        LogicalId x_first = g.contiguous(g.slice(x_rope,
-                                                g.constant({3}, starts_first, DType::INT32),
-                                                g.constant({3}, ends_first, DType::INT32),
-                                                steps_111_node));
+        LogicalId x_first = g.contiguous(g.slice(x_rope, g.constant({3}, starts_first, DType::INT32),
+                                                 g.constant({3}, ends_first, DType::INT32), steps_111_node));
 
         // x_second = x_rope[..., 32:64]
         int32_t starts_second[] = {0, 0, half_dim_i};
         int32_t ends_second[] = {n_groups_i, seq_len_i, rope_dim_i};
-        LogicalId x_second = g.contiguous(g.slice(x_rope,
-                                                 g.constant({3}, starts_second, DType::INT32),
-                                                 g.constant({3}, ends_second, DType::INT32),
-                                                 steps_111_node));
+        LogicalId x_second = g.contiguous(g.slice(x_rope, g.constant({3}, starts_second, DType::INT32),
+                                                  g.constant({3}, ends_second, DType::INT32), steps_111_node));
 
-        // -------- 3. Build the standard rotated tensor: [-x_second, x_first] --------
+        // -------- 3. Build the standard rotated tensor: [-x_second, x_first]
+        // --------
         LogicalId neg_x_second = g.neg(x_second);
         int32_t ax2 = 2;
         LogicalId rotated = g.concat({neg_x_second, x_first}, g.constant({1}, &ax2, DType::INT32));
@@ -422,18 +418,16 @@ public:
         LogicalId term2 = g.mul(rotated, sin_expanded);
         LogicalId x_rope_applied = g.add(term1, term2);
 
-        // -------- 6. Pass through the non-rotary portion (rope_dim < head_dim) --------
+        // -------- 6. Pass through the non-rotary portion (rope_dim < head_dim)
+        // --------
         if (rope_dim < head_dim)
         {
             int32_t starts_pass[] = {0, 0, rope_dim_i};
             int32_t ends_pass[] = {n_groups_i, seq_len_i, head_dim_i};
-            LogicalId x_pass = g.contiguous(g.slice(x_id,
-                                                   g.constant({3}, starts_pass, DType::INT32),
-                                                   g.constant({3}, ends_pass, DType::INT32),
-                                                   steps_111_node));
+            LogicalId x_pass = g.contiguous(g.slice(x_id, g.constant({3}, starts_pass, DType::INT32),
+                                                    g.constant({3}, ends_pass, DType::INT32), steps_111_node));
             int32_t ax2_pass = 2;
-            return g.concat({x_rope_applied, x_pass},
-                            g.constant({1}, &ax2_pass, DType::INT32));
+            return g.concat({x_rope_applied, x_pass}, g.constant({1}, &ax2_pass, DType::INT32));
         }
         return x_rope_applied;
     }
@@ -458,13 +452,15 @@ public:
     }
 
     // --- GATED ATTENTION (FULL ATTENTION LAYER) ---
-    std::tuple<LogicalId, LogicalId, LogicalId, LogicalId> gated_attention_qkv_atomic(LogicalId x, const std::string &prefix, LogicalId rope_cos, LogicalId rope_sin)
+    std::tuple<LogicalId, LogicalId, LogicalId, LogicalId> gated_attention_qkv_atomic(LogicalId x,
+                                                                                      const std::string &prefix,
+                                                                                      LogicalId rope_cos,
+                                                                                      LogicalId rope_sin)
     {
         int32_t perm_dims[] = {1, 0};
         LogicalId dims_node = g.constant({2}, perm_dims, DType::INT32);
 
-        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
-        {
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d) {
             LogicalId w = weight(w_path, prefix + suffix);
             LogicalId w_t = g.permute(w, dims_node);
             w_t = g.contiguous(w_t);
@@ -473,9 +469,11 @@ public:
         };
 
         // q_proj provides Q and Gate
-        LogicalId q_and_gate = project(".self_attn.q_proj.weight", cfg.hidden_size, cfg.attn_n_q_heads * cfg.head_dim * 2);
+        LogicalId q_and_gate =
+            project(".self_attn.q_proj.weight", cfg.hidden_size, cfg.attn_n_q_heads * cfg.head_dim * 2);
 
-        // Reshape to 4D to isolate the head_dim * 2 structure [1, seq_len, num_heads, head_dim * 2]
+        // Reshape to 4D to isolate the head_dim * 2 structure [1, seq_len,
+        // num_heads, head_dim * 2]
         int32_t q_and_gate_shape4[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.head_dim * 2};
         LogicalId q_and_gate_4d = g.reshape(q_and_gate, g.constant({4}, q_and_gate_shape4, DType::INT32));
 
@@ -483,11 +481,15 @@ public:
         int32_t s_q[] = {0, 0, 0, 0};
         int32_t e_q[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.head_dim};
         int32_t steps[] = {1, 1, 1, 1};
-        LogicalId q_4d = g.contiguous(g.slice(q_and_gate_4d, g.constant({4}, s_q, DType::INT32), g.constant({4}, e_q, DType::INT32), g.constant({4}, steps, DType::INT32)));
+        LogicalId q_4d =
+            g.contiguous(g.slice(q_and_gate_4d, g.constant({4}, s_q, DType::INT32), g.constant({4}, e_q, DType::INT32),
+                                 g.constant({4}, steps, DType::INT32)));
 
         int32_t s_g[] = {0, 0, 0, (int32_t)cfg.head_dim};
         int32_t e_g[] = {1, (int32_t)seq_len, (int32_t)cfg.attn_n_q_heads, (int32_t)cfg.head_dim * 2};
-        LogicalId gate_4d = g.contiguous(g.slice(q_and_gate_4d, g.constant({4}, s_g, DType::INT32), g.constant({4}, e_g, DType::INT32), g.constant({4}, steps, DType::INT32)));
+        LogicalId gate_4d =
+            g.contiguous(g.slice(q_and_gate_4d, g.constant({4}, s_g, DType::INT32), g.constant({4}, e_g, DType::INT32),
+                                 g.constant({4}, steps, DType::INT32)));
 
         // Reshape Gate back to 3D: [1, seq_len, num_heads * head_dim]
         int32_t gate_shape3[] = {1, (int32_t)seq_len, (int32_t)(cfg.attn_n_q_heads * cfg.head_dim)};
@@ -529,7 +531,8 @@ public:
         {
             uint32_t repeats = cfg.attn_n_q_heads / cfg.attn_n_kv_heads;
 
-            // 1. Reshape [n_kv_heads, seq_len, head_dim] -> [n_kv_heads, 1, seq_len, head_dim]
+            // 1. Reshape [n_kv_heads, seq_len, head_dim] -> [n_kv_heads, 1, seq_len,
+            // head_dim]
             int32_t sh4[] = {(int32_t)cfg.attn_n_kv_heads, 1, (int32_t)seq_len, (int32_t)cfg.head_dim};
             LogicalId sh4_node = g.constant({4}, sh4, DType::INT32);
             k = g.reshape(k, sh4_node);
@@ -556,7 +559,8 @@ public:
         return std::make_tuple(g.contiguous(q), g.contiguous(k), g.contiguous(v), gate);
     }
 
-    LogicalId gated_attention_output_atomic(std::tuple<LogicalId, LogicalId, LogicalId, LogicalId> qkvg, const std::string &prefix, LogicalId mask_id)
+    LogicalId gated_attention_output_atomic(std::tuple<LogicalId, LogicalId, LogicalId, LogicalId> qkvg,
+                                            const std::string &prefix, LogicalId mask_id)
     {
         LogicalId q = std::get<0>(qkvg);
         LogicalId k = std::get<1>(qkvg);
@@ -564,7 +568,8 @@ public:
         LogicalId gate = std::get<3>(qkvg);
 
         float scale_val = 1.0f / std::sqrt((float)cfg.head_dim);
-        LogicalId scale_node = expand_scalar_to_3d(g.constant({1}, &scale_val, DType::FLOAT32), cfg.attn_n_q_heads, seq_len, cfg.head_dim);
+        LogicalId scale_node =
+            expand_scalar_to_3d(g.constant({1}, &scale_val, DType::FLOAT32), cfg.attn_n_q_heads, seq_len, cfg.head_dim);
         LogicalId scaled_q = g.mul(q, scale_node);
 
         int32_t perm_k[] = {0, 2, 1};
@@ -581,7 +586,8 @@ public:
         LogicalId shifted_scores = g.add(scores, g.neg(max_scores));
 
         float e_val = 2.718281828459045f;
-        LogicalId e_node = expand_scalar_to_3d(g.constant({1}, &e_val, DType::FLOAT32), cfg.attn_n_q_heads, seq_len, seq_len);
+        LogicalId e_node =
+            expand_scalar_to_3d(g.constant({1}, &e_val, DType::FLOAT32), cfg.attn_n_q_heads, seq_len, seq_len);
         LogicalId exp_scores = g.pow(e_node, shifted_scores);
 
         LogicalId sum_exp = g.sum(exp_scores, g.constant({1}, &axis_val, DType::INT32));
@@ -602,9 +608,11 @@ public:
 
         // multiply by sigmoid(gate)
         float neg_one_val = -1.0f;
-        LogicalId neg_one = expand_scalar_to_3d(g.constant({1}, &neg_one_val, DType::FLOAT32), 1, seq_len, cfg.attn_n_q_heads * cfg.head_dim);
+        LogicalId neg_one = expand_scalar_to_3d(g.constant({1}, &neg_one_val, DType::FLOAT32), 1, seq_len,
+                                                cfg.attn_n_q_heads * cfg.head_dim);
         LogicalId neg_gate = g.mul(gate, neg_one);
-        LogicalId e_node_gate = expand_scalar_to_3d(g.constant({1}, &e_val, DType::FLOAT32), 1, seq_len, cfg.attn_n_q_heads * cfg.head_dim);
+        LogicalId e_node_gate =
+            expand_scalar_to_3d(g.constant({1}, &e_val, DType::FLOAT32), 1, seq_len, cfg.attn_n_q_heads * cfg.head_dim);
         LogicalId exp_neg_gate = g.pow(e_node_gate, neg_gate);
         LogicalId one_node = expand_scalar_to_3d(one_fp32, 1, seq_len, cfg.attn_n_q_heads * cfg.head_dim);
         LogicalId den = g.add(one_node, exp_neg_gate);
@@ -632,8 +640,7 @@ public:
         int32_t perm_dims[] = {1, 0};
         LogicalId dims_node = g.constant({2}, perm_dims, DType::INT32);
 
-        auto project_tensor = [&](LogicalId input_tensor, const std::string &suffix, uint32_t in_d, uint32_t out_d)
-        {
+        auto project_tensor = [&](LogicalId input_tensor, const std::string &suffix, uint32_t in_d, uint32_t out_d) {
             LogicalId w = weight(w_path, prefix + suffix);
             LogicalId w_t = g.permute(w, dims_node);
             w_t = g.contiguous(w_t);
@@ -641,8 +648,7 @@ public:
             return g.dot(input_tensor, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
         };
 
-        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
-        {
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d) {
             return project_tensor(x, suffix, in_d, out_d);
         };
 
@@ -662,7 +668,8 @@ public:
 
         float zero_val = 0.0f;
         int32_t pad_shape[] = {1, (int32_t)qkv_dim, 3};
-        LogicalId pad_zeros = g.fill(g.constant({1}, &zero_val, DType::FLOAT32), g.constant({3}, pad_shape, DType::INT32));
+        LogicalId pad_zeros =
+            g.fill(g.constant({1}, &zero_val, DType::FLOAT32), g.constant({3}, pad_shape, DType::INT32));
 
         int32_t ax2 = 2;
         LogicalId padded = g.concat({pad_zeros, mixed_qkv_tr}, g.constant({1}, &ax2, DType::INT32));
@@ -671,19 +678,23 @@ public:
 
         int32_t starts0[] = {0, 0, 3};
         int32_t ends0[] = {1, (int32_t)qkv_dim, (int32_t)(seq_len + 3)};
-        LogicalId padded_t0 = g.slice(padded, g.constant({3}, starts0, DType::INT32), g.constant({3}, ends0, DType::INT32), g.constant({3}, steps, DType::INT32));
+        LogicalId padded_t0 = g.slice(padded, g.constant({3}, starts0, DType::INT32),
+                                      g.constant({3}, ends0, DType::INT32), g.constant({3}, steps, DType::INT32));
 
         int32_t starts1[] = {0, 0, 2};
         int32_t ends1[] = {1, (int32_t)qkv_dim, (int32_t)(seq_len + 2)};
-        LogicalId padded_t1 = g.slice(padded, g.constant({3}, starts1, DType::INT32), g.constant({3}, ends1, DType::INT32), g.constant({3}, steps, DType::INT32));
+        LogicalId padded_t1 = g.slice(padded, g.constant({3}, starts1, DType::INT32),
+                                      g.constant({3}, ends1, DType::INT32), g.constant({3}, steps, DType::INT32));
 
         int32_t starts2[] = {0, 0, 1};
         int32_t ends2[] = {1, (int32_t)qkv_dim, (int32_t)(seq_len + 1)};
-        LogicalId padded_t2 = g.slice(padded, g.constant({3}, starts2, DType::INT32), g.constant({3}, ends2, DType::INT32), g.constant({3}, steps, DType::INT32));
+        LogicalId padded_t2 = g.slice(padded, g.constant({3}, starts2, DType::INT32),
+                                      g.constant({3}, ends2, DType::INT32), g.constant({3}, steps, DType::INT32));
 
         int32_t starts3[] = {0, 0, 0};
         int32_t ends3[] = {1, (int32_t)qkv_dim, (int32_t)seq_len};
-        LogicalId padded_t3 = g.slice(padded, g.constant({3}, starts3, DType::INT32), g.constant({3}, ends3, DType::INT32), g.constant({3}, steps, DType::INT32));
+        LogicalId padded_t3 = g.slice(padded, g.constant({3}, starts3, DType::INT32),
+                                      g.constant({3}, ends3, DType::INT32), g.constant({3}, steps, DType::INT32));
 
         LogicalId conv_w = weight(w_path, prefix + ".linear_attn.conv1d.weight");
 
@@ -694,19 +705,31 @@ public:
 
         int32_t ws0[] = {0, 0, 0};
         int32_t we0[] = {(int32_t)qkv_dim, 1, 1};
-        LogicalId w0 = g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws0, DType::INT32), g.constant({3}, we0, DType::INT32), g.constant({3}, w_steps, DType::INT32))), w_reshape);
+        LogicalId w0 =
+            g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws0, DType::INT32),
+                                           g.constant({3}, we0, DType::INT32), g.constant({3}, w_steps, DType::INT32))),
+                      w_reshape);
 
         int32_t ws1[] = {0, 0, 1};
         int32_t we1[] = {(int32_t)qkv_dim, 1, 2};
-        LogicalId w1 = g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws1, DType::INT32), g.constant({3}, we1, DType::INT32), g.constant({3}, w_steps, DType::INT32))), w_reshape);
+        LogicalId w1 =
+            g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws1, DType::INT32),
+                                           g.constant({3}, we1, DType::INT32), g.constant({3}, w_steps, DType::INT32))),
+                      w_reshape);
 
         int32_t ws2[] = {0, 0, 2};
         int32_t we2[] = {(int32_t)qkv_dim, 1, 3};
-        LogicalId w2 = g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws2, DType::INT32), g.constant({3}, we2, DType::INT32), g.constant({3}, w_steps, DType::INT32))), w_reshape);
+        LogicalId w2 =
+            g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws2, DType::INT32),
+                                           g.constant({3}, we2, DType::INT32), g.constant({3}, w_steps, DType::INT32))),
+                      w_reshape);
 
         int32_t ws3[] = {0, 0, 3};
         int32_t we3[] = {(int32_t)qkv_dim, 1, 4};
-        LogicalId w3 = g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws3, DType::INT32), g.constant({3}, we3, DType::INT32), g.constant({3}, w_steps, DType::INT32))), w_reshape);
+        LogicalId w3 =
+            g.reshape(g.contiguous(g.slice(conv_w, g.constant({3}, ws3, DType::INT32),
+                                           g.constant({3}, we3, DType::INT32), g.constant({3}, w_steps, DType::INT32))),
+                      w_reshape);
 
         LogicalId w0_exp = repeat_3d_axis(w0, seq_len, 2);
         LogicalId w1_exp = repeat_3d_axis(w1, seq_len, 2);
@@ -727,15 +750,21 @@ public:
 
         int32_t starts_q[] = {0, 0, 0};
         int32_t ends_q[] = {1, (int32_t)seq_len, (int32_t)key_dim};
-        LogicalId q = g.contiguous(g.slice(conv_out_tr, g.constant({3}, starts_q, DType::INT32), g.constant({3}, ends_q, DType::INT32), g.constant({3}, steps, DType::INT32)));
+        LogicalId q =
+            g.contiguous(g.slice(conv_out_tr, g.constant({3}, starts_q, DType::INT32),
+                                 g.constant({3}, ends_q, DType::INT32), g.constant({3}, steps, DType::INT32)));
 
         int32_t starts_k[] = {0, 0, (int32_t)key_dim};
         int32_t ends_k[] = {1, (int32_t)seq_len, (int32_t)(key_dim * 2)};
-        LogicalId k = g.contiguous(g.slice(conv_out_tr, g.constant({3}, starts_k, DType::INT32), g.constant({3}, ends_k, DType::INT32), g.constant({3}, steps, DType::INT32)));
+        LogicalId k =
+            g.contiguous(g.slice(conv_out_tr, g.constant({3}, starts_k, DType::INT32),
+                                 g.constant({3}, ends_k, DType::INT32), g.constant({3}, steps, DType::INT32)));
 
         int32_t starts_v[] = {0, 0, (int32_t)(key_dim * 2)};
         int32_t ends_v[] = {1, (int32_t)seq_len, (int32_t)qkv_dim};
-        LogicalId v = g.contiguous(g.slice(conv_out_tr, g.constant({3}, starts_v, DType::INT32), g.constant({3}, ends_v, DType::INT32), g.constant({3}, steps, DType::INT32)));
+        LogicalId v =
+            g.contiguous(g.slice(conv_out_tr, g.constant({3}, starts_v, DType::INT32),
+                                 g.constant({3}, ends_v, DType::INT32), g.constant({3}, steps, DType::INT32)));
 
         // 3. Compute beta and g (decay alpha)
         LogicalId beta = sigmoid(b, cfg.linear_n_v_heads);
@@ -744,7 +773,8 @@ public:
         LogicalId dt_bias = weight(w_path, prefix + ".linear_attn.dt_bias");
 
         int32_t ba_reshape_shape[] = {1, 1, (int32_t)cfg.linear_n_v_heads};
-        LogicalId dt_bias_3d = repeat_3d_axis(g.reshape(dt_bias, g.constant({3}, ba_reshape_shape, DType::INT32)), seq_len, 1);
+        LogicalId dt_bias_3d =
+            repeat_3d_axis(g.reshape(dt_bias, g.constant({3}, ba_reshape_shape, DType::INT32)), seq_len, 1);
         LogicalId a_plus_dt_bias = g.add(a, dt_bias_3d);
 
         LogicalId exp_x = g.pow(expand_scalar_to_3d(2.7182818f, 1, seq_len, cfg.linear_n_v_heads), a_plus_dt_bias);
@@ -752,26 +782,33 @@ public:
         LogicalId softplus_x = g.log(one_plus_exp);
 
         LogicalId A_log_exp = g.pow(expand_scalar_to_1d(2.7182818f, cfg.linear_n_v_heads), A_log);
-        LogicalId A_log_exp_3d = repeat_3d_axis(g.reshape(A_log_exp, g.constant({3}, ba_reshape_shape, DType::INT32)), seq_len, 1);
+        LogicalId A_log_exp_3d =
+            repeat_3d_axis(g.reshape(A_log_exp, g.constant({3}, ba_reshape_shape, DType::INT32)), seq_len, 1);
         LogicalId decay_g = g.mul(g.neg(A_log_exp_3d), softplus_x);
         LogicalId decay_alpha = g.pow(expand_scalar_to_3d(2.7182818f, 1, seq_len, cfg.linear_n_v_heads), decay_g);
 
         // 4. Reshape Q, K, V to head-based layout and L2 Norm
         int32_t perm_heads[] = {0, 2, 1, 3};
         int32_t q_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.linear_n_qk_heads, (int32_t)cfg.linear_head_dim};
-        LogicalId q_heads = g.contiguous(g.permute(g.reshape(q, g.constant({4}, q_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
+        LogicalId q_heads = g.contiguous(
+            g.permute(g.reshape(q, g.constant({4}, q_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
 
         int32_t k_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.linear_n_qk_heads, (int32_t)cfg.linear_head_dim};
-        LogicalId k_heads = g.contiguous(g.permute(g.reshape(k, g.constant({4}, k_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
+        LogicalId k_heads = g.contiguous(
+            g.permute(g.reshape(k, g.constant({4}, k_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
 
         int32_t v_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.linear_n_v_heads, (int32_t)cfg.linear_head_dim};
-        LogicalId v_heads = g.contiguous(g.permute(g.reshape(v, g.constant({4}, v_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
+        LogicalId v_heads = g.contiguous(
+            g.permute(g.reshape(v, g.constant({4}, v_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
 
         int32_t b_shape[] = {1, (int32_t)seq_len, (int32_t)cfg.linear_n_v_heads, 1};
-        LogicalId b_heads = g.contiguous(g.permute(g.reshape(beta, g.constant({4}, b_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
-        LogicalId a_heads = g.contiguous(g.permute(g.reshape(decay_alpha, g.constant({4}, b_shape, DType::INT32)), g.constant({4}, perm_heads, DType::INT32)));
+        LogicalId b_heads = g.contiguous(g.permute(g.reshape(beta, g.constant({4}, b_shape, DType::INT32)),
+                                                   g.constant({4}, perm_heads, DType::INT32)));
+        LogicalId a_heads = g.contiguous(g.permute(g.reshape(decay_alpha, g.constant({4}, b_shape, DType::INT32)),
+                                                   g.constant({4}, perm_heads, DType::INT32)));
 
-        // 1. Reshape [1, 16, 8, 128] -> [1, 16, 1, 8, 128] to insert a unit dimension at axis 2
+        // 1. Reshape [1, 16, 8, 128] -> [1, 16, 1, 8, 128] to insert a unit
+        // dimension at axis 2
         int32_t sh5[] = {1, (int32_t)cfg.linear_n_qk_heads, 1, (int32_t)seq_len, (int32_t)cfg.linear_head_dim};
         LogicalId sh5_node = g.constant({5}, sh5, DType::INT32);
         LogicalId q_heads_5d = g.reshape(q_heads, sh5_node);
@@ -791,7 +828,8 @@ public:
         LogicalId q_heads_contig = g.contiguous(q_heads_rep);
         LogicalId k_heads_contig = g.contiguous(k_heads_rep);
 
-        // 4. Reshape back to 4D: [1, 32, 8, 128], collapsing the [16, 2] dimensions into 32
+        // 4. Reshape back to 4D: [1, 32, 8, 128], collapsing the [16, 2] dimensions
+        // into 32
         int32_t sh4_target[] = {1, (int32_t)cfg.linear_n_v_heads, (int32_t)seq_len, (int32_t)cfg.linear_head_dim};
         LogicalId sh4_target_node = g.constant({4}, sh4_target, DType::INT32);
 
@@ -801,16 +839,25 @@ public:
         int32_t ax_neg1 = -1;
         LogicalId q_sq = g.mul(q_heads_exp, q_heads_exp);
         LogicalId q_sum = g.sum(q_sq, g.constant({1}, &ax_neg1, DType::INT32));
-        LogicalId q_std = g.pow(g.add(q_sum, expand_scalar_to_4d(1e-6f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1)), expand_scalar_to_4d(0.5f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1));
-        LogicalId q_norm = g.mul(q_heads_exp, repeat_3d_axis(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), q_std), (int32_t)cfg.linear_head_dim, 3));
+        LogicalId q_std = g.pow(g.add(q_sum, expand_scalar_to_4d(1e-6f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1)),
+                                expand_scalar_to_4d(0.5f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1));
+        LogicalId q_norm =
+            g.mul(q_heads_exp,
+                  repeat_3d_axis(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), q_std),
+                                 (int32_t)cfg.linear_head_dim, 3));
 
         float scale_factor = 1.0f / std::sqrt((float)cfg.linear_head_dim);
-        q_norm = g.mul(q_norm, expand_scalar_to_4d(scale_factor, 1, (int32_t)cfg.linear_n_v_heads, seq_len, (int32_t)cfg.linear_head_dim));
+        q_norm = g.mul(q_norm, expand_scalar_to_4d(scale_factor, 1, (int32_t)cfg.linear_n_v_heads, seq_len,
+                                                   (int32_t)cfg.linear_head_dim));
 
         LogicalId k_sq = g.mul(k_heads_exp, k_heads_exp);
         LogicalId k_sum = g.sum(k_sq, g.constant({1}, &ax_neg1, DType::INT32));
-        LogicalId k_std = g.pow(g.add(k_sum, expand_scalar_to_4d(1e-6f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1)), expand_scalar_to_4d(0.5f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1));
-        LogicalId k_norm = g.mul(k_heads_exp, repeat_3d_axis(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), k_std), (int32_t)cfg.linear_head_dim, 3));
+        LogicalId k_std = g.pow(g.add(k_sum, expand_scalar_to_4d(1e-6f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1)),
+                                expand_scalar_to_4d(0.5f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1));
+        LogicalId k_norm =
+            g.mul(k_heads_exp,
+                  repeat_3d_axis(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), k_std),
+                                 (int32_t)cfg.linear_head_dim, 3));
 
         // 5. Gated Delta Rule Recurrence Loop
         int32_t s_shape[] = {(int32_t)cfg.linear_n_v_heads, (int32_t)cfg.linear_head_dim, (int32_t)cfg.linear_head_dim};
@@ -822,25 +869,35 @@ public:
             int32_t starts_t_ab[] = {0, 0, (int32_t)t, 0};
             int32_t ends_t_b[] = {1, (int32_t)cfg.linear_n_v_heads, (int32_t)(t + 1), 1};
             int32_t steps_t[] = {1, 1, 1, 1};
-            LogicalId a_t = g.contiguous(g.slice(a_heads, g.constant({4}, starts_t_ab, DType::INT32), g.constant({4}, ends_t_b, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+            LogicalId a_t =
+                g.contiguous(g.slice(a_heads, g.constant({4}, starts_t_ab, DType::INT32),
+                                     g.constant({4}, ends_t_b, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
 
             int32_t flat_scalar_shape[] = {(int32_t)cfg.linear_n_v_heads, 1, 1};
             LogicalId a_t_flat = g.reshape(a_t, g.constant({3}, flat_scalar_shape, DType::INT32));
 
             int32_t starts_t_k[] = {0, 0, (int32_t)t, 0};
             int32_t ends_t_k[] = {1, (int32_t)cfg.linear_n_v_heads, (int32_t)(t + 1), (int32_t)cfg.linear_head_dim};
-            LogicalId k_t = g.contiguous(g.slice(k_norm, g.constant({4}, starts_t_k, DType::INT32), g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+            LogicalId k_t =
+                g.contiguous(g.slice(k_norm, g.constant({4}, starts_t_k, DType::INT32),
+                                     g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
 
             int32_t flat_vector_shape[] = {(int32_t)cfg.linear_n_v_heads, 1, (int32_t)cfg.linear_head_dim};
             LogicalId k_t_flat = g.reshape(k_t, g.constant({3}, flat_vector_shape, DType::INT32));
 
-            LogicalId v_t = g.contiguous(g.slice(v_heads, g.constant({4}, starts_t_k, DType::INT32), g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+            LogicalId v_t =
+                g.contiguous(g.slice(v_heads, g.constant({4}, starts_t_k, DType::INT32),
+                                     g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
             LogicalId v_t_flat = g.reshape(v_t, g.constant({3}, flat_vector_shape, DType::INT32));
 
-            LogicalId b_t = g.contiguous(g.slice(b_heads, g.constant({4}, starts_t_ab, DType::INT32), g.constant({4}, ends_t_b, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+            LogicalId b_t =
+                g.contiguous(g.slice(b_heads, g.constant({4}, starts_t_ab, DType::INT32),
+                                     g.constant({4}, ends_t_b, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
             LogicalId b_t_flat = g.reshape(b_t, g.constant({3}, flat_scalar_shape, DType::INT32));
 
-            LogicalId q_t = g.contiguous(g.slice(q_norm, g.constant({4}, starts_t_k, DType::INT32), g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
+            LogicalId q_t =
+                g.contiguous(g.slice(q_norm, g.constant({4}, starts_t_k, DType::INT32),
+                                     g.constant({4}, ends_t_k, DType::INT32), g.constant({4}, steps_t, DType::INT32)));
             LogicalId q_t_flat = g.reshape(q_t, g.constant({3}, flat_vector_shape, DType::INT32));
 
             // 1. Recall from the CURRENT (pre-decay) state
@@ -857,7 +914,8 @@ public:
             LogicalId outer_prod = g.contiguous(g.dot(k_t_t, delta));
 
             // 4. Apply decay AND write in one expression: S = g*S + outer
-            LogicalId a_t_exp = repeat_3d_axis(repeat_3d_axis(a_t_flat, (int32_t)cfg.linear_head_dim, 1), (int32_t)cfg.linear_head_dim, 2);
+            LogicalId a_t_exp = repeat_3d_axis(repeat_3d_axis(a_t_flat, (int32_t)cfg.linear_head_dim, 1),
+                                               (int32_t)cfg.linear_head_dim, 2);
             S = g.add(g.mul(S, a_t_exp), outer_prod);
 
             // 5. Read output from the fully updated state
@@ -885,7 +943,8 @@ public:
         int32_t final_context_shape[] = {1, (int32_t)seq_len, (int32_t)value_dim};
 
         // 6. Gated RMSNorm and Final Output Projection
-        // Reshape context and z to head-wise format: [1, seq_len * linear_n_v_heads, linear_head_dim]
+        // Reshape context and z to head-wise format: [1, seq_len *
+        // linear_n_v_heads, linear_head_dim]
         int32_t head_format_shape[] = {1, (int32_t)(seq_len * cfg.linear_n_v_heads), (int32_t)cfg.linear_head_dim};
         LogicalId head_format_shape_node = g.constant({3}, head_format_shape, DType::INT32);
 
@@ -893,7 +952,8 @@ public:
         LogicalId z_flat = g.reshape(z, head_format_shape_node);
 
         // Apply Gated RMSNorm on the head-wise format
-        LogicalId norm_flat = gated_rms_norm(context_flat, z_flat, prefix + ".linear_attn.norm.weight", cfg.linear_head_dim, seq_len * cfg.linear_n_v_heads);
+        LogicalId norm_flat = gated_rms_norm(context_flat, z_flat, prefix + ".linear_attn.norm.weight",
+                                             cfg.linear_head_dim, seq_len * cfg.linear_n_v_heads);
 
         // Reshape back to value_dim [1, seq_len, value_dim]
         LogicalId output = g.reshape(norm_flat, g.constant({3}, final_context_shape, DType::INT32));
@@ -907,8 +967,7 @@ public:
         int32_t perm_dims[] = {1, 0};
         LogicalId p_node = g.constant({2}, perm_dims, DType::INT32);
 
-        auto project_tensor = [&](LogicalId input_tensor, const std::string &suffix, uint32_t in_d, uint32_t out_d)
-        {
+        auto project_tensor = [&](LogicalId input_tensor, const std::string &suffix, uint32_t in_d, uint32_t out_d) {
             LogicalId w = weight(w_path, prefix + suffix);
             LogicalId w_t = g.permute(w, p_node);
             w_t = g.contiguous(w_t);
@@ -916,8 +975,7 @@ public:
             return g.dot(input_tensor, g.reshape(w_t, g.constant({3}, s3, DType::INT32)));
         };
 
-        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
-        {
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d) {
             return project_tensor(x, suffix, in_d, out_d);
         };
 
@@ -956,9 +1014,9 @@ public:
 
         // 3. Generate Expert Range: [1, S, K, E]
         int32_t arange_start = 0, arange_stop = (int32_t)E, arange_step = 1;
-        LogicalId range_1d = g.arange(g.constant({1}, &arange_start, DType::INT32),
-                                     g.constant({1}, &arange_stop, DType::INT32),
-                                     g.constant({1}, &arange_step, DType::INT32));
+        LogicalId range_1d =
+            g.arange(g.constant({1}, &arange_start, DType::INT32), g.constant({1}, &arange_stop, DType::INT32),
+                     g.constant({1}, &arange_step, DType::INT32));
         int32_t sh4_range[] = {1, 1, 1, (int32_t)E};
         LogicalId range_reshaped = g.reshape(range_1d, g.constant({4}, sh4_range, DType::INT32));
         LogicalId range_expanded = g.contiguous(repeat_ax(repeat_ax(range_reshaped, S, 1), K, 2));
@@ -986,7 +1044,8 @@ public:
 
         int32_t rep_e[] = {(int32_t)cfg.n_experts};
         int32_t ax_e[] = {0};
-        LogicalId x_expanded = g.repeat(x_reshaped, g.constant({1}, rep_e, DType::INT32), g.constant({1}, ax_e, DType::INT32));
+        LogicalId x_expanded =
+            g.repeat(x_reshaped, g.constant({1}, rep_e, DType::INT32), g.constant({1}, ax_e, DType::INT32));
         x_expanded = g.contiguous(x_expanded); // [E, S, H]
 
         // --- Step 2: Batched Gate/Up Projection ---
@@ -1002,12 +1061,14 @@ public:
 
         int32_t starts_gate[] = {0, 0, 0};
         int32_t ends_gate[] = {(int32_t)cfg.n_experts, (int32_t)seq_len, (int32_t)expert_inter_dim};
-        LogicalId exp_gate = g.slice(gate_up_proj, g.constant({3}, starts_gate, DType::INT32), g.constant({3}, ends_gate, DType::INT32), g.constant({3}, steps_3d, DType::INT32));
+        LogicalId exp_gate = g.slice(gate_up_proj, g.constant({3}, starts_gate, DType::INT32),
+                                     g.constant({3}, ends_gate, DType::INT32), g.constant({3}, steps_3d, DType::INT32));
         exp_gate = g.contiguous(exp_gate);
 
         int32_t starts_up[] = {0, 0, (int32_t)expert_inter_dim};
         int32_t ends_up[] = {(int32_t)cfg.n_experts, (int32_t)seq_len, (int32_t)(expert_inter_dim * 2)};
-        LogicalId exp_up = g.slice(gate_up_proj, g.constant({3}, starts_up, DType::INT32), g.constant({3}, ends_up, DType::INT32), g.constant({3}, steps_3d, DType::INT32));
+        LogicalId exp_up = g.slice(gate_up_proj, g.constant({3}, starts_up, DType::INT32),
+                                   g.constant({3}, ends_up, DType::INT32), g.constant({3}, steps_3d, DType::INT32));
         exp_up = g.contiguous(exp_up);
 
         LogicalId exp_gate_silu = silu_atomic(exp_gate, cfg.n_experts, seq_len, expert_inter_dim);
@@ -1034,7 +1095,8 @@ public:
         // 3. Repeat normalized_probs_perm [S, E, 1] -> [S, E, H]
         int32_t rep_h[] = {(int32_t)cfg.hidden_size};
         int32_t ax_h[] = {2};
-        LogicalId normalized_probs_exp = g.repeat(normalized_probs_perm, g.constant({1}, rep_h, DType::INT32), g.constant({1}, ax_h, DType::INT32));
+        LogicalId normalized_probs_exp =
+            g.repeat(normalized_probs_perm, g.constant({1}, rep_h, DType::INT32), g.constant({1}, ax_h, DType::INT32));
         normalized_probs_exp = g.contiguous(normalized_probs_exp); // [S, E, H]
 
         // 4. Multiply element-wise
@@ -1058,7 +1120,8 @@ public:
         LogicalId w_shared_down_t = g.permute(w_shared_down, p_node);
         w_shared_down_t = g.contiguous(w_shared_down_t);
         int32_t s3_shared[] = {1, (int32_t)cfg.shared_expert_dim, (int32_t)cfg.hidden_size};
-        LogicalId shared_out = g.dot(shared_gate_up, g.reshape(w_shared_down_t, g.constant({3}, s3_shared, DType::INT32)));
+        LogicalId shared_out =
+            g.dot(shared_gate_up, g.reshape(w_shared_down_t, g.constant({3}, s3_shared, DType::INT32)));
 
         LogicalId shared_expert_gate = project(".mlp.shared_expert_gate.weight", cfg.hidden_size, 1);
 
@@ -1082,7 +1145,8 @@ public:
     LogicalId build_graph(LogicalId input_ids_id)
     {
         // #L1275
-        LogicalId w_emb = weight(w_path, "model.language_model.embed_tokens.weight"); // [vocab_size, hidden_size]
+        LogicalId w_emb = weight(w_path, "model.language_model.embed_tokens.weight"); // [vocab_size,
+                                                                                      // hidden_size]
         LogicalId x = g.gather(w_emb, input_ids_id);                                  // [B, seq_len, hidden_size]
 
         // #L1283 position_ids [B, seq_len]

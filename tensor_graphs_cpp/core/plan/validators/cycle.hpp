@@ -15,9 +15,7 @@ struct CycleValidator : public ISelectionValidator
     // detectCycles — proper implementation of the stub.
     //   Kahn's algorithm restricted to the selection-induced subgraph.
     //   Returns true and sets reason="cycle" if a cycle is found.
-    bool detectCycles(
-        const std::unordered_map<EClassId, uint32_t> &selection_map,
-        std::string &reason)
+    bool detectCycles(const std::unordered_map<EClassId, uint32_t> &selection_map, std::string &reason)
     {
         std::fill(indegree.begin(), indegree.end(), 0);
         for (const auto &kv : selection_map)
@@ -68,10 +66,9 @@ struct CycleValidator : public ISelectionValidator
     }
 
     bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
-                  std::vector<ParallelBuffer> &buffers,
-                  std::unordered_map<EClassId, BufferId> &eclass_to_buf,
-                  BufferId &overflow,
-                  float &cost, std::string &reason, bool &updated_buffers, bool &updated_cost) override
+                  std::vector<ParallelBuffer> &buffers, std::unordered_map<EClassId, BufferId> &eclass_to_buf,
+                  BufferId &overflow, float &cost, std::string &reason, bool &updated_buffers,
+                  bool &updated_cost) override
     {
         return !detectCycles(selection_map, reason);
     }

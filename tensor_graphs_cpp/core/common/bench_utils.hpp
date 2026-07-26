@@ -1,32 +1,32 @@
 // File: tensor_graphs_cpp/core/common/bench_utils.hpp
 #pragma once
 
-#include <iostream>
+#include <algorithm>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <vector>
-#include <filesystem>
-#include <cstring>
-#include <algorithm>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
-#include "core/types.hpp"
-#include "core/memory.hpp"
+#include "core/cost_model.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
-#include "core/cost_model.hpp"
+#include "core/memory.hpp"
 #include "core/misc.hpp"
+#include "core/types.hpp"
 
 #ifdef TG_OS_WINDOWS
-#include <io.h>
 #include <fcntl.h>
+#include <io.h>
 #include <share.h>
 #else
-#include <unistd.h>
 #include <fcntl.h>
+#include <unistd.h>
 #endif
 
 // =============================================================================
@@ -106,7 +106,8 @@ struct BenchBuffer
             clMem = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR, bytes, devicePtr, &err);
             if (err != CL_SUCCESS || !clMem)
             {
-                Error::throw_err("clCreateBuffer failed to allocate memory of size " + std::to_string(bytes) + ". Error: " + std::to_string(err));
+                Error::throw_err("clCreateBuffer failed to allocate memory of size " + std::to_string(bytes) +
+                                 ". Error: " + std::to_string(err));
             }
         }
         else
@@ -131,14 +132,9 @@ struct BenchBuffer
         {
             if (clMem && !hostData.empty())
             {
-                cl_int err = clEnqueueWriteBuffer(
-                    OpenCLState::get().queue,
-                    clMem,
-                    CL_TRUE, // Blocking write to guarantee host-to-device visibility
-                    0,
-                    bytes,
-                    hostData.data(),
-                    0, nullptr, nullptr);
+                cl_int err = clEnqueueWriteBuffer(OpenCLState::get().queue, clMem,
+                                                  CL_TRUE, // Blocking write to guarantee host-to-device visibility
+                                                  0, bytes, hostData.data(), 0, nullptr, nullptr);
                 if (err != CL_SUCCESS)
                 {
                     Error::throw_err("clEnqueueWriteBuffer failed with error: " + std::to_string(err));
@@ -163,14 +159,9 @@ struct BenchBuffer
         {
             if (clMem && !hostData.empty())
             {
-                cl_int err = clEnqueueReadBuffer(
-                    OpenCLState::get().queue,
-                    clMem,
-                    CL_TRUE, // Blocking read to guarantee device-to-host visibility
-                    0,
-                    bytes,
-                    hostData.data(),
-                    0, nullptr, nullptr);
+                cl_int err = clEnqueueReadBuffer(OpenCLState::get().queue, clMem,
+                                                 CL_TRUE, // Blocking read to guarantee device-to-host visibility
+                                                 0, bytes, hostData.data(), 0, nullptr, nullptr);
                 if (err != CL_SUCCESS)
                 {
                     Error::throw_err("clEnqueueReadBuffer failed with error: " + std::to_string(err));
@@ -224,8 +215,9 @@ struct StorageFiles
     StorageFiles(const StorageFiles &) = delete;
     StorageFiles &operator=(const StorageFiles &) = delete;
 
-    StorageFiles(StorageFiles &&other) noexcept
-        : paths(std::move(other.paths)), fds(std::move(other.fds)) {}
+    StorageFiles(StorageFiles &&other) noexcept : paths(std::move(other.paths)), fds(std::move(other.fds))
+    {
+    }
 
     StorageFiles &operator=(StorageFiles &&other) noexcept
     {
@@ -266,7 +258,8 @@ struct StorageFiles
     }
 };
 
-inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel, int runIdx, const std::vector<BenchBuffer> *inputBuffers = nullptr)
+inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kernel, int runIdx,
+                                        const std::vector<BenchBuffer> *inputBuffers = nullptr)
 {
     StorageFiles sf;
     std::vector<char> dummyBuf(1024 * 1024, 0);
@@ -276,7 +269,9 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
         uint64_t ruleIdx = idx;
         if (kernel.min_num_inputs != kernel.max_num_inputs)
         {
-            ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1) : 0;
+            ruleIdx = (idx == r.inputShapes.size() - 1)
+                          ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1)
+                          : 0;
         }
         MemSpace b = {1, HandleType::CPP};
         if (!r.input_mem_spaces.empty() && ruleIdx < r.input_mem_spaces.size())
@@ -291,7 +286,8 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
                 Error::throw_err("[createStorageInputs] got 0 bytes for file size");
             }
 
-            std::string path = "benchmarks/dummy_storage_" + std::to_string(sf.fds.size()) + "_" + std::to_string(r.kernelId.value) + "_run_" + std::to_string(runIdx) + ".bin";
+            std::string path = "benchmarks/dummy_storage_" + std::to_string(sf.fds.size()) + "_" +
+                               std::to_string(r.kernelId.value) + "_run_" + std::to_string(runIdx) + ".bin";
             std::ofstream out(path, std::ios::binary | std::ios::trunc);
             if (!out.is_open())
             {
@@ -299,7 +295,8 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
                 continue;
             }
 
-            // Write prepared host-side data if available; otherwise, write fallback zeroes
+            // Write prepared host-side data if available; otherwise, write fallback
+            // zeroes
             if (inputBuffers && idx < inputBuffers->size() && !(*inputBuffers)[idx].hostData.empty())
             {
                 out.write(reinterpret_cast<const char *>((*inputBuffers)[idx].hostData.data()), bytes);
@@ -365,7 +362,8 @@ struct PreparedKernel
     KernelContext ctx;
     StorageFiles sf;
 
-    void prepare(const KernelEntry &kernel, const Record &r, const std::vector<std::vector<uint8_t>> *explicitInputData = nullptr)
+    void prepare(const KernelEntry &kernel, const Record &r,
+                 const std::vector<std::vector<uint8_t>> *explicitInputData = nullptr)
     {
         inputBuffers.resize(r.inputShapes.size());
         inPtrs.assign(r.inputShapes.size(), nullptr);
@@ -394,7 +392,9 @@ struct PreparedKernel
             uint64_t ruleIdx = idx;
             if (kernel.min_num_inputs != kernel.max_num_inputs)
             {
-                ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1) : 0;
+                ruleIdx = (idx == r.inputShapes.size() - 1)
+                              ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1)
+                              : 0;
             }
             MemSpace b = {1, HandleType::CPP};
             if (!r.input_mem_spaces.empty() && ruleIdx < r.input_mem_spaces.size())
@@ -404,9 +404,11 @@ struct PreparedKernel
 
             if (explicitInputData && idx < explicitInputData->size() && !(*explicitInputData)[idx].empty())
             {
-                std::memcpy(inputBuffers[idx].hostData.data(), (*explicitInputData)[idx].data(), std::min(bytes, (uint64_t)(*explicitInputData)[idx].size()));
+                std::memcpy(inputBuffers[idx].hostData.data(), (*explicitInputData)[idx].data(),
+                            std::min(bytes, (uint64_t)(*explicitInputData)[idx].size()));
             }
-            else if (idx < r.inputConstants.size() && !r.inputConstants[idx].empty() && r.inputConstants[idx].size() == bytes)
+            else if (idx < r.inputConstants.size() && !r.inputConstants[idx].empty() &&
+                     r.inputConstants[idx].size() == bytes)
             {
                 std::memcpy(inputBuffers[idx].hostData.data(), r.inputConstants[idx].data(), bytes);
             }
@@ -423,8 +425,8 @@ struct PreparedKernel
                     int32_t *iptr = reinterpret_cast<int32_t *>(inputBuffers[idx].hostData.data());
                     if (kernel.opType == OpType::PERMUTE || kernel.opName.find("Permute") != std::string::npos)
                     {
-                        if (idx == 1 && r.inputShapes.size() > 0 &&
-                            r.inputShapes[0].size() == r.outputShape.size() && elements == r.inputShapes[0].size())
+                        if (idx == 1 && r.inputShapes.size() > 0 && r.inputShapes[0].size() == r.outputShape.size() &&
+                            elements == r.inputShapes[0].size())
                         {
                             std::vector<bool> used(elements, false);
                             for (uint64_t k = 0; k < elements; ++k)
@@ -553,7 +555,9 @@ struct PreparedKernel
             uint64_t ruleIdx = idx;
             if (kernel.min_num_inputs != kernel.max_num_inputs)
             {
-                ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1) : 0;
+                ruleIdx = (idx == r.inputShapes.size() - 1)
+                              ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1)
+                              : 0;
             }
             MemSpace b = {1, HandleType::CPP};
             if (!r.input_mem_spaces.empty() && ruleIdx < r.input_mem_spaces.size())

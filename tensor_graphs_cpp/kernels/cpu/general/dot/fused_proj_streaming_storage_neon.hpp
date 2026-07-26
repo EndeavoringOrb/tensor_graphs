@@ -1,4 +1,5 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/dot/fused_proj_streaming_storage_neon.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/dot/fused_proj_streaming_storage_neon.hpp
 //
 // Fused 2D Projection GEMM with Streaming Storage Loading (BFDOT-optimised)
 // -----------------------------------------------------------------------
@@ -11,10 +12,11 @@
 //
 //   uint32_t weight(...) { return g.cast(g.weight(path, name), F32); }
 //   auto project = [&](suffix, in_d, out_d) {
-//       uint32_t w   = weight(...);                  // [out_d, in_d] bf16 STORAGE -> CPU fp32
-//       LogicalId w_t = g.permute(w, {1, 0});         // [in_d, out_d] fp32 CPU view
-//       w_t          = g.contiguous(w_t);            // materialise the transpose  <-- 2nd COPY_TO
-//       return g.dot(x, g.reshape(w_t, {1, in_d, out_d}));
+//       uint32_t w   = weight(...);                  // [out_d, in_d] bf16
+//       STORAGE -> CPU fp32 LogicalId w_t = g.permute(w, {1, 0});         //
+//       [in_d, out_d] fp32 CPU view w_t          = g.contiguous(w_t); //
+//       materialise the transpose  <-- 2nd COPY_TO return g.dot(x,
+//       g.reshape(w_t, {1, in_d, out_d}));
 //   };
 //
 // The e-graph already rewrites cast+permute+contiguous+dot into
@@ -82,25 +84,26 @@
 //   thanks to BFDOT, hence the ~80 ms estimate.
 
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON) && defined(__ARM_FEATURE_BF16)
 
 #include <arm_neon.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
-#include <algorithm>
-#include <cstring>
-#include <cmath>
-#include <string>
 
 #ifdef TG_OS_WINDOWS
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
 #include <io.h>
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -118,9 +121,7 @@
 //
 // We only validate shape compatibility.
 // ---------------------------------------------------------------------------
-inline bool matchFusedProjStreamingStorage(
-    const std::vector<TensorNode> &inputs,
-    const TensorNode &output)
+inline bool matchFusedProjStreamingStorage(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // X: [1, S, K], W: [N, K], Out: [1, S, N]
     if (inputs[0].getShape().size() != 3)
@@ -157,8 +158,7 @@ inline bool matchFusedProjStreamingStorage(
 // renamed to avoid ODR collision when multiple headers are included in the
 // same translation unit via cpu_kernels.gen.hpp)
 // ---------------------------------------------------------------------------
-static inline bool fusedProj_readFromFileAtOffset(
-    int fd, uint64_t offset, void *buf, uint64_t bytes)
+static inline bool fusedProj_readFromFileAtOffset(int fd, uint64_t offset, void *buf, uint64_t bytes)
 {
     if (bytes == 0)
         return true;
@@ -175,8 +175,7 @@ static inline bool fusedProj_readFromFileAtOffset(
         OVERLAPPED ov = {};
         ov.Offset = static_cast<DWORD>(cur & 0xFFFFFFFFull);
         ov.OffsetHigh = static_cast<DWORD>((cur >> 32) & 0xFFFFFFFFull);
-        DWORD toRead = static_cast<DWORD>(
-            std::min<uint64_t>(remaining, 0x40000000ull));
+        DWORD toRead = static_cast<DWORD>(std::min<uint64_t>(remaining, 0x40000000ull));
         DWORD bytesRead = 0;
         if (!ReadFile(hFile, p, toRead, &bytesRead, &ov))
             return false;
@@ -222,7 +221,8 @@ static inline uint16x8_t fp32x8_to_bf16_u16x8(float32x4_t lo, float32x4_t hi)
 }
 
 // ---------------------------------------------------------------------------
-// Per-thread compute: Out[0, 0..S, n_start..n_end] = X[0, 0..S, 0..K] @ W[n_start..n_end, 0..K]^T
+// Per-thread compute: Out[0, 0..S, n_start..n_end] = X[0, 0..S, 0..K] @
+// W[n_start..n_end, 0..K]^T
 //
 // X_bf16: pre-converted bf16 view of X (size S*K bf16 elements)
 // W:        pointer into the per-thread W buffer (or directly mmap'd region)
@@ -249,15 +249,15 @@ static inline uint16x8_t fp32x8_to_bf16_u16x8(float32x4_t lo, float32x4_t hi)
 //       Out[s, n+0..n+3] = horizontal_sum(acc[0..3])
 //
 // 4 BFDOT instructions process 4 output rows * 8 K-elements = 32 multiplies,
-// vs 4 FMA instructions in the v4/v5 kernel which process 4 * 4 = 16 multiplies.
+// vs 4 FMA instructions in the v4/v5 kernel which process 4 * 4 = 16
+// multiplies.
 // => 2x throughput on bf16-capable hardware (Qualcomm Oryon, Cortex-X4).
 // ---------------------------------------------------------------------------
-static inline void fusedProj_computeTile(
-    const uint16_t *X_bf16, // bf16 stored as uint16_t (portable, matches existing codebase)
-    const uint16_t *W,      // bf16 stored as uint16_t
-    float *Out,
-    uint32_t S, uint32_t K, uint32_t N,
-    uint32_t n_start, uint32_t n_end)
+static inline void fusedProj_computeTile(const uint16_t *X_bf16, // bf16 stored as uint16_t (portable, matches
+                                                                 // existing codebase)
+                                         const uint16_t *W,      // bf16 stored as uint16_t
+                                         float *Out, uint32_t S, uint32_t K, uint32_t N, uint32_t n_start,
+                                         uint32_t n_end)
 {
     const uint32_t K8 = K & ~7u;     // BFDOT processes 8 K-elements
     const uint32_t N4 = n_end & ~3u; // 4 output rows at a time
@@ -315,9 +315,7 @@ static inline void fusedProj_computeTile(
                     uint32_t bits = static_cast<uint32_t>(W[(n + i - n_start) * K + k]) << 16;
                     float wv;
                     std::memcpy(&wv, &bits, sizeof(float));
-                    float &target = (i == 0) ? sum0 : (i == 1) ? sum1
-                                                  : (i == 2)   ? sum2
-                                                               : sum3;
+                    float &target = (i == 0) ? sum0 : (i == 1) ? sum1 : (i == 2) ? sum2 : sum3;
                     target += xv * wv;
                 }
             }
@@ -364,10 +362,12 @@ static inline void fusedProj_computeTile(
 // Run function
 //
 // Pipeline:
-//   1. Convert X (fp32) to bf16 once per token. S*K = 8*2048 = 16k bf16 = 32 KB,
+//   1. Convert X (fp32) to bf16 once per token. S*K = 8*2048 = 16k bf16 = 32
+//   KB,
 //      fits in L1. Reused across all N output rows.
 //   2. Decide streaming vs. all-at-once based on W size:
-//        - W <= 64 MB: each thread reads its full N-range into a per-thread buffer.
+//        - W <= 64 MB: each thread reads its full N-range into a per-thread
+//        buffer.
 //        - W  > 64 MB: each thread streams its N-range in 256-KB chunks
 //                       (fits in L2, maximises disk sequential throughput).
 //   3. Multi-threaded across N. Each thread:
@@ -391,10 +391,9 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
     const int fd = ctx.fd[1];
     if (fd < 0)
     {
-        Error::throw_err(
-            "Fused_Proj_StreamingStorage_NEON: expected STORAGE input for W "
-            "(fd[1] >= 0). The planner should only route STORAGE-backed "
-            "weights to this kernel.");
+        Error::throw_err("Fused_Proj_StreamingStorage_NEON: expected STORAGE input for W "
+                         "(fd[1] >= 0). The planner should only route STORAGE-backed "
+                         "weights to this kernel.");
     }
 
     const uint64_t fileOffset = viewW.offset;
@@ -449,8 +448,7 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
     if (num_threads == 0)
         num_threads = 1;
 
-    auto worker = [&](uint32_t tid, uint32_t n_start, uint32_t n_end)
-    {
+    auto worker = [&](uint32_t tid, uint32_t n_start, uint32_t n_end) {
         const uint32_t n_range = n_end - n_start;
         if (n_range == 0)
             return;
@@ -462,18 +460,12 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
         {
             // ----- All-at-once path: read full N-range into per-thread buffer -----
             std::vector<uint16_t> w_buf(static_cast<uint64_t>(n_range) * K);
-            if (!fusedProj_readFromFileAtOffset(fd, my_W_offset,
-                                                w_buf.data(), my_W_bytes))
+            if (!fusedProj_readFromFileAtOffset(fd, my_W_offset, w_buf.data(), my_W_bytes))
             {
                 std::memset(w_buf.data(), 0, static_cast<uint64_t>(my_W_bytes));
             }
 
-            fusedProj_computeTile(
-                X_bf16.data(),
-                w_buf.data(),
-                Out,
-                S, K, N,
-                n_start, n_end);
+            fusedProj_computeTile(X_bf16.data(), w_buf.data(), Out, S, K, N, n_start, n_end);
         }
         else
         {
@@ -483,8 +475,8 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
             // so the chunk is <= 256 KB. For K=2048, chunk_rows = 64 (256 KB).
             // The chunk is read once, then used for all S rows of X (which is in
             // L1/L2). Output rows for this chunk are written directly to Out.
-            const uint32_t chunk_rows = std::max(1u, static_cast<uint32_t>(
-                                                         STREAM_CHUNK_BYTES / (static_cast<uint64_t>(K) * sizeof(uint16_t))));
+            const uint32_t chunk_rows =
+                std::max(1u, static_cast<uint32_t>(STREAM_CHUNK_BYTES / (static_cast<uint64_t>(K) * sizeof(uint16_t))));
 
             std::vector<uint16_t> w_buf(static_cast<uint64_t>(chunk_rows) * K);
 
@@ -495,8 +487,7 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
                 uint64_t chunk_off = fileOffset + static_cast<uint64_t>(chunk_start) * K * sizeof(uint16_t);
                 uint64_t chunk_bytes = static_cast<uint64_t>(this_rows) * K * sizeof(uint16_t);
 
-                if (!fusedProj_readFromFileAtOffset(fd, chunk_off,
-                                                    w_buf.data(), chunk_bytes))
+                if (!fusedProj_readFromFileAtOffset(fd, chunk_off, w_buf.data(), chunk_bytes))
                 {
                     std::memset(w_buf.data(), 0, static_cast<uint64_t>(chunk_bytes));
                 }
@@ -632,19 +623,19 @@ inline void runFusedProjStreamingStorage(const KernelContext &ctx)
 // Reconstructs the EXACT chain that the model's project() helper produces:
 //
 //   raw_weight = g.weight(path, name)               // 2D bf16 STORAGE [N, K]
-//   w_cpu_f32  = g.cast(raw_weight, F32)            // 2D fp32 CPU [N, K]  <-- COPY_TO+CAST
-//   w_t        = g.permute(w_cpu_f32, {1, 0})       // 2D fp32 CPU [K, N] (view)
-//   w_t_contig = g.contiguous(w_t)                  // 2D fp32 CPU [K, N] <-- 2nd COPY_TO (transpose)
-//   w_3d       = g.reshape(w_t_contig, {1, K, N})   // 3D fp32 CPU [1, K, N] (view)
-//   out        = g.dot(x, w_3d)                     // 3D fp32 CPU [1, S, N]
+//   w_cpu_f32  = g.cast(raw_weight, F32)            // 2D fp32 CPU [N, K]  <--
+//   COPY_TO+CAST w_t        = g.permute(w_cpu_f32, {1, 0})       // 2D fp32 CPU
+//   [K, N] (view) w_t_contig = g.contiguous(w_t)                  // 2D fp32
+//   CPU [K, N] <-- 2nd COPY_TO (transpose) w_3d       = g.reshape(w_t_contig,
+//   {1, K, N})   // 3D fp32 CPU [1, K, N] (view) out        = g.dot(x, w_3d) //
+//   3D fp32 CPU [1, S, N]
 //
 // This matches:
 //   - inputs[0]: X [1, S, K] fp32 CPU
 //   - inputs[1]: raw_weight W [N, K] bf16 STORAGE
 //   - output:    Out [1, S, N] fp32 CPU
 // ===========================================================================
-inline LogicalId refFactoryFusedProjStreamingStorage(const std::vector<LogicalId> &inputs,
-    Graph &graph)
+inline LogicalId refFactoryFusedProjStreamingStorage(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     // inputs[0]: X [1, S, K] fp32 CPU
     // inputs[1]: W [N, K]    bf16 STORAGE (the raw on-disk weight node)
@@ -657,18 +648,15 @@ inline LogicalId refFactoryFusedProjStreamingStorage(const std::vector<LogicalId
 
     // [N, K] -> [K, N]  (this is the PERMUTE we are fusing away)
     int32_t perm[] = {1, 0};
-    LogicalId w_t = graph.permute(
-        w_cast, graph.constant({2}, perm, DType::INT32));
+    LogicalId w_t = graph.permute(w_cast, graph.constant({2}, perm, DType::INT32));
 
     // materialise  (this is the CONTIGUOUS we are fusing away)
     LogicalId w_t_contig = graph.contiguous(w_t);
 
     // [K, N] -> [1, K, N]  (this is the RESHAPE we are fusing away)
     auto w_shape = graph.getNode(inputs[1]).getShape();
-    int32_t s3[] = {1, static_cast<int32_t>(w_shape[1]),
-                    static_cast<int32_t>(w_shape[0])};
-    LogicalId w_3d = graph.reshape(w_t_contig,
-                                  graph.constant({3}, s3, DType::INT32));
+    int32_t s3[] = {1, static_cast<int32_t>(w_shape[1]), static_cast<int32_t>(w_shape[0])};
+    LogicalId w_3d = graph.reshape(w_t_contig, graph.constant({3}, s3, DType::INT32));
 
     // The actual matmul (this is the DOT we are fusing away)
     return graph.dot(inputs[0], w_3d);
@@ -684,10 +672,13 @@ inline LogicalId refFactoryFusedProjStreamingStorage(const std::vector<LogicalId
 // Output:
 //   [0] Out — fp32, CPU,   [1, S, N]  — projection output
 // ---------------------------------------------------------------------------
-REGISTER_KERNEL("Fused_Proj_StreamingStorage_NEON", 2, 2, matchFusedProjStreamingStorage, runFusedProjStreamingStorage, refFactoryFusedProjStreamingStorage, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},                        // output backend
-    {DType::FLOAT32, DType::BF16},         // X is fp32, W is bf16
-    {{1, 8, 2048}, {8192, 2048}},          // dummy shapes for the bench harness
-    {true, true},                          // both inputs must be contiguous
-    {{MemSpace(1, HandleType::CPP)}, {MemSpace(0, HandleType::STORAGE)}}); // X from CPU, W directly from STORAGE
+REGISTER_KERNEL("Fused_Proj_StreamingStorage_NEON", 2, 2, matchFusedProjStreamingStorage, runFusedProjStreamingStorage,
+                refFactoryFusedProjStreamingStorage, MemSpace(1, HandleType::CPP),
+                {Engine(0, EngineType::CPU)},  // output backend
+                {DType::FLOAT32, DType::BF16}, // X is fp32, W is bf16
+                {{1, 8, 2048}, {8192, 2048}},  // dummy shapes for the bench harness
+                {true, true},                  // both inputs must be contiguous
+                {{MemSpace(1, HandleType::CPP)},
+                 {MemSpace(0, HandleType::STORAGE)}}); // X from CPU, W directly from STORAGE
 
 #endif // TG_HAS_NEON && __ARM_FEATURE_BF16

@@ -1,9 +1,10 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 // =============================================================================
 // FUSED KERNEL: Negate F32 ND (NEON + Multi-threaded)
@@ -13,7 +14,8 @@
 // multi-threading for near-linear scaling across all 12 cores.
 //
 // Expected savings: ~580ms remaining after softmax fusion (RoPE neg patterns)
-// But also critical for enabling correct fusion of other subgraphs containing neg.
+// But also critical for enabling correct fusion of other subgraphs containing
+// neg.
 // =============================================================================
 
 #if defined(TG_HAS_NEON)
@@ -42,8 +44,7 @@ inline void runNegF32_ND_NEON_Threaded(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             const uint64_t start = t * chunk;
             const uint64_t end = std::min(start + chunk, n);
             uint64_t i = start;
@@ -58,7 +59,8 @@ inline void runNegF32_ND_NEON_Threaded(const KernelContext &ctx)
             for (; i < end; ++i)
             {
                 out[i] = -x[i];
-            } });
+            }
+        });
     }
     for (auto &w : workers)
         w.join();
@@ -70,6 +72,8 @@ inline LogicalId refFactoryNegND_NEON_Threaded(const std::vector<LogicalId> &inp
     return graph.neg(inputs[0]);
 }
 
-REGISTER_KERNEL("Neg_F32_ND_NEON_Threaded", 1, 1, matchNegF32_ND_NEON_Threaded, runNegF32_ND_NEON_Threaded, refFactoryNegND_NEON_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1536}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Neg_F32_ND_NEON_Threaded", 1, 1, matchNegF32_ND_NEON_Threaded, runNegF32_ND_NEON_Threaded,
+                refFactoryNegND_NEON_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32}, {{1536}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

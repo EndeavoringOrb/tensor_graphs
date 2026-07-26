@@ -1,14 +1,14 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
+#include <cstring>
 #include <thread>
 #include <vector>
-#include <cstring>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchDotTransposedBF16(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-
     auto sX = inputs[0].getShape();
     auto sW = inputs[1].getShape();
     auto sOut = output.getShape();
@@ -43,20 +43,22 @@ inline void runDotTransposedBF16(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t start_row = t * rows_per_thread;
             uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
 
-            for (uint32_t row_idx = start_row; row_idx < end_row; ++row_idx) {
-                const float* x_row = X + row_idx * InDim;
-                float* out_row = Out + row_idx * OutDim;
+            for (uint32_t row_idx = start_row; row_idx < end_row; ++row_idx)
+            {
+                const float *x_row = X + row_idx * InDim;
+                float *out_row = Out + row_idx * OutDim;
 
-                for (uint32_t o = 0; o < OutDim; ++o) {
-                    const uint16_t* w_row = W + o * InDim;
+                for (uint32_t o = 0; o < OutDim; ++o)
+                {
+                    const uint16_t *w_row = W + o * InDim;
                     float sum = 0.0f;
-                    
-                    for (uint32_t i = 0; i < InDim; ++i) {
+
+                    for (uint32_t i = 0; i < InDim; ++i)
+                    {
                         uint32_t bits = static_cast<uint32_t>(w_row[i]) << 16;
                         float w_f32;
                         std::memcpy(&w_f32, &bits, 4);
@@ -64,7 +66,8 @@ inline void runDotTransposedBF16(const KernelContext &ctx)
                     }
                     out_row[o] = sum;
                 }
-            } });
+            }
+        });
     }
 
     for (auto &thread : workers)
@@ -90,4 +93,7 @@ inline LogicalId refFactoryDotTransposedBF16(const std::vector<LogicalId> &input
     return graph.dot(inputs[0], w_3d);
 }
 
-REGISTER_KERNEL("Dot_Transposed_BF16", 2, 2, matchDotTransposedBF16, runDotTransposedBF16, refFactoryDotTransposedBF16, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::BF16}, {{1, 8, 640}, {256, 640}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Dot_Transposed_BF16", 2, 2, matchDotTransposedBF16, runDotTransposedBF16, refFactoryDotTransposedBF16,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::BF16},
+                {{1, 8, 640}, {256, 640}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

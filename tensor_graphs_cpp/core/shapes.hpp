@@ -1,8 +1,9 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/graph.hpp"
-#include <cstring>
 #include <algorithm>
+#include <cstring>
+
+#include "core/graph.hpp"
+#include "core/types.hpp"
 
 inline bool isElementwise(OpType op)
 {
@@ -94,7 +95,8 @@ inline std::vector<Region> makeFull(const std::vector<uint32_t> &shape)
     return {r};
 }
 
-inline void getFlatBounds(const Region &region, const std::vector<uint32_t> &shape, uint64_t &flat_start, uint64_t &flat_stop)
+inline void getFlatBounds(const Region &region, const std::vector<uint32_t> &shape, uint64_t &flat_start,
+                          uint64_t &flat_stop)
 {
     std::vector<uint64_t> strides(shape.size(), 1);
     for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i)
@@ -279,23 +281,22 @@ struct ShapePropagator
         case OpType::LT:
         case OpType::EQ:
         case OpType::AND:
-        case OpType::OR:
-        {
+        case OpType::OR: {
             auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             auto s1 = graph.getNode(graph.getNode(nodeId).child_ids[1]).getShape();
             if (s0 != s1)
             {
                 std::stringstream ss;
                 ss << "[ShapePropagator.inferShape] Atomic " << toString(graph.getNode(nodeId).opType)
-                   << " requires exact shape match. Got " << toString(s0)
-                   << " and " << toString(s1) << ". Use explicit repeat/reshape. (Node " << graph.getNode(nodeId).id << "). " + graph.getNode(nodeId).debugOrigin;
+                   << " requires exact shape match. Got " << toString(s0) << " and " << toString(s1)
+                   << ". Use explicit repeat/reshape. (Node " << graph.getNode(nodeId).id
+                   << "). " + graph.getNode(nodeId).debugOrigin;
                 Error::throw_err(ss.str());
             }
             graph.getNode(nodeId).setShape(s0);
             break;
         }
-        case OpType::DOT:
-        {
+        case OpType::DOT: {
             const auto &s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             const auto &s1 = graph.getNode(graph.getNode(nodeId).child_ids[1]).getShape();
             uint64_t r0 = s0.size();
@@ -304,8 +305,12 @@ struct ShapePropagator
             if (r0 != r1)
             {
                 std::stringstream ss;
-                ss << "[ShapePropagator.inferShape] nodeId=" + toString(nodeId) + " DOT requires equal ranks. Got " << r0 << " (" + toString(s0) + ") and " << r1
-                   << " (" + toString(s1) + "). Implicit broadcasting is disabled; use explicit reshape to align ranks.";
+                ss << "[ShapePropagator.inferShape] nodeId=" + toString(nodeId) + " DOT requires equal ranks. Got "
+                   << r0 << " (" + toString(s0) + ") and " << r1
+                   << " (" + toString(s1) +
+                          "). Implicit broadcasting is disabled; use explicit "
+                          "reshape "
+                          "to align ranks.";
                 Error::throw_err(ss.str());
             }
 
@@ -318,20 +323,24 @@ struct ShapePropagator
             else if (r0 == 3)
             {
                 if (s0[2] != s1[1])
-                    Error::throw_err("DOT: K-dim mismatch [B,M,K] @ [B,K,N], " + std::to_string(s0[2]) + " != " + std::to_string(s1[1]));
+                    Error::throw_err("DOT: K-dim mismatch [B,M,K] @ [B,K,N], " + std::to_string(s0[2]) +
+                                     " != " + std::to_string(s1[1]));
                 graph.getNode(nodeId).setShape({s0[0], s0[1], s1[2]});
             }
             else if (r0 == 4)
             {
                 if (s0[0] != s1[0] || s0[1] != s1[1] || s0[3] != s1[2])
                 {
-                    Error::throw_err("DOT 4D: Dimension mismatch [B,H,M,K] @ [B,H,K,N], " + std::to_string(s0[2]) + " != " + std::to_string(s1[1]));
+                    Error::throw_err("DOT 4D: Dimension mismatch [B,H,M,K] @ [B,H,K,N], " + std::to_string(s0[2]) +
+                                     " != " + std::to_string(s1[1]));
                 }
                 graph.getNode(nodeId).setShape({s0[0], s0[1], s0[2], s1[3]});
             }
             else
             {
-                Error::throw_err("DOT: Only Rank 2 and Rank 3 are currently supported in this framework. Got r0=" + std::to_string(r0) + ", r1=" + std::to_string(r1));
+                Error::throw_err("DOT: Only Rank 2 and Rank 3 are currently supported "
+                                 "in this framework. Got r0=" +
+                                 std::to_string(r0) + ", r1=" + std::to_string(r1));
             }
             break;
         }
@@ -343,20 +352,17 @@ struct ShapePropagator
         case OpType::CONTIGUOUS:
         case OpType::SCATTER:
         case OpType::LOG:
-        case OpType::NOT:
-        {
+        case OpType::NOT: {
             graph.getNode(nodeId).setShape(graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape());
             break;
         }
-        case OpType::COPY_TO:
-        {
+        case OpType::COPY_TO: {
             graph.getNode(nodeId).setShape(graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape());
             graph.getNode(nodeId).strides = graph.getNode(graph.getNode(nodeId).child_ids[0]).strides;
             break;
         }
         case OpType::SUM:
-        case OpType::MAX:
-        {
+        case OpType::MAX: {
             auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             auto axis_vec = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1]);
             int32_t axis = axis_vec[0];
@@ -374,8 +380,7 @@ struct ShapePropagator
             graph.getNode(nodeId).setShape(new_shape);
             break;
         }
-        case OpType::RESHAPE:
-        {
+        case OpType::RESHAPE: {
             auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             auto target_dims = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1]);
             uint64_t total_vol = countElements(s0);
@@ -396,8 +401,7 @@ struct ShapePropagator
             graph.getNode(nodeId).setShape(out_shape);
             break;
         }
-        case OpType::PERMUTE:
-        {
+        case OpType::PERMUTE: {
             auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             auto dims = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1]);
             std::vector<uint32_t> out_shape(dims.size());
@@ -414,8 +418,7 @@ struct ShapePropagator
             }
             break;
         }
-        case OpType::GATHER:
-        {
+        case OpType::GATHER: {
             auto data_shape = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             auto idx_shape = graph.getNode(graph.getNode(nodeId).child_ids[1]).getShape();
             std::vector<uint32_t> out_shape = idx_shape;
@@ -426,8 +429,7 @@ struct ShapePropagator
             graph.getNode(nodeId).setShape(out_shape);
             break;
         }
-        case OpType::CONCAT:
-        {
+        case OpType::CONCAT: {
             LogicalId axis_id = graph.getNode(nodeId).child_ids[0];
             auto axis_vec = graph.getConstantInt32(axis_id);
             int32_t axis = axis_vec[0];
@@ -446,8 +448,7 @@ struct ShapePropagator
             graph.getNode(nodeId).setShape(out_shape);
             break;
         }
-        case OpType::REPEAT:
-        {
+        case OpType::REPEAT: {
             auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             auto repeats = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1])[0];
             auto axis = graph.getConstantInt32(graph.getNode(nodeId).child_ids[2])[0];
@@ -468,8 +469,7 @@ struct ShapePropagator
             }
             break;
         }
-        case OpType::FILL:
-        {
+        case OpType::FILL: {
             auto target_dims = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1]);
             std::vector<uint32_t> out_shape(target_dims.size());
             for (uint64_t i = 0; i < target_dims.size(); ++i)
@@ -479,8 +479,7 @@ struct ShapePropagator
             graph.getNode(nodeId).setShape(out_shape);
             break;
         }
-        case OpType::IM2COL:
-        {
+        case OpType::IM2COL: {
             auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape(); // N, C, H, W
             uint32_t k = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1])[0];
             uint32_t s = graph.getConstantInt32(graph.getNode(nodeId).child_ids[2])[0];
@@ -492,8 +491,7 @@ struct ShapePropagator
             graph.getNode(nodeId).setShape({s0[0], s0[1] * k * k, H_out * W_out});
             break;
         }
-        case OpType::SLICE:
-        {
+        case OpType::SLICE: {
             auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             auto starts = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1]);
             auto ends = graph.getConstantInt32(graph.getNode(nodeId).child_ids[2]);
@@ -517,7 +515,8 @@ struct ShapePropagator
                 out_shape[i] = std::max(0, (end - start + step - 1) / step);
                 if (out_shape[i] == 0)
                 {
-                    Error::throw_err("Zero-sized dimension in tensor shape!" + toString(graph.getNode(nodeId), graph, ""));
+                    Error::throw_err("Zero-sized dimension in tensor shape!" +
+                                     toString(graph.getNode(nodeId), graph, ""));
                 }
             }
             graph.getNode(nodeId).setShape(out_shape);
@@ -534,16 +533,14 @@ struct ShapePropagator
             }
             break;
         }
-        case OpType::ARANGE:
-        {
+        case OpType::ARANGE: {
             int32_t start = graph.getConstantInt32(graph.getNode(nodeId).child_ids[0])[0];
             int32_t stop = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1])[0];
             int32_t step = graph.getConstantInt32(graph.getNode(nodeId).child_ids[2])[0];
             graph.getNode(nodeId).setShape({(uint32_t)std::max(0, (stop - start + step - 1) / step)});
             break;
         }
-        case OpType::ARGMAX:
-        {
+        case OpType::ARGMAX: {
             auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
             auto axis_vec = graph.getConstantInt32(graph.getNode(nodeId).child_ids[1]);
             int32_t axis = axis_vec[0];
@@ -565,7 +562,8 @@ struct ShapePropagator
             break;
         }
         case OpType::FUSED:
-            break; // TODO: we should never hit this, only infer shapes for atomic, fused should inherit from atomic that it is replacing
+            break; // TODO: we should never hit this, only infer shapes for atomic,
+                   // fused should inherit from atomic that it is replacing
         default:
             break;
         }
@@ -579,11 +577,11 @@ struct ShapePropagator
         }
     }
 
-    std::vector<Region> forwardElementwise(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardElementwise(const TensorNode &node, const Graph &graph,
+                                           const std::vector<std::vector<Region>> &parentRegions)
     {
         std::vector<Region> outputRegions;
-        auto regionExists = [&](const Region &r)
-        {
+        auto regionExists = [&](const Region &r) {
             for (const auto &existing : outputRegions)
             {
                 if (regionsMatch(existing, r))
@@ -604,7 +602,8 @@ struct ShapePropagator
         return mergeRegions(outputRegions);
     }
 
-    std::vector<std::vector<Region>> backwardElementwise(const uint32_t n_children, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardElementwise(const uint32_t n_children,
+                                                         const std::vector<Region> &outputRegions)
     {
         std::vector<std::vector<Region>> inputRegions(n_children);
         std::vector<Region> merged = mergeRegions(outputRegions);
@@ -615,7 +614,8 @@ struct ShapePropagator
         return inputRegions;
     }
 
-    std::vector<Region> forwardFull(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardFull(const TensorNode &node, const Graph &graph,
+                                    const std::vector<std::vector<Region>> &parentRegions)
     {
         for (const auto &p : parentRegions)
         {
@@ -625,7 +625,8 @@ struct ShapePropagator
         return {};
     }
 
-    std::vector<std::vector<Region>> backwardFull(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardFull(const TensorNode &node, const Graph &graph,
+                                                  const std::vector<Region> &outputRegions)
     {
         std::vector<std::vector<Region>> res(node.child_ids.size());
         if (outputRegions.empty())
@@ -637,7 +638,8 @@ struct ShapePropagator
         return res;
     }
 
-    std::vector<Region> forwardDot(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardDot(const TensorNode &node, const Graph &graph,
+                                   const std::vector<std::vector<Region>> &parentRegions)
     {
         const auto &rA = parentRegions[0];
         const auto &rB = parentRegions[1];
@@ -693,7 +695,8 @@ struct ShapePropagator
         return mergeRegions(outBoxes);
     }
 
-    std::vector<std::vector<Region>> backwardDot(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardDot(const TensorNode &node, const Graph &graph,
+                                                 const std::vector<Region> &outputRegions)
     {
         if (outputRegions.empty())
             return {{}, {}};
@@ -734,7 +737,8 @@ struct ShapePropagator
         return {mergeRegions(reqA), mergeRegions(reqB)};
     }
 
-    std::vector<Region> forwardReshape(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardReshape(const TensorNode &node, const Graph &graph,
+                                       const std::vector<std::vector<Region>> &parentRegions)
     {
         const auto &rA = parentRegions[0];
         if (rA.empty())
@@ -815,7 +819,8 @@ struct ShapePropagator
         return mergeRegions(outBoxes);
     }
 
-    std::vector<std::vector<Region>> backwardReshape(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardReshape(const TensorNode &node, const Graph &graph,
+                                                     const std::vector<Region> &outputRegions)
     {
         if (outputRegions.empty())
             return {{}, {}};
@@ -894,7 +899,8 @@ struct ShapePropagator
         return {mergeRegions(inBoxes), makeFull(sShape)};
     }
 
-    std::vector<Region> forwardReduce(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardReduce(const TensorNode &node, const Graph &graph,
+                                      const std::vector<std::vector<Region>> &parentRegions)
     {
         const auto &rA = parentRegions[0];
         if (rA.empty())
@@ -932,7 +938,8 @@ struct ShapePropagator
         return mergeRegions(outBoxes);
     }
 
-    std::vector<std::vector<Region>> backwardReduce(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardReduce(const TensorNode &node, const Graph &graph,
+                                                    const std::vector<Region> &outputRegions)
     {
         if (outputRegions.empty())
             return {{}, {}};
@@ -969,7 +976,8 @@ struct ShapePropagator
         return {mergeRegions(inBoxes), makeFull(graph.getNode(node.child_ids[1]).getShape())};
     }
 
-    std::vector<Region> forwardPermute(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardPermute(const TensorNode &node, const Graph &graph,
+                                       const std::vector<std::vector<Region>> &parentRegions)
     {
         const auto &rA = parentRegions[0];
         if (rA.empty())
@@ -990,7 +998,8 @@ struct ShapePropagator
         return mergeRegions(outBoxes);
     }
 
-    std::vector<std::vector<Region>> backwardPermute(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardPermute(const TensorNode &node, const Graph &graph,
+                                                     const std::vector<Region> &outputRegions)
     {
         if (outputRegions.empty())
             return {{}, {}};
@@ -1015,7 +1024,8 @@ struct ShapePropagator
         return {mergeRegions(inBoxes), makeFull(graph.getNode(node.child_ids[1]).getShape())};
     }
 
-    std::vector<Region> forwardGather(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardGather(const TensorNode &node, const Graph &graph,
+                                      const std::vector<std::vector<Region>> &parentRegions)
     {
         const auto &dataReg = parentRegions[0];
         const auto &idxReg = parentRegions[1];
@@ -1066,7 +1076,8 @@ struct ShapePropagator
                 for (uint32_t d = 0; d < idxRank; ++d)
                     outBox.region.push_back({0, outShape[d]});
                 for (uint32_t d = 1; d < dataShape.size(); ++d)
-                    outBox.region.push_back(dataBox.region.size() > d ? dataBox.region[d] : Dim{0, outShape[idxRank + d - 1]});
+                    outBox.region.push_back(dataBox.region.size() > d ? dataBox.region[d]
+                                                                      : Dim{0, outShape[idxRank + d - 1]});
                 if (isValidRegion(outBox))
                     outBoxes.push_back(outBox);
             }
@@ -1089,7 +1100,8 @@ struct ShapePropagator
         return mergeRegions(outBoxes);
     }
 
-    std::vector<std::vector<Region>> backwardGather(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardGather(const TensorNode &node, const Graph &graph,
+                                                    const std::vector<Region> &outputRegions)
     {
         if (outputRegions.empty())
             return {{}, {}};
@@ -1183,7 +1195,8 @@ struct ShapePropagator
         return {mergeRegions(dataBoxes), mergeRegions(idxBoxes)};
     }
 
-    std::vector<Region> forwardConcat(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardConcat(const TensorNode &node, const Graph &graph,
+                                      const std::vector<std::vector<Region>> &parentRegions)
     {
         bool allClean = true;
         for (uint64_t i = 1; i < parentRegions.size(); ++i)
@@ -1224,7 +1237,8 @@ struct ShapePropagator
         return mergeRegions(outBoxes);
     }
 
-    std::vector<std::vector<Region>> backwardConcat(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardConcat(const TensorNode &node, const Graph &graph,
+                                                    const std::vector<Region> &outputRegions)
     {
         std::vector<std::vector<Region>> res(node.child_ids.size());
         if (outputRegions.empty())
@@ -1265,7 +1279,8 @@ struct ShapePropagator
         return res;
     }
 
-    std::vector<Region> forwardRepeat(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardRepeat(const TensorNode &node, const Graph &graph,
+                                      const std::vector<std::vector<Region>> &parentRegions)
     {
         const auto &rA = parentRegions[0];
         if (rA.empty())
@@ -1290,7 +1305,8 @@ struct ShapePropagator
         return mergeRegions(outBoxes);
     }
 
-    std::vector<std::vector<Region>> backwardRepeat(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardRepeat(const TensorNode &node, const Graph &graph,
+                                                    const std::vector<Region> &outputRegions)
     {
         if (outputRegions.empty())
             return {{}, {}, {}};
@@ -1310,10 +1326,12 @@ struct ShapePropagator
             inBoxes.push_back(inBox);
         }
 
-        return {mergeRegions(inBoxes), makeFull(graph.getNode(node.child_ids[1]).getShape()), makeFull(graph.getNode(node.child_ids[2]).getShape())};
+        return {mergeRegions(inBoxes), makeFull(graph.getNode(node.child_ids[1]).getShape()),
+                makeFull(graph.getNode(node.child_ids[2]).getShape())};
     }
 
-    std::vector<Region> forwardSlice(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardSlice(const TensorNode &node, const Graph &graph,
+                                     const std::vector<std::vector<Region>> &parentRegions)
     {
         const auto &rA = parentRegions[0];
         if (rA.empty())
@@ -1330,7 +1348,8 @@ struct ShapePropagator
         return mergeRegions(outBoxes);
     }
 
-    std::vector<std::vector<Region>> backwardSlice(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardSlice(const TensorNode &node, const Graph &graph,
+                                                   const std::vector<Region> &outputRegions)
     {
         if (outputRegions.empty())
             return {{}, {}, {}, {}};
@@ -1344,10 +1363,13 @@ struct ShapePropagator
         for (const auto &region : outputRegions)
             inBoxes.push_back(mapSliceRegionBackward(region, shape, starts, ends, steps));
 
-        return {mergeRegions(inBoxes), makeFull(graph.getNode(node.child_ids[1]).getShape()), makeFull(graph.getNode(node.child_ids[2]).getShape()), makeFull(graph.getNode(node.child_ids[3]).getShape())};
+        return {mergeRegions(inBoxes), makeFull(graph.getNode(node.child_ids[1]).getShape()),
+                makeFull(graph.getNode(node.child_ids[2]).getShape()),
+                makeFull(graph.getNode(node.child_ids[3]).getShape())};
     }
 
-    std::vector<Region> forwardScatter(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forwardScatter(const TensorNode &node, const Graph &graph,
+                                       const std::vector<std::vector<Region>> &parentRegions)
     {
         const auto &targetRegions = parentRegions[0];
         const auto &updateRegions = parentRegions[1];
@@ -1367,7 +1389,8 @@ struct ShapePropagator
         return mergeRegions(outBoxes);
     }
 
-    std::vector<std::vector<Region>> backwardScatter(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardScatter(const TensorNode &node, const Graph &graph,
+                                                     const std::vector<Region> &outputRegions)
     {
         if (outputRegions.empty())
             return {{}, {}, {}, {}, {}};
@@ -1385,10 +1408,14 @@ struct ShapePropagator
             updateBoxes.push_back(mapSliceRegionForward(region, targetShape, starts, ends, steps));
         }
 
-        return {mergeRegions(targetBoxes), mergeRegions(updateBoxes), makeFull(graph.getNode(node.child_ids[2]).getShape()), makeFull(graph.getNode(node.child_ids[3]).getShape()), makeFull(graph.getNode(node.child_ids[4]).getShape())};
+        return {mergeRegions(targetBoxes), mergeRegions(updateBoxes),
+                makeFull(graph.getNode(node.child_ids[2]).getShape()),
+                makeFull(graph.getNode(node.child_ids[3]).getShape()),
+                makeFull(graph.getNode(node.child_ids[4]).getShape())};
     }
 
-    std::vector<Region> forward(const TensorNode &node, const Graph &graph, const std::vector<std::vector<Region>> &parentRegions)
+    std::vector<Region> forward(const TensorNode &node, const Graph &graph,
+                                const std::vector<std::vector<Region>> &parentRegions)
     {
         for (LogicalId pid : node.child_ids)
         {
@@ -1405,14 +1432,12 @@ struct ShapePropagator
         }
         switch (node.opType)
         {
-        case OpType::TRIU:
-        {
+        case OpType::TRIU: {
             if (!parentRegions[1].empty())
                 return makeFull(node.getShape());
             return mergeRegions(parentRegions[0]);
         }
-        case OpType::SCATTER:
-        {
+        case OpType::SCATTER: {
             if (!parentRegions[2].empty() || !parentRegions[3].empty() || !parentRegions[4].empty())
                 return makeFull(node.getShape());
             return forwardScatter(node, graph, parentRegions);
@@ -1422,8 +1447,7 @@ struct ShapePropagator
         case OpType::SUM:
         case OpType::MAX:
             return forwardReduce(node, graph, parentRegions);
-        case OpType::ARGMAX:
-        {
+        case OpType::ARGMAX: {
             const auto &rA = parentRegions[0];
             if (rA.empty())
                 return {};
@@ -1479,12 +1503,15 @@ struct ShapePropagator
             return forwardSlice(node, graph, parentRegions);
         default:
             std::stringstream ss;
-            ss << "[ShapePropagator.forward] Unsupported OpType for ShapePropagator.forward: " << toString(node.opType);
+            ss << "[ShapePropagator.forward] Unsupported OpType for "
+                  "ShapePropagator.forward: "
+               << toString(node.opType);
             Error::throw_err(ss.str());
         }
     }
 
-    std::vector<std::vector<Region>> backward(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backward(const TensorNode &node, const Graph &graph,
+                                              const std::vector<Region> &outputRegions)
     {
         if (isElementwise(node.opType) || node.opType == OpType::INPUT)
         {
@@ -1501,8 +1528,7 @@ struct ShapePropagator
         case OpType::SUM:
         case OpType::MAX:
             return backwardReduce(node, graph, outputRegions);
-        case OpType::ARGMAX:
-        {
+        case OpType::ARGMAX: {
             std::vector<std::vector<Region>> res(3);
             if (outputRegions.empty())
                 return res;
@@ -1559,7 +1585,9 @@ struct ShapePropagator
             return backwardSlice(node, graph, outputRegions);
         default:
             std::stringstream ss;
-            ss << "[ShapePropagator.backward] Unsupported OpType for ShapePropagator.backward: " << toString(node.opType);
+            ss << "[ShapePropagator.backward] Unsupported OpType for "
+                  "ShapePropagator.backward: "
+               << toString(node.opType);
             Error::throw_err(ss.str());
         }
     }

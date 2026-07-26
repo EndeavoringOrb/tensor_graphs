@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 // ---------------------------------------------------------
 // FUSED KERNEL: TANH F32 1D (Contiguous)
@@ -65,4 +65,5 @@ LogicalId refFactoryTanh(const std::vector<LogicalId> &inputs, Graph &graph)
     return graph.div(num, den);
 }
 
-REGISTER_KERNEL("Tanh", 1, 1, matchTanhF32_1D, runTanhF32_1D, refFactoryTanh, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Tanh", 1, 1, matchTanhF32_1D, runTanhF32_1D, refFactoryTanh, MemSpace(1, HandleType::CPP),
+                {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1}}, {true}, {{MemSpace(1, HandleType::CPP)}});

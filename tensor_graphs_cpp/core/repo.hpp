@@ -1,14 +1,15 @@
 // tensor_graphs_cpp/core/repo.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/graph.hpp"
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iostream>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <fstream>
-#include <iostream>
-#include <filesystem>
-#include <functional>
+
+#include "core/graph.hpp"
+#include "core/types.hpp"
 
 struct RefMetaEntry
 {
@@ -40,8 +41,7 @@ inline void tg_deserialize(BinaryReader &br, RefMetaEntry &val)
 inline std::string computeGraphHash(const Graph &graph, const std::vector<LogicalId> &rootIds)
 {
     std::unordered_map<LogicalId, std::string> memo;
-    std::function<std::string(LogicalId)> hashNode = [&](LogicalId id)
-    {
+    std::function<std::string(LogicalId)> hashNode = [&](LogicalId id) {
         if (memo.count(id))
             return memo[id];
         const TensorNode &n = graph.getNode(id);
@@ -88,9 +88,8 @@ class Repo
     bool readOnly;
     bool valid = false;
 
-public:
-    Repo(const std::string &path, const std::string &gHash, bool ro = true)
-        : graphHash(gHash), readOnly(ro)
+  public:
+    Repo(const std::string &path, const std::string &gHash, bool ro = true) : graphHash(gHash), readOnly(ro)
     {
         metaPath = path + ".refmeta";
         dataPath = path + ".reftensors";
@@ -141,7 +140,10 @@ public:
         }
     }
 
-    bool isValid() const { return valid; }
+    bool isValid() const
+    {
+        return valid;
+    }
 
     bool has(LogicalId logicalId) const
     {

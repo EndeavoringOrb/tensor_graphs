@@ -1,29 +1,30 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/graph.hpp"
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <queue>
+#include <sstream>
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 #include "core/cost_model.hpp"
-#include "core/kernels.hpp"
-#include "core/rewrite.hpp"
-#include "core/shapes.hpp"
-#include "core/misc.hpp"
 #include "core/egraph.hpp"
+#include "core/graph.hpp"
+#include "core/kernels.hpp"
+#include "core/misc.hpp"
 #include "core/plan/extractor.hpp"
 #include "core/plan/validators/cycle.hpp"
 #include "core/plan/validators/mem.hpp"
-#include <vector>
-#include <unordered_map>
-#include <unordered_set>
-#include <algorithm>
-#include <memory>
-#include <functional>
-#include <cmath>
-#include <limits>
-#include <stdexcept>
-#include <iostream>
-#include <sstream>
-#include <fstream>
-#include <filesystem>
-#include <queue>
+#include "core/rewrite.hpp"
+#include "core/shapes.hpp"
+#include "core/types.hpp"
 
 struct ExtractionResult
 {
@@ -49,7 +50,9 @@ struct Planner
         }
     }
 
-    void saturate(EGraph &egraph, const std::unordered_set<EClassId> &protectedEClasses, std::unordered_map<EClassId, LogicalId> &eclassToLogical, bool injected, bool allowPushDownOnProtected = false, Repo *repo = nullptr)
+    void saturate(EGraph &egraph, const std::unordered_set<EClassId> &protectedEClasses,
+                  std::unordered_map<EClassId, LogicalId> &eclassToLogical, bool injected,
+                  bool allowPushDownOnProtected = false, Repo *repo = nullptr)
     {
         RuleCtx ctx{egraph, protectedEClasses, eclassToLogical, repo};
         std::vector<std::unique_ptr<Rule>> rules;
@@ -116,13 +119,11 @@ struct Planner
                                  const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
                                  const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
                                  const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
-                                 bool stopOnFirstValid = true,
-                                 bool strictCache = false)
+                                 bool stopOnFirstValid = true, bool strictCache = false)
     {
         constexpr float EPS = 1e-6f;
 
-        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool
-        {
+        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool {
             if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
                 return true;
             if (op == OpType::RESHAPE && inputIdx == 1)
@@ -173,7 +174,8 @@ struct Planner
                 {
                     EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
                     EClassId canonId = egraph.findConst(e_class_id);
-                    LogicalId logicalId = eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : LogicalId{UINT32_MAX};
+                    LogicalId logicalId =
+                        eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : LogicalId{UINT32_MAX};
                     if (logicalId == LogicalId{UINT32_MAX} || cachedNodes.find(logicalId) == cachedNodes.end())
                     {
                         info.cost = TGConstants::INF;
@@ -236,15 +238,13 @@ struct Planner
                     {
                         if (refEntry && pGraph)
                         {
-                            auto traceToInputIdx = [&](LogicalId pid) -> int
-                            {
+                            auto traceToInputIdx = [&](LogicalId pid) -> int {
                                 LogicalId curr = pid;
-                                while (pGraph->hasNode(curr) &&
-                                       (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
-                                        pGraph->getNode(curr).opType == OpType::CAST ||
-                                        pGraph->getNode(curr).opType == OpType::COPY_TO ||
-                                        pGraph->getNode(curr).opType == OpType::RESHAPE ||
-                                        pGraph->getNode(curr).opType == OpType::PERMUTE))
+                                while (pGraph->hasNode(curr) && (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
+                                                                 pGraph->getNode(curr).opType == OpType::CAST ||
+                                                                 pGraph->getNode(curr).opType == OpType::COPY_TO ||
+                                                                 pGraph->getNode(curr).opType == OpType::RESHAPE ||
+                                                                 pGraph->getNode(curr).opType == OpType::PERMUTE))
                                 {
                                     if (pGraph->getNode(curr).child_ids.empty())
                                         break;
@@ -268,12 +268,14 @@ struct Planner
                                         int inputIdx = traceToInputIdx(n.child_ids[p_idx]);
                                         if (kernel.min_num_inputs != kernel.max_num_inputs)
                                         {
-                                            if (inputIdx == (int)kernel.min_num_inputs - 1 && j == enode.getChildren().size() - 1)
+                                            if (inputIdx == (int)kernel.min_num_inputs - 1 &&
+                                                j == enode.getChildren().size() - 1)
                                             {
                                                 needed = true;
                                                 break;
                                             }
-                                            else if (inputIdx >= 0 && inputIdx < (int)kernel.min_num_inputs - 1 && j < enode.getChildren().size() - 1)
+                                            else if (inputIdx >= 0 && inputIdx < (int)kernel.min_num_inputs - 1 &&
+                                                     j < enode.getChildren().size() - 1)
                                             {
                                                 needed = true;
                                                 break;
@@ -306,16 +308,13 @@ struct Planner
                     }
                 }
 
-                info.cost = costModel.estimateCost(
-                    enode.getKernelId(),
-                    enode.getShape(),
-                    enode.getStrides(),
-                    enode.getDType(),
-                    inShapes, inStrides, inDTypes, inConstants);
+                info.cost = costModel.estimateCost(enode.getKernelId(), enode.getShape(), enode.getStrides(),
+                                                   enode.getDType(), inShapes, inStrides, inDTypes, inConstants);
             }
             else
             {
-                Error::throw_err("[Planner.extractBest] enode.kernelId != 0, but isn't OpType::INPUT or OpType::CACHE. this shouldn't happen");
+                Error::throw_err("[Planner.extractBest] enode.kernelId != 0, but isn't "
+                                 "OpType::INPUT or OpType::CACHE. this shouldn't happen");
             }
 
             enodeInfos[i] = std::move(info);
@@ -368,7 +367,8 @@ struct Planner
                     if (a != b)
                         continue;
 
-                    // B dominates A only if strictly cheaper, OR equal-cost with smaller ID.
+                    // B dominates A only if strictly cheaper, OR equal-cost with smaller
+                    // ID.
                     if (ib.cost < ia.cost - 1e-9f)
                     {
                         dominated = true;
@@ -389,13 +389,17 @@ struct Planner
 
         if (totalPruned > 0)
         {
-            std::cout << "[Planner.extractBest] Pruned " << totalPruned << " dominated enodes from the search space." << std::endl;
+            std::cout << "[Planner.extractBest] Pruned " << totalPruned << " dominated enodes from the search space."
+                      << std::endl;
         }
 
         if (droppedInf)
         {
-            std::cout << "[Planner.extractBest] Warning: Filtered out nodes with infinite cost. "
-                      << "You may need to run 'bench' to gather missing kernel performance data." << std::endl;
+            std::cout << "[Planner.extractBest] Warning: Filtered out nodes with "
+                         "infinite cost. "
+                      << "You may need to run 'bench' to gather missing kernel "
+                         "performance data."
+                      << std::endl;
         }
 
         auto rootIt = nodeToEClass.find(rootId);
@@ -422,16 +426,14 @@ struct Planner
         const uint64_t numCanonical = canonicalClasses.size();
         const uint64_t bitWords = numCanonical == 0 ? 0 : (numCanonical + 63) >> 6;
 
-        auto bitTest = [&](const std::vector<uint64_t> &bits, EClassId e_class_id) -> bool
-        {
+        auto bitTest = [&](const std::vector<uint64_t> &bits, EClassId e_class_id) -> bool {
             uint32_t idx = classToBitIdx[e_class_id.value];
             if (idx == UINT32_MAX || bits.empty())
                 return false;
             return (bits[idx >> 6] >> (idx & 63)) & 1ULL;
         };
 
-        auto bitSet = [&](std::vector<uint64_t> &bits, EClassId e_class_id)
-        {
+        auto bitSet = [&](std::vector<uint64_t> &bits, EClassId e_class_id) {
             uint32_t idx = classToBitIdx[e_class_id.value];
             if (idx != UINT32_MAX && !bits.empty())
             {
@@ -583,8 +585,7 @@ struct Planner
 
                     optimisticEnodeDagCost[enodeId.value] = candidateCost;
 
-                    if (!best.valid ||
-                        candidateCost < best.cost - EPS ||
+                    if (!best.valid || candidateCost < best.cost - EPS ||
                         (std::abs(candidateCost - best.cost) <= EPS && enodeId < best.chosenEnode))
                     {
                         best.valid = true;
@@ -598,9 +599,9 @@ struct Planner
                 if (!best.valid)
                     continue;
 
-                if (!opt[e_class_id.value].valid ||
-                    best.cost < opt[e_class_id.value].cost - EPS ||
-                    (std::abs(best.cost - opt[e_class_id.value].cost) <= EPS && best.chosenEnode < opt[e_class_id.value].chosenEnode))
+                if (!opt[e_class_id.value].valid || best.cost < opt[e_class_id.value].cost - EPS ||
+                    (std::abs(best.cost - opt[e_class_id.value].cost) <= EPS &&
+                     best.chosenEnode < opt[e_class_id.value].chosenEnode))
                 {
                     opt[e_class_id.value] = std::move(best);
 
@@ -716,18 +717,16 @@ struct Planner
         for (EClassId e_class_id : canonicalClasses)
         {
             EClass &cls = egraph.getEClass(e_class_id);
-            std::sort(cls.enodes.begin(), cls.enodes.end(),
-                      [&](ENodeId a, ENodeId b)
-                      {
-                          float costA = optimisticEnodeDagCost[a.value];
-                          float costB = optimisticEnodeDagCost[b.value];
+            std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b) {
+                float costA = optimisticEnodeDagCost[a.value];
+                float costB = optimisticEnodeDagCost[b.value];
 
-                          if (costA < costB)
-                              return true;
-                          if (costA > costB)
-                              return false;
-                          return a < b;
-                      });
+                if (costA < costB)
+                    return true;
+                if (costA > costB)
+                    return false;
+                return a < b;
+            });
         }
 
         if (egraph.getEClass(rootEClassId).enodes.size() == 0)
@@ -735,8 +734,8 @@ struct Planner
             Error::throw_err("[Planner.extractBest] no valid extractions");
         }
         float root_optimistic_cost = optimisticEnodeDagCost[egraph.getEClass(rootEClassId).enodes[0].value];
-        std::cout << "[Planner.extractBest] Optimistic root cost: "
-                  << std::to_string(root_optimistic_cost) << std::endl;
+        std::cout << "[Planner.extractBest] Optimistic root cost: " << std::to_string(root_optimistic_cost)
+                  << std::endl;
         if (std::isinf(root_optimistic_cost))
         {
             Error::throw_err("[Planner.extractBest] cannot have inf root cost");
@@ -777,7 +776,8 @@ struct Planner
             std::cout << "loop " << std::to_string(loopTimer.getElapsed() * 1000) << "ms";
             if (max_iters - (remaining_iters + 1) > 0)
             {
-                std::cout << ", avg loop " << std::to_string(timer.getElapsed() * 1000 / (max_iters - (remaining_iters + 1))) << "ms";
+                std::cout << ", avg loop "
+                          << std::to_string(timer.getElapsed() * 1000 / (max_iters - (remaining_iters + 1))) << "ms";
             }
             std::cout << std::endl;
             loopTimer.reset();
@@ -816,7 +816,8 @@ struct Planner
                     break;
                 }
             }
-            std::cout << "[Planner.extractBest] iterated " << dispatch_iterator.getIter() << " dispatch orders" << std::endl;
+            std::cout << "[Planner.extractBest] iterated " << dispatch_iterator.getIter() << " dispatch orders"
+                      << std::endl;
 
             if (valid && stopOnFirstValid)
             {
@@ -825,8 +826,7 @@ struct Planner
 
             if (!valid)
             {
-                std::cout << "[Planner.extractBest] [iter "
-                          << std::to_string(max_iters - remaining_iters)
+                std::cout << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
                           << "] invalid reason: " << reason << std::endl;
             }
 
@@ -843,33 +843,34 @@ struct Planner
 
         if (best_cost == TGConstants::INF)
         {
-            Error::throw_err("[Planner.extractBest] no valid extraction found under given constraints. try running bench");
+            Error::throw_err("[Planner.extractBest] no valid extraction found under "
+                             "given constraints. try running bench");
         }
 
         std::unordered_map<EClassId, float> best_eclass_to_cost;
         for (const auto &pair : best_selection_map)
         {
-            best_eclass_to_cost[pair.first] = enodeInfos[egraph.getEClass(pair.first).enodes[best_selection_map.at(pair.first)].value].cost;
+            best_eclass_to_cost[pair.first] =
+                enodeInfos[egraph.getEClass(pair.first).enodes[best_selection_map.at(pair.first)].value].cost;
         }
-        ExtractionResult result = {best_selection_map, best_order, best_buffers, best_eclass_to_buf, best_cost, best_eclass_to_cost};
+        ExtractionResult result = {best_selection_map, best_order, best_buffers,
+                                   best_eclass_to_buf, best_cost,  best_eclass_to_cost};
 
         return result;
     }
 
-    CompiledGraph buildCompiledGraph(
-        LogicalId rootId,
-        const Graph &graph,
-        EGraph &egraph,
-        const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
-        const ExtractionResult &extraction,
-        const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
-        const std::unordered_map<EClassId, LogicalId> &eclassToLogical)
+    CompiledGraph buildCompiledGraph(LogicalId rootId, const Graph &graph, EGraph &egraph,
+                                     const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
+                                     const ExtractionResult &extraction,
+                                     const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                                     const std::unordered_map<EClassId, LogicalId> &eclassToLogical)
     {
         CompiledGraph compiled;
 
         for (EClassId eclass_id : extraction.order)
         {
-            const ENode &enode = egraph.getENode(egraph.getEClass(eclass_id).enodes[extraction.selection_map.at(eclass_id)]);
+            const ENode &enode =
+                egraph.getENode(egraph.getEClass(eclass_id).enodes[extraction.selection_map.at(eclass_id)]);
             LogicalId logical_id = eclassToLogical.count(eclass_id) ? eclassToLogical.at(eclass_id) : LogicalId();
 
             OpInstruction inst;
@@ -911,7 +912,8 @@ struct Planner
                 compiled.instructions.push_back(inst);
             }
 
-            compiled.nodeViews[eclass_id] = TensorView(enode.getShape(), inst.outBuffer.offset, enode.getStrides(), enode.getDType());
+            compiled.nodeViews[eclass_id] =
+                TensorView(enode.getShape(), inst.outBuffer.offset, enode.getStrides(), enode.getDType());
         }
 
         compiled.nodeCosts = extraction.eclass_to_cost;
@@ -970,7 +972,9 @@ struct Planner
                 std::vector<EClassId> children;
                 for (LogicalId pid : node.child_ids)
                     children.push_back(baseState.egraph.findConst(baseState.nodeToEClass[pid]));
-                ENode enode = ENode(KernelId{0}, node.opType, node.opName, children, node.getShape(), node.strides, node.dtype, graph.getInputDataType(nodeId) == InputDataType::STORAGE ? storage : ram, {cpu}, node.contentHash);
+                ENode enode = ENode(
+                    KernelId{0}, node.opType, node.opName, children, node.getShape(), node.strides, node.dtype,
+                    graph.getInputDataType(nodeId) == InputDataType::STORAGE ? storage : ram, {cpu}, node.contentHash);
                 baseState.egraph.addENode(e_class_id, enode);
                 continue;
             }
@@ -989,7 +993,10 @@ struct Planner
 
             if (refs.size() == 0)
             {
-                Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels to init EClass " + toString(e_class_id) + " " + toString(baseState.egraph.getEClass(e_class_id)) + "\nNode " + toString(node, graph));
+                Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels "
+                                 "to init EClass " +
+                                 toString(e_class_id) + " " + toString(baseState.egraph.getEClass(e_class_id)) +
+                                 "\nNode " + toString(node, graph));
             }
 
             bool any_success = false;
@@ -1009,7 +1016,9 @@ struct Planner
                     uint64_t ruleIdx = i;
                     if (kernel.min_num_inputs != kernel.max_num_inputs)
                     {
-                        ruleIdx = (i == node.child_ids.size() - 1) ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1) : 0;
+                        ruleIdx = (i == node.child_ids.size() - 1)
+                                      ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1)
+                                      : 0;
                     }
                     MemSpace dst_ms = ram;
                     if (!kernel.input_mem_spaces.empty() && ruleIdx < kernel.input_mem_spaces.size())
@@ -1029,7 +1038,9 @@ struct Planner
                         EClass curr_cls = baseState.egraph.getEClass(curr_eclass);
                         if (requires_contig && !isContiguous(curr_cls))
                         {
-                            curr_eclass = addOpToEGraph(baseState.egraph, OpType::CONTIGUOUS, {curr_eclass}, curr_cls.shape, calcContiguousStrides(curr_cls.shape), curr_cls.dtype, curr_cls.mem_space);
+                            curr_eclass = addOpToEGraph(baseState.egraph, OpType::CONTIGUOUS, {curr_eclass},
+                                                        curr_cls.shape, calcContiguousStrides(curr_cls.shape),
+                                                        curr_cls.dtype, curr_cls.mem_space);
                         }
                         children.push_back(curr_eclass);
                     }
@@ -1048,14 +1059,17 @@ struct Planner
 
                         if (!isContiguous(curr_cls))
                         {
-                            curr_eclass = addOpToEGraph(baseState.egraph, OpType::CONTIGUOUS, {curr_eclass}, curr_cls.shape, calcContiguousStrides(curr_cls.shape), curr_cls.dtype, curr_cls.mem_space);
+                            curr_eclass = addOpToEGraph(baseState.egraph, OpType::CONTIGUOUS, {curr_eclass},
+                                                        curr_cls.shape, calcContiguousStrides(curr_cls.shape),
+                                                        curr_cls.dtype, curr_cls.mem_space);
                             curr_cls = baseState.egraph.getEClass(baseState.egraph.findConst(curr_eclass));
                         }
 
                         for (uint64_t p_idx = 1; p_idx < path.size(); ++p_idx)
                         {
                             MemSpace next_ms = path[p_idx];
-                            curr_eclass = addOpToEGraph(baseState.egraph, OpType::COPY_TO, {curr_eclass}, curr_cls.shape, curr_cls.strides, curr_cls.dtype, next_ms);
+                            curr_eclass = addOpToEGraph(baseState.egraph, OpType::COPY_TO, {curr_eclass},
+                                                        curr_cls.shape, curr_cls.strides, curr_cls.dtype, next_ms);
                         }
                         children.push_back(curr_eclass);
                     }
@@ -1074,13 +1088,16 @@ struct Planner
                 {
                     strides = calcContiguousStrides(node.getShape());
                 }
-                ENode enode = ENode(uid, node.opType, node.opName, children, node.getShape(), strides, node.dtype, ram, {cpu});
+                ENode enode =
+                    ENode(uid, node.opType, node.opName, children, node.getShape(), strides, node.dtype, ram, {cpu});
                 baseState.egraph.addENode(e_class_id, enode);
             }
 
             if (!any_success)
             {
-                Error::throw_err("[Planner.initBaseEGraph] found kernels, but could not route memory spaces to satisfy input constraints for node " + toString(nodeId) + "\n" + toString(node, graph));
+                Error::throw_err("[Planner.initBaseEGraph] found kernels, but could not route "
+                                 "memory spaces to satisfy input constraints for node " +
+                                 toString(nodeId) + "\n" + toString(node, graph));
             }
         }
 
@@ -1092,15 +1109,10 @@ struct Planner
         baseStateInitialized = true;
     }
 
-    bool injectPartialPath(
-        EGraph &egraph,
-        const Graph &graph,
-        LogicalId logicalId,
-        const std::vector<Region> &regions,
-        const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
-        const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
-        std::unordered_map<EClassId, LogicalId> &eclassToLogical,
-        bool strictCache = false)
+    bool injectPartialPath(EGraph &egraph, const Graph &graph, LogicalId logicalId, const std::vector<Region> &regions,
+                           const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                           const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
+                           std::unordered_map<EClassId, LogicalId> &eclassToLogical, bool strictCache = false)
     {
         bool injected = false;
         EClassId E_L = egraph.find(nodeToEClass.at(logicalId));
@@ -1147,14 +1159,14 @@ struct Planner
         const EClass lClass = egraph.getEClass(E_L);
 
         EClassId E_Cache = egraph.addEClass(lClass.shape, lClass.strides, lClass.dtype, target_mem_space);
-        ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, lClass.shape, lClass.strides, lClass.dtype, target_mem_space, {cpu}, toString(logicalId));
+        ENode cacheNode(KernelId{0}, OpType::CACHE, "", {}, lClass.shape, lClass.strides, lClass.dtype,
+                        target_mem_space, {cpu}, toString(logicalId));
         egraph.addENode(E_Cache, cacheNode);
 
         eclassToLogical[E_Cache] = logicalId;
         EClassId current_E = E_Cache;
 
-        auto addConst = [&](const std::vector<int32_t> &vals)
-        {
+        auto addConst = [&](const std::vector<int32_t> &vals) {
             return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
         };
 
@@ -1212,10 +1224,12 @@ struct Planner
 
                 std::vector<MemSpace> input_mem_spaces = {lClass.mem_space, ram, ram, ram};
 
-                auto sliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", dIns, dOut, true, lClass.mem_space, input_mem_spaces, {cpu});
+                auto sliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", dIns, dOut, true,
+                                                                           lClass.mem_space, input_mem_spaces, {cpu});
                 for (KernelId kid : sliceRefs)
                 {
-                    ENode sliceNode(kid, OpType::SLICE, "", {E_L, startsId, endsId, stepsId}, partialShape, sliceStrides, lClass.dtype, lClass.mem_space, {cpu});
+                    ENode sliceNode(kid, OpType::SLICE, "", {E_L, startsId, endsId, stepsId}, partialShape,
+                                    sliceStrides, lClass.dtype, lClass.mem_space, {cpu});
                     egraph.addENode(slicedEClass, sliceNode);
                 }
             }
@@ -1234,7 +1248,10 @@ struct Planner
                     std::vector<Region> inputSliceRegions = dirtyInputRegions[p_idx];
                     if (inputSliceRegions.size() != 1)
                     {
-                        Error::throw_err("[Planner.injectPartialPath] expected exactly 1 input slice region for parent " + std::to_string(p_idx) + " but got " + std::to_string(inputSliceRegions.size()));
+                        Error::throw_err("[Planner.injectPartialPath] expected exactly 1 "
+                                         "input slice region for parent " +
+                                         std::to_string(p_idx) + " but got " +
+                                         std::to_string(inputSliceRegions.size()));
                     }
                     Region inputSliceRegion = inputSliceRegions[0];
 
@@ -1263,7 +1280,8 @@ struct Planner
                         pSliceStrides[d] *= pSteps[d];
                     }
 
-                    EClassId pSliceEClass = egraph.addEClass(pPartialShape, pSliceStrides, pClass.dtype, pClass.mem_space);
+                    EClassId pSliceEClass =
+                        egraph.addEClass(pPartialShape, pSliceStrides, pClass.dtype, pClass.mem_space);
 
                     TensorNode pOut;
                     pOut.setShape(pPartialShape);
@@ -1280,17 +1298,21 @@ struct Planner
                     pIns[3].dtype = DType::INT32;
 
                     std::vector<MemSpace> pSliceInputMemSpaces = {pClass.mem_space, ram, ram, ram};
-                    auto pSliceRefs = KernelRegistry::get().findMatchingKernels(OpType::SLICE, "", pIns, pOut, true, pClass.mem_space, pSliceInputMemSpaces, {cpu});
+                    auto pSliceRefs = KernelRegistry::get().findMatchingKernels(
+                        OpType::SLICE, "", pIns, pOut, true, pClass.mem_space, pSliceInputMemSpaces, {cpu});
 
                     for (KernelId uid : pSliceRefs)
                     {
                         const auto &kernel = KernelRegistry::get().getKernel(uid);
-                        std::vector<uint64_t> strides = kernel.is_view ? pSliceStrides : calcContiguousStrides(pPartialShape);
-                        ENode sn(uid, OpType::SLICE, "", {E_parent, pStartsId, pEndsId, pStepsId}, pPartialShape, strides, pClass.dtype, pClass.mem_space, {cpu});
+                        std::vector<uint64_t> strides =
+                            kernel.is_view ? pSliceStrides : calcContiguousStrides(pPartialShape);
+                        ENode sn(uid, OpType::SLICE, "", {E_parent, pStartsId, pEndsId, pStepsId}, pPartialShape,
+                                 strides, pClass.dtype, pClass.mem_space, {cpu});
                         egraph.addENode(pSliceEClass, sn);
                     }
 
-                    EClassId pContigEClass = egraph.addEClass(pPartialShape, calcContiguousStrides(pPartialShape), pClass.dtype, pClass.mem_space);
+                    EClassId pContigEClass = egraph.addEClass(pPartialShape, calcContiguousStrides(pPartialShape),
+                                                              pClass.dtype, pClass.mem_space);
 
                     TensorNode cOut;
                     cOut.setShape(pPartialShape);
@@ -1302,12 +1324,15 @@ struct Planner
                     cIn.dtype = pClass.dtype;
                     cIn.strides = pSliceStrides;
 
-                    auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", {cIn}, cOut, true, pClass.mem_space, {pClass.mem_space}, {cpu});
+                    auto contigRefs = KernelRegistry::get().findMatchingKernels(
+                        OpType::CONTIGUOUS, "", {cIn}, cOut, true, pClass.mem_space, {pClass.mem_space}, {cpu});
                     for (KernelId uid : contigRefs)
                     {
                         const auto &kernel = KernelRegistry::get().getKernel(uid);
-                        std::vector<uint64_t> strides = kernel.is_view ? pSliceStrides : calcContiguousStrides(pPartialShape);
-                        ENode cn(uid, OpType::CONTIGUOUS, "", {pSliceEClass}, pPartialShape, strides, pClass.dtype, pClass.mem_space, {cpu});
+                        std::vector<uint64_t> strides =
+                            kernel.is_view ? pSliceStrides : calcContiguousStrides(pPartialShape);
+                        ENode cn(uid, OpType::CONTIGUOUS, "", {pSliceEClass}, pPartialShape, strides, pClass.dtype,
+                                 pClass.mem_space, {cpu});
                         egraph.addENode(pContigEClass, cn);
                     }
 
@@ -1329,21 +1354,28 @@ struct Planner
                 dummyOut.dtype = sourceNode.dtype;
                 dummyOut.strides = calcContiguousStrides(partialShape);
 
-                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName, dummyInputNodes, dummyOut, true, target_mem_space, dummyInputMemSpaces, {cpu});
+                auto opRefs = KernelRegistry::get().findMatchingKernels(sourceNode.opType, sourceNode.opName,
+                                                                        dummyInputNodes, dummyOut, true,
+                                                                        target_mem_space, dummyInputMemSpaces, {cpu});
                 if (opRefs.size() == 0)
                 {
-                    Error::throw_err("[Planner.injectPartialPath] couldn't find any slice kernels for op " + toString(sourceNode.opType));
+                    Error::throw_err("[Planner.injectPartialPath] couldn't find any "
+                                     "slice kernels for op " +
+                                     toString(sourceNode.opType));
                 }
 
-                slicedEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space);
+                slicedEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), sourceNode.dtype,
+                                                target_mem_space);
                 for (KernelId uid : opRefs)
                 {
-                    ENode sn(uid, sourceNode.opType, sourceNode.opName, slicedInputs, partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space, {cpu});
+                    ENode sn(uid, sourceNode.opType, sourceNode.opName, slicedInputs, partialShape,
+                             calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space, {cpu});
                     egraph.addENode(slicedEClass, sn);
                 }
             }
 
-            EClassId contigEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space);
+            EClassId contigEClass =
+                egraph.addEClass(partialShape, calcContiguousStrides(partialShape), sourceNode.dtype, target_mem_space);
 
             TensorNode cOut;
             cOut.setShape(partialShape);
@@ -1355,12 +1387,14 @@ struct Planner
             cIn.dtype = sourceNode.dtype;
             cIn.strides = calcContiguousStrides(partialShape);
 
-            auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", {cIn}, cOut, true, target_mem_space, {target_mem_space}, {cpu});
+            auto contigRefs = KernelRegistry::get().findMatchingKernels(OpType::CONTIGUOUS, "", {cIn}, cOut, true,
+                                                                        target_mem_space, {target_mem_space}, {cpu});
             for (KernelId uid : contigRefs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
                 std::vector<uint64_t> strides = kernel.is_view ? cIn.strides : calcContiguousStrides(partialShape);
-                ENode cn(uid, OpType::CONTIGUOUS, "", {slicedEClass}, partialShape, strides, sourceNode.dtype, target_mem_space, {cpu});
+                ENode cn(uid, OpType::CONTIGUOUS, "", {slicedEClass}, partialShape, strides, sourceNode.dtype,
+                         target_mem_space, {cpu});
                 egraph.addENode(contigEClass, cn);
             }
 
@@ -1384,12 +1418,16 @@ struct Planner
 
             std::vector<MemSpace> scatterInputSpaces = {target_mem_space, target_mem_space, ram, ram, ram};
 
-            auto scatterRefs = KernelRegistry::get().findMatchingKernels(OpType::SCATTER, "", sIns, sOut, true, target_mem_space, scatterInputSpaces, {cpu});
+            auto scatterRefs = KernelRegistry::get().findMatchingKernels(OpType::SCATTER, "", sIns, sOut, true,
+                                                                         target_mem_space, scatterInputSpaces, {cpu});
             for (KernelId uid : scatterRefs)
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
-                std::vector<uint64_t> strides = (kernel.is_view) ? lClass.strides : calcContiguousStrides(lClass.shape); // TODO check inplace based on bufferization stuff
-                ENode sn(uid, OpType::SCATTER, "", {current_E, contigEClass, startsId, endsId, stepsId}, lClass.shape, strides, lClass.dtype, target_mem_space, {cpu});
+                std::vector<uint64_t> strides =
+                    (kernel.is_view) ? lClass.strides : calcContiguousStrides(lClass.shape); // TODO check inplace based
+                                                                                             // on bufferization stuff
+                ENode sn(uid, OpType::SCATTER, "", {current_E, contigEClass, startsId, endsId, stepsId}, lClass.shape,
+                         strides, lClass.dtype, target_mem_space, {cpu});
                 egraph.addENode(scatterEClass, sn);
             }
 
@@ -1402,13 +1440,11 @@ struct Planner
         return injected;
     }
 
-    bool injectInputPartialPaths(
-        EGraph &egraph,
-        const Graph &graph,
-        const std::unordered_map<LogicalId, std::vector<Region>> &dirtyOutputRegions,
-        const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
-        const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
-        std::unordered_map<EClassId, LogicalId> &eclassToLogical)
+    bool injectInputPartialPaths(EGraph &egraph, const Graph &graph,
+                                 const std::unordered_map<LogicalId, std::vector<Region>> &dirtyOutputRegions,
+                                 const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                                 const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
+                                 std::unordered_map<EClassId, LogicalId> &eclassToLogical)
     {
         bool injected = false;
         for (const auto &kv : dirtyOutputRegions)
@@ -1422,7 +1458,8 @@ struct Planner
             {
                 if (!kv.second.empty())
                 {
-                    injected = injected || injectPartialPath(egraph, graph, nodeId, kv.second, cachedNodes, nodeToEClass, eclassToLogical);
+                    injected = injected || injectPartialPath(egraph, graph, nodeId, kv.second, cachedNodes,
+                                                             nodeToEClass, eclassToLogical);
                 }
             }
         }
@@ -1433,19 +1470,17 @@ struct Planner
         return injected;
     }
 
-    bool injectOutputPartialPaths(
-        EGraph &egraph,
-        const Graph &graph,
-        LogicalId rootId,
-        const std::vector<Region> &outputNeeded,
-        const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
-        const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
-        std::unordered_map<EClassId, LogicalId> &eclassToLogical)
+    bool injectOutputPartialPaths(EGraph &egraph, const Graph &graph, LogicalId rootId,
+                                  const std::vector<Region> &outputNeeded,
+                                  const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                                  const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
+                                  std::unordered_map<EClassId, LogicalId> &eclassToLogical)
     {
         bool injected = false;
         if (!outputNeeded.empty())
         {
-            injected = injectPartialPath(egraph, graph, rootId, outputNeeded, cachedNodes, nodeToEClass, eclassToLogical);
+            injected =
+                injectPartialPath(egraph, graph, rootId, outputNeeded, cachedNodes, nodeToEClass, eclassToLogical);
         }
         if (injected)
         {
@@ -1455,16 +1490,13 @@ struct Planner
     }
 
     Planner(CostModel &costModel, const std::unordered_map<MemSpace, uint64_t> &mem_caps)
-        : costModel(costModel), mem_caps(mem_caps) {}
+        : costModel(costModel), mem_caps(mem_caps)
+    {
+    }
 
-    CompiledGraph plan(
-        LogicalId rootId,
-        const Graph &graph,
-        const Bucket &bucket,
-        const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
-        bool doSaturate = true,
-        bool strictCache = false,
-        Repo *repo = nullptr)
+    CompiledGraph plan(LogicalId rootId, const Graph &graph, const Bucket &bucket,
+                       const std::unordered_map<LogicalId, MemSpace> &cachedNodes, bool doSaturate = true,
+                       bool strictCache = false, Repo *repo = nullptr)
     {
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
@@ -1526,7 +1558,8 @@ struct Planner
 
             if (logicalId != LogicalId{UINT32_MAX} && !logicalDirty[logicalId])
             {
-                ENode cacheNode = ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype, cls.mem_space, {cpu}, toString(logicalId));
+                ENode cacheNode = ENode(KernelId{0}, OpType::CACHE, "", {}, cls.shape, cls.strides, cls.dtype,
+                                        cls.mem_space, {cpu}, toString(logicalId));
                 egraph.addENode(canonId, cacheNode);
             }
         }
@@ -1538,9 +1571,11 @@ struct Planner
             protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
         }
 
-        bool dirtyInjected = injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions, cachedNodes, baseState.nodeToEClass, eclassToLogical);
+        bool dirtyInjected = injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions, cachedNodes,
+                                                     baseState.nodeToEClass, eclassToLogical);
 
-        bool neededInjected = injectOutputPartialPaths(egraph, graph, rootId, bucket.outputNeededRegion, cachedNodes, baseState.nodeToEClass, eclassToLogical);
+        bool neededInjected = injectOutputPartialPaths(egraph, graph, rootId, bucket.outputNeededRegion, cachedNodes,
+                                                       baseState.nodeToEClass, eclassToLogical);
 
         if (doSaturate)
         {
@@ -1557,8 +1592,9 @@ struct Planner
         }
         eclassToLogical = std::move(updatedEClassToLogical);
 
-        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical, true, strictCache);
-        return buildCompiledGraph(
-            rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes, eclassToLogical);
+        auto extraction =
+            extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical, true, strictCache);
+        return buildCompiledGraph(rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes,
+                                  eclassToLogical);
     }
 };

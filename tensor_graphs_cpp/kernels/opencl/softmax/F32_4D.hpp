@@ -1,7 +1,7 @@
 // tensor_graphs_cpp/kernels/opencl/softmax/F32_4D.hpp
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #include "kernels/opencl/opencl_utils.hpp"
 
 inline bool matchSoftmaxF32_4D_OpenCL(const std::vector<TensorNode> &inputs, const TensorNode &output)
@@ -23,7 +23,8 @@ inline void runSoftmaxF32_4D_OpenCL(const KernelContext &ctx)
 
     uint64_t local_work_size = 256;
     uint64_t global_work_size = ((outer_size + local_work_size - 1) / local_work_size) * local_work_size;
-    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0, nullptr, nullptr);
+    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0,
+                                        nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Softmax_4D_OpenCL");
 
@@ -52,8 +53,7 @@ inline LogicalId refFactorySoftmax4D_OpenCL(const std::vector<LogicalId> &inputs
         if (r <= 1)
             continue;
         int32_t a = i;
-        e_b = g.repeat(e_b, g.constant({1}, &r, DType::INT32),
-                       g.constant({1}, &a, DType::INT32));
+        e_b = g.repeat(e_b, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
     }
 
     LogicalId exps = g.pow(e_b, shifted);
@@ -61,8 +61,6 @@ inline LogicalId refFactorySoftmax4D_OpenCL(const std::vector<LogicalId> &inputs
     return g.div(exps, sums);
 }
 
-REGISTER_KERNEL("Softmax_4D_OpenCL", 1, 1, matchSoftmaxF32_4D_OpenCL, runSoftmaxF32_4D_OpenCL, refFactorySoftmax4D_OpenCL, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
-    {DType::FLOAT32},
-    {{1, 24, 1536, 1536}},
-    {true},
-    {{MemSpace(1, HandleType::OPENCL)}});
+REGISTER_KERNEL("Softmax_4D_OpenCL", 1, 1, matchSoftmaxF32_4D_OpenCL, runSoftmaxF32_4D_OpenCL,
+                refFactorySoftmax4D_OpenCL, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
+                {DType::FLOAT32}, {{1, 24, 1536, 1536}}, {true}, {{MemSpace(1, HandleType::OPENCL)}});

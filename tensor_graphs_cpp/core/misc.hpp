@@ -1,10 +1,11 @@
 // tensor_graphs_cpp/core/misc.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/graph.hpp"
-#include "core/egraph.hpp"
-#include "core/timer.hpp"
 #include <unordered_set>
+
+#include "core/egraph.hpp"
+#include "core/graph.hpp"
+#include "core/timer.hpp"
+#include "core/types.hpp"
 
 inline std::string toString(const std::vector<uint32_t> &shape)
 {
@@ -79,8 +80,9 @@ inline std::string toString(const TensorNode &node, const std::string &prefix = 
 }
 
 /**
- * Helper to format a TensorNode's metadata and its parents' metadata into a string.
- * This encapsulates the logging logic used in estimateCost and interpolate.
+ * Helper to format a TensorNode's metadata and its parents' metadata into a
+ * string. This encapsulates the logging logic used in estimateCost and
+ * interpolate.
  */
 inline std::string toString(const TensorNode &node, const Graph &graph, const std::string &prefix = "")
 {
@@ -106,14 +108,12 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
             {
                 const auto &parent = graph.getNode(pid);
                 ss << "\n"
-                   << prefix << "    [" << i << "] Parent ID " << pid.value
-                   << "\n"
+                   << prefix << "    [" << i << "] Parent ID " << pid.value << "\n"
                    << toString(parent, (std::string) "    ");
             }
             else
             {
-                ss << "\n"
-                   << prefix << "[" << i << "] Parent ID " << pid.value << " [OUT OF BOUNDS/NOT FOUND]";
+                ss << "\n" << prefix << "[" << i << "] Parent ID " << pid.value << " [OUT OF BOUNDS/NOT FOUND]";
             }
         }
     }
@@ -125,9 +125,7 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
  */
 inline void printNode(const TensorNode &node, const Graph &graph, const std::string &label = "NODE INFO")
 {
-    std::cout << "--- " << label << " ---\n"
-              << toString(node, graph)
-              << "\n-----------------------" << std::endl;
+    std::cout << "--- " << label << " ---\n" << toString(node, graph) << "\n-----------------------" << std::endl;
 }
 
 inline std::string toString(const Region &reg)
@@ -149,9 +147,8 @@ inline std::string toString(const Region &reg)
 inline std::string toString(const ParallelBuffer &buf)
 {
     std::stringstream ss;
-    ss << "Buffer(id=" << buf.id << ", mem_space=" << buf.mem_space
-       << ", size=" << buf.size << ", lifetime=[" << buf.start << ", " << buf.end
-       << "], offset=" << buf.offset << ")";
+    ss << "Buffer(id=" << buf.id << ", mem_space=" << buf.mem_space << ", size=" << buf.size << ", lifetime=["
+       << buf.start << ", " << buf.end << "], offset=" << buf.offset << ")";
     return ss.str();
 }
 
@@ -214,8 +211,7 @@ inline bool regionsMatch(const Region &r1, const Region &r2)
         return false;
     for (uint64_t i = 0; i < r1.region.size(); ++i)
     {
-        if (r1.region[i].start != r2.region[i].start ||
-            r1.region[i].stop != r2.region[i].stop)
+        if (r1.region[i].start != r2.region[i].start || r1.region[i].stop != r2.region[i].stop)
         {
             return false;
         }
@@ -294,29 +290,30 @@ inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regio
     for (const auto &groupPair : groups)
     {
         std::vector<Region> group = groupPair.second;
-        std::sort(group.begin(), group.end(), [mergeDim](const Region &a, const Region &b)
-                  {
-                      if (a.region.size() != b.region.size())
-                          return a.region.size() < b.region.size();
-                      for (uint64_t i = 0; i < a.region.size(); ++i)
-                      {
-                          if (i == mergeDim)
-                              continue;
-                          if (a.region[i].start != b.region[i].start)
-                              return a.region[i].start < b.region[i].start;
-                          if (a.region[i].stop != b.region[i].stop)
-                              return a.region[i].stop < b.region[i].stop;
-                      }
-                      if (a.region[mergeDim].start != b.region[mergeDim].start)
-                          return a.region[mergeDim].start < b.region[mergeDim].start;
-                      return a.region[mergeDim].stop < b.region[mergeDim].stop; });
+        std::sort(group.begin(), group.end(), [mergeDim](const Region &a, const Region &b) {
+            if (a.region.size() != b.region.size())
+                return a.region.size() < b.region.size();
+            for (uint64_t i = 0; i < a.region.size(); ++i)
+            {
+                if (i == mergeDim)
+                    continue;
+                if (a.region[i].start != b.region[i].start)
+                    return a.region[i].start < b.region[i].start;
+                if (a.region[i].stop != b.region[i].stop)
+                    return a.region[i].stop < b.region[i].stop;
+            }
+            if (a.region[mergeDim].start != b.region[mergeDim].start)
+                return a.region[mergeDim].start < b.region[mergeDim].start;
+            return a.region[mergeDim].stop < b.region[mergeDim].stop;
+        });
 
         Region current = group.front();
         for (uint64_t i = 1; i < group.size(); ++i)
         {
             if (intervalsOverlapOrAdjacent(current.region[mergeDim], group[i].region[mergeDim]))
             {
-                current.region[mergeDim].start = std::min(current.region[mergeDim].start, group[i].region[mergeDim].start);
+                current.region[mergeDim].start =
+                    std::min(current.region[mergeDim].start, group[i].region[mergeDim].start);
                 current.region[mergeDim].stop = std::max(current.region[mergeDim].stop, group[i].region[mergeDim].stop);
             }
             else
@@ -336,8 +333,9 @@ inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regio
 //
 // Examples:
 // f([(0,2),(2,4)]) -> [(0,4)]
-// f([((0,4),(0,2)),((0,2),(2,4)),((2,4),(2,4))]) -> [((0,4),(0,2)),((0,4),(2,4))]
-// f([((0,4),(0,2)),((0,4),(2,4))]) -> [((0,4),(0,4))]
+// f([((0,4),(0,2)),((0,2),(2,4)),((2,4),(2,4))]) ->
+// [((0,4),(0,2)),((0,4),(2,4))] f([((0,4),(0,2)),((0,4),(2,4))]) ->
+// [((0,4),(0,4))]
 inline std::vector<Region> mergeRegions(const std::vector<Region> &regions)
 {
     if (regions.empty())
@@ -348,7 +346,9 @@ inline std::vector<Region> mergeRegions(const std::vector<Region> &regions)
         return result;
 
     const int rank = result.front().region.size();
-    for (int dim = rank - 1; dim >= 0; dim--) // TODO: maybe merge top down? could discover different optimizations in InfinityDomination if we merge different ways?
+    for (int dim = rank - 1; dim >= 0; dim--) // TODO: maybe merge top down? could discover different
+                                              // optimizations in InfinityDomination if we merge different
+                                              // ways?
     {
         std::vector<Region> next = mergeRegionsAlongDim(result, dim);
         if (encodeRegionList(next) != encodeRegionList(result))
@@ -404,8 +404,7 @@ inline std::vector<LogicalId> topologicalSort(const std::vector<LogicalId> &root
 {
     std::vector<LogicalId> order;
     std::unordered_set<LogicalId> visited;
-    auto visit = [&](auto &self, LogicalId node) -> void
-    {
+    auto visit = [&](auto &self, LogicalId node) -> void {
         if (visited.count(node))
             return;
         visited.insert(node);

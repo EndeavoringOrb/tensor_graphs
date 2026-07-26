@@ -6,7 +6,7 @@ switch ShapePropagator to registry so we can assert that every op has handling
 
 remove Graph::cast from user space
 
-symbolic compilation for things like seq len, dirty input/output slices
+symbolic compilation for things like seq len, dirty input/output slices. then we don't have to recompile 
 
 add grid search for kernel params like tile size. define search space in registration
 

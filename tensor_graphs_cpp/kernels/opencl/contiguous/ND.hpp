@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #include "kernels/opencl/opencl_utils.hpp"
 
 struct ContiguousParamsOpenCL
@@ -60,7 +60,8 @@ inline void runContiguous_OpenCL_ND(const KernelContext &ctx)
     uint64_t local_work_size = 256;
     uint64_t global_work_size = ((numElements + local_work_size - 1) / local_work_size) * local_work_size;
 
-    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0, nullptr, nullptr);
+    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0,
+                                        nullptr, nullptr);
     if (err != CL_SUCCESS)
     {
         Error::throw_err("OpenCL: Failed to enqueue Contiguous_OpenCL_ND");
@@ -74,9 +75,10 @@ inline LogicalId refFactoryContiguous_OpenCL_ND(const std::vector<LogicalId> &in
     return graph.contiguous(inputs[0]);
 }
 
-REGISTER_KERNEL("Contiguous_OpenCL_ND", 1, 1, matchContiguous_OpenCL_ND, runContiguous_OpenCL_ND, refFactoryContiguous_OpenCL_ND, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
-                {DType::ANY},       // Input DType
-                {{1024, 640}},      // Dummy shape
-                {false},            // Input does NOT require contiguity
+REGISTER_KERNEL("Contiguous_OpenCL_ND", 1, 1, matchContiguous_OpenCL_ND, runContiguous_OpenCL_ND,
+                refFactoryContiguous_OpenCL_ND, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
+                {DType::ANY},                       // Input DType
+                {{1024, 640}},                      // Dummy shape
+                {false},                            // Input does NOT require contiguity
                 {{MemSpace(1, HandleType::OPENCL)}} // Input backends
 );

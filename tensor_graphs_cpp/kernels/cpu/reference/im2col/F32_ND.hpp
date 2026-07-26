@@ -1,8 +1,9 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
-#include <cstring>
 #include <algorithm>
+#include <cstring>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchIm2ColF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -80,4 +81,10 @@ inline void runIm2ColF32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::IM2COL, 4, 4, matchIm2ColF32_ND, runIm2ColF32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1, 1, 8, 8}, {1}, {1}, {1}}, {false, false, false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_REF_KERNEL(OpType::IM2COL, 4, 4, matchIm2ColF32_ND, runIm2ColF32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32},
+                    {{1, 1, 8, 8}, {1}, {1}, {1}}, {false, false, false, false},
+                    {{MemSpace(1, HandleType::CPP)},
+                     {MemSpace(1, HandleType::CPP)},
+                     {MemSpace(1, HandleType::CPP)},
+                     {MemSpace(1, HandleType::CPP)}});

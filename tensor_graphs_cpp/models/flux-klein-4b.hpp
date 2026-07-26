@@ -1,13 +1,14 @@
 // File: tensor_graphs_cpp/models/flux-klein-4b.hpp
 #pragma once
 
-#include "core/types.hpp"
-#include "core/memory.hpp"
-#include "core/graph.hpp"
-#include <string>
-#include <vector>
 #include <cmath>
 #include <optional>
+#include <string>
+#include <vector>
+
+#include "core/graph.hpp"
+#include "core/memory.hpp"
+#include "core/types.hpp"
 
 struct FluxConfig
 {
@@ -44,11 +45,13 @@ struct FluxConfig
 // Base class containing shared atomic utilities for FLUX.2 components
 class FluxGraphBase
 {
-protected:
+  protected:
     Graph &g;
     std::string w_path;
 
-    FluxGraphBase(Graph &graph, const std::string &path) : g(graph), w_path(path) {}
+    FluxGraphBase(Graph &graph, const std::string &path) : g(graph), w_path(path)
+    {
+    }
 
     LogicalId weight(const std::string &name)
     {

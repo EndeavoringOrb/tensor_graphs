@@ -1,16 +1,16 @@
 // tensor_graphs_cpp/main.cpp
-#include <iostream>
-#include <vector>
-#include <string>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <random>
-#include <algorithm>
-#include <unordered_map>
-#include <fstream>
-#include <sstream>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <iostream>
+#include <random>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #if defined(_WIN32)
 #include <float.h>
@@ -24,27 +24,24 @@
 #include "stb_image_write.h"
 
 #define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
-
-#include "core/types.hpp"
-#include "core/memory.hpp"
-#include "core/graph.hpp"
-#include "core/session.hpp"
-#include "core/kernels.hpp"
-#include "core/repo.hpp"
 #include "core/argparse.hpp"
 #include "core/debug.hpp"
-
-#include "models/run_models.hpp"
-#include "generated/kernels_all.gen.hpp"
+#include "core/graph.hpp"
+#include "core/kernels.hpp"
+#include "core/memory.hpp"
+#include "core/repo.hpp"
+#include "core/session.hpp"
+#include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
+#include "generated/kernels_all.gen.hpp"
+#include "models/run_models.hpp"
+#include "stb_image.h"
 
 namespace fs = std::filesystem;
 
 std::unordered_map<MemSpace, uint64_t> getDefaultBufferSizes()
 {
-    std::unordered_map<MemSpace, uint64_t> bufferSizes = {
-        {MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
 #ifdef USE_CUDA
     bufferSizes[MemSpace{2, HandleType::CUDA}] = 24ULL * 1024 * 1024 * 1024;
 #endif
@@ -86,20 +83,12 @@ int32_t perform_argmax(const float *logits, uint32_t vocab_size)
 }
 
 template <typename ConfigClass>
-void run_autoregressive_llm(
-    const std::string &model_name,
-    const std::string &cache_file,
-    const std::vector<uint32_t> &initial_tokens,
-    uint32_t vocab_size,
-    uint32_t max_seq_len,
-    uint32_t num_tokens_to_generate,
-    bool only_plan,
-    bool disable_caching,
-    ModelGraphRoots (*builder)(Graph &, MemoryManager &),
-    bool refOnly = false,
-    bool doSaturate = true,
-    const Debug::Callback &debugCb = nullptr,
-    Graph **activeGraphOut = nullptr)
+void run_autoregressive_llm(const std::string &model_name, const std::string &cache_file,
+                            const std::vector<uint32_t> &initial_tokens, uint32_t vocab_size, uint32_t max_seq_len,
+                            uint32_t num_tokens_to_generate, bool only_plan, bool disable_caching,
+                            ModelGraphRoots (*builder)(Graph &, MemoryManager &), bool refOnly = false,
+                            bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
+                            Graph **activeGraphOut = nullptr)
 {
     KernelRegistry::get().setReferenceOnly(refOnly);
     std::vector<uint32_t> tokens = initial_tokens;
@@ -178,47 +167,31 @@ void run_autoregressive_llm(
 
         int32_t argmax_idx = perform_argmax(logits_vec, vocab_size);
         tokens.push_back((uint32_t)argmax_idx);
-        std::cout << "Step " << step + 1 << " | Token: " << argmax_idx << " | End-To-End Latency: " << runtimeMs << "ms\n";
+        std::cout << "Step " << step + 1 << " | Token: " << argmax_idx << " | End-To-End Latency: " << runtimeMs
+                  << "ms\n";
     }
 }
 
-void run_gemma(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+void run_gemma(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true,
+               const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
-    run_autoregressive_llm<Gemma3ModelConfig>(
-        "gemma-3-270m",
-        "dirty_region_caches/gemma-3-270m-cpp.bin",
-        {2, 9259},
-        Gemma3ModelConfig().vocab_size,
-        8,
-        6,
-        only_plan,
-        disable_caching,
-        build_gemma_graph,
-        refOnly,
-        doSaturate,
-        debugCb,
-        activeGraphOut);
+    run_autoregressive_llm<Gemma3ModelConfig>("gemma-3-270m", "dirty_region_caches/gemma-3-270m-cpp.bin", {2, 9259},
+                                              Gemma3ModelConfig().vocab_size, 8, 6, only_plan, disable_caching,
+                                              build_gemma_graph, refOnly, doSaturate, debugCb, activeGraphOut);
 }
 
-void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true,
+                  const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
-    run_autoregressive_llm<Qwen3_6_35B_A3B_Config>(
-        "qwen-3.6-35b-a3b",
-        "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin",
-        {24227},
-        Qwen3_6_35B_A3B_Config().vocab_size,
-        8,
-        7,
-        only_plan,
-        disable_caching,
-        build_qwen_graph,
-        refOnly,
-        doSaturate,
-        debugCb,
-        activeGraphOut);
+    run_autoregressive_llm<Qwen3_6_35B_A3B_Config>("qwen-3.6-35b-a3b", "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin",
+                                                   {24227}, Qwen3_6_35B_A3B_Config().vocab_size, 8, 7, only_plan,
+                                                   disable_caching, build_qwen_graph, refOnly, doSaturate, debugCb,
+                                                   activeGraphOut);
 }
 
-// void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+// void run_flux(bool only_plan, bool disable_caching, bool refOnly = false,
+// bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph
+// **activeGraphOut = nullptr)
 // {
 //     KernelRegistry::get().setReferenceOnly(refOnly);
 //     FluxConfig cfg;
@@ -244,13 +217,16 @@ void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bo
 //     uint32_t in_sin = roots.inputs[5];
 //     uint32_t in_vae_latent = roots.inputs[6];
 
-//     Session sess_text(g, mem, roots.roots[0], "dirty_region_caches/flux-text.bin", 0, &repo, disable_caching);
+//     Session sess_text(g, mem, roots.roots[0],
+//     "dirty_region_caches/flux-text.bin", 0, &repo, disable_caching);
 //     sess_text.plan(doSaturate);
 
-//     Session sess_trans(g, mem, roots.roots[1], "dirty_region_caches/flux-trans.bin", 0, &repo, disable_caching);
+//     Session sess_trans(g, mem, roots.roots[1],
+//     "dirty_region_caches/flux-trans.bin", 0, &repo, disable_caching);
 //     sess_trans.plan(doSaturate);
 
-//     Session sess_vae(g, mem, roots.roots[2], "dirty_region_caches/flux-vae.bin", 0, &repo, disable_caching);
+//     Session sess_vae(g, mem, roots.roots[2],
+//     "dirty_region_caches/flux-vae.bin", 0, &repo, disable_caching);
 //     sess_vae.plan(doSaturate);
 
 //     if (only_plan)
@@ -260,20 +236,24 @@ void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bo
 
 //     uint32_t width = 512, height = 512;
 //     uint32_t latent_w = width / 16, latent_h = height / 16;
-//     uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
+//     uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w,
+//     total_seq = txt_seq + img_seq;
 
 //     std::cout << "Executing Text Encoder..." << std::endl;
-//     std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);
-//     sess_text.writeInput(in_ids, input_ids.data(), input_ids.size() * sizeof(int32_t));
-//     const float *text_emb_ptr = static_cast<const float *>(sess_text.run({}, debugCb, doSaturate));
+//     std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt",
+//     txt_seq); sess_text.writeInput(in_ids, input_ids.data(), input_ids.size()
+//     * sizeof(int32_t)); const float *text_emb_ptr = static_cast<const float
+//     *>(sess_text.run({}, debugCb, doSaturate));
 
 //     std::vector<float> text_emb_buf;
-//     const float *text_emb_host = sync_output_to_host(text_emb_ptr, 1 * txt_seq * cfg.text_dim, text_emb_buf);
-//     std::vector<float> text_emb(text_emb_host, text_emb_host + 1 * txt_seq * cfg.text_dim);
+//     const float *text_emb_host = sync_output_to_host(text_emb_ptr, 1 *
+//     txt_seq * cfg.text_dim, text_emb_buf); std::vector<float>
+//     text_emb(text_emb_host, text_emb_host + 1 * txt_seq * cfg.text_dim);
 
 //     std::cout << "Sampling..." << std::endl;
 //     std::vector<float> rope_cos, rope_sin;
-//     compute_rope_cpu(txt_seq, latent_h, latent_w, cfg.head_dim, cfg.rope_theta, rope_cos, rope_sin);
+//     compute_rope_cpu(txt_seq, latent_h, latent_w, cfg.head_dim,
+//     cfg.rope_theta, rope_cos, rope_sin);
 
 //     int num_steps = 4;
 //     std::vector<float> schedule = get_flux_schedule(num_steps, img_seq);
@@ -290,26 +270,30 @@ void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bo
 //         float t_curr = schedule[i], dt = schedule[i + 1] - t_curr;
 
 //         sess_trans.writeInput(in_latent, z.data(), z.size() * sizeof(float));
-//         sess_trans.writeInput(in_txt_emb, text_emb.data(), text_emb.size() * sizeof(float));
-//         sess_trans.writeInput(in_t, &t_curr, sizeof(float));
-//         sess_trans.writeInput(in_cos, rope_cos.data(), rope_cos.size() * sizeof(float));
-//         sess_trans.writeInput(in_sin, rope_sin.data(), rope_sin.size() * sizeof(float));
+//         sess_trans.writeInput(in_txt_emb, text_emb.data(), text_emb.size() *
+//         sizeof(float)); sess_trans.writeInput(in_t, &t_curr, sizeof(float));
+//         sess_trans.writeInput(in_cos, rope_cos.data(), rope_cos.size() *
+//         sizeof(float)); sess_trans.writeInput(in_sin, rope_sin.data(),
+//         rope_sin.size() * sizeof(float));
 
 //         Bucket b; // TODO: proper bucket to avoid weight loads?
-//         const float *v_ptr = static_cast<const float *>(sess_trans.run(b, debugCb, doSaturate));
+//         const float *v_ptr = static_cast<const float *>(sess_trans.run(b,
+//         debugCb, doSaturate));
 
 //         std::vector<float> v_buf;
-//         const float *v_host_ptr = sync_output_to_host(v_ptr, z.size(), v_buf);
-//         v_ptr = v_host_ptr;
+//         const float *v_host_ptr = sync_output_to_host(v_ptr, z.size(),
+//         v_buf); v_ptr = v_host_ptr;
 
 //         for (uint64_t j = 0; j < z.size(); ++j)
 //             z[j] += v_ptr[j] * dt;
-//         std::cout << "Step " << i + 1 << "/" << num_steps << " complete." << std::endl;
+//         std::cout << "Step " << i + 1 << "/" << num_steps << " complete." <<
+//         std::endl;
 //     }
 
 //     std::cout << "Executing VAE Decoder..." << std::endl;
 //     sess_vae.writeInput(in_vae_latent, z.data(), z.size() * sizeof(float));
-//     const float *img_ptr = static_cast<const float *>(sess_vae.run({}, debugCb, doSaturate));
+//     const float *img_ptr = static_cast<const float *>(sess_vae.run({},
+//     debugCb, doSaturate));
 
 //     std::vector<float> img_buf;
 //     img_ptr = sync_output_to_host(img_ptr, 3 * height * width, img_buf);
@@ -333,8 +317,9 @@ void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bo
 //             image_data[idx + 2] = static_cast<uint8_t>(b * 255.0f);
 //         }
 //     }
-//     stbi_write_png("flux_output.png", width, height, 3, image_data.data(), width * 3);
-//     std::cout << "Saved flux_output.png successfully!" << std::endl;
+//     stbi_write_png("flux_output.png", width, height, 3, image_data.data(),
+//     width * 3); std::cout << "Saved flux_output.png successfully!" <<
+//     std::endl;
 // }
 
 int main(int argc, char *argv[])
@@ -356,7 +341,10 @@ int main(int argc, char *argv[])
     parser.add_flag({"--disable-caching"}, "Disable dirty region session caching.");
     parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
     parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
-    parser.add_positional("model", "Name of the target model (flux-klein-4b, gemma-3-270m, qwen-3.6-35b-a3b).", "gemma-3-270m");
+    parser.add_positional("model",
+                          "Name of the target model (flux-klein-4b, "
+                          "gemma-3-270m, qwen-3.6-35b-a3b).",
+                          "gemma-3-270m");
 
     if (!parser.parse(argc, argv))
     {
@@ -380,15 +368,15 @@ int main(int argc, char *argv[])
     bool doSaturate = write_refs.empty();
 
     Graph *activeGraphPtr = nullptr;
-    auto debugCb = [&](LogicalId logicalId, const KernelContext &ctx, const void *data)
-    {
+    auto debugCb = [&](LogicalId logicalId, const KernelContext &ctx, const void *data) {
         verifier.verify(logicalId, ctx, data, activeGraphPtr);
     };
 
     if (model == "gemma-3-270m")
         run_gemma(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
     // else if (model == "flux-klein-4b")
-    //     run_flux(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
+    //     run_flux(only_plan, disable_caching, refOnly, doSaturate, debugCb,
+    //     &activeGraphPtr);
     else if (model == "qwen-3.6-35b-a3b")
         run_qwen_35b(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
     else

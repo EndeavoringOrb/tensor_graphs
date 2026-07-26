@@ -1,27 +1,29 @@
 #pragma once
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <json.hpp>
+#include <limits>
+#include <list>
+#include <map>
+#include <memory>
+#include <source_location>
+#include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
-#include <stdexcept>
-#include <iostream>
-#include <cstdint>
-#include <sstream>
-#include <fstream>
 #include <vector>
-#include <limits>
-#include <cctype>
-#include <memory>
-#include <list>
-#include <algorithm>
-#include <map>
-#include <iomanip>
-#include <json.hpp>
-#include <source_location>
+
 #include "core/serialization.hpp"
 using json = nlohmann::json;
 
 // TODO: split up into types/tensor_node.hpp, types/...
 
-// TODO: os & architecture detection should be in hardware.hpp and types should include hardware.hpp
+// TODO: os & architecture detection should be in hardware.hpp and types should
+// include hardware.hpp
 // --- OS Detection ---
 #if defined(_WIN32) || defined(_WIN64)
 #define TG_OS_WINDOWS
@@ -43,14 +45,13 @@ using json = nlohmann::json;
 
 namespace Error
 {
-    template <typename T = std::runtime_error, typename... Args>
-    [[noreturn]] inline void throw_err(const std::string &msg, Args &&...args)
-    {
-        std::cerr << "\n[TensorGraph Error] " << msg << std::endl
-                  << std::flush;
-        throw T(msg, std::forward<Args>(args)...);
-    }
+template <typename T = std::runtime_error, typename... Args>
+[[noreturn]] inline void throw_err(const std::string &msg, Args &&...args)
+{
+    std::cerr << "\n[TensorGraph Error] " << msg << std::endl << std::flush;
+    throw T(msg, std::forward<Args>(args)...);
 }
+} // namespace Error
 
 enum class OpType : uint32_t
 {
@@ -123,7 +124,7 @@ struct LogicalId
 
 class LogicalIdAllocator
 {
-public:
+  public:
     LogicalIdAllocator(const LogicalIdAllocator &) = delete;
     LogicalIdAllocator &operator=(const LogicalIdAllocator &) = delete;
     LogicalIdAllocator(LogicalIdAllocator &&) = delete;
@@ -134,7 +135,7 @@ public:
         return instance()._allocate();
     }
 
-private:
+  private:
     LogicalIdAllocator() = default;
     ~LogicalIdAllocator() = default;
 
@@ -198,52 +199,46 @@ struct MemSpace
 
 namespace std
 {
-    template <>
-    struct hash<LogicalId>
+template <> struct hash<LogicalId>
+{
+    std::uint64_t operator()(const LogicalId &id) const noexcept
     {
-        std::uint64_t operator()(const LogicalId &id) const noexcept
-        {
-            return std::hash<uint32_t>()(id.value);
-        }
-    };
+        return std::hash<uint32_t>()(id.value);
+    }
+};
 
-    template <>
-    struct hash<EClassId>
+template <> struct hash<EClassId>
+{
+    std::uint64_t operator()(const EClassId &id) const noexcept
     {
-        std::uint64_t operator()(const EClassId &id) const noexcept
-        {
-            return std::hash<uint32_t>()(id.value);
-        }
-    };
+        return std::hash<uint32_t>()(id.value);
+    }
+};
 
-    template <>
-    struct hash<ENodeId>
+template <> struct hash<ENodeId>
+{
+    std::uint64_t operator()(const ENodeId &id) const noexcept
     {
-        std::uint64_t operator()(const ENodeId &id) const noexcept
-        {
-            return std::hash<uint32_t>()(id.value);
-        }
-    };
+        return std::hash<uint32_t>()(id.value);
+    }
+};
 
-    template <>
-    struct hash<KernelId>
+template <> struct hash<KernelId>
+{
+    std::uint64_t operator()(const KernelId &id) const noexcept
     {
-        std::uint64_t operator()(const KernelId &id) const noexcept
-        {
-            return std::hash<uint64_t>()(id.value);
-        }
-    };
+        return std::hash<uint64_t>()(id.value);
+    }
+};
 
-    template <>
-    struct hash<MemSpace>
+template <> struct hash<MemSpace>
+{
+    uint64_t operator()(const MemSpace &ms) const noexcept
     {
-        uint64_t operator()(const MemSpace &ms) const noexcept
-        {
-            return std::hash<uint32_t>()(ms.idx) ^
-                   (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
-        }
-    };
-}
+        return std::hash<uint32_t>()(ms.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
+    }
+};
+} // namespace std
 
 struct Engine
 {
@@ -257,7 +252,8 @@ struct Engine
     }
 };
 
-// When you add a new DType, remember to update getDTypeSize and toString(DType dtype)
+// When you add a new DType, remember to update getDTypeSize and toString(DType
+// dtype)
 enum class DType : uint32_t
 {
     FLOAT32,
@@ -340,10 +336,10 @@ static std::vector<uint64_t> calcContiguousStrides(const std::vector<uint32_t> &
 
 struct TensorNode
 {
-private:
+  private:
     std::vector<uint32_t> shape;
 
-public:
+  public:
     LogicalId id;
     OpType opType;
     std::string opName; // Used if opType == OpType::FUSED
@@ -353,10 +349,15 @@ public:
     std::string contentHash;
     std::string debugOrigin;
 
-    TensorNode() {}
+    TensorNode()
+    {
+    }
 
-    TensorNode(LogicalId _id, OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _child_ids, std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, std::string _contentHash = "", std::string _debugOrigin = "")
-        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), child_ids(_child_ids), shape(_shape), strides(_strides), contentHash(_contentHash), debugOrigin(_debugOrigin)
+    TensorNode(LogicalId _id, OpType _opType, std::string _opName, DType _dtype, std::vector<LogicalId> _child_ids,
+               std::vector<uint32_t> _shape, std::vector<uint64_t> _strides, std::string _contentHash = "",
+               std::string _debugOrigin = "")
+        : id(_id), opType(_opType), opName(_opName), dtype(_dtype), child_ids(_child_ids), shape(_shape),
+          strides(_strides), contentHash(_contentHash), debugOrigin(_debugOrigin)
     {
         if (strides.empty())
         {
@@ -398,17 +399,26 @@ inline uint64_t countElements(const TensorNode &node)
 
 struct TensorView
 {
-private:
+  private:
     std::vector<uint32_t> shape;
 
-public:
+  public:
     uint64_t offset = 0;           // Offset into the MemoryManager's DeviceBuffer
     std::vector<uint64_t> strides; // Strides in terms of elements, not bytes
     DType dtype;
 
-    TensorView() {}
-    TensorView(const std::vector<uint32_t> &_shape, const uint64_t _offset, const std::vector<uint64_t> &_strides, const DType &_dtype) : offset(_offset), shape(_shape), strides(_strides), dtype(_dtype) {}
-    TensorView(const TensorNode &node, uint64_t _offset) : offset(_offset), shape(node.getShape()), strides(node.strides), dtype(node.dtype) {}
+    TensorView()
+    {
+    }
+    TensorView(const std::vector<uint32_t> &_shape, const uint64_t _offset, const std::vector<uint64_t> &_strides,
+               const DType &_dtype)
+        : offset(_offset), shape(_shape), strides(_strides), dtype(_dtype)
+    {
+    }
+    TensorView(const TensorNode &node, uint64_t _offset)
+        : offset(_offset), shape(node.getShape()), strides(node.strides), dtype(node.dtype)
+    {
+    }
 
     const std::vector<uint32_t> &getShape() const
     {
@@ -445,11 +455,9 @@ struct GraphPatternCacheKey
 
     bool operator==(const GraphPatternCacheKey &o) const
     {
-        if (pOpType != o.pOpType || pOpName != o.pOpName ||
-            reference_only != o.reference_only ||
+        if (pOpType != o.pOpType || pOpName != o.pOpName || reference_only != o.reference_only ||
             ignore_output_mem_space != o.ignore_output_mem_space ||
-            ignore_input_mem_spaces != o.ignore_input_mem_spaces ||
-            ignore_engines != o.ignore_engines)
+            ignore_input_mem_spaces != o.ignore_input_mem_spaces || ignore_engines != o.ignore_engines)
             return false;
         if (inputs.size() != o.inputs.size())
             return false;
@@ -459,12 +467,14 @@ struct GraphPatternCacheKey
             return false;
         for (uint64_t i = 0; i < inputs.size(); ++i)
         {
-            if ((!ignore_input_mem_spaces && i < input_mem_spaces.size() && i < o.input_mem_spaces.size() && input_mem_spaces[i] != o.input_mem_spaces[i]) || inputs[i].dtype != o.inputs[i].dtype ||
-                inputs[i].getShape() != o.inputs[i].getShape() || inputs[i].strides != o.inputs[i].strides)
+            if ((!ignore_input_mem_spaces && i < input_mem_spaces.size() && i < o.input_mem_spaces.size() &&
+                 input_mem_spaces[i] != o.input_mem_spaces[i]) ||
+                inputs[i].dtype != o.inputs[i].dtype || inputs[i].getShape() != o.inputs[i].getShape() ||
+                inputs[i].strides != o.inputs[i].strides)
                 return false;
         }
-        if (output.dtype != o.output.dtype ||
-            output.getShape() != o.output.getShape() || output.strides != o.output.strides)
+        if (output.dtype != o.output.dtype || output.getShape() != o.output.getShape() ||
+            output.strides != o.output.strides)
             return false;
         return true;
     }
@@ -472,57 +482,55 @@ struct GraphPatternCacheKey
 
 namespace std
 {
-    template <>
-    struct hash<GraphPatternCacheKey>
+template <> struct hash<GraphPatternCacheKey>
+{
+    uint64_t operator()(const GraphPatternCacheKey &k) const noexcept
     {
-        uint64_t operator()(const GraphPatternCacheKey &k) const noexcept
+        uint64_t h = 0;
+        auto combine = [&](uint64_t val) { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
+
+        combine(static_cast<uint64_t>(k.pOpType));
+        if (!k.pOpName.empty())
+            combine(std::hash<std::string>()(k.pOpName));
+        combine(static_cast<uint64_t>(k.reference_only));
+        combine(static_cast<uint64_t>(k.ignore_output_mem_space));
+        combine(static_cast<uint64_t>(k.ignore_input_mem_spaces));
+        combine(static_cast<uint64_t>(k.ignore_engines));
+
+        if (!k.ignore_output_mem_space)
+            combine(std::hash<MemSpace>()(k.output_mem_space));
+
+        if (!k.ignore_engines)
         {
-            uint64_t h = 0;
-            auto combine = [&](uint64_t val)
-            { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
-
-            combine(static_cast<uint64_t>(k.pOpType));
-            if (!k.pOpName.empty())
-                combine(std::hash<std::string>()(k.pOpName));
-            combine(static_cast<uint64_t>(k.reference_only));
-            combine(static_cast<uint64_t>(k.ignore_output_mem_space));
-            combine(static_cast<uint64_t>(k.ignore_input_mem_spaces));
-            combine(static_cast<uint64_t>(k.ignore_engines));
-
-            if (!k.ignore_output_mem_space)
-                combine(std::hash<MemSpace>()(k.output_mem_space));
-
-            if (!k.ignore_engines)
+            for (const auto &eng : k.engines)
             {
-                for (const auto &eng : k.engines)
-                {
-                    combine(static_cast<uint64_t>(eng.idx));
-                    combine(static_cast<uint64_t>(eng.type));
-                }
+                combine(static_cast<uint64_t>(eng.idx));
+                combine(static_cast<uint64_t>(eng.type));
             }
-
-            for (uint64_t i = 0; i < k.inputs.size(); ++i)
-            {
-                if (!k.ignore_input_mem_spaces && i < k.input_mem_spaces.size())
-                    combine(std::hash<MemSpace>()(k.input_mem_spaces[i]));
-                auto &in = k.inputs[i];
-                combine(static_cast<uint64_t>(in.dtype));
-                for (auto s : in.getShape())
-                    combine(static_cast<uint64_t>(s));
-                for (auto s : in.strides)
-                    combine(static_cast<uint64_t>(s));
-            }
-
-            combine(static_cast<uint64_t>(k.output.dtype));
-            for (auto s : k.output.getShape())
-                combine(static_cast<uint64_t>(s));
-            for (auto s : k.output.strides)
-                combine(static_cast<uint64_t>(s));
-
-            return h;
         }
-    };
-}
+
+        for (uint64_t i = 0; i < k.inputs.size(); ++i)
+        {
+            if (!k.ignore_input_mem_spaces && i < k.input_mem_spaces.size())
+                combine(std::hash<MemSpace>()(k.input_mem_spaces[i]));
+            auto &in = k.inputs[i];
+            combine(static_cast<uint64_t>(in.dtype));
+            for (auto s : in.getShape())
+                combine(static_cast<uint64_t>(s));
+            for (auto s : in.strides)
+                combine(static_cast<uint64_t>(s));
+        }
+
+        combine(static_cast<uint64_t>(k.output.dtype));
+        for (auto s : k.output.getShape())
+            combine(static_cast<uint64_t>(s));
+        for (auto s : k.output.strides)
+            combine(static_cast<uint64_t>(s));
+
+        return h;
+    }
+};
+} // namespace std
 
 inline void tg_serialize(BinaryWriter &bw, const LogicalId &val)
 {
@@ -602,7 +610,8 @@ inline void tg_deserialize(BinaryReader &br, ParallelBuffer &val)
     br.read(val.offset);
 }
 
-inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
+inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape,
+                                const std::vector<uint64_t> &strides)
 {
     uint64_t stridedIndex = 0;
     uint64_t temp = flatIndex;
@@ -647,9 +656,11 @@ struct ViewOpValidationError : public TensorGraphError
     std::vector<uint32_t> shape;
     uint64_t dimIndex;
 
-    ViewOpValidationError(const std::string &msg, uint32_t nid, OpType op,
-                          const std::vector<uint32_t> &s, uint64_t dim = 0)
-        : TensorGraphError(msg), nodeId(nid), opType(op), shape(s), dimIndex(dim) {}
+    ViewOpValidationError(const std::string &msg, uint32_t nid, OpType op, const std::vector<uint32_t> &s,
+                          uint64_t dim = 0)
+        : TensorGraphError(msg), nodeId(nid), opType(op), shape(s), dimIndex(dim)
+    {
+    }
 };
 
 struct ShapeMismatchError : public TensorGraphError
@@ -658,19 +669,20 @@ struct ShapeMismatchError : public TensorGraphError
     std::vector<uint32_t> expectedShape;
     std::vector<uint32_t> actualShape;
 
-    ShapeMismatchError(const std::string &msg, uint32_t nid,
-                       const std::vector<uint32_t> &expected,
+    ShapeMismatchError(const std::string &msg, uint32_t nid, const std::vector<uint32_t> &expected,
                        const std::vector<uint32_t> &actual)
-        : TensorGraphError(msg), nodeId(nid),
-          expectedShape(expected), actualShape(actual) {}
+        : TensorGraphError(msg), nodeId(nid), expectedShape(expected), actualShape(actual)
+    {
+    }
 };
 
 struct MemoryAllocationError : public TensorGraphError
 {
     uint64_t requestedSize = 0;
 
-    MemoryAllocationError(const std::string &msg, uint64_t size)
-        : TensorGraphError(msg), requestedSize(size) {}
+    MemoryAllocationError(const std::string &msg, uint64_t size) : TensorGraphError(msg), requestedSize(size)
+    {
+    }
 };
 
 struct MemoryExhaustedError : public std::runtime_error
@@ -679,9 +691,11 @@ struct MemoryExhaustedError : public std::runtime_error
     uint64_t availableMemory;
 
     MemoryExhaustedError(uint64_t requested, uint64_t available)
-        : std::runtime_error("Memory exhausted: requested " + std::to_string(requested) +
-                             " bytes, available " + std::to_string(available) + " bytes"),
-          requestedMemory(requested), availableMemory(available) {}
+        : std::runtime_error("Memory exhausted: requested " + std::to_string(requested) + " bytes, available " +
+                             std::to_string(available) + " bytes"),
+          requestedMemory(requested), availableMemory(available)
+    {
+    }
 };
 
 inline bool operator==(const Region &a, const Region &b)
@@ -709,7 +723,8 @@ inline bool operator<=(const Region &a, const Region &b)
     // Does b completely cover a?
     if (a.region.size() != b.region.size())
     {
-        Error::throw_err("[Region<Region] cannot compare regions with sizes " + std::to_string(a.region.size()) + " and " + std::to_string(b.region.size()));
+        Error::throw_err("[Region<Region] cannot compare regions with sizes " + std::to_string(a.region.size()) +
+                         " and " + std::to_string(b.region.size()));
     }
     bool covers = true;
     for (int i = 0; i < a.region.size(); i++)
@@ -757,21 +772,21 @@ inline std::string encodeRegion(const Region &r)
 
 inline std::vector<Region> normalizeRegions(std::vector<Region> regions)
 {
-    std::sort(regions.begin(), regions.end(), [](const Region &a, const Region &b)
-              {
-                  if (a.region.size() != b.region.size())
-                      return a.region.size() < b.region.size();
-                  for (uint64_t i = 0; i < a.region.size(); ++i)
-                  {
-                      if (a.region[i].start != b.region[i].start)
-                          return a.region[i].start < b.region[i].start;
-                      if (a.region[i].stop != b.region[i].stop)
-                          return a.region[i].stop < b.region[i].stop;
-                  }
-                  return false; });
+    std::sort(regions.begin(), regions.end(), [](const Region &a, const Region &b) {
+        if (a.region.size() != b.region.size())
+            return a.region.size() < b.region.size();
+        for (uint64_t i = 0; i < a.region.size(); ++i)
+        {
+            if (a.region[i].start != b.region[i].start)
+                return a.region[i].start < b.region[i].start;
+            if (a.region[i].stop != b.region[i].stop)
+                return a.region[i].stop < b.region[i].stop;
+        }
+        return false;
+    });
 
-    regions.erase(std::unique(regions.begin(), regions.end(), [](const Region &a, const Region &b)
-                              { return regionsMatch(a, b); }),
+    regions.erase(std::unique(regions.begin(), regions.end(),
+                              [](const Region &a, const Region &b) { return regionsMatch(a, b); }),
                   regions.end());
     return regions;
 }
@@ -807,13 +822,13 @@ inline bool isContiguous(const TensorView &view)
     return isContiguous(view.strides, view.getShape());
 }
 
-inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape, DType dtype) // TODO: redundant with TensorNode::getSizeBytes?
+inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape,
+                             DType dtype) // TODO: redundant with TensorNode::getSizeBytes?
 {
     return countElements(shape) * getDTypeSize(dtype);
 }
 
-template <typename T>
-inline std::string toString(const std::vector<T> &vec)
+template <typename T> inline std::string toString(const std::vector<T> &vec)
 {
     std::stringstream ss;
     ss << "[";
@@ -854,7 +869,8 @@ inline DType fromString(const std::string &str)
         if (toString(dtype) == str)
             return dtype;
     }
-    Error::throw_err("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for that instead of generic runtime_error
+    Error::throw_err("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for
+                                               // that instead of generic runtime_error
 }
 
 inline std::string toString(OpType op) // TODO: make build.py check that each op has a case here
@@ -993,15 +1009,42 @@ inline std::string toString(BufferId id)
     return "BufferId(" + std::to_string(id.value) + ")";
 }
 
-inline std::ostream &operator<<(std::ostream &os, LogicalId id) { return os << toString(id); }
-inline std::ostream &operator<<(std::ostream &os, KernelId id) { return os << toString(id); }
-inline std::ostream &operator<<(std::ostream &os, EClassId id) { return os << toString(id); }
-inline std::ostream &operator<<(std::ostream &os, ENodeId id) { return os << toString(id); }
-inline std::ostream &operator<<(std::ostream &os, BufferId id) { return os << toString(id); }
-inline std::ostream &operator<<(std::ostream &os, DType dtype) { return os << toString(dtype); }
-inline std::ostream &operator<<(std::ostream &os, OpType op) { return os << toString(op); }
-inline std::ostream &operator<<(std::ostream &os, HandleType handle_type) { return os << toString(handle_type); }
-inline std::ostream &operator<<(std::ostream &os, EngineType engine_type) { return os << toString(engine_type); }
+inline std::ostream &operator<<(std::ostream &os, LogicalId id)
+{
+    return os << toString(id);
+}
+inline std::ostream &operator<<(std::ostream &os, KernelId id)
+{
+    return os << toString(id);
+}
+inline std::ostream &operator<<(std::ostream &os, EClassId id)
+{
+    return os << toString(id);
+}
+inline std::ostream &operator<<(std::ostream &os, ENodeId id)
+{
+    return os << toString(id);
+}
+inline std::ostream &operator<<(std::ostream &os, BufferId id)
+{
+    return os << toString(id);
+}
+inline std::ostream &operator<<(std::ostream &os, DType dtype)
+{
+    return os << toString(dtype);
+}
+inline std::ostream &operator<<(std::ostream &os, OpType op)
+{
+    return os << toString(op);
+}
+inline std::ostream &operator<<(std::ostream &os, HandleType handle_type)
+{
+    return os << toString(handle_type);
+}
+inline std::ostream &operator<<(std::ostream &os, EngineType engine_type)
+{
+    return os << toString(engine_type);
+}
 
 std::string toString(const MemSpace &mem_space)
 {
@@ -1017,12 +1060,18 @@ std::string toString(const Engine &engine)
     return ss.str();
 }
 
-inline std::ostream &operator<<(std::ostream &os, MemSpace mem_space) { return os << toString(mem_space); }
-inline std::ostream &operator<<(std::ostream &os, Engine engine) { return os << toString(engine); }
+inline std::ostream &operator<<(std::ostream &os, MemSpace mem_space)
+{
+    return os << toString(mem_space);
+}
+inline std::ostream &operator<<(std::ostream &os, Engine engine)
+{
+    return os << toString(engine);
+}
 
 class SHA256
 {
-private:
+  private:
     uint32_t state[8];
     uint64_t bitlen;
     uint8_t data[64];
@@ -1038,25 +1087,44 @@ private:
         0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
         0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 
-    static inline uint32_t rotr(uint32_t x, uint32_t n) { return (x >> n) | (x << (32 - n)); }
-    static inline uint32_t ch(uint32_t x, uint32_t y, uint32_t z) { return (x & y) ^ (~x & z); }
-    static inline uint32_t maj(uint32_t x, uint32_t y, uint32_t z) { return (x & y) ^ (x & z) ^ (y & z); }
-    static inline uint32_t ep0(uint32_t x) { return rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22); }
-    static inline uint32_t ep1(uint32_t x) { return rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25); }
-    static inline uint32_t sig0(uint32_t x) { return rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3); }
-    static inline uint32_t sig1(uint32_t x) { return rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10); }
+    static inline uint32_t rotr(uint32_t x, uint32_t n)
+    {
+        return (x >> n) | (x << (32 - n));
+    }
+    static inline uint32_t ch(uint32_t x, uint32_t y, uint32_t z)
+    {
+        return (x & y) ^ (~x & z);
+    }
+    static inline uint32_t maj(uint32_t x, uint32_t y, uint32_t z)
+    {
+        return (x & y) ^ (x & z) ^ (y & z);
+    }
+    static inline uint32_t ep0(uint32_t x)
+    {
+        return rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22);
+    }
+    static inline uint32_t ep1(uint32_t x)
+    {
+        return rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25);
+    }
+    static inline uint32_t sig0(uint32_t x)
+    {
+        return rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3);
+    }
+    static inline uint32_t sig1(uint32_t x)
+    {
+        return rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10);
+    }
 
     void transform()
     {
-        uint32_t a = state[0], b = state[1], c = state[2], d = state[3],
-                 e = state[4], f = state[5], g = state[6], h = state[7];
+        uint32_t a = state[0], b = state[1], c = state[2], d = state[3], e = state[4], f = state[5], g = state[6],
+                 h = state[7];
         uint32_t w[64];
 
         for (int i = 0; i < 16; i++)
-            w[i] = (static_cast<uint32_t>(data[i * 4]) << 24) |
-                   (static_cast<uint32_t>(data[i * 4 + 1]) << 16) |
-                   (static_cast<uint32_t>(data[i * 4 + 2]) << 8) |
-                   (static_cast<uint32_t>(data[i * 4 + 3]));
+            w[i] = (static_cast<uint32_t>(data[i * 4]) << 24) | (static_cast<uint32_t>(data[i * 4 + 1]) << 16) |
+                   (static_cast<uint32_t>(data[i * 4 + 2]) << 8) | (static_cast<uint32_t>(data[i * 4 + 3]));
         for (int i = 16; i < 64; i++)
             w[i] = sig1(w[i - 2]) + w[i - 7] + sig0(w[i - 15]) + w[i - 16];
 
@@ -1084,7 +1152,7 @@ private:
         state[7] += h;
     }
 
-public:
+  public:
     SHA256()
     {
         state[0] = 0x6a09e667;
@@ -1177,7 +1245,8 @@ inline void tg_serialize(BinaryWriter &bw, const Bucket &val)
     for (const auto &pair : val.inputDirtyRegions)
     {
         bw.write(pair.first);
-        // TODO: make a tg_serialize that handles any vector as long as it can handle the type in the vector
+        // TODO: make a tg_serialize that handles any vector as long as it can
+        // handle the type in the vector
         uint32_t regionsSize = static_cast<uint32_t>(pair.second.size());
         bw.write(regionsSize);
         for (const Region &r : pair.second)

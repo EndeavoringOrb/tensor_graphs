@@ -1,13 +1,12 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 
 inline bool matchMulF32_1D_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    return inputs[0].getShape().size() == 3 &&
-           isContiguous(output);
+    return inputs[0].getShape().size() == 3 && isContiguous(output);
 }
 
 inline void runMulF32_1D_NEON(const KernelContext &ctx)
@@ -33,6 +32,8 @@ inline LogicalId refFactoryMul1D_NEON(const std::vector<LogicalId> &inputs, Grap
     return graph.mul(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Mul_1D_NEON", 2, 2, matchMulF32_1D_NEON, runMulF32_1D_NEON, refFactoryMul1D_NEON, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{2048}, {2048}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Mul_1D_NEON", 2, 2, matchMulF32_1D_NEON, runMulF32_1D_NEON, refFactoryMul1D_NEON,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {{2048}, {2048}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

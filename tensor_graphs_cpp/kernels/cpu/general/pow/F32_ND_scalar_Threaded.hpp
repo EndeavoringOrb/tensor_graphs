@@ -1,10 +1,11 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
-#include <vector>
-#include <thread>
 #include <algorithm>
 #include <cmath>
+#include <thread>
+#include <vector>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchPowF32_ND_Scalar_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -30,19 +31,27 @@ inline void runPowF32_ND_Scalar_Threaded(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint64_t start = t * chunk;
             uint64_t end = std::min(start + chunk, totalElements);
-            
+
             // Fast paths for common powers
-            if (scalarValue == 0.5f) {
-                for (uint64_t i = start; i < end; ++i) out[i] = std::sqrt(dataND[i]);
-            } else if (scalarValue == 2.0f) {
-                for (uint64_t i = start; i < end; ++i) out[i] = dataND[i] * dataND[i];
-            } else {
-                for (uint64_t i = start; i < end; ++i) out[i] = std::pow(dataND[i], scalarValue);
-            } });
+            if (scalarValue == 0.5f)
+            {
+                for (uint64_t i = start; i < end; ++i)
+                    out[i] = std::sqrt(dataND[i]);
+            }
+            else if (scalarValue == 2.0f)
+            {
+                for (uint64_t i = start; i < end; ++i)
+                    out[i] = dataND[i] * dataND[i];
+            }
+            else
+            {
+                for (uint64_t i = start; i < end; ++i)
+                    out[i] = std::pow(dataND[i], scalarValue);
+            }
+        });
     }
     for (auto &w : workers)
         w.join();
@@ -70,4 +79,7 @@ inline LogicalId refFactoryPowND_Scalar_Threaded(const std::vector<LogicalId> &i
     return graph.pow(idND, out);
 }
 
-REGISTER_KERNEL("Pow_ND_Scalar_Threaded", 2, 2, matchPowF32_ND_Scalar_Threaded, runPowF32_ND_Scalar_Threaded, refFactoryPowND_Scalar_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{2, 128}, {1}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Pow_ND_Scalar_Threaded", 2, 2, matchPowF32_ND_Scalar_Threaded, runPowF32_ND_Scalar_Threaded,
+                refFactoryPowND_Scalar_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{2, 128}, {1}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

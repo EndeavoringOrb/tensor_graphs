@@ -1,11 +1,10 @@
 // tensor_graphs_cpp/kernels/opencl/gelu/F32_ND.hpp
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #include "kernels/opencl/opencl_utils.hpp"
 
-inline bool matchJinaGeluExact_F32_3D_OpenCL(const std::vector<TensorNode> &inputs,
-                                             const TensorNode &output)
+inline bool matchJinaGeluExact_F32_3D_OpenCL(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs[0].getShape().size() != 3)
         return false;
@@ -25,23 +24,22 @@ inline void runJinaGeluExact_F32_3D_OpenCL(const KernelContext &ctx)
 
     uint64_t local_work_size = 256;
     uint64_t global_work_size = ((n + local_work_size - 1) / local_work_size) * local_work_size;
-    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0, nullptr, nullptr);
+    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0,
+                                        nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Gelu_OpenCL");
 
     clFinish(OpenCLState::get().queue);
 }
 
-inline LogicalId refFactoryJinaGeluExact_F32_3D_OpenCL(const std::vector<LogicalId> &inputs,
-                                                      Graph &g)
+inline LogicalId refFactoryJinaGeluExact_F32_3D_OpenCL(const std::vector<LogicalId> &inputs, Graph &g)
 {
     LogicalId x_id = inputs[0];
     const auto &shape = g.getNode(x_id).getShape();
     uint32_t S = shape[1];
     uint32_t D = shape[2];
 
-    auto expand_scalar_SD = [&](float val) -> LogicalId
-    {
+    auto expand_scalar_SD = [&](float val) -> LogicalId {
         LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
         LogicalId out = g.reshape(node, g.constant({3}, sh, DType::INT32));
@@ -49,17 +47,13 @@ inline LogicalId refFactoryJinaGeluExact_F32_3D_OpenCL(const std::vector<Logical
         {
             int32_t rep = (int32_t)S;
             int32_t ax = 1;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         if (D > 1)
         {
             int32_t rep = (int32_t)D;
             int32_t ax = 2;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         return out;
     };
@@ -109,8 +103,7 @@ inline LogicalId refFactoryJinaGeluExact_F32_3D_OpenCL(const std::vector<Logical
     return g.mul(half_x, one_plus_erf);
 }
 
-REGISTER_KERNEL("JinaGeluExact_F32_3D_OpenCL", 1, 1, matchJinaGeluExact_F32_3D_OpenCL, runJinaGeluExact_F32_3D_OpenCL, refFactoryJinaGeluExact_F32_3D_OpenCL, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
-                {DType::FLOAT32},
-                {{1, 1024, 3072}},
-                {true},
+REGISTER_KERNEL("JinaGeluExact_F32_3D_OpenCL", 1, 1, matchJinaGeluExact_F32_3D_OpenCL, runJinaGeluExact_F32_3D_OpenCL,
+                refFactoryJinaGeluExact_F32_3D_OpenCL, MemSpace(1, HandleType::OPENCL),
+                {Engine(0, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32}, {{1, 1024, 3072}}, {true},
                 {{MemSpace(1, HandleType::OPENCL)}});

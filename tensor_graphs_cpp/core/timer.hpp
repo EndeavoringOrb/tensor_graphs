@@ -23,15 +23,12 @@ struct ProgressTimer
     bool disable;
     bool disable_tick;
 
-    ProgressTimer(uint64_t total_ = 0, std::string label_ = "", bool disable_ = false, bool disable_tick_ = false, double minInterval_ = 2)
-        : start(clock::now()),
-          last_print(start),
-          total(total_),
-          minInterval(minInterval_),
-          label(label_),
-          has_total(total_ > 0),
-          disable(disable_),
-          disable_tick(disable_tick_) {}
+    ProgressTimer(uint64_t total_ = 0, std::string label_ = "", bool disable_ = false, bool disable_tick_ = false,
+                  double minInterval_ = 2)
+        : start(clock::now()), last_print(start), total(total_), minInterval(minInterval_), label(label_),
+          has_total(total_ > 0), disable(disable_), disable_tick(disable_tick_)
+    {
+    }
 
     void reset()
     {
@@ -73,14 +70,11 @@ struct ProgressTimer
         {
             double eta = (total > current) ? (total - current) / rate : 0.0;
 
-            std::cout << current << "/" << total
-                      << " ETA: " << eta << "s";
+            std::cout << current << "/" << total << " ETA: " << eta << "s";
         }
         else
         {
-            std::cout << current
-                      << " (" << rate << " it/s, "
-                      << elapsed << "s)";
+            std::cout << current << " (" << rate << " it/s, " << elapsed << "s)";
         }
 
         std::cout << "\r" << std::flush;
@@ -101,8 +95,7 @@ struct ProgressTimer
         auto end = clock::now();
         double elapsed = std::chrono::duration<double>(end - start).count();
 
-        std::cout << "\n"
-                  << label;
+        std::cout << "\n" << label;
 
         if (has_total)
         {
@@ -121,8 +114,12 @@ struct ProgressTimer
 
 struct ProgressTimer
 {
-    ProgressTimer(uint64_t, const char * = "", double = 0.0) {}
-    inline void tick(uint64_t = 1) {}
+    ProgressTimer(uint64_t, const char * = "", double = 0.0)
+    {
+    }
+    inline void tick(uint64_t = 1)
+    {
+    }
 };
 
 #endif

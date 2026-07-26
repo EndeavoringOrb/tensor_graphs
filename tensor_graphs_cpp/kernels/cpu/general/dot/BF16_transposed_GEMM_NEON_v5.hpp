@@ -1,13 +1,15 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/dot/BF16_transposed_GEMM_NEON_v5.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/dot/BF16_transposed_GEMM_NEON_v5.hpp
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
-#include <thread>
-#include <vector>
+
 #include <algorithm>
 #include <cstring>
+#include <thread>
+#include <vector>
 
 inline bool matchBF16TransposedGEMM_v5(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -43,27 +45,35 @@ inline void runBF16TransposedGEMM_v5(const KernelContext &ctx)
 
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t n_start = t * n_block;
-            if (n_start >= N) return;
+            if (n_start >= N)
+                return;
             uint32_t n_end = std::min(n_start + n_block, N);
             uint32_t s_rem = S & ~3;
             uint32_t n_rem = n_end & ~3;
 
-            for (uint32_t b = 0; b < B; ++b) {
+            for (uint32_t b = 0; b < B; ++b)
+            {
                 // 4x4 blocks -> S is outermost to keep X in cache!
-                for (uint32_t s = 0; s < s_rem; s += 4) {
-                    const float* x_ptr = X + b * S * K + s * K;
-                    for (uint32_t n = n_start; n < n_rem; n += 4) {
-                        float32x4_t acc00 = vdupq_n_f32(0), acc01 = vdupq_n_f32(0), acc02 = vdupq_n_f32(0), acc03 = vdupq_n_f32(0);
-                        float32x4_t acc10 = vdupq_n_f32(0), acc11 = vdupq_n_f32(0), acc12 = vdupq_n_f32(0), acc13 = vdupq_n_f32(0);
-                        float32x4_t acc20 = vdupq_n_f32(0), acc21 = vdupq_n_f32(0), acc22 = vdupq_n_f32(0), acc23 = vdupq_n_f32(0);
-                        float32x4_t acc30 = vdupq_n_f32(0), acc31 = vdupq_n_f32(0), acc32 = vdupq_n_f32(0), acc33 = vdupq_n_f32(0);
+                for (uint32_t s = 0; s < s_rem; s += 4)
+                {
+                    const float *x_ptr = X + b * S * K + s * K;
+                    for (uint32_t n = n_start; n < n_rem; n += 4)
+                    {
+                        float32x4_t acc00 = vdupq_n_f32(0), acc01 = vdupq_n_f32(0), acc02 = vdupq_n_f32(0),
+                                    acc03 = vdupq_n_f32(0);
+                        float32x4_t acc10 = vdupq_n_f32(0), acc11 = vdupq_n_f32(0), acc12 = vdupq_n_f32(0),
+                                    acc13 = vdupq_n_f32(0);
+                        float32x4_t acc20 = vdupq_n_f32(0), acc21 = vdupq_n_f32(0), acc22 = vdupq_n_f32(0),
+                                    acc23 = vdupq_n_f32(0);
+                        float32x4_t acc30 = vdupq_n_f32(0), acc31 = vdupq_n_f32(0), acc32 = vdupq_n_f32(0),
+                                    acc33 = vdupq_n_f32(0);
 
-                        const uint16_t* w_ptr = W + n * K;
+                        const uint16_t *w_ptr = W + n * K;
 
-                        for (uint32_t k = 0; k < (K & ~3); k += 4) {
+                        for (uint32_t k = 0; k < (K & ~3); k += 4)
+                        {
                             float32x4_t w0 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(w_ptr + 0 * K + k), 16));
                             float32x4_t w1 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(w_ptr + 1 * K + k), 16));
                             float32x4_t w2 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(w_ptr + 2 * K + k), 16));
@@ -74,24 +84,36 @@ inline void runBF16TransposedGEMM_v5(const KernelContext &ctx)
                             float32x4_t x2 = vld1q_f32(x_ptr + 2 * K + k);
                             float32x4_t x3 = vld1q_f32(x_ptr + 3 * K + k);
 
-                            acc00 = vfmaq_f32(acc00, x0, w0); acc01 = vfmaq_f32(acc01, x0, w1);
-                            acc02 = vfmaq_f32(acc02, x0, w2); acc03 = vfmaq_f32(acc03, x0, w3);
-                            acc10 = vfmaq_f32(acc10, x1, w0); acc11 = vfmaq_f32(acc11, x1, w1);
-                            acc12 = vfmaq_f32(acc12, x1, w2); acc13 = vfmaq_f32(acc13, x1, w3);
-                            acc20 = vfmaq_f32(acc20, x2, w0); acc21 = vfmaq_f32(acc21, x2, w1);
-                            acc22 = vfmaq_f32(acc22, x2, w2); acc23 = vfmaq_f32(acc23, x2, w3);
-                            acc30 = vfmaq_f32(acc30, x3, w0); acc31 = vfmaq_f32(acc31, x3, w1);
-                            acc32 = vfmaq_f32(acc32, x3, w2); acc33 = vfmaq_f32(acc33, x3, w3);
+                            acc00 = vfmaq_f32(acc00, x0, w0);
+                            acc01 = vfmaq_f32(acc01, x0, w1);
+                            acc02 = vfmaq_f32(acc02, x0, w2);
+                            acc03 = vfmaq_f32(acc03, x0, w3);
+                            acc10 = vfmaq_f32(acc10, x1, w0);
+                            acc11 = vfmaq_f32(acc11, x1, w1);
+                            acc12 = vfmaq_f32(acc12, x1, w2);
+                            acc13 = vfmaq_f32(acc13, x1, w3);
+                            acc20 = vfmaq_f32(acc20, x2, w0);
+                            acc21 = vfmaq_f32(acc21, x2, w1);
+                            acc22 = vfmaq_f32(acc22, x2, w2);
+                            acc23 = vfmaq_f32(acc23, x2, w3);
+                            acc30 = vfmaq_f32(acc30, x3, w0);
+                            acc31 = vfmaq_f32(acc31, x3, w1);
+                            acc32 = vfmaq_f32(acc32, x3, w2);
+                            acc33 = vfmaq_f32(acc33, x3, w3);
                         }
 
-                        auto store_4 = [&](uint32_t row_s, float32x4_t a0, float32x4_t a1, float32x4_t a2, float32x4_t a3) {
-                            float* out_ptr = Out + b * S * N + (s + row_s) * N + n;
+                        auto store_4 = [&](uint32_t row_s, float32x4_t a0, float32x4_t a1, float32x4_t a2,
+                                           float32x4_t a3) {
+                            float *out_ptr = Out + b * S * N + (s + row_s) * N + n;
                             float res[4] = {vaddvq_f32(a0), vaddvq_f32(a1), vaddvq_f32(a2), vaddvq_f32(a3)};
-                            for (uint32_t k = (K & ~3); k < K; ++k) {
+                            for (uint32_t k = (K & ~3); k < K; ++k)
+                            {
                                 float xv = x_ptr[row_s * K + k];
-                                for (int i = 0; i < 4; ++i) {
+                                for (int i = 0; i < 4; ++i)
+                                {
                                     uint32_t bits = (uint32_t)W[(n + i) * K + k] << 16;
-                                    float wv; std::memcpy(&wv, &bits, 4);
+                                    float wv;
+                                    std::memcpy(&wv, &bits, 4);
                                     res[i] += xv * wv;
                                 }
                             }
@@ -104,14 +126,18 @@ inline void runBF16TransposedGEMM_v5(const KernelContext &ctx)
                         store_4(3, acc30, acc31, acc32, acc33);
                     }
                 }
-                
-                for (uint32_t s = s_rem; s < S; ++s) {
-                    const float* x_ptr = X + b * S * K + s * K;
-                    for (uint32_t n = n_start; n < n_rem; n += 4) {
-                        float32x4_t acc0 = vdupq_n_f32(0), acc1 = vdupq_n_f32(0), acc2 = vdupq_n_f32(0), acc3 = vdupq_n_f32(0);
-                        const uint16_t* w_ptr = W + n * K;
 
-                        for (uint32_t k = 0; k < (K & ~3); k += 4) {
+                for (uint32_t s = s_rem; s < S; ++s)
+                {
+                    const float *x_ptr = X + b * S * K + s * K;
+                    for (uint32_t n = n_start; n < n_rem; n += 4)
+                    {
+                        float32x4_t acc0 = vdupq_n_f32(0), acc1 = vdupq_n_f32(0), acc2 = vdupq_n_f32(0),
+                                    acc3 = vdupq_n_f32(0);
+                        const uint16_t *w_ptr = W + n * K;
+
+                        for (uint32_t k = 0; k < (K & ~3); k += 4)
+                        {
                             float32x4_t w0 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(w_ptr + 0 * K + k), 16));
                             float32x4_t w1 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(w_ptr + 1 * K + k), 16));
                             float32x4_t w2 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(w_ptr + 2 * K + k), 16));
@@ -125,14 +151,17 @@ inline void runBF16TransposedGEMM_v5(const KernelContext &ctx)
                             acc3 = vfmaq_f32(acc3, x0, w3);
                         }
 
-                        float* out_ptr = Out + b * S * N + s * N + n;
+                        float *out_ptr = Out + b * S * N + s * N + n;
                         float res[4] = {vaddvq_f32(acc0), vaddvq_f32(acc1), vaddvq_f32(acc2), vaddvq_f32(acc3)};
-                        
-                        for (uint32_t k = (K & ~3); k < K; ++k) {
+
+                        for (uint32_t k = (K & ~3); k < K; ++k)
+                        {
                             float xv = x_ptr[k];
-                            for (int i = 0; i < 4; ++i) {
+                            for (int i = 0; i < 4; ++i)
+                            {
                                 uint32_t bits = (uint32_t)W[(n + i) * K + k] << 16;
-                                float wv; std::memcpy(&wv, &bits, 4);
+                                float wv;
+                                std::memcpy(&wv, &bits, 4);
                                 res[i] += xv * wv;
                             }
                         }
@@ -140,19 +169,24 @@ inline void runBF16TransposedGEMM_v5(const KernelContext &ctx)
                     }
                 }
 
-                for (uint32_t n = n_rem; n < n_end; ++n) {
-                    for (uint32_t s = 0; s < S; ++s) {
+                for (uint32_t n = n_rem; n < n_end; ++n)
+                {
+                    for (uint32_t s = 0; s < S; ++s)
+                    {
                         float sum = 0.0f;
-                        const uint16_t* w_ptr = W + n * K;
-                        for (uint32_t k = 0; k < K; ++k) {
+                        const uint16_t *w_ptr = W + n * K;
+                        for (uint32_t k = 0; k < K; ++k)
+                        {
                             uint32_t bits = (uint32_t)w_ptr[k] << 16;
-                            float wf; std::memcpy(&wf, &bits, 4);
+                            float wf;
+                            std::memcpy(&wf, &bits, 4);
                             sum += X[b * S * K + s * K + k] * wf;
                         }
                         Out[b * S * N + s * N + n] = sum;
                     }
                 }
-            } });
+            }
+        });
     }
     for (auto &worker : workers)
         worker.join();
@@ -168,5 +202,8 @@ inline LogicalId refFactoryBF16TransposedGEMM_v5(const std::vector<LogicalId> &i
     return graph.dot(inputs[0], graph.reshape(w_t, graph.constant({3}, s3, DType::INT32)));
 }
 
-REGISTER_KERNEL("BF16_Transposed_GEMM_NEON_v5", 2, 2, matchBF16TransposedGEMM_v5, runBF16TransposedGEMM_v5, refFactoryBF16TransposedGEMM_v5, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::BF16}, {{1, 8, 64}, {1024, 64}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("BF16_Transposed_GEMM_NEON_v5", 2, 2, matchBF16TransposedGEMM_v5, runBF16TransposedGEMM_v5,
+                refFactoryBF16TransposedGEMM_v5, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::BF16}, {{1, 8, 64}, {1024, 64}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

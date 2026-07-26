@@ -1,4 +1,5 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/dot/batched_transposed_gemm_streaming_storage_neon.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/dot/batched_transposed_gemm_streaming_storage_neon.hpp
 //
 // Fused Batched Transposed GEMM with Streaming Storage Loading
 // ------------------------------------------------------------
@@ -32,34 +33,40 @@
 //   W  : STORAGE  bf16  [E, O, H]    (on disk, never fully loaded)
 //   Out: CPU      fp32  [E, S, O]
 //
-//   Out[e, s, o] = sum_h X[e, s, h] * W[e, o, h]      (note: W is *not* transposed
-//                                                       on disk; we read it row-by-
-//                                                       row and feed it straight into
-//                                                       the transposed-GEMM inner loop)
+//   Out[e, s, o] = sum_h X[e, s, h] * W[e, o, h]      (note: W is *not*
+//   transposed
+//                                                       on disk; we read it
+//                                                       row-by- row and feed it
+//                                                       straight into the
+//                                                       transposed-GEMM inner
+//                                                       loop)
 //
 // PIPELINE
 //
 //   1 producer thread  : sequential pread()/ReadFile() of one expert at a time
-//                        (4 MB for gate_up, 2 MB for down) into a 4-slot ring buffer.
-//                        Sequential access maximises SSD/HDD throughput.
+//                        (4 MB for gate_up, 2 MB for down) into a 4-slot ring
+//                        buffer. Sequential access maximises SSD/HDD
+//                        throughput.
 //
 //   N-1 consumer threads: grab a ready slot, run the NEON GEMM for that expert,
 //                         release the slot. The bf16->fp32 cast is folded into
-//                         the NEON FMLA loop via vshll_n_u16 + vreinterpretq_f32_u32
-//                         (zero cost — it's just bit manipulation in the register
-//                         file). The PERMUTE is folded into the access pattern
-//                         (we iterate W in [O, H] order, which is its on-disk layout,
-//                         and use it as W^T in the dot product).
+//                         the NEON FMLA loop via vshll_n_u16 +
+//                         vreinterpretq_f32_u32 (zero cost — it's just bit
+//                         manipulation in the register file). The PERMUTE is
+//                         folded into the access pattern (we iterate W in [O,
+//                         H] order, which is its on-disk layout, and use it as
+//                         W^T in the dot product).
 //
-//   Ring buffer (4 slots) gives 3-way overlap: while consumer k computes expert e,
-//   consumer k+1 computes expert e-1, and the producer reads expert e+1.
+//   Ring buffer (4 slots) gives 3-way overlap: while consumer k computes expert
+//   e, consumer k+1 computes expert e-1, and the producer reads expert e+1.
 //
 // WHY THIS IS FAST FOR THE EXACT PROBLEM SIZES
 //
 //   gate_up_proj: E=256, S=8, H=2048, O=1024
 //     - per-expert W on disk: 1024 * 2048 * 2 = 4 MB
 //     - per-expert Y output :    8 * 1024 * 4 = 32 KB  (fits in L1/L2)
-//     - per-expert X input  :    8 * 2048 * 4 = 64 KB  (fits in L2, reused 256x)
+//     - per-expert X input  :    8 * 2048 * 4 = 64 KB  (fits in L2, reused
+//     256x)
 //     - NEON accumulator    :  8 * 4 float32x4_t = 32 registers (exactly fills
 //                              the AArch64 NEON register file — no spills)
 //
@@ -67,7 +74,8 @@
 //     - per-expert W on disk: 2048 *  512 * 2 = 2 MB
 //     - same S=8 register file fit
 //
-// EXPECTED SPEEDUP (vs. the current COPY_TO+CAST+GEMM chain, per layer MoE batch)
+// EXPECTED SPEEDUP (vs. the current COPY_TO+CAST+GEMM chain, per layer MoE
+// batch)
 //
 //   gate_up:  280 ms -> ~158 ms  (1.8x)   -- now bounded by disk read
 //   down:     148 ms ->  ~75 ms  (2.0x)
@@ -77,26 +85,27 @@
 // compute (54/39 ms) is hidden behind the disk read.
 
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 
 #include <arm_neon.h>
-#include <thread>
-#include <vector>
+
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
-#include <condition_variable>
-#include <atomic>
+#include <thread>
+#include <vector>
 
 #ifdef TG_OS_WINDOWS
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
 #include <io.h>
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -104,7 +113,8 @@
 // ---------------------------------------------------------------------------
 // Match function
 //
-// Linter rules enforced by build.py (see validate_kernel_match_logic in build.py):
+// Linter rules enforced by build.py (see validate_kernel_match_logic in
+// build.py):
 //   - Cannot check inputs.size()
 //   - Cannot check inputs[i].backend
 //   - Cannot check output.backend
@@ -113,14 +123,10 @@
 // All of those are validated by the registration macro. The match function
 // only validates shape compatibility and the S<=8 register-file constraint.
 // ---------------------------------------------------------------------------
-inline bool matchBatchedTransposedGEMM_StreamingStorage(
-    const std::vector<TensorNode> &inputs,
-    const TensorNode &output)
+inline bool matchBatchedTransposedGEMM_StreamingStorage(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // X: [E, S, H], W: [E, O, H], Out: [E, S, O]
-    if (inputs[0].getShape().size() != 3 ||
-        inputs[1].getShape().size() != 3 ||
-        output.getShape().size() != 3)
+    if (inputs[0].getShape().size() != 3 || inputs[1].getShape().size() != 3 || output.getShape().size() != 3)
         return false;
 
     const auto &sX = inputs[0].getShape();
@@ -171,8 +177,7 @@ static inline bool readFromFileAtOffset(int fd, uint64_t offset, void *buf, uint
         OVERLAPPED ov = {};
         ov.Offset = static_cast<DWORD>(cur & 0xFFFFFFFFull);
         ov.OffsetHigh = static_cast<DWORD>((cur >> 32) & 0xFFFFFFFFull);
-        DWORD toRead = static_cast<DWORD>(
-            std::min<uint64_t>(remaining, 0x40000000ull)); // cap at 1 GB per call
+        DWORD toRead = static_cast<DWORD>(std::min<uint64_t>(remaining, 0x40000000ull)); // cap at 1 GB per call
         DWORD bytesRead = 0;
         if (!ReadFile(hFile, p, toRead, &bytesRead, &ov))
             return false;
@@ -204,24 +209,23 @@ static inline bool readFromFileAtOffset(int fd, uint64_t offset, void *buf, uint
 //
 // W_e is bf16 (read directly from the disk buffer, no conversion pass).
 // X_e and Y_e are fp32. The bf16->fp32 cast is folded into the FMLA loop
-// via vshll_n_u16 + vreinterpretq_f32_u32 — pure register-file bit manipulation,
-// costs zero cycles on AArch64 (it's just register renaming).
+// via vshll_n_u16 + vreinterpretq_f32_u32 — pure register-file bit
+// manipulation, costs zero cycles on AArch64 (it's just register renaming).
 //
 // Loop nesting (chosen for cache reuse on the exact problem sizes):
-//   for o in 0..O step 4:           // 4 W rows at a time (16 KB working set for W)
+//   for o in 0..O step 4:           // 4 W rows at a time (16 KB working set
+//   for W)
 //     for h in 0..H step 4:         // NEON 4-wide FMLA
-//       for s in 0..S:              // S=8, fully unrolled, 32 accumulators in registers
+//       for s in 0..S:              // S=8, fully unrolled, 32 accumulators in
+//       registers
 //         acc[s][o%4] += X[s,h:h+4] * W[o+i,h:h+4]
 //
 // X[s, :] (64 KB for H=2048) is re-read O/4 = 256 times per expert, but it
 // stays in L2 (256 KB-1 MB typical on Cortex-X / Neoverse) so re-reads are
 // L2 hits. W[*, :] is streamed through L1 once and discarded.
 // ---------------------------------------------------------------------------
-static inline void computeExpertGEMM(
-    const uint16_t *W_e,
-    const float *X_e,
-    float *Y_e,
-    uint32_t S, uint32_t H, uint32_t O)
+static inline void computeExpertGEMM(const uint16_t *W_e, const float *X_e, float *Y_e, uint32_t S, uint32_t H,
+                                     uint32_t O)
 {
     const uint32_t H4 = H & ~3u;
     const uint32_t O4 = O & ~3u;
@@ -268,11 +272,8 @@ static inline void computeExpertGEMM(
         // for the target shapes H=2048 and H=512 the tail is empty).
         for (uint32_t s = 0; s < S; ++s)
         {
-            float sums[4] = {
-                vaddvq_f32(acc[s][0]),
-                vaddvq_f32(acc[s][1]),
-                vaddvq_f32(acc[s][2]),
-                vaddvq_f32(acc[s][3])};
+            float sums[4] = {vaddvq_f32(acc[s][0]), vaddvq_f32(acc[s][1]), vaddvq_f32(acc[s][2]),
+                             vaddvq_f32(acc[s][3])};
 
             for (uint32_t h = H4; h < H; ++h)
             {
@@ -335,10 +336,9 @@ inline void runBatchedTransposedGEMM_StreamingStorage(const KernelContext &ctx)
     const int fd = ctx.fd[1];
     if (fd < 0)
     {
-        Error::throw_err(
-            "Batched_Transposed_GEMM_StreamingStorage_NEON: expected STORAGE input "
-            "for W (fd[1] >= 0), but got fd[1] < 0. The planner should only route "
-            "STORAGE-backed weights to this kernel.");
+        Error::throw_err("Batched_Transposed_GEMM_StreamingStorage_NEON: expected STORAGE input "
+                         "for W (fd[1] >= 0), but got fd[1] < 0. The planner should only route "
+                         "STORAGE-backed weights to this kernel.");
     }
 
     const uint64_t fileOffset = viewW.offset; // bytes
@@ -352,8 +352,7 @@ inline void runBatchedTransposedGEMM_StreamingStorage(const KernelContext &ctx)
         {
             std::memset(wbuf.data(), 0, expertBytes);
         }
-        computeExpertGEMM(
-            reinterpret_cast<const uint16_t *>(wbuf.data()), X, Out, S, H, O);
+        computeExpertGEMM(reinterpret_cast<const uint16_t *>(wbuf.data()), X, Out, S, H, O);
         return;
     }
 
@@ -385,22 +384,21 @@ inline void runBatchedTransposedGEMM_StreamingStorage(const KernelContext &ctx)
     std::atomic<bool> ioDone{false};
 
     // -------- Producer thread: sequential pread into the ring buffer --------
-    auto ioWorker = [&]()
-    {
+    auto ioWorker = [&]() {
         for (uint32_t e = 0; e < E; ++e)
         {
             int slotIdx = -1;
             {
                 std::unique_lock<std::mutex> lk(mtx);
-                cv.wait(lk, [&]
+                cv.wait(lk, [&] {
+                    for (uint32_t i = 0; i < NUM_SLOTS; ++i)
+                        if (states[i] == EMPTY)
                         {
-                            for (uint32_t i = 0; i < NUM_SLOTS; ++i)
-                                if (states[i] == EMPTY)
-                                {
-                                    slotIdx = static_cast<int>(i);
-                                    return true;
-                                }
-                            return false; });
+                            slotIdx = static_cast<int>(i);
+                            return true;
+                        }
+                    return false;
+                });
                 states[slotIdx] = RESERVED; // claim before releasing lock
                 slotExpert[slotIdx] = e;
             }
@@ -426,34 +424,31 @@ inline void runBatchedTransposedGEMM_StreamingStorage(const KernelContext &ctx)
     };
 
     // -------- Consumer threads: grab a ready slot and run the GEMM --------
-    auto computeWorker = [&]()
-    {
+    auto computeWorker = [&]() {
         while (true)
         {
             int slotIdx = -1;
             uint32_t e;
             {
                 std::unique_lock<std::mutex> lk(mtx);
-                cv.wait(lk, [&]
+                cv.wait(lk, [&] {
+                    for (uint32_t i = 0; i < NUM_SLOTS; ++i)
+                        if (states[i] == READY)
                         {
-                            for (uint32_t i = 0; i < NUM_SLOTS; ++i)
-                                if (states[i] == READY)
-                                {
-                                    slotIdx = static_cast<int>(i);
-                                    return true;
-                                }
-                            // Termination: producer is done AND every expert
-                            // has been consumed.
-                            return ioDone.load(std::memory_order_acquire) &&
-                                   consumed.load(std::memory_order_acquire) >= E; });
+                            slotIdx = static_cast<int>(i);
+                            return true;
+                        }
+                    // Termination: producer is done AND every expert
+                    // has been consumed.
+                    return ioDone.load(std::memory_order_acquire) && consumed.load(std::memory_order_acquire) >= E;
+                });
                 if (slotIdx == -1)
                     return; // all done
                 states[slotIdx] = BUSY;
                 e = slotExpert[slotIdx];
             }
 
-            const uint16_t *W_e =
-                reinterpret_cast<const uint16_t *>(slots[slotIdx].data());
+            const uint16_t *W_e = reinterpret_cast<const uint16_t *>(slots[slotIdx].data());
             const float *X_e = X + static_cast<uint64_t>(e) * S * H;
             float *Y_e = Out + static_cast<uint64_t>(e) * S * O;
             computeExpertGEMM(W_e, X_e, Y_e, S, H, O);
@@ -490,8 +485,7 @@ inline void runBatchedTransposedGEMM_StreamingStorage(const KernelContext &ctx)
 //
 // Reconstructs: dot(X, contiguous(permute(cast(copyto(W, CPU)), [0, 2, 1])))
 // ---------------------------------------------------------------------------
-inline LogicalId refFactoryBatchedTransposedGEMM_StreamingStorage(const std::vector<LogicalId> &inputs,
-    Graph &graph)
+inline LogicalId refFactoryBatchedTransposedGEMM_StreamingStorage(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     // STORAGE bf16 -> CPU bf16 (this is the COPY_TO we are fusing away)
     LogicalId copy_w = graph._copyto(inputs[1]);
@@ -499,17 +493,19 @@ inline LogicalId refFactoryBatchedTransposedGEMM_StreamingStorage(const std::vec
     LogicalId cast_w = graph.cast(copy_w, DType::FLOAT32);
     // [E, O, H] -> [E, H, O]  (this is the PERMUTE+CONTIGUOUS we are fusing away)
     int32_t perm[] = {0, 2, 1};
-    LogicalId perm_w = graph.permute(
-        cast_w, graph.constant({3}, perm, DType::INT32));
+    LogicalId perm_w = graph.permute(cast_w, graph.constant({3}, perm, DType::INT32));
     LogicalId contig_w = graph.contiguous(perm_w);
     // The actual batched dot
     return graph.dot(inputs[0], contig_w);
 }
 
-REGISTER_KERNEL("Batched_Transposed_GEMM_StreamingStorage_NEON", 2, 2, matchBatchedTransposedGEMM_StreamingStorage, runBatchedTransposedGEMM_StreamingStorage, refFactoryBatchedTransposedGEMM_StreamingStorage, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},                        // output backend
-    {DType::FLOAT32, DType::BF16},         // X is fp32, W is bf16
-    {{256, 8, 2048}, {256, 1024, 2048}},   // dummy shapes for the bench harness
-    {true, true},                          // both inputs must be contiguous
-    {{MemSpace(1, HandleType::CPP)}, {MemSpace(0, HandleType::STORAGE)}}); // X from CPU, W directly from STORAGE
+REGISTER_KERNEL("Batched_Transposed_GEMM_StreamingStorage_NEON", 2, 2, matchBatchedTransposedGEMM_StreamingStorage,
+                runBatchedTransposedGEMM_StreamingStorage, refFactoryBatchedTransposedGEMM_StreamingStorage,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, // output backend
+                {DType::FLOAT32, DType::BF16},                              // X is fp32, W is bf16
+                {{256, 8, 2048}, {256, 1024, 2048}},                        // dummy shapes for the bench harness
+                {true, true},                                               // both inputs must be contiguous
+                {{MemSpace(1, HandleType::CPP)},
+                 {MemSpace(0, HandleType::STORAGE)}}); // X from CPU, W directly from STORAGE
 
 #endif // TG_HAS_NEON

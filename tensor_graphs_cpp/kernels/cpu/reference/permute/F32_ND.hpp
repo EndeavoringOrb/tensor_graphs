@@ -1,7 +1,7 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include "core/graph.hpp"
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchPermuteView(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -25,4 +25,6 @@ inline void inferViewPermute(TensorNode &node, const std::vector<TensorNode> &in
     }
 }
 
-REGISTER_REF_KERNEL_VIEW(OpType::PERMUTE, 2, 2, matchPermuteView, inferViewPermute, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY, DType::INT32}, {{1}, {1}}, {false, false}, {MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP)});
+REGISTER_REF_KERNEL_VIEW(OpType::PERMUTE, 2, 2, matchPermuteView, inferViewPermute, MemSpace(1, HandleType::CPP),
+                         {Engine(0, EngineType::CPU)}, {DType::ANY, DType::INT32}, {{1}, {1}}, {false, false},
+                         {MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP)});

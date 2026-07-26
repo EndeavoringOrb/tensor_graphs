@@ -1,9 +1,10 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
-#include <vector>
-#include <thread>
 #include <algorithm>
+#include <thread>
+#include <vector>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -35,21 +36,23 @@ inline void runDivF32_ND_Scalar_Threaded(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint64_t start = t * chunk;
             uint64_t end = std::min(start + chunk, totalElements);
             uint64_t i = start;
-            
+
             float32x4_t v_inv = vdupq_n_f32(invScalar);
-            
-            for (; i + 4 <= end; i += 4) {
+
+            for (; i + 4 <= end; i += 4)
+            {
                 float32x4_t v_data = vld1q_f32(dataND + i);
                 vst1q_f32(out + i, vmulq_f32(v_data, v_inv)); // NEON FMA/Mul is faster than Div
             }
-            for (; i < end; ++i) {
+            for (; i < end; ++i)
+            {
                 out[i] = dataND[i] * invScalar;
-            } });
+            }
+        });
     }
     for (auto &w : workers)
         w.join();
@@ -77,5 +80,8 @@ inline LogicalId refFactoryDivND_Scalar_Threaded(const std::vector<LogicalId> &i
     return graph.div(idND, out);
 }
 
-REGISTER_KERNEL("Div_ND_Scalar_Threaded_NEON", 2, 2, matchDivF32_ND_Scalar_Threaded, runDivF32_ND_Scalar_Threaded, refFactoryDivND_Scalar_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 32, 512, 128}, {1}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Div_ND_Scalar_Threaded_NEON", 2, 2, matchDivF32_ND_Scalar_Threaded, runDivF32_ND_Scalar_Threaded,
+                refFactoryDivND_Scalar_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{1, 32, 512, 128}, {1}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

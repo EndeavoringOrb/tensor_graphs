@@ -1,20 +1,21 @@
 // File: tensor_graphs_cpp/core/cost_model.hpp
 #pragma once
-#include "core/types.hpp"
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
+#include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
-#include <vector>
-#include <unordered_map>
-#include <unordered_set>
-#include <fstream>
-#include <iostream>
-#include <cmath>
-#include <limits>
-#include <filesystem>
-#include <mutex>
-#include <algorithm>
 
 // TODO: make hardware detection better
 #if defined(USE_CUDA)
@@ -43,7 +44,8 @@
 #define HW_TAG PLAT_OS_STR "_" PLAT_ARCH_STR
 #endif
 
-// Uncomment the following line to enable logging calls to `benchmarks/calls.bin`
+// Uncomment the following line to enable logging calls to
+// `benchmarks/calls.bin`
 #define TENSOR_GRAPHS_LOG_COST_CALLS
 
 struct Record
@@ -125,9 +127,17 @@ struct CostModel
     {
         int rows, cols;
         std::vector<double> data;
-        Matrix(int r, int c) : rows(r), cols(c), data(r * c, 0.0) {}
-        double &operator()(int r, int c) { return data[r * cols + c]; }
-        double operator()(int r, int c) const { return data[r * cols + c]; }
+        Matrix(int r, int c) : rows(r), cols(c), data(r * c, 0.0)
+        {
+        }
+        double &operator()(int r, int c)
+        {
+            return data[r * cols + c];
+        }
+        double operator()(int r, int c) const
+        {
+            return data[r * cols + c];
+        }
     };
 
     static Matrix transpose(const Matrix &A)
@@ -267,12 +277,9 @@ struct CostModel
 #endif
     }
 
-    void log_call(KernelId kernelId, const std::vector<uint32_t> &outShape,
-                  const std::vector<uint64_t> &outStrides,
-                  DType outDType,
-                  const std::vector<std::vector<uint32_t>> &inShapes,
-                  const std::vector<std::vector<uint64_t>> &inStrides,
-                  const std::vector<DType> &inDTypes,
+    void log_call(KernelId kernelId, const std::vector<uint32_t> &outShape, const std::vector<uint64_t> &outStrides,
+                  DType outDType, const std::vector<std::vector<uint32_t>> &inShapes,
+                  const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
                   const std::vector<std::vector<uint8_t>> &inConstants)
     {
         Record r;
@@ -320,13 +327,10 @@ struct CostModel
         }
     }
 
-    std::vector<double> extractFeatures(
-        const std::vector<std::vector<uint32_t>> &inShapes,
-        const std::vector<std::vector<uint64_t>> &inStrides,
-        const std::vector<DType> &inDTypes,
-        const std::vector<uint32_t> &outShape,
-        const std::vector<uint64_t> &outStrides,
-        const DType &outDType) const
+    std::vector<double> extractFeatures(const std::vector<std::vector<uint32_t>> &inShapes,
+                                        const std::vector<std::vector<uint64_t>> &inStrides,
+                                        const std::vector<DType> &inDTypes, const std::vector<uint32_t> &outShape,
+                                        const std::vector<uint64_t> &outStrides, const DType &outDType) const
     {
         std::vector<double> features;
         features.push_back(1.0); // Bias
@@ -377,9 +381,8 @@ struct CostModel
         }
 
         int K = static_cast<int>(recs.size());
-        auto sample_feat = extractFeatures(
-            recs[0].inputShapes, recs[0].inputStrides, recs[0].inputDTypes,
-            recs[0].outputShape, recs[0].outputStrides, recs[0].outputDType);
+        auto sample_feat = extractFeatures(recs[0].inputShapes, recs[0].inputStrides, recs[0].inputDTypes,
+                                           recs[0].outputShape, recs[0].outputStrides, recs[0].outputDType);
         int D = static_cast<int>(sample_feat.size());
 
         Matrix X(K, D);
@@ -389,9 +392,8 @@ struct CostModel
 
         for (int i = 0; i < K; ++i)
         {
-            auto feat = extractFeatures(
-                recs[i].inputShapes, recs[i].inputStrides, recs[i].inputDTypes,
-                recs[i].outputShape, recs[i].outputStrides, recs[i].outputDType);
+            auto feat = extractFeatures(recs[i].inputShapes, recs[i].inputStrides, recs[i].inputDTypes,
+                                        recs[i].outputShape, recs[i].outputStrides, recs[i].outputDType);
             for (int j = 0; j < D && j < static_cast<int>(feat.size()); ++j)
             {
                 X(i, j) = feat[j];
@@ -456,7 +458,8 @@ struct CostModel
             Record r;
             br.read(r);
             total++;
-            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID || !KernelRegistry::get().hasKernel(r.kernelId))
+            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID ||
+                !KernelRegistry::get().hasKernel(r.kernelId))
                 continue;
             valid++;
             records[r.kernelId].push_back(r);
@@ -475,17 +478,12 @@ struct CostModel
         }
     }
 
-    float estimateCost(
-        KernelId kernelId,
-        const std::vector<uint32_t> &outShape,
-        const std::vector<uint64_t> &outStrides,
-        DType outDType,
-        const std::vector<std::vector<uint32_t>> &inShapes,
-        const std::vector<std::vector<uint64_t>> &inStrides,
-        const std::vector<DType> &inDTypes,
-        const std::vector<std::vector<uint8_t>> &inConstants)
+    float estimateCost(KernelId kernelId, const std::vector<uint32_t> &outShape,
+                       const std::vector<uint64_t> &outStrides, DType outDType,
+                       const std::vector<std::vector<uint32_t>> &inShapes,
+                       const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
+                       const std::vector<std::vector<uint8_t>> &inConstants)
     {
-
         auto it = records.find(kernelId);
         if (it == records.end() || it->second.empty())
         {
@@ -494,8 +492,7 @@ struct CostModel
 #endif
             if (!doneWarning)
             {
-                std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n"
-                          << std::flush;
+                std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n" << std::flush;
                 doneWarning = true;
             }
             return std::numeric_limits<float>::infinity();
@@ -504,9 +501,8 @@ struct CostModel
         // Exact match short-circuit
         for (const auto &r : it->second)
         {
-            if (r.inputShapes == inShapes && r.outputShape == outShape &&
-                r.inputStrides == inStrides && r.outputStrides == outStrides &&
-                r.inputDTypes == inDTypes && r.outputDType == outDType &&
+            if (r.inputShapes == inShapes && r.outputShape == outShape && r.inputStrides == inStrides &&
+                r.outputStrides == outStrides && r.inputDTypes == inDTypes && r.outputDType == outDType &&
                 r.inputConstants == inConstants)
             {
                 return r.runTime;

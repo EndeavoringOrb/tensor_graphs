@@ -1,8 +1,8 @@
 // File: tensor_graphs_cpp/kernels/cpu/reference/slice/F32_ND.hpp
 // TODO: make view only
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchSliceView(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -28,5 +28,8 @@ inline void inferViewSlice(TensorNode &node, const std::vector<TensorNode> &inpu
     }
 }
 
-REGISTER_REF_KERNEL_VIEW(OpType::SLICE, 4, 4, matchSliceView, inferViewSlice, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY, DType::INT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}, {1}}, {false, false, false, false}, {MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP)});
-
+REGISTER_REF_KERNEL_VIEW(OpType::SLICE, 4, 4, matchSliceView, inferViewSlice, MemSpace(1, HandleType::CPP),
+                         {Engine(0, EngineType::CPU)}, {DType::ANY, DType::INT32, DType::INT32, DType::INT32},
+                         {{1}, {1}, {1}, {1}}, {false, false, false, false},
+                         {MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP),
+                          MemSpace(1, HandleType::CPP)});

@@ -1,8 +1,9 @@
 // File: tensor_graphs_cpp/kernels/cpu/general/mul/FP32_3D_1D.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <vector>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchMulFP32_3D_1D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -57,4 +58,6 @@ inline LogicalId refFactoryMul3D_1D(const std::vector<LogicalId> &inputs, Graph 
     return graph.mul(inputs[0], out);
 }
 
-REGISTER_KERNEL("Mul_3D_1D", 2, 2, matchMulFP32_3D_1D, runMulFP32_3D_1D, refFactoryMul3D_1D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Mul_3D_1D", 2, 2, matchMulFP32_3D_1D, runMulFP32_3D_1D, refFactoryMul3D_1D,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {{1, 1, 640}, {640}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

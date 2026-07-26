@@ -1,9 +1,10 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -64,8 +65,7 @@ inline void runBatchedTransposedGEMM(const KernelContext &ctx)
 
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t e_start = t * e_per_thread;
             uint32_t e_end = std::min(e_start + e_per_thread, E);
 
@@ -107,7 +107,8 @@ inline void runBatchedTransposedGEMM(const KernelContext &ctx)
                         Out[((uint64_t)e * S + s) * O + o] = sum;
                     }
                 }
-            } });
+            }
+        });
     }
 
     for (auto &worker : workers)
@@ -123,10 +124,9 @@ inline LogicalId refFactoryBatchedTransposedGEMM(const std::vector<LogicalId> &i
     return graph.dot(inputs[0], transposed);
 }
 
-REGISTER_KERNEL("Batched_Transposed_GEMM_NEON", 2, 2, matchBatchedTransposedGEMM, runBatchedTransposedGEMM, refFactoryBatchedTransposedGEMM, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-    {DType::FLOAT32, DType::FLOAT32},
-    {{256, 8, 2048}, {256, 1024, 2048}},
-    {true, true},
-    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Batched_Transposed_GEMM_NEON", 2, 2, matchBatchedTransposedGEMM, runBatchedTransposedGEMM,
+                refFactoryBatchedTransposedGEMM, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{256, 8, 2048}, {256, 1024, 2048}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

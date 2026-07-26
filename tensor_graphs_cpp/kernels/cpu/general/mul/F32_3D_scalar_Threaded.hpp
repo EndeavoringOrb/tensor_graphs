@@ -1,10 +1,11 @@
 // File: tensor_graphs_cpp/kernels/cpu/general/mul/F32_3D_scalar_Threaded.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
-#include <vector>
-#include <thread>
 #include <algorithm>
+#include <thread>
+#include <vector>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchMulFP32_3D_Scalar_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -30,12 +31,12 @@ inline void runMulFP32_3D_Scalar_Threaded(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint64_t start = t * chunk;
             uint64_t end = std::min(start + chunk, totalElements);
             for (uint64_t i = start; i < end; ++i)
-                out[i] = data3D[i] * scalarValue; });
+                out[i] = data3D[i] * scalarValue;
+        });
     }
     for (auto &w : workers)
         w.join();
@@ -59,4 +60,7 @@ inline LogicalId refFactoryMul3D_Scalar_Threaded(const std::vector<LogicalId> &i
     return graph.mul(inputs[0], out);
 }
 
-REGISTER_KERNEL("Mul_3D_Scalar_Threaded", 2, 2, matchMulFP32_3D_Scalar_Threaded, runMulFP32_3D_Scalar_Threaded, refFactoryMul3D_Scalar_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Mul_3D_Scalar_Threaded", 2, 2, matchMulFP32_3D_Scalar_Threaded, runMulFP32_3D_Scalar_Threaded,
+                refFactoryMul3D_Scalar_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

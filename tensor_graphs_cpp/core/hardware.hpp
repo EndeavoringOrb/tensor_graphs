@@ -1,7 +1,8 @@
 #pragma once
-#include <string>
 #include <iostream>
+#include <string>
 #include <thread>
+
 #include "core/types.hpp"
 
 #ifdef USE_CUDA
@@ -51,7 +52,9 @@ void queryOpenCLDeviceLimits(cl_device_id device)
         }
         if (svm_caps == 0)
         {
-            std::cout << "  - No SVM capabilities supported on this device/driver configuration." << std::endl;
+            std::cout << "  - No SVM capabilities supported on this device/driver "
+                         "configuration."
+                      << std::endl;
         }
     }
     else
@@ -64,8 +67,7 @@ void queryOpenCLDeviceLimits(cl_device_id device)
     err = clGetDeviceInfo(device, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(max_alloc), &max_alloc, nullptr);
     if (err == CL_SUCCESS)
     {
-        std::cout << "Max Single Allocation Size (CL_DEVICE_MAX_MEM_ALLOC_SIZE): "
-                  << max_alloc << " bytes ("
+        std::cout << "Max Single Allocation Size (CL_DEVICE_MAX_MEM_ALLOC_SIZE): " << max_alloc << " bytes ("
                   << (double)max_alloc / (1024.0 * 1024.0) << " MB)" << std::endl;
     }
     else
@@ -96,7 +98,7 @@ struct HardwareCaps
         return instance;
     }
 
-private:
+  private:
     void probe()
     {
         // 1. Detect CPU Architecture & SIMD
@@ -133,7 +135,8 @@ private:
             for (auto platform : platforms)
             {
                 cl_uint numDevices = 0;
-                if (clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices) == CL_SUCCESS && numDevices > 0)
+                if (clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices) == CL_SUCCESS &&
+                    numDevices > 0)
                 {
                     std::vector<cl_device_id> devices(numDevices);
                     clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, numDevices, devices.data(), nullptr);

@@ -11,8 +11,10 @@
 // and HF `transformers.models.qwen3_vl.modeling_qwen3_vl`):
 //
 //   Vision tower : Qwen3VLVisionModel
-//                  - patch_embed: Conv3d(T=2, P=16, P=16) with bias → Linear(1536, 768) + bias
-//                  - pos_embed: nn.Embedding(2304, 768), bilinear-interpolated from 48×48
+//                  - patch_embed: Conv3d(T=2, P=16, P=16) with bias →
+//                  Linear(1536, 768) + bias
+//                  - pos_embed: nn.Embedding(2304, 768), bilinear-interpolated
+//                  from 48×48
 //                    grid to the 32×32 patch grid, added after patch_embed
 //                  - 12 × Qwen3VL vision blocks (LayerNorm eps=1e-6, fused QKV,
 //                    2-D RoPE, bidirectional, GELU-MLP)
@@ -28,7 +30,8 @@
 //                  - RMSNorm eps=1e-5, 1-D RoPE (theta=1,000,000)
 //                  - SwiGLU MLP (intermediate=3072), no biases on attn/mlp
 //                  - Input = chat-template-wrapped image features:
-//                    [8 prefix tokens] + [256 image features] + [6 suffix tokens] = 270
+//                    [8 prefix tokens] + [256 image features] + [6 suffix
+//                    tokens] = 270
 //
 //   Pooling      : last-token pooling (position = 269, the last suffix token)
 //   Output       : L2-normalized 768-dim embedding
@@ -74,34 +77,37 @@
 //       (Qwen3VL uses nn.GELU() = exact, not nn.GELU(approximate='tanh'))
 //
 // Weight naming (matches the Python LlavaEuroBertAudioForEmbedding state_dict):
-//   vision_tower.patch_embed.proj.{weight,bias}        (768, 3, 2, 16, 16) / (768,)
-//   vision_tower.pos_embed.weight                      (2304, 768)
-//   vision_tower.blocks.{i}.norm1.{weight,bias}        (768,) / (768,)   ← LayerNorm
-//   vision_tower.blocks.{i}.attn.qkv.{weight,bias}     (2304, 768) / (2304,)
-//   vision_tower.blocks.{i}.attn.proj.{weight,bias}    (768, 768) / (768,)
-//   vision_tower.blocks.{i}.norm2.{weight,bias}        (768,) / (768,)   ← LayerNorm
-//   vision_tower.blocks.{i}.mlp.linear_fc1.{weight,bias}  (3072, 768) / (3072,)
-//   vision_tower.blocks.{i}.mlp.linear_fc2.{weight,bias}  (768, 3072) / (768,)
-//   merger.norm.{weight,bias}                          (768,) / (768,)   ← LayerNorm
-//   merger.linear_fc1.{weight,bias}                    (3072, 3072) / (3072,)
+//   vision_tower.patch_embed.proj.{weight,bias}        (768, 3, 2, 16, 16) /
+//   (768,) vision_tower.pos_embed.weight                      (2304, 768)
+//   vision_tower.blocks.{i}.norm1.{weight,bias}        (768,) / (768,)   ←
+//   LayerNorm vision_tower.blocks.{i}.attn.qkv.{weight,bias}     (2304, 768) /
+//   (2304,) vision_tower.blocks.{i}.attn.proj.{weight,bias}    (768, 768) /
+//   (768,) vision_tower.blocks.{i}.norm2.{weight,bias}        (768,) / (768,)
+//   ← LayerNorm vision_tower.blocks.{i}.mlp.linear_fc1.{weight,bias}  (3072,
+//   768) / (3072,) vision_tower.blocks.{i}.mlp.linear_fc2.{weight,bias}  (768,
+//   3072) / (768,) merger.norm.{weight,bias}                          (768,) /
+//   (768,)   ← LayerNorm merger.linear_fc1.{weight,bias} (3072, 3072) / (3072,)
 //   merger.linear_fc2.{weight,bias}                    (768, 3072) / (768,)
 //   language_model.embed_tokens.weight                 (128260, 768)
-//   language_model.layers.{i}.input_layernorm.weight   (768,)            ← RMSNorm (no bias)
-//   language_model.layers.{i}.self_attn.{q,k,v,o}_proj.weight  (768, 768) (no bias)
-//   language_model.layers.{i}.post_attention_layernorm.weight  (768,)    ← RMSNorm (no bias)
-//   language_model.layers.{i}.mlp.{gate,up,down}_proj.weight   (3072,768)/(3072,768)/(768,3072) (no bias)
-//   language_model.norm.weight                         (768,)            ← RMSNorm (no bias)
+//   language_model.layers.{i}.input_layernorm.weight   (768,)            ←
+//   RMSNorm (no bias) language_model.layers.{i}.self_attn.{q,k,v,o}_proj.weight
+//   (768, 768) (no bias)
+//   language_model.layers.{i}.post_attention_layernorm.weight  (768,)    ←
+//   RMSNorm (no bias) language_model.layers.{i}.mlp.{gate,up,down}_proj.weight
+//   (3072,768)/(3072,768)/(768,3072) (no bias) language_model.norm.weight
+//   (768,)            ← RMSNorm (no bias)
 // =============================================================================
 
-#include "core/types.hpp"
-#include "core/memory.hpp"
-#include "core/graph.hpp"
-#include <string>
-#include <vector>
 #include <cmath>
-#include <tuple>
 #include <fstream>
 #include <sstream>
+#include <string>
+#include <tuple>
+#include <vector>
+
+#include "core/graph.hpp"
+#include "core/memory.hpp"
+#include "core/types.hpp"
 
 // -----------------------------------------------------------------------------
 // Chat-template token IDs.
@@ -132,8 +138,8 @@ static constexpr uint32_t CHAT_SUFFIX_LEN = 7;
 struct JinaV5Config
 {
     // ---- Image / patch geometry (runtime-configured) ----
-    // image_h and image_w must be divisible by (patch_size * spatial_merge_size = 32).
-    // For 512×512: grid 32×32 → 1024 patches → 256 merged → 270 text tokens.
+    // image_h and image_w must be divisible by (patch_size * spatial_merge_size =
+    // 32). For 512×512: grid 32×32 → 1024 patches → 256 merged → 270 text tokens.
     // For 480×544: grid 30×34 → 1020 patches → 255 merged → 269 text tokens.
     uint32_t image_h; // set at runtime (default 512)
     uint32_t image_w; // set at runtime (default 512)
@@ -188,25 +194,20 @@ struct JinaV5Config
     // Constructor takes runtime image dimensions.
     // Both must be divisible by (patch_size * spatial_merge_size = 32).
     JinaV5Config(uint32_t img_h = 512, uint32_t img_w = 512)
-        : image_h(img_h), image_w(img_w),
-          grid_h(img_h / patch_size),
-          grid_w(img_w / patch_size),
-          num_patches(grid_h * grid_w),
-          merged_grid_h(grid_h / spatial_merge_size),
-          merged_grid_w(grid_w / spatial_merge_size),
-          num_merged(merged_grid_h * merged_grid_w),
+        : image_h(img_h), image_w(img_w), grid_h(img_h / patch_size), grid_w(img_w / patch_size),
+          num_patches(grid_h * grid_w), merged_grid_h(grid_h / spatial_merge_size),
+          merged_grid_w(grid_w / spatial_merge_size), num_merged(merged_grid_h * merged_grid_w),
           patch_dim(temporal_patch_size * patch_size * patch_size * in_channels),
-          merged_dim(vision_hidden_size * spatial_merge_size * spatial_merge_size),
-          text_prefix_len(CHAT_PREFIX_LEN),
-          text_image_len(num_merged),
-          text_suffix_len(CHAT_SUFFIX_LEN),
-          text_seq_len((CHAT_PREFIX_LEN + CHAT_SUFFIX_LEN) +
-                       num_merged) {}
+          merged_dim(vision_hidden_size * spatial_merge_size * spatial_merge_size), text_prefix_len(CHAT_PREFIX_LEN),
+          text_image_len(num_merged), text_suffix_len(CHAT_SUFFIX_LEN),
+          text_seq_len((CHAT_PREFIX_LEN + CHAT_SUFFIX_LEN) + num_merged)
+    {
+    }
 };
 
 class JinaV5OmniNanoRetrievalModel
 {
-private:
+  private:
     JinaV5Config cfg;
     Graph &g;
     MemoryManager &mem;
@@ -229,8 +230,7 @@ private:
         if (repeats <= 1)
             return id;
         int32_t r = repeats, a = axis;
-        return g.repeat(id, g.constant({1}, &r, DType::INT32),
-                        g.constant({1}, &a, DType::INT32));
+        return g.repeat(id, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
     }
 
     LogicalId repeat_3d_axis(LogicalId tensor_id, uint32_t repeats, uint32_t axis)
@@ -239,9 +239,7 @@ private:
             return tensor_id;
         int32_t rep[] = {(int32_t)repeats};
         int32_t ax[] = {(int32_t)axis};
-        return g.repeat(tensor_id,
-                        g.constant({1}, rep, DType::INT32),
-                        g.constant({1}, ax, DType::INT32));
+        return g.repeat(tensor_id, g.constant({1}, rep, DType::INT32), g.constant({1}, ax, DType::INT32));
     }
 
     LogicalId repeat_4d_axis(LogicalId tensor_id, uint32_t repeats, uint32_t axis)
@@ -250,9 +248,7 @@ private:
             return tensor_id;
         int32_t rep[] = {(int32_t)repeats};
         int32_t ax[] = {(int32_t)axis};
-        return g.repeat(tensor_id,
-                        g.constant({1}, rep, DType::INT32),
-                        g.constant({1}, ax, DType::INT32));
+        return g.repeat(tensor_id, g.constant({1}, rep, DType::INT32), g.constant({1}, ax, DType::INT32));
     }
 
     LogicalId expand_scalar_to_1d(float val, uint32_t d0)
@@ -321,8 +317,7 @@ private:
 
     // LayerNorm — used by vision blocks (norm1, norm2) and merger (norm).
     // nn.LayerNorm(eps=1e-6) has both weight and bias.
-    LogicalId layer_norm(LogicalId x, const std::string &w_name,
-                         const std::string &b_name, uint32_t S, uint32_t D,
+    LogicalId layer_norm(LogicalId x, const std::string &w_name, const std::string &b_name, uint32_t S, uint32_t D,
                          float eps = 1e-6f)
     {
         int32_t ax_val = -1;
@@ -366,8 +361,7 @@ private:
     }
 
     // RMSNorm — used by text encoder (LlamaModel).  No bias.
-    LogicalId rms_norm(LogicalId x_id, const std::string &w_name,
-                       uint32_t S, uint32_t D, float eps)
+    LogicalId rms_norm(LogicalId x_id, const std::string &w_name, uint32_t S, uint32_t D, float eps)
     {
         LogicalId x_sq = g.mul(x_id, x_id);
         int32_t axis_val = -1;
@@ -391,8 +385,8 @@ private:
     // -------------------------------------------------------------------------
     // Linear (weight expected 2-D: [out_d, in_d])
     // -------------------------------------------------------------------------
-    LogicalId linear(LogicalId x, const std::string &w_name, const std::string &b_name,
-                     uint32_t in_d, uint32_t out_d, uint32_t S)
+    LogicalId linear(LogicalId x, const std::string &w_name, const std::string &b_name, uint32_t in_d, uint32_t out_d,
+                     uint32_t S)
     {
         LogicalId w = weight(w_name);
         int32_t p[] = {1, 0};
@@ -426,14 +420,16 @@ private:
         return g.mul(x_id, sigmoid);
     }
 
-    // Exact GELU using erf, via Abramowitz-Stegun approximation (max err ~1.5e-7).
-    // gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+    // Exact GELU using erf, via Abramowitz-Stegun approximation (max err
+    // ~1.5e-7). gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
     //
     // erf(x) for x >= 0:
     //   t = 1 / (1 + p*|x|),  p = 0.3275911
     //   erf ≈ 1 - (a1*t + a2*t^2 + a3*t^3 + a4*t^4 + a5*t^5) * exp(-x^2)
-    //   a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429
-    // For x < 0: erf(x) = -erf(-x), i.e. erf is odd → erf(x) = sign(x) * erf(|x|).
+    //   a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027,
+    //   a5=1.061405429
+    // For x < 0: erf(x) = -erf(-x), i.e. erf is odd → erf(x) = sign(x) *
+    // erf(|x|).
     LogicalId gelu_exact(LogicalId x_id, uint32_t S, uint32_t D)
     {
         // x_scaled = x / sqrt(2)
@@ -498,8 +494,7 @@ private:
     // -------------------------------------------------------------------------
 
     // Apply RoPE to a 4-D Q/K tensor of shape (1, n_groups, S, head_dim).
-    LogicalId apply_rope(LogicalId x, LogicalId cos, LogicalId sin,
-                         uint32_t n_groups, uint32_t head_dim, uint32_t S)
+    LogicalId apply_rope(LogicalId x, LogicalId cos, LogicalId sin, uint32_t n_groups, uint32_t head_dim, uint32_t S)
     {
         int32_t starts1[] = {0, 0, 0, 0};
         int32_t ends1[] = {1, (int32_t)n_groups, (int32_t)S, (int32_t)head_dim / 2};
@@ -507,11 +502,9 @@ private:
         int32_t ends2[] = {1, (int32_t)n_groups, (int32_t)S, (int32_t)head_dim};
         int32_t steps[] = {1, 1, 1, 1};
 
-        LogicalId x1 = g.slice(x, g.constant({4}, starts1, DType::INT32),
-                               g.constant({4}, ends1, DType::INT32),
+        LogicalId x1 = g.slice(x, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends1, DType::INT32),
                                g.constant({4}, steps, DType::INT32));
-        LogicalId x2 = g.slice(x, g.constant({4}, starts2, DType::INT32),
-                               g.constant({4}, ends2, DType::INT32),
+        LogicalId x2 = g.slice(x, g.constant({4}, starts2, DType::INT32), g.constant({4}, ends2, DType::INT32),
                                g.constant({4}, steps, DType::INT32));
 
         int32_t ax = 3;
@@ -527,40 +520,35 @@ private:
     std::tuple<LogicalId, LogicalId> compute_rope_1d(uint32_t S, uint32_t head_dim, float theta)
     {
         int32_t start_val = 0, stop_val = (int32_t)head_dim, step_val = 2;
-        LogicalId indices_int = g.arange(g.constant({1}, &start_val, DType::INT32),
-                                         g.constant({1}, &stop_val, DType::INT32),
-                                         g.constant({1}, &step_val, DType::INT32));
+        LogicalId indices_int =
+            g.arange(g.constant({1}, &start_val, DType::INT32), g.constant({1}, &stop_val, DType::INT32),
+                     g.constant({1}, &step_val, DType::INT32));
         LogicalId indices = g.cast(indices_int, DType::FLOAT32);
 
         LogicalId h_dim_node = expand_scalar_to_1d((float)head_dim, head_dim / 2);
         LogicalId exp = g.div(indices, h_dim_node);
         LogicalId theta_node = expand_scalar_to_1d(theta, head_dim / 2);
-        LogicalId inv_freq = g.div(expand_scalar_to_1d(1.0f, head_dim / 2),
-                                   g.pow(theta_node, exp));
+        LogicalId inv_freq = g.div(expand_scalar_to_1d(1.0f, head_dim / 2), g.pow(theta_node, exp));
 
         int32_t pos_stop = (int32_t)S;
         int32_t pos_step = 1;
-        LogicalId pos = g.cast(g.arange(g.constant({1}, &start_val, DType::INT32),
-                                        g.constant({1}, &pos_stop, DType::INT32),
-                                        g.constant({1}, &pos_step, DType::INT32)),
-                               DType::FLOAT32);
+        LogicalId pos =
+            g.cast(g.arange(g.constant({1}, &start_val, DType::INT32), g.constant({1}, &pos_stop, DType::INT32),
+                            g.constant({1}, &pos_step, DType::INT32)),
+                   DType::FLOAT32);
 
         int32_t sh_col[] = {(int32_t)S, 1};
-        LogicalId pos_col = repeat_ax(g.reshape(pos, g.constant({2}, sh_col, DType::INT32)),
-                                      head_dim / 2, 1);
+        LogicalId pos_col = repeat_ax(g.reshape(pos, g.constant({2}, sh_col, DType::INT32)), head_dim / 2, 1);
         int32_t sh_row[] = {1, (int32_t)head_dim / 2};
-        LogicalId freq_row = repeat_ax(g.reshape(inv_freq, g.constant({2}, sh_row, DType::INT32)),
-                                       S, 0);
+        LogicalId freq_row = repeat_ax(g.reshape(inv_freq, g.constant({2}, sh_row, DType::INT32)), S, 0);
 
         LogicalId angles_half = g.mul(pos_col, freq_row);
         int32_t ax = 1;
-        LogicalId angles = g.concat({angles_half, angles_half},
-                                    g.constant({1}, &ax, DType::INT32));
+        LogicalId angles = g.concat({angles_half, angles_half}, g.constant({1}, &ax, DType::INT32));
 
         int32_t sh4[] = {1, 1, (int32_t)S, (int32_t)head_dim};
         LogicalId sh4_node = g.constant({4}, sh4, DType::INT32);
-        return {g.reshape(g.cos(angles), sh4_node),
-                g.reshape(g.sin(angles), sh4_node)};
+        return {g.reshape(g.cos(angles), sh4_node), g.reshape(g.sin(angles), sh4_node)};
     }
 
     // 2-D RoPE for the vision tower — FIXED.
@@ -574,38 +562,38 @@ private:
     //
     // The original C++ used dim = head_dim = 64 (32-element inv_freq) and split
     // into two DIFFERENT 16-element halves — both halves were wrong.
-    std::tuple<LogicalId, LogicalId> compute_rope_2d(uint32_t grid_h, uint32_t grid_w,
-                                                     uint32_t head_dim, float theta)
+    std::tuple<LogicalId, LogicalId> compute_rope_2d(uint32_t grid_h, uint32_t grid_w, uint32_t head_dim, float theta)
     {
         uint32_t S = grid_h * grid_w;
         uint32_t half = head_dim / 2; // 32
         uint32_t quarter = half / 2;  // 16
 
-        // ---- inv_freq: 1 / theta^(arange(0, dim, 2) / dim)  with dim = head_dim // 2 = 32
+        // ---- inv_freq: 1 / theta^(arange(0, dim, 2) / dim)  with dim = head_dim
+        // // 2 = 32
         //   → arange(0, 32, 2) = [0, 2, ..., 30]  (16 elements)
         //   → / 32 → [0, 1/16, ..., 15/16]
         //   → inv_freq = 1 / theta^([0, 1/16, ..., 15/16])  (16 elements)
-        int32_t start_val = 0, stop_val = (int32_t)half, step_val = 2; // stop=32, step=2
-        LogicalId indices_int = g.arange(g.constant({1}, &start_val, DType::INT32),
-                                         g.constant({1}, &stop_val, DType::INT32),
-                                         g.constant({1}, &step_val, DType::INT32));
+        int32_t start_val = 0, stop_val = (int32_t)half,
+                step_val = 2; // stop=32, step=2
+        LogicalId indices_int =
+            g.arange(g.constant({1}, &start_val, DType::INT32), g.constant({1}, &stop_val, DType::INT32),
+                     g.constant({1}, &step_val, DType::INT32));
         LogicalId indices = g.cast(indices_int, DType::FLOAT32);
         LogicalId dim_node = expand_scalar_to_1d((float)half, quarter); // 32.0 broadcast to 16
         LogicalId exps = g.div(indices, dim_node);
         LogicalId theta_node = expand_scalar_to_1d(theta, quarter);
-        LogicalId inv_freq = g.div(expand_scalar_to_1d(1.0f, quarter),
-                                   g.pow(theta_node, exps)); // (quarter,) = (16,)
+        LogicalId inv_freq = g.div(expand_scalar_to_1d(1.0f, quarter), g.pow(theta_node, exps)); // (quarter,) = (16,)
 
         // ---- Build h_pos (S,) and w_pos (S,) for row-major patch order.
         int32_t gh_stop = (int32_t)grid_h, gw_stop = (int32_t)grid_w, one_step = 1;
-        LogicalId h_arr = g.cast(g.arange(g.constant({1}, &start_val, DType::INT32),
-                                          g.constant({1}, &gh_stop, DType::INT32),
-                                          g.constant({1}, &one_step, DType::INT32)),
-                                 DType::FLOAT32);
-        LogicalId w_arr = g.cast(g.arange(g.constant({1}, &start_val, DType::INT32),
-                                          g.constant({1}, &gw_stop, DType::INT32),
-                                          g.constant({1}, &one_step, DType::INT32)),
-                                 DType::FLOAT32);
+        LogicalId h_arr =
+            g.cast(g.arange(g.constant({1}, &start_val, DType::INT32), g.constant({1}, &gh_stop, DType::INT32),
+                            g.constant({1}, &one_step, DType::INT32)),
+                   DType::FLOAT32);
+        LogicalId w_arr =
+            g.cast(g.arange(g.constant({1}, &start_val, DType::INT32), g.constant({1}, &gw_stop, DType::INT32),
+                            g.constant({1}, &one_step, DType::INT32)),
+                   DType::FLOAT32);
 
         int32_t sh_col[] = {(int32_t)grid_h, 1};
         LogicalId h_col2d = g.reshape(h_arr, g.constant({2}, sh_col, DType::INT32));
@@ -619,7 +607,8 @@ private:
         LogicalId w_pos = g.reshape(w_pos_2d, g.constant({1}, sh_S, DType::INT32)); // (S,)
 
         // ---- angles_h = h_pos[:, None] * inv_freq[None, :]   (S, quarter)
-        //      angles_w = w_pos[:, None] * inv_freq[None, :]   (S, quarter)  ← SAME inv_freq
+        //      angles_w = w_pos[:, None] * inv_freq[None, :]   (S, quarter)  ← SAME
+        //      inv_freq
         int32_t sh_S_1[] = {(int32_t)S, 1};
         int32_t sh_1_q[] = {1, (int32_t)quarter};
         h_pos_2d = g.reshape(h_pos, g.constant({2}, sh_S_1, DType::INT32));
@@ -636,10 +625,8 @@ private:
         // ---- angles = cat([angles_h, angles_w], -1)  (S, half)
         //      emb    = cat([angles, angles],     -1)  (S, head_dim)
         int32_t ax1 = 1;
-        LogicalId angles = g.concat({angles_h, angles_w},
-                                    g.constant({1}, &ax1, DType::INT32)); // (S, half)
-        LogicalId emb = g.concat({angles, angles},
-                                 g.constant({1}, &ax1, DType::INT32)); // (S, head_dim)
+        LogicalId angles = g.concat({angles_h, angles_w}, g.constant({1}, &ax1, DType::INT32)); // (S, half)
+        LogicalId emb = g.concat({angles, angles}, g.constant({1}, &ax1, DType::INT32));        // (S, head_dim)
 
         LogicalId cos_t = g.cos(emb);
         LogicalId sin_t = g.sin(emb);
@@ -709,11 +696,10 @@ private:
         const uint32_t W = cfg.grid_w;               // 32
         const uint32_t D = cfg.vision_hidden_size;   // 768
 
-        // Precompute corner indices and weights (host-side, then upload as constants)
-        std::vector<int32_t> idx00(num_patches), idx01(num_patches),
-            idx10(num_patches), idx11(num_patches);
-        std::vector<float> w00(num_patches), w01(num_patches),
-            w10(num_patches), w11(num_patches);
+        // Precompute corner indices and weights (host-side, then upload as
+        // constants)
+        std::vector<int32_t> idx00(num_patches), idx01(num_patches), idx10(num_patches), idx11(num_patches);
+        std::vector<float> w00(num_patches), w01(num_patches), w10(num_patches), w11(num_patches);
 
         for (uint32_t gi = 0; gi < H; ++gi)
         {
@@ -768,16 +754,13 @@ private:
         //   1. Create 1-D weight (num_patches,)
         //   2. Reshape to (1, num_patches, 1)
         //   3. Repeat along axis 2 by D times → (1, num_patches, D)
-        auto make_weight_3d = [&](const std::vector<float> &w_data) -> LogicalId
-        {
+        auto make_weight_3d = [&](const std::vector<float> &w_data) -> LogicalId {
             LogicalId w_1d = g.constant({num_patches}, w_data.data(), DType::FLOAT32);
             int32_t sh3_w[] = {1, (int32_t)num_patches, 1};
             LogicalId w_3d = g.reshape(w_1d, g.constant({3}, sh3_w, DType::INT32));
             int32_t rep_D[] = {(int32_t)D};
             int32_t ax2[] = {2};
-            return g.repeat(w_3d,
-                            g.constant({1}, rep_D, DType::INT32),
-                            g.constant({1}, ax2, DType::INT32));
+            return g.repeat(w_3d, g.constant({1}, rep_D, DType::INT32), g.constant({1}, ax2, DType::INT32));
         };
 
         LogicalId w00_3d = make_weight_3d(w00);
@@ -795,13 +778,12 @@ private:
     }
 
     // Fused-QKV attention with 2-D RoPE, bidirectional (no causal mask).
-    LogicalId vision_attention(LogicalId x, int layer_idx,
-                               LogicalId cos, LogicalId sin, uint32_t S)
+    LogicalId vision_attention(LogicalId x, int layer_idx, LogicalId cos, LogicalId sin, uint32_t S)
     {
         std::string prefix = "vision_tower.blocks." + std::to_string(layer_idx) + ".attn.";
 
-        LogicalId qkv = linear(x, prefix + "qkv.weight", prefix + "qkv.bias",
-                               cfg.vision_hidden_size, 3 * cfg.vision_hidden_size, S);
+        LogicalId qkv = linear(x, prefix + "qkv.weight", prefix + "qkv.bias", cfg.vision_hidden_size,
+                               3 * cfg.vision_hidden_size, S);
 
         int32_t steps[] = {1, 1, 1};
         int32_t sq[] = {0, 0, 0}, eq[] = {1, (int32_t)S, (int32_t)cfg.vision_hidden_size};
@@ -809,24 +791,21 @@ private:
                 ek[] = {1, (int32_t)S, (int32_t)(2 * cfg.vision_hidden_size)};
         int32_t sv[] = {0, 0, (int32_t)(2 * cfg.vision_hidden_size)},
                 ev[] = {1, (int32_t)S, (int32_t)(3 * cfg.vision_hidden_size)};
-        LogicalId q = g.contiguous(g.slice(qkv, g.constant({3}, sq, DType::INT32),
-                                           g.constant({3}, eq, DType::INT32),
+        LogicalId q = g.contiguous(g.slice(qkv, g.constant({3}, sq, DType::INT32), g.constant({3}, eq, DType::INT32),
                                            g.constant({3}, steps, DType::INT32)));
-        LogicalId k = g.contiguous(g.slice(qkv, g.constant({3}, sk, DType::INT32),
-                                           g.constant({3}, ek, DType::INT32),
+        LogicalId k = g.contiguous(g.slice(qkv, g.constant({3}, sk, DType::INT32), g.constant({3}, ek, DType::INT32),
                                            g.constant({3}, steps, DType::INT32)));
-        LogicalId v = g.contiguous(g.slice(qkv, g.constant({3}, sv, DType::INT32),
-                                           g.constant({3}, ev, DType::INT32),
+        LogicalId v = g.contiguous(g.slice(qkv, g.constant({3}, sv, DType::INT32), g.constant({3}, ev, DType::INT32),
                                            g.constant({3}, steps, DType::INT32)));
 
         int32_t sh4[] = {1, (int32_t)S, (int32_t)cfg.vision_num_heads, (int32_t)cfg.vision_head_dim};
         int32_t p_attn[] = {0, 2, 1, 3};
-        q = g.contiguous(g.permute(g.reshape(q, g.constant({4}, sh4, DType::INT32)),
-                                   g.constant({4}, p_attn, DType::INT32)));
-        k = g.contiguous(g.permute(g.reshape(k, g.constant({4}, sh4, DType::INT32)),
-                                   g.constant({4}, p_attn, DType::INT32)));
-        v = g.contiguous(g.permute(g.reshape(v, g.constant({4}, sh4, DType::INT32)),
-                                   g.constant({4}, p_attn, DType::INT32)));
+        q = g.contiguous(
+            g.permute(g.reshape(q, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_attn, DType::INT32)));
+        k = g.contiguous(
+            g.permute(g.reshape(k, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_attn, DType::INT32)));
+        v = g.contiguous(
+            g.permute(g.reshape(v, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_attn, DType::INT32)));
 
         // 2-D RoPE on Q and K
         q = apply_rope(q, cos, sin, cfg.vision_num_heads, cfg.vision_head_dim, S);
@@ -847,37 +826,37 @@ private:
         int32_t sh3_ctx[] = {1, (int32_t)S, (int32_t)cfg.vision_hidden_size};
         LogicalId ctx_flat = g.reshape(ctx_perm, g.constant({3}, sh3_ctx, DType::INT32));
 
-        return linear(ctx_flat, prefix + "proj.weight", prefix + "proj.bias",
-                      cfg.vision_hidden_size, cfg.vision_hidden_size, S);
+        return linear(ctx_flat, prefix + "proj.weight", prefix + "proj.bias", cfg.vision_hidden_size,
+                      cfg.vision_hidden_size, S);
     }
 
     LogicalId vision_mlp(LogicalId x, int layer_idx, uint32_t S)
     {
         std::string prefix = "vision_tower.blocks." + std::to_string(layer_idx) + ".mlp.";
-        LogicalId h = linear(x, prefix + "linear_fc1.weight", prefix + "linear_fc1.bias",
-                             cfg.vision_hidden_size, cfg.vision_intermediate_size, S);
+        LogicalId h = linear(x, prefix + "linear_fc1.weight", prefix + "linear_fc1.bias", cfg.vision_hidden_size,
+                             cfg.vision_intermediate_size, S);
         // [FIX] Bug #4: exact GELU instead of tanh approximation
         h = gelu_exact(h, S, cfg.vision_intermediate_size);
-        return linear(h, prefix + "linear_fc2.weight", prefix + "linear_fc2.bias",
-                      cfg.vision_intermediate_size, cfg.vision_hidden_size, S);
+        return linear(h, prefix + "linear_fc2.weight", prefix + "linear_fc2.bias", cfg.vision_intermediate_size,
+                      cfg.vision_hidden_size, S);
     }
 
-    // [FIX] Bug #3: vision blocks now use LayerNorm (with bias) instead of RMSNorm.
+    // [FIX] Bug #3: vision blocks now use LayerNorm (with bias) instead of
+    // RMSNorm.
     LogicalId vision_block(LogicalId x, int layer_idx, LogicalId cos, LogicalId sin, uint32_t S)
     {
         std::string prefix = "vision_tower.blocks." + std::to_string(layer_idx) + ".";
         LogicalId residual = x;
 
         // norm1: LayerNorm(eps=1e-6) with weight AND bias
-        LogicalId h = layer_norm(x, prefix + "norm1.weight", prefix + "norm1.bias",
-                                 S, cfg.vision_hidden_size, cfg.vision_ln_eps);
+        LogicalId h =
+            layer_norm(x, prefix + "norm1.weight", prefix + "norm1.bias", S, cfg.vision_hidden_size, cfg.vision_ln_eps);
         h = vision_attention(h, layer_idx, cos, sin, S);
         h = g.add(residual, h);
         residual = h;
 
         // norm2: LayerNorm(eps=1e-6) with weight AND bias
-        h = layer_norm(h, prefix + "norm2.weight", prefix + "norm2.bias",
-                       S, cfg.vision_hidden_size, cfg.vision_ln_eps);
+        h = layer_norm(h, prefix + "norm2.weight", prefix + "norm2.bias", S, cfg.vision_hidden_size, cfg.vision_ln_eps);
         h = vision_mlp(h, layer_idx, S);
         return g.add(residual, h);
     }
@@ -893,8 +872,7 @@ private:
         LogicalId pos = compute_pos_embed(S); // (1, 1024, 768)
         h = g.add(h, pos);
 
-        auto [cos, sin] = compute_rope_2d(cfg.grid_h, cfg.grid_w,
-                                          cfg.vision_head_dim, cfg.vision_rope_theta);
+        auto [cos, sin] = compute_rope_2d(cfg.grid_h, cfg.grid_w, cfg.vision_head_dim, cfg.vision_rope_theta);
 
         for (uint32_t i = 0; i < cfg.vision_num_layers; ++i)
             h = vision_block(h, (int)i, cos, sin, S);
@@ -906,25 +884,21 @@ private:
     //  TEXT ENCODER (EuroBERT / LlamaModel, bidirectional)
     // =========================================================================
 
-    LogicalId text_attention(LogicalId x, int layer_idx,
-                             LogicalId cos, LogicalId sin, uint32_t S)
+    LogicalId text_attention(LogicalId x, int layer_idx, LogicalId cos, LogicalId sin, uint32_t S)
     {
         std::string prefix = "language_model.layers." + std::to_string(layer_idx) + ".self_attn.";
-        LogicalId q = linear(x, prefix + "q_proj.weight", "",
-                             cfg.text_hidden_size, cfg.text_hidden_size, S);
-        LogicalId k = linear(x, prefix + "k_proj.weight", "",
-                             cfg.text_hidden_size, cfg.text_hidden_size, S);
-        LogicalId v = linear(x, prefix + "v_proj.weight", "",
-                             cfg.text_hidden_size, cfg.text_hidden_size, S);
+        LogicalId q = linear(x, prefix + "q_proj.weight", "", cfg.text_hidden_size, cfg.text_hidden_size, S);
+        LogicalId k = linear(x, prefix + "k_proj.weight", "", cfg.text_hidden_size, cfg.text_hidden_size, S);
+        LogicalId v = linear(x, prefix + "v_proj.weight", "", cfg.text_hidden_size, cfg.text_hidden_size, S);
 
         int32_t sh4[] = {1, (int32_t)S, (int32_t)cfg.text_num_heads, (int32_t)cfg.text_head_dim};
         int32_t p_attn[] = {0, 2, 1, 3};
-        q = g.contiguous(g.permute(g.reshape(q, g.constant({4}, sh4, DType::INT32)),
-                                   g.constant({4}, p_attn, DType::INT32)));
-        k = g.contiguous(g.permute(g.reshape(k, g.constant({4}, sh4, DType::INT32)),
-                                   g.constant({4}, p_attn, DType::INT32)));
-        v = g.contiguous(g.permute(g.reshape(v, g.constant({4}, sh4, DType::INT32)),
-                                   g.constant({4}, p_attn, DType::INT32)));
+        q = g.contiguous(
+            g.permute(g.reshape(q, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_attn, DType::INT32)));
+        k = g.contiguous(
+            g.permute(g.reshape(k, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_attn, DType::INT32)));
+        v = g.contiguous(
+            g.permute(g.reshape(v, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p_attn, DType::INT32)));
 
         q = apply_rope(q, cos, sin, cfg.text_num_heads, cfg.text_head_dim, S);
         k = apply_rope(k, cos, sin, cfg.text_num_heads, cfg.text_head_dim, S);
@@ -944,21 +918,18 @@ private:
         int32_t sh3_ctx[] = {1, (int32_t)S, (int32_t)cfg.text_hidden_size};
         LogicalId ctx_flat = g.reshape(ctx_perm, g.constant({3}, sh3_ctx, DType::INT32));
 
-        return linear(ctx_flat, prefix + "o_proj.weight", "",
-                      cfg.text_hidden_size, cfg.text_hidden_size, S);
+        return linear(ctx_flat, prefix + "o_proj.weight", "", cfg.text_hidden_size, cfg.text_hidden_size, S);
     }
 
     LogicalId text_mlp(LogicalId x, int layer_idx, uint32_t S)
     {
         std::string prefix = "language_model.layers." + std::to_string(layer_idx) + ".mlp.";
-        LogicalId gate = linear(x, prefix + "gate_proj.weight", "",
-                                cfg.text_hidden_size, cfg.text_intermediate_size, S);
-        LogicalId up = linear(x, prefix + "up_proj.weight", "",
-                              cfg.text_hidden_size, cfg.text_intermediate_size, S);
+        LogicalId gate =
+            linear(x, prefix + "gate_proj.weight", "", cfg.text_hidden_size, cfg.text_intermediate_size, S);
+        LogicalId up = linear(x, prefix + "up_proj.weight", "", cfg.text_hidden_size, cfg.text_intermediate_size, S);
         LogicalId gate_silu = silu_atomic(gate, 1, S, cfg.text_intermediate_size);
         LogicalId gate_up = g.mul(gate_silu, up);
-        return linear(gate_up, prefix + "down_proj.weight", "",
-                      cfg.text_intermediate_size, cfg.text_hidden_size, S);
+        return linear(gate_up, prefix + "down_proj.weight", "", cfg.text_intermediate_size, cfg.text_hidden_size, S);
     }
 
     LogicalId l2_normalize(LogicalId x, uint32_t D)
@@ -974,9 +945,8 @@ private:
 
         int32_t rep[] = {(int32_t)D};
         int32_t axis[] = {1};
-        LogicalId inv_std_expanded = g.repeat(inv_std,
-                                              g.constant({1}, rep, DType::INT32),
-                                              g.constant({1}, axis, DType::INT32));
+        LogicalId inv_std_expanded =
+            g.repeat(inv_std, g.constant({1}, rep, DType::INT32), g.constant({1}, axis, DType::INT32));
         return g.mul(x, inv_std_expanded);
     }
 
@@ -984,7 +954,8 @@ private:
     // Returns a (1, prefix_len + suffix_len, hidden) tensor containing
     // the embed_tokens rows for the prefix and suffix token IDs.
     //
-    // Token IDs come from the static CHAT_PREFIX_TOKEN_IDS / CHAT_SUFFIX_TOKEN_IDS tables
+    // Token IDs come from the static CHAT_PREFIX_TOKEN_IDS /
+    // CHAT_SUFFIX_TOKEN_IDS tables
     //       (Llama-BPE tokenisation of "<|im_start|>user\n" / "<|im_end|>\n")
     LogicalId build_chat_template_embeds()
     {
@@ -995,21 +966,16 @@ private:
         const int32_t *suffix_ids = CHAT_SUFFIX_TOKEN_IDS;
 
         // Gather prefix: (prefix_len, hidden)
-        LogicalId prefix_idx = g.constant({cfg.text_prefix_len},
-                                          prefix_ids,
-                                          DType::INT32);
+        LogicalId prefix_idx = g.constant({cfg.text_prefix_len}, prefix_ids, DType::INT32);
         LogicalId prefix_emb = g.gather(embed_table, prefix_idx); // (prefix_len, hidden)
 
         // Gather suffix: (suffix_len, hidden)
-        LogicalId suffix_idx = g.constant({cfg.text_suffix_len},
-                                          suffix_ids,
-                                          DType::INT32);
+        LogicalId suffix_idx = g.constant({cfg.text_suffix_len}, suffix_ids, DType::INT32);
         LogicalId suffix_emb = g.gather(embed_table, suffix_idx); // (suffix_len, hidden)
 
         // Concat prefix + suffix along axis 0 → (prefix_len + suffix_len, hidden)
         int32_t ax0 = 0;
-        LogicalId combined = g.concat({prefix_emb, suffix_emb},
-                                      g.constant({1}, &ax0, DType::INT32));
+        LogicalId combined = g.concat({prefix_emb, suffix_emb}, g.constant({1}, &ax0, DType::INT32));
 
         // Reshape to (1, prefix_len + suffix_len, hidden)
         uint32_t total = cfg.text_prefix_len + cfg.text_suffix_len;
@@ -1017,10 +983,11 @@ private:
         return g.reshape(combined, g.constant({3}, sh3, DType::INT32));
     }
 
-public:
-    JinaV5OmniNanoRetrievalModel(JinaV5Config &_cfg, Graph &_g, MemoryManager &_mem,
-                                 std::string _w_path)
-        : cfg(_cfg), g(_g), mem(_mem), w_path(std::move(_w_path)) {}
+  public:
+    JinaV5OmniNanoRetrievalModel(JinaV5Config &_cfg, Graph &_g, MemoryManager &_mem, std::string _w_path)
+        : cfg(_cfg), g(_g), mem(_mem), w_path(std::move(_w_path))
+    {
+    }
 
     // Build the image-embedding graph.
     //
@@ -1035,9 +1002,8 @@ public:
 
         // ---- 2. Merger (PretrainedMerger) ----------------------------------
         // LayerNorm(768, eps=1e-6) on patch features
-        LogicalId ln_patches = layer_norm(patch_feats,
-                                          "merger.norm.weight", "merger.norm.bias",
-                                          cfg.num_patches, cfg.vision_hidden_size);
+        LogicalId ln_patches =
+            layer_norm(patch_feats, "merger.norm.weight", "merger.norm.bias", cfg.num_patches, cfg.vision_hidden_size);
 
         // Reshape (1, num_patches, 768) → (1, grid_h, grid_w, 768)
         int32_t sh4_grid[] = {1, (int32_t)cfg.grid_h, (int32_t)cfg.grid_w, (int32_t)cfg.vision_hidden_size};
@@ -1045,12 +1011,15 @@ public:
 
         // Split into 2×2 blocks: (1, merged_h, 2, merged_w, 2, 768)
         int32_t sh6_split[] = {1,
-                               (int32_t)cfg.merged_grid_h, (int32_t)cfg.spatial_merge_size,
-                               (int32_t)cfg.merged_grid_w, (int32_t)cfg.spatial_merge_size,
+                               (int32_t)cfg.merged_grid_h,
+                               (int32_t)cfg.spatial_merge_size,
+                               (int32_t)cfg.merged_grid_w,
+                               (int32_t)cfg.spatial_merge_size,
                                (int32_t)cfg.vision_hidden_size};
         LogicalId split = g.reshape(grid, g.constant({6}, sh6_split, DType::INT32));
 
-        // Permute so the 2×2 block dims are adjacent: (1, merged_h, merged_w, 2, 2, 768)
+        // Permute so the 2×2 block dims are adjacent: (1, merged_h, merged_w, 2, 2,
+        // 768)
         int32_t perm6[] = {0, 1, 3, 2, 4, 5};
         LogicalId perm_split = g.contiguous(g.permute(split, g.constant({6}, perm6, DType::INT32)));
 
@@ -1059,12 +1028,12 @@ public:
         LogicalId merged = g.reshape(perm_split, g.constant({3}, sh3_merged, DType::INT32));
 
         // linear_fc1: 3072 → 3072, GELU, linear_fc2: 3072 → 768
-        LogicalId proj1 = linear(merged, "merger.linear_fc1.weight", "merger.linear_fc1.bias",
-                                 cfg.merged_dim, cfg.merged_dim, cfg.num_merged);
+        LogicalId proj1 = linear(merged, "merger.linear_fc1.weight", "merger.linear_fc1.bias", cfg.merged_dim,
+                                 cfg.merged_dim, cfg.num_merged);
         // [FIX] Bug #4: exact GELU
         LogicalId act = gelu_exact(proj1, cfg.num_merged, cfg.merged_dim);
-        LogicalId proj2 = linear(act, "merger.linear_fc2.weight", "merger.linear_fc2.bias",
-                                 cfg.merged_dim, cfg.text_hidden_size, cfg.num_merged);
+        LogicalId proj2 = linear(act, "merger.linear_fc2.weight", "merger.linear_fc2.bias", cfg.merged_dim,
+                                 cfg.text_hidden_size, cfg.num_merged);
 
         // proj2 is the 256-token image-feature sequence.
 
@@ -1076,26 +1045,20 @@ public:
         int32_t pre_starts[] = {0, 0, 0};
         int32_t pre_ends[] = {1, (int32_t)cfg.text_prefix_len, (int32_t)cfg.text_hidden_size};
         int32_t suf_starts[] = {0, (int32_t)cfg.text_prefix_len, 0};
-        int32_t suf_ends[] = {1, (int32_t)(cfg.text_prefix_len + cfg.text_suffix_len),
-                              (int32_t)cfg.text_hidden_size};
+        int32_t suf_ends[] = {1, (int32_t)(cfg.text_prefix_len + cfg.text_suffix_len), (int32_t)cfg.text_hidden_size};
         int32_t slice_steps[] = {1, 1, 1};
 
-        LogicalId prefix_emb = g.contiguous(
-            g.slice(chat_embeds,
-                    g.constant({3}, pre_starts, DType::INT32),
-                    g.constant({3}, pre_ends, DType::INT32),
-                    g.constant({3}, slice_steps, DType::INT32))); // (1, 8, 768)
+        LogicalId prefix_emb = g.contiguous(g.slice(chat_embeds, g.constant({3}, pre_starts, DType::INT32),
+                                                    g.constant({3}, pre_ends, DType::INT32),
+                                                    g.constant({3}, slice_steps, DType::INT32))); // (1, 8, 768)
 
-        LogicalId suffix_emb = g.contiguous(
-            g.slice(chat_embeds,
-                    g.constant({3}, suf_starts, DType::INT32),
-                    g.constant({3}, suf_ends, DType::INT32),
-                    g.constant({3}, slice_steps, DType::INT32))); // (1, 6, 768)
+        LogicalId suffix_emb = g.contiguous(g.slice(chat_embeds, g.constant({3}, suf_starts, DType::INT32),
+                                                    g.constant({3}, suf_ends, DType::INT32),
+                                                    g.constant({3}, slice_steps, DType::INT32))); // (1, 6, 768)
 
         // Concat: prefix + image_features + suffix → (1, 270, 768)
         int32_t ax_seq = 1;
-        LogicalId text_input = g.concat({prefix_emb, proj2, suffix_emb},
-                                        g.constant({1}, &ax_seq, DType::INT32));
+        LogicalId text_input = g.concat({prefix_emb, proj2, suffix_emb}, g.constant({1}, &ax_seq, DType::INT32));
 
         // ---- 4. Text encoder (EuroBERT / LlamaModel, bidirectional) -------
         LogicalId h = text_input;      // (1, 270, 768)
@@ -1108,20 +1071,18 @@ public:
             std::string prefix = "language_model.layers." + std::to_string(i) + ".";
             LogicalId residual = h;
 
-            LogicalId norm1 = rms_norm(h, prefix + "input_layernorm.weight", S,
-                                       cfg.text_hidden_size, cfg.text_rms_eps);
+            LogicalId norm1 = rms_norm(h, prefix + "input_layernorm.weight", S, cfg.text_hidden_size, cfg.text_rms_eps);
             LogicalId attn_out = text_attention(norm1, (int)i, cos, sin, S);
             h = g.add(residual, attn_out);
             residual = h;
 
-            LogicalId norm2 = rms_norm(h, prefix + "post_attention_layernorm.weight", S,
-                                       cfg.text_hidden_size, cfg.text_rms_eps);
+            LogicalId norm2 =
+                rms_norm(h, prefix + "post_attention_layernorm.weight", S, cfg.text_hidden_size, cfg.text_rms_eps);
             LogicalId mlp_out = text_mlp(norm2, (int)i, S);
             h = g.add(residual, mlp_out);
         }
 
-        h = rms_norm(h, "language_model.norm.weight", S,
-                     cfg.text_hidden_size, cfg.text_rms_eps);
+        h = rms_norm(h, "language_model.norm.weight", S, cfg.text_hidden_size, cfg.text_rms_eps);
 
         // ---- 5. Last-token pooling ----------------------------------------
         // [FIX] The last token is at position S-1 = 269 (the last suffix token,
@@ -1129,10 +1090,9 @@ public:
         int32_t starts_last[] = {0, (int32_t)(S - 1), 0};
         int32_t ends_last[] = {1, (int32_t)S, (int32_t)cfg.text_hidden_size};
         int32_t steps_last[] = {1, 1, 1};
-        LogicalId last_token = g.contiguous(g.slice(h,
-                                                    g.constant({3}, starts_last, DType::INT32),
-                                                    g.constant({3}, ends_last, DType::INT32),
-                                                    g.constant({3}, steps_last, DType::INT32)));
+        LogicalId last_token =
+            g.contiguous(g.slice(h, g.constant({3}, starts_last, DType::INT32),
+                                 g.constant({3}, ends_last, DType::INT32), g.constant({3}, steps_last, DType::INT32)));
 
         int32_t sh2_out[] = {1, (int32_t)cfg.text_hidden_size};
         LogicalId pooled = g.reshape(last_token, g.constant({2}, sh2_out, DType::INT32));

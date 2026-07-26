@@ -1,23 +1,23 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/graph.hpp"
-#include "core/memory.hpp"
-#include "core/cost_model.hpp"
-#include "core/plan/planner.hpp"
-#include "core/executor.hpp"
-#include "core/shapes.hpp"
-#include "core/repo.hpp"
-#include <unordered_map>
-#include <memory>
-#include <string>
 #include <algorithm>
 #include <cstring>
-#include <set>
-#include <queue>
 #include <filesystem>
+#include <memory>
+#include <queue>
+#include <set>
+#include <string>
+#include <unordered_map>
 
-static std::string encodeCacheKey(
-    const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)
+#include "core/cost_model.hpp"
+#include "core/executor.hpp"
+#include "core/graph.hpp"
+#include "core/memory.hpp"
+#include "core/plan/planner.hpp"
+#include "core/repo.hpp"
+#include "core/shapes.hpp"
+#include "core/types.hpp"
+
+static std::string encodeCacheKey(const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)
 {
     std::vector<uint32_t> ids;
     ids.reserve(inputRegions.size());
@@ -145,13 +145,16 @@ struct Session
         }
     }
 
-    void addBucket(const std::unordered_map<LogicalId, std::vector<Region>> &inputDirtyRegions, const std::vector<Region> &outputNeededRegion)
+    void addBucket(const std::unordered_map<LogicalId, std::vector<Region>> &inputDirtyRegions,
+                   const std::vector<Region> &outputNeededRegion)
     {
         manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
     }
 
-    Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0, Repo *_repo = nullptr, bool _disableCaching = false)
-        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching)
+    Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
+            Repo *_repo = nullptr, bool _disableCaching = false)
+        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
+          nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching)
     {
         ensureOutputDirectories();
         loadCache();
@@ -233,8 +236,7 @@ struct Session
                         {
                             const TensorNode &node = graph.getNode(logical_id);
                             const ParallelBuffer &buf = inst.inBuffers[i];
-                            memManager.write(buf.mem_space, buf.offset,
-                                             graph.constantStaging.at(logical_id)->data(),
+                            memManager.write(buf.mem_space, buf.offset, graph.constantStaging.at(logical_id)->data(),
                                              node.getSizeBytes());
                         }
                     }
@@ -263,11 +265,11 @@ struct Session
                 }
             }
         }
-        Error::throw_err("Logical Node ID " + toString(logicalId) + " not found in compiled instructions during Session::writeInput");
+        Error::throw_err("Logical Node ID " + toString(logicalId) +
+                         " not found in compiled instructions during Session::writeInput");
     }
 
-    const void *run(Bucket bucket = {}, Debug::Callback debugCallback = nullptr,
-                    bool doSaturate = true)
+    const void *run(Bucket bucket = {}, Debug::Callback debugCallback = nullptr, bool doSaturate = true)
     {
         if (!isCompiled)
         {
@@ -303,7 +305,9 @@ struct Session
         cachedGraphs.clear();
         selectedCachedNodes.clear();
 
-        std::cout << "[Session.ensureCacheCoverage] Starting iterative cache optimization..." << std::endl;
+        std::cout << "[Session.ensureCacheCoverage] Starting iterative cache "
+                     "optimization..."
+                  << std::endl;
         Planner planner(costModel, memManager.getMemCaps());
 
         std::unordered_map<LogicalId, MemSpace> protectedCachedNodes;
@@ -314,13 +318,8 @@ struct Session
             {
                 const Bucket &bucket = manualBuckets[i];
 
-                CompiledGraph plan = planner.plan(
-                    rootId, graph,
-                    bucket,
-                    protectedCachedNodes,
-                    i == fullBucketIdx ? false : doSaturate,
-                    false,
-                    repo);
+                CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes,
+                                                  i == fullBucketIdx ? false : doSaturate, false, repo);
 
                 for (const auto &inst : plan.instructions)
                 {
@@ -337,17 +336,12 @@ struct Session
             }
         }
 
-        std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size() << " protected eclasses..." << std::endl;
+        std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size()
+                  << " protected eclasses..." << std::endl;
         for (uint64_t i = 0; i < manualBuckets.size(); ++i)
         {
             const Bucket &bucket = manualBuckets[i];
-            CompiledGraph plan = planner.plan(
-                rootId, graph,
-                bucket,
-                protectedCachedNodes,
-                doSaturate,
-                true,
-                repo);
+            CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo);
             plan.bucket = bucket;
             cachedGraphs.push_back(plan);
         }
@@ -363,8 +357,7 @@ struct Session
         persistCache();
     }
 
-    const uint32_t getBestGraphIdx(
-        const Bucket &bucket) const
+    const uint32_t getBestGraphIdx(const Bucket &bucket) const
     {
         uint32_t bestIdx = UINT32_MAX;
         float bestCost = std::numeric_limits<float>::max();

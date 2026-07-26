@@ -1,39 +1,47 @@
 // File: tensor_graphs_cpp/core/serialization.hpp
 #pragma once
-#include <iostream>
 #include <fstream>
+#include <iostream>
+#include <memory>
+#include <sstream>
 #include <string>
-#include <vector>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
-#include <memory>
-#include <type_traits>
-#include <sstream>
+#include <vector>
 
 class BinaryWriter
 {
     std::ostream &os;
 
-public:
-    BinaryWriter(std::ostream &os) : os(os) {}
+  public:
+    BinaryWriter(std::ostream &os) : os(os)
+    {
+    }
 
-    template <typename T>
-    void write(const T &val);
+    template <typename T> void write(const T &val);
 
-    std::ostream &getStream() { return os; }
+    std::ostream &getStream()
+    {
+        return os;
+    }
 };
 
 class BinaryReader
 {
     std::istream &is;
 
-public:
-    BinaryReader(std::istream &is) : is(is) {}
+  public:
+    BinaryReader(std::istream &is) : is(is)
+    {
+    }
 
-    template <typename T>
-    void read(T &val);
+    template <typename T> void read(T &val);
 
-    std::istream &getStream() { return is; }
+    std::istream &getStream()
+    {
+        return is;
+    }
 };
 
 // Global generic serializers for fundamental and standard types
@@ -86,8 +94,7 @@ inline void tg_deserialize(BinaryReader &br, std::string &val)
     }
 }
 
-template <typename T>
-void tg_serialize(BinaryWriter &bw, const std::vector<T> &val)
+template <typename T> void tg_serialize(BinaryWriter &bw, const std::vector<T> &val)
 {
     uint32_t size = static_cast<uint32_t>(val.size());
     bw.write(size);
@@ -110,8 +117,7 @@ void tg_serialize(BinaryWriter &bw, const std::vector<T> &val)
     }
 }
 
-template <typename T>
-void tg_deserialize(BinaryReader &br, std::vector<T> &val)
+template <typename T> void tg_deserialize(BinaryReader &br, std::vector<T> &val)
 {
     uint32_t size;
     br.read(size);
@@ -135,8 +141,7 @@ void tg_deserialize(BinaryReader &br, std::vector<T> &val)
     }
 }
 
-template <typename K, typename V>
-void tg_serialize(BinaryWriter &bw, const std::unordered_map<K, V> &val)
+template <typename K, typename V> void tg_serialize(BinaryWriter &bw, const std::unordered_map<K, V> &val)
 {
     uint32_t size = static_cast<uint32_t>(val.size());
     bw.write(size);
@@ -147,8 +152,7 @@ void tg_serialize(BinaryWriter &bw, const std::unordered_map<K, V> &val)
     }
 }
 
-template <typename K, typename V>
-void tg_deserialize(BinaryReader &br, std::unordered_map<K, V> &val)
+template <typename K, typename V> void tg_deserialize(BinaryReader &br, std::unordered_map<K, V> &val)
 {
     uint32_t size;
     br.read(size);
@@ -163,8 +167,7 @@ void tg_deserialize(BinaryReader &br, std::unordered_map<K, V> &val)
     }
 }
 
-template <typename T>
-void tg_serialize(BinaryWriter &bw, const std::unordered_set<T> &val)
+template <typename T> void tg_serialize(BinaryWriter &bw, const std::unordered_set<T> &val)
 {
     uint32_t size = static_cast<uint32_t>(val.size());
     bw.write(size);
@@ -174,8 +177,7 @@ void tg_serialize(BinaryWriter &bw, const std::unordered_set<T> &val)
     }
 }
 
-template <typename T>
-void tg_deserialize(BinaryReader &br, std::unordered_set<T> &val)
+template <typename T> void tg_deserialize(BinaryReader &br, std::unordered_set<T> &val)
 {
     uint32_t size;
     br.read(size);
@@ -189,21 +191,18 @@ void tg_deserialize(BinaryReader &br, std::unordered_set<T> &val)
     }
 }
 
-template <typename T>
-void BinaryWriter::write(const T &val)
+template <typename T> void BinaryWriter::write(const T &val)
 {
     tg_serialize(*this, val);
 }
 
-template <typename T>
-void BinaryReader::read(T &val)
+template <typename T> void BinaryReader::read(T &val)
 {
     tg_deserialize(*this, val);
 }
 
 // Utility function to uniquely hash records/strings in-memory
-template <typename T>
-std::string serializeToString(const T &val)
+template <typename T> std::string serializeToString(const T &val)
 {
     std::stringstream ss(std::ios::binary | std::ios::out);
     BinaryWriter bw(ss);

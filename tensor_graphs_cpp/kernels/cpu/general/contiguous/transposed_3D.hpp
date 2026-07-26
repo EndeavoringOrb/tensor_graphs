@@ -1,13 +1,15 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 /**
- * Highly optimized multi-threaded cache-blocked 3D Transposition / Contiguous kernel.
- * Replaces the slow, recursive fallback for [B, M, N] transposed strides.
+ * Highly optimized multi-threaded cache-blocked 3D Transposition / Contiguous
+ * kernel. Replaces the slow, recursive fallback for [B, M, N] transposed
+ * strides.
  */
 
 inline bool matchContiguousTransposed3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
@@ -61,8 +63,7 @@ inline void runContiguousTransposed3D(const KernelContext &ctx)
 
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t b_start = t * b_per_thread;
             uint32_t b_end = std::min(b_start + b_per_thread, B);
 
@@ -91,7 +92,8 @@ inline void runContiguousTransposed3D(const KernelContext &ctx)
                         }
                     }
                 }
-            } });
+            }
+        });
     }
 
     for (auto &worker : workers)
@@ -103,8 +105,6 @@ inline LogicalId refFactoryContiguousTransposed3D(const std::vector<LogicalId> &
     return graph.contiguous(inputs[0]);
 }
 
-REGISTER_KERNEL("Contiguous_Transposed_3D", 1, 1, matchContiguousTransposed3D, runContiguousTransposed3D, refFactoryContiguousTransposed3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-    {DType::FLOAT32},
-    {{256, 2048, 1024}},
-    {false},
-    {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Contiguous_Transposed_3D", 1, 1, matchContiguousTransposed3D, runContiguousTransposed3D,
+                refFactoryContiguousTransposed3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32}, {{256, 2048, 1024}}, {false}, {{MemSpace(1, HandleType::CPP)}});

@@ -1,13 +1,14 @@
 #pragma once
-#include <vector>
-#include <string>
 #include <mutex>
-#include "core/types.hpp"
+#include <string>
+#include <vector>
+
 #include "core/loaders/safetensors.hpp"
+#include "core/types.hpp"
 
 #ifdef TG_OS_WINDOWS
-#include <io.h>
 #include <fcntl.h>
+#include <io.h>
 #include <share.h>
 #endif
 
@@ -16,8 +17,10 @@ class FileRegistry
     std::vector<int> openFiles; // Store OS file descriptors, not FILE*
     std::unordered_map<std::string, uint32_t> pathToId;
     std::mutex mtx;
-    std::unordered_map<std::string, std::shared_ptr<ModelLoader>> loaders;           // Mapping of path -> polymorphic Loader instance
-    std::unordered_map<LogicalId, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
+    std::unordered_map<std::string, std::shared_ptr<ModelLoader>>
+        loaders; // Mapping of path -> polymorphic Loader instance
+    std::unordered_map<LogicalId, std::pair<std::string, std::string>>
+        weightSources; // Mapping of nodeId -> {path, tensor_name}
 
     uint32_t getFileId(const std::string &path)
     {
@@ -40,9 +43,12 @@ class FileRegistry
         return id;
     }
 
-    int getFd(uint32_t id) { return openFiles[id]; }
+    int getFd(uint32_t id)
+    {
+        return openFiles[id];
+    }
 
-public:
+  public:
     static FileRegistry &get()
     {
         static FileRegistry fr;
@@ -127,7 +133,11 @@ public:
         const auto &it = weightSources.find(nodeId);
         if (it == weightSources.end())
         {
-            Error::throw_err("[FileRegistry.getNodeMeta] node id " + toString(nodeId) + " is not registered"); // TODO: make build.py linter check if Error::throw_err calls inside a function start with [struct.func]. just use std::source_location
+            Error::throw_err("[FileRegistry.getNodeMeta] node id " + toString(nodeId) +
+                             " is not registered"); // TODO: make build.py linter check if
+                                                    // Error::throw_err calls inside a function
+                                                    // start with [struct.func]. just use
+                                                    // std::source_location
         }
         const auto &pair = weightSources.at(nodeId);
         return getMetadata(pair.first, pair.second);

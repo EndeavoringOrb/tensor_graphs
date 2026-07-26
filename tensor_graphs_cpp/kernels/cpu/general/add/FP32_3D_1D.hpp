@@ -1,7 +1,8 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <vector>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchAddFP32_3D_1D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -16,7 +17,7 @@ inline bool matchAddFP32_3D_1D(const std::vector<TensorNode> &inputs, const Tens
     return true;
 }
 
-inline void runAddFP32_3D_1D(const KernelContext& ctx)
+inline void runAddFP32_3D_1D(const KernelContext &ctx)
 {
     const float *data3D = static_cast<const float *>(ctx.inputs[0]);
     const float *data1D = static_cast<const float *>(ctx.inputs[1]);
@@ -65,4 +66,6 @@ inline LogicalId refFactoryAdd3D_1D(const std::vector<LogicalId> &inputs, Graph 
     return graph.add(id3D, expanded);
 }
 
-REGISTER_KERNEL("Add_3D_1D", 2, 2, matchAddFP32_3D_1D, runAddFP32_3D_1D, refFactoryAdd3D_1D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Add_3D_1D", 2, 2, matchAddFP32_3D_1D, runAddFP32_3D_1D, refFactoryAdd3D_1D,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {{1, 1, 640}, {640}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

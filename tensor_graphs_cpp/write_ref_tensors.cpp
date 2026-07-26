@@ -1,25 +1,27 @@
 // tensor_graphs_cpp/write_ref_tensors.cpp
-#include <iostream>
-#include <vector>
-#include <string>
 #include <chrono>
 #include <cmath>
-#include <unordered_map>
-#include <unordered_set>
 #include <filesystem>
 #include <fstream>
-#include "core/types.hpp"
-#include "core/memory.hpp"
+#include <iostream>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include "core/argparse.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
+#include "core/memory.hpp"
 #include "core/misc.hpp"
 #include "core/repo.hpp"
-#include "core/argparse.hpp"
-#include "models/run_models.hpp"
+#include "core/types.hpp"
 #include "generated/kernels_all.gen.hpp"
+#include "models/run_models.hpp"
 
 // We use a custom version of executeReferenceGraph for clean tensors
-void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &rootIds, const std::vector<LogicalId> &dynamicInputs, Repo &repo)
+void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &rootIds,
+                                 const std::vector<LogicalId> &dynamicInputs, Repo &repo)
 {
     std::vector<uint32_t> topo = topologicalSort(rootIds, graph);
 
@@ -97,16 +99,15 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
             }
             else
             {
-                Error::throw_err("[computeAndWriteCleanTensors] input node value not found in constantStaging");
+                Error::throw_err("[computeAndWriteCleanTensors] input node value not "
+                                 "found in constantStaging");
             }
 
             uint64_t numElements = countElements(view);
             for (uint64_t i = 0; i < numElements; ++i)
             {
                 uint64_t idx = getStridedIndex(i, view.getShape(), view.strides);
-                std::memcpy(results[nodeId.value].data() + idx * elemSize,
-                            rawBytes.data() + i * elemSize,
-                            elemSize);
+                std::memcpy(results[nodeId.value].data() + idx * elemSize, rawBytes.data() + i * elemSize, elemSize);
             }
 
             repo.write(nodeId, node, results[nodeId.value].data(), results[nodeId.value].size());
@@ -141,13 +142,14 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
 
         TensorView outViewContig = makeView(node);
         TensorNode outNodeC = node;
-        auto refs_c = KernelRegistry::get().findMatchingKernels(
-            node.opType, node.opName,
-            inputNodes, outNodeC, true, MemSpace{1, HandleType::CPP}, {}, {Engine{0, EngineType::CPU}}, false, true, false, true);
+        auto refs_c = KernelRegistry::get().findMatchingKernels(node.opType, node.opName, inputNodes, outNodeC, true,
+                                                                MemSpace{1, HandleType::CPP}, {},
+                                                                {Engine{0, EngineType::CPU}}, false, true, false, true);
 
         if (refs_c.empty())
         {
-            Error::throw_err("No reference kernel found for node " + std::to_string(nodeId.value) + " op=" + toString(node.opType));
+            Error::throw_err("No reference kernel found for node " + std::to_string(nodeId.value) +
+                             " op=" + toString(node.opType));
         }
 
         TensorView chosenOutView = outViewContig;
@@ -198,7 +200,10 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
 int main(int argc, char *argv[])
 {
     ArgParser parser("write_ref_tensors", "Compute and write reference/clean tensors for a model.");
-    parser.add_positional("model", "Name of the target model (gemma-3-270m, flux-klein-4b, qwen-3.6-35b-a3b).", "gemma-3-270m");
+    parser.add_positional("model",
+                          "Name of the target model (gemma-3-270m, "
+                          "flux-klein-4b, qwen-3.6-35b-a3b).",
+                          "gemma-3-270m");
 
     if (!parser.parse(argc, argv))
     {

@@ -1,31 +1,29 @@
 // File: tensor_graphs_cpp/bench.cpp
-#include <iostream>
-#include <fstream>
-#include <string>
-#include <vector>
-#include <unordered_set>
-#include <chrono>
-#include <filesystem>
-#include <cstring>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
-#include "core/types.hpp"
-#include "core/memory.hpp"
+#include "core/argparse.hpp"
+#include "core/common/bench_utils.hpp"
+#include "core/cost_model.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
-#include "core/cost_model.hpp"
+#include "core/memory.hpp"
 #include "core/misc.hpp"
-#include "core/argparse.hpp"
-
-#include "core/common/bench_utils.hpp"
-
-#include "generated/kernels_all.gen.hpp"
+#include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
+#include "generated/kernels_all.gen.hpp"
 
 int main(int argc, char *argv[])
 {
@@ -72,7 +70,10 @@ int main(int argc, char *argv[])
     std::ifstream callsFile(callsPath, std::ios::binary);
     if (!callsFile.is_open())
     {
-        std::cerr << "No calls file found at " << callsPath << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference pass first." << std::endl;
+        std::cerr << "No calls file found at " << callsPath
+                  << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference "
+                     "pass first."
+                  << std::endl;
         return 0;
     }
 
@@ -114,30 +115,32 @@ int main(int argc, char *argv[])
     for (uint32_t i = 0; i < toBenchmark.size(); i++)
     {
         Record &r = toBenchmark[i];
-        float cost = costModel.estimateCost(
-            r.kernelId, r.outputShape, r.outputStrides, r.outputDType,
-            r.inputShapes, r.inputStrides, r.inputDTypes, r.inputConstants);
+        float cost = costModel.estimateCost(r.kernelId, r.outputShape, r.outputStrides, r.outputDType, r.inputShapes,
+                                            r.inputStrides, r.inputDTypes, r.inputConstants);
         r.runTime = std::isinf(cost) ? -1.0f : cost;
     }
 
-    std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb)
-                     {
+    std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb) {
         float costA = ra.runTime;
         float costB = rb.runTime;
 
-        if (std::abs(costA - costB) < 1e-7) {
+        if (std::abs(costA - costB) < 1e-7)
+        {
             bool isRefA = KernelRegistry::get().getKernel(ra.kernelId).isReference;
             bool isRefB = KernelRegistry::get().getKernel(rb.kernelId).isReference;
-            if (isRefA != isRefB) return !isRefA;
+            if (isRefA != isRefB)
+                return !isRefA;
 
-            auto getVolume = [](const Record& r) {
+            auto getVolume = [](const Record &r) {
                 uint64_t v = 1;
-                for (uint32_t d : r.outputShape) v *= d;
+                for (uint32_t d : r.outputShape)
+                    v *= d;
                 return v;
             };
             return getVolume(ra) < getVolume(rb);
         }
-        return costA < costB; });
+        return costA < costB;
+    });
 
     uint64_t startIdx = (skipCount > (int)toBenchmark.size()) ? toBenchmark.size() : (uint64_t)std::max(0, skipCount);
 
@@ -146,7 +149,8 @@ int main(int argc, char *argv[])
         std::cout << "Skipping the first " << startIdx << " kernels..." << std::endl;
     }
 
-    std::cout << (listOnly ? "Listing " : "Benchmarking ") << toBenchmark.size() - startIdx << " configurations..." << std::endl;
+    std::cout << (listOnly ? "Listing " : "Benchmarking ") << toBenchmark.size() - startIdx << " configurations..."
+              << std::endl;
 
     std::ofstream outFile;
     if (!listOnly)
@@ -168,19 +172,18 @@ int main(int argc, char *argv[])
                 std::cout << ",";
             std::cout << toString(kernel.engines[bidx].type);
         }
-        std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                  << " (0x" << std::hex << kernelId << std::dec << ")"
+        std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "") << " (0x"
+                  << std::hex << kernelId << std::dec << ")"
                   << " est " << std::to_string(r.runTime) << " ms\n";
 
         for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
         {
             std::cout << "  In  #" << idx << ": dtype=" << toString(r.inputDTypes[idx])
-                      << ", shape=" << toString(r.inputShapes[idx])
-                      << ", strides=" << toString(r.inputStrides[idx]) << "\n";
+                      << ", shape=" << toString(r.inputShapes[idx]) << ", strides=" << toString(r.inputStrides[idx])
+                      << "\n";
         }
 
-        std::cout << "  Out #0: dtype=" << toString(r.outputDType)
-                  << ", shape=" << toString(r.outputShape)
+        std::cout << "  Out #0: dtype=" << toString(r.outputDType) << ", shape=" << toString(r.outputShape)
                   << ", strides=" << toString(r.outputStrides) << "\n";
 
         if (listOnly)
@@ -203,9 +206,11 @@ int main(int argc, char *argv[])
             dummyOutput.strides = r.outputStrides;
             dummyOutput.dtype = r.outputDType;
 
-            if (!kernel.matches(dummyInputs, dummyOutput, r.output_mem_space, r.input_mem_spaces, r.engines, false, false, false, true))
+            if (!kernel.matches(dummyInputs, dummyOutput, r.output_mem_space, r.input_mem_spaces, r.engines, false,
+                                false, false, true))
             {
-                std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelId << "): record fails matches() validity check." << std::endl;
+                std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelId
+                          << "): record fails matches() validity check." << std::endl;
                 continue;
             }
 

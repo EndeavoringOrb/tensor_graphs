@@ -35,25 +35,29 @@ inline ModelGraphRoots build_qwen_graph(Graph &g, MemoryManager &mem)
 //     FluxConfig cfg;
 //     uint32_t width = 512, height = 512;
 //     uint32_t latent_w = width / 16, latent_h = height / 16;
-//     uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
+//     uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w,
+//     total_seq = txt_seq + img_seq;
 
 //     FluxTextEncoder text_encoder(cfg, g, mem, "flux-klein-4b/text_encoder");
 //     LogicalId in_ids = g.input({1, txt_seq}, DType::INT32);
 //     LogicalId text_root = text_encoder.build_graph(in_ids);
 
-//     FluxTransformer trans(cfg, g, mem, "flux-klein-4b/transformer", latent_h, latent_w);
-//     LogicalId in_latent = g.input({1, cfg.latent_channels, latent_h, latent_w}, DType::FLOAT32);
-//     LogicalId in_txt_emb = g.input({1, txt_seq, cfg.text_dim}, DType::FLOAT32);
-//     LogicalId in_t = g.input({1}, DType::FLOAT32);
-//     LogicalId in_cos = g.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32);
-//     LogicalId in_sin = g.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32);
-//     LogicalId trans_root = trans.build_graph(in_latent, in_txt_emb, in_t, in_cos, in_sin);
+//     FluxTransformer trans(cfg, g, mem, "flux-klein-4b/transformer", latent_h,
+//     latent_w); LogicalId in_latent = g.input({1, cfg.latent_channels,
+//     latent_h, latent_w}, DType::FLOAT32); LogicalId in_txt_emb = g.input({1,
+//     txt_seq, cfg.text_dim}, DType::FLOAT32); LogicalId in_t = g.input({1},
+//     DType::FLOAT32); LogicalId in_cos = g.input({1, 1, total_seq,
+//     cfg.head_dim}, DType::FLOAT32); LogicalId in_sin = g.input({1, 1,
+//     total_seq, cfg.head_dim}, DType::FLOAT32); LogicalId trans_root =
+//     trans.build_graph(in_latent, in_txt_emb, in_t, in_cos, in_sin);
 
 //     FluxVAEDecoder vae(cfg, g, mem, "flux-klein-4b/vae", latent_h, latent_w);
-//     LogicalId in_vae_latent = g.input({1, cfg.vae_channels, latent_h, latent_w}, DType::FLOAT32);
-//     LogicalId vae_root = vae.build_graph(in_vae_latent);
+//     LogicalId in_vae_latent = g.input({1, cfg.vae_channels, latent_h,
+//     latent_w}, DType::FLOAT32); LogicalId vae_root =
+//     vae.build_graph(in_vae_latent);
 
-//     return {{text_root, trans_root, vae_root}, {in_ids, in_latent, in_txt_emb, in_t, in_cos, in_sin, in_vae_latent}};
+//     return {{text_root, trans_root, vae_root}, {in_ids, in_latent,
+//     in_txt_emb, in_t, in_cos, in_sin, in_vae_latent}};
 // }
 
 std::vector<float> get_flux_schedule(int num_steps, int image_seq_len)
@@ -61,7 +65,10 @@ std::vector<float> get_flux_schedule(int num_steps, int image_seq_len)
     std::vector<float> schedule(num_steps + 1, 0.0f);
     double a1 = 8.73809524e-05, b1 = 1.89833333;
     double a2 = 0.00016927, b2 = 0.45666666;
-    double mu = (image_seq_len > 4300) ? (a2 * image_seq_len + b2) : (((a2 * image_seq_len + b2) - (a1 * image_seq_len + b1)) / 190.0 * num_steps + (a2 * image_seq_len + b2) - 200.0 * ((a2 * image_seq_len + b2) - (a1 * image_seq_len + b1)) / 190.0);
+    double mu = (image_seq_len > 4300) ? (a2 * image_seq_len + b2)
+                                       : (((a2 * image_seq_len + b2) - (a1 * image_seq_len + b1)) / 190.0 * num_steps +
+                                          (a2 * image_seq_len + b2) -
+                                          200.0 * ((a2 * image_seq_len + b2) - (a1 * image_seq_len + b1)) / 190.0);
 
     for (int i = 0; i <= num_steps; ++i)
     {
@@ -76,7 +83,8 @@ std::vector<float> get_flux_schedule(int num_steps, int image_seq_len)
     return schedule;
 }
 
-void compute_rope_cpu(int txt_seq, int img_h, int img_w, int head_dim, float theta, std::vector<float> &cos_out, std::vector<float> &sin_out)
+void compute_rope_cpu(int txt_seq, int img_h, int img_w, int head_dim, float theta, std::vector<float> &cos_out,
+                      std::vector<float> &sin_out)
 {
     int img_seq = img_h * img_w, total_seq = txt_seq + img_seq, axis_dim = head_dim / 4;
     cos_out.assign(total_seq * head_dim, 1.0f);
@@ -134,7 +142,6 @@ std::vector<int32_t> load_tokens_from_file(const std::string &filename, uint64_t
     // Note: This also stops if we reach the txt_seq limit
     while (std::getline(file, part, ',') && count < txt_seq)
     {
-
         // Trim potential whitespace/newlines and convert to integer
         if (!part.empty())
         {

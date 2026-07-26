@@ -1,12 +1,14 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/dot/arm_neon_F32_3D_TransposedB_v2.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/dot/arm_neon_F32_3D_TransposedB_v2.hpp
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
+
+#include <algorithm>
 #include <thread>
 #include <vector>
-#include <algorithm>
 
 inline bool matchDotF32_3D_TransposedB_v2(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -50,29 +52,31 @@ inline void runDotF32_3D_TransposedB_v2(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t start_row = t * rows_per_thread;
             uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
 
-            for (uint32_t row_idx = start_row; row_idx < end_row; ++row_idx) {
+            for (uint32_t row_idx = start_row; row_idx < end_row; ++row_idx)
+            {
                 uint32_t b = row_idx / M, m = row_idx % M;
-                const float* rowA = A_ptr + (b * strideA_B) + (m * strideA_M);
-                const float* batchB = B_ptr + (b * strideB_B);
-                float* rowOut = Out_ptr + (b * strideO_B) + (m * strideO_M);
+                const float *rowA = A_ptr + (b * strideA_B) + (m * strideA_M);
+                const float *batchB = B_ptr + (b * strideB_B);
+                float *rowOut = Out_ptr + (b * strideO_B) + (m * strideO_M);
 
                 uint32_t n = 0;
-                for (; n + 4 <= N; n += 4) {
-                    const float* rowB0 = batchB + (n * strideB_N);
-                    const float* rowB1 = batchB + ((n+1) * strideB_N);
-                    const float* rowB2 = batchB + ((n+2) * strideB_N);
-                    const float* rowB3 = batchB + ((n+3) * strideB_N);
-                    
+                for (; n + 4 <= N; n += 4)
+                {
+                    const float *rowB0 = batchB + (n * strideB_N);
+                    const float *rowB1 = batchB + ((n + 1) * strideB_N);
+                    const float *rowB2 = batchB + ((n + 2) * strideB_N);
+                    const float *rowB3 = batchB + ((n + 3) * strideB_N);
+
                     float32x4_t sum0 = vdupq_n_f32(0.0f), sum1 = vdupq_n_f32(0.0f);
                     float32x4_t sum2 = vdupq_n_f32(0.0f), sum3 = vdupq_n_f32(0.0f);
 
                     uint32_t k = 0;
-                    for (; k + 4 <= K; k += 4) {
+                    for (; k + 4 <= K; k += 4)
+                    {
                         float32x4_t vA = vld1q_f32(rowA + k);
                         sum0 = vfmaq_f32(sum0, vA, vld1q_f32(rowB0 + k));
                         sum1 = vfmaq_f32(sum1, vA, vld1q_f32(rowB1 + k));
@@ -80,26 +84,35 @@ inline void runDotF32_3D_TransposedB_v2(const KernelContext &ctx)
                         sum3 = vfmaq_f32(sum3, vA, vld1q_f32(rowB3 + k));
                     }
                     float s0 = vaddvq_f32(sum0), s1 = vaddvq_f32(sum1), s2 = vaddvq_f32(sum2), s3 = vaddvq_f32(sum3);
-                    for (; k < K; ++k) {
+                    for (; k < K; ++k)
+                    {
                         float a_val = rowA[k];
-                        s0 += a_val * rowB0[k]; s1 += a_val * rowB1[k];
-                        s2 += a_val * rowB2[k]; s3 += a_val * rowB3[k];
+                        s0 += a_val * rowB0[k];
+                        s1 += a_val * rowB1[k];
+                        s2 += a_val * rowB2[k];
+                        s3 += a_val * rowB3[k];
                     }
-                    rowOut[n * strideO_N] = s0; rowOut[(n+1) * strideO_N] = s1;
-                    rowOut[(n+2) * strideO_N] = s2; rowOut[(n+3) * strideO_N] = s3;
+                    rowOut[n * strideO_N] = s0;
+                    rowOut[(n + 1) * strideO_N] = s1;
+                    rowOut[(n + 2) * strideO_N] = s2;
+                    rowOut[(n + 3) * strideO_N] = s3;
                 }
-                for (; n < N; ++n) {
-                    const float* rowB = batchB + (n * strideB_N);
+                for (; n < N; ++n)
+                {
+                    const float *rowB = batchB + (n * strideB_N);
                     float32x4_t sum = vdupq_n_f32(0.0f);
                     uint32_t k = 0;
-                    for (; k + 4 <= K; k += 4) {
+                    for (; k + 4 <= K; k += 4)
+                    {
                         sum = vfmaq_f32(sum, vld1q_f32(rowA + k), vld1q_f32(rowB + k));
                     }
                     float s = vaddvq_f32(sum);
-                    for (; k < K; ++k) s += rowA[k] * rowB[k];
+                    for (; k < K; ++k)
+                        s += rowA[k] * rowB[k];
                     rowOut[n * strideO_N] = s;
                 }
-            } });
+            }
+        });
     }
     for (auto &thread : workers)
         thread.join();
@@ -110,5 +123,8 @@ inline LogicalId refFactoryDotF32_3D_TransposedB_v2(const std::vector<LogicalId>
     return graph.dot(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Dot_F32_3D_TransposedB_v2", 2, 2, matchDotF32_3D_TransposedB_v2, runDotF32_3D_TransposedB_v2, refFactoryDotF32_3D_TransposedB_v2, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 1}}, {true, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Dot_F32_3D_TransposedB_v2", 2, 2, matchDotF32_3D_TransposedB_v2, runDotF32_3D_TransposedB_v2,
+                refFactoryDotF32_3D_TransposedB_v2, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 1}}, {true, false},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

@@ -1,12 +1,13 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
+
+#include <algorithm>
 #include <thread>
 #include <vector>
-#include <algorithm>
 
 /**
  * KERNEL: Mul_ND_NEON
@@ -19,7 +20,6 @@
 
 inline bool matchMulF32_ND_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-
     // Shapes must match exactly for element-wise multiplication
     if (inputs[0].getShape() != inputs[1].getShape() || inputs[0].getShape() != output.getShape())
         return false;
@@ -45,8 +45,7 @@ inline void runMulF32_ND_NEON(const KernelContext &ctx)
 
     uint64_t chunk_size = (n + num_threads - 1) / num_threads;
 
-    auto worker = [=](uint64_t start, uint64_t end)
-    {
+    auto worker = [=](uint64_t start, uint64_t end) {
         uint64_t i = start;
         // 1. NEON SIMD Loop (4 elements per step)
         for (; i + 4 <= end; i += 4)
@@ -79,14 +78,14 @@ inline void runMulF32_ND_NEON(const KernelContext &ctx)
 
 inline LogicalId refFactoryMulND_NEON(const std::vector<LogicalId> &inputs, Graph &graph)
 {
-    // This allows the e-graph to identify this kernel as a valid implementation for MUL
+    // This allows the e-graph to identify this kernel as a valid implementation
+    // for MUL
     return graph.mul(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Mul_ND_NEON", 2, 2, matchMulF32_ND_NEON, runMulF32_ND_NEON, refFactoryMulND_NEON, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-    {DType::FLOAT32, DType::FLOAT32},
-    {{1, 32, 512, 512}, {1, 32, 512, 512}}, // Target typical bottleneck shapes
-    {true, true},
-    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Mul_ND_NEON", 2, 2, matchMulF32_ND_NEON, runMulF32_ND_NEON, refFactoryMulND_NEON,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {{1, 32, 512, 512}, {1, 32, 512, 512}}, // Target typical bottleneck shapes
+                {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

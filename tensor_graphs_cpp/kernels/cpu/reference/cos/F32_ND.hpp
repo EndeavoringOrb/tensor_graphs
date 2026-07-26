@@ -1,7 +1,8 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cmath>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchCosF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -17,4 +18,6 @@ inline void runCosF32_ND(const KernelContext &ctx)
         out[i] = std::cos(in[i]);
 }
 
-REGISTER_REF_KERNEL(OpType::COS, 1, 1, matchCosF32_ND, runCosF32_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_REF_KERNEL(OpType::COS, 1, 1, matchCosF32_ND, runCosF32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{8, 32}}, {true},
+                    {{MemSpace(1, HandleType::CPP)}});

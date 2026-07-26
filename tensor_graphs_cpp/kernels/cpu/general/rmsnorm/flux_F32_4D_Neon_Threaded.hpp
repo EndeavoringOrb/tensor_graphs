@@ -1,10 +1,11 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <cmath>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -54,24 +55,26 @@ inline void runFluxRMSNormF32_4D(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t start_row = t * rows_per_thread;
             uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
 
-            for (uint32_t r = start_row; r < end_row; ++r) {
-                const float* row_x = x + r * D;
-                float* row_out = out + r * D;
+            for (uint32_t r = start_row; r < end_row; ++r)
+            {
+                const float *row_x = x + r * D;
+                float *row_out = out + r * D;
 
                 // 1. Sum of squares using NEON
                 float32x4_t v_sum_sq = vdupq_n_f32(0.0f);
                 uint32_t d = 0;
-                for (; d + 4 <= D; d += 4) {
+                for (; d + 4 <= D; d += 4)
+                {
                     float32x4_t v_x = vld1q_f32(row_x + d);
                     v_sum_sq = vfmaq_f32(v_sum_sq, v_x, v_x);
                 }
                 float sum_sq = vaddvq_f32(v_sum_sq);
-                for (; d < D; ++d) sum_sq += row_x[d] * row_x[d];
+                for (; d < D; ++d)
+                    sum_sq += row_x[d] * row_x[d];
 
                 // 2. Inverse Standard Deviation
                 float inv_std = 1.0f / std::sqrt((sum_sq / (float)D) + eps);
@@ -79,16 +82,19 @@ inline void runFluxRMSNormF32_4D(const KernelContext &ctx)
 
                 // 3. Normalize and scale by weight
                 d = 0;
-                for (; d + 4 <= D; d += 4) {
+                for (; d + 4 <= D; d += 4)
+                {
                     float32x4_t v_x = vld1q_f32(row_x + d);
                     float32x4_t v_w = vld1q_f32(w + d);
                     float32x4_t v_norm = vmulq_f32(v_x, v_inv_std);
                     vst1q_f32(row_out + d, vmulq_f32(v_norm, v_w));
                 }
-                for (; d < D; ++d) {
+                for (; d < D; ++d)
+                {
                     row_out[d] = row_x[d] * inv_std * w[d];
                 }
-            } });
+            }
+        });
     }
 
     for (auto &worker : workers)
@@ -114,8 +120,7 @@ inline LogicalId refFactoryFluxRMSNorm4D(const std::vector<LogicalId> &inputs, G
     LogicalId axis_node = g.constant({1}, &axis_val, DType::INT32);
     LogicalId sum_sq = g.sum(x_sq, axis_node);
 
-    auto expand_to_4d_broadcast = [&](float val, uint32_t last_d)
-    {
+    auto expand_to_4d_broadcast = [&](float val, uint32_t last_d) {
         int32_t sh[] = {1, 1, 1, 1};
         LogicalId out = g.reshape(g.constant({1}, &val, DType::FLOAT32), g.constant({4}, sh, DType::INT32));
         if (B > 1)
@@ -154,7 +159,8 @@ inline LogicalId refFactoryFluxRMSNorm4D(const std::vector<LogicalId> &inputs, G
     LogicalId one_node = expand_to_4d_broadcast(1.0f, 1);
     LogicalId inv_std_scalar = g.div(one_node, std_dev);
     int32_t r_d = D, a_d = 3;
-    LogicalId inv_std = g.repeat(inv_std_scalar, g.constant({1}, &r_d, DType::INT32), g.constant({1}, &a_d, DType::INT32));
+    LogicalId inv_std =
+        g.repeat(inv_std_scalar, g.constant({1}, &r_d, DType::INT32), g.constant({1}, &a_d, DType::INT32));
 
     // x_norm = x * inv_std
     LogicalId x_norm = g.mul(x_id, inv_std);
@@ -172,7 +178,8 @@ inline LogicalId refFactoryFluxRMSNorm4D(const std::vector<LogicalId> &inputs, G
         int32_t r = S, a = 2;
         w_exp = g.repeat(w_exp, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
     }
-    // Batch repeat usually handled by strides/0-stride view, but for ref pattern compatibility:
+    // Batch repeat usually handled by strides/0-stride view, but for ref pattern
+    // compatibility:
     if (B > 1)
     {
         int32_t r = B, a = 0;
@@ -182,7 +189,9 @@ inline LogicalId refFactoryFluxRMSNorm4D(const std::vector<LogicalId> &inputs, G
     return g.mul(x_norm, w_exp);
 }
 
-REGISTER_KERNEL("FluxRMSNorm_F32_4D", 2, 2, matchFluxRMSNormF32_4D, runFluxRMSNormF32_4D, refFactoryFluxRMSNorm4D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
-                {{1, 24, 512, 128}, {128}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("FluxRMSNorm_F32_4D", 2, 2, matchFluxRMSNormF32_4D, runFluxRMSNormF32_4D, refFactoryFluxRMSNorm4D,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {{1, 24, 512, 128}, {128}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

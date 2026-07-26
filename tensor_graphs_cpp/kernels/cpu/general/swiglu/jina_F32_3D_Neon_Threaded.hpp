@@ -1,4 +1,5 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/swiglu/jina_F32_3D_Neon_Threaded.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/swiglu/jina_F32_3D_Neon_Threaded.hpp
 //
 // FUSED KERNEL: SwiGLU for jina-embeddings-v5-omni-nano-retrieval text encoder
 //
@@ -26,12 +27,13 @@
 // Hardware: Qualcomm aarch64 (ARMv8.6, 12 cores, NEON FMA).
 // Value constants matched byte-for-byte: -1.0, 2.718281828459045, 1.0.
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <cmath>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -59,8 +61,7 @@ static inline float32x4_t jina_swiglu_exp_neon(float32x4_t x)
     return vmulq_f32(v_poly, v_2n);
 }
 
-inline bool matchJinaSwiGLU_F32_3D(const std::vector<TensorNode> &inputs,
-                                   const TensorNode &output)
+inline bool matchJinaSwiGLU_F32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // gate: 3-D [1, S, D], up: 3-D [1, S, D], same shape
     if (inputs[0].getShape().size() != 3)
@@ -93,8 +94,7 @@ inline void runJinaSwiGLU_F32_3D(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint64_t start = t * chunk;
             uint64_t end = std::min(start + chunk, n);
 
@@ -159,7 +159,8 @@ inline void runJinaSwiGLU_F32_3D(const KernelContext &ctx)
                     silu = g * eg / (1.0f + eg);
                 }
                 out[i] = silu * up[i];
-            } });
+            }
+        });
     }
     for (auto &worker : workers)
         worker.join();
@@ -168,8 +169,7 @@ inline void runJinaSwiGLU_F32_3D(const KernelContext &ctx)
 // Reference Factory — mirrors jina's text_mlp pattern:
 //   silu_atomic(gate) * up
 // where silu_atomic uses mul(gate, -1) for negation.
-inline LogicalId refFactoryJinaSwiGLU_F32_3D(const std::vector<LogicalId> &inputs,
-                                            Graph &g)
+inline LogicalId refFactoryJinaSwiGLU_F32_3D(const std::vector<LogicalId> &inputs, Graph &g)
 {
     LogicalId gate_id = inputs[0];
     LogicalId up_id = inputs[1];
@@ -177,8 +177,7 @@ inline LogicalId refFactoryJinaSwiGLU_F32_3D(const std::vector<LogicalId> &input
     uint32_t S = shape[1];
     uint32_t D = shape[2];
 
-    auto expand_scalar_SD = [&](float val) -> LogicalId
-    {
+    auto expand_scalar_SD = [&](float val) -> LogicalId {
         LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
         LogicalId out = g.reshape(node, g.constant({3}, sh, DType::INT32));
@@ -186,17 +185,13 @@ inline LogicalId refFactoryJinaSwiGLU_F32_3D(const std::vector<LogicalId> &input
         {
             int32_t rep = (int32_t)S;
             int32_t ax = 1;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         if (D > 1)
         {
             int32_t rep = (int32_t)D;
             int32_t ax = 2;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         return out;
     };
@@ -215,10 +210,9 @@ inline LogicalId refFactoryJinaSwiGLU_F32_3D(const std::vector<LogicalId> &input
     return g.mul(gate_silu, up_id);
 }
 
-REGISTER_KERNEL("JinaSwiGLU_F32_3D", 2, 2, matchJinaSwiGLU_F32_3D, runJinaSwiGLU_F32_3D, refFactoryJinaSwiGLU_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32, DType::FLOAT32},
-                {{1, 1024, 3072}, {1, 1024, 3072}},
-                {true, true},
+REGISTER_KERNEL("JinaSwiGLU_F32_3D", 2, 2, matchJinaSwiGLU_F32_3D, runJinaSwiGLU_F32_3D, refFactoryJinaSwiGLU_F32_3D,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {{1, 1024, 3072}, {1, 1024, 3072}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

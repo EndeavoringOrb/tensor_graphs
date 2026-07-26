@@ -1,11 +1,10 @@
 // tensor_graphs_cpp/kernels/opencl/rmsnorm/F32_3D.hpp
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #include "kernels/opencl/opencl_utils.hpp"
 
-inline bool matchJinaRMSNorm_F32_3D_OpenCL(const std::vector<TensorNode> &inputs,
-                                           const TensorNode &output)
+inline bool matchJinaRMSNorm_F32_3D_OpenCL(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     if (inputs[0].getShape().size() != 3 || inputs[1].getShape().size() != 1)
         return false;
@@ -33,15 +32,15 @@ inline void runJinaRMSNorm_F32_3D_OpenCL(const KernelContext &ctx)
 
     uint64_t local_work_size = 256;
     uint64_t global_work_size = ((outer_size + local_work_size - 1) / local_work_size) * local_work_size;
-    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0, nullptr, nullptr);
+    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0,
+                                        nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue RMSNorm_OpenCL");
 
     clFinish(OpenCLState::get().queue);
 }
 
-inline LogicalId refFactoryJinaRMSNorm_F32_3D_OpenCL(const std::vector<LogicalId> &inputs,
-                                                    Graph &g)
+inline LogicalId refFactoryJinaRMSNorm_F32_3D_OpenCL(const std::vector<LogicalId> &inputs, Graph &g)
 {
     LogicalId x_id = inputs[0];
     LogicalId w_id = inputs[1];
@@ -51,8 +50,7 @@ inline LogicalId refFactoryJinaRMSNorm_F32_3D_OpenCL(const std::vector<LogicalId
     uint32_t S = shape[1];
     uint32_t D = shape[2];
 
-    auto expand_scalar_1S1 = [&](float val) -> LogicalId
-    {
+    auto expand_scalar_1S1 = [&](float val) -> LogicalId {
         LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
         LogicalId out = g.reshape(node, g.constant({3}, sh, DType::INT32));
@@ -60,33 +58,25 @@ inline LogicalId refFactoryJinaRMSNorm_F32_3D_OpenCL(const std::vector<LogicalId
         {
             int32_t rep = (int32_t)S;
             int32_t ax = 1;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         return out;
     };
 
-    auto repeat_d_axis2 = [&](LogicalId node) -> LogicalId
-    {
+    auto repeat_d_axis2 = [&](LogicalId node) -> LogicalId {
         int32_t rep = (int32_t)D;
         int32_t ax = 2;
-        return g.repeat(node,
-                        g.constant({1}, &rep, DType::INT32),
-                        g.constant({1}, &ax, DType::INT32));
+        return g.repeat(node, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
     };
 
-    auto expand_1d_1SD = [&](LogicalId vec) -> LogicalId
-    {
+    auto expand_1d_1SD = [&](LogicalId vec) -> LogicalId {
         int32_t sh[] = {1, 1, (int32_t)D};
         LogicalId out = g.reshape(vec, g.constant({3}, sh, DType::INT32));
         if (S > 1)
         {
             int32_t rep = (int32_t)S;
             int32_t ax = 1;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         return out;
     };
@@ -114,8 +104,7 @@ inline LogicalId refFactoryJinaRMSNorm_F32_3D_OpenCL(const std::vector<LogicalId
     return g.mul(x_norm, w_exp);
 }
 
-REGISTER_KERNEL("JinaRMSNorm_F32_3D_OpenCL", 2, 2, matchJinaRMSNorm_F32_3D_OpenCL, runJinaRMSNorm_F32_3D_OpenCL, refFactoryJinaRMSNorm_F32_3D_OpenCL, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
-                {DType::FLOAT32, DType::FLOAT32},
-                {{1, 1024, 768}, {768}},
-                {true, true},
-                {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});
+REGISTER_KERNEL("JinaRMSNorm_F32_3D_OpenCL", 2, 2, matchJinaRMSNorm_F32_3D_OpenCL, runJinaRMSNorm_F32_3D_OpenCL,
+                refFactoryJinaRMSNorm_F32_3D_OpenCL, MemSpace(1, HandleType::OPENCL),
+                {Engine(0, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1024, 768}, {768}},
+                {true, true}, {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});

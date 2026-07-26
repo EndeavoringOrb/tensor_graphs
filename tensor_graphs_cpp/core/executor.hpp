@@ -1,18 +1,20 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/graph.hpp"
-#include "core/plan/planner.hpp"
-#include "core/memory.hpp"
-#include "core/kernels.hpp"
 #include "core/debug.hpp"
+#include "core/graph.hpp"
+#include "core/kernels.hpp"
+#include "core/memory.hpp"
+#include "core/plan/planner.hpp"
+#include "core/types.hpp"
 
 class Executor
 {
-private:
+  private:
     MemoryManager &memManager;
 
-public:
-    Executor(MemoryManager &mm) : memManager(mm) {}
+  public:
+    Executor(MemoryManager &mm) : memManager(mm)
+    {
+    }
 
     void run(const CompiledGraph &compiled, const Debug::Callback &debugCallback = nullptr)
     {
@@ -73,7 +75,9 @@ public:
 #ifdef USE_CUDA
             cudaDeviceSynchronize();
 #endif
-            Debug::checkValues(ctx.inputs, ctx.inViews, "(inputs) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" + toString(kernel));
+            Debug::checkValues(ctx.inputs, ctx.inViews,
+                               "(inputs) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
+                                   toString(kernel));
 
             if (!kernel.is_view && kernel.run)
             {
@@ -88,7 +92,9 @@ public:
             cudaDeviceSynchronize();
 #endif
             std::vector<const void *> c_outputs(ctx.outputs.begin(), ctx.outputs.end());
-            Debug::checkValues(c_outputs, ctx.outViews, ctx.inputs, ctx.inViews, kernel, "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" + toString(kernel));
+            Debug::checkValues(c_outputs, ctx.outViews, ctx.inputs, ctx.inViews, kernel,
+                               "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
+                                   toString(kernel));
 
             if (debugCallback)
             {

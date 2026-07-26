@@ -3,13 +3,15 @@
 
 class FluxTextEncoder : public FluxGraphBase
 {
-private:
+  private:
     FluxConfig cfg;
     MemoryManager &mem;
 
-public:
+  public:
     FluxTextEncoder(FluxConfig config, Graph &graph, MemoryManager &memory, const std::string &weight_path)
-        : FluxGraphBase(graph, weight_path), cfg(config), mem(memory) {}
+        : FluxGraphBase(graph, weight_path), cfg(config), mem(memory)
+    {
+    }
 
     uint32_t compute_causal_mask()
     {
@@ -36,9 +38,9 @@ public:
     std::tuple<uint32_t, uint32_t> compute_rope()
     {
         int32_t start_val = 0, stop_val = cfg.text_head_dim, step_val = 2;
-        uint32_t indices_int = g.arange(g.constant({1}, &start_val, DType::INT32),
-                                        g.constant({1}, &stop_val, DType::INT32),
-                                        g.constant({1}, &step_val, DType::INT32));
+        uint32_t indices_int =
+            g.arange(g.constant({1}, &start_val, DType::INT32), g.constant({1}, &stop_val, DType::INT32),
+                     g.constant({1}, &step_val, DType::INT32));
         uint32_t indices = g.cast(indices_int, DType::FLOAT32);
 
         uint32_t h_dim_node = expand_scalar_to_1d((float)cfg.text_head_dim, cfg.text_head_dim / 2);
@@ -49,10 +51,10 @@ public:
 
         int32_t pos_stop = cfg.text_max_seq;
         int32_t pos_step = 1;
-        uint32_t pos = g.cast(g.arange(g.constant({1}, &start_val, DType::INT32),
-                                       g.constant({1}, &pos_stop, DType::INT32),
-                                       g.constant({1}, &pos_step, DType::INT32)),
-                              DType::FLOAT32);
+        uint32_t pos =
+            g.cast(g.arange(g.constant({1}, &start_val, DType::INT32), g.constant({1}, &pos_stop, DType::INT32),
+                            g.constant({1}, &pos_step, DType::INT32)),
+                   DType::FLOAT32);
 
         int32_t sh_col[] = {(int32_t)cfg.text_max_seq, 1};
         uint32_t pos_col = repeat_ax(g.reshape(pos, g.constant({2}, sh_col, DType::INT32)), cfg.text_head_dim / 2, 1);
@@ -73,14 +75,12 @@ public:
         int32_t starts1[] = {0, 0, 0, 0};
         int32_t ends1[] = {1, (int32_t)n_groups, (int32_t)cfg.text_max_seq, (int32_t)cfg.text_head_dim / 2};
         int32_t steps[] = {1, 1, 1, 1};
-        uint32_t x1 = g.slice(x, g.constant({4}, starts1, DType::INT32),
-                              g.constant({4}, ends1, DType::INT32),
+        uint32_t x1 = g.slice(x, g.constant({4}, starts1, DType::INT32), g.constant({4}, ends1, DType::INT32),
                               g.constant({4}, steps, DType::INT32));
 
         int32_t starts2[] = {0, 0, 0, (int32_t)cfg.text_head_dim / 2};
         int32_t ends2[] = {1, (int32_t)n_groups, (int32_t)cfg.text_max_seq, (int32_t)cfg.text_head_dim};
-        uint32_t x2 = g.slice(x, g.constant({4}, starts2, DType::INT32),
-                              g.constant({4}, ends2, DType::INT32),
+        uint32_t x2 = g.slice(x, g.constant({4}, starts2, DType::INT32), g.constant({4}, ends2, DType::INT32),
                               g.constant({4}, steps, DType::INT32));
         int32_t ax = 3;
         uint32_t rotated = g.concat({g.neg(x2), x1}, g.constant({1}, &ax, DType::INT32));
@@ -97,8 +97,7 @@ public:
         uint32_t sum_sq = g.sum(sq, g.constant({1}, &ax, DType::INT32));
 
         // Helper to expand scalars based on target rank
-        auto expand = [&](float val, uint32_t d_last)
-        {
+        auto expand = [&](float val, uint32_t d_last) {
             if (rank == 4)
                 return expand_scalar_to_4d(val, 1, heads, cfg.text_max_seq, d_last);
             return expand_scalar_to_3d(val, 1, cfg.text_max_seq, d_last);
@@ -108,7 +107,8 @@ public:
         uint32_t var = g.add(mean_sq, expand(1e-6f, 1));
         uint32_t std = g.pow(var, expand(0.5f, 1));
 
-        // Calculate inverse std and repeat across feature dimension (rank-1 is always feature dim)
+        // Calculate inverse std and repeat across feature dimension (rank-1 is
+        // always feature dim)
         uint32_t inv_std = repeat_ax(g.div(expand(1.0f, 1), std), dims, rank - 1);
         uint32_t x_norm = g.mul(x, inv_std);
 
@@ -119,7 +119,8 @@ public:
         {
             int32_t sh4[] = {1, 1, 1, (int32_t)dims};
             // For 4D (QK Norm), repeat heads (dim 1) and seq (dim 2)
-            w_exp = repeat_ax(repeat_ax(g.reshape(w, g.constant({4}, sh4, DType::INT32)), heads, 1), cfg.text_max_seq, 2);
+            w_exp =
+                repeat_ax(repeat_ax(g.reshape(w, g.constant({4}, sh4, DType::INT32)), heads, 1), cfg.text_max_seq, 2);
         }
         else
         {
@@ -137,8 +138,7 @@ public:
         int32_t p_t[] = {1, 0};
         uint32_t p_node = g.constant({2}, p_t, DType::INT32);
 
-        auto proj = [&](const std::string &name, int out_d)
-        {
+        auto proj = [&](const std::string &name, int out_d) {
             uint32_t w = g.permute(weight(prefix + name), p_node);
             w = g.contiguous(w);
             int32_t sh3[] = {1, (int32_t)cfg.text_hidden_size, (int32_t)out_d};
@@ -149,11 +149,11 @@ public:
         uint32_t k = proj("k_proj.weight", cfg.text_num_kv_heads * cfg.text_head_dim);
         uint32_t v = proj("v_proj.weight", cfg.text_num_kv_heads * cfg.text_head_dim);
 
-        auto prep = [&](uint32_t t, int heads)
-        {
+        auto prep = [&](uint32_t t, int heads) {
             int32_t sh4[] = {1, (int32_t)cfg.text_max_seq, heads, (int32_t)cfg.text_head_dim};
             int32_t p[] = {0, 2, 1, 3};
-            return g.contiguous(g.permute(g.reshape(t, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32)));
+            return g.contiguous(
+                g.permute(g.reshape(t, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32)));
         };
 
         q = prep(q, cfg.text_num_heads);
@@ -169,7 +169,8 @@ public:
         if (reps > 1)
         {
             // 1. Reshape to [1, num_kv_heads, 1, seq_len, head_dim]
-            int32_t sh5[] = {1, (int32_t)cfg.text_num_kv_heads, 1, (int32_t)cfg.text_max_seq, (int32_t)cfg.text_head_dim};
+            int32_t sh5[] = {1, (int32_t)cfg.text_num_kv_heads, 1, (int32_t)cfg.text_max_seq,
+                             (int32_t)cfg.text_head_dim};
             uint32_t sh5_node = g.constant({5}, sh5, DType::INT32);
             k = g.reshape(k, sh5_node);
             v = g.reshape(v, sh5_node);
@@ -201,7 +202,8 @@ public:
         int32_t ax = -1;
         uint32_t max_s = repeat_ax(g.max(scores, g.constant({1}, &ax, DType::INT32)), cfg.text_max_seq, 3);
         uint32_t shifted = g.add(scores, g.neg(max_s));
-        uint32_t exps = g.pow(expand_scalar_to_4d(2.7182818f, 1, cfg.text_num_heads, cfg.text_max_seq, cfg.text_max_seq), shifted);
+        uint32_t exps =
+            g.pow(expand_scalar_to_4d(2.7182818f, 1, cfg.text_num_heads, cfg.text_max_seq, cfg.text_max_seq), shifted);
         uint32_t sums = repeat_ax(g.sum(exps, g.constant({1}, &ax, DType::INT32)), cfg.text_max_seq, 3);
         uint32_t probs = g.div(exps, sums);
 
@@ -212,7 +214,9 @@ public:
         int32_t sh_c[] = {1, (int32_t)cfg.text_max_seq, (int32_t)(cfg.text_num_heads * cfg.text_head_dim)};
         ctx = g.reshape(ctx, g.constant({3}, sh_c, DType::INT32));
 
-        return proj("o_proj.weight", cfg.text_hidden_size); // Notice 'x' for input doesn't matter here if we reconstruct it
+        return proj("o_proj.weight",
+                    cfg.text_hidden_size); // Notice 'x' for input doesn't matter
+                                           // here if we reconstruct it
     }
 
     uint32_t mlp(uint32_t x, int layer_idx)
@@ -221,8 +225,7 @@ public:
         int32_t p_t[] = {1, 0};
         uint32_t p_node = g.constant({2}, p_t, DType::INT32);
 
-        auto proj = [&](const std::string &name, uint32_t out_d)
-        {
+        auto proj = [&](const std::string &name, uint32_t out_d) {
             uint32_t w = g.permute(weight(prefix + name), p_node);
             w = g.contiguous(w);
             int32_t sh3[] = {1, (int32_t)cfg.text_hidden_size, (int32_t)out_d};
@@ -258,11 +261,11 @@ public:
             uint32_t res = x;
             x = rms_norm_qwen(x, prefix + ".input_layernorm.weight", cfg.text_hidden_size);
 
-            // Custom attention dot products inline (we passed x but redefined proj to capture x, fixed here):
+            // Custom attention dot products inline (we passed x but redefined proj to
+            // capture x, fixed here):
             int32_t p_t[] = {1, 0};
             uint32_t p_node = g.constant({2}, p_t, DType::INT32);
-            auto proj_local = [&](const std::string &name, uint32_t in_d, uint32_t out_d, uint32_t inp)
-            {
+            auto proj_local = [&](const std::string &name, uint32_t in_d, uint32_t out_d, uint32_t inp) {
                 uint32_t w = g.permute(weight(prefix + ".self_attn." + name), p_node);
                 w = g.contiguous(w);
                 int32_t sh3[] = {1, (int32_t)in_d, (int32_t)out_d};
@@ -271,22 +274,26 @@ public:
 
             // Recalculating Attention explicitly to use local x
             uint32_t q = proj_local("q_proj.weight", cfg.text_hidden_size, cfg.text_num_heads * cfg.text_head_dim, x);
-            uint32_t k = proj_local("k_proj.weight", cfg.text_hidden_size, cfg.text_num_kv_heads * cfg.text_head_dim, x);
-            uint32_t v = proj_local("v_proj.weight", cfg.text_hidden_size, cfg.text_num_kv_heads * cfg.text_head_dim, x);
+            uint32_t k =
+                proj_local("k_proj.weight", cfg.text_hidden_size, cfg.text_num_kv_heads * cfg.text_head_dim, x);
+            uint32_t v =
+                proj_local("v_proj.weight", cfg.text_hidden_size, cfg.text_num_kv_heads * cfg.text_head_dim, x);
 
-            auto prep = [&](uint32_t t, int heads)
-            {
+            auto prep = [&](uint32_t t, int heads) {
                 int32_t sh4[] = {1, (int32_t)cfg.text_max_seq, heads, (int32_t)cfg.text_head_dim};
                 int32_t p[] = {0, 2, 1, 3};
-                return g.contiguous(g.permute(g.reshape(t, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32)));
+                return g.contiguous(
+                    g.permute(g.reshape(t, g.constant({4}, sh4, DType::INT32)), g.constant({4}, p, DType::INT32)));
             };
 
             q = prep(q, cfg.text_num_heads);
             k = prep(k, cfg.text_num_kv_heads);
             v = prep(v, cfg.text_num_kv_heads);
 
-            q = rms_norm_qwen(q, prefix + ".self_attn.q_norm.weight", cfg.text_head_dim, 4, cfg.text_num_heads);    // GQA norm
-            k = rms_norm_qwen(k, prefix + ".self_attn.k_norm.weight", cfg.text_head_dim, 4, cfg.text_num_kv_heads); // GQA norm
+            q = rms_norm_qwen(q, prefix + ".self_attn.q_norm.weight", cfg.text_head_dim, 4,
+                              cfg.text_num_heads); // GQA norm
+            k = rms_norm_qwen(k, prefix + ".self_attn.k_norm.weight", cfg.text_head_dim, 4,
+                              cfg.text_num_kv_heads); // GQA norm
 
             q = apply_rope(q, cos, sin, cfg.text_num_heads);
             k = apply_rope(k, cos, sin, cfg.text_num_kv_heads);
@@ -294,8 +301,10 @@ public:
             int reps = cfg.text_num_heads / cfg.text_num_kv_heads;
             if (reps > 1)
             {
-                // 1. Reshape [1, 8, 512, 128] -> [1, 8, 1, 512, 128] to create a unit dim at axis 2
-                int32_t sh5[] = {1, (int32_t)cfg.text_num_kv_heads, 1, (int32_t)cfg.text_max_seq, (int32_t)cfg.text_head_dim};
+                // 1. Reshape [1, 8, 512, 128] -> [1, 8, 1, 512, 128] to create a unit
+                // dim at axis 2
+                int32_t sh5[] = {1, (int32_t)cfg.text_num_kv_heads, 1, (int32_t)cfg.text_max_seq,
+                                 (int32_t)cfg.text_head_dim};
                 uint32_t sh5_node = g.constant({5}, sh5, DType::INT32);
                 k = g.reshape(k, sh5_node);
                 v = g.reshape(v, sh5_node);
@@ -317,12 +326,14 @@ public:
             float scale_val = 1.0f / std::sqrt((float)cfg.text_head_dim);
             q = g.mul(q, expand_scalar_to_4d(scale_val, 1, cfg.text_num_heads, cfg.text_max_seq, cfg.text_head_dim));
             int32_t p_k[] = {0, 1, 3, 2};
-            uint32_t scores = g.add(g.dot(q, g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)))), g.contiguous(repeat_ax(mask, cfg.text_num_heads, 1)));
+            uint32_t scores = g.add(g.dot(q, g.contiguous(g.permute(k, g.constant({4}, p_k, DType::INT32)))),
+                                    g.contiguous(repeat_ax(mask, cfg.text_num_heads, 1)));
 
             int32_t ax = -1;
             uint32_t max_s = repeat_ax(g.max(scores, g.constant({1}, &ax, DType::INT32)), cfg.text_max_seq, 3);
             uint32_t shifted = g.add(scores, g.neg(max_s));
-            uint32_t exps = g.pow(expand_scalar_to_4d(2.7182818f, 1, cfg.text_num_heads, cfg.text_max_seq, cfg.text_max_seq), shifted);
+            uint32_t exps = g.pow(
+                expand_scalar_to_4d(2.7182818f, 1, cfg.text_num_heads, cfg.text_max_seq, cfg.text_max_seq), shifted);
             uint32_t sums = repeat_ax(g.sum(exps, g.constant({1}, &ax, DType::INT32)), cfg.text_max_seq, 3);
             uint32_t ctx = g.dot(g.div(exps, sums), v);
 
@@ -332,7 +343,8 @@ public:
             int32_t sh_c[] = {1, (int32_t)cfg.text_max_seq, (int32_t)(cfg.text_num_heads * cfg.text_head_dim)};
             ctx = g.reshape(ctx, g.constant({3}, sh_c, DType::INT32));
 
-            x = g.add(res, proj_local("o_proj.weight", cfg.text_num_heads * cfg.text_head_dim, cfg.text_hidden_size, ctx));
+            x = g.add(res,
+                      proj_local("o_proj.weight", cfg.text_num_heads * cfg.text_head_dim, cfg.text_hidden_size, ctx));
 
             // MLP
             res = x;

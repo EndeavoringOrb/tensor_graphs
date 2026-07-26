@@ -1,20 +1,22 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/layernorm/jina_F32_3D_Weight_Bias_Neon_Threaded.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/layernorm/jina_F32_3D_Weight_Bias_Neon_Threaded.hpp
 //
-// FUSED KERNEL: LayerNorm (with weight + bias) for jina-embeddings-v5-omni-nano-retrieval
+// FUSED KERNEL: LayerNorm (with weight + bias) for
+// jina-embeddings-v5-omni-nano-retrieval
 //
-// Matches the exact subgraph produced by JinaV5OmniNanoRetrievalModel::layer_norm():
+// Matches the exact subgraph produced by
+// JinaV5OmniNanoRetrievalModel::layer_norm():
 //
 //   ax_node  = constant(-1, INT32)
 //   sum_x    = sum(x, ax_node)                        // {B, S, 1}
-//   d_node   = expand_scalar_to_3d(D, 1, S, 1)        // {1, S, 1}  (D as float, e.g. 768.0)
-//   mean_val = div(sum_x, d_node)                     // {B, S, 1}
-//   mean     = repeat_3d_axis(mean_val, D, 2)         // {B, S, D}
-//   x_sub    = add(x, neg(mean))                      // {B, S, D}
-//   sq       = mul(x_sub, x_sub)                      // {B, S, D}
-//   sum_sq   = sum(sq, ax_node)                       // {B, S, 1}
-//   var      = div(sum_sq, d_node)                    // {B, S, 1}
-//   eps_node = expand_scalar_to_3d(eps, 1, S, 1)      // {1, S, 1}  (eps = 1e-6)
-//   var_eps  = add(var, eps_node)                     // {B, S, 1}
+//   d_node   = expand_scalar_to_3d(D, 1, S, 1)        // {1, S, 1}  (D as
+//   float, e.g. 768.0) mean_val = div(sum_x, d_node)                     // {B,
+//   S, 1} mean     = repeat_3d_axis(mean_val, D, 2)         // {B, S, D} x_sub
+//   = add(x, neg(mean))                      // {B, S, D} sq       = mul(x_sub,
+//   x_sub)                      // {B, S, D} sum_sq   = sum(sq, ax_node) // {B,
+//   S, 1} var      = div(sum_sq, d_node)                    // {B, S, 1}
+//   eps_node = expand_scalar_to_3d(eps, 1, S, 1)      // {1, S, 1}  (eps =
+//   1e-6) var_eps  = add(var, eps_node)                     // {B, S, 1}
 //   sqrt_exp = expand_scalar_to_3d(0.5, 1, S, 1)      // {1, S, 1}
 //   std_dev  = pow(var_eps, sqrt_exp)                 // {B, S, 1}
 //   one_node = expand_scalar_to_3d(1.0, 1, S, 1)      // {1, S, 1}
@@ -34,12 +36,13 @@
 // by the e-graph isomorphism check, so this kernel only fires on subgraphs
 // that use the exact same constants.  For jina-v5: D=768, eps=1e-6.
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <cmath>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -47,8 +50,7 @@
 // ---------------------------------------------------------------------------
 // Match function — only structural shape checks (linter-friendly).
 // ---------------------------------------------------------------------------
-inline bool matchJinaLayerNormWB_F32_3D(const std::vector<TensorNode> &inputs,
-                                        const TensorNode &output)
+inline bool matchJinaLayerNormWB_F32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // x: 3-D [B, S, D], w: 1-D [D], b: 1-D [D]
     if (inputs[0].getShape().size() != 3)
@@ -93,8 +95,7 @@ inline void runJinaLayerNormWB_F32_3D(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t start_row = t * rows_per_thread;
             uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
 
@@ -164,7 +165,7 @@ inline void runJinaLayerNormWB_F32_3D(const KernelContext &ctx)
 
                     float32x4_t v_n0 = vmulq_f32(vsubq_f32(v_x0, v_mean), v_inv_std);
                     float32x4_t v_n1 = vmulq_f32(vsubq_f32(v_x1, v_mean), v_inv_std);
-                    v_n0 = vfmaq_f32(v_b0, v_n0, v_w0);  // n * w + b
+                    v_n0 = vfmaq_f32(v_b0, v_n0, v_w0); // n * w + b
                     v_n1 = vfmaq_f32(v_b1, v_n1, v_w1);
                     vst1q_f32(row_out + d, v_n0);
                     vst1q_f32(row_out + d + 4, v_n1);
@@ -183,7 +184,8 @@ inline void runJinaLayerNormWB_F32_3D(const KernelContext &ctx)
                     float n = (row_x[d] - mean) * inv_std;
                     row_out[d] = n * w[d] + b[d];
                 }
-            } });
+            }
+        });
     }
     for (auto &worker : workers)
         worker.join();
@@ -197,8 +199,7 @@ inline void runJinaLayerNormWB_F32_3D(const KernelContext &ctx)
 // isomorphism checking, so this factory only matches subgraphs with the
 // same D and eps.  For jina-v5 vision blocks + merger: D=768, eps=1e-6.
 // ---------------------------------------------------------------------------
-inline LogicalId refFactoryJinaLayerNormWB_F32_3D(const std::vector<LogicalId> &inputs,
-                                                 Graph &g)
+inline LogicalId refFactoryJinaLayerNormWB_F32_3D(const std::vector<LogicalId> &inputs, Graph &g)
 {
     LogicalId x_id = inputs[0];
     LogicalId w_id = inputs[1];
@@ -211,8 +212,7 @@ inline LogicalId refFactoryJinaLayerNormWB_F32_3D(const std::vector<LogicalId> &
 
     // Helper: expand_scalar_to_3d(val, 1, S, 1) → {1, S, 1}
     // Mirrors JinaV5OmniNanoRetrievalModel::expand_scalar_to_3d exactly.
-    auto expand_scalar_1S1 = [&](float val) -> LogicalId
-    {
+    auto expand_scalar_1S1 = [&](float val) -> LogicalId {
         LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
         LogicalId out = g.reshape(node, g.constant({3}, sh, DType::INT32));
@@ -220,36 +220,28 @@ inline LogicalId refFactoryJinaLayerNormWB_F32_3D(const std::vector<LogicalId> &
         {
             int32_t rep = (int32_t)S;
             int32_t ax = 1;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         return out;
     };
 
     // Helper: repeat_3d_axis(node, D, 2) → broadcast axis 2 by D
-    auto repeat_d_axis2 = [&](LogicalId node) -> LogicalId
-    {
+    auto repeat_d_axis2 = [&](LogicalId node) -> LogicalId {
         int32_t rep = (int32_t)D;
         int32_t ax = 2;
-        return g.repeat(node,
-                        g.constant({1}, &rep, DType::INT32),
-                        g.constant({1}, &ax, DType::INT32));
+        return g.repeat(node, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
     };
 
     // Helper: expand_1d_to_3d(vec, D, 1, S) → {1, S, D}
     // Mirrors JinaV5OmniNanoRetrievalModel::expand_1d_to_3d exactly.
-    auto expand_1d_1SD = [&](LogicalId vec) -> LogicalId
-    {
+    auto expand_1d_1SD = [&](LogicalId vec) -> LogicalId {
         int32_t sh[] = {1, 1, (int32_t)D};
         LogicalId out = g.reshape(vec, g.constant({3}, sh, DType::INT32));
         if (S > 1)
         {
             int32_t rep = (int32_t)S;
             int32_t ax = 1;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         return out;
     };
@@ -260,7 +252,7 @@ inline LogicalId refFactoryJinaLayerNormWB_F32_3D(const std::vector<LogicalId> &
 
     // --- mean ---
     LogicalId sum_x = g.sum(x_id, axis_node);      // {B, S, 1}
-    float d_float = (float)D;                     // 768.0f
+    float d_float = (float)D;                      // 768.0f
     LogicalId d_node = expand_scalar_1S1(d_float); // {1, S, 1}
     LogicalId mean_val = g.div(sum_x, d_node);     // {B, S, 1}
     LogicalId mean = repeat_d_axis2(mean_val);     // {B, S, D}
@@ -288,18 +280,17 @@ inline LogicalId refFactoryJinaLayerNormWB_F32_3D(const std::vector<LogicalId> &
     LogicalId normalized = g.mul(x_sub, inv_std_exp); // {B, S, D}
 
     // --- apply weight ---
-    LogicalId w_exp = expand_1d_1SD(w_id);  // {1, S, D}
+    LogicalId w_exp = expand_1d_1SD(w_id); // {1, S, D}
     normalized = g.mul(normalized, w_exp); // {B, S, D}
 
     // --- apply bias ---
     LogicalId b_exp = expand_1d_1SD(b_id); // {1, S, D}
-    return g.add(normalized, b_exp);      // {B, S, D}
+    return g.add(normalized, b_exp);       // {B, S, D}
 }
 
-REGISTER_KERNEL("JinaLayerNormWB_F32_3D", 3, 3, matchJinaLayerNormWB_F32_3D, runJinaLayerNormWB_F32_3D, refFactoryJinaLayerNormWB_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32},
-                {{1, 1024, 768}, {768}, {768}},
-                {true, true, true},
+REGISTER_KERNEL("JinaLayerNormWB_F32_3D", 3, 3, matchJinaLayerNormWB_F32_3D, runJinaLayerNormWB_F32_3D,
+                refFactoryJinaLayerNormWB_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32}, {{1, 1024, 768}, {768}, {768}}, {true, true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

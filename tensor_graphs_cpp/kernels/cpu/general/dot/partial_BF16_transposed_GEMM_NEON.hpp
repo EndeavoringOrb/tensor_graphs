@@ -1,20 +1,21 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/dot/partial_BF16_transposed_GEMM_NEON.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/dot/partial_BF16_transposed_GEMM_NEON.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
-#include "core/graph.hpp"
-#include <cstring>
-#include <cmath>
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <thread>
 #include <vector>
+
+#include "core/graph.hpp"
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 
 inline bool matchPartialBF16TransposedGEMM(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-
     const auto &shape_C = inputs[0].getShape();
     const auto &shape_A = inputs[1].getShape();
     const auto &shape_W = inputs[2].getShape();
@@ -46,7 +47,8 @@ inline void runPartialBF16TransposedGEMM(const KernelContext &ctx)
 
     float *out_cache_ptr = static_cast<float *>(ctx.outputs[0]);
 
-    if (target_ptr != out_cache_ptr) {
+    if (target_ptr != out_cache_ptr)
+    {
         Error::throw_err("[runPartialBF16TransposedGEMM] target_ptr != out_cache_ptr");
     }
 
@@ -61,23 +63,26 @@ inline void runPartialBF16TransposedGEMM(const KernelContext &ctx)
     for (int i = 0; i < 3; ++i)
     {
         startsC[i] = (ctx.inViews[3].getShape().empty() || i >= ctx.inViews[3].getShape()[0]) ? 0 : startsC_raw[i];
-        endsC[i] = (ctx.inViews[4].getShape().empty() || i >= ctx.inViews[4].getShape()[0]) ? view_cache.getShape()[i] : endsC_raw[i];
+        endsC[i] = (ctx.inViews[4].getShape().empty() || i >= ctx.inViews[4].getShape()[0]) ? view_cache.getShape()[i]
+                                                                                            : endsC_raw[i];
         stepsC[i] = (ctx.inViews[5].getShape().empty() || i >= ctx.inViews[5].getShape()[0]) ? 1 : stepsC_raw[i];
 
         startsA[i] = (ctx.inViews[6].getShape().empty() || i >= ctx.inViews[6].getShape()[0]) ? 0 : startsA_raw[i];
-        endsA[i] = (ctx.inViews[7].getShape().empty() || i >= ctx.inViews[7].getShape()[0]) ? view_A.getShape()[i] : endsA_raw[i];
+        endsA[i] = (ctx.inViews[7].getShape().empty() || i >= ctx.inViews[7].getShape()[0]) ? view_A.getShape()[i]
+                                                                                            : endsA_raw[i];
         stepsA[i] = (ctx.inViews[8].getShape().empty() || i >= ctx.inViews[8].getShape()[0]) ? 1 : stepsA_raw[i];
     }
 
     for (int i = 0; i < 3; ++i)
     {
         startsW[i] = (ctx.inViews[9].getShape().empty() || i >= ctx.inViews[9].getShape()[0]) ? 0 : startsW_raw[i];
-        endsW[i] = (ctx.inViews[10].getShape().empty() || i >= ctx.inViews[10].getShape()[0]) ? (i == 0 ? 1 : (i == 1 ? view_W.getShape()[1] : view_W.getShape()[0])) : endsW_raw[i];
+        endsW[i] = (ctx.inViews[10].getShape().empty() || i >= ctx.inViews[10].getShape()[0])
+                       ? (i == 0 ? 1 : (i == 1 ? view_W.getShape()[1] : view_W.getShape()[0]))
+                       : endsW_raw[i];
         stepsW[i] = (ctx.inViews[11].getShape().empty() || i >= ctx.inViews[11].getShape()[0]) ? 1 : stepsW_raw[i];
     }
 
-    auto get_dim = [](int32_t s, int32_t e, int32_t st, uint32_t dim_len) -> uint32_t
-    {
+    auto get_dim = [](int32_t s, int32_t e, int32_t st, uint32_t dim_len) -> uint32_t {
         if (s < 0)
             s += dim_len;
         if (e < 0)
@@ -123,9 +128,8 @@ inline void runPartialBF16TransposedGEMM(const KernelContext &ctx)
     const int64_t strideC_S = view_cache.strides[1];
     const int64_t strideC_N = view_cache.strides[2];
 
-    bool can_simd = (strideC_N == 1 && stepC_n == 1 &&
-                     strideW_K == 1 && stepW_k == 1 &&
-                     strideA_K == 1 && stepA_k == 1);
+    bool can_simd =
+        (strideC_N == 1 && stepC_n == 1 && strideW_K == 1 && stepW_k == 1 && strideA_K == 1 && stepA_k == 1);
 
     uint32_t num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0)
@@ -138,66 +142,97 @@ inline void runPartialBF16TransposedGEMM(const KernelContext &ctx)
 
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t n_start = t * n_block;
-            if (n_start >= slice_N) return;
+            if (n_start >= slice_N)
+                return;
             uint32_t n_end = std::min(n_start + n_block, slice_N);
             uint32_t s_rem = slice_S & ~3;
             uint32_t n_rem = n_end & ~3;
 
-            for (uint32_t b = 0; b < slice_B; ++b) {
+            for (uint32_t b = 0; b < slice_B; ++b)
+            {
                 int32_t b_C = startC_b + b * stepC_b;
                 int32_t b_A = startA_b + b * stepA_b;
 
-                if (can_simd) {
+                if (can_simd)
+                {
                     // S loop in chunks of 4
-                    for (uint32_t s = 0; s < s_rem; s += 4) {
+                    for (uint32_t s = 0; s < s_rem; s += 4)
+                    {
                         int32_t s_C = startC_s + s * stepC_s;
                         int32_t s_A = startA_s + s * stepA_s;
-                        
-                        for (uint32_t n = n_start; n < n_rem; n += 4) {
+
+                        for (uint32_t n = n_start; n < n_rem; n += 4)
+                        {
                             int32_t n_C = startC_n + n; // step is 1
                             int32_t n_W = startW_n + n; // step is 1
 
-                            float32x4_t acc00 = vdupq_n_f32(0), acc01 = vdupq_n_f32(0), acc02 = vdupq_n_f32(0), acc03 = vdupq_n_f32(0);
-                            float32x4_t acc10 = vdupq_n_f32(0), acc11 = vdupq_n_f32(0), acc12 = vdupq_n_f32(0), acc13 = vdupq_n_f32(0);
-                            float32x4_t acc20 = vdupq_n_f32(0), acc21 = vdupq_n_f32(0), acc22 = vdupq_n_f32(0), acc23 = vdupq_n_f32(0);
-                            float32x4_t acc30 = vdupq_n_f32(0), acc31 = vdupq_n_f32(0), acc32 = vdupq_n_f32(0), acc33 = vdupq_n_f32(0);
+                            float32x4_t acc00 = vdupq_n_f32(0), acc01 = vdupq_n_f32(0), acc02 = vdupq_n_f32(0),
+                                        acc03 = vdupq_n_f32(0);
+                            float32x4_t acc10 = vdupq_n_f32(0), acc11 = vdupq_n_f32(0), acc12 = vdupq_n_f32(0),
+                                        acc13 = vdupq_n_f32(0);
+                            float32x4_t acc20 = vdupq_n_f32(0), acc21 = vdupq_n_f32(0), acc22 = vdupq_n_f32(0),
+                                        acc23 = vdupq_n_f32(0);
+                            float32x4_t acc30 = vdupq_n_f32(0), acc31 = vdupq_n_f32(0), acc32 = vdupq_n_f32(0),
+                                        acc33 = vdupq_n_f32(0);
 
-                            for (uint32_t k = 0; k < (slice_K & ~3); k += 4) {
-                                int32_t k_W = startW_k + k; 
-                                int32_t k_A = startA_k + k; 
+                            for (uint32_t k = 0; k < (slice_K & ~3); k += 4)
+                            {
+                                int32_t k_W = startW_k + k;
+                                int32_t k_A = startA_k + k;
 
-                                float32x4_t w0 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(W_ptr + (n_W + 0) * strideW_N + k_W), 16));
-                                float32x4_t w1 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(W_ptr + (n_W + 1) * strideW_N + k_W), 16));
-                                float32x4_t w2 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(W_ptr + (n_W + 2) * strideW_N + k_W), 16));
-                                float32x4_t w3 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(W_ptr + (n_W + 3) * strideW_N + k_W), 16));
+                                float32x4_t w0 = vreinterpretq_f32_u32(
+                                    vshll_n_u16(vld1_u16(W_ptr + (n_W + 0) * strideW_N + k_W), 16));
+                                float32x4_t w1 = vreinterpretq_f32_u32(
+                                    vshll_n_u16(vld1_u16(W_ptr + (n_W + 1) * strideW_N + k_W), 16));
+                                float32x4_t w2 = vreinterpretq_f32_u32(
+                                    vshll_n_u16(vld1_u16(W_ptr + (n_W + 2) * strideW_N + k_W), 16));
+                                float32x4_t w3 = vreinterpretq_f32_u32(
+                                    vshll_n_u16(vld1_u16(W_ptr + (n_W + 3) * strideW_N + k_W), 16));
 
-                                float32x4_t x0 = vld1q_f32(A_ptr + b_A * strideA_B + (s_A + 0 * stepA_s) * strideA_S + k_A);
-                                float32x4_t x1 = vld1q_f32(A_ptr + b_A * strideA_B + (s_A + 1 * stepA_s) * strideA_S + k_A);
-                                float32x4_t x2 = vld1q_f32(A_ptr + b_A * strideA_B + (s_A + 2 * stepA_s) * strideA_S + k_A);
-                                float32x4_t x3 = vld1q_f32(A_ptr + b_A * strideA_B + (s_A + 3 * stepA_s) * strideA_S + k_A);
+                                float32x4_t x0 =
+                                    vld1q_f32(A_ptr + b_A * strideA_B + (s_A + 0 * stepA_s) * strideA_S + k_A);
+                                float32x4_t x1 =
+                                    vld1q_f32(A_ptr + b_A * strideA_B + (s_A + 1 * stepA_s) * strideA_S + k_A);
+                                float32x4_t x2 =
+                                    vld1q_f32(A_ptr + b_A * strideA_B + (s_A + 2 * stepA_s) * strideA_S + k_A);
+                                float32x4_t x3 =
+                                    vld1q_f32(A_ptr + b_A * strideA_B + (s_A + 3 * stepA_s) * strideA_S + k_A);
 
-                                acc00 = vfmaq_f32(acc00, x0, w0); acc01 = vfmaq_f32(acc01, x0, w1);
-                                acc02 = vfmaq_f32(acc02, x0, w2); acc03 = vfmaq_f32(acc03, x0, w3);
-                                acc10 = vfmaq_f32(acc10, x1, w0); acc11 = vfmaq_f32(acc11, x1, w1);
-                                acc12 = vfmaq_f32(acc12, x1, w2); acc13 = vfmaq_f32(acc13, x1, w3);
-                                acc20 = vfmaq_f32(acc20, x2, w0); acc21 = vfmaq_f32(acc21, x2, w1);
-                                acc22 = vfmaq_f32(acc22, x2, w2); acc23 = vfmaq_f32(acc23, x2, w3);
-                                acc30 = vfmaq_f32(acc30, x3, w0); acc31 = vfmaq_f32(acc31, x3, w1);
-                                acc32 = vfmaq_f32(acc32, x3, w2); acc33 = vfmaq_f32(acc33, x3, w3);
+                                acc00 = vfmaq_f32(acc00, x0, w0);
+                                acc01 = vfmaq_f32(acc01, x0, w1);
+                                acc02 = vfmaq_f32(acc02, x0, w2);
+                                acc03 = vfmaq_f32(acc03, x0, w3);
+                                acc10 = vfmaq_f32(acc10, x1, w0);
+                                acc11 = vfmaq_f32(acc11, x1, w1);
+                                acc12 = vfmaq_f32(acc12, x1, w2);
+                                acc13 = vfmaq_f32(acc13, x1, w3);
+                                acc20 = vfmaq_f32(acc20, x2, w0);
+                                acc21 = vfmaq_f32(acc21, x2, w1);
+                                acc22 = vfmaq_f32(acc22, x2, w2);
+                                acc23 = vfmaq_f32(acc23, x2, w3);
+                                acc30 = vfmaq_f32(acc30, x3, w0);
+                                acc31 = vfmaq_f32(acc31, x3, w1);
+                                acc32 = vfmaq_f32(acc32, x3, w2);
+                                acc33 = vfmaq_f32(acc33, x3, w3);
                             }
 
-                            auto store_4 = [&](uint32_t row_s, float32x4_t a0, float32x4_t a1, float32x4_t a2, float32x4_t a3) {
-                                float* out_ptr = out_cache_ptr + b_C * strideC_B + (s_C + row_s * stepC_s) * strideC_S + n_C;
+                            auto store_4 = [&](uint32_t row_s, float32x4_t a0, float32x4_t a1, float32x4_t a2,
+                                               float32x4_t a3) {
+                                float *out_ptr =
+                                    out_cache_ptr + b_C * strideC_B + (s_C + row_s * stepC_s) * strideC_S + n_C;
                                 float res[4] = {vaddvq_f32(a0), vaddvq_f32(a1), vaddvq_f32(a2), vaddvq_f32(a3)};
-                                
-                                for (uint32_t k = (slice_K & ~3); k < slice_K; ++k) {
-                                    float xv = A_ptr[b_A * strideA_B + (s_A + row_s * stepA_s) * strideA_S + startA_k + k];
-                                    for (int i = 0; i < 4; ++i) {
+
+                                for (uint32_t k = (slice_K & ~3); k < slice_K; ++k)
+                                {
+                                    float xv =
+                                        A_ptr[b_A * strideA_B + (s_A + row_s * stepA_s) * strideA_S + startA_k + k];
+                                    for (int i = 0; i < 4; ++i)
+                                    {
                                         uint32_t bits = (uint32_t)W_ptr[(n_W + i) * strideW_N + startW_k + k] << 16;
-                                        float wv; std::memcpy(&wv, &bits, 4);
+                                        float wv;
+                                        std::memcpy(&wv, &bits, 4);
                                         res[i] += xv * wv;
                                     }
                                 }
@@ -211,25 +246,34 @@ inline void runPartialBF16TransposedGEMM(const KernelContext &ctx)
                         }
                     }
 
-                    // S remainder block (Hits directly when seq_len=1 in partial decoding caches!)
-                    for (uint32_t s = s_rem; s < slice_S; ++s) {
+                    // S remainder block (Hits directly when seq_len=1 in partial decoding
+                    // caches!)
+                    for (uint32_t s = s_rem; s < slice_S; ++s)
+                    {
                         int32_t s_C = startC_s + s * stepC_s;
                         int32_t s_A = startA_s + s * stepA_s;
 
-                        for (uint32_t n = n_start; n < n_rem; n += 4) {
+                        for (uint32_t n = n_start; n < n_rem; n += 4)
+                        {
                             int32_t n_C = startC_n + n;
                             int32_t n_W = startW_n + n;
 
-                            float32x4_t acc0 = vdupq_n_f32(0), acc1 = vdupq_n_f32(0), acc2 = vdupq_n_f32(0), acc3 = vdupq_n_f32(0);
+                            float32x4_t acc0 = vdupq_n_f32(0), acc1 = vdupq_n_f32(0), acc2 = vdupq_n_f32(0),
+                                        acc3 = vdupq_n_f32(0);
 
-                            for (uint32_t k = 0; k < (slice_K & ~3); k += 4) {
+                            for (uint32_t k = 0; k < (slice_K & ~3); k += 4)
+                            {
                                 int32_t k_W = startW_k + k;
                                 int32_t k_A = startA_k + k;
 
-                                float32x4_t w0 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(W_ptr + (n_W + 0) * strideW_N + k_W), 16));
-                                float32x4_t w1 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(W_ptr + (n_W + 1) * strideW_N + k_W), 16));
-                                float32x4_t w2 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(W_ptr + (n_W + 2) * strideW_N + k_W), 16));
-                                float32x4_t w3 = vreinterpretq_f32_u32(vshll_n_u16(vld1_u16(W_ptr + (n_W + 3) * strideW_N + k_W), 16));
+                                float32x4_t w0 = vreinterpretq_f32_u32(
+                                    vshll_n_u16(vld1_u16(W_ptr + (n_W + 0) * strideW_N + k_W), 16));
+                                float32x4_t w1 = vreinterpretq_f32_u32(
+                                    vshll_n_u16(vld1_u16(W_ptr + (n_W + 1) * strideW_N + k_W), 16));
+                                float32x4_t w2 = vreinterpretq_f32_u32(
+                                    vshll_n_u16(vld1_u16(W_ptr + (n_W + 2) * strideW_N + k_W), 16));
+                                float32x4_t w3 = vreinterpretq_f32_u32(
+                                    vshll_n_u16(vld1_u16(W_ptr + (n_W + 3) * strideW_N + k_W), 16));
 
                                 float32x4_t x0 = vld1q_f32(A_ptr + b_A * strideA_B + s_A * strideA_S + k_A);
 
@@ -239,14 +283,17 @@ inline void runPartialBF16TransposedGEMM(const KernelContext &ctx)
                                 acc3 = vfmaq_f32(acc3, x0, w3);
                             }
 
-                            float* out_ptr = out_cache_ptr + b_C * strideC_B + s_C * strideC_S + n_C;
+                            float *out_ptr = out_cache_ptr + b_C * strideC_B + s_C * strideC_S + n_C;
                             float res[4] = {vaddvq_f32(acc0), vaddvq_f32(acc1), vaddvq_f32(acc2), vaddvq_f32(acc3)};
 
-                            for (uint32_t k = (slice_K & ~3); k < slice_K; ++k) {
+                            for (uint32_t k = (slice_K & ~3); k < slice_K; ++k)
+                            {
                                 float xv = A_ptr[b_A * strideA_B + s_A * strideA_S + startA_k + k];
-                                for (int i = 0; i < 4; ++i) {
+                                for (int i = 0; i < 4; ++i)
+                                {
                                     uint32_t bits = (uint32_t)W_ptr[(n_W + i) * strideW_N + startW_k + k] << 16;
-                                    float wv; std::memcpy(&wv, &bits, 4);
+                                    float wv;
+                                    std::memcpy(&wv, &bits, 4);
                                     res[i] += xv * wv;
                                 }
                             }
@@ -255,52 +302,63 @@ inline void runPartialBF16TransposedGEMM(const KernelContext &ctx)
                     }
 
                     // N remainder
-                    for (uint32_t n = n_rem; n < n_end; ++n) {
+                    for (uint32_t n = n_rem; n < n_end; ++n)
+                    {
                         int32_t n_C = startC_n + n;
                         int32_t n_W = startW_n + n;
 
-                        for (uint32_t s = 0; s < slice_S; ++s) {
+                        for (uint32_t s = 0; s < slice_S; ++s)
+                        {
                             int32_t s_C = startC_s + s * stepC_s;
                             int32_t s_A = startA_s + s * stepA_s;
 
                             float sum = 0.0f;
-                            for (uint32_t k = 0; k < slice_K; ++k) {
+                            for (uint32_t k = 0; k < slice_K; ++k)
+                            {
                                 int32_t k_A = startA_k + k;
                                 int32_t k_W = startW_k + k;
 
                                 uint32_t bits = (uint32_t)W_ptr[n_W * strideW_N + k_W] << 16;
-                                float wf; std::memcpy(&wf, &bits, 4);
+                                float wf;
+                                std::memcpy(&wf, &bits, 4);
                                 sum += A_ptr[b_A * strideA_B + s_A * strideA_S + k_A] * wf;
                             }
                             out_cache_ptr[b_C * strideC_B + s_C * strideC_S + n_C] = sum;
                         }
                     }
-                } else {
+                }
+                else
+                {
                     // Scalar fallback if strides aren't 1
-                    for (uint32_t s = 0; s < slice_S; ++s) {
+                    for (uint32_t s = 0; s < slice_S; ++s)
+                    {
                         int32_t s_C = startC_s + s * stepC_s;
                         int32_t s_A = startA_s + s * stepA_s;
 
-                        for (uint32_t n = n_start; n < n_end; ++n) {
+                        for (uint32_t n = n_start; n < n_end; ++n)
+                        {
                             int32_t n_C = startC_n + n * stepC_n;
                             int32_t n_W = startW_n + n * stepW_n;
 
                             float sum = 0.0f;
-                            for (uint32_t k = 0; k < slice_K; ++k) {
+                            for (uint32_t k = 0; k < slice_K; ++k)
+                            {
                                 int32_t k_A = startA_k + k * stepA_k;
                                 int32_t k_W = startW_k + k * stepW_k;
 
                                 float a_val = A_ptr[b_A * strideA_B + s_A * strideA_S + k_A * strideA_K];
                                 uint16_t w_bf16 = W_ptr[n_W * strideW_N + k_W * strideW_K];
                                 uint32_t bits = (uint32_t)w_bf16 << 16;
-                                float w_val; std::memcpy(&w_val, &bits, 4);
+                                float w_val;
+                                std::memcpy(&w_val, &bits, 4);
                                 sum += a_val * w_val;
                             }
                             out_cache_ptr[b_C * strideC_B + s_C * strideC_S + n_C * strideC_N] = sum;
                         }
                     }
                 }
-            } });
+            }
+        });
     }
 
     for (auto &th : workers)
@@ -333,13 +391,24 @@ inline LogicalId refFactoryPartialBF16TransposedGEMM(const std::vector<LogicalId
     return graph.scatter(inIds[0], contigDot, inIds[3], inIds[4], inIds[5]);
 }
 
-REGISTER_KERNEL_INPLACE("Scatter_BF16_Transposed_GEMM_NEON", 12, 12, matchPartialBF16TransposedGEMM, runPartialBF16TransposedGEMM, refFactoryPartialBF16TransposedGEMM, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-    {DType::FLOAT32, DType::FLOAT32, DType::BF16,
-     DType::INT32, DType::INT32, DType::INT32,
-     DType::INT32, DType::INT32, DType::INT32,
-     DType::INT32, DType::INT32, DType::INT32},
-    {{1, 8, 2048}, {1, 8, 2048}, {2048, 2048}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}},
-    {false, false, false, false, false, false, false, false, false, false, false, false},
-    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL_INPLACE("Scatter_BF16_Transposed_GEMM_NEON", 12, 12, matchPartialBF16TransposedGEMM,
+                        runPartialBF16TransposedGEMM, refFactoryPartialBF16TransposedGEMM, MemSpace(1, HandleType::CPP),
+                        {Engine(0, EngineType::CPU)},
+                        {DType::FLOAT32, DType::FLOAT32, DType::BF16, DType::INT32, DType::INT32, DType::INT32,
+                         DType::INT32, DType::INT32, DType::INT32, DType::INT32, DType::INT32, DType::INT32},
+                        {{1, 8, 2048}, {1, 8, 2048}, {2048, 2048}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}},
+                        {false, false, false, false, false, false, false, false, false, false, false, false},
+                        {{MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)}});
 
 #endif

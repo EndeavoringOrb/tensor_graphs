@@ -1,7 +1,8 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cmath>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 // =============================================================================
 // FUSED KERNEL: LayerNorm F32 (no affine parameters)
@@ -202,4 +203,6 @@ inline LogicalId refFactoryLayerNorm(const std::vector<LogicalId> &inputs, Graph
     return graph.mul(x_sub, inv_std_expanded);
 }
 
-REGISTER_KERNEL("LayerNorm", 1, 1, matchLayerNormF32_3D, runLayerNormF32_3D, refFactoryLayerNorm, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 3072}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("LayerNorm", 1, 1, matchLayerNormF32_3D, runLayerNormF32_3D, refFactoryLayerNorm,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 3072}}, {true},
+                {{MemSpace(1, HandleType::CPP)}});

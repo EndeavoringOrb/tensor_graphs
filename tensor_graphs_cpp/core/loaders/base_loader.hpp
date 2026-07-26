@@ -1,7 +1,8 @@
 #pragma once
-#include "core/types.hpp"
-#include <vector>
 #include <string>
+#include <vector>
+
+#include "core/types.hpp"
 
 struct TensorMetadata
 {
@@ -14,7 +15,7 @@ struct TensorMetadata
 
 class ModelLoader
 {
-public:
+  public:
     virtual ~ModelLoader() = default;
     virtual bool hasTensor(const std::string &name) const = 0;
     virtual TensorMetadata getMetadata(const std::string &name) const = 0;

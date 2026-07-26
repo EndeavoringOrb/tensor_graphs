@@ -1,9 +1,10 @@
 #pragma once
 
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cstring>
 #include <vector>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -36,7 +37,8 @@ inline bool matchZeroStrideBroadcast_ND(const std::vector<TensorNode> &inputs, c
     if (strides.empty())
         return false;
 
-    // Strict Match: Only triggers if the first stride is 1 and ALL subsequent strides are 0.
+    // Strict Match: Only triggers if the first stride is 1 and ALL subsequent
+    // strides are 0.
     if (strides[0] != 1)
         return false;
     for (uint64_t i = 1; i < strides.size(); ++i)
@@ -94,7 +96,8 @@ inline void runZeroStrideBroadcast_ND(const KernelContext &ctx)
                 for (int64_t j = 0; j < (int64_t)(inner_elements / 16); ++j)
                 {
                     int64_t offset = j * 16;
-                    // Unrolled 4x to write exactly one 64-byte ARM cache line per iteration
+                    // Unrolled 4x to write exactly one 64-byte ARM cache line per
+                    // iteration
                     vst1q_f32(current_dst + offset, val_vec);
                     vst1q_f32(current_dst + offset + 4, val_vec);
                     vst1q_f32(current_dst + offset + 8, val_vec);
@@ -211,16 +214,15 @@ inline LogicalId refFactoryZeroStrideBroadcast_ND(const std::vector<LogicalId> &
     {
         std::vector<uint64_t> strides(node.getShape().size(), 0);
         strides[0] = 1;
-        node.strides = strides; // TODO: add dummy input strides to REGISTER_KERNEL macro so we don't have to do this hack
+        node.strides = strides; // TODO: add dummy input strides to REGISTER_KERNEL
+                                // macro so we don't have to do this hack
     }
 
     return graph.contiguous(inputs[0]);
 }
 
-REGISTER_KERNEL("ZeroStrideBroadcast_ND", 1, 1, matchZeroStrideBroadcast_ND, runZeroStrideBroadcast_ND, refFactoryZeroStrideBroadcast_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-    {DType::ANY},
-    {{8, 32}},
-    {false},
-    {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("ZeroStrideBroadcast_ND", 1, 1, matchZeroStrideBroadcast_ND, runZeroStrideBroadcast_ND,
+                refFactoryZeroStrideBroadcast_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::ANY}, {{8, 32}}, {false}, {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

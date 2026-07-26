@@ -271,7 +271,7 @@ def train(model, dataset, optimizer, epochs=3, batch_size=32):
             total_loss += loss.item()
 
         print(
-            f"Epoch {epoch+1} Loss: {total_loss / (len(dataset)//batch_size + 1):.4f}"
+            f"Epoch {epoch + 1} Loss: {total_loss / (len(dataset) // batch_size + 1):.4f}"
         )
 
 
@@ -330,14 +330,14 @@ def evaluate_model(model, N=20, num_games=10, max_steps=5000, compare_all=True):
         success_gu = dfs(env.clone(), use_model=True, steps_counter=guided_counter)
 
         tqdm.write(
-            f"Game {g+1}: Unguided = {unguided_counter[0]:<5} steps | Guided = {guided_counter[0]:<5} steps"
+            f"Game {g + 1}: Unguided = {unguided_counter[0]:<5} steps | Guided = {guided_counter[0]:<5} steps"
         )
         if (success_un and success_gu) or compare_all:
             unguided_steps.append(unguided_counter[0])
             guided_steps.append(guided_counter[0])
         else:
             failures += 1
-            tqdm.write(f"Game {g+1}: OOM / No solution exists under capacity.")
+            tqdm.write(f"Game {g + 1}: OOM / No solution exists under capacity.")
 
     if unguided_steps:
         avg_un = sum(unguided_steps) / len(unguided_steps)

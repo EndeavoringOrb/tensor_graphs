@@ -1,15 +1,18 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/rmsnorm/jina_F32_3D_Neon_Threaded.hpp
+// File:
+// tensor_graphs_cpp/kernels/cpu/general/rmsnorm/jina_F32_3D_Neon_Threaded.hpp
 //
-// FUSED KERNEL: RMSNorm (plain, no bias) for jina-embeddings-v5-omni-nano-retrieval
+// FUSED KERNEL: RMSNorm (plain, no bias) for
+// jina-embeddings-v5-omni-nano-retrieval
 //
-// Matches the exact subgraph produced by JinaV5OmniNanoRetrievalModel::rms_norm():
+// Matches the exact subgraph produced by
+// JinaV5OmniNanoRetrievalModel::rms_norm():
 //
 //   x_sq     = mul(x, x)                              // {B, S, D}
 //   sum_sq   = sum(x_sq, axis=-1)                     // {B, S, 1}
-//   n_node   = expand_scalar_to_3d(D, 1, S, 1)        // {1, S, 1}  (D as float = 768.0)
-//   mean_sq  = div(sum_sq, n_node)                    // {B, S, 1}
-//   eps_exp  = expand_scalar_to_3d(eps, 1, S, 1)      // {1, S, 1}  (eps = 1e-5)
-//   ms_eps   = add(mean_sq, eps_exp)                  // {B, S, 1}
+//   n_node   = expand_scalar_to_3d(D, 1, S, 1)        // {1, S, 1}  (D as float
+//   = 768.0) mean_sq  = div(sum_sq, n_node)                    // {B, S, 1}
+//   eps_exp  = expand_scalar_to_3d(eps, 1, S, 1)      // {1, S, 1}  (eps =
+//   1e-5) ms_eps   = add(mean_sq, eps_exp)                  // {B, S, 1}
 //   sqrt_exp = expand_scalar_to_3d(0.5, 1, S, 1)      // {1, S, 1}
 //   std      = pow(ms_eps, sqrt_exp)                  // {B, S, 1}
 //   one_node = expand_scalar_to_3d(1.0, 1, S, 1)      // {1, S, 1}
@@ -25,18 +28,18 @@
 // Value constants matched byte-for-byte: D=768.0, eps=1e-5, 0.5, 1.0.
 // For jina-v5 text encoder: D=768, eps=1e-5 (text_rms_eps).
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <cmath>
 #include <thread>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 
-inline bool matchJinaRMSNorm_F32_3D(const std::vector<TensorNode> &inputs,
-                                    const TensorNode &output)
+inline bool matchJinaRMSNorm_F32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // x: 3-D [B, S, D], w: 1-D [D]
     if (inputs[0].getShape().size() != 3)
@@ -74,8 +77,7 @@ inline void runJinaRMSNorm_F32_3D(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t start_row = t * rows_per_thread;
             uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
 
@@ -129,7 +131,8 @@ inline void runJinaRMSNorm_F32_3D(const KernelContext &ctx)
                 }
                 for (; d < D; ++d)
                     row_out[d] = row_x[d] * inv_std * w[d];
-            } });
+            }
+        });
     }
     for (auto &worker : workers)
         worker.join();
@@ -137,8 +140,7 @@ inline void runJinaRMSNorm_F32_3D(const KernelContext &ctx)
 
 // Reference Factory — mirrors JinaV5OmniNanoRetrievalModel::rms_norm() exactly.
 // Value constants: D=768.0, eps=1e-5, 0.5, 1.0.
-inline LogicalId refFactoryJinaRMSNorm_F32_3D(const std::vector<LogicalId> &inputs,
-                                             Graph &g)
+inline LogicalId refFactoryJinaRMSNorm_F32_3D(const std::vector<LogicalId> &inputs, Graph &g)
 {
     LogicalId x_id = inputs[0];
     LogicalId w_id = inputs[1];
@@ -148,8 +150,7 @@ inline LogicalId refFactoryJinaRMSNorm_F32_3D(const std::vector<LogicalId> &inpu
     uint32_t S = shape[1];
     uint32_t D = shape[2];
 
-    auto expand_scalar_1S1 = [&](float val) -> LogicalId
-    {
+    auto expand_scalar_1S1 = [&](float val) -> LogicalId {
         LogicalId node = g.constant({1}, &val, DType::FLOAT32);
         int32_t sh[] = {1, 1, 1};
         LogicalId out = g.reshape(node, g.constant({3}, sh, DType::INT32));
@@ -157,33 +158,25 @@ inline LogicalId refFactoryJinaRMSNorm_F32_3D(const std::vector<LogicalId> &inpu
         {
             int32_t rep = (int32_t)S;
             int32_t ax = 1;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         return out;
     };
 
-    auto repeat_d_axis2 = [&](LogicalId node) -> LogicalId
-    {
+    auto repeat_d_axis2 = [&](LogicalId node) -> LogicalId {
         int32_t rep = (int32_t)D;
         int32_t ax = 2;
-        return g.repeat(node,
-                        g.constant({1}, &rep, DType::INT32),
-                        g.constant({1}, &ax, DType::INT32));
+        return g.repeat(node, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
     };
 
-    auto expand_1d_1SD = [&](LogicalId vec) -> LogicalId
-    {
+    auto expand_1d_1SD = [&](LogicalId vec) -> LogicalId {
         int32_t sh[] = {1, 1, (int32_t)D};
         LogicalId out = g.reshape(vec, g.constant({3}, sh, DType::INT32));
         if (S > 1)
         {
             int32_t rep = (int32_t)S;
             int32_t ax = 1;
-            out = g.repeat(out,
-                           g.constant({1}, &rep, DType::INT32),
-                           g.constant({1}, &ax, DType::INT32));
+            out = g.repeat(out, g.constant({1}, &rep, DType::INT32), g.constant({1}, &ax, DType::INT32));
         }
         return out;
     };
@@ -220,10 +213,9 @@ inline LogicalId refFactoryJinaRMSNorm_F32_3D(const std::vector<LogicalId> &inpu
     return g.mul(x_norm, w_exp);
 }
 
-REGISTER_KERNEL("JinaRMSNorm_F32_3D", 2, 2, matchJinaRMSNorm_F32_3D, runJinaRMSNorm_F32_3D, refFactoryJinaRMSNorm_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32, DType::FLOAT32},
-                {{1, 1024, 768}, {768}},
-                {true, true},
+REGISTER_KERNEL("JinaRMSNorm_F32_3D", 2, 2, matchJinaRMSNorm_F32_3D, runJinaRMSNorm_F32_3D,
+                refFactoryJinaRMSNorm_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{1, 1024, 768}, {768}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

@@ -1,7 +1,8 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cmath>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 // =============================================================================
 // FUSED KERNEL: SiLU (Sigmoid Linear Unit) F32
@@ -98,7 +99,8 @@ inline LogicalId refFactorySilu_3(const std::vector<LogicalId> &inputs, Graph &g
 
     // 3. den = 1 + exp(-x)
     float one_val = 1.0f;
-    LogicalId one_node = ref_silu_broadcast_scalar_3(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
+    LogicalId one_node =
+        ref_silu_broadcast_scalar_3(graph, graph.constant({1}, &one_val, DType::FLOAT32), target_shape);
     LogicalId den = graph.add(one_node, exp_neg);
 
     // 4. sig = 1 / den
@@ -108,4 +110,6 @@ inline LogicalId refFactorySilu_3(const std::vector<LogicalId> &inputs, Graph &g
     return graph.mul(x_id, sig);
 }
 
-REGISTER_KERNEL("Silu_3D_3", 1, 1, matchSiluF32_3, runSiluF32_3, refFactorySilu_3, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{4, 4, 2048}}, {true}, {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Silu_3D_3", 1, 1, matchSiluF32_3, runSiluF32_3, refFactorySilu_3, MemSpace(1, HandleType::CPP),
+                {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{4, 4, 2048}}, {true},
+                {{MemSpace(1, HandleType::CPP)}});
