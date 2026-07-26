@@ -1,4 +1,6 @@
 #pragma once
+#include <CL/cl.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -1477,3 +1479,32 @@ inline void tg_deserialize(BinaryReader &br, CompiledGraph &val)
         val.constantStaging[eclass_id] = std::make_shared<std::vector<uint8_t>>(std::move(data));
     }
 }
+
+struct KernelContext
+{
+    std::vector<const void *> inputs;
+    std::vector<void *> outputs;
+    std::vector<TensorView> inViews;
+    std::vector<TensorView> outViews;
+    std::vector<int> fd;
+    std::vector<cl_mem> cl_inputs;
+    std::vector<cl_mem> cl_outputs;
+
+    KernelContext()
+    {
+    }
+    KernelContext(const std::vector<const void *> &_inputs, const std::vector<void *> &_outputs,
+                  const std::vector<TensorView> &_inViews, const std::vector<TensorView> &_outViews)
+        : inputs(_inputs), outputs(_outputs), inViews(_inViews), outViews(_outViews)
+    {
+        for (int i = 0; i < inputs.size(); i++)
+        {
+            fd.push_back(-1);
+            cl_inputs.push_back(nullptr);
+        }
+        for (int i = 0; i < outputs.size(); i++)
+        {
+            cl_outputs.push_back(nullptr);
+        }
+    }
+};

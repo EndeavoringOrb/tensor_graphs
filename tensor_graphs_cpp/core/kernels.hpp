@@ -6,39 +6,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core/graph.hpp"
 #include "core/memory.hpp"
 #include "core/misc.hpp"
 #include "core/types.hpp"
-
-struct KernelContext
-{
-    std::vector<const void *> inputs;
-    std::vector<void *> outputs;
-    std::vector<TensorView> inViews;
-    std::vector<TensorView> outViews;
-    std::vector<int> fd;
-    std::vector<cl_mem> cl_inputs;
-    std::vector<cl_mem> cl_outputs;
-
-    KernelContext()
-    {
-    }
-    KernelContext(const std::vector<const void *> &_inputs, const std::vector<void *> &_outputs,
-                  const std::vector<TensorView> &_inViews, const std::vector<TensorView> &_outViews)
-        : inputs(_inputs), outputs(_outputs), inViews(_inViews), outViews(_outViews)
-    {
-        for (int i = 0; i < inputs.size(); i++)
-        {
-            fd.push_back(-1);
-            cl_inputs.push_back(nullptr);
-        }
-        for (int i = 0; i < outputs.size(); i++)
-        {
-            cl_outputs.push_back(nullptr);
-        }
-    }
-};
 
 using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
 using KernelFunc = void (*)(const KernelContext &ctx);

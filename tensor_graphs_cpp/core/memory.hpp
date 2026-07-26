@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "core/hardware.hpp"
-#include "core/kernels.hpp"
+#include "core/loaders/loader.hpp"
 #include "core/types.hpp"
 
 #ifdef USE_CUDA

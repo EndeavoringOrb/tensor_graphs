@@ -243,6 +243,8 @@ struct Session
                 }
             }
         }
+        std::cout << "Wrote " << written.size() << " constants to memory. Graph has " << graph.constantStaging.size()
+                  << " constants." << std::endl;
 
         executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
