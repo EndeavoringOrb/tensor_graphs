@@ -119,6 +119,7 @@ struct Planner
                                  const std::unordered_map<LogicalId, EClassId> &nodeToEClass,
                                  const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
                                  const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
+                                 const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers,
                                  bool stopOnFirstValid = true, bool strictCache = false)
     {
         constexpr float EPS = 1e-6f;
@@ -756,7 +757,8 @@ struct Planner
 
         Extractor extractor = Extractor(egraph, rootEClassId);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps));
+        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical,
+                                                                    preallocatedBuffers));
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
@@ -1535,7 +1537,8 @@ struct Planner
 
     CompiledGraph plan(LogicalId rootId, const Graph &graph, const Bucket &bucket,
                        const std::unordered_map<LogicalId, MemSpace> &cachedNodes, bool doSaturate = true,
-                       bool strictCache = false, Repo *repo = nullptr)
+                       bool strictCache = false, Repo *repo = nullptr,
+                       const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers = {})
     {
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
@@ -1632,7 +1635,8 @@ struct Planner
         eclassToLogical = std::move(updatedEClassToLogical);
 
         auto extraction =
-            extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical, true, strictCache);
+            extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical, preallocatedBuffers,
+                        true, strictCache);
         return buildCompiledGraph(rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes,
                                   eclassToLogical);
     }

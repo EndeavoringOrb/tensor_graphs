@@ -233,6 +233,14 @@ template <> struct hash<KernelId>
     }
 };
 
+template <> struct hash<BufferId>
+{
+    std::uint64_t operator()(const BufferId &id) const noexcept
+    {
+        return std::hash<uint32_t>()(id.value);
+    }
+};
+
 template <> struct hash<MemSpace>
 {
     uint64_t operator()(const MemSpace &ms) const noexcept
@@ -1513,3 +1521,4 @@ inline std::string toString(std::source_location loc)
 {
     return std::string(loc.file_name()) + ":" + std::to_string(loc.line());
 }
+

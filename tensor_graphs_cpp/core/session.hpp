@@ -338,12 +338,25 @@ struct Session
             }
         }
 
+        // ------------------------------------------------------------------
+        // Pre-allocate ParallelBuffers for INPUT and CACHE logical nodes
+        // *outside* of Planner, before the Final replanning. This guarantees
+        // that the byte offset of every persistent INPUT/CACHE buffer is
+        // identical across all buckets, so Session::writeInput and the
+        // constant-staging writes in Session::compile land at the same
+        // physical offset regardless of which bucket's compiled graph is
+        // selected at run time.
+        // ------------------------------------------------------------------
+        std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
+        preallocateLogicalBuffers(protectedCachedNodes, preallocatedBuffers);
+
         std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size()
                   << " protected eclasses..." << std::endl;
         for (uint64_t i = 0; i < manualBuckets.size(); ++i)
         {
             const Bucket &bucket = manualBuckets[i];
-            CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo);
+            CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo,
+                                              preallocatedBuffers);
             plan.bucket = bucket;
             cachedGraphs.push_back(plan);
         }
@@ -357,6 +370,116 @@ struct Session
         }
 
         persistCache();
+    }
+
+    // Allocate stable ParallelBuffers for every logical INPUT node and every
+    // node in `cachedNodes` (the protected CACHE set discovered during the
+    // first planning pass). STORAGE-backed INPUTs are skipped because their
+    // offset is resolved dynamically inside StorageBuffer::setupInput.
+    //
+    // Buffers within a MemSpace are placed contiguously starting at offset 0,
+    // sorted by LogicalId for determinism. The MemValidator will reduce the
+    // malloc solver's mem_cap by max(offset+size) of these buffers so the
+    // transient buffers land strictly above the pre-allocated region.
+    void preallocateLogicalBuffers(const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                                   std::unordered_map<LogicalId, ParallelBuffer> &out) const
+    {
+        out.clear();
+
+        // Collect (LogicalId, MemSpace, shape, dtype) tuples for every logical
+        // node that needs a stable buffer.
+        struct PreAllocEntry
+        {
+            LogicalId logicalId;
+            MemSpace memSpace;
+            std::vector<uint32_t> shape;
+            DType dtype;
+        };
+        std::vector<PreAllocEntry> entries;
+
+        MemSpace storage = MemSpace{0, HandleType::STORAGE};
+        MemSpace ram = MemSpace{1, HandleType::CPP};
+
+        // 1. All logical INPUT nodes (constants + runtime inputs + weights).
+        for (const auto &pair : graph.nodes)
+        {
+            const TensorNode &node = pair.second;
+            if (node.opType != OpType::INPUT)
+                continue;
+
+            // STORAGE-backed INPUTs (file weights) bypass the arena entirely.
+            auto idtIt = graph.input_data_types.find(node.id);
+            if (idtIt != graph.input_data_types.end() && idtIt->second == InputDataType::STORAGE)
+                continue;
+
+            entries.push_back({node.id, ram, node.getShape(), node.dtype});
+        }
+
+        // 2. All protected CACHE nodes (computed tensors that survived the
+        // first-pass cache selection). Their MemSpace comes from the first
+        // pass's `inst.outBuffer.mem_space`; if missing, default to RAM.
+        for (const auto &kv : cachedNodes)
+        {
+            LogicalId logicalId = kv.first;
+            MemSpace ms = kv.second;
+            if (!graph.hasNode(logicalId))
+                continue;
+            const TensorNode &node = graph.getNode(logicalId);
+            // Skip if this logical id is also an INPUT we already added above
+            // (an INPUT can also be a cache source). Prefer the INPUT memspace.
+            bool alreadyAdded = false;
+            for (const auto &e : entries)
+            {
+                if (e.logicalId == logicalId)
+                {
+                    alreadyAdded = true;
+                    break;
+                }
+            }
+            if (alreadyAdded)
+                continue;
+            entries.push_back({logicalId, ms, node.getShape(), node.dtype});
+        }
+
+        // Stable ordering: sort by LogicalId so the layout is identical across
+        // runs even if iteration order over `graph.nodes` differs.
+        std::sort(entries.begin(), entries.end(),
+                  [](const PreAllocEntry &a, const PreAllocEntry &b) { return a.logicalId < b.logicalId; });
+
+        // Assign offsets per MemSpace, contiguously from offset 0, with the
+        // same 4096-byte alignment used by bufferize().
+        std::unordered_map<MemSpace, uint64_t> cursor;
+        BufferId nextId{0};
+        for (const auto &e : entries)
+        {
+            if (e.memSpace == storage)
+                continue;
+
+            uint64_t size_bytes = getSizeBytes(e.shape, e.dtype);
+            if (size_bytes == 0)
+                continue;
+            size_bytes = (size_bytes + 4095) & ~4095ULL;
+
+            uint64_t offset = cursor[e.memSpace];
+            cursor[e.memSpace] = offset + size_bytes;
+
+            ParallelBuffer buf;
+            buf.id = nextId++;
+            buf.mem_space = e.memSpace;
+            buf.size = size_bytes;
+            buf.start = 0.0f;       // INPUT/CACHE buffers are alive forever.
+            buf.end = std::numeric_limits<float>::infinity();
+            buf.offset = static_cast<int64_t>(offset);
+            out[e.logicalId] = std::move(buf);
+        }
+
+        std::cout << "[Session.preallocateLogicalBuffers] Pre-allocated " << out.size() << " INPUT/CACHE buffers.";
+        for (const auto &kv : cursor)
+        {
+            std::cout << " MemSpace(idx=" << kv.first.idx << ",type=" << static_cast<int>(kv.first.type)
+                      << ") reserved=" << kv.second << " bytes.";
+        }
+        std::cout << std::endl;
     }
 
     const uint32_t getBestGraphIdx(const Bucket &bucket) const

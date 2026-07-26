@@ -711,10 +711,22 @@ struct MemValidator : public ISelectionValidator
     const EGraph &egraph;
     const std::vector<ENodeInfo> &enodeInfos;
     const std::unordered_map<MemSpace, uint64_t> &mem_caps;
+    // Map from canonical eclass id -> logical id (used to detect INPUT/CACHE
+    // enodes that correspond to a logical node whose buffer was pre-allocated
+    // outside of the Planner).
+    const std::unordered_map<EClassId, LogicalId> &eclassToLogical;
+    // Pre-allocated stable ParallelBuffers for INPUT/CACHE logical nodes,
+    // keyed by LogicalId. These buffers are placed in a contiguous region
+    // starting at offset 0 in their MemSpace, and the malloc solver is given
+    // a reduced mem_cap so it places all other buffers *above* this region.
+    const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers;
 
     MemValidator(const EGraph &_egraph, const std::vector<ENodeInfo> &_enodeInfos,
-                 const std::unordered_map<MemSpace, uint64_t> &_mem_caps)
-        : egraph(_egraph), enodeInfos(_enodeInfos), mem_caps(_mem_caps)
+                 const std::unordered_map<MemSpace, uint64_t> &_mem_caps,
+                 const std::unordered_map<EClassId, LogicalId> &_eclassToLogical,
+                 const std::unordered_map<LogicalId, ParallelBuffer> &_preallocatedBuffers)
+        : egraph(_egraph), enodeInfos(_enodeInfos), mem_caps(_mem_caps),
+          eclassToLogical(_eclassToLogical), preallocatedBuffers(_preallocatedBuffers)
     {
     }
 
@@ -738,27 +750,91 @@ struct MemValidator : public ISelectionValidator
         cost = current_cost;
         updated_cost = true;
 
-        // group buffers by mem_space instead of mem_space.idx
+        // ------------------------------------------------------------------
+        // Identify pre-allocated buffers (INPUT/CACHE enodes whose eclass has
+        // a logical mapping AND for which a pre-allocated ParallelBuffer was
+        // supplied by the Session). These buffers must NOT be re-allocated by
+        // the malloc solver; their offset is fixed by the Session so that the
+        // same logical node lands at the same byte offset across runs.
+        // ------------------------------------------------------------------
+        std::unordered_set<BufferId> preallocated_buf_ids;
+        std::unordered_map<BufferId, ParallelBuffer> preallocated_overrides;
+        // Per-MemSpace "high water mark" of the pre-allocated region.
+        // Buffers are placed contiguously from offset 0 upward by the Session,
+        // so max(offset+size) == total bytes reserved in that MemSpace.
+        std::unordered_map<MemSpace, uint64_t> reserved_per_ms;
+        for (EClassId eclass : order)
+        {
+            auto logicalIt = eclassToLogical.find(eclass);
+            if (logicalIt == eclassToLogical.end())
+                continue;
+
+            uint32_t sel = selection_map.at(eclass);
+            ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
+            const ENode &node = egraph.getENode(enode_id);
+            if (node.getOpType() != OpType::INPUT && node.getOpType() != OpType::CACHE)
+                continue;
+
+            auto preIt = preallocatedBuffers.find(logicalIt->second);
+            if (preIt == preallocatedBuffers.end())
+                continue;
+
+            // The eclass' buffer id was assigned by bufferize() above. We use
+            // that same id in the final `buffers` vector, but override the
+            // offset with the pre-allocated value.
+            BufferId buf_id = eclass_to_buf.at(eclass);
+            preallocated_buf_ids.insert(buf_id);
+            preallocated_overrides[buf_id] = preIt->second;
+
+            const ParallelBuffer &pre = preIt->second;
+            uint64_t extent = static_cast<uint64_t>(pre.offset) + pre.size;
+            uint64_t &cur = reserved_per_ms[pre.mem_space];
+            cur = std::max(cur, extent);
+        }
+
+        // group buffers by mem_space instead of mem_space.idx.
+        // Pre-allocated buffers are excluded from the malloc input (the user's
+        // "ignore any INPUT or CACHE where eclassToLogical.count(eclass_id) != 0"
+        // rule). They will be added back to the final `buffers` vector below
+        // with their pre-allocated offsets.
         std::unordered_map<MemSpace, std::vector<ParallelBuffer>> buf_by_mem_space;
         for (auto &buf : unallocated_buffers)
         {
             if (buf.mem_space.type == HandleType::STORAGE)
                 continue;
+            if (preallocated_buf_ids.count(buf.id))
+                continue;
             buf_by_mem_space[buf.mem_space].push_back(buf);
         }
 
-        // malloc: try to assign offsets within mem_cap for each mem_space
+        // malloc: try to assign offsets within (reduced) mem_cap for each
+        // mem_space. The malloc solver places buffers starting from offset 0,
+        // so after it returns we shift every malloc'd buffer UP by
+        // `reserved_per_ms[ms]` to leave the low-offset region for the
+        // pre-allocated INPUT/CACHE buffers.
         buffers.clear();
         buffers.reserve(unallocated_buffers.size());
 
-        // Directly copy STORAGE buffers to the final list since they don't need
-        // allocation
+        // 1. STORAGE buffers: dynamic offset resolved at runtime, no malloc.
         for (auto &buf : unallocated_buffers)
         {
             if (buf.mem_space.type == HandleType::STORAGE)
             {
                 buf.offset = 0; // Actual file offset is resolved dynamically in
                                 // StorageBuffer::setupInput
+                buffers.push_back(buf);
+            }
+        }
+
+        // 2. Pre-allocated INPUT/CACHE buffers: use the Session-assigned offset.
+        for (auto &buf : unallocated_buffers)
+        {
+            if (preallocated_buf_ids.count(buf.id))
+            {
+                ParallelBuffer pre = preallocated_overrides.at(buf.id);
+                // Preserve bufferize()'s assigned id / lifetime / size; only
+                // the offset comes from the pre-allocated buffer.
+                buf.offset = pre.offset;
                 buffers.push_back(buf);
             }
         }
@@ -771,17 +847,32 @@ struct MemValidator : public ISelectionValidator
             MemSpace ms = kv.first;
             auto &bufs = kv.second;
             uint64_t cap = mem_caps.count(ms) ? mem_caps.at(ms) : std::numeric_limits<uint64_t>::max();
+            // Reduce mem_caps by the max(offset+size) of the pre-allocated
+            // logical-node buffers in this MemSpace.
+            uint64_t reserved = reserved_per_ms.count(ms) ? reserved_per_ms.at(ms) : 0;
+            uint64_t reduced_cap = (cap == std::numeric_limits<uint64_t>::max())
+                                       ? cap
+                                       : (cap > reserved ? cap - reserved : 0);
+
             std::vector<ParallelBuffer> allocated;
             ProgressTimer t2 =
                 ProgressTimer(0,
                               "malloc mem_space=(" + std::to_string(ms.idx) + "," + std::to_string((int)ms.type) +
-                                  "), n_bufs=" + std::to_string(bufs.size()) + " ",
+                                  "), n_bufs=" + std::to_string(bufs.size()) +
+                                  ", reserved=" + std::to_string(reserved) + " ",
                               false, true);
-            if (!malloc_by_time_components(cap, bufs, allocated, overflow))
+            if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow))
             {
                 alloc_ok = false;
                 oom_reason = "OOM:" + std::to_string(ms.idx) + ":" + std::to_string(static_cast<int>(ms.type));
                 break;
+            }
+
+            // Shift malloc'd buffers above the pre-allocated region so they
+            // do not collide with the INPUT/CACHE buffers placed at low offsets.
+            for (auto &buf : allocated)
+            {
+                buf.offset += static_cast<int64_t>(reserved);
             }
 
             buffers.insert(buffers.end(), std::make_move_iterator(allocated.begin()),
