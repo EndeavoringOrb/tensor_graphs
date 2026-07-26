@@ -4,6 +4,32 @@
 #include <cstring>
 #include <algorithm>
 
+inline bool isElementwise(OpType op)
+{
+    switch (op)
+    {
+    case OpType::ADD:
+    case OpType::MUL:
+    case OpType::DIVIDE:
+    case OpType::POWER:
+    case OpType::SIN:
+    case OpType::COS:
+    case OpType::NEGATE:
+    case OpType::CAST:
+    case OpType::COPY_TO:
+    case OpType::CONTIGUOUS:
+    case OpType::LOG:
+    case OpType::LT:
+    case OpType::EQ:
+    case OpType::AND:
+    case OpType::OR:
+    case OpType::NOT:
+        return true;
+    default:
+        return false;
+    }
+}
+
 inline std::vector<uint32_t> coordsFromFlatIndex(uint64_t flatIndex, const std::vector<uint32_t> &shape)
 {
     std::vector<uint32_t> coords(shape.size(), 0);
@@ -578,12 +604,13 @@ struct ShapePropagator
         return mergeRegions(outputRegions);
     }
 
-    std::vector<std::vector<Region>> backwardElementwise(const TensorNode &node, const std::vector<Region> &outputRegions)
+    std::vector<std::vector<Region>> backwardElementwise(const uint32_t n_children, const std::vector<Region> &outputRegions)
     {
-        std::vector<std::vector<Region>> inputRegions(node.child_ids.size());
-        for (uint64_t i = 0; i < node.child_ids.size(); ++i)
+        std::vector<std::vector<Region>> inputRegions(n_children);
+        std::vector<Region> merged = mergeRegions(outputRegions);
+        for (uint64_t i = 0; i < n_children; ++i)
         {
-            inputRegions[i] = mergeRegions(outputRegions);
+            inputRegions[i] = merged;
         }
         return inputRegions;
     }
@@ -1074,7 +1101,7 @@ struct ShapePropagator
         std::vector<Region> idxBoxes;
 
         std::vector<int32_t> idxValues = graph.getConstantInt32(node.child_ids[1]);
-        
+
         bool exactIdxValues = countElements(idxShape) == idxValues.size();
 
         for (const auto &outReg : outputRegions)
@@ -1372,25 +1399,12 @@ struct ShapePropagator
                 Error::throw_err(ss.str());
             }
         }
+        if (isElementwise(node.opType))
+        {
+            return forwardElementwise(node, graph, parentRegions);
+        }
         switch (node.opType)
         {
-        case OpType::ADD:
-        case OpType::MUL:
-        case OpType::DIVIDE:
-        case OpType::POWER:
-        case OpType::SIN:
-        case OpType::COS:
-        case OpType::NEGATE:
-        case OpType::CAST:
-        case OpType::COPY_TO:
-        case OpType::CONTIGUOUS:
-        case OpType::LOG:
-        case OpType::LT:
-        case OpType::EQ:
-        case OpType::AND:
-        case OpType::OR:
-        case OpType::NOT:
-            return forwardElementwise(node, graph, parentRegions);
         case OpType::TRIU:
         {
             if (!parentRegions[1].empty())
@@ -1472,26 +1486,12 @@ struct ShapePropagator
 
     std::vector<std::vector<Region>> backward(const TensorNode &node, const Graph &graph, const std::vector<Region> &outputRegions)
     {
+        if (isElementwise(node.opType) || node.opType == OpType::INPUT)
+        {
+            return backwardElementwise(node.child_ids.size(), outputRegions);
+        }
         switch (node.opType)
         {
-        case OpType::INPUT:
-        case OpType::ADD:
-        case OpType::MUL:
-        case OpType::DIVIDE:
-        case OpType::POWER:
-        case OpType::SIN:
-        case OpType::COS:
-        case OpType::NEGATE:
-        case OpType::CAST:
-        case OpType::COPY_TO:
-        case OpType::CONTIGUOUS:
-        case OpType::LOG:
-        case OpType::LT:
-        case OpType::EQ:
-        case OpType::AND:
-        case OpType::OR:
-        case OpType::NOT:
-            return backwardElementwise(node, outputRegions);
         case OpType::TRIU:
             return {mergeRegions(outputRegions), makeFull(graph.getNode(node.child_ids[1]).getShape())};
         case OpType::SCATTER:

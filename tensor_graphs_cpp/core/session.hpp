@@ -221,12 +221,22 @@ struct Session
         {
             for (const auto &inst : g.instructions)
             {
-                if (inst.logical_id != LogicalId() && graph.constantStaging.count(inst.logical_id))
+                for (uint32_t i = 0; i < inst.children.size(); i++)
                 {
-                    if (written.insert(inst.logical_id).second)
+                    EClassId child = inst.children[i];
+                    if (!g.has_logical_id(child))
+                        continue;
+                    LogicalId logical_id = g.get_logical_id(child);
+                    if (graph.constantStaging.count(logical_id))
                     {
-                        uint64_t sizeBytes = countElements(graph.getNode(inst.logical_id).getShape()) * getDTypeSize(graph.getNode(inst.logical_id).dtype);
-                        memManager.write(inst.outBuffer.mem_space, inst.outBuffer.offset, graph.constantStaging.at(inst.logical_id)->data(), sizeBytes);
+                        if (written.insert(logical_id).second)
+                        {
+                            const TensorNode &node = graph.getNode(logical_id);
+                            const ParallelBuffer &buf = inst.inBuffers[i];
+                            memManager.write(buf.mem_space, buf.offset,
+                                             graph.constantStaging.at(logical_id)->data(),
+                                             node.getSizeBytes());
+                        }
                     }
                 }
             }

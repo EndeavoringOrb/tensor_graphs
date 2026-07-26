@@ -87,7 +87,8 @@ public:
 #ifdef USE_CUDA
             cudaDeviceSynchronize();
 #endif
-            Debug::checkValues(ctx.outputs, ctx.outViews, "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" + toString(kernel));
+            std::vector<const void *> c_outputs(ctx.outputs.begin(), ctx.outputs.end());
+            Debug::checkValues(c_outputs, ctx.outViews, ctx.inputs, ctx.inViews, kernel, "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" + toString(kernel));
 
             if (debugCallback)
             {

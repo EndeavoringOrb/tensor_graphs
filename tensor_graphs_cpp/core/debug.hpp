@@ -14,12 +14,15 @@
 #include "core/types.hpp"
 #include "core/memory.hpp"
 #include "core/misc.hpp"
+#include "core/shapes.hpp"
 
 namespace Debug
 {
     using Callback = std::function<void(LogicalId logicalId, const KernelContext &ctx, const void *data)>;
 
-    inline void checkValues(const std::vector<const void *> &ptrs, const std::vector<TensorView> &views, const std::string &context)
+    template <typename ErrorHandler>
+    inline void _checkValues(const std::vector<const void *> &ptrs, const std::vector<TensorView> &views,
+                             const std::string &context, ErrorHandler &&reportError)
     {
         for (uint64_t i = 0; i < ptrs.size(); ++i)
         {
@@ -48,10 +51,7 @@ namespace Debug
                     uint64_t idx = getStridedIndex(j, views[i].getShape(), views[i].strides);
                     if (std::isnan(data[idx]) || std::isinf(data[idx]))
                     {
-                        std::string msg = "[NaN/Inf Detection] Found NaN/Inf during \"" + context + "\" in buffer " + std::to_string(i) + " at element " + std::to_string(j) + " (flat index " + std::to_string(idx) + ")";
-                        std::cerr << "\n"
-                                  << msg << "\n";
-                        Error::throw_err(msg);
+                        reportError(i, j, idx);
                     }
                 }
             }
@@ -66,20 +66,118 @@ namespace Debug
                     bool is_nan = ((bits & 0x7F80) == 0x7F80) && ((bits & 0x007F) != 0);
                     if (is_inf || is_nan)
                     {
-                        std::string msg = "[NaN/Inf Detection] Found BF16 NaN/Inf during \"" + context + "\" in buffer " + std::to_string(i) + " at element " + std::to_string(j) + " (flat index " + std::to_string(idx) + ")";
-                        std::cerr << "\n"
-                                  << msg << "\n";
-                        Error::throw_err(msg);
+                        reportError(i, j, idx);
                     }
                 }
             }
         }
     }
 
-    inline void checkValues(const std::vector<void *> &ptrs, const std::vector<TensorView> &views, const std::string &context)
+    inline void checkValues(const std::vector<const void *> &ptrs, const std::vector<TensorView> &views, const std::string &context)
     {
-        std::vector<const void *> cptrs(ptrs.begin(), ptrs.end());
-        checkValues(cptrs, views, context);
+        _checkValues(ptrs, views, context, [&](uint64_t bufferIdx, uint64_t elemIdx, uint64_t flatIdx)
+                     {
+            std::string msg = "[NaN/Inf Detection] Found NaN/Inf during \"" + context + "\" in buffer " +
+                              std::to_string(bufferIdx) + " at element " + std::to_string(elemIdx) +
+                              " (flat index " + std::to_string(flatIdx) + ")";
+            std::cerr << "\n" << msg << "\n";
+            Error::throw_err(msg); });
+    }
+
+    inline void checkValues(const std::vector<const void *> &out_ptrs, const std::vector<TensorView> &out_views,
+                            const std::vector<const void *> &in_ptrs, const std::vector<TensorView> &in_views,
+                            const KernelEntry &kernel,
+                            const std::string &context)
+    {
+        _checkValues(out_ptrs, out_views, context, [&](uint64_t bufferIdx, uint64_t elemIdx, uint64_t flatIdx)
+                     {
+            std::string msg = "[NaN/Inf Detection] Found NaN/Inf during \"" + context + "\" in buffer " +
+                              std::to_string(bufferIdx) + " at element " + std::to_string(elemIdx) +
+                              " (flat index " + std::to_string(flatIdx) + ")";
+
+            if (isElementwise(kernel.opType))
+            {
+                ShapePropagator prop;
+                std::vector<uint32_t> coords = coordsFromFlatIndex(elemIdx, out_views[bufferIdx].getShape());
+                Region outReg;
+                for (uint32_t c : coords)
+                {
+                    outReg.region.push_back({c, c + 1});
+                }
+                std::vector<std::vector<Region>> inRegions = prop.backwardElementwise(in_ptrs.size(), {outReg});
+
+                msg += "\n  Relevant Input Values:";
+                for (size_t in_i = 0; in_i < in_ptrs.size(); ++in_i)
+                {
+                    if (!in_ptrs[in_i] || in_i >= inRegions.size())
+                        continue;
+
+                    const void *in_host_ptr = in_ptrs[in_i];
+#ifdef USE_CUDA
+                    std::vector<uint8_t> temp_in_host_data;
+                    cudaPointerAttributes in_attrs;
+                    if (cudaPointerGetAttributes(&in_attrs, in_ptrs[in_i]) == cudaSuccess && in_attrs.type == cudaMemoryTypeDevice)
+                    {
+                        uint64_t inSizeBytes = getRequiredBufferSize(in_views[in_i]) * getDTypeSize(in_views[in_i].dtype);
+                        temp_in_host_data.resize(inSizeBytes);
+                        cudaMemcpy(temp_in_host_data.data(), in_ptrs[in_i], inSizeBytes, cudaMemcpyDeviceToHost);
+                        in_host_ptr = temp_in_host_data.data();
+                    }
+#endif
+
+                    msg += "\n    Input " + std::to_string(in_i) + ":";
+                    const auto &regions = inRegions[in_i];
+                    int printCount = 0;
+                    for (const Region &r : regions)
+                    {
+                        std::vector<uint32_t> rShape;
+                        for (const Dim &d : r.region)
+                            rShape.push_back(d.stop - d.start);
+                        uint64_t rElems = countElements(rShape);
+                        for (uint64_t localFlat = 0; localFlat < rElems && printCount < 50; ++localFlat, ++printCount)
+                        {
+                            auto localCoords = coordsFromFlatIndex(localFlat, rShape);
+                            std::vector<uint32_t> absCoords = localCoords;
+                            for (size_t d = 0; d < r.region.size(); ++d)
+                            {
+                                absCoords[d] += r.region[d].start;
+                            }
+                            uint64_t inFlatIdx = flatIndexFromCoords(absCoords, in_views[in_i].getShape());
+                            uint64_t inStridedIdx = getStridedIndex(inFlatIdx, in_views[in_i].getShape(), in_views[in_i].strides);
+
+                            msg += "\n      " + toString(absCoords) + " = ";
+                            if (in_views[in_i].dtype == DType::FLOAT32)
+                            {
+                                msg += std::to_string(static_cast<const float *>(in_host_ptr)[inStridedIdx]);
+                            }
+                            else if (in_views[in_i].dtype == DType::INT32)
+                            {
+                                msg += std::to_string(static_cast<const int32_t *>(in_host_ptr)[inStridedIdx]);
+                            }
+                            else if (in_views[in_i].dtype == DType::BF16)
+                            {
+                                uint16_t bits = static_cast<const uint16_t *>(in_host_ptr)[inStridedIdx];
+                                uint32_t f32_bits = static_cast<uint32_t>(bits) << 16;
+                                float val;
+                                std::memcpy(&val, &f32_bits, 4);
+                                msg += std::to_string(val);
+                            }
+                            else
+                            {
+                                msg += "?";
+                            }
+                        }
+                        if (printCount >= 50)
+                        {
+                            msg += "\n      ... (truncated)";
+                            break;
+                        }
+                    }
+                }
+            }
+
+            std::cerr << "\n" << msg << "\n";
+            Error::throw_err(msg); });
     }
 
     struct RefIndexEntry

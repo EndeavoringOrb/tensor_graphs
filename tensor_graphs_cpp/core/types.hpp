@@ -19,6 +19,8 @@
 #include "core/serialization.hpp"
 using json = nlohmann::json;
 
+// TODO: split up into types/tensor_node.hpp, types/...
+
 // TODO: os & architecture detection should be in hardware.hpp and types should include hardware.hpp
 // --- OS Detection ---
 #if defined(_WIN32) || defined(_WIN64)
@@ -267,6 +269,27 @@ enum class DType : uint32_t
     _COUNT
 };
 
+inline uint64_t getDTypeSize(DType dtype)
+{
+    switch (dtype)
+    {
+    case DType::FLOAT32:
+        return 4;
+    case DType::INT32:
+        return 4;
+    case DType::INT64:
+        return 8;
+    case DType::BF16:
+        return 2;
+    case DType::BOOL:
+        return 1;
+    case DType::ANY:
+        return 0;
+    default:
+        Error::throw_err("Unknown DType size");
+    }
+}
+
 struct ParallelBuffer
 {
     BufferId id;         // unique buf id
@@ -292,6 +315,16 @@ struct Region
         return region.empty();
     }
 };
+
+inline uint64_t countElements(const std::vector<uint32_t> &shape)
+{
+    uint64_t count = 1;
+    for (uint32_t val : shape)
+    {
+        count *= val;
+    }
+    return count;
+}
 
 static std::vector<uint64_t> calcContiguousStrides(const std::vector<uint32_t> &targetShape)
 {
@@ -351,7 +384,49 @@ public:
         shape = _shape;
         strides = calcContiguousStrides(_shape);
     }
+
+    uint64_t getSizeBytes() const
+    {
+        return countElements(getShape()) * getDTypeSize(dtype);
+    }
 };
+
+inline uint64_t countElements(const TensorNode &node)
+{
+    return countElements(node.getShape());
+}
+
+struct TensorView
+{
+private:
+    std::vector<uint32_t> shape;
+
+public:
+    uint64_t offset = 0;           // Offset into the MemoryManager's DeviceBuffer
+    std::vector<uint64_t> strides; // Strides in terms of elements, not bytes
+    DType dtype;
+
+    TensorView() {}
+    TensorView(const std::vector<uint32_t> &_shape, const uint64_t _offset, const std::vector<uint64_t> &_strides, const DType &_dtype) : offset(_offset), shape(_shape), strides(_strides), dtype(_dtype) {}
+    TensorView(const TensorNode &node, uint64_t _offset) : offset(_offset), shape(node.getShape()), strides(node.strides), dtype(node.dtype) {}
+
+    const std::vector<uint32_t> &getShape() const
+    {
+        return shape;
+    }
+
+    void setShape(const std::vector<uint32_t> &_shape)
+    {
+        shape = _shape;
+        if (strides.empty() || shape.size() != strides.size())
+            strides = calcContiguousStrides(_shape);
+    }
+};
+
+inline uint64_t countElements(const TensorView &view)
+{
+    return countElements(view.getShape());
+}
 
 struct GraphPatternCacheKey
 {
@@ -543,16 +618,6 @@ inline uint64_t getStridedIndex(uint64_t flatIndex, const std::vector<uint32_t> 
     return stridedIndex;
 }
 
-inline uint64_t countElements(const std::vector<uint32_t> &shape)
-{
-    uint64_t count = 1;
-    for (uint32_t val : shape)
-    {
-        count *= val;
-    }
-    return count;
-}
-
 inline bool operator==(DType a, DType b)
 {
     return static_cast<uint32_t>(a) == static_cast<uint32_t>(b) ||
@@ -563,27 +628,6 @@ inline bool operator==(DType a, DType b)
 inline bool operator!=(DType a, DType b)
 {
     return !(a == b);
-}
-
-inline uint64_t getDTypeSize(DType dtype)
-{
-    switch (dtype)
-    {
-    case DType::FLOAT32:
-        return 4;
-    case DType::INT32:
-        return 4;
-    case DType::INT64:
-        return 8;
-    case DType::BF16:
-        return 2;
-    case DType::BOOL:
-        return 1;
-    case DType::ANY:
-        return 0;
-    default:
-        Error::throw_err("Unknown DType size");
-    }
 }
 
 inline constexpr bool isAtomic(OpType type)
@@ -758,49 +802,12 @@ inline bool isContiguous(const TensorNode &node)
     return isContiguous(node.strides, node.getShape());
 }
 
-inline uint64_t countElements(const TensorNode &node)
-{
-    return countElements(node.getShape());
-}
-
-struct TensorView
-{
-private:
-    std::vector<uint32_t> shape;
-
-public:
-    uint64_t offset = 0;           // Offset into the MemoryManager's DeviceBuffer
-    std::vector<uint64_t> strides; // Strides in terms of elements, not bytes
-    DType dtype;
-
-    TensorView() {}
-    TensorView(const std::vector<uint32_t> &_shape, const uint64_t _offset, const std::vector<uint64_t> &_strides, const DType &_dtype) : offset(_offset), shape(_shape), strides(_strides), dtype(_dtype) {}
-    TensorView(const TensorNode &node, uint64_t _offset) : offset(_offset), shape(node.getShape()), strides(node.strides), dtype(node.dtype) {}
-
-    const std::vector<uint32_t> &getShape() const
-    {
-        return shape;
-    }
-
-    void setShape(const std::vector<uint32_t> &_shape)
-    {
-        shape = _shape;
-        if (strides.empty() || shape.size() != strides.size())
-            strides = calcContiguousStrides(_shape);
-    }
-};
-
 inline bool isContiguous(const TensorView &view)
 {
     return isContiguous(view.strides, view.getShape());
 }
 
-inline uint64_t countElements(const TensorView &view)
-{
-    return countElements(view.getShape());
-}
-
-inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape, DType dtype)
+inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape, DType dtype) // TODO: redundant with TensorNode::getSizeBytes?
 {
     return countElements(shape) * getDTypeSize(dtype);
 }
