@@ -19,6 +19,69 @@ namespace Debug
 {
     using Callback = std::function<void(LogicalId logicalId, const KernelContext &ctx, const void *data)>;
 
+    inline void checkValues(const std::vector<const void *> &ptrs, const std::vector<TensorView> &views, const std::string &context)
+    {
+        for (uint64_t i = 0; i < ptrs.size(); ++i)
+        {
+            if (!ptrs[i])
+                continue;
+            uint64_t numElements = countElements(views[i]);
+
+            const void *host_ptr = ptrs[i];
+#ifdef USE_CUDA
+            std::vector<uint8_t> temp_host_data;
+            cudaPointerAttributes attrs;
+            if (cudaPointerGetAttributes(&attrs, ptrs[i]) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
+            {
+                uint64_t sizeBytes = getRequiredBufferSize(views[i]) * getDTypeSize(views[i].dtype);
+                temp_host_data.resize(sizeBytes);
+                cudaMemcpy(temp_host_data.data(), ptrs[i], sizeBytes, cudaMemcpyDeviceToHost);
+                host_ptr = temp_host_data.data();
+            }
+#endif
+
+            if (views[i].dtype == DType::FLOAT32)
+            {
+                const float *data = static_cast<const float *>(host_ptr);
+                for (uint64_t j = 0; j < numElements; ++j)
+                {
+                    uint64_t idx = getStridedIndex(j, views[i].getShape(), views[i].strides);
+                    if (std::isnan(data[idx]) || std::isinf(data[idx]))
+                    {
+                        std::string msg = "[NaN/Inf Detection] Found NaN/Inf during \"" + context + "\" in buffer " + std::to_string(i) + " at element " + std::to_string(j) + " (flat index " + std::to_string(idx) + ")";
+                        std::cerr << "\n"
+                                  << msg << "\n";
+                        Error::throw_err(msg);
+                    }
+                }
+            }
+            else if (views[i].dtype == DType::BF16)
+            {
+                const uint16_t *data = static_cast<const uint16_t *>(host_ptr);
+                for (uint64_t j = 0; j < numElements; ++j)
+                {
+                    uint64_t idx = getStridedIndex(j, views[i].getShape(), views[i].strides);
+                    uint16_t bits = data[idx];
+                    bool is_inf = (bits & 0x7F80) == 0x7F80 && (bits & 0x007F) == 0;
+                    bool is_nan = ((bits & 0x7F80) == 0x7F80) && ((bits & 0x007F) != 0);
+                    if (is_inf || is_nan)
+                    {
+                        std::string msg = "[NaN/Inf Detection] Found BF16 NaN/Inf during \"" + context + "\" in buffer " + std::to_string(i) + " at element " + std::to_string(j) + " (flat index " + std::to_string(idx) + ")";
+                        std::cerr << "\n"
+                                  << msg << "\n";
+                        Error::throw_err(msg);
+                    }
+                }
+            }
+        }
+    }
+
+    inline void checkValues(const std::vector<void *> &ptrs, const std::vector<TensorView> &views, const std::string &context)
+    {
+        std::vector<const void *> cptrs(ptrs.begin(), ptrs.end());
+        checkValues(cptrs, views, context);
+    }
+
     struct RefIndexEntry
     {
         uint64_t fileOffset;
@@ -260,7 +323,8 @@ namespace Debug
                     {
                         std::cout << "    [" << i << "] ";
 
-                        if (i < node.child_ids.size()) {
+                        if (i < node.child_ids.size())
+                        {
                             std::cout << "id=" << node.child_ids[i];
                         }
 

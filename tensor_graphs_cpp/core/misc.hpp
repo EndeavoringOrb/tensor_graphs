@@ -6,8 +6,6 @@
 #include "core/timer.hpp"
 #include <unordered_set>
 
-
-
 inline std::string toString(const std::vector<uint32_t> &shape)
 {
     std::stringstream ss;
@@ -148,14 +146,34 @@ inline std::string toString(const Region &reg)
     return ss.str();
 }
 
+inline std::string toString(const ParallelBuffer &buf)
+{
+    std::stringstream ss;
+    ss << "Buffer(id=" << buf.id << ", mem_space=" << buf.mem_space
+       << ", size=" << buf.size << ", lifetime=[" << buf.start << ", " << buf.end
+       << "], offset=" << buf.offset << ")";
+    return ss.str();
+}
+
 inline std::string toString(const OpInstruction &inst)
 {
     std::stringstream ss;
-    ss << "OpInstruction\n"
-       << "  EClass ID: " << inst.eclass_id << "\n"
-       << "  Logical ID: " << inst.logical_id << "\n"
-       << "  Kernel ID: " << inst.kernel_id << "\n";
-       // TODO: cout the rest
+    ss << "OpInstruction {\n"
+       << "  EClass ID:    " << inst.eclass_id << "\n"
+       << "  Logical ID:   " << inst.logical_id << "\n"
+       << "  Kernel ID:    " << inst.kernel_id << "\n"
+       << "  Children:     " << toString(inst.children) << "\n"
+       << "  Out Buffer:   " << toString(inst.outBuffer) << "\n"
+       << "  In Buffers:   [";
+    for (uint64_t i = 0; i < inst.inBuffers.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << toString(inst.inBuffers[i]);
+    }
+    ss << "]\n"
+       << "  Debug Origin: " << (inst.debugOrigin.empty() ? "N/A" : inst.debugOrigin) << "\n"
+       << "}";
     return ss.str();
 }
 

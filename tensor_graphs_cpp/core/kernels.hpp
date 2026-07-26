@@ -192,6 +192,48 @@ struct KernelEntry
     }
 };
 
+inline std::string toString(const KernelEntry &entry)
+{
+    std::stringstream ss;
+    ss << "KernelEntry {\n"
+       << "  UID:                 " << entry.uid << "\n"
+       << "  OpType:              " << toString(entry.opType) << "\n"
+       << "  OpName:              " << (entry.opName.empty() ? "N/A" : entry.opName) << "\n"
+       << "  Min Num Inputs:      " << entry.min_num_inputs << "\n"
+       << "  Max Num Inputs:      " << entry.max_num_inputs << "\n"
+       << "  Match Func:          " << (entry.match ? "present" : "nullptr") << "\n"
+       << "  Run Func:            " << (entry.run ? "present" : "nullptr") << "\n"
+       << "  Ref Factory:         " << (entry.refFactory ? "present" : "nullptr") << "\n"
+       << "  Safe Inplace Idxs:   " << toString(entry.safe_inplace_idxs) << "\n"
+       << "  Is View:             " << (entry.is_view ? "true" : "false") << "\n"
+       << "  Is Reference:        " << (entry.isReference ? "true" : "false") << "\n"
+       << "  Infer View Func:     " << (entry.inferView ? "present" : "nullptr") << "\n"
+       << "  Output MemSpace:     " << entry.output_mem_space << "\n"
+       << "  Engines:             " << toString(entry.engines) << "\n"
+       << "  DTypes:              " << toString(entry.dtypes) << "\n"
+       << "  Dummy Shapes:        [";
+    for (uint64_t i = 0; i < entry.dummyShapes.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << toString(entry.dummyShapes[i]);
+    }
+    ss << "]\n"
+       << "  Requires Contiguous: [";
+    for (uint64_t i = 0; i < entry.requiresContiguous.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << (entry.requiresContiguous[i] ? "true" : "false");
+    }
+    ss << "]\n"
+       << "  Input MemSpaces:     " << toString(entry.input_mem_spaces) << "\n"
+       << "}";
+    return ss.str();
+}
+
+inline std::ostream &operator<<(std::ostream &os, const KernelEntry &entry) { return os << toString(entry); }
+
 class KernelRegistry
 {
 public:

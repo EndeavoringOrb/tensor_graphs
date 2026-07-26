@@ -44,7 +44,8 @@ public:
                     Error::throw_err("Input DeviceBuffer not found");
 
                 LogicalId logical_id;
-                if (compiled.has_logical_id(inst.children[i])) {
+                if (compiled.has_logical_id(inst.children[i]))
+                {
                     logical_id = compiled.get_logical_id(inst.children[i]);
                 }
                 inBufObj->setupInput(ctx, inView, logical_id);
@@ -56,17 +57,37 @@ public:
                 Error::throw_err("Output DeviceBuffer not found");
 
             LogicalId logical_id;
-            if (compiled.has_logical_id(inst.eclass_id)) {
+            if (compiled.has_logical_id(inst.eclass_id))
+            {
                 logical_id = compiled.get_logical_id(inst.eclass_id);
             }
             outBufObj->setupOutput(ctx, outView, logical_id);
 
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
+            std::string opName = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
+
+            if (OpenCLState::get().initialized)
+            {
+                clFinish(OpenCLState::get().queue);
+            }
+#ifdef USE_CUDA
+            cudaDeviceSynchronize();
+#endif
+            Debug::checkValues(ctx.inputs, ctx.inViews, "(inputs) inst # " + std::to_string(idx) + toString(inst) + "\n" + toString(kernel));
 
             if (!kernel.is_view && kernel.run)
             {
                 kernel.run(ctx);
             }
+
+            if (OpenCLState::get().initialized)
+            {
+                clFinish(OpenCLState::get().queue);
+            }
+#ifdef USE_CUDA
+            cudaDeviceSynchronize();
+#endif
+            Debug::checkValues(ctx.outputs, ctx.outViews, "(output) inst # " + std::to_string(idx) + toString(inst) + "\n" + toString(kernel));
 
             if (debugCallback)
             {
