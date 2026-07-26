@@ -73,7 +73,7 @@ public:
 #ifdef USE_CUDA
             cudaDeviceSynchronize();
 #endif
-            Debug::checkValues(ctx.inputs, ctx.inViews, "(inputs) inst # " + std::to_string(idx) + toString(inst) + "\n" + toString(kernel));
+            Debug::checkValues(ctx.inputs, ctx.inViews, "(inputs) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" + toString(kernel));
 
             if (!kernel.is_view && kernel.run)
             {
@@ -87,7 +87,7 @@ public:
 #ifdef USE_CUDA
             cudaDeviceSynchronize();
 #endif
-            Debug::checkValues(ctx.outputs, ctx.outViews, "(output) inst # " + std::to_string(idx) + toString(inst) + "\n" + toString(kernel));
+            Debug::checkValues(ctx.outputs, ctx.outViews, "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" + toString(kernel));
 
             if (debugCallback)
             {

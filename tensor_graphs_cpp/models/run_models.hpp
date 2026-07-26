@@ -3,20 +3,20 @@
 #include "core/graph.hpp"
 #include "core/memory.hpp"
 #include "models/gemma-3-270m.hpp"
-#include "models/flux-klein-4b.hpp"
+// #include "models/flux-klein-4b.hpp"
 #include "models/qwen-3.6-35b-a3b.hpp"
 
 struct ModelGraphRoots
 {
-    std::vector<uint32_t> roots;
-    std::vector<uint32_t> inputs;
+    std::vector<LogicalId> roots;
+    std::vector<LogicalId> inputs;
 };
 
 inline ModelGraphRoots build_gemma_graph(Graph &g, MemoryManager &mem)
 {
     Gemma3ModelConfig cfg;
     uint32_t maxSeqLen = 8;
-    uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32);
+    LogicalId inputIdsId = g.input({1, maxSeqLen}, DType::INT32);
     Gemma3Model gemma(cfg, maxSeqLen, g, mem, "resources/model.safetensors");
     return {{gemma.build_graph(inputIdsId)}, {inputIdsId}};
 }
@@ -25,36 +25,36 @@ inline ModelGraphRoots build_qwen_graph(Graph &g, MemoryManager &mem)
 {
     Qwen3_6_35B_A3B_Config cfg;
     uint32_t maxSeqLen = 8;
-    uint32_t inputIdsId = g.input({1, maxSeqLen}, DType::INT32);
+    LogicalId inputIdsId = g.input({1, maxSeqLen}, DType::INT32);
     Qwen3_6_35B_A3B_Model qwen(cfg, maxSeqLen, g, mem, "models/Qwen/Qwen3.6-35B-A3B");
     return {{qwen.build_graph(inputIdsId)}, {inputIdsId}};
 }
 
-inline ModelGraphRoots build_flux_graph(Graph &g, MemoryManager &mem)
-{
-    FluxConfig cfg;
-    uint32_t width = 512, height = 512;
-    uint32_t latent_w = width / 16, latent_h = height / 16;
-    uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
+// inline ModelGraphRoots build_flux_graph(Graph &g, MemoryManager &mem)
+// {
+//     FluxConfig cfg;
+//     uint32_t width = 512, height = 512;
+//     uint32_t latent_w = width / 16, latent_h = height / 16;
+//     uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
 
-    FluxTextEncoder text_encoder(cfg, g, mem, "flux-klein-4b/text_encoder");
-    uint32_t in_ids = g.input({1, txt_seq}, DType::INT32);
-    uint32_t text_root = text_encoder.build_graph(in_ids);
+//     FluxTextEncoder text_encoder(cfg, g, mem, "flux-klein-4b/text_encoder");
+//     LogicalId in_ids = g.input({1, txt_seq}, DType::INT32);
+//     LogicalId text_root = text_encoder.build_graph(in_ids);
 
-    FluxTransformer trans(cfg, g, mem, "flux-klein-4b/transformer", latent_h, latent_w);
-    uint32_t in_latent = g.input({1, cfg.latent_channels, latent_h, latent_w}, DType::FLOAT32);
-    uint32_t in_txt_emb = g.input({1, txt_seq, cfg.text_dim}, DType::FLOAT32);
-    uint32_t in_t = g.input({1}, DType::FLOAT32);
-    uint32_t in_cos = g.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32);
-    uint32_t in_sin = g.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32);
-    uint32_t trans_root = trans.build_graph(in_latent, in_txt_emb, in_t, in_cos, in_sin);
+//     FluxTransformer trans(cfg, g, mem, "flux-klein-4b/transformer", latent_h, latent_w);
+//     LogicalId in_latent = g.input({1, cfg.latent_channels, latent_h, latent_w}, DType::FLOAT32);
+//     LogicalId in_txt_emb = g.input({1, txt_seq, cfg.text_dim}, DType::FLOAT32);
+//     LogicalId in_t = g.input({1}, DType::FLOAT32);
+//     LogicalId in_cos = g.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32);
+//     LogicalId in_sin = g.input({1, 1, total_seq, cfg.head_dim}, DType::FLOAT32);
+//     LogicalId trans_root = trans.build_graph(in_latent, in_txt_emb, in_t, in_cos, in_sin);
 
-    FluxVAEDecoder vae(cfg, g, mem, "flux-klein-4b/vae", latent_h, latent_w);
-    uint32_t in_vae_latent = g.input({1, cfg.vae_channels, latent_h, latent_w}, DType::FLOAT32);
-    uint32_t vae_root = vae.build_graph(in_vae_latent);
+//     FluxVAEDecoder vae(cfg, g, mem, "flux-klein-4b/vae", latent_h, latent_w);
+//     LogicalId in_vae_latent = g.input({1, cfg.vae_channels, latent_h, latent_w}, DType::FLOAT32);
+//     LogicalId vae_root = vae.build_graph(in_vae_latent);
 
-    return {{text_root, trans_root, vae_root}, {in_ids, in_latent, in_txt_emb, in_t, in_cos, in_sin, in_vae_latent}};
-}
+//     return {{text_root, trans_root, vae_root}, {in_ids, in_latent, in_txt_emb, in_t, in_cos, in_sin, in_vae_latent}};
+// }
 
 std::vector<float> get_flux_schedule(int num_steps, int image_seq_len)
 {

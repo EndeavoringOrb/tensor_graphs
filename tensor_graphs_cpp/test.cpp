@@ -15,7 +15,7 @@
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/shapes.hpp"
-#include "core/planner.hpp"
+#include "core/plan/planner.hpp"
 #include "core/session.hpp"
 #include "core/loaders/safetensors.hpp"
 #include "core/cost_model.hpp"
@@ -193,19 +193,19 @@ void runShapePropagationTests()
     std::cout << "shape propagation tests" << std::endl
               << std::flush;
     ShapePropagator prop;
-    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> uint32_t
+    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> LogicalId
     {
         return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
     };
-    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> uint32_t
+    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> LogicalId
     {
         return graph.input(shape, DType::FLOAT32, {});
     };
     {
         Graph graph;
-        uint32_t x = makeFloatInput(graph, {4, 5});
-        uint32_t axis = makeIntConst(graph, {1});
-        uint32_t sumId = graph.sum(x, axis);
+        LogicalId x = makeFloatInput(graph, {4, 5});
+        LogicalId axis = makeIntConst(graph, {1});
+        LogicalId sumId = graph.sum(x, axis);
         prop.inferShapeRecursive(sumId, graph);
         auto forward = prop.forward(graph.getNode(sumId), graph, {{makeRegion({{1, 3}, {2, 4}})}, {}});
         assertRegionListEquals(forward, {makeRegion({{1, 3}, {0, 1}})}, "SUM forward");
@@ -215,9 +215,9 @@ void runShapePropagationTests()
     }
     {
         Graph graph;
-        uint32_t x = makeFloatInput(graph, {4, 5});
-        uint32_t axis = makeIntConst(graph, {1});
-        uint32_t maxId = graph.max(x, axis);
+        LogicalId x = makeFloatInput(graph, {4, 5});
+        LogicalId axis = makeIntConst(graph, {1});
+        LogicalId maxId = graph.max(x, axis);
         prop.inferShapeRecursive(maxId, graph);
         auto forward = prop.forward(graph.getNode(maxId), graph, {{makeRegion({{0, 4}, {1, 3}})}, {}});
         assertRegionListEquals(forward, {makeRegion({{0, 4}, {0, 1}})}, "MAX forward");
@@ -226,9 +226,9 @@ void runShapePropagationTests()
     }
     {
         Graph graph;
-        uint32_t x = makeFloatInput(graph, {2, 3});
-        uint32_t dims = makeIntConst(graph, {1, 0});
-        uint32_t permId = graph.permute(x, dims);
+        LogicalId x = makeFloatInput(graph, {2, 3});
+        LogicalId dims = makeIntConst(graph, {1, 0});
+        LogicalId permId = graph.permute(x, dims);
         prop.inferShapeRecursive(permId, graph);
         auto forward = prop.forward(graph.getNode(permId), graph,
                                     {{makeRegion({{0, 1}, {1, 3}}), makeRegion({{1, 2}, {0, 2}})}, {}});
@@ -247,10 +247,10 @@ void runShapePropagationTests()
     }
     {
         Graph graph;
-        uint32_t a = makeFloatInput(graph, {2, 2});
-        uint32_t b = makeFloatInput(graph, {2, 2});
-        uint32_t axis = makeIntConst(graph, {0});
-        uint32_t concatId = graph.concat({a, b}, axis);
+        LogicalId a = makeFloatInput(graph, {2, 2});
+        LogicalId b = makeFloatInput(graph, {2, 2});
+        LogicalId axis = makeIntConst(graph, {0});
+        LogicalId concatId = graph.concat({a, b}, axis);
         prop.inferShapeRecursive(concatId, graph);
         auto forward = prop.forward(graph.getNode(concatId), graph,
                                     {{makeRegion({{0, 1}, {0, 2}})}, {makeRegion({{1, 2}, {1, 2}})}, {}});
@@ -266,10 +266,10 @@ void runShapePropagationTests()
     }
     {
         Graph graph;
-        uint32_t x = makeFloatInput(graph, {2, 2});
-        uint32_t repeats = makeIntConst(graph, {3});
-        uint32_t axis = makeIntConst(graph, {0});
-        uint32_t repeatId = graph.repeat(x, repeats, axis);
+        LogicalId x = makeFloatInput(graph, {2, 2});
+        LogicalId repeats = makeIntConst(graph, {3});
+        LogicalId axis = makeIntConst(graph, {0});
+        LogicalId repeatId = graph.repeat(x, repeats, axis);
         prop.inferShapeRecursive(repeatId, graph);
         auto forward = prop.forward(graph.getNode(repeatId), graph, {{makeRegion({{1, 2}, {0, 2}})}, {}, {}});
         assertRegionListEquals(forward, {makeRegion({{3, 6}, {0, 2}})}, "REPEAT forward");
@@ -278,11 +278,11 @@ void runShapePropagationTests()
     }
     {
         Graph graph;
-        uint32_t x = makeFloatInput(graph, {8});
-        uint32_t starts = makeIntConst(graph, {2});
-        uint32_t ends = makeIntConst(graph, {6});
-        uint32_t steps = makeIntConst(graph, {1});
-        uint32_t sliceId = graph.slice(x, starts, ends, steps);
+        LogicalId x = makeFloatInput(graph, {8});
+        LogicalId starts = makeIntConst(graph, {2});
+        LogicalId ends = makeIntConst(graph, {6});
+        LogicalId steps = makeIntConst(graph, {1});
+        LogicalId sliceId = graph.slice(x, starts, ends, steps);
         prop.inferShapeRecursive(sliceId, graph);
         auto forward = prop.forward(graph.getNode(sliceId), graph, {{makeRegion({{2, 3}}), makeRegion({{5, 6}})}, {}, {}, {}});
         assertRegionListEquals(forward, {makeRegion({{0, 1}}), makeRegion({{3, 4}})}, "SLICE forward");
@@ -291,12 +291,12 @@ void runShapePropagationTests()
     }
     {
         Graph graph;
-        uint32_t target = makeFloatInput(graph, {8});
-        uint32_t updates = makeFloatInput(graph, {4});
-        uint32_t starts = makeIntConst(graph, {2});
-        uint32_t ends = makeIntConst(graph, {6});
-        uint32_t steps = makeIntConst(graph, {1});
-        uint32_t scatterId = graph.scatter(target, updates, starts, ends, steps);
+        LogicalId target = makeFloatInput(graph, {8});
+        LogicalId updates = makeFloatInput(graph, {4});
+        LogicalId starts = makeIntConst(graph, {2});
+        LogicalId ends = makeIntConst(graph, {6});
+        LogicalId steps = makeIntConst(graph, {1});
+        LogicalId scatterId = graph.scatter(target, updates, starts, ends, steps);
         prop.inferShapeRecursive(scatterId, graph);
         auto forward = prop.forward(graph.getNode(scatterId), graph, {{makeRegion({{0, 2}})}, {makeRegion({{1, 3}})}, {}, {}, {}});
         assertRegionListEquals(forward, {makeRegion({{0, 2}}), makeRegion({{3, 5}})}, "SCATTER forward");
@@ -306,9 +306,9 @@ void runShapePropagationTests()
     }
     {
         Graph graph;
-        uint32_t data = makeFloatInput(graph, {4, 3});
-        uint32_t idx = makeIntConst(graph, {2});
-        uint32_t gatherId = graph.gather(data, idx);
+        LogicalId data = makeFloatInput(graph, {4, 3});
+        LogicalId idx = makeIntConst(graph, {2});
+        LogicalId gatherId = graph.gather(data, idx);
         prop.inferShapeRecursive(gatherId, graph);
         auto forward = prop.forward(graph.getNode(gatherId), graph, {{makeRegion({{1, 3}, {0, 3}})}, {makeRegion({{0, 2}})}});
         assertRegionListEquals(forward, {makeRegion({{0, 2}, {0, 3}})}, "GATHER forward");
@@ -318,14 +318,14 @@ void runShapePropagationTests()
     }
     {
         Graph graph;
-        uint32_t data = makeFloatInput(graph, {4, 3});
-        uint32_t idxSrc = makeIntConst(graph, {1, 3, 0, 2});
-        uint32_t sliceStart = makeIntConst(graph, {0});
-        uint32_t sliceEnd = makeIntConst(graph, {2});
-        uint32_t sliceStep = makeIntConst(graph, {1});
-        uint32_t idx = graph.slice(idxSrc, sliceStart, sliceEnd, sliceStep);
+        LogicalId data = makeFloatInput(graph, {4, 3});
+        LogicalId idxSrc = makeIntConst(graph, {1, 3, 0, 2});
+        LogicalId sliceStart = makeIntConst(graph, {0});
+        LogicalId sliceEnd = makeIntConst(graph, {2});
+        LogicalId sliceStep = makeIntConst(graph, {1});
+        LogicalId idx = graph.slice(idxSrc, sliceStart, sliceEnd, sliceStep);
         prop.inferShapeRecursive(idx, graph);
-        uint32_t gatherId = graph.gather(data, idx);
+        LogicalId gatherId = graph.gather(data, idx);
         prop.inferShapeRecursive(gatherId, graph);
         auto backward = prop.backward(graph.getNode(gatherId), graph, {makeRegion({{0, 2}, {0, 3}})});
         assertRegionListEquals(backward[0], {makeRegion({{1, 2}, {0, 3}}), makeRegion({{3, 4}, {0, 3}})}, "GATHER backward sliced indices data");
@@ -404,7 +404,6 @@ std::vector<float> executeReferenceGraph(
             inputViews.push_back(views[pid]);
             TensorNode inNode = graph.getNode(pid);
             inNode.strides = views[pid].strides;
-            inNode.viewOffset = views[pid].offset / getDTypeSize(inNode.dtype);
             inputNodes.push_back(inNode);
         }
 
@@ -451,7 +450,6 @@ std::vector<float> executeReferenceGraph(
             LogicalId parentId = node.child_ids[0];
             results[nodeId] = results[parentId];
             chosenOutView.strides = dummyOutNode.strides;
-            chosenOutView.offset = dummyOutNode.viewOffset * elemSize;
             views[nodeId] = chosenOutView;
             continue;
         }
@@ -464,7 +462,7 @@ std::vector<float> executeReferenceGraph(
 
         if (kernel.run)
         {
-            kernel.run(KernelContext(inputPtrs, outputPtrs, inputViews, outputViews)); // TODO: construct inputPtrs, outputPtrs, inputViews, outputViews on ctx.inputs, ... instead of creating at last moment
+            kernel.run(KernelContext(inputPtrs, outputPtrs, inputViews, outputViews));
         }
     }
 
@@ -508,7 +506,7 @@ std::vector<float> executeReferenceGraph(
 std::vector<float> executeFusedKernel(
     const KernelEntry &kernel,
     const std::vector<std::vector<uint8_t>> &inputData,
-    const std::vector<uint32_t> &inputIds,
+    const std::vector<LogicalId> &inputIds,
     const std::vector<uint32_t> &outShape,
     const std::vector<uint64_t> &outStrides,
     DType outDType,
@@ -518,7 +516,6 @@ std::vector<float> executeFusedKernel(
     {
         Error::throw_err("Fused kernel " + kernel.opName + " inputs count mismatch");
     }
-    
 
     Record r;
     r.kernelId = kernel.uid;
@@ -566,7 +563,6 @@ std::vector<float> executeFusedKernel(
             dummyInputs[i].setShape(pk.inViews[i].getShape());
             dummyInputs[i].strides = pk.inViews[i].strides;
             dummyInputs[i].dtype = pk.inViews[i].dtype;
-            dummyInputs[i].viewOffset = pk.inViews[i].offset / getDTypeSize(dummyInputs[i].dtype);
         }
         TensorNode dummyOutput;
         dummyOutput.setShape(outShape);
@@ -574,7 +570,6 @@ std::vector<float> executeFusedKernel(
         kernel.inferView(dummyOutput, dummyInputs, graph);
 
         outView.strides = dummyOutput.strides;
-        outView.offset = dummyOutput.viewOffset * getDTypeSize(outDType);
 
         return flattenOutput(pk.inputBuffers[0].hostData.data() + outView.offset, outView.getShape(), outView.strides, outView.dtype);
     }
@@ -596,12 +591,12 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
     result.inputIds.resize(kernel.min_num_inputs);
 
     std::vector<bool> isConstantParam(kernel.min_num_inputs, false);
-    std::vector<std::vector<int32_t>> constantValues(kernel.numInputs);
+    std::vector<std::vector<int32_t>> constantValues(kernel.min_num_inputs);
 
     if (!kernel.isReference && kernel.refFactory)
     {
         Graph tempGraph;
-        std::vector<uint32_t> tempInputs;
+        std::vector<LogicalId> tempInputs;
         for (uint64_t i = 0; i < kernel.min_num_inputs; ++i)
         {
             DType d = static_cast<uint32_t>(kernel.dtypes[i]) == static_cast<uint32_t>(DType::ANY) ? DType::FLOAT32 : kernel.dtypes[i];
@@ -614,9 +609,9 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         {
             const TensorNode &n = pair.second;
 
-            auto traceToInputIdx = [&](uint32_t pid) -> int
+            auto traceToInputIdx = [&](LogicalId pid) -> int
             {
-                uint32_t curr = pid;
+                LogicalId curr = pid;
                 while (tempGraph.hasNode(curr) &&
                        (tempGraph.getNode(curr).opType == OpType::CONTIGUOUS ||
                         tempGraph.getNode(curr).opType == OpType::CAST ||
@@ -770,7 +765,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
 
     for (uint64_t i = 0; i < kernel.min_num_inputs; ++i)
     {
-        uint32_t id = UINT32_MAX;
+        LogicalId id;
         DType dtype = static_cast<uint32_t>(kernel.dtypes[i]) == static_cast<uint32_t>(DType::ANY) ? DType::FLOAT32 : kernel.dtypes[i];
         uint64_t elements = countElements(kernel.dummyShapes[i]);
         uint64_t sizeBytes = elements * getDTypeSize(dtype);
@@ -815,8 +810,6 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             dummyInputs[idx].setShape(rec.inputShapes[idx]);
             dummyInputs[idx].strides = rec.inputStrides[idx];
             dummyInputs[idx].dtype = rec.inputDTypes[idx];
-
-            
         }
 
         TensorNode dummyOutput;
@@ -849,8 +842,8 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
 
         Graph graph;
         std::vector<std::vector<uint8_t>> rawData(rec.inputShapes.size());
-        std::unordered_map<uint32_t, std::vector<uint8_t>> rawInputData;
-        std::vector<uint32_t> inputIds(rec.inputShapes.size());
+        std::unordered_map<LogicalId, std::vector<uint8_t>> rawInputData;
+        std::vector<LogicalId> inputIds(rec.inputShapes.size());
 
         for (uint64_t i = 0; i < rec.inputShapes.size(); ++i)
         {
@@ -919,7 +912,7 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             }
             else
             {
-                inputIds[i] = graph.input(rec.inputShapes[i], rec.inputDTypes[i], {}, StorageType::PERSISTENT);
+                inputIds[i] = graph.input(rec.inputShapes[i], rec.inputDTypes[i], {});
                 if (rec.inputDTypes[i] == DType::INT32)
                 {
                     graph.constantStaging[inputIds[i]] = std::make_shared<std::vector<uint8_t>>(contiguousData);
@@ -930,7 +923,7 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
             rawInputData[inputIds[i]] = contiguousData;
         }
 
-        uint32_t rootId = kernel.refFactory(inputIds, graph);
+        LogicalId rootId = kernel.refFactory(inputIds, graph);
 
         // Reference graph will handle the continuous mapping identically internally
         std::vector<float> refOutput = executeReferenceGraph(rootId, graph, rawInputData, false);
@@ -952,9 +945,9 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
     }
 }
 
-std::unordered_map<uint64_t, std::vector<Record>> loadCallRecords(const std::string &path)
+std::unordered_map<KernelId, std::vector<Record>> loadCallRecords(const std::string &path)
 {
-    std::unordered_map<uint64_t, std::vector<Record>> records;
+    std::unordered_map<KernelId, std::vector<Record>> records;
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open())
         return records;
@@ -1004,7 +997,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         BinaryReader br(infoFile);
         Record rec;
         br.read(rec);
-        OpType opType = static_cast<OpType>(rec.kernelId);
+        OpType opType = static_cast<OpType>(rec.kernelId.value);
 
         SafetensorsLoader loader(dataPath);
         std::vector<std::vector<uint8_t>> inputData;
@@ -1036,9 +1029,9 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         for (auto &vec : inputData)
             inPtrs.push_back(vec.data());
 
-        std::vector<uint32_t> outShape = rec.outputShapes[0];
-        std::vector<uint64_t> outStrides = rec.outputStrides[0];
-        DType outDType = rec.outputDTypes[0];
+        std::vector<uint32_t> outShape = rec.outputShape;
+        std::vector<uint64_t> outStrides = rec.outputStrides;
+        DType outDType = rec.outputDType;
         uint64_t outSizeBytes = countElements(outShape) * getDTypeSize(outDType);
         std::vector<uint8_t> expectedData(outSizeBytes);
         loader.loadTensor("output", expectedData.data(), outSizeBytes);
@@ -1074,7 +1067,6 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
             for (uint64_t k = 0; k < dummyInputNodes.size(); ++k)
             {
                 dummyInputNodes[k].strides = inViews[k].strides;
-                dummyInputNodes[k].viewOffset = inViews[k].offset / getDTypeSize(dummyInputNodes[k].dtype);
             }
             kernel.inferView(dummyOutNode, dummyInputNodes, dummyGraph);
             uint64_t elements = countElements(outShape);
@@ -1084,7 +1076,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
                 float *dst = reinterpret_cast<float *>(actualData.data());
                 for (uint64_t k = 0; k < elements; ++k)
                 {
-                    uint64_t srcIdx = dummyOutNode.viewOffset + getStridedIndex(k, dummyOutNode.getShape(), dummyOutNode.strides);
+                    uint64_t srcIdx = getStridedIndex(k, dummyOutNode.getShape(), dummyOutNode.strides);
                     dst[k] = src[srcIdx];
                 }
             }
@@ -1094,14 +1086,14 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
                 int32_t *dst = reinterpret_cast<int32_t *>(actualData.data());
                 for (uint64_t k = 0; k < elements; ++k)
                 {
-                    uint64_t srcIdx = dummyOutNode.viewOffset + getStridedIndex(k, dummyOutNode.getShape(), dummyOutNode.strides);
+                    uint64_t srcIdx = getStridedIndex(k, dummyOutNode.getShape(), dummyOutNode.strides);
                     dst[k] = src[srcIdx];
                 }
             }
         }
         else if (kernel.run)
         {
-            kernel.run(KernelContext(inPtrs, outPtrs, inViews, outViews)); // TODO: construct inPtrs, outPtrs, inViews, outViews on ctx.inputs, ... instead of creating at last moment
+            kernel.run(KernelContext(inPtrs, outPtrs, inViews, outViews));
         }
 
         bool ok = false;
@@ -1137,10 +1129,9 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
               << std::endl;
 }
 
-// TODO: this is sort of redundant with Session::loadCache
-std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
+std::unordered_map<KernelId, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
 {
-    std::unordered_map<uint64_t, std::vector<Record>> recordsByUid;
+    std::unordered_map<KernelId, std::vector<Record>> recordsByUid;
     std::unordered_set<std::string> seen;
 
     std::ifstream file(cachePath, std::ios::binary);
@@ -1172,11 +1163,11 @@ std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std:
 
             for (const auto &inst : cg.instructions)
             {
-                if (inst.fullKernelId == 0)
+                if (inst.kernel_id.value == 0)
                     continue;
 
                 Record r;
-                r.kernelId = inst.fullKernelId;
+                r.kernelId = inst.kernel_id;
                 r.buildContextId = BUILD_CONTEXT_ID;
                 r.hwTag = HW_TAG;
                 r.runTime = 0.0f;
@@ -1195,23 +1186,34 @@ std::unordered_map<uint64_t, std::vector<Record>> getRecordsFromCache(const std:
 
                     uint64_t ruleIdx = std::min((uint64_t)i, static_cast<uint64_t>(kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1));
                     MemSpace ms = {1, HandleType::CPP};
-                    if (!kernel.input_mem_spaces.empty() && ruleIdx < kernel.input_mem_spaces.size()) {
+                    if (!kernel.input_mem_spaces.empty() && ruleIdx < kernel.input_mem_spaces.size())
+                    {
                         ms = kernel.input_mem_spaces[ruleIdx];
                     }
                     r.input_mem_spaces.push_back(ms);
 
-                    if (cg.has_logical_id(inId)) {
+                    if (cg.has_logical_id(inId))
+                    {
                         LogicalId logicalId = cg.get_logical_id(inId);
-                        if (cg.constantStaging.count(EClassId{logicalId.value})) {
+                        if (cg.constantStaging.count(EClassId{logicalId.value}))
+                        {
                             r.inputConstants.push_back(*cg.constantStaging.at(EClassId{logicalId.value}));
-                        } else if (cg.constantStaging.count(inId)) {
+                        }
+                        else if (cg.constantStaging.count(inId))
+                        {
                             r.inputConstants.push_back(*cg.constantStaging.at(inId));
-                        } else {
+                        }
+                        else
+                        {
                             r.inputConstants.push_back({});
                         }
-                    } else if (cg.constantStaging.count(inId)) {
+                    }
+                    else if (cg.constantStaging.count(inId))
+                    {
                         r.inputConstants.push_back(*cg.constantStaging.at(inId));
-                    } else {
+                    }
+                    else
+                    {
                         r.inputConstants.push_back({});
                     }
                 }
@@ -1266,7 +1268,7 @@ int main(int argc, char *argv[])
         runPythonTests();
     }
 
-    std::unordered_map<uint64_t, std::vector<Record>> recordsByUid;
+    std::unordered_map<KernelId, std::vector<Record>> recordsByUid;
     if (!cachePath.empty())
     {
         recordsByUid = getRecordsFromCache(cachePath);
@@ -1320,12 +1322,12 @@ int main(int argc, char *argv[])
             // 1. Dummy Shapes Test
             Graph refGraph;
             TestInputs refInputs = createTestInputs(refGraph, kernel);
-            uint32_t rootId = kernel.refFactory(refInputs.inputIds, refGraph);
+            LogicalId rootId = kernel.refFactory(refInputs.inputIds, refGraph);
 
             // Synchronize physical rawData with any stride changes made by refFactory
             for (uint64_t i = 0; i < kernel.min_num_inputs; ++i)
             {
-                uint32_t id = refInputs.inputIds[i];
+                LogicalId id = refInputs.inputIds[i];
                 const TensorNode &node = refGraph.getNode(id);
                 if (!node.strides.empty() && node.strides != calcContiguousStrides(node.getShape()))
                 {

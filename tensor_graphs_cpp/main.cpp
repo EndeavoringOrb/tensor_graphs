@@ -113,8 +113,8 @@ void run_autoregressive_llm(
 
     std::cout << "Building " << model_name << " Graph..." << std::endl;
     auto roots = builder(g, mem);
-    uint32_t logits_id = roots.roots[0];
-    uint32_t inputIdsId = roots.inputs[0];
+    LogicalId logits_id = roots.roots[0];
+    LogicalId inputIdsId = roots.inputs[0];
 
     std::string gHash = computeGraphHash(g, roots.roots);
     Repo repo("benchmarks/repo_" + model_name, gHash, true);
@@ -123,7 +123,7 @@ void run_autoregressive_llm(
 
     for (uint32_t i = tokens.size(); i < max_seq_len; ++i)
     {
-        std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
+        std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
         Region inputRegion;
         inputRegion.region = {{0, 1}, {i, i + 1}};
         inputDirty[inputIdsId] = {inputRegion};
@@ -218,124 +218,124 @@ void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bo
         activeGraphOut);
 }
 
-void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
-{
-    KernelRegistry::get().setReferenceOnly(refOnly);
-    FluxConfig cfg;
-    auto bufferSizes = getDefaultBufferSizes();
-    MemoryManager mem(bufferSizes);
-    Graph g;
-    if (activeGraphOut)
-    {
-        *activeGraphOut = &g;
-    }
+// void run_flux(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+// {
+//     KernelRegistry::get().setReferenceOnly(refOnly);
+//     FluxConfig cfg;
+//     auto bufferSizes = getDefaultBufferSizes();
+//     MemoryManager mem(bufferSizes);
+//     Graph g;
+//     if (activeGraphOut)
+//     {
+//         *activeGraphOut = &g;
+//     }
 
-    std::cout << "Building FLUX Graphs..." << std::endl;
-    auto roots = build_flux_graph(g, mem);
+//     std::cout << "Building FLUX Graphs..." << std::endl;
+//     auto roots = build_flux_graph(g, mem);
 
-    std::string gHash = computeGraphHash(g, roots.roots);
-    Repo repo("benchmarks/repo_flux-klein-4b", gHash, true);
+//     std::string gHash = computeGraphHash(g, roots.roots);
+//     Repo repo("benchmarks/repo_flux-klein-4b", gHash, true);
 
-    uint32_t in_ids = roots.inputs[0];
-    uint32_t in_latent = roots.inputs[1];
-    uint32_t in_txt_emb = roots.inputs[2];
-    uint32_t in_t = roots.inputs[3];
-    uint32_t in_cos = roots.inputs[4];
-    uint32_t in_sin = roots.inputs[5];
-    uint32_t in_vae_latent = roots.inputs[6];
+//     uint32_t in_ids = roots.inputs[0];
+//     uint32_t in_latent = roots.inputs[1];
+//     uint32_t in_txt_emb = roots.inputs[2];
+//     uint32_t in_t = roots.inputs[3];
+//     uint32_t in_cos = roots.inputs[4];
+//     uint32_t in_sin = roots.inputs[5];
+//     uint32_t in_vae_latent = roots.inputs[6];
 
-    Session sess_text(g, mem, roots.roots[0], "dirty_region_caches/flux-text.bin", 0, &repo, disable_caching);
-    sess_text.plan(doSaturate);
+//     Session sess_text(g, mem, roots.roots[0], "dirty_region_caches/flux-text.bin", 0, &repo, disable_caching);
+//     sess_text.plan(doSaturate);
 
-    Session sess_trans(g, mem, roots.roots[1], "dirty_region_caches/flux-trans.bin", 0, &repo, disable_caching);
-    sess_trans.plan(doSaturate);
+//     Session sess_trans(g, mem, roots.roots[1], "dirty_region_caches/flux-trans.bin", 0, &repo, disable_caching);
+//     sess_trans.plan(doSaturate);
 
-    Session sess_vae(g, mem, roots.roots[2], "dirty_region_caches/flux-vae.bin", 0, &repo, disable_caching);
-    sess_vae.plan(doSaturate);
+//     Session sess_vae(g, mem, roots.roots[2], "dirty_region_caches/flux-vae.bin", 0, &repo, disable_caching);
+//     sess_vae.plan(doSaturate);
 
-    if (only_plan)
-    {
-        return;
-    }
+//     if (only_plan)
+//     {
+//         return;
+//     }
 
-    uint32_t width = 512, height = 512;
-    uint32_t latent_w = width / 16, latent_h = height / 16;
-    uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
+//     uint32_t width = 512, height = 512;
+//     uint32_t latent_w = width / 16, latent_h = height / 16;
+//     uint32_t txt_seq = cfg.text_max_seq, img_seq = latent_h * latent_w, total_seq = txt_seq + img_seq;
 
-    std::cout << "Executing Text Encoder..." << std::endl;
-    std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);
-    sess_text.writeInput(in_ids, input_ids.data(), input_ids.size() * sizeof(int32_t));
-    const float *text_emb_ptr = static_cast<const float *>(sess_text.run({}, debugCb, doSaturate));
+//     std::cout << "Executing Text Encoder..." << std::endl;
+//     std::vector<int32_t> input_ids = load_tokens_from_file("toks.txt", txt_seq);
+//     sess_text.writeInput(in_ids, input_ids.data(), input_ids.size() * sizeof(int32_t));
+//     const float *text_emb_ptr = static_cast<const float *>(sess_text.run({}, debugCb, doSaturate));
 
-    std::vector<float> text_emb_buf;
-    const float *text_emb_host = sync_output_to_host(text_emb_ptr, 1 * txt_seq * cfg.text_dim, text_emb_buf);
-    std::vector<float> text_emb(text_emb_host, text_emb_host + 1 * txt_seq * cfg.text_dim);
+//     std::vector<float> text_emb_buf;
+//     const float *text_emb_host = sync_output_to_host(text_emb_ptr, 1 * txt_seq * cfg.text_dim, text_emb_buf);
+//     std::vector<float> text_emb(text_emb_host, text_emb_host + 1 * txt_seq * cfg.text_dim);
 
-    std::cout << "Sampling..." << std::endl;
-    std::vector<float> rope_cos, rope_sin;
-    compute_rope_cpu(txt_seq, latent_h, latent_w, cfg.head_dim, cfg.rope_theta, rope_cos, rope_sin);
+//     std::cout << "Sampling..." << std::endl;
+//     std::vector<float> rope_cos, rope_sin;
+//     compute_rope_cpu(txt_seq, latent_h, latent_w, cfg.head_dim, cfg.rope_theta, rope_cos, rope_sin);
 
-    int num_steps = 4;
-    std::vector<float> schedule = get_flux_schedule(num_steps, img_seq);
-    std::vector<float> z(1 * cfg.latent_channels * latent_h * latent_w);
-    std::mt19937 gen(42);
-    std::normal_distribution<float> dist(0.0f, 1.0f);
-    for (uint64_t j = 0; j < z.size(); ++j)
-    {
-        z[j] = dist(gen);
-    }
+//     int num_steps = 4;
+//     std::vector<float> schedule = get_flux_schedule(num_steps, img_seq);
+//     std::vector<float> z(1 * cfg.latent_channels * latent_h * latent_w);
+//     std::mt19937 gen(42);
+//     std::normal_distribution<float> dist(0.0f, 1.0f);
+//     for (uint64_t j = 0; j < z.size(); ++j)
+//     {
+//         z[j] = dist(gen);
+//     }
 
-    for (int i = 0; i < num_steps; ++i)
-    {
-        float t_curr = schedule[i], dt = schedule[i + 1] - t_curr;
+//     for (int i = 0; i < num_steps; ++i)
+//     {
+//         float t_curr = schedule[i], dt = schedule[i + 1] - t_curr;
 
-        sess_trans.writeInput(in_latent, z.data(), z.size() * sizeof(float));
-        sess_trans.writeInput(in_txt_emb, text_emb.data(), text_emb.size() * sizeof(float));
-        sess_trans.writeInput(in_t, &t_curr, sizeof(float));
-        sess_trans.writeInput(in_cos, rope_cos.data(), rope_cos.size() * sizeof(float));
-        sess_trans.writeInput(in_sin, rope_sin.data(), rope_sin.size() * sizeof(float));
+//         sess_trans.writeInput(in_latent, z.data(), z.size() * sizeof(float));
+//         sess_trans.writeInput(in_txt_emb, text_emb.data(), text_emb.size() * sizeof(float));
+//         sess_trans.writeInput(in_t, &t_curr, sizeof(float));
+//         sess_trans.writeInput(in_cos, rope_cos.data(), rope_cos.size() * sizeof(float));
+//         sess_trans.writeInput(in_sin, rope_sin.data(), rope_sin.size() * sizeof(float));
 
-        Bucket b; // TODO: proper bucket to avoid weight loads?
-        const float *v_ptr = static_cast<const float *>(sess_trans.run(b, debugCb, doSaturate));
+//         Bucket b; // TODO: proper bucket to avoid weight loads?
+//         const float *v_ptr = static_cast<const float *>(sess_trans.run(b, debugCb, doSaturate));
 
-        std::vector<float> v_buf;
-        const float *v_host_ptr = sync_output_to_host(v_ptr, z.size(), v_buf);
-        v_ptr = v_host_ptr;
+//         std::vector<float> v_buf;
+//         const float *v_host_ptr = sync_output_to_host(v_ptr, z.size(), v_buf);
+//         v_ptr = v_host_ptr;
 
-        for (uint64_t j = 0; j < z.size(); ++j)
-            z[j] += v_ptr[j] * dt;
-        std::cout << "Step " << i + 1 << "/" << num_steps << " complete." << std::endl;
-    }
+//         for (uint64_t j = 0; j < z.size(); ++j)
+//             z[j] += v_ptr[j] * dt;
+//         std::cout << "Step " << i + 1 << "/" << num_steps << " complete." << std::endl;
+//     }
 
-    std::cout << "Executing VAE Decoder..." << std::endl;
-    sess_vae.writeInput(in_vae_latent, z.data(), z.size() * sizeof(float));
-    const float *img_ptr = static_cast<const float *>(sess_vae.run({}, debugCb, doSaturate));
+//     std::cout << "Executing VAE Decoder..." << std::endl;
+//     sess_vae.writeInput(in_vae_latent, z.data(), z.size() * sizeof(float));
+//     const float *img_ptr = static_cast<const float *>(sess_vae.run({}, debugCb, doSaturate));
 
-    std::vector<float> img_buf;
-    img_ptr = sync_output_to_host(img_ptr, 3 * height * width, img_buf);
+//     std::vector<float> img_buf;
+//     img_ptr = sync_output_to_host(img_ptr, 3 * height * width, img_buf);
 
-    std::vector<uint8_t> image_data(height * width * 3);
-    for (uint32_t y = 0; y < height; ++y)
-    {
-        for (uint32_t x = 0; x < width; ++x)
-        {
-            float r = img_ptr[0 * height * width + y * width + x];
-            float g = img_ptr[1 * height * width + y * width + x];
-            float b = img_ptr[2 * height * width + y * width + x];
+//     std::vector<uint8_t> image_data(height * width * 3);
+//     for (uint32_t y = 0; y < height; ++y)
+//     {
+//         for (uint32_t x = 0; x < width; ++x)
+//         {
+//             float r = img_ptr[0 * height * width + y * width + x];
+//             float g = img_ptr[1 * height * width + y * width + x];
+//             float b = img_ptr[2 * height * width + y * width + x];
 
-            r = std::max(0.0f, std::min(1.0f, (r + 1.0f) * 0.5f));
-            g = std::max(0.0f, std::min(1.0f, (g + 1.0f) * 0.5f));
-            b = std::max(0.0f, std::min(1.0f, (b + 1.0f) * 0.5f));
+//             r = std::max(0.0f, std::min(1.0f, (r + 1.0f) * 0.5f));
+//             g = std::max(0.0f, std::min(1.0f, (g + 1.0f) * 0.5f));
+//             b = std::max(0.0f, std::min(1.0f, (b + 1.0f) * 0.5f));
 
-            uint32_t idx = (y * width + x) * 3;
-            image_data[idx + 0] = static_cast<uint8_t>(r * 255.0f);
-            image_data[idx + 1] = static_cast<uint8_t>(g * 255.0f);
-            image_data[idx + 2] = static_cast<uint8_t>(b * 255.0f);
-        }
-    }
-    stbi_write_png("flux_output.png", width, height, 3, image_data.data(), width * 3);
-    std::cout << "Saved flux_output.png successfully!" << std::endl;
-}
+//             uint32_t idx = (y * width + x) * 3;
+//             image_data[idx + 0] = static_cast<uint8_t>(r * 255.0f);
+//             image_data[idx + 1] = static_cast<uint8_t>(g * 255.0f);
+//             image_data[idx + 2] = static_cast<uint8_t>(b * 255.0f);
+//         }
+//     }
+//     stbi_write_png("flux_output.png", width, height, 3, image_data.data(), width * 3);
+//     std::cout << "Saved flux_output.png successfully!" << std::endl;
+// }
 
 int main(int argc, char *argv[])
 {
@@ -380,15 +380,15 @@ int main(int argc, char *argv[])
     bool doSaturate = write_refs.empty();
 
     Graph *activeGraphPtr = nullptr;
-    auto debugCb = [&](uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)
+    auto debugCb = [&](LogicalId logicalId, const KernelContext &ctx, const void *data)
     {
-        verifier.verify(logicalId, node, ctx, data, activeGraphPtr);
+        verifier.verify(logicalId, ctx, data, activeGraphPtr);
     };
 
     if (model == "gemma-3-270m")
         run_gemma(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
-    else if (model == "flux-klein-4b")
-        run_flux(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
+    // else if (model == "flux-klein-4b")
+    //     run_flux(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
     else if (model == "qwen-3.6-35b-a3b")
         run_qwen_35b(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
     else

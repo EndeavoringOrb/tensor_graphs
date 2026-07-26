@@ -1474,6 +1474,7 @@ struct ShapePropagator
     {
         switch (node.opType)
         {
+        case OpType::INPUT:
         case OpType::ADD:
         case OpType::MUL:
         case OpType::DIVIDE:
