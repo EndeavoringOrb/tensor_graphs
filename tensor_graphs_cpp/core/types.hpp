@@ -1508,3 +1508,8 @@ struct KernelContext
         }
     }
 };
+
+inline std::string toString(std::source_location loc)
+{
+    return std::string(loc.file_name()) + ":" + std::to_string(loc.line());
+}

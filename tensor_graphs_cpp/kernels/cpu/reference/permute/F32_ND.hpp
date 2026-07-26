@@ -14,14 +14,14 @@ inline bool matchPermuteView(const std::vector<TensorNode> &inputs, const Tensor
     return true;
 }
 
-inline void inferViewPermute(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
+inline void inferViewPermute(const std::vector<TensorNode> &inputs, TensorView &output, const Graph &graph)
 {
     auto dims = graph.getConstantInt32(inputs[1].id);
 
-    node.strides.resize(dims.size());
+    output.strides.resize(dims.size());
     for (uint64_t i = 0; i < dims.size(); ++i)
     {
-        node.strides[i] = inputs[0].strides[dims[i]];
+        output.strides[i] = inputs[0].strides[dims[i]];
     }
 }
 

@@ -44,6 +44,13 @@ void get_births(const std::vector<EClassId> &ordered, const EGraph &egraph,
         uint32_t sel = selection_map.at(eclass);
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENode &node = egraph.getENode(enode_id);
+
+        if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE)
+        {
+            birth_times[eclass] = 0.0f;
+            continue;
+        }
+
         float cost = enodeInfos[enode_id.value].cost;
 
         // 1. Calculate max finish time among all child engines
@@ -95,7 +102,14 @@ static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egrap
         EClassId node_eclass = ordered[i];
         uint32_t sel = selection_map.at(node_eclass);
         ENodeId enode_id = egraph.getEClass(node_eclass).enodes[sel];
+        const ENode &node = egraph.getENode(enode_id);
         float cost = enodeInfos[enode_id.value].cost;
+
+        if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE)
+        {
+            death_times[node_eclass] = std::numeric_limits<float>::infinity();
+            continue;
+        }
 
         float death = birth_times.at(node_eclass) + cost;
         for (uint64_t j = i + 1; j < ordered.size(); ++j)
@@ -139,28 +153,71 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     get_deaths(ordered, egraph, selection_map, enodeInfos, birth_times, death_times);
 
     std::vector<ParallelBuffer> buffers;
-    buffers.reserve(ordered.size());
+    std::unordered_map<EClassId, EClassId> alias_map;
+
+    // Pass 1: resolve aliases and lifetimes
     for (EClassId eclass : ordered)
     {
+        alias_map[eclass] = eclass;
         uint32_t sel = selection_map.at(eclass);
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
-        const ENode &node = egraph.getENode(enode_id);
+        const ENodeInfo &info = enodeInfos[enode_id.value];
 
-        BufferId buf_id = BufferId{(uint32_t)buffers.size()};
-        eclass_to_buf[eclass] = buf_id;
-
-        uint64_t size_bytes = getSizeBytes(node.getShape(), node.getDType());
-        if (size_bytes == 0)
+        if (info.is_view)
         {
-            size_bytes = 1;
-        }
-        // Align to 4096 bytes to prevent OpenCL CL_MISALIGNED_SUB_BUFFER_OFFSET
-        // (-13)
-        size_bytes = (size_bytes + 4095) & ~4095ULL;
+            const ENode &node = egraph.getENode(enode_id);
+            if (node.getChildren().empty())
+                Error::throw_err("node has no children");
 
-        ParallelBuffer buf = {buf_id, node.getMemSpace(), size_bytes, birth_times.at(eclass), death_times.at(eclass),
-                              -1};
-        buffers.push_back(std::move(buf));
+            EClassId child = egraph.findConst(node.getChildren()[0]);
+
+            // Resolve child alias
+            while (alias_map.count(child) && alias_map[child] != child)
+            {
+                child = alias_map[child];
+            }
+            alias_map[eclass] = child;
+
+            // Expand base's lifetime
+            birth_times[child] =
+                std::min(birth_times[child], birth_times[eclass]); // TODO: is this needed since we are already ordered?
+            death_times[child] = std::max(death_times[child], death_times[eclass]);
+        }
+    }
+
+    // Pass 2: assign BufferIds
+    std::unordered_map<EClassId, BufferId> base_to_buf;
+    for (EClassId eclass : ordered)
+    {
+        EClassId base = eclass;
+        while (alias_map.count(base) && alias_map[base] != base)
+        {
+            base = alias_map[base];
+        }
+
+        if (base_to_buf.find(base) == base_to_buf.end())
+        {
+            BufferId buf_id = BufferId{(uint32_t)buffers.size()};
+            base_to_buf[base] = buf_id;
+
+            uint32_t base_sel = selection_map.at(base);
+            ENodeId base_enode_id = egraph.getEClass(base).enodes[base_sel];
+            const ENode &base_node = egraph.getENode(base_enode_id);
+
+            uint64_t size_bytes = getSizeBytes(base_node.getShape(), base_node.getDType());
+            if (size_bytes == 0)
+            {
+                Error::throw_err("empty node");
+            }
+            // Align to 4096 bytes to prevent OpenCL CL_MISALIGNED_SUB_BUFFER_OFFSET (-13)
+            size_bytes = (size_bytes + 4095) & ~4095ULL;
+
+            ParallelBuffer buf = {
+                buf_id, base_node.getMemSpace(), size_bytes, birth_times.at(base), death_times.at(base), -1};
+            buffers.push_back(std::move(buf));
+        }
+
+        eclass_to_buf[eclass] = base_to_buf[base];
     }
     return buffers;
 }
@@ -171,7 +228,8 @@ static bool malloc_recursive(uint64_t mem_cap, std::vector<ParallelBuffer> &unal
     if (unallocated.empty())
         return true;
 
-    auto get_min_height = [&]() -> int64_t {
+    auto get_min_height = [&]() -> int64_t
+    {
         int64_t min_height = std::numeric_limits<int64_t>::max();
         for (uint64_t i = 0; i < unallocated.size(); ++i)
         {
@@ -461,11 +519,11 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
     }
 
     // Process Ends before Starts to correctly simulate memory release
-    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b) {
+    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b)
+              {
         if (a.time != b.time)
             return a.time < b.time;
-        return a.type < b.type;
-    });
+        return a.type < b.type; });
 
     int64_t current_mem = 0;
     for (const auto &ev : events)
@@ -509,11 +567,12 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
     std::vector<ParallelBuffer> bufs = unallocated;
 
     // Heuristic: Place largest buffers first to minimize fragmentation
-    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
-        if (a.size != b.size)
-            return a.size > b.size;
-        return a.id < b.id; // Deterministic tie-breaker
-    });
+    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
+              {
+                  if (a.size != b.size)
+                      return a.size > b.size;
+                  return a.id < b.id; // Deterministic tie-breaker
+              });
 
     allocated.clear();
     allocated.reserve(bufs.size());
@@ -534,7 +593,8 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 
         // Sort overlapping buffers by their memory offset ascending
         std::sort(time_overlaps.begin(), time_overlaps.end(),
-                  [](const ParallelBuffer *a, const ParallelBuffer *b) { return a->offset < b->offset; });
+                  [](const ParallelBuffer *a, const ParallelBuffer *b)
+                  { return a->offset < b->offset; });
 
         // First-fit algorithm: push best_offset upwards if there's a memory
         // collision
@@ -569,14 +629,15 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
 
     // 1. Sort buffers by start time (and then end time to be deterministic)
     std::vector<ParallelBuffer> sorted_bufs = unallocated;
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
+              {
         if (a.start != b.start)
             return a.start < b.start;
-        return a.end < b.end;
-    });
+        return a.end < b.end; });
 
     // Helper lambda to process an independent connected component of buffers
-    auto process_component = [&](std::vector<ParallelBuffer> &current_comp) -> bool {
+    auto process_component = [&](std::vector<ParallelBuffer> &current_comp) -> bool
+    {
         if (current_comp.empty())
             return true;
 
@@ -598,11 +659,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
         // OPTIMIZATION 3: Exact solver fallback with aggressive pruning ordering
         // Sorting by size descending forces the tree to hit conflict limits much
         // faster.
-        std::sort(current_comp.begin(), current_comp.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
+        std::sort(current_comp.begin(), current_comp.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
+                  {
             if (a.size != b.size)
                 return a.size > b.size;
-            return a.id < b.id;
-        });
+            return a.id < b.id; });
 
         if (!malloc(mem_cap, current_comp, comp_allocated))
         {

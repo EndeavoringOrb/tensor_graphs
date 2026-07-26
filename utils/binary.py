@@ -215,7 +215,6 @@ class BinaryReader:
             "child_ids": self.read_vector(self.read_u32),
             "shape": self.read_vector(self.read_u32),
             "strides": self.read_vector(self.read_u64),
-            "viewOffset": self.read_u64(),
             "backend": self.read_backend(),
             "storageType": (
                 self.read_storage_type() if self.string_enums else self.read_u32()

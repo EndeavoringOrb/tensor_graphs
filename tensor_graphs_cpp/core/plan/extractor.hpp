@@ -27,8 +27,6 @@
 struct ENodeInfo
 {
     float cost;
-    bool inplace;
-    int32_t inplace_idx;
     bool is_view;
 };
 

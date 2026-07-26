@@ -20,15 +20,15 @@ inline bool matchRepeatView(const std::vector<TensorNode> &inputs, const TensorN
     return true;
 }
 
-inline void inferViewRepeat(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
+inline void inferViewRepeat(const std::vector<TensorNode> &inputs, TensorView &output, const Graph &graph)
 {
-    node.strides = inputs[0].strides;
+    output.strides = inputs[0].strides;
 
-    for (uint64_t d = 0; d < node.getShape().size(); ++d)
+    for (uint64_t d = 0; d < output.getShape().size(); ++d)
     {
-        if (inputs[0].getShape()[d] != node.getShape()[d])
+        if (inputs[0].getShape()[d] != output.getShape()[d])
         {
-            node.strides[d] = 0;
+            output.strides[d] = 0;
         }
     }
 }

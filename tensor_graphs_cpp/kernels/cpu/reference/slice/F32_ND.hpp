@@ -9,12 +9,12 @@ inline bool matchSliceView(const std::vector<TensorNode> &inputs, const TensorNo
     return true;
 }
 
-inline void inferViewSlice(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
+inline void inferViewSlice(const std::vector<TensorNode> &inputs, TensorView &output, const Graph &graph)
 {
     auto starts = graph.getConstantInt32(inputs[1].id);
     auto steps = graph.getConstantInt32(inputs[3].id);
 
-    node.strides.resize(inputs[0].strides.size());
+    output.strides.resize(inputs[0].strides.size());
 
     for (uint64_t i = 0; i < inputs[0].strides.size(); ++i)
     {
@@ -24,12 +24,13 @@ inline void inferViewSlice(TensorNode &node, const std::vector<TensorNode> &inpu
         if (start < 0)
             start += inputs[0].getShape()[i];
 
-        node.strides[i] = inputs[0].strides[i] * step;
+        output.strides[i] = inputs[0].strides[i] * step;
+        output.offset += start * inputs[0].strides[i] * getDTypeSize(output.dtype);
     }
 }
 
 REGISTER_REF_KERNEL_VIEW(OpType::SLICE, 4, 4, matchSliceView, inferViewSlice, MemSpace(1, HandleType::CPP),
                          {Engine(0, EngineType::CPU)}, {DType::ANY, DType::INT32, DType::INT32, DType::INT32},
-                         {{1}, {1}, {1}, {1}}, {false, false, false, false},
+                         {{1}, {1}, {1}, {1}}, {true, false, false, false},
                          {MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP),
                           MemSpace(1, HandleType::CPP)});

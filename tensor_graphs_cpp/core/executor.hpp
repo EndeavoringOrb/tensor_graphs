@@ -68,7 +68,7 @@ class Executor
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
             std::string opName = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
 
-            if (OpenCLState::get().initialized)
+            if (OpenCLState::get().initialized) // TODO: only synchronize engines that inputs are on.
             {
                 clFinish(OpenCLState::get().queue);
             }

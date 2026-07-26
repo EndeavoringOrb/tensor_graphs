@@ -9,9 +9,9 @@ inline bool matchReshapeView(const std::vector<TensorNode> &inputs, const Tensor
     return countElements(inputs[0].getShape()) == countElements(output.getShape());
 }
 
-inline void inferViewReshape(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
+inline void inferViewReshape(const std::vector<TensorNode> &inputs, TensorView &output, const Graph &graph)
 {
-    node.strides = calcContiguousStrides(node.getShape());
+    output.strides = calcContiguousStrides(output.getShape());
 }
 
 REGISTER_REF_KERNEL_VIEW(OpType::RESHAPE, 2, 2, matchReshapeView, inferViewReshape, MemSpace(1, HandleType::CPP),

@@ -13,7 +13,7 @@
 using MatchFunc = bool (*)(const std::vector<TensorNode> &inputs, const TensorNode &output);
 using KernelFunc = void (*)(const KernelContext &ctx);
 using ReferenceFactory = LogicalId (*)(const std::vector<LogicalId> &inputs, Graph &graph);
-using InferViewFunc = void (*)(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph);
+using InferViewFunc = void (*)(const std::vector<TensorNode> &inputs, TensorView &output, const Graph &graph);
 
 struct ReferenceGraphEntry
 {

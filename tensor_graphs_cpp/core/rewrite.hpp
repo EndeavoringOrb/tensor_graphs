@@ -34,7 +34,8 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     std::vector<MemSpace> current_path = {src};
     std::unordered_set<MemSpace> visited = {src};
 
-    std::function<void(MemSpace)> dfs = [&](MemSpace curr) {
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
+    {
         if (curr == dst)
         {
             all_paths.push_back(current_path);
@@ -102,7 +103,7 @@ struct Rule
 
 inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClassId> &children,
                               const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, DType dtype,
-                              MemSpace mem_space, EClassId targetEClass = EClassId())
+                              MemSpace mem_space, EClassId targetEClass = EClassId(), std::source_location loc = std::source_location::current())
 {
     EClassId cls = targetEClass;
     if (cls == EClassId())
@@ -210,7 +211,8 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
         {
             std::stringstream ss;
             ss << "\n[addOpToEGraph] No matching kernel found for the given "
-                  "configuration!\n"
+                  "configuration at "
+               << toString(loc) << "\n"
                << "  Operation:       " << toString(op) << "\n"
                << "  Target MemSpace: " << toString(mem_space) << "\n"
                << "  Expected Output: "
@@ -1158,24 +1160,28 @@ struct SlicePushDownElementwise : public Rule
                     EClassId canonChildId = egraph.findConst(childId);
                     const EClass childCls = egraph.getEClass(canonChildId);
                     std::vector<uint64_t> childSliceStrides = childCls.strides;
-                    std::vector<uint32_t> childShape = childCls.shape;
-                    DType childDtype = childCls.dtype;
 
-                    for (uint64_t d = 0; d < starts.size() && d < childShape.size(); ++d)
+                    for (uint64_t d = 0; d < starts.size() && d < childCls.shape.size(); ++d)
                     {
                         int32_t start = starts[d];
                         if (start < 0)
-                            start += childShape[d];
+                            start += childCls.shape[d];
                         childSliceStrides[d] *= steps[d];
+                    }
+
+                    if (!isContiguous(childCls))
+                    {
+                        canonChildId = addOpToEGraph(egraph, OpType::CONTIGUOUS, {canonChildId}, childCls.shape,
+                                                     calcContiguousStrides(childCls.shape), childCls.dtype, childCls.mem_space);
                     }
 
                     EClassId childSlice =
                         addOpToEGraph(egraph, OpType::SLICE, {canonChildId, startsId, endsId, stepsId}, sliceShape,
-                                      childSliceStrides, childDtype, childCls.mem_space);
+                                      childSliceStrides, childCls.dtype, childCls.mem_space);
 
-                    EClassId childContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {childSlice}, sliceShape,
-                                                         sliceContigStrides, childDtype, childCls.mem_space);
-                    newChildren.push_back(childContig);
+                    EClassId sliceContig = addOpToEGraph(egraph, OpType::CONTIGUOUS, {childSlice}, sliceShape,
+                                                         sliceContigStrides, childCls.dtype, childCls.mem_space);
+                    newChildren.push_back(sliceContig);
                 }
 
                 EClassId opEClass = addOpToEGraph(egraph, op, newChildren, sliceShape, sliceContigStrides,
@@ -1428,7 +1434,8 @@ struct SlicePushDownDot : public Rule
                 EClassId stepsIdB = addIntConst(egraph, stepsB);
 
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en,
-                                       EClassId stId, EClassId enId, EClassId stepId) {
+                                       EClassId stId, EClassId enId, EClassId stepId)
+                {
                     EClassId canonId = egraph.findConst(classId);
                     const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;

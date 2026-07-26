@@ -157,8 +157,6 @@ struct Planner
         {
             const ENode &enode = egraph.getENodes()[i];
             ENodeInfo info;
-            info.inplace = false;
-            info.inplace_idx = -1;
             info.is_view = false;
 
             if (enode.getKernelId() != KernelId{0})
@@ -907,13 +905,54 @@ struct Planner
                 compiled.constantStaging[eclass_id] = egraph.constantStaging.at(eclass_id);
             }
 
+            bool is_view = false;
+            const KernelEntry *kernel_ptr = nullptr;
+            if (enode.getKernelId().value != 0)
+            {
+                kernel_ptr = &KernelRegistry::get().getKernel(enode.getKernelId());
+                is_view = kernel_ptr->is_view;
+            }
+
+            uint64_t final_offset_bytes = inst.outBuffer.offset;
+            std::vector<uint64_t> final_strides = enode.getStrides();
+
+            if (is_view && kernel_ptr && kernel_ptr->inferView)
+            {
+                Graph tempGraph;
+                std::vector<TensorNode> dummyInputNodes;
+
+                for (uint32_t i = 0; i < inst.children.size(); i++)
+                {
+                    EClassId child_id = inst.children[i];
+                    const TensorView &childView = compiled.nodeViews.at(child_id);
+
+                    LogicalId fakeId = tempGraph.input(childView.getShape(), childView.dtype, childView.strides);
+
+                    if (egraph.constantStaging.count(child_id))
+                    {
+                        tempGraph.constantStaging[fakeId] = egraph.constantStaging.at(child_id);
+                    }
+
+                    dummyInputNodes.push_back(tempGraph.getNode(fakeId));
+                }
+
+                final_offset_bytes = compiled.nodeViews.at(inst.children[0]).offset;
+
+                TensorView dummyOutView(enode.getShape(), final_offset_bytes, enode.getStrides(), enode.getDType());
+
+                kernel_ptr->inferView(dummyInputNodes, dummyOutView, tempGraph);
+
+                final_offset_bytes = dummyOutView.offset;
+                final_strides = dummyOutView.strides;
+            }
+
+            compiled.nodeViews[eclass_id] =
+                TensorView(enode.getShape(), final_offset_bytes, final_strides, enode.getDType());
+
             if (enode.getOpType() != OpType::INPUT && enode.getOpType() != OpType::CACHE)
             {
                 compiled.instructions.push_back(inst);
             }
-
-            compiled.nodeViews[eclass_id] =
-                TensorView(enode.getShape(), inst.outBuffer.offset, enode.getStrides(), enode.getDType());
         }
 
         compiled.nodeCosts = extraction.eclass_to_cost;

@@ -78,7 +78,7 @@ struct Graph
                              std::string _contentHash = "", std::source_location loc = std::source_location::current())
     {
         LogicalId id = LogicalIdAllocator::allocate();
-        std::string origin = std::string(loc.file_name()) + ":" + std::to_string(loc.line());
+        std::string origin = toString(loc);
         nodes[id] = TensorNode(id, _opType, _opName, _dtype, _child_ids, _shape, _strides, _contentHash, origin);
         return nodes[id];
     }
