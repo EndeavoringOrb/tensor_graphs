@@ -1,4 +1,4 @@
-# File: analyze_performance.py
+# File: utils/analyze_performance.py
 import argparse
 import json
 import os
@@ -8,7 +8,29 @@ import re
 
 
 def load_uids_from_cpp():
-    # Locate the generated header file relative to the script directory
+    json_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "tensor_graphs_cpp",
+        "generated",
+        "kernel_uids.json",
+    )
+    uid_map = {}
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for key, info in data.items():
+                    uid_map[key] = info
+                    try:
+                        uid_map[int(key)] = info
+                    except ValueError:
+                        pass
+            return uid_map
+        except Exception as e:
+            print(f"Warning: Failed to load {json_path}: {e}")
+
+    # Fallback to header file
     header_path = os.path.join(
         os.path.dirname(__file__),
         "..",
@@ -16,18 +38,18 @@ def load_uids_from_cpp():
         "generated",
         "kernel_uids.gen.hpp",
     )
-    uid_to_name = {}
-    if not os.path.exists(header_path):
-        return uid_to_name
-
-    pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
-    with open(header_path, "r") as f:
-        content = f.read()
-        matches = pattern.findall(content)
-        for name, hex_val in matches:
-            val_int = int(hex_val, 16)
-            uid_to_name[val_int] = name
-    return uid_to_name
+    if os.path.exists(header_path):
+        pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
+        with open(header_path, "r") as f:
+            content = f.read()
+            matches = pattern.findall(content)
+            for name, hex_val in matches:
+                val_int = int(hex_val, 16)
+                info = {"name": name, "path": "", "hex_uid": hex_val}
+                uid_map[val_int] = info
+                uid_map[hex_val.lower()] = info
+                uid_map[str(val_int)] = info
+    return uid_map
 
 
 def format_ms(ms):
@@ -38,7 +60,7 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
     print(f"Loading compiled buckets from: {cache_file}")
     cache_entries = load_cache_file(cache_file)
 
-    # Load the physical UID mapping
+    # Load physical UID mapping
     uid_map = load_uids_from_cpp()
 
     compiled_buckets = [
@@ -71,39 +93,46 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
     for entry in buckets_to_analyze:
         bucket_count += 1
         graph = entry["graph"]
-        nodes = graph["nodesMap"]
+        node_views = graph.get("nodeViews", {})
         instructions = graph["instructions"]
         node_costs = graph.get("nodeCosts", {})
 
         bucket_sequence = []
         for inst in instructions:
-            node_id = inst["nodeId"]
-            node = nodes[str(node_id)]
+            eclass_id = inst["eclassId"]
+            node_view = node_views.get(eclass_id, {})
 
-            # Fetch the runtime
-            runtime = node_costs[node_id]
+            runtime = node_costs.get(eclass_id, 0.0)
+            if runtime == float("inf"):
+                runtime = 0.0
 
-            # --- RESOLVE PHYSICAL KERNEL NAME ---
-            kernel_uid = inst.get("fullKernelId", 0)
-            if kernel_uid in uid_map:
-                op_name = uid_map[kernel_uid]
+            kernel_uid = inst.get("kernelId", 0)
+            info = (
+                uid_map.get(kernel_uid)
+                or uid_map.get(str(kernel_uid))
+                or uid_map.get(hex(kernel_uid).lower())
+            )
+
+            if info and isinstance(info, dict):
+                k_name = info.get("name", f"Kernel_{hex(kernel_uid)}")
+                k_path = info.get("path", "")
+                op_name = f"{k_name} [{k_path}]" if k_path else k_name
+            elif isinstance(info, str):
+                op_name = info
             else:
-                op_name = node["opType"]
-                if op_name == "FUSED":
-                    op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
+                op_name = f"Kernel_{hex(kernel_uid)}"
 
             input_shapes = []
-            for pid in inst["inputNodeIds"]:
-                p_node = nodes[str(pid)]
-                input_shapes.append(p_node["shape"])
+            for child_eclass in inst.get("children", []):
+                if child_eclass in node_views:
+                    input_shapes.append(node_views[child_eclass].get("shape", []))
 
-            shape = node["shape"]
-            debug_origin = node.get("debugOrigin", "UNKNOWN")
+            shape = node_view.get("shape", [])
+            debug_origin = inst.get("debugOrigin", "UNKNOWN")
 
-            # Identity for display purposes in the report
             display_identity = (
                 op_name,
-                hex(inst["fullKernelId"]),
+                hex(kernel_uid),
                 tuple(shape),
                 json.dumps(input_shapes),
                 debug_origin,
@@ -137,7 +166,6 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
         chain_stats.items(), key=lambda x: x[1]["time"], reverse=True
     )
 
-    # Pre-generate and cache formatted labels to avoid redundant work
     formatted_chains = []
     for identities, stats in sorted_chains[:top_n]:
         parts = []
@@ -148,7 +176,6 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
         label = " -> ".join(parts)
         formatted_chains.append((label, stats))
 
-    # Dynamically determine the column widths based on the contents to be printed
     label_len = max((len(label) for label, _ in formatted_chains), default=0)
     col1_header = f"Top {top_n} {chain_label}"
     col1_width = max(label_len, len(col1_header))
@@ -179,7 +206,6 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
         ),
     )
 
-    # Format headers dynamically and calculate total width for divider lines
     header = f"{col1_header:<{col1_width}} | {col2_header:<{col2_width}} | {col3_header:<{col3_width}} | {col4_header:<{col4_width}}"
     total_width = len(header)
 
@@ -193,7 +219,6 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
             f"{label:<{col1_width}} | {stats['count']:<{col2_width}} | {format_ms(stats['time']):<{col3_width}} | {format_ms(avg):<{col4_width}}"
         )
 
-    # Dynamically format the Operation Type summary table
     sorted_ops = sorted(op_type_stats.items(), key=lambda x: x[1], reverse=True)
 
     op_col1_header = "Operation Type"
@@ -219,7 +244,7 @@ def analyze(cache_file, top_n=20, chain_len=1, bucket_idx=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze TensorGraph performance.")
-    parser.add_argument("--graph", default="dirty_region_caches/flux-trans.bin")
+    parser.add_argument("--graph", default="dirty_region_caches/jina-v5-928x1376.bin")
     parser.add_argument("--top_n", "-n", type=int, default=20)
     parser.add_argument("--chain_len", "-c", type=int, default=1)
     parser.add_argument("--bucket", nargs="?", const="show_range", default=None)

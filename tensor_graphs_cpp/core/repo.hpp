@@ -161,7 +161,7 @@ class Repo
         return data;
     }
 
-    void write(LogicalId logicalId, const TensorNode &node, const void *data, uint64_t sizeBytes)
+    void write(LogicalId logicalId, const TensorView &view, const void *data, uint64_t sizeBytes)
     {
         if (readOnly || !valid)
             return;
@@ -176,8 +176,8 @@ class Repo
         e.logicalId = logicalId;
         e.offset = offset;
         e.sizeBytes = sizeBytes;
-        e.dtype = node.dtype;
-        e.shape = node.getShape();
+        e.dtype = view.dtype;
+        e.shape = view.getShape();
         entries[logicalId] = e;
 
         BinaryWriter bw(metaOut);

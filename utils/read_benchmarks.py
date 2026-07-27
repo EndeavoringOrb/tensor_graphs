@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 import os
 import argparse
+import json
 import re
 import struct
-from binary import load_cache_file, load_records_file
+from binary import load_cache_file, BinaryReader
 
 
 def _format_constants(raw_bytes, dtype):
@@ -33,7 +34,29 @@ def format_constants(raw_bytes, dtype):
 
 
 def load_uids_from_cpp(header_path):
+    json_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "tensor_graphs_cpp",
+        "generated",
+        "kernel_uids.json",
+    )
     uid_to_name = {}
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for key, info in data.items():
+                    if isinstance(info, dict):
+                        k_name = info.get("name", "")
+                        k_path = info.get("path", "")
+                        label = f"{k_name} [{k_path}]" if k_path else k_name
+                        uid_to_name[str(key)] = label
+                        uid_to_name[key] = label
+            return uid_to_name
+        except Exception:
+            pass
+
     if not header_path or not os.path.exists(header_path):
         return uid_to_name
     pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
@@ -55,16 +78,52 @@ def load_uid_map(cache_path):
     for entry in entries:
         if entry.get("type") == "compiled_bucket":
             graph = entry["graph"]
-            nodes = graph["nodesMap"]
             for inst in graph["instructions"]:
-                uid = str(inst["fullKernelId"])
-                node = nodes.get(str(inst["nodeId"]))
-                if node:
-                    op_name = node["opType"]
-                    if op_name == "FUSED":
-                        op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
-                    uid_to_name[uid] = op_name
+                uid = str(inst["kernelId"])
+                uid_to_name[uid] = f"Kernel_{hex(inst['kernelId'])}"
     return uid_to_name
+
+
+def print_record(idx, name, r):
+    dtypes = ["FLOAT32", "INT32", "BF16", "UINT8"]
+    backends_map = ["STORAGE", "CPU", "CUDA"]
+
+    uid = hex(r["kernelId"])
+    b_list = [
+        backends_map[b] if b < len(backends_map) else "???"
+        for b in r.get("backends", [])
+    ]
+    backends = ",".join(b_list) if b_list else "CPU"
+
+    print(f"[{idx + 1}][{backends}] {name} ({uid})")
+
+    in_shapes = r.get("inputShapes", [])
+    in_dtypes = r.get("inputDTypes", [])
+    in_strides = r.get("inputStrides", [])
+    in_consts = r.get("inputConstants", [])
+
+    for idx in range(len(in_shapes)):
+        dt_raw = in_dtypes[idx] if idx < len(in_dtypes) else -1
+        dt = dtypes[dt_raw] if dt_raw >= 0 and dt_raw < len(dtypes) else "???"
+        sh = in_shapes[idx]
+        st = in_strides[idx] if idx < len(in_strides) else []
+        ic_raw = in_consts[idx] if idx < len(in_consts) else []
+        ic_formatted = format_constants(ic_raw, dt_raw)
+        const_str = f", constants={ic_formatted}" if ic_formatted else ""
+        print(f"  In  #{idx}: dtype={dt}, shape={sh}, strides={st}{const_str}")
+
+    out_shapes = r.get("outputShapes", [])
+    out_dtypes = r.get("outputDTypes", [])
+    out_strides = r.get("outputStrides", [])
+    for idx in range(len(out_shapes)):
+        dt_raw = out_dtypes[idx] if idx < len(out_dtypes) else -1
+        dt = dtypes[dt_raw] if dt_raw >= 0 and dt_raw < len(dtypes) else "???"
+        sh = out_shapes[idx]
+        st = out_strides[idx] if idx < len(out_strides) else []
+        print(f"  Out #{idx}: dtype={dt}, shape={sh}, strides={st}")
+
+    runtime = r.get("runTime", 0.0)
+    print(f"  Benchmarking... -> {runtime:.6f} ms\n")
 
 
 def main():
@@ -97,69 +156,38 @@ def main():
     header_map = load_uids_from_cpp(args.header)
     uid_map.update(header_map)
 
-    records = load_records_file(args.records)
+    idx = 0
+    matched_idx = 0
+    if os.path.exists(args.records):
+        with open(args.records, "rb") as f:
+            br = BinaryReader(f)
+            while True:
+                idx += 1
+                print(idx, end="\r")
+                r = br.read_record()
+                if r is None:
+                    break
 
-    filtered = []
-    for r in records:
-        uid = str(r["kernelId"])
-        name = uid_map.get(uid, uid_map.get(hex(r["kernelId"]), None))
-        if not name:
-            continue
+                uid = str(r["kernelId"])
+                name = uid_map.get(uid, uid_map.get(hex(r["kernelId"]), None))
+                if not name:
+                    continue
 
-        if (
-            args.op
-            and not re.search(args.op, name, re.IGNORECASE)
-            and not re.search(args.op, uid, re.IGNORECASE)
-        ):
-            continue
+                if (
+                    args.op
+                    and not re.search(args.op, name, re.IGNORECASE)
+                    and not re.search(args.op, uid, re.IGNORECASE)
+                ):
+                    continue
 
-        out_shapes_str = str(r.get("outputShapes", [])) + str(r.get("inputShapes", []))
-        if args.shape and args.shape not in out_shapes_str:
-            continue
+                out_shapes_str = str(r.get("outputShapes", [])) + str(
+                    r.get("inputShapes", [])
+                )
+                if args.shape and args.shape not in out_shapes_str:
+                    continue
 
-        filtered.append((name, r))
-
-    total = len(filtered)
-    dtypes = ["FLOAT32", "INT32", "BF16", "UINT8"]
-    backends_map = ["STORAGE", "CPU", "CUDA"]
-
-    for i, (name, r) in enumerate(filtered):
-        uid = hex(r["kernelId"])
-        b_list = [
-            backends_map[b] if b < len(backends_map) else "???"
-            for b in r.get("backends", [])
-        ]
-        backends = ",".join(b_list) if b_list else "CPU"
-
-        print(f"[{i + 1}/{total}][{backends}] {name} ({uid})")
-
-        in_shapes = r.get("inputShapes", [])
-        in_dtypes = r.get("inputDTypes", [])
-        in_strides = r.get("inputStrides", [])
-        in_consts = r.get("inputConstants", [])
-
-        for idx in range(len(in_shapes)):
-            dt_raw = in_dtypes[idx] if idx < len(in_dtypes) else -1
-            dt = dtypes[dt_raw] if dt_raw >= 0 and dt_raw < len(dtypes) else "???"
-            sh = in_shapes[idx]
-            st = in_strides[idx] if idx < len(in_strides) else []
-            ic_raw = in_consts[idx] if idx < len(in_consts) else []
-            ic_formatted = format_constants(ic_raw, dt_raw)
-            const_str = f", constants={ic_formatted}" if ic_formatted else ""
-            print(f"  In  #{idx}: dtype={dt}, shape={sh}, strides={st}{const_str}")
-
-        out_shapes = r.get("outputShapes", [])
-        out_dtypes = r.get("outputDTypes", [])
-        out_strides = r.get("outputStrides", [])
-        for idx in range(len(out_shapes)):
-            dt_raw = out_dtypes[idx] if idx < len(out_dtypes) else -1
-            dt = dtypes[dt_raw] if dt_raw >= 0 and dt_raw < len(dtypes) else "???"
-            sh = out_shapes[idx]
-            st = out_strides[idx] if idx < len(out_strides) else []
-            print(f"  Out #{idx}: dtype={dt}, shape={sh}, strides={st}")
-
-        runtime = r.get("runTime", 0.0)
-        print(f"  Benchmarking... -> {runtime:.6f} ms\n")
+                print_record(matched_idx, name, r)
+                matched_idx += 1
 
 
 if __name__ == "__main__":

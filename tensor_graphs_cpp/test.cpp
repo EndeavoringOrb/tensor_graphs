@@ -31,32 +31,28 @@ void fillRandom(void *ptr, uint64_t elements, DType dtype)
     switch (dtype)
     {
     case DType::ANY:
-    case DType::FLOAT32:
-    {
+    case DType::FLOAT32: {
         float *fptr = static_cast<float *>(ptr);
         std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
         for (uint64_t i = 0; i < elements; ++i)
             fptr[i] = dist(gen);
         break;
     }
-    case DType::INT32:
-    {
+    case DType::INT32: {
         int32_t *iptr = static_cast<int32_t *>(ptr);
         std::uniform_int_distribution<int32_t> dist(1, 10);
         for (uint64_t i = 0; i < elements; ++i)
             iptr[i] = dist(gen);
         break;
     }
-    case DType::BOOL:
-    {
+    case DType::BOOL: {
         bool *bptr = static_cast<bool *>(ptr);
         std::uniform_int_distribution<int> dist(0, 1);
         for (uint64_t i = 0; i < elements; ++i)
             bptr[i] = dist(gen) != 0;
         break;
     }
-    case DType::BF16:
-    {
+    case DType::BF16: {
         uint16_t *bfptr = static_cast<uint16_t *>(ptr);
         std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
         for (uint64_t i = 0; i < elements; ++i)
@@ -147,8 +143,7 @@ void assertRegionListEquals(const std::vector<Region> &actual, const std::vector
 
 void runRegionMergeTests()
 {
-    std::cout << "region merge tests" << std::endl
-              << std::flush;
+    std::cout << "region merge tests" << std::endl << std::flush;
     {
         std::vector<Region> actual = mergeRegions({makeRegion({{0, 2}}), makeRegion({{2, 4}})});
         assertRegionListEquals(actual, {makeRegion({{0, 4}})}, "1D adjacent merge");
@@ -191,15 +186,12 @@ void runRegionMergeTests()
 
 void runShapePropagationTests()
 {
-    std::cout << "shape propagation tests" << std::endl
-              << std::flush;
+    std::cout << "shape propagation tests" << std::endl << std::flush;
     ShapePropagator prop;
-    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> LogicalId
-    {
+    auto makeIntConst = [](Graph &graph, const std::vector<int32_t> &values) -> LogicalId {
         return graph.constant({(uint32_t)values.size()}, values.data(), DType::INT32);
     };
-    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> LogicalId
-    {
+    auto makeFloatInput = [](Graph &graph, const std::vector<uint32_t> &shape) -> LogicalId {
         return graph.input(shape, DType::FLOAT32, {});
     };
     {
@@ -614,8 +606,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
         {
             const TensorNode &n = pair.second;
 
-            auto traceToInputIdx = [&](LogicalId pid) -> int
-            {
+            auto traceToInputIdx = [&](LogicalId pid) -> int {
                 LogicalId curr = pid;
                 while (tempGraph.hasNode(curr) && (tempGraph.getNode(curr).opType == OpType::CONTIGUOUS ||
                                                    tempGraph.getNode(curr).opType == OpType::CAST ||
@@ -635,8 +626,7 @@ TestInputs createTestInputs(Graph &graph, const KernelEntry &kernel)
                 return -1;
             };
 
-            auto checkParam = [&](uint64_t parentIdx, const std::vector<int32_t> &defaultVals)
-            {
+            auto checkParam = [&](uint64_t parentIdx, const std::vector<int32_t> &defaultVals) {
                 if (parentIdx < n.child_ids.size())
                 {
                     int inputIdx = traceToInputIdx(n.child_ids[parentIdx]);
@@ -986,11 +976,11 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         if (entry.is_directory())
             testDirs.push_back(entry.path().string());
     }
-    std::sort(testDirs.begin(), testDirs.end(), [](const std::string &a, const std::string &b)
-              {
+    std::sort(testDirs.begin(), testDirs.end(), [](const std::string &a, const std::string &b) {
         std::string na = std::filesystem::path(a).filename().string();
         std::string nb = std::filesystem::path(b).filename().string();
-        return a < b; });
+        return a < b;
+    });
     for (const std::string &testDir : testDirs)
     {
         total++;
@@ -1135,8 +1125,7 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
     }
     std::cout << "\n----------------------" << std::endl;
     std::cout << "Python Reference Tests Passed: " << passed << "/" << total << std::endl;
-    std::cout << "----------------------\n"
-              << std::endl;
+    std::cout << "----------------------\n" << std::endl;
 }
 
 std::unordered_map<KernelId, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)

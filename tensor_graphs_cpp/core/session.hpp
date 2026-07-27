@@ -355,8 +355,8 @@ struct Session
         for (uint64_t i = 0; i < manualBuckets.size(); ++i)
         {
             const Bucket &bucket = manualBuckets[i];
-            CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo,
-                                              preallocatedBuffers);
+            CompiledGraph plan =
+                planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo, preallocatedBuffers);
             plan.bucket = bucket;
             cachedGraphs.push_back(plan);
         }
@@ -467,7 +467,7 @@ struct Session
             buf.id = nextId++;
             buf.mem_space = e.memSpace;
             buf.size = size_bytes;
-            buf.start = 0.0f;       // INPUT/CACHE buffers are alive forever.
+            buf.start = 0.0f; // INPUT/CACHE buffers are alive forever.
             buf.end = std::numeric_limits<float>::infinity();
             buf.offset = static_cast<int64_t>(offset);
             out[e.logicalId] = std::move(buf);

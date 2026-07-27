@@ -343,7 +343,7 @@ class ReferenceVerifier
             uint32_t nameLen = opName.size();
             uint64_t numElems = optData.size();
 
-            refOutFile.write(reinterpret_cast<const char *>(&logicalId), sizeof(logicalId));
+            refOutFile.write(reinterpret_cast<const char *>(&logicalId.value), sizeof(logicalId.value));
             refOutFile.write(reinterpret_cast<const char *>(&nameLen), sizeof(nameLen));
             if (nameLen > 0)
                 refOutFile.write(opName.c_str(), nameLen);

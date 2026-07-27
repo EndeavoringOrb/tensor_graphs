@@ -228,8 +228,7 @@ static bool malloc_recursive(uint64_t mem_cap, std::vector<ParallelBuffer> &unal
     if (unallocated.empty())
         return true;
 
-    auto get_min_height = [&]() -> int64_t
-    {
+    auto get_min_height = [&]() -> int64_t {
         int64_t min_height = std::numeric_limits<int64_t>::max();
         for (uint64_t i = 0; i < unallocated.size(); ++i)
         {
@@ -519,11 +518,11 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
     }
 
     // Process Ends before Starts to correctly simulate memory release
-    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b)
-              {
+    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b) {
         if (a.time != b.time)
             return a.time < b.time;
-        return a.type < b.type; });
+        return a.type < b.type;
+    });
 
     int64_t current_mem = 0;
     for (const auto &ev : events)
@@ -567,12 +566,11 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
     std::vector<ParallelBuffer> bufs = unallocated;
 
     // Heuristic: Place largest buffers first to minimize fragmentation
-    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
-                  if (a.size != b.size)
-                      return a.size > b.size;
-                  return a.id < b.id; // Deterministic tie-breaker
-              });
+    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
+        if (a.size != b.size)
+            return a.size > b.size;
+        return a.id < b.id; // Deterministic tie-breaker
+    });
 
     allocated.clear();
     allocated.reserve(bufs.size());
@@ -593,8 +591,7 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 
         // Sort overlapping buffers by their memory offset ascending
         std::sort(time_overlaps.begin(), time_overlaps.end(),
-                  [](const ParallelBuffer *a, const ParallelBuffer *b)
-                  { return a->offset < b->offset; });
+                  [](const ParallelBuffer *a, const ParallelBuffer *b) { return a->offset < b->offset; });
 
         // First-fit algorithm: push best_offset upwards if there's a memory
         // collision
@@ -629,15 +626,14 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
 
     // 1. Sort buffers by start time (and then end time to be deterministic)
     std::vector<ParallelBuffer> sorted_bufs = unallocated;
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
         if (a.start != b.start)
             return a.start < b.start;
-        return a.end < b.end; });
+        return a.end < b.end;
+    });
 
     // Helper lambda to process an independent connected component of buffers
-    auto process_component = [&](std::vector<ParallelBuffer> &current_comp) -> bool
-    {
+    auto process_component = [&](std::vector<ParallelBuffer> &current_comp) -> bool {
         if (current_comp.empty())
             return true;
 
@@ -659,11 +655,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
         // OPTIMIZATION 3: Exact solver fallback with aggressive pruning ordering
         // Sorting by size descending forces the tree to hit conflict limits much
         // faster.
-        std::sort(current_comp.begin(), current_comp.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-                  {
+        std::sort(current_comp.begin(), current_comp.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
             if (a.size != b.size)
                 return a.size > b.size;
-            return a.id < b.id; });
+            return a.id < b.id;
+        });
 
         if (!malloc(mem_cap, current_comp, comp_allocated))
         {
@@ -725,8 +721,8 @@ struct MemValidator : public ISelectionValidator
                  const std::unordered_map<MemSpace, uint64_t> &_mem_caps,
                  const std::unordered_map<EClassId, LogicalId> &_eclassToLogical,
                  const std::unordered_map<LogicalId, ParallelBuffer> &_preallocatedBuffers)
-        : egraph(_egraph), enodeInfos(_enodeInfos), mem_caps(_mem_caps),
-          eclassToLogical(_eclassToLogical), preallocatedBuffers(_preallocatedBuffers)
+        : egraph(_egraph), enodeInfos(_enodeInfos), mem_caps(_mem_caps), eclassToLogical(_eclassToLogical),
+          preallocatedBuffers(_preallocatedBuffers)
     {
     }
 
@@ -850,17 +846,15 @@ struct MemValidator : public ISelectionValidator
             // Reduce mem_caps by the max(offset+size) of the pre-allocated
             // logical-node buffers in this MemSpace.
             uint64_t reserved = reserved_per_ms.count(ms) ? reserved_per_ms.at(ms) : 0;
-            uint64_t reduced_cap = (cap == std::numeric_limits<uint64_t>::max())
-                                       ? cap
-                                       : (cap > reserved ? cap - reserved : 0);
+            uint64_t reduced_cap =
+                (cap == std::numeric_limits<uint64_t>::max()) ? cap : (cap > reserved ? cap - reserved : 0);
 
             std::vector<ParallelBuffer> allocated;
-            ProgressTimer t2 =
-                ProgressTimer(0,
-                              "malloc mem_space=(" + std::to_string(ms.idx) + "," + std::to_string((int)ms.type) +
-                                  "), n_bufs=" + std::to_string(bufs.size()) +
-                                  ", reserved=" + std::to_string(reserved) + " ",
-                              false, true);
+            ProgressTimer t2 = ProgressTimer(
+                0,
+                "malloc mem_space=(" + std::to_string(ms.idx) + "," + std::to_string((int)ms.type) +
+                    "), n_bufs=" + std::to_string(bufs.size()) + ", reserved=" + std::to_string(reserved) + " ",
+                false, true);
             if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow))
             {
                 alloc_ok = false;

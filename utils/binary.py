@@ -3,8 +3,6 @@ import torch
 import struct
 import os
 
-# TODO: make build.py extract these from the C++ code
-# Common enums exported for reuse across the codebase (cache viewer, benchmarks, etc.)
 OP_TYPES = [
     "INPUT",
     "CACHE",
@@ -44,7 +42,7 @@ OP_TYPES = [
 ]
 
 DTYPES = ["FLOAT32", "INT32", "INT64", "BF16", "BOOL", "ANY"]
-BACKENDS = ["STORAGE", "CPU", "CUDA"]
+BACKENDS = ["STORAGE", "CPU", "CUDA", "OPENCL"]
 STORAGE_TYPES = ["TRANSIENT", "PERSISTENT", "PINNED"]
 
 DTYPE_MAP = {
@@ -72,9 +70,8 @@ to_op_type = make_enum_mapper(OP_TYPES)
 
 
 class BinaryReader:
-    def __init__(self, f, lazy=False, string_enums=False):
+    def __init__(self, f, string_enums=False):
         self.f = f
-        self.lazy = lazy
         self.string_enums = string_enums
 
     def read_u8(self):
@@ -100,6 +97,12 @@ class BinaryReader:
         if not buf:
             return None
         return struct.unpack("<i", buf)[0]
+
+    def read_i64(self):
+        buf = self.f.read(8)
+        if not buf:
+            return None
+        return struct.unpack("<q", buf)[0]
 
     def read_float(self):
         buf = self.f.read(4)
@@ -154,7 +157,7 @@ class BinaryReader:
         inputDTypes = self.read_vector(self.read_dtype)
         outputDTypes = self.read_vector(self.read_dtype)
 
-        inputConstants = self.read_vector(lambda: self.f.read(self.read_u32()))
+        inputConstants = self.read_vector(lambda: self.read_u32)
 
         backends = self.read_vector(self.read_backend)
         inputBackends = self.read_vector(lambda: self.read_vector(self.read_backend))
@@ -192,79 +195,81 @@ class BinaryReader:
             "outputNeededRegion": self.read_vector(self.read_region),
         }
 
-    def read_op_instruction(self):
+    def read_parallel_buffer(self):
+        buf_id = self.read_u32()
+        mem_idx = self.read_u32()
+        mem_type = self.read_u32()
+        size = self.read_u64()
+        start = self.read_float()
+        end = self.read_float()
+        offset = self.read_i64()
         return {
-            "nodeId": self.read_u32(),
-            "logicalNodeId": self.read_u32(),
-            "kernelId": self.read_u64(),
-            "inputNodeIds": self.read_vector(self.read_u32),
-            "inplaceInputIndex": self.read_i32(),
-            "viewInputIndex": self.read_i32(),
-            "backend": self.read_backend(),
-            "outputStorageType": (
-                self.read_storage_type() if self.string_enums else self.read_u32()
-            ),
+            "id": buf_id,
+            "memSpaceIdx": mem_idx,
+            "memSpaceType": to_backend(mem_type) if self.string_enums else mem_type,
+            "size": size,
+            "start": start,
+            "end": end,
+            "offset": offset,
         }
 
-    def read_tensor_node(self):
+    def read_op_instruction(self):
+        eclass_id = self.read_u32()
+        logical_id = self.read_u32()
+        kernel_id = self.read_u64()
+        children = self.read_vector(self.read_u32)
+        out_buffer = self.read_parallel_buffer()
+        in_buffers = self.read_vector(self.read_parallel_buffer)
+        debug_origin = self.read_string()
         return {
-            "id": self.read_u32(),
-            "opType": to_op_type(self.read_u32()),
-            "opName": self.read_string(),
-            "dtype": self.read_dtype(),
-            "child_ids": self.read_vector(self.read_u32),
-            "shape": self.read_vector(self.read_u32),
-            "strides": self.read_vector(self.read_u64),
-            "backend": self.read_backend(),
-            "storageType": (
-                self.read_storage_type() if self.string_enums else self.read_u32()
-            ),
-            "contentHash": self.read_string(),
-            "debugOrigin": self.read_string(),
+            "eclassId": eclass_id,
+            "nodeId": eclass_id,  # compatibility alias
+            "logicalId": logical_id,
+            "kernelId": kernel_id,
+            "fullKernelId": kernel_id,  # compatibility alias
+            "children": children,
+            "inputNodeIds": children,  # compatibility alias
+            "outBuffer": out_buffer,
+            "inBuffers": in_buffers,
+            "debugOrigin": debug_origin,
+        }
+
+    def read_tensor_view(self):
+        offset = self.read_u64()
+        shape = self.read_vector(self.read_u32)
+        strides = self.read_vector(self.read_u64)
+        dtype = self.read_dtype()
+        return {
+            "offset": offset,
+            "shape": shape,
+            "strides": strides,
+            "dtype": dtype,
         }
 
     def read_compiled_graph(self):
         bucket = self.read_bucket()
+        node_views = self.read_map(self.read_u32, self.read_tensor_view)
         instructions = self.read_vector(self.read_op_instruction)
-        ref_counts = self.read_map(self.read_u32, self.read_u32)
-        nodes_map = self.read_map(self.read_u32, self.read_tensor_node)
-        assert nodes_map is not None
-        nodes_map = {str(k): v for k, v in nodes_map.items()}
         node_costs = self.read_map(self.read_u32, self.read_float)
-        physical_to_logical = self.read_map(self.read_u32, self.read_u32)
+        eclass_to_logical = self.read_map(self.read_u32, self.read_u32)
 
-        if self.lazy:
-            constants_meta = []
-            const_size = self.read_u32()
-            if const_size is not None:
-                for _ in range(const_size):
-                    node_id = self.read_u32()
-                    data_len = self.read_u32()
-                    offset = self.f.tell()
-                    self.f.seek(data_len, 1)  # Fast skip
-                    constants_meta.append(
-                        {"nodeId": node_id, "length": data_len, "offset": offset}
-                    )
-            return {
-                "bucket": bucket,
-                "instructions": instructions,
-                "nodesMap": nodes_map,
-                "nodeCosts": node_costs,
-                "physicalToLogicalNodeMap": physical_to_logical,
-                "constantsMeta": constants_meta,
-            }
-        else:
-            const_staging = self.read_vector(
-                lambda: (self.read_u32(), self.f.read(self.read_u32()))
-            )
-            return {
-                "bucket": bucket,
-                "instructions": instructions,
-                "nodesMap": nodes_map,
-                "nodeCosts": node_costs,
-                "physicalToLogicalNodeMap": physical_to_logical,
-                "constStaging": const_staging,
-            }
+        const_size = self.read_u32()
+        const_staging = []
+        if const_size is not None:
+            for _ in range(const_size):
+                eclass_id = self.read_u32()
+                data_len = self.read_u32()
+                data = self.f.read(data_len)
+                const_staging.append((eclass_id, data))
+
+        return {
+            "bucket": bucket,
+            "nodeViews": node_views,
+            "instructions": instructions,
+            "nodeCosts": node_costs,
+            "eclassToLogical": eclass_to_logical,
+            "constStaging": const_staging,
+        }
 
 
 class BinaryWriter:
@@ -337,11 +342,11 @@ def load_records_file(path):
     return records
 
 
-def load_cache_file(path, lazy=False, string_enums=False):
+def load_cache_file(path, string_enums=False):
     entries = []
     if os.path.exists(path):
         with open(path, "rb") as f:
-            br = BinaryReader(f, lazy=lazy, string_enums=string_enums)
+            br = BinaryReader(f, string_enums=string_enums)
             while True:
                 t = br.read_u8()
                 if t is None:
@@ -349,7 +354,15 @@ def load_cache_file(path, lazy=False, string_enums=False):
                 if t == 0:  # Metadata
                     version = br.read_u32()
                     rootId = br.read_u32()
-                    selectedCachedNodes = br.read_map(br.read_u32, br.read_backend)
+                    selectedCachedNodes = br.read_map(
+                        br.read_u32,
+                        lambda: {
+                            "idx": br.read_u32(),
+                            "type": br.read_backend()
+                            if string_enums
+                            else br.read_u32(),
+                        },
+                    )
                     entries.append(
                         {
                             "type": "metadata",
@@ -362,34 +375,21 @@ def load_cache_file(path, lazy=False, string_enums=False):
                     graph = br.read_compiled_graph()
                     entries.append({"type": "compiled_bucket", "graph": graph})
                 elif t == 2:  # Constants
-                    if lazy:
-                        # Skip global constants data
-                        count = br.read_u32()
-                        assert count is not None
-                        for _ in range(count):
-                            br.read_u32()
-                            data_len = br.read_u32()
-                            assert data_len is not None
-                            f.seek(data_len, 1)
-                    else:
-                        constants = {}
-                        count = br.read_u32()
-                        assert count is not None
+                    constants = {}
+                    count = br.read_u32()
+                    if count is not None:
                         for _ in range(count):
                             nodeId = br.read_u32()
-                            data = f.read(br.read_u32())
+                            data_len = br.read_u32()
+                            data = f.read(data_len)
                             constants[nodeId] = data
-                        entries.append({"type": "constants", "constants": constants})
+                    entries.append({"type": "constants", "constants": constants})
                 else:
                     break
     return entries
 
 
 def get_record_identity(r):
-    """
-    Creates a unique hashable signature for a kernel configuration.
-    Matches the logic used in C++ CostModel::estimateCost.
-    """
     return (
         r["kernelId"],
         tuple(tuple(s) for s in r["inputShapes"]),

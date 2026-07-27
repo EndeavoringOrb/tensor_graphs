@@ -3,14 +3,13 @@ import argparse
 import os
 import sys
 import hashlib
+import json
 import subprocess
 import re
 from pathlib import Path
 import platform
 from rich.console import Console
 from rich.panel import Panel
-
-# TODO: add linter check that every `#endif` has a comment that matches `#if`/`#ifdef`
 
 console = Console()
 
@@ -216,9 +215,13 @@ def generate_kernel_includes(core_seed):
     cpu_includes_hpp = GENERATED_DIR / "cpu_kernels.gen.hpp"
     cuda_includes_cu = GENERATED_DIR / "cuda_kernels.gen.cu"
     kernels_all_hpp = GENERATED_DIR / "kernels_all.gen.hpp"
+    kernel_uids_json = GENERATED_DIR / "kernel_uids.json"
+    kernel_uids_hpp = GENERATED_DIR / "kernel_uids.gen.hpp"
 
     kernel_entries_cpu = []
     kernel_entries_cuda = []
+    uid_info_map = {}
+    hpp_lines = ["#pragma once\n", "#include <cstdint>\n\n"]
 
     for root, _, files in os.walk(KERNELS_DIR):
         for f in files:
@@ -226,20 +229,53 @@ def generate_kernel_includes(core_seed):
             validate_kernel_match_logic(path)
             rel_path = path.relative_to(ROOT_DIR)
 
-            if f.endswith(".hpp"):
+            if f.endswith(".hpp") or f.endswith(".cu"):
                 file_content_hash = get_file_hash(path)
                 combined = core_seed + file_content_hash
                 full_hash = hashlib.sha256(combined.encode("utf-8")).hexdigest()
-                uid_val = f"0x{full_hash[:16]}ULL"
+                uid_hex = f"0x{full_hash[:16]}"
+                uid_val = f"{uid_hex}ULL"
                 inc_path = str(rel_path).replace("\\", "/")
-                kernel_entries_cpu.append((inc_path, uid_val))
-            elif f.endswith(".cu"):
-                file_content_hash = get_file_hash(path)
-                combined = core_seed + file_content_hash
-                full_hash = hashlib.sha256(combined.encode("utf-8")).hexdigest()
-                uid_val = f"0x{full_hash[:16]}ULL"
-                inc_path = str(rel_path).replace("\\", "/")
-                kernel_entries_cuda.append((inc_path, uid_val))
+
+                if f.endswith(".hpp"):
+                    kernel_entries_cpu.append((inc_path, uid_val))
+                else:
+                    kernel_entries_cuda.append((inc_path, uid_val))
+
+                op_name = path.stem
+                try:
+                    with open(path, "r", encoding="utf-8", errors="ignore") as kf:
+                        kcontent = kf.read()
+                    m_name = re.search(
+                        r'REGISTER_KERNEL(?:_INPLACE|_VIEW)?\s*\(\s*"([^"]+)"', kcontent
+                    )
+                    m_ref = re.search(
+                        r"REGISTER_REF_KERNEL(?:_VIEW)?\s*\(\s*OpType::(\w+)", kcontent
+                    )
+                    if m_name:
+                        op_name = m_name.group(1)
+                    elif m_ref:
+                        op_name = f"REF_{m_ref.group(1)}"
+                except Exception:
+                    pass
+
+                info = {
+                    "name": op_name,
+                    "path": inc_path,
+                    "hex_uid": uid_hex,
+                }
+
+                uid_int = int(full_hash[:16], 16)
+                uid_info_map[str(uid_int)] = info
+                uid_info_map[uid_hex.lower()] = info
+
+                const_name = (
+                    inc_path.replace("/", "_")
+                    .replace("\\", "_")
+                    .replace(".", "_")
+                    .upper()
+                )
+                hpp_lines.append(f"constexpr uint64_t {const_name} = {uid_val};\n")
 
     def write_includes(filepath, entries, is_cu=False):
         with open(filepath, "w") as f:
@@ -282,9 +318,17 @@ def generate_kernel_includes(core_seed):
         f.write("#pragma once\n")
         f.write('#include "cpu_kernels.gen.hpp"\n')
 
+    # Save kernel UIDs JSON and header files
+    with open(kernel_uids_json, "w", encoding="utf-8") as f:
+        json.dump(uid_info_map, f, indent=2)
+
+    with open(kernel_uids_hpp, "w", encoding="utf-8") as f:
+        f.writelines(hpp_lines)
+
     console.print(
         f"[dim]Generated {len(kernel_entries_cpu)} CPU and {len(kernel_entries_cuda)} CUDA Kernel Includes.[/dim]"
     )
+    console.print("[dim]Saved UID metadata mapping to kernel_uids.json.[/dim]")
 
 
 def generate_build_context():

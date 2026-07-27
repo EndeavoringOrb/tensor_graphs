@@ -23,25 +23,25 @@
 void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &rootIds,
                                  const std::vector<LogicalId> &dynamicInputs, Repo &repo)
 {
-    std::vector<uint32_t> topo = topologicalSort(rootIds, graph);
+    std::vector<LogicalId> topo = topologicalSort(rootIds, graph);
 
     // Create a set for O(1) lookup of dynamic model inputs
-    std::unordered_set<uint32_t> dynamicInputSet(dynamicInputs.begin(), dynamicInputs.end());
+    std::unordered_set<LogicalId> dynamicInputSet(dynamicInputs.begin(), dynamicInputs.end());
 
     // 1. Identify "clean" nodes
-    std::unordered_map<uint32_t, bool> is_clean;
-    for (uint32_t nodeId : topo)
+    std::unordered_map<LogicalId, bool> is_clean;
+    for (LogicalId nodeId : topo)
     {
         const TensorNode &node = graph.getNode(nodeId);
         if (node.opType == OpType::INPUT)
         {
             // If the node is a dynamic input, it is not considered clean/static
-            is_clean[nodeId.value] = (dynamicInputSet.count(nodeId) == 0);
+            is_clean[nodeId] = (dynamicInputSet.count(nodeId) == 0);
         }
         else
         {
             bool all_clean = true;
-            for (uint32_t pid : node.child_ids)
+            for (LogicalId pid : node.child_ids)
             {
                 if (!is_clean[pid])
                 {
@@ -54,7 +54,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
     }
 
     // 2. Infer shapes only for clean nodes
-    for (uint32_t nodeId : topo)
+    for (LogicalId nodeId : topo)
     {
         if (!is_clean[nodeId])
             continue;
@@ -71,7 +71,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
     int computed = 0;
     int skipped = 0;
 
-    for (uint32_t nodeId : topo)
+    for (LogicalId nodeId : topo)
     {
         if (!is_clean[nodeId])
             continue;
@@ -110,7 +110,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
                 std::memcpy(results[nodeId.value].data() + idx * elemSize, rawBytes.data() + i * elemSize, elemSize);
             }
 
-            repo.write(nodeId, node, results[nodeId.value].data(), results[nodeId.value].size());
+            repo.write(nodeId, view, results[nodeId.value].data(), results[nodeId.value].size());
             computed++;
             continue;
         }
@@ -136,7 +136,6 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
             inputViews.push_back(views[pid.value]);
             TensorNode inNode = graph.getNode(pid);
             inNode.strides = views[pid.value].strides;
-            inNode.viewOffset = views[pid.value].offset / getDTypeSize(inNode.dtype);
             inputNodes.push_back(inNode);
         }
 
@@ -158,15 +157,16 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
 
         if (kernel.is_view)
         {
-            TensorNode dummyOutNode = node;
-            kernel.inferView(dummyOutNode, inputNodes, graph);
+            TensorView dummyOutView(node, 0);
+            kernel.inferView(inputNodes, dummyOutView, graph);
             LogicalId parentId = node.child_ids[0];
             results[nodeId.value] = results[parentId.value];
-            chosenOutView.strides = dummyOutNode.strides;
-            chosenOutView.offset = dummyOutNode.viewOffset * elemSize;
+            chosenOutView.strides = dummyOutView.strides;
+            chosenOutView.offset = dummyOutView.offset;
             views[nodeId.value] = chosenOutView;
 
-            TensorView contigView = makeView(dummyOutNode);
+            TensorView contigView = dummyOutView;
+            contigView.strides = calcContiguousStrides(dummyOutView.getShape());
             std::vector<uint8_t> contigData(countElements(contigView) * elemSize);
             const uint8_t *srcData = results[parentId.value].data() + chosenOutView.offset;
             for (uint64_t i = 0; i < countElements(contigView); ++i)
@@ -174,7 +174,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
                 uint64_t srcIdx = getStridedIndex(i, chosenOutView.getShape(), chosenOutView.strides);
                 std::memcpy(contigData.data() + i * elemSize, srcData + srcIdx * elemSize, elemSize);
             }
-            repo.write(nodeId, dummyOutNode, contigData.data(), contigData.size());
+            repo.write(nodeId, contigView, contigData.data(), contigData.size());
             computed++;
             continue;
         }
@@ -190,7 +190,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
             kernel.run(KernelContext(inputPtrs, outputPtrs, inputViews, outputViews));
         }
 
-        repo.write(nodeId, node, results[nodeId.value].data(), results[nodeId.value].size());
+        repo.write(nodeId, chosenOutView, results[nodeId.value].data(), results[nodeId.value].size());
         computed++;
     }
 
@@ -214,7 +214,7 @@ int main(int argc, char *argv[])
 
     std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
     std::unordered_map<uint32_t, uint64_t> idxCaps = {{1, 24ULL * 1024 * 1024 * 1024}};
-    MemoryManager mem(bufferSizes, idxCaps);
+    MemoryManager mem(bufferSizes);
     Graph g;
 
     std::cout << "Building " << model << " Graph for Reference Tensors..." << std::endl;
@@ -224,10 +224,10 @@ int main(int argc, char *argv[])
     {
         roots = build_gemma_graph(g, mem);
     }
-    else if (model == "flux-klein-4b")
-    {
-        roots = build_flux_graph(g, mem);
-    }
+    // else if (model == "flux-klein-4b")
+    // {
+    //     roots = build_flux_graph(g, mem);
+    // }
     else if (model == "qwen-3.6-35b-a3b")
     {
         roots = build_qwen_graph(g, mem);

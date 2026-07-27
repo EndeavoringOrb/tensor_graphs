@@ -757,8 +757,8 @@ struct Planner
 
         Extractor extractor = Extractor(egraph, rootEClassId);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
-        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical,
-                                                                    preallocatedBuffers));
+        extractor.registerValidator(
+            std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical, preallocatedBuffers));
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
@@ -1634,9 +1634,8 @@ struct Planner
         }
         eclassToLogical = std::move(updatedEClassToLogical);
 
-        auto extraction =
-            extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical, preallocatedBuffers,
-                        true, strictCache);
+        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical,
+                                      preallocatedBuffers, true, strictCache);
         return buildCompiledGraph(rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes,
                                   eclassToLogical);
     }

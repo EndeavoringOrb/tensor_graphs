@@ -16,6 +16,7 @@ from .jobs import (
     BinaryReader,
     save_report,
     load_reports,
+    load_cache_file,
 )
 
 app = Flask(__name__)
@@ -94,6 +95,9 @@ def get_hardware_info():
     return jsonify({"hwinfo": get_hw_info()})
 
 
+# In kernel_bench/app.py
+
+
 @app.get("/api/read_benchmarks")
 def get_read_benchmarks():
     op_filter = request.args.get("op", "")
@@ -111,34 +115,16 @@ def get_read_benchmarks():
 
     uid_map = {}
     if cache_path.exists():
-        with open(cache_path, "rb") as f:
-            br = BinaryReader(f)
-            while True:
-                t = br.read_u8()
-                if t is None:
-                    break
-                if t == 1:  # Compiled Bucket
-                    br.read_string()  # key
-                    graph = br.read_compiled_graph()
-                    nodes = graph["nodesMap"]
-                    for inst in graph["instructions"]:
-                        uid = str(inst["fullKernelId"])
-                        node = nodes[str(inst["nodeId"])]
-                        op_name = node["opType"]
-                        if op_name == "FUSED":
-                            op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
-                        uid_map[uid] = op_name
-                elif t == 0:  # Metadata
-                    br.read_u32()
-                    br.read_u32()
-                    br.read_map(br.read_u32, br.read_backend)
-                elif t == 2:  # Constants
-                    count = br.read_u32()
-                    for _ in range(count):
-                        br.read_u32()
-                        f.read(br.read_u32())
-                else:
-                    break
+        cache_entries = load_cache_file(cache_path)
+        for entry in cache_entries:
+            if entry.get("type") == "compiled_bucket":
+                graph = entry["graph"]
+                node_views = graph.get("nodeViews", {})
+                for inst in graph["instructions"]:
+                    uid = str(inst["kernelId"])
+                    eclass_id = inst["eclassId"]
+                    # Map UID
+                    uid_map[uid] = f"Kernel_{hex(inst['kernelId'])}"
 
     if header_path.exists():
         pattern = re.compile(r"constexpr uint64_t\s+(\w+)\s+=\s+(0x[0-9a-fA-F]+)ULL;")
@@ -209,53 +195,43 @@ def get_analyze():
     op_type_stats = defaultdict(float)
 
     for cache_path in cache_paths:
-        with open(cache_path, "rb") as f:
-            br = BinaryReader(f)
-            while True:
-                t = br.read_u8()
-                if t is None:
-                    break
-                if t == 1:  # Compiled Bucket
-                    br.read_string()  # key
-                    graph = br.read_compiled_graph()
-                    nodes = graph["nodesMap"]
-                    node_costs = graph.get("nodeCosts", {})
-                    for inst in graph["instructions"]:
-                        node_id = inst["nodeId"]
-                        node = nodes[str(node_id)]
-                        uid = inst["fullKernelId"]
-                        extracted_uids.add(uid)
-                        op_name = node["opType"]
-                        if op_name == "FUSED":
-                            op_name = f"FUSED_{node.get('opName', 'UNKNOWN')}"
+        cache_entries = load_cache_file(cache_path)
+        for entry in cache_entries:
+            if entry.get("type") == "compiled_bucket":
+                graph = entry["graph"]
+                node_views = graph.get("nodeViews", {})
+                node_costs = graph.get("nodeCosts", {})
+                for inst in graph["instructions"]:
+                    eclass_id = inst["eclassId"]
+                    uid = inst["kernelId"]
+                    extracted_uids.add(uid)
+                    op_name = f"Kernel_{hex(uid)}"
 
-                        runtime = node_costs.get(node_id, 0.0)
-                        if runtime == float("inf"):
-                            runtime = 0.0
+                    runtime = node_costs.get(eclass_id, 0.0)
+                    if runtime == float("inf"):
+                        runtime = 0.0
 
-                        total_estimated_time += runtime
-                        op_type_stats[op_name] += runtime
-                        input_shapes = [
-                            nodes[str(pid)]["shape"] if str(pid) in nodes else []
-                            for pid in node["child_ids"]
-                        ]
+                    total_estimated_time += runtime
+                    op_type_stats[op_name] += runtime
 
-                        debug_origin = node.get("debugOrigin", "UNKNOWN")
-                        identity = f"{op_name}({input_shapes}->{list(node['shape'])}) [{debug_origin}]"
+                    input_shapes = [
+                        node_views[cid]["shape"]
+                        for cid in inst.get("children", [])
+                        if cid in node_views
+                    ]
+                    out_shape = (
+                        node_views[eclass_id]["shape"]
+                        if eclass_id in node_views
+                        else []
+                    )
 
-                        chain_stats[identity]["time"] += runtime
-                        chain_stats[identity]["count"] += 1
-                elif t == 0:  # Metadata
-                    br.read_u32()
-                    br.read_u32()
-                    br.read_map(br.read_u32, br.read_backend)
-                elif t == 2:  # Constants
-                    count = br.read_u32()
-                    for _ in range(count):
-                        br.read_u32()
-                        f.read(br.read_u32())
-                else:
-                    break
+                    debug_origin = inst.get("debugOrigin", "UNKNOWN")
+                    identity = (
+                        f"{op_name}({input_shapes}->{list(out_shape)}) [{debug_origin}]"
+                    )
+
+                    chain_stats[identity]["time"] += runtime
+                    chain_stats[identity]["count"] += 1
 
     top_chains = sorted(
         [

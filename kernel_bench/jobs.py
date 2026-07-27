@@ -121,6 +121,18 @@ def run_cmd(cmd: list[str], timeout: int) -> dict:
 
 
 def get_uid_for_file(rel_path: str):
+    json_path = GENERATED_DIR / "kernel_uids.json"
+    if json_path.exists():
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                target_rel = rel_path.replace("\\", "/")
+                for key, info in data.items():
+                    if isinstance(info, dict) and info.get("path") == target_rel:
+                        return info.get("hex_uid")
+        except Exception:
+            pass
+
     header_path = GENERATED_DIR / "kernel_uids.gen.hpp"
     if not header_path.exists():
         return None
@@ -165,11 +177,11 @@ def analyze_total_time(target_model: str):
                 node_costs = graph.get("nodeCosts", {})
 
                 for inst in graph["instructions"]:
-                    uid = inst["fullKernelId"]
-                    node_id = inst["nodeId"]
+                    uid = inst.get("kernelId", inst.get("fullKernelId"))
+                    eclass_id = inst.get("eclassId", inst.get("nodeId"))
                     extracted_uids.add(uid)
 
-                    runtime = node_costs.get(node_id, 0.0)
+                    runtime = node_costs.get(eclass_id, 0.0)
                     if runtime == float("inf"):
                         runtime = 0.0
                     total_time += runtime
