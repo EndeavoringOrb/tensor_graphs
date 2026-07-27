@@ -8,10 +8,10 @@
 
 class Executor
 {
-  private:
+private:
     MemoryManager &memManager;
 
-  public:
+public:
     Executor(MemoryManager &mm) : memManager(mm)
     {
     }
@@ -68,22 +68,25 @@ class Executor
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
             std::string opName = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
 
+#ifdef DEBUG
             if (OpenCLState::get().initialized) // TODO: only synchronize engines that inputs are on.
             {
                 clFinish(OpenCLState::get().queue);
             }
 #ifdef USE_CUDA
             cudaDeviceSynchronize();
-#endif
+#endif // USE_CUDA
             Debug::checkValues(ctx.inputs, ctx.inViews,
                                "(inputs) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
                                    toString(kernel));
+#endif // DEBUG
 
             if (!kernel.is_view && kernel.run)
             {
                 kernel.run(ctx);
             }
 
+#ifdef DEBUG
             if (OpenCLState::get().initialized)
             {
                 clFinish(OpenCLState::get().queue);
@@ -95,6 +98,7 @@ class Executor
             Debug::checkValues(c_outputs, ctx.outViews, ctx.inputs, ctx.inViews, kernel,
                                "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
                                    toString(kernel));
+#endif // DEBUG
 
             if (debugCallback)
             {
