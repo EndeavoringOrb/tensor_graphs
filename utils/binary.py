@@ -142,6 +142,29 @@ class BinaryReader:
             return None
         return {read_key(): read_val() for _ in range(size)}
 
+    def read_mem_space(self):
+        idx = self.read_u32()
+        if idx is None:
+            return None
+        mtype = self.read_backend() if self.string_enums else self.read_u32()
+        return {"idx": idx, "type": mtype}
+
+    def read_engine(self):
+        idx = self.read_u32()
+        if idx is None:
+            return None
+        etype = self.read_u32()
+        supported = self.read_vector(self.read_mem_space)
+        return {"idx": idx, "type": etype, "supported": supported}
+
+    def read_bytes_vector(self):
+        length = self.read_u32()
+        if length is None:
+            return None
+        if length == 0:
+            return b""
+        return self.f.read(length)
+
     def read_record(self):
         kernelId = self.read_u64()
         if kernelId is None:
@@ -150,34 +173,46 @@ class BinaryReader:
         hwTag = self.read_string()
 
         inputShapes = self.read_vector(lambda: self.read_vector(self.read_u32))
-        outputShapes = self.read_vector(lambda: self.read_vector(self.read_u32))
+        outputShape = self.read_vector(self.read_u32)
         inputStrides = self.read_vector(lambda: self.read_vector(self.read_u64))
-        outputStrides = self.read_vector(lambda: self.read_vector(self.read_u64))
+        outputStrides = self.read_vector(self.read_u64)
 
         inputDTypes = self.read_vector(self.read_dtype)
-        outputDTypes = self.read_vector(self.read_dtype)
+        outputDType = self.read_dtype()
 
-        inputConstants = self.read_vector(lambda: self.read_u32)
+        inputConstants = self.read_vector(self.read_bytes_vector)
 
-        backends = self.read_vector(self.read_backend)
-        inputBackends = self.read_vector(lambda: self.read_vector(self.read_backend))
+        output_mem_space = self.read_mem_space()
+        engines = self.read_vector(self.read_engine)
+        input_mem_spaces = self.read_vector(self.read_mem_space)
 
         runTime = self.read_float()
 
+        # Aliases for backward compatibility with scripts expecting plural outputShapes / backends:
+        outputShapes = [outputShape] if outputShape is not None else []
+        outputStrides_list = [outputStrides] if outputStrides is not None else []
+        outputDTypes = [outputDType] if outputDType is not None else []
+        backends = [e["type"] for e in engines] if engines else []
+
         return {
             "kernelId": kernelId,
-            "outputShapes": outputShapes,
-            "outputStrides": outputStrides,
-            "runTime": runTime,
+            "buildContextId": buildContextId,
+            "hwTag": hwTag,
             "inputShapes": inputShapes,
+            "outputShape": outputShape,
+            "outputShapes": outputShapes,
             "inputStrides": inputStrides,
+            "outputStrides": outputStrides_list,
+            "outputStride": outputStrides,
             "inputDTypes": inputDTypes,
+            "outputDType": outputDType,
             "outputDTypes": outputDTypes,
             "inputConstants": inputConstants,
+            "output_mem_space": output_mem_space,
+            "engines": engines,
+            "input_mem_spaces": input_mem_spaces,
             "backends": backends,
-            "inputBackends": inputBackends,
-            "hwTag": hwTag,
-            "buildContextId": buildContextId,
+            "runTime": runTime,
         }
 
     def read_dim(self):
@@ -301,6 +336,33 @@ class BinaryWriter:
         for x in v:
             write_func(x)
 
+    def write_mem_space(self, ms):
+        if isinstance(ms, dict):
+            idx = ms["idx"]
+            mtype = ms["type"]
+        elif isinstance(ms, (list, tuple)):
+            idx = ms[0]
+            mtype = ms[1]
+        else:
+            idx, mtype = 1, 1
+        self.write_u32(idx)
+        self.write_u32(BACKENDS.index(mtype) if isinstance(mtype, str) else mtype)
+
+    def write_engine(self, eng):
+        if isinstance(eng, dict):
+            idx = eng["idx"]
+            etype = eng["type"]
+            supported = eng.get("supported", [])
+        elif isinstance(eng, (list, tuple)):
+            idx = eng[0]
+            etype = eng[1]
+            supported = eng[2] if len(eng) > 2 else []
+        else:
+            idx, etype, supported = 0, 0, []
+        self.write_u32(idx)
+        self.write_u32(etype)
+        self.write_vector(supported, self.write_mem_space)
+
     def write_record(self, r):
         self.write_u64(r["kernelId"])
         self.write_u64(r["buildContextId"])
@@ -308,24 +370,44 @@ class BinaryWriter:
         self.write_vector(
             r["inputShapes"], lambda v: self.write_vector(v, self.write_u32)
         )
-        self.write_vector(
-            r["outputShapes"], lambda v: self.write_vector(v, self.write_u32)
-        )
+
+        out_shape = r.get("outputShape")
+        if out_shape is None and r.get("outputShapes"):
+            out_shape = r["outputShapes"][0]
+        self.write_vector(out_shape or [], self.write_u32)
+
         self.write_vector(
             r["inputStrides"], lambda v: self.write_vector(v, self.write_u64)
         )
-        self.write_vector(
-            r["outputStrides"], lambda v: self.write_vector(v, self.write_u64)
-        )
+
+        out_strides = r.get("outputStrides")
+        if (
+            out_strides is not None
+            and len(out_strides) > 0
+            and isinstance(out_strides[0], (list, tuple))
+        ):
+            out_strides = out_strides[0]
+        self.write_vector(out_strides or [], self.write_u64)
+
         self.write_vector(r["inputDTypes"], self.write_u32)
-        self.write_vector(r["outputDTypes"], self.write_u32)
-        self.write_vector(
-            r["inputConstants"], lambda v: (self.write_u32(len(v)), self.f.write(v))
-        )
-        self.write_vector(r["backends"], self.write_u32)
-        self.write_vector(
-            r["inputBackends"], lambda v: self.write_vector(v, self.write_u32)
-        )
+
+        out_dtype = r.get("outputDType")
+        if out_dtype is None and r.get("outputDTypes"):
+            out_dtype = r["outputDTypes"][0]
+        self.write_u32(out_dtype if out_dtype is not None else 0)
+
+        def write_bytes(b):
+            self.write_u32(len(b))
+            self.f.write(b)
+
+        self.write_vector(r["inputConstants"], write_bytes)
+
+        output_ms = r.get("output_mem_space", {"idx": 1, "type": 1})
+        self.write_mem_space(output_ms)
+
+        self.write_vector(r.get("engines", []), self.write_engine)
+        self.write_vector(r.get("input_mem_spaces", []), self.write_mem_space)
+
         self.write_float(r["runTime"])
 
 
@@ -358,9 +440,9 @@ def load_cache_file(path, string_enums=False):
                         br.read_u32,
                         lambda: {
                             "idx": br.read_u32(),
-                            "type": br.read_backend()
-                            if string_enums
-                            else br.read_u32(),
+                            "type": (
+                                br.read_backend() if string_enums else br.read_u32()
+                            ),
                         },
                     )
                     entries.append(
@@ -390,13 +472,29 @@ def load_cache_file(path, string_enums=False):
 
 
 def get_record_identity(r):
+    out_shape = r.get("outputShape")
+    if out_shape is None and "outputShapes" in r:
+        out_shape = r["outputShapes"][0] if r["outputShapes"] else ()
+
+    out_stride = r.get("outputStride")
+    if out_stride is None and "outputStrides" in r:
+        out_stride = (
+            r["outputStrides"][0]
+            if r["outputStrides"] and isinstance(r["outputStrides"][0], (list, tuple))
+            else r["outputStrides"]
+        )
+
+    out_dtype = r.get("outputDType")
+    if out_dtype is None and "outputDTypes" in r:
+        out_dtype = r["outputDTypes"][0] if r["outputDTypes"] else 0
+
     return (
         r["kernelId"],
         tuple(tuple(s) for s in r["inputShapes"]),
         tuple(tuple(s) for s in r["inputStrides"]),
         tuple(r["inputDTypes"]),
-        tuple(tuple(s) for s in r["outputShapes"]),
-        tuple(tuple(s) for s in r["outputStrides"]),
-        tuple(r["outputDTypes"]),
+        tuple(out_shape if out_shape is not None else ()),
+        tuple(out_stride if out_stride is not None else ()),
+        out_dtype,
         tuple(r["inputConstants"]),
     )
