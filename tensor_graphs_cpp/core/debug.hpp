@@ -255,7 +255,7 @@ class ReferenceVerifier
             while (refInFile.peek() != EOF)
             {
                 LogicalId logicalId;
-                if (!refInFile.read(reinterpret_cast<char *>(&logicalId), sizeof(logicalId)))
+                if (!refInFile.read(reinterpret_cast<char *>(&logicalId.value), sizeof(logicalId.value)))
                     break;
 
                 uint32_t nameLen;

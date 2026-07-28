@@ -112,7 +112,11 @@ public:
                     cudaDeviceSynchronize();
                 }
 #endif
-                debugCallback(logical_id, ctx, ctx.outputs[0]);
+                // TODO: transfer from other mem spaces
+                if (outBufObj->mem_space.type == HandleType::CPP)
+                {
+                    debugCallback(logical_id, ctx, ctx.outputs[0]);
+                }
             }
 
             // Cleanup Context
