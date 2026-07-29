@@ -266,16 +266,9 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
 
     for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
     {
-        uint64_t ruleIdx = idx;
-        if (kernel.min_num_inputs != kernel.max_num_inputs)
-        {
-            ruleIdx = (idx == r.inputShapes.size() - 1)
-                          ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1)
-                          : 0;
-        }
         MemSpace b = {1, HandleType::CPP};
-        if (!r.input_mem_spaces.empty() && ruleIdx < r.input_mem_spaces.size())
-            b = r.input_mem_spaces[ruleIdx];
+        if (!r.input_mem_spaces.empty() && idx < r.input_mem_spaces.size())
+            b = r.input_mem_spaces[idx];
 
         if (b.type == HandleType::STORAGE)
         {
@@ -389,16 +382,9 @@ struct PreparedKernel
                 elements = 1;
             uint64_t bytes = elements * getDTypeSize(r.inputDTypes[idx]);
 
-            uint64_t ruleIdx = idx;
-            if (kernel.min_num_inputs != kernel.max_num_inputs)
-            {
-                ruleIdx = (idx == r.inputShapes.size() - 1)
-                              ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1)
-                              : 0;
-            }
             MemSpace b = {1, HandleType::CPP};
-            if (!r.input_mem_spaces.empty() && ruleIdx < r.input_mem_spaces.size())
-                b = r.input_mem_spaces[ruleIdx];
+            if (!r.input_mem_spaces.empty() && idx < r.input_mem_spaces.size())
+                b = r.input_mem_spaces[idx];
 
             inputBuffers[idx].allocate(b, bytes);
 
@@ -552,16 +538,9 @@ struct PreparedKernel
         uint64_t storageInIdx = 0;
         for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
         {
-            uint64_t ruleIdx = idx;
-            if (kernel.min_num_inputs != kernel.max_num_inputs)
-            {
-                ruleIdx = (idx == r.inputShapes.size() - 1)
-                              ? (kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1)
-                              : 0;
-            }
             MemSpace b = {1, HandleType::CPP};
-            if (!r.input_mem_spaces.empty() && ruleIdx < r.input_mem_spaces.size())
-                b = r.input_mem_spaces[ruleIdx];
+            if (!r.input_mem_spaces.empty() && idx < r.input_mem_spaces.size())
+                b = r.input_mem_spaces[idx];
 
             if (b.type == HandleType::STORAGE)
             {
