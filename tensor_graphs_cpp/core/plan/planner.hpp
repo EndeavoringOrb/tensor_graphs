@@ -137,7 +137,7 @@ struct Planner
                 return true;
             if ((op == OpType::SUM || op == OpType::MAX) && inputIdx == 1)
                 return true;
-            if (op == OpType::CONCAT && inputIdx == numInputs - 1)
+            if (op == OpType::CONCAT && inputIdx == 0)
                 return true;
             if (op == OpType::TRIU && inputIdx == 1)
                 return true;

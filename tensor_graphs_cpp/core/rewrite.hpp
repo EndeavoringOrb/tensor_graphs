@@ -364,7 +364,7 @@ struct FusionRule : public Rule
 
                 if (eNode.getOpType() == OpType::CONCAT && eNode.getChildren().size() > 2)
                 {
-                    for (uint64_t i = 0; i < eNode.getChildren().size() - 1; ++i)
+                    for (uint64_t i = 1; i < eNode.getChildren().size(); ++i)
                     {
                         mr.variadicConcatTensorEClasses.push_back(egraph.findConst(eNode.getChildren()[i]));
                     }
@@ -735,17 +735,19 @@ struct FusionRule : public Rule
             if (eNode.getChildren().size() < 2)
                 return false;
 
-            if (!matchPatternClass(eNode.getChildren().back(), egraph, pNode.child_ids.back(), pattern, binding,
-                                   protectedEClasses, true))
+            // Match axis (first element)
+            if (!matchPatternClass(eNode.getChildren()[0], egraph, pNode.child_ids[0], pattern, binding,
+                                   protectedEClasses, false))
                 return false;
 
+            // The rest are tensors. The pattern has one tensor at index 1.
             bool firstTensor = true;
-            for (uint64_t i = 0; i < eNode.getChildren().size() - 1; ++i)
+            for (uint64_t i = 1; i < eNode.getChildren().size(); ++i)
             {
                 if (firstTensor)
                 {
-                    if (!matchPatternClass(eNode.getChildren()[i], egraph, pNode.child_ids[0], pattern, binding,
-                                           protectedEClasses, false))
+                    if (!matchPatternClass(eNode.getChildren()[i], egraph, pNode.child_ids[1], pattern, binding,
+                                           protectedEClasses, true))
                         return false;
                     firstTensor = false;
                 }
@@ -753,7 +755,7 @@ struct FusionRule : public Rule
                 {
                     EClassId canonChild = egraph.findConst(eNode.getChildren()[i]);
                     const EClass &childCls = egraph.getEClass(canonChild);
-                    if (childCls.dtype != pattern.dtypes[0])
+                    if (childCls.dtype != pattern.dtypes[1])
                         return false;
                 }
             }
@@ -1174,6 +1176,7 @@ struct SlicePushDownElementwise : public Rule
                         canonChildId =
                             addOpToEGraph(egraph, OpType::CONTIGUOUS, {canonChildId}, childCls.shape,
                                           calcContiguousStrides(childCls.shape), childCls.dtype, childCls.mem_space);
+                        childSliceStrides = calcContiguousStrides(childCls.shape);
                     }
 
                     EClassId childSlice =
