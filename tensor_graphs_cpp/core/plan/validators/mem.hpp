@@ -92,6 +92,39 @@ void get_births(const std::vector<EClassId> &ordered, const EGraph &egraph,
     }
 }
 
+inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
+                              const std::unordered_map<EClassId, uint32_t> &selection_map,
+                              const std::vector<ENodeInfo> &enodeInfos)
+{
+    EClassId curr = egraph.findConst(id);
+    while (true)
+    {
+        auto sel_it = selection_map.find(curr);
+        if (sel_it == selection_map.end())
+            break;
+        uint32_t sel = sel_it->second;
+        ENodeId enode_id = egraph.getEClass(curr).enodes[sel];
+        if (enodeInfos[enode_id.value].is_view)
+        {
+            const ENode &node = egraph.getENode(enode_id);
+            if (!node.getChildren().empty())
+            {
+                curr = egraph.findConst(node.getChildren()[0]);
+            }
+            else
+            {
+                break;
+            }
+        }
+        else
+        {
+            break;
+        }
+    }
+    return curr;
+}
+
+// 2. Refactor `get_deaths`
 static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egraph,
                        const std::unordered_map<EClassId, uint32_t> &selection_map,
                        const std::vector<ENodeInfo> &enodeInfos, const std::unordered_map<EClassId, float> &birth_times,
@@ -122,7 +155,8 @@ static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egrap
             bool is_consumed = false;
             for (EClassId child : other_node.getChildren())
             {
-                if (egraph.findConst(child) == node_eclass)
+                if (resolve_view_alias(child, egraph, selection_map, enodeInfos) == 
+                    resolve_view_alias(node_eclass, egraph, selection_map, enodeInfos))
                 {
                     is_consumed = true;
                     break;
@@ -138,7 +172,7 @@ static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egrap
     }
 }
 
-// Search for bufferize() function and update its loop
+// 3. Refactor `bufferize`
 static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordered, const EGraph &egraph,
                                              const std::unordered_map<EClassId, uint32_t> &selection_map,
                                              const std::vector<ENodeInfo> &enodeInfos,
@@ -153,35 +187,23 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     get_deaths(ordered, egraph, selection_map, enodeInfos, birth_times, death_times);
 
     std::vector<ParallelBuffer> buffers;
-    std::unordered_map<EClassId, EClassId> alias_map;
 
     // Pass 1: resolve aliases and lifetimes
     for (EClassId eclass : ordered)
     {
-        alias_map[eclass] = eclass;
         uint32_t sel = selection_map.at(eclass);
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENodeInfo &info = enodeInfos[enode_id.value];
 
         if (info.is_view)
         {
-            const ENode &node = egraph.getENode(enode_id);
-            if (node.getChildren().empty())
-                Error::throw_err("node has no children");
+            EClassId base = resolve_view_alias(eclass, egraph, selection_map, enodeInfos);
 
-            EClassId child = egraph.findConst(node.getChildren()[0]);
-
-            // Resolve child alias
-            while (alias_map.count(child) && alias_map[child] != child)
-            {
-                child = alias_map[child];
-            }
-            alias_map[eclass] = child;
-
-            // Expand base's lifetime
-            birth_times[child] =
-                std::min(birth_times[child], birth_times[eclass]); // TODO: is this needed since we are already ordered?
-            death_times[child] = std::max(death_times[child], death_times[eclass]);
+            // Expand base's lifetime to encompass the view
+            if (birth_times.count(base))
+                birth_times[base] = std::min(birth_times[base], birth_times[eclass]);
+            if (death_times.count(base))
+                death_times[base] = std::max(death_times[base], death_times[eclass]);
         }
     }
 
@@ -189,11 +211,7 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     std::unordered_map<EClassId, BufferId> base_to_buf;
     for (EClassId eclass : ordered)
     {
-        EClassId base = eclass;
-        while (alias_map.count(base) && alias_map[base] != base)
-        {
-            base = alias_map[base];
-        }
+        EClassId base = resolve_view_alias(eclass, egraph, selection_map, enodeInfos);
 
         if (base_to_buf.find(base) == base_to_buf.end())
         {

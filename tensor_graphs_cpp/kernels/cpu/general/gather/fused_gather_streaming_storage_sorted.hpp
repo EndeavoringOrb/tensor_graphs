@@ -178,13 +178,11 @@ inline void runGatherStreamingStorageSorted(const KernelContext &ctx)
         {
             uint64_t offset = fileOffset + static_cast<uint64_t>(idx) * rowSizeBytes;
             last_read_success = gather_sorted_readFromFileAtOffset(fd, offset, row_buf.data(), rowSizeBytes);
+            if (!last_read_success)
+            {
+                Error::throw_err("Error reading from file at offset " + std::to_string(offset));
+            }
             last_read_idx = idx;
-        }
-
-        if (!last_read_success)
-        {
-            std::memset(dst_row, 0, rowSize * sizeof(float));
-            continue;
         }
 
         uint64_t j = 0;
@@ -228,8 +226,8 @@ inline LogicalId refFactoryGatherStreamingStorageSorted(const std::vector<Logica
 
 REGISTER_KERNEL("Gather_StreamingStorage_Sorted_NEON", 2, 2, matchGatherStreamingStorageSorted,
                 runGatherStreamingStorageSorted, refFactoryGatherStreamingStorageSorted, MemSpace(1, HandleType::CPP),
-                {Engine(0, EngineType::CPU)}, // output backend
-                {DType::BF16, DType::INT32},  // input types: raw weight (BF16), indices (INT32)
-                {{248320, 2048}, {1, 8}},     // dummy shapes
-                {true, true},                 // requires contiguous inputs
+                {Engine(0, EngineType::CPU)},                                          // output backend
+                {DType::BF16, DType::INT32},                                           // input types: raw weight (BF16), indices (INT32)
+                {{248320, 2048}, {1, 8}},                                              // dummy shapes
+                {true, true},                                                          // requires contiguous inputs
                 {{MemSpace(0, HandleType::STORAGE)}, {MemSpace(1, HandleType::CPP)}}); // input placement
