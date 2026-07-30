@@ -452,7 +452,7 @@ struct Extractor
         }
     }
 
-    void ascend(const std::vector<ENodeInfo> &enodeInfos)
+    void ascend()
     {
         bool skip_increment = (target_backtrack_eclass != EClassId{UINT32_MAX});
 
@@ -474,7 +474,6 @@ struct Extractor
             const auto &enodes = egraph.getEClass(current).enodes;
             ENodeId enode_id = enodes[sel];
             const ENode &node = egraph.getENode(enode_id);
-            const ENodeInfo &info = enodeInfos[enode_id.value];
 
             if (!skip_increment && sel + 1 < enodes.size())
             {

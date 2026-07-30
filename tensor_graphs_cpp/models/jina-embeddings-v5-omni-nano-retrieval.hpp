@@ -30,8 +30,8 @@
 //                  - RMSNorm eps=1e-5, 1-D RoPE (theta=1,000,000)
 //                  - SwiGLU MLP (intermediate=3072), no biases on attn/mlp
 //                  - Input = chat-template-wrapped image features:
-//                    [8 prefix tokens] + [256 image features] + [6 suffix
-//                    tokens] = 270
+//                    [8 prefix tokens] + [256 image features] + [7 suffix
+//                    tokens] = 271
 //
 //   Pooling      : last-token pooling (position = 269, the last suffix token)
 //   Output       : L2-normalized 768-dim embedding

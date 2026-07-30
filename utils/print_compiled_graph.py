@@ -268,8 +268,7 @@ def matches_filter(
     except Exception as e:
         console.print(
             f"[bold red]Error evaluating filter expression '{filter_expr}' (parsed as"
-            f" '{preprocessed}'):[/bold red] {e}",
-            file=sys.stderr,
+            f" '{preprocessed}'):[/bold red] {e}"
         )
         sys.exit(1)
 
@@ -505,7 +504,6 @@ def main():
     if not os.path.exists(args.graph):
         console.print(
             f"[bold red]Error:[/bold red] File '{args.graph}' does not exist.",
-            file=sys.stderr,
         )
         sys.exit(1)
 

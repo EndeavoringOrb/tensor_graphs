@@ -503,8 +503,8 @@ int main(int argc, char *argv[])
                     b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
                 }
 
-                auto cb = [&](LogicalId logicalId, const KernelContext &ctx, const void *data) {
-                    verifier.verify(logicalId, ctx, data, cs.graph.get());
+                auto cb = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx, const void *data) {
+                    verifier.verify(logicalId, kernel_name, ctx, data, cs.graph.get());
                 };
 
                 const float *device_output_ptr = static_cast<const float *>(cs.session->run(b, cb));
@@ -629,8 +629,8 @@ int main(int argc, char *argv[])
 
         auto start = std::chrono::high_resolution_clock::now();
 
-        auto cb = [&](LogicalId logicalId, const KernelContext &ctx, const void *data) {
-            verifier.verify(logicalId, ctx, data, cs.graph.get());
+        auto cb = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx, const void *data) {
+            verifier.verify(logicalId, kernel_name, ctx, data, cs.graph.get());
         };
 
         Bucket b;

@@ -842,7 +842,7 @@ struct Planner
                 extractor.backtrack(reason, eclass_to_buf, overflow);
             }
 
-            extractor.ascend(enodeInfos);
+            extractor.ascend();
         }
 
         if (best_cost == TGConstants::INF)

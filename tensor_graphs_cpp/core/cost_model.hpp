@@ -236,12 +236,12 @@ struct CostModel
                         val /= scale[i];
                     y += weights[i] * val;
                 }
-                return static_cast<float>(std::max(0.0, y));
+                return static_cast<float>(std::max(1e-6, y));
             }
             // Linear Fallback
             if (fallbackElements > 0)
                 return static_cast<float>(fallbackTime * (static_cast<double>(targetElements) / fallbackElements));
-            return 0.0f;
+            return 1e-6f;
         }
     };
 
@@ -505,7 +505,7 @@ struct CostModel
                 r.outputStrides == outStrides && r.inputDTypes == inDTypes && r.outputDType == outDType &&
                 r.inputConstants == inConstants)
             {
-                return r.runTime;
+                return std::max(1e-6f, r.runTime);
             }
         }
 

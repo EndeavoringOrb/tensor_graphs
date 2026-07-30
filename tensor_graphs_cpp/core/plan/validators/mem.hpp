@@ -93,8 +93,8 @@ void get_births(const std::vector<EClassId> &ordered, const EGraph &egraph,
 }
 
 inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
-                              const std::unordered_map<EClassId, uint32_t> &selection_map,
-                              const std::vector<ENodeInfo> &enodeInfos)
+                                   const std::unordered_map<EClassId, uint32_t> &selection_map,
+                                   const std::vector<ENodeInfo> &enodeInfos)
 {
     EClassId curr = egraph.findConst(id);
     while (true)
@@ -144,7 +144,7 @@ static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egrap
             continue;
         }
 
-        float death = birth_times.at(node_eclass) + cost;
+        float death = birth_times.at(node_eclass) + std::max(0.1f, cost); // TODO: this 0.1f is very hacky, do something better. maybe integer timing based on order?
         for (uint64_t j = i + 1; j < ordered.size(); ++j)
         {
             EClassId other_eclass = ordered[j];
@@ -155,7 +155,7 @@ static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egrap
             bool is_consumed = false;
             for (EClassId child : other_node.getChildren())
             {
-                if (resolve_view_alias(child, egraph, selection_map, enodeInfos) == 
+                if (resolve_view_alias(child, egraph, selection_map, enodeInfos) ==
                     resolve_view_alias(node_eclass, egraph, selection_map, enodeInfos))
                 {
                     is_consumed = true;
@@ -165,7 +165,7 @@ static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egrap
             if (is_consumed)
             {
                 float other_cost = enodeInfos[other_enode_id.value].cost;
-                death = std::max(death, birth_times.at(other_eclass) + other_cost);
+                death = std::max(death, birth_times.at(other_eclass) + std::max(0.1f, other_cost)); // TODO: use std::nextafter
             }
         }
         death_times[node_eclass] = death;
@@ -186,6 +186,68 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     get_births(ordered, egraph, selection_map, enodeInfos, birth_times, engine_finish_out);
     get_deaths(ordered, egraph, selection_map, enodeInfos, birth_times, death_times);
 
+    std::unordered_map<EClassId, uint32_t> last_consumer;
+    for (uint32_t i = 0; i < ordered.size(); ++i)
+    {
+        EClassId eclass = ordered[i];
+        uint32_t sel = selection_map.at(eclass);
+        ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
+        const ENode &node = egraph.getENode(enode_id);
+        for (EClassId child : node.getChildren())
+        {
+            EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
+            last_consumer[child_base] = std::max(last_consumer[child_base], i);
+        }
+    }
+
+    std::unordered_map<EClassId, EClassId> inplace_alias;
+    auto get_inplace_alias = [&](EClassId id)
+    {
+        while (inplace_alias.count(id))
+            id = inplace_alias.at(id);
+        return id;
+    };
+
+    for (uint32_t i = 0; i < ordered.size(); ++i)
+    {
+        EClassId eclass = ordered[i];
+        uint32_t sel = selection_map.at(eclass);
+        ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
+        const ENode &node = egraph.getENode(enode_id);
+
+        if (node.getKernelId().value != 0)
+        {
+            const KernelEntry &kernel = KernelRegistry::get().getKernel(node.getKernelId());
+            if (!kernel.safe_inplace_idxs.empty())
+            {
+                for (uint32_t idx : kernel.safe_inplace_idxs)
+                {
+                    if (idx < node.getChildren().size())
+                    {
+                        EClassId child = egraph.findConst(node.getChildren()[idx]);
+                        EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
+
+                        if (last_consumer[child_base] == i)
+                        {
+                            uint32_t c_sel = selection_map.at(child_base);
+                            const ENode &c_node = egraph.getENode(egraph.getEClass(child_base).enodes[c_sel]);
+                            if (c_node.getOpType() != OpType::INPUT && c_node.getOpType() != OpType::CACHE)
+                            {
+                                uint64_t out_size = getSizeBytes(node.getShape(), node.getDType());
+                                uint64_t in_size = getSizeBytes(c_node.getShape(), c_node.getDType());
+                                if (out_size <= in_size)
+                                {
+                                    inplace_alias[eclass] = get_inplace_alias(child_base);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     std::vector<ParallelBuffer> buffers;
 
     // Pass 1: resolve aliases and lifetimes
@@ -195,15 +257,20 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENodeInfo &info = enodeInfos[enode_id.value];
 
+        EClassId base = eclass;
         if (info.is_view)
         {
-            EClassId base = resolve_view_alias(eclass, egraph, selection_map, enodeInfos);
+            base = resolve_view_alias(eclass, egraph, selection_map, enodeInfos);
+        }
 
-            // Expand base's lifetime to encompass the view
-            if (birth_times.count(base))
-                birth_times[base] = std::min(birth_times[base], birth_times[eclass]);
-            if (death_times.count(base))
-                death_times[base] = std::max(death_times[base], death_times[eclass]);
+        EClassId target_base = get_inplace_alias(base);
+
+        if (target_base != eclass)
+        {
+            if (birth_times.count(target_base))
+                birth_times[target_base] = std::min(birth_times[target_base], birth_times[eclass]);
+            if (death_times.count(target_base))
+                death_times[target_base] = std::max(death_times[target_base], death_times[eclass]);
         }
     }
 
@@ -211,15 +278,23 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     std::unordered_map<EClassId, BufferId> base_to_buf;
     for (EClassId eclass : ordered)
     {
-        EClassId base = resolve_view_alias(eclass, egraph, selection_map, enodeInfos);
+        EClassId base = eclass;
+        uint32_t sel = selection_map.at(eclass);
+        ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
+        if (enodeInfos[enode_id.value].is_view)
+        {
+            base = resolve_view_alias(eclass, egraph, selection_map, enodeInfos);
+        }
 
-        if (base_to_buf.find(base) == base_to_buf.end())
+        EClassId target_base = get_inplace_alias(base);
+
+        if (base_to_buf.find(target_base) == base_to_buf.end())
         {
             BufferId buf_id = BufferId{(uint32_t)buffers.size()};
-            base_to_buf[base] = buf_id;
+            base_to_buf[target_base] = buf_id;
 
-            uint32_t base_sel = selection_map.at(base);
-            ENodeId base_enode_id = egraph.getEClass(base).enodes[base_sel];
+            uint32_t base_sel = selection_map.at(target_base);
+            ENodeId base_enode_id = egraph.getEClass(target_base).enodes[base_sel];
             const ENode &base_node = egraph.getENode(base_enode_id);
 
             uint64_t size_bytes = getSizeBytes(base_node.getShape(), base_node.getDType());
@@ -231,22 +306,24 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
             size_bytes = (size_bytes + 4095) & ~4095ULL;
 
             ParallelBuffer buf = {
-                buf_id, base_node.getMemSpace(), size_bytes, birth_times.at(base), death_times.at(base), -1};
+                buf_id, base_node.getMemSpace(), size_bytes, birth_times.at(target_base), death_times.at(target_base), -1};
             buffers.push_back(std::move(buf));
         }
 
-        eclass_to_buf[eclass] = base_to_buf[base];
+        eclass_to_buf[eclass] = base_to_buf[target_base];
     }
     return buffers;
 }
 
+// Just a simpler reference for how malloc works
 static bool malloc_recursive(uint64_t mem_cap, std::vector<ParallelBuffer> &unallocated,
                              std::vector<ParallelBuffer> &allocated)
 {
     if (unallocated.empty())
         return true;
 
-    auto get_min_height = [&]() -> int64_t {
+    auto get_min_height = [&]() -> int64_t
+    {
         int64_t min_height = std::numeric_limits<int64_t>::max();
         for (uint64_t i = 0; i < unallocated.size(); ++i)
         {
@@ -536,11 +613,11 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
     }
 
     // Process Ends before Starts to correctly simulate memory release
-    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b) {
+    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b)
+              {
         if (a.time != b.time)
             return a.time < b.time;
-        return a.type < b.type;
-    });
+        return a.type < b.type; });
 
     int64_t current_mem = 0;
     for (const auto &ev : events)
@@ -584,11 +661,12 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
     std::vector<ParallelBuffer> bufs = unallocated;
 
     // Heuristic: Place largest buffers first to minimize fragmentation
-    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
-        if (a.size != b.size)
-            return a.size > b.size;
-        return a.id < b.id; // Deterministic tie-breaker
-    });
+    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
+              {
+                  if (a.size != b.size)
+                      return a.size > b.size;
+                  return a.id < b.id; // Deterministic tie-breaker
+              });
 
     allocated.clear();
     allocated.reserve(bufs.size());
@@ -609,7 +687,8 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 
         // Sort overlapping buffers by their memory offset ascending
         std::sort(time_overlaps.begin(), time_overlaps.end(),
-                  [](const ParallelBuffer *a, const ParallelBuffer *b) { return a->offset < b->offset; });
+                  [](const ParallelBuffer *a, const ParallelBuffer *b)
+                  { return a->offset < b->offset; });
 
         // First-fit algorithm: push best_offset upwards if there's a memory
         // collision
@@ -644,14 +723,15 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
 
     // 1. Sort buffers by start time (and then end time to be deterministic)
     std::vector<ParallelBuffer> sorted_bufs = unallocated;
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
+              {
         if (a.start != b.start)
             return a.start < b.start;
-        return a.end < b.end;
-    });
+        return a.end < b.end; });
 
     // Helper lambda to process an independent connected component of buffers
-    auto process_component = [&](std::vector<ParallelBuffer> &current_comp) -> bool {
+    auto process_component = [&](std::vector<ParallelBuffer> &current_comp) -> bool
+    {
         if (current_comp.empty())
             return true;
 
@@ -673,11 +753,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
         // OPTIMIZATION 3: Exact solver fallback with aggressive pruning ordering
         // Sorting by size descending forces the tree to hit conflict limits much
         // faster.
-        std::sort(current_comp.begin(), current_comp.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
+        std::sort(current_comp.begin(), current_comp.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
+                  {
             if (a.size != b.size)
                 return a.size > b.size;
-            return a.id < b.id;
-        });
+            return a.id < b.id; });
 
         if (!malloc(mem_cap, current_comp, comp_allocated))
         {
@@ -894,6 +974,35 @@ struct MemValidator : public ISelectionValidator
 
         if (alloc_ok)
         {
+            std::unordered_map<BufferId, ParallelBuffer> id_to_buf;
+            for (auto &buf : buffers)
+            {
+                id_to_buf[buf.id] = buf;
+            }
+            for (uint32_t i = 0; i < order.size(); i++)
+            {
+                EClassId eclass_id = order[i];
+                if (!eclass_to_buf.count(eclass_id))
+                    Error::throw_err("eclass_id " + toString(eclass_id) + " not present in eclass_to_buf");
+                BufferId buffer_id = eclass_to_buf.at(eclass_id);
+                if (!id_to_buf.count(buffer_id))
+                    Error::throw_err("buffer_id " + toString(buffer_id) + " not present in id_to_buf");
+                ParallelBuffer &buf = id_to_buf.at(buffer_id);
+                uint32_t sel = selection_map.at(eclass_id);
+                ENodeId enode_id = egraph.getEClass(eclass_id).enodes[sel];
+                const ENode &enode = egraph.getENode(enode_id);
+                for (EClassId child : enode.getChildren())
+                {
+                    if (!eclass_to_buf.count(child))
+                        continue;
+                    ParallelBuffer &child_buf = id_to_buf.at(eclass_to_buf.at(child));
+                    if (buf.offset == child_buf.offset && !(enode.getOpType() == OpType::PERMUTE || enode.getOpType() == OpType::REPEAT || enode.getOpType() == OpType::RESHAPE || enode.getOpType() == OpType::SLICE))
+                    {
+                        std::cout << "inplace op at " << toString(enode) << " " << (eclassToLogical.count(eclass_id) ? toString(eclassToLogical.at(eclass_id)) : "no logical id") << std::endl;
+                    }
+                }
+            }
+
             return true;
         }
         reason = oom_reason;

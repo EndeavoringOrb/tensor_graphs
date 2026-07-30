@@ -368,8 +368,8 @@ int main(int argc, char *argv[])
     bool doSaturate = write_refs.empty();
 
     Graph *activeGraphPtr = nullptr;
-    auto debugCb = [&](LogicalId logicalId, const KernelContext &ctx, const void *data) {
-        verifier.verify(logicalId, ctx, data, activeGraphPtr);
+    auto debugCb = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx, const void *data) {
+        verifier.verify(logicalId, kernel_name, ctx, data, activeGraphPtr);
     };
 
     if (model == "gemma-3-270m")

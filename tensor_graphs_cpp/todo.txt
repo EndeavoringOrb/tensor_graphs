@@ -1,3 +1,5 @@
+remove REGISTER_KERNEL_INPLACE in favor of explicit safe_inplace_idxs parameter
+
 add .nBytes() to TensorNode and TensorView in place of countElements * getDTypeSize
 
 CI/CD pipeline

@@ -66,7 +66,7 @@ public:
             outBufObj->setupOutput(ctx, outView, logical_id);
 
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
-            std::string opName = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
+            std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
 
 #ifdef DEBUG
             if (OpenCLState::get().initialized) // TODO: only synchronize engines that inputs are on.
@@ -115,7 +115,7 @@ public:
                 // TODO: transfer from other mem spaces
                 if (outBufObj->mem_space.type == HandleType::CPP)
                 {
-                    debugCallback(logical_id, ctx, ctx.outputs[0]);
+                    debugCallback(logical_id, kernel_name, ctx, ctx.outputs[0]);
                 }
             }
 

@@ -117,10 +117,10 @@ struct Graph
         const auto &meta = FileRegistry::get().getMetadata(path, name);
         TensorNode &node = allocateNode(OpType::INPUT, name, meta.dtype, {}, meta.shape, {}, sha.digest(), loc);
         FileRegistry::get().registerNode(node.id, path, name);
-
         input_data_types[node.id] = InputDataType::STORAGE;
+        TensorNode &copyNode = allocateNode(OpType::COPY_TO, "", meta.dtype, {node.id}, {}, {}, "", loc);
 
-        return node.id;
+        return copyNode.id;
     }
 
     LogicalId input(std::vector<uint32_t> shape, DType dtype, std::vector<uint64_t> strides = {},

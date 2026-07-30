@@ -19,7 +19,7 @@
 
 namespace Debug
 {
-    using Callback = std::function<void(LogicalId logicalId, const KernelContext &ctx, const void *data)>;
+    using Callback = std::function<void(LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx, const void *data)>;
 
     template <typename ErrorHandler>
     inline void _checkValues(const std::vector<const void *> &ptrs, const std::vector<TensorView> &views,
@@ -316,23 +316,18 @@ namespace Debug
             return mismatchCount;
         }
 
-        void verify(LogicalId logicalId, const KernelContext &ctx, const void *data, Graph *graph)
+        void verify(LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx, const void *data, Graph *graph)
         {
-            if (mode == "none" || !graph)
+            if (mode == "none" || !graph || logicalId == LogicalId())
                 return;
 
             const TensorView &view = ctx.outViews[0];
             std::vector<float> optData = flattenOutput(data, view.getShape(), view.strides, view.dtype);
-            std::string opName = "UNKNOWN";
+            std::string opName = kernel_name;
             TensorNode node;
             if (graph->hasNode(logicalId))
             {
                 node = graph->getNode(logicalId);
-                opName = toString(node.opType);
-                if (node.opType == OpType::FUSED)
-                {
-                    opName = "FUSED_" + node.opName;
-                }
             }
 
             int iter = callCounts[logicalId]++;
@@ -358,7 +353,6 @@ namespace Debug
                 double sumDiff = 0.0;
                 float avgDiff = 0.0f;
                 bool hasNan = false;
-                std::string opName = node.opType == OpType::FUSED ? "FUSED_" + node.opName : toString(node.opType);
 
                 auto it = refIndex.find(key);
                 if (it == refIndex.end())
@@ -408,7 +402,7 @@ namespace Debug
                     mismatchCount++;
                 }
 
-                std::cout << std::left << std::setw(15) << key << std::setw(25) << opName.substr(0, 24) << std::setw(15)
+                std::cout << std::left << std::setw(15) << key << std::setw(25) << opName.substr(0, 32) << std::setw(15)
                           << minDiff << std::setw(15) << maxDiff << std::setw(15) << avgDiff << "id=" << node.id
                           << ", dtype=" << toString(view.dtype) << ", shape=" << toString(view.getShape())
                           << ", strides=" << toString(view.strides) << ", offset=" << view.offset
