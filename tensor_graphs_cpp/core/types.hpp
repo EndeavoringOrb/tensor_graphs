@@ -301,8 +301,8 @@ struct ParallelBuffer
     BufferId id;         // unique buf id
     MemSpace mem_space;  // which physical memory this buffer lives in
     uint64_t size = 0;   // bytes
-    float start = 0.0f;  // birth time (parallel schedule)
-    float end = 0.0f;    // death time (parallel schedule)
+    uint32_t start = 0;  // birth time (idx into dispatch order of first eclass that uses this)
+    uint32_t end = 0;    // death time (idx into dispatch order of last eclass that uses this)
     int64_t offset = -1; // assigned byte offset, -1 = unallocated
 };
 

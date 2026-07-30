@@ -235,8 +235,8 @@ class BinaryReader:
         mem_idx = self.read_u32()
         mem_type = self.read_u32()
         size = self.read_u64()
-        start = self.read_float()
-        end = self.read_float()
+        start = self.read_u32()
+        end = self.read_u32()
         offset = self.read_i64()
         return {
             "id": buf_id,

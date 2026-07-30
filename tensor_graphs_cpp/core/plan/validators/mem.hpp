@@ -32,13 +32,14 @@ bool overlapsBuf(const ParallelBuffer &a, const ParallelBuffer &b)
     ParallelBuffer x = a, y = b;
     if (y.start < x.start)
         std::swap(x, y);
-    return y.start < x.end;
+    return y.start <= x.end;
 }
 
-void get_births(const std::vector<EClassId> &ordered, const EGraph &egraph,
-                const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
-                std::unordered_map<EClassId, float> &birth_times, std::unordered_map<uint32_t, float> &engine_finish)
+float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
+               const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos)
 {
+    std::unordered_map<EClassId, float> birth_times;
+    std::unordered_map<uint32_t, float> engine_finish;
     for (EClassId eclass : ordered)
     {
         uint32_t sel = selection_map.at(eclass);
@@ -90,6 +91,13 @@ void get_births(const std::vector<EClassId> &ordered, const EGraph &egraph,
             engine_finish[engine.idx] = birth + cost;
         }
     }
+
+    float cost = 0.0f;
+    for (const auto &kv : engine_finish)
+    {
+        cost = std::max(cost, kv.second);
+    }
+    return cost;
 }
 
 inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
@@ -176,27 +184,24 @@ static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egrap
 static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordered, const EGraph &egraph,
                                              const std::unordered_map<EClassId, uint32_t> &selection_map,
                                              const std::vector<ENodeInfo> &enodeInfos,
-                                             std::unordered_map<uint32_t, float> &engine_finish_out,
                                              std::unordered_map<EClassId, BufferId> &eclass_to_buf)
 {
     ProgressTimer t = ProgressTimer(0, "bufferize ", false, true);
-    std::unordered_map<EClassId, float> birth_times;
-    std::unordered_map<EClassId, float> death_times;
 
-    get_births(ordered, egraph, selection_map, enodeInfos, birth_times, engine_finish_out);
-    get_deaths(ordered, egraph, selection_map, enodeInfos, birth_times, death_times);
-
-    std::unordered_map<EClassId, uint32_t> last_consumer;
+    std::unordered_map<EClassId, uint32_t> birth_times;
+    std::unordered_map<EClassId, uint32_t> death_times;
     for (uint32_t i = 0; i < ordered.size(); ++i)
     {
         EClassId eclass = ordered[i];
+        birth_times[eclass] = i;
+        death_times[eclass] = i + 1;
         uint32_t sel = selection_map.at(eclass);
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENode &node = egraph.getENode(enode_id);
         for (EClassId child : node.getChildren())
         {
             EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
-            last_consumer[child_base] = std::max(last_consumer[child_base], i);
+            death_times[child_base] = std::max(death_times[child_base], i);
         }
     }
 
@@ -227,7 +232,7 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
                         EClassId child = egraph.findConst(node.getChildren()[idx]);
                         EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
 
-                        if (last_consumer[child_base] == i)
+                        if (death_times[child_base] == i)
                         {
                             uint32_t c_sel = selection_map.at(child_base);
                             const ENode &c_node = egraph.getENode(egraph.getEClass(child_base).enodes[c_sel]);
@@ -251,8 +256,9 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     std::vector<ParallelBuffer> buffers;
 
     // Pass 1: resolve aliases and lifetimes
-    for (EClassId eclass : ordered)
+    for (uint32_t i = 0; i < ordered.size(); ++i)
     {
+        EClassId eclass = ordered[i];
         uint32_t sel = selection_map.at(eclass);
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENodeInfo &info = enodeInfos[enode_id.value];
@@ -268,9 +274,9 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
         if (target_base != eclass)
         {
             if (birth_times.count(target_base))
-                birth_times[target_base] = std::min(birth_times[target_base], birth_times[eclass]);
+                birth_times[target_base] = std::min(birth_times[target_base], i);
             if (death_times.count(target_base))
-                death_times[target_base] = std::max(death_times[target_base], death_times[eclass]);
+                death_times[target_base] = std::max(death_times[target_base], i + 1);
         }
     }
 
@@ -589,10 +595,9 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
 
     struct Event
     {
-        float time;
+        uint32_t time;
         int type; // 0 for end, 1 for start
         int64_t size;
-        bool is_zero_duration;
         BufferId buffer_id;
     };
 
@@ -600,16 +605,8 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
     events.reserve(bufs.size() * 2);
     for (const auto &b : bufs)
     {
-        bool is_zero = (b.start == b.end);
-        if (is_zero)
-        {
-            events.push_back({b.start, 1, static_cast<int64_t>(b.size), true, b.id});
-        }
-        else
-        {
-            events.push_back({b.start, 1, static_cast<int64_t>(b.size), false, b.id});
-            events.push_back({b.end, 0, static_cast<int64_t>(b.size), false, b.id});
-        }
+        events.push_back({b.start, 1, static_cast<int64_t>(b.size), b.id});
+        events.push_back({b.end, 0, static_cast<int64_t>(b.size), b.id});
     }
 
     // Process Ends before Starts to correctly simulate memory release
@@ -624,23 +621,11 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
     {
         if (ev.type == 1)
         { // start
-            if (ev.is_zero_duration)
+            current_mem += ev.size;
+            if (current_mem > static_cast<int64_t>(mem_cap))
             {
-                // Zero-duration buffers only overlap with strictly active intervals
-                if (current_mem + ev.size > static_cast<int64_t>(mem_cap))
-                {
-                    overflow = ev.buffer_id;
-                    return false;
-                }
-            }
-            else
-            {
-                current_mem += ev.size;
-                if (current_mem > static_cast<int64_t>(mem_cap))
-                {
-                    overflow = ev.buffer_id;
-                    return false;
-                }
+                overflow = ev.buffer_id;
+                return false;
             }
         }
         else
@@ -729,74 +714,39 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
             return a.start < b.start;
         return a.end < b.end; });
 
-    // Helper lambda to process an independent connected component of buffers
-    auto process_component = [&](std::vector<ParallelBuffer> &current_comp) -> bool
+    if (sorted_bufs.empty())
+        return true;
+
+    // OPTIMIZATION 1: Absolute strict lower bound check
+    if (!check_peak_memory(sorted_bufs, mem_cap, overflow))
     {
-        if (current_comp.empty())
-            return true;
+        return false; // Mathematically impossible to fit; abort instantly
+    }
 
-        // OPTIMIZATION 1: Absolute strict lower bound check
-        if (!check_peak_memory(current_comp, mem_cap, overflow))
-        {
-            return false; // Mathematically impossible to fit; abort instantly
-        }
+    // OPTIMIZATION 2: Fast greedy allocator path (solves immediately most of
+    // the time)
+    std::vector<ParallelBuffer> comp_allocated;
+    if (greedy_alloc(mem_cap, sorted_bufs, comp_allocated, overflow))
+    {
+        allocated.insert(allocated.end(), comp_allocated.begin(), comp_allocated.end());
+        return true;
+    }
 
-        // OPTIMIZATION 2: Fast greedy allocator path (solves immediately most of
-        // the time)
-        std::vector<ParallelBuffer> comp_allocated;
-        if (greedy_alloc(mem_cap, current_comp, comp_allocated, overflow))
-        {
-            allocated.insert(allocated.end(), comp_allocated.begin(), comp_allocated.end());
-            return true;
-        }
-
-        // OPTIMIZATION 3: Exact solver fallback with aggressive pruning ordering
-        // Sorting by size descending forces the tree to hit conflict limits much
-        // faster.
-        std::sort(current_comp.begin(), current_comp.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-                  {
+    // OPTIMIZATION 3: Exact solver fallback with aggressive pruning ordering
+    // Sorting by size descending forces the tree to hit conflict limits much
+    // faster.
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
+              {
             if (a.size != b.size)
                 return a.size > b.size;
             return a.id < b.id; });
 
-        if (!malloc(mem_cap, current_comp, comp_allocated))
-        {
-            return false;
-        }
-
-        allocated.insert(allocated.end(), comp_allocated.begin(), comp_allocated.end());
-        return true;
-    };
-
-    std::vector<ParallelBuffer> current_comp;
-    float max_end = sorted_bufs[0].end;
-    current_comp.push_back(sorted_bufs[0]);
-
-    // 2. Iterate and split components at time gaps
-    for (size_t i = 1; i < sorted_bufs.size(); ++i)
-    {
-        if (sorted_bufs[i].start >= max_end)
-        {
-            if (!process_component(current_comp))
-                return false;
-
-            // Reset for the next component
-            current_comp.clear();
-            max_end = sorted_bufs[i].end;
-        }
-        else
-        {
-            max_end = std::max(max_end, sorted_bufs[i].end);
-        }
-        current_comp.push_back(sorted_bufs[i]);
-    }
-
-    // 3. Solve the final component
-    if (!process_component(current_comp))
+    if (!malloc(mem_cap, sorted_bufs, comp_allocated))
     {
         return false;
     }
 
+    allocated.insert(allocated.end(), comp_allocated.begin(), comp_allocated.end());
     return true;
 }
 
@@ -830,19 +780,11 @@ struct MemValidator : public ISelectionValidator
                   bool &updated_cost) override
     {
         ProgressTimer t = ProgressTimer(0, "validate ", false, true);
-        // bufferize: parallel schedule + per-node lifetimes
-        std::unordered_map<uint32_t, float> engine_finish;
-        std::vector<ParallelBuffer> unallocated_buffers =
-            bufferize(order, egraph, selection_map, enodeInfos, engine_finish, eclass_to_buf);
-
-        // parallel critical-path cost = max(engine_finish.values())
-        float current_cost = 0.0f;
-        for (const auto &kv : engine_finish)
-        {
-            current_cost = std::max(current_cost, kv.second);
-        }
-        cost = current_cost;
+        cost = get_cost(order, egraph, selection_map, enodeInfos);
         updated_cost = true;
+        // bufferize: parallel schedule + per-node lifetimes
+        std::vector<ParallelBuffer> unallocated_buffers =
+            bufferize(order, egraph, selection_map, enodeInfos, eclass_to_buf);
 
         // ------------------------------------------------------------------
         // Identify pre-allocated buffers (INPUT/CACHE enodes whose eclass has
