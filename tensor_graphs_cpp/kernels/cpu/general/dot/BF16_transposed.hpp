@@ -1,11 +1,11 @@
 #pragma once
 #include <algorithm>
 #include <cstring>
-#include <thread>
 #include <vector>
 
 #include "core/kernels.hpp"
 #include "core/types.hpp"
+#include "core/common/thread_pool.hpp"
 
 inline bool matchDotTransposedBF16(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -38,42 +38,33 @@ inline void runDotTransposedBF16(const KernelContext &ctx)
     uint32_t num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0)
         num_threads = 1;
-    uint32_t rows_per_thread = (total_rows + num_threads - 1) / num_threads;
 
-    std::vector<std::thread> workers;
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() {
-            uint32_t start_row = t * rows_per_thread;
-            uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t)
+                                   {
+        uint32_t rows_per_thread = (total_rows + num_threads - 1) / num_threads;
+        uint32_t start_row = t * rows_per_thread;
+        uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
 
-            for (uint32_t row_idx = start_row; row_idx < end_row; ++row_idx)
+        for (uint32_t row_idx = start_row; row_idx < end_row; ++row_idx)
+        {
+            const float *x_row = X + row_idx * InDim;
+            float *out_row = Out + row_idx * OutDim;
+
+            for (uint32_t o = 0; o < OutDim; ++o)
             {
-                const float *x_row = X + row_idx * InDim;
-                float *out_row = Out + row_idx * OutDim;
+                const uint16_t *w_row = W + o * InDim;
+                float sum = 0.0f;
 
-                for (uint32_t o = 0; o < OutDim; ++o)
+                for (uint32_t i = 0; i < InDim; ++i)
                 {
-                    const uint16_t *w_row = W + o * InDim;
-                    float sum = 0.0f;
-
-                    for (uint32_t i = 0; i < InDim; ++i)
-                    {
-                        uint32_t bits = static_cast<uint32_t>(w_row[i]) << 16;
-                        float w_f32;
-                        std::memcpy(&w_f32, &bits, 4);
-                        sum += x_row[i] * w_f32;
-                    }
-                    out_row[o] = sum;
+                    uint32_t bits = static_cast<uint32_t>(w_row[i]) << 16;
+                    float w_f32;
+                    std::memcpy(&w_f32, &bits, 4);
+                    sum += x_row[i] * w_f32;
                 }
+                out_row[o] = sum;
             }
-        });
-    }
-
-    for (auto &thread : workers)
-    {
-        thread.join();
-    }
+        } });
 }
 
 inline LogicalId refFactoryDotTransposedBF16(const std::vector<LogicalId> &inputs, Graph &graph)

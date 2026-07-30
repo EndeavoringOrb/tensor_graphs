@@ -1,3 +1,4 @@
+// File: tensor_graphs_cpp/core/executor.hpp
 #pragma once
 #include "core/debug.hpp"
 #include "core/graph.hpp"
@@ -24,6 +25,11 @@ public:
         disableTimer = false;
 #endif
         ProgressTimer timer(nInst, "running ", disableTimer);
+
+        bool cuda_busy = false;
+        bool opencl_busy = false;
+        std::unordered_map<uint32_t, EngineType> buffer_last_writer;
+
         for (uint64_t idx = 0; idx < nInst; ++idx)
         {
             const OpInstruction &inst = compiled.instructions[idx];
@@ -33,6 +39,46 @@ public:
                 std::cerr << "\n[Executor] Interrupt detected, aborting execution..." << std::endl;
                 InterruptManager::cleanup();
                 std::exit(SIGINT);
+            }
+
+            const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
+            std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
+            EngineType current_engine = kernel.engines.empty() ? EngineType::CPU : kernel.engines[0].type;
+
+            bool sync_cuda = false;
+            bool sync_opencl = false;
+
+            // Check if any input was last written by a different asynchronous engine
+            for (const ParallelBuffer &inBuf : inst.inBuffers)
+            {
+                auto it = buffer_last_writer.find(inBuf.id.value);
+                if (it != buffer_last_writer.end())
+                {
+                    EngineType writer_engine = it->second;
+                    if (writer_engine != current_engine)
+                    {
+                        if (writer_engine == EngineType::CUDA_GPU && cuda_busy)
+                            sync_cuda = true;
+                        if (writer_engine == EngineType::QUALCOMM_IGPU && opencl_busy)
+                            sync_opencl = true;
+                    }
+                }
+            }
+
+            if (sync_cuda)
+            {
+#ifdef USE_CUDA
+                cudaDeviceSynchronize();
+#endif
+                cuda_busy = false;
+            }
+            if (sync_opencl)
+            {
+                if (OpenCLState::get().initialized)
+                {
+                    clFinish(OpenCLState::get().queue);
+                }
+                opencl_busy = false;
             }
 
             KernelContext ctx;
@@ -65,54 +111,48 @@ public:
             }
             outBufObj->setupOutput(ctx, outView, logical_id);
 
-            const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
-            std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
-
 #ifdef DEBUG
-            if (OpenCLState::get().initialized) // TODO: only synchronize engines that inputs are on.
-            {
-                clFinish(OpenCLState::get().queue);
-            }
-#ifdef USE_CUDA
-            cudaDeviceSynchronize();
-#endif // USE_CUDA
             Debug::checkValues(ctx.inputs, ctx.inViews,
                                "(inputs) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
                                    toString(kernel));
-#endif // DEBUG
+#endif
 
             if (!kernel.is_view && kernel.run)
             {
                 kernel.run(ctx);
+                if (current_engine == EngineType::CUDA_GPU)
+                    cuda_busy = true;
+                if (current_engine == EngineType::QUALCOMM_IGPU)
+                    opencl_busy = true;
             }
 
+            // Track who wrote to this memory space
+            buffer_last_writer[inst.outBuffer.id.value] = current_engine;
+
 #ifdef DEBUG
-            if (OpenCLState::get().initialized)
+            if (cuda_busy)
             {
-                clFinish(OpenCLState::get().queue);
-            }
 #ifdef USE_CUDA
-            cudaDeviceSynchronize();
+                cudaDeviceSynchronize();
 #endif
+                cuda_busy = false;
+            }
+            if (opencl_busy)
+            {
+                if (OpenCLState::get().initialized)
+                {
+                    clFinish(OpenCLState::get().queue);
+                }
+                opencl_busy = false;
+            }
             std::vector<const void *> c_outputs(ctx.outputs.begin(), ctx.outputs.end());
             Debug::checkValues(c_outputs, ctx.outViews, ctx.inputs, ctx.inViews, kernel,
                                "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
                                    toString(kernel));
-#endif // DEBUG
+#endif
 
             if (debugCallback)
             {
-                if (outBufObj->mem_space.type == HandleType::OPENCL)
-                {
-                    clFinish(OpenCLState::get().queue);
-                }
-#ifdef USE_CUDA
-                else if (outBufObj->mem_space.type == HandleType::CUDA)
-                {
-                    cudaDeviceSynchronize();
-                }
-#endif
-                // TODO: transfer from other mem spaces
                 if (outBufObj->mem_space.type == HandleType::CPP)
                 {
                     debugCallback(logical_id, kernel_name, ctx, ctx.outputs[0]);
@@ -127,6 +167,21 @@ public:
             outBufObj->cleanupContext(ctx);
 
             timer.tick();
+        }
+
+        // Final synchronization to ensure all pending work is completed before returning to Python/User
+        if (cuda_busy)
+        {
+#ifdef USE_CUDA
+            cudaDeviceSynchronize();
+#endif
+        }
+        if (opencl_busy)
+        {
+            if (OpenCLState::get().initialized)
+            {
+                clFinish(OpenCLState::get().queue);
+            }
         }
     }
 };
