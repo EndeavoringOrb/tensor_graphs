@@ -1,10 +1,11 @@
 #pragma once
 #include <algorithm>
 #include <cstring>
-#include <thread>
+#include <vector>
 
 #include "core/kernels.hpp"
 #include "core/types.hpp"
+#include "core/common/thread_pool.hpp"
 
 inline bool matchSmartConcat(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -49,15 +50,13 @@ inline void runSmartConcat(const KernelContext &ctx)
     }
 
     uint32_t num_threads = std::thread::hardware_concurrency();
-    uint32_t chunk = (outer + num_threads - 1) / num_threads;
+    if (num_threads == 0)
+        num_threads = 1;
 
-    std::vector<std::thread> workers;
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() { compute(t * chunk, std::min((uint64_t)(t * chunk + chunk), outer)); });
-    }
-    for (auto &w : workers)
-        w.join();
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        uint32_t chunk = (outer + num_threads - 1) / num_threads;
+        compute(t * chunk, std::min((uint64_t)(t * chunk + chunk), outer));
+    });
 }
 
 inline LogicalId refSmartConcat(const std::vector<LogicalId> &inputs, Graph &graph)

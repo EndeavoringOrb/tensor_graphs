@@ -26,11 +26,11 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
-#include <thread>
 #include <vector>
 
 #include "core/kernels.hpp"
 #include "core/types.hpp"
+#include "core/common/thread_pool.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -129,78 +129,72 @@ inline void runJinaGeluExact_F32_3D(const KernelContext &ctx)
         num_threads = 1;
     if (num_threads > 12)
         num_threads = 12;
-    uint64_t chunk = (n + num_threads - 1) / num_threads;
 
     const float32x4_t v_inv_sqrt2 = vdupq_n_f32(0.7071067811865475f);
     const float32x4_t v_half = vdupq_n_f32(0.5f);
     const float32x4_t v_one = vdupq_n_f32(1.0f);
 
-    std::vector<std::thread> workers;
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() {
-            uint64_t start = t * chunk;
-            uint64_t end = std::min(start + chunk, n);
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        uint64_t chunk = (n + num_threads - 1) / num_threads;
+        uint64_t start = t * chunk;
+        uint64_t end = std::min(start + chunk, n);
 
-            uint64_t i = start;
-            // Process 16 elements at a time (4 NEON vectors) for better ILP
-            for (; i + 16 <= end; i += 16)
-            {
-                float32x4_t v_x0 = vld1q_f32(in + i);
-                float32x4_t v_x1 = vld1q_f32(in + i + 4);
-                float32x4_t v_x2 = vld1q_f32(in + i + 8);
-                float32x4_t v_x3 = vld1q_f32(in + i + 12);
+        uint64_t i = start;
+        // Process 16 elements at a time (4 NEON vectors) for better ILP
+        for (; i + 16 <= end; i += 16)
+        {
+            float32x4_t v_x0 = vld1q_f32(in + i);
+            float32x4_t v_x1 = vld1q_f32(in + i + 4);
+            float32x4_t v_x2 = vld1q_f32(in + i + 8);
+            float32x4_t v_x3 = vld1q_f32(in + i + 12);
 
-                // z = x / sqrt(2)
-                float32x4_t v_z0 = vmulq_f32(v_x0, v_inv_sqrt2);
-                float32x4_t v_z1 = vmulq_f32(v_x1, v_inv_sqrt2);
-                float32x4_t v_z2 = vmulq_f32(v_x2, v_inv_sqrt2);
-                float32x4_t v_z3 = vmulq_f32(v_x3, v_inv_sqrt2);
+            // z = x / sqrt(2)
+            float32x4_t v_z0 = vmulq_f32(v_x0, v_inv_sqrt2);
+            float32x4_t v_z1 = vmulq_f32(v_x1, v_inv_sqrt2);
+            float32x4_t v_z2 = vmulq_f32(v_x2, v_inv_sqrt2);
+            float32x4_t v_z3 = vmulq_f32(v_x3, v_inv_sqrt2);
 
-                // erf(z)
-                float32x4_t v_erf0 = jina_gelu_erf_neon(v_z0);
-                float32x4_t v_erf1 = jina_gelu_erf_neon(v_z1);
-                float32x4_t v_erf2 = jina_gelu_erf_neon(v_z2);
-                float32x4_t v_erf3 = jina_gelu_erf_neon(v_z3);
+            // erf(z)
+            float32x4_t v_erf0 = jina_gelu_erf_neon(v_z0);
+            float32x4_t v_erf1 = jina_gelu_erf_neon(v_z1);
+            float32x4_t v_erf2 = jina_gelu_erf_neon(v_z2);
+            float32x4_t v_erf3 = jina_gelu_erf_neon(v_z3);
 
-                // 0.5 * x * (1 + erf)
-                float32x4_t v_r0 = vmulq_f32(v_half, vmulq_f32(v_x0, vaddq_f32(v_one, v_erf0)));
-                float32x4_t v_r1 = vmulq_f32(v_half, vmulq_f32(v_x1, vaddq_f32(v_one, v_erf1)));
-                float32x4_t v_r2 = vmulq_f32(v_half, vmulq_f32(v_x2, vaddq_f32(v_one, v_erf2)));
-                float32x4_t v_r3 = vmulq_f32(v_half, vmulq_f32(v_x3, vaddq_f32(v_one, v_erf3)));
+            // 0.5 * x * (1 + erf)
+            float32x4_t v_r0 = vmulq_f32(v_half, vmulq_f32(v_x0, vaddq_f32(v_one, v_erf0)));
+            float32x4_t v_r1 = vmulq_f32(v_half, vmulq_f32(v_x1, vaddq_f32(v_one, v_erf1)));
+            float32x4_t v_r2 = vmulq_f32(v_half, vmulq_f32(v_x2, vaddq_f32(v_one, v_erf2)));
+            float32x4_t v_r3 = vmulq_f32(v_half, vmulq_f32(v_x3, vaddq_f32(v_one, v_erf3)));
 
-                vst1q_f32(out + i, v_r0);
-                vst1q_f32(out + i + 4, v_r1);
-                vst1q_f32(out + i + 8, v_r2);
-                vst1q_f32(out + i + 12, v_r3);
-            }
-            // 4-element tail
-            for (; i + 4 <= end; i += 4)
-            {
-                float32x4_t v_x = vld1q_f32(in + i);
-                float32x4_t v_z = vmulq_f32(v_x, v_inv_sqrt2);
-                float32x4_t v_erf = jina_gelu_erf_neon(v_z);
-                float32x4_t v_r = vmulq_f32(v_half, vmulq_f32(v_x, vaddq_f32(v_one, v_erf)));
-                vst1q_f32(out + i, v_r);
-            }
-            // Scalar tail
-            for (; i < end; ++i)
-            {
-                float x = in[i];
-                float z = x * 0.7071067811865475f;
-                // Scalar erf using the same AS approximation
-                float az = std::fabs(z);
-                float t = 1.0f / (1.0f + 0.3275911f * az);
-                float poly = t * (0.254829592f +
-                                  t * (-0.284496736f + t * (1.421413741f + t * (-1.453152027f + t * 1.061405429f))));
-                float erf_pos = 1.0f - poly * std::exp(-z * z);
-                float erf_val = (z >= 0.0f) ? erf_pos : -erf_pos;
-                out[i] = 0.5f * x * (1.0f + erf_val);
-            }
-        });
-    }
-    for (auto &worker : workers)
-        worker.join();
+            vst1q_f32(out + i, v_r0);
+            vst1q_f32(out + i + 4, v_r1);
+            vst1q_f32(out + i + 8, v_r2);
+            vst1q_f32(out + i + 12, v_r3);
+        }
+        // 4-element tail
+        for (; i + 4 <= end; i += 4)
+        {
+            float32x4_t v_x = vld1q_f32(in + i);
+            float32x4_t v_z = vmulq_f32(v_x, v_inv_sqrt2);
+            float32x4_t v_erf = jina_gelu_erf_neon(v_z);
+            float32x4_t v_r = vmulq_f32(v_half, vmulq_f32(v_x, vaddq_f32(v_one, v_erf)));
+            vst1q_f32(out + i, v_r);
+        }
+        // Scalar tail
+        for (; i < end; ++i)
+        {
+            float x = in[i];
+            float z = x * 0.7071067811865475f;
+            // Scalar erf using the same AS approximation
+            float az = std::fabs(z);
+            float t = 1.0f / (1.0f + 0.3275911f * az);
+            float poly = t * (0.254829592f +
+                              t * (-0.284496736f + t * (1.421413741f + t * (-1.453152027f + t * 1.061405429f))));
+            float erf_pos = 1.0f - poly * std::exp(-z * z);
+            float erf_val = (z >= 0.0f) ? erf_pos : -erf_pos;
+            out[i] = 0.5f * x * (1.0f + erf_val);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

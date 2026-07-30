@@ -1,10 +1,11 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
-#include <thread>
+#include <vector>
 
 #include "core/kernels.hpp"
 #include "core/types.hpp"
+#include "core/common/thread_pool.hpp"
 
 inline bool matchExpND_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -31,12 +32,13 @@ inline void runExpND_NEON(const KernelContext &ctx)
     }
 
     uint32_t nt = std::thread::hardware_concurrency();
-    uint64_t chunk = (n + nt - 1) / nt;
-    std::vector<std::thread> workers;
-    for (uint32_t t = 0; t < nt; ++t)
-        workers.emplace_back([=]() { compute(t * chunk, std::min((t + 1) * chunk, n)); });
-    for (auto &w : workers)
-        w.join();
+    if (nt == 0)
+        nt = 1;
+
+    ThreadPool::get().parallel_for(nt, [=](uint32_t t) {
+        uint64_t chunk = (n + nt - 1) / nt;
+        compute(t * chunk, std::min((t + 1) * chunk, n));
+    });
 }
 
 inline LogicalId refFactoryExpND(const std::vector<LogicalId> &inputs, Graph &g)

@@ -6,10 +6,7 @@
 
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
+#include "core/common/thread_pool.hpp"
 
 /**
  * KERNEL: RecursiveContiguous_ND
@@ -24,7 +21,7 @@
  * 2. Allocation-Free: Removed std::vector<uint32_t> coords from the hot path.
  * 3. Small-Block Optimization: Uses direct assignment instead of std::memcpy
  *    when block_size == 1, bypassing memcpy's call overhead.
- * 4. Parallelization: Utilizes OpenMP to parallelize the outermost dimension
+ * 4. Parallelization: Utilizes ThreadPool to parallelize the outermost dimension
  *    for large tensors.
  * 5. Contiguity Analysis: Identifies the largest contiguous suffix to maximize
  *    the size of memcpy calls.
@@ -142,6 +139,10 @@ inline void runRecursiveContiguous_ND(const KernelContext &ctx)
     int outer_rank = contig_dim_start;
     uint64_t block_size = (outer_rank == rank) ? 1 : contig_elements;
 
+    uint32_t num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0)
+        num_threads = 1;
+
     if (elementSize == 4)
     {
         uint32_t *dst_ptr = reinterpret_cast<uint32_t *>(dst_base);
@@ -151,13 +152,17 @@ inline void runRecursiveContiguous_ND(const KernelContext &ctx)
             const uint32_t dim0_size = shape[0];
             const uint64_t dim0_stride = strides[0];
             const uint64_t inner_elements = countElements(shape) / dim0_size;
-#pragma omp parallel for schedule(static)
-            for (int i = 0; i < (int)dim0_size; ++i)
-            {
-                uint32_t *local_dst = dst_ptr + (i * inner_elements);
-                const uint32_t *local_src = src_ptr + (i * dim0_stride);
-                detail::copy_recursive_fast<uint32_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
-            }
+            ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+                uint32_t chunk = (dim0_size + num_threads - 1) / num_threads;
+                uint32_t start_i = t * chunk;
+                uint32_t end_i = std::min(start_i + chunk, dim0_size);
+                for (uint32_t i = start_i; i < end_i; ++i)
+                {
+                    uint32_t *local_dst = dst_ptr + (i * inner_elements);
+                    const uint32_t *local_src = src_ptr + (i * dim0_stride);
+                    detail::copy_recursive_fast<uint32_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+                }
+            });
         }
         else
         {
@@ -174,13 +179,17 @@ inline void runRecursiveContiguous_ND(const KernelContext &ctx)
             const uint32_t dim0_size = shape[0];
             const uint64_t dim0_stride = strides[0];
             const uint64_t inner_elements = countElements(shape) / dim0_size;
-#pragma omp parallel for schedule(static)
-            for (int i = 0; i < (int)dim0_size; ++i)
-            {
-                uint16_t *local_dst = dst_ptr + (i * inner_elements);
-                const uint16_t *local_src = src_ptr + (i * dim0_stride);
-                detail::copy_recursive_fast<uint16_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
-            }
+            ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+                uint32_t chunk = (dim0_size + num_threads - 1) / num_threads;
+                uint32_t start_i = t * chunk;
+                uint32_t end_i = std::min(start_i + chunk, dim0_size);
+                for (uint32_t i = start_i; i < end_i; ++i)
+                {
+                    uint16_t *local_dst = dst_ptr + (i * inner_elements);
+                    const uint16_t *local_src = src_ptr + (i * dim0_stride);
+                    detail::copy_recursive_fast<uint16_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+                }
+            });
         }
         else
         {
@@ -197,13 +206,17 @@ inline void runRecursiveContiguous_ND(const KernelContext &ctx)
             const uint32_t dim0_size = shape[0];
             const uint64_t dim0_stride = strides[0];
             const uint64_t inner_elements = countElements(shape) / dim0_size;
-#pragma omp parallel for schedule(static)
-            for (int i = 0; i < (int)dim0_size; ++i)
-            {
-                uint64_t *local_dst = dst_ptr + (i * inner_elements);
-                const uint64_t *local_src = src_ptr + (i * dim0_stride);
-                detail::copy_recursive_fast<uint64_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
-            }
+            ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+                uint32_t chunk = (dim0_size + num_threads - 1) / num_threads;
+                uint32_t start_i = t * chunk;
+                uint32_t end_i = std::min(start_i + chunk, dim0_size);
+                for (uint32_t i = start_i; i < end_i; ++i)
+                {
+                    uint64_t *local_dst = dst_ptr + (i * inner_elements);
+                    const uint64_t *local_src = src_ptr + (i * dim0_stride);
+                    detail::copy_recursive_fast<uint64_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+                }
+            });
         }
         else
         {
@@ -220,13 +233,17 @@ inline void runRecursiveContiguous_ND(const KernelContext &ctx)
             const uint32_t dim0_size = shape[0];
             const uint64_t dim0_stride = strides[0];
             const uint64_t inner_elements = countElements(shape) / dim0_size;
-#pragma omp parallel for schedule(static)
-            for (int i = 0; i < (int)dim0_size; ++i)
-            {
-                uint8_t *local_dst = dst_ptr + (i * inner_elements);
-                const uint8_t *local_src = src_ptr + (i * dim0_stride);
-                detail::copy_recursive_fast<uint8_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
-            }
+            ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+                uint32_t chunk = (dim0_size + num_threads - 1) / num_threads;
+                uint32_t start_i = t * chunk;
+                uint32_t end_i = std::min(start_i + chunk, dim0_size);
+                for (uint32_t i = start_i; i < end_i; ++i)
+                {
+                    uint8_t *local_dst = dst_ptr + (i * inner_elements);
+                    const uint8_t *local_src = src_ptr + (i * dim0_stride);
+                    detail::copy_recursive_fast<uint8_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+                }
+            });
         }
         else
         {

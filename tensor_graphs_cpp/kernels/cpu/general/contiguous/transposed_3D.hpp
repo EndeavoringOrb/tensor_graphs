@@ -1,10 +1,10 @@
 #pragma once
 #include <algorithm>
-#include <thread>
 #include <vector>
 
 #include "core/kernels.hpp"
 #include "core/types.hpp"
+#include "core/common/thread_pool.hpp"
 
 /**
  * Highly optimized multi-threaded cache-blocked 3D Transposition / Contiguous
@@ -58,46 +58,38 @@ inline void runContiguousTransposed3D(const KernelContext &ctx)
     if (num_threads > B)
         num_threads = B;
 
-    std::vector<std::thread> workers;
-    uint32_t b_per_thread = (B + num_threads - 1) / num_threads;
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        uint32_t b_per_thread = (B + num_threads - 1) / num_threads;
+        uint32_t b_start = t * b_per_thread;
+        uint32_t b_end = std::min(b_start + b_per_thread, B);
 
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() {
-            uint32_t b_start = t * b_per_thread;
-            uint32_t b_end = std::min(b_start + b_per_thread, B);
+        // 32x32 block tile size keeps memory chunks entirely within L1/L2 caches
+        constexpr uint32_t BLOCK = 32;
 
-            // 32x32 block tile size keeps memory chunks entirely within L1/L2 caches
-            constexpr uint32_t BLOCK = 32;
+        for (uint32_t b = b_start; b < b_end; ++b)
+        {
+            uint64_t batch_offset = (uint64_t)b * M * N;
+            const float *in_batch = in + batch_offset;
+            float *out_batch = out + batch_offset;
 
-            for (uint32_t b = b_start; b < b_end; ++b)
+            for (uint32_t m_outer = 0; m_outer < M; m_outer += BLOCK)
             {
-                uint64_t batch_offset = (uint64_t)b * M * N;
-                const float *in_batch = in + batch_offset;
-                float *out_batch = out + batch_offset;
-
-                for (uint32_t m_outer = 0; m_outer < M; m_outer += BLOCK)
+                uint32_t m_end = std::min(m_outer + BLOCK, M);
+                for (uint32_t n_outer = 0; n_outer < N; n_outer += BLOCK)
                 {
-                    uint32_t m_end = std::min(m_outer + BLOCK, M);
-                    for (uint32_t n_outer = 0; n_outer < N; n_outer += BLOCK)
+                    uint32_t n_end = std::min(n_outer + BLOCK, N);
+                    for (uint32_t m = m_outer; m < m_end; ++m)
                     {
-                        uint32_t n_end = std::min(n_outer + BLOCK, N);
-                        for (uint32_t m = m_outer; m < m_end; ++m)
+                        uint32_t n = n_outer;
+                        for (; n < n_end; ++n)
                         {
-                            uint32_t n = n_outer;
-                            for (; n < n_end; ++n)
-                            {
-                                out_batch[m * N + n] = in_batch[n * M + m];
-                            }
+                            out_batch[m * N + n] = in_batch[n * M + m];
                         }
                     }
                 }
             }
-        });
-    }
-
-    for (auto &worker : workers)
-        worker.join();
+        }
+    });
 }
 
 inline LogicalId refFactoryContiguousTransposed3D(const std::vector<LogicalId> &inputs, Graph &graph)

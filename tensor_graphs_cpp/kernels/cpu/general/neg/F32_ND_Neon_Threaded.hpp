@@ -1,10 +1,10 @@
 #pragma once
 #include <algorithm>
-#include <thread>
 #include <vector>
 
 #include "core/kernels.hpp"
 #include "core/types.hpp"
+#include "core/common/thread_pool.hpp"
 
 // =============================================================================
 // FUSED KERNEL: Negate F32 ND (NEON + Multi-threaded)
@@ -38,32 +38,28 @@ inline void runNegF32_ND_NEON_Threaded(const KernelContext &ctx)
     if (n == 0)
         return;
 
-    const uint32_t num_threads = std::max(1u, std::thread::hardware_concurrency());
-    const uint64_t chunk = (n + num_threads - 1) / num_threads;
+    uint32_t num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0)
+        num_threads = 1;
 
-    std::vector<std::thread> workers;
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() {
-            const uint64_t start = t * chunk;
-            const uint64_t end = std::min(start + chunk, n);
-            uint64_t i = start;
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        const uint64_t chunk = (n + num_threads - 1) / num_threads;
+        const uint64_t start = t * chunk;
+        const uint64_t end = std::min(start + chunk, n);
+        uint64_t i = start;
 
-            // NEON path: negate 4 floats at a time
-            for (; i + 4 <= end; i += 4)
-            {
-                float32x4_t vx = vld1q_f32(x + i);
-                vst1q_f32(out + i, vnegq_f32(vx));
-            }
-            // Scalar tail
-            for (; i < end; ++i)
-            {
-                out[i] = -x[i];
-            }
-        });
-    }
-    for (auto &w : workers)
-        w.join();
+        // NEON path: negate 4 floats at a time
+        for (; i + 4 <= end; i += 4)
+        {
+            float32x4_t vx = vld1q_f32(x + i);
+            vst1q_f32(out + i, vnegq_f32(vx));
+        }
+        // Scalar tail
+        for (; i < end; ++i)
+        {
+            out[i] = -x[i];
+        }
+    });
 }
 
 // Reference factory: same as the reference negate - just graph.neg(x)

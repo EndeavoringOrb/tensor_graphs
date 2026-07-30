@@ -4,8 +4,9 @@
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
+#include <vector>
 
-#include <thread>
+#include "core/common/thread_pool.hpp"
 
 inline bool matchDivF32_ND_Fast(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -20,25 +21,21 @@ inline void runDivF32_ND_Fast(const KernelContext &ctx)
     uint64_t n = countElements(ctx.inViews[0].getShape());
 
     uint32_t num_threads = std::thread::hardware_concurrency();
-    uint64_t chunk = (n + num_threads - 1) / num_threads;
-    std::vector<std::thread> workers;
+    if (num_threads == 0)
+        num_threads = 1;
 
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() {
-            uint64_t start = t * chunk;
-            uint64_t end = std::min(start + chunk, n);
-            uint64_t i = start;
-            for (; i + 4 <= end; i += 4)
-            {
-                vst1q_f32(out + i, vdivq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
-            }
-            for (; i < end; ++i)
-                out[i] = a[i] / b[i];
-        });
-    }
-    for (auto &w : workers)
-        w.join();
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        uint64_t chunk = (n + num_threads - 1) / num_threads;
+        uint64_t start = t * chunk;
+        uint64_t end = std::min(start + chunk, n);
+        uint64_t i = start;
+        for (; i + 4 <= end; i += 4)
+        {
+            vst1q_f32(out + i, vdivq_f32(vld1q_f32(a + i), vld1q_f32(b + i)));
+        }
+        for (; i < end; ++i)
+            out[i] = a[i] / b[i];
+    });
 }
 
 inline LogicalId refFactoryDivND_Fast(const std::vector<LogicalId> &inputs, Graph &graph)

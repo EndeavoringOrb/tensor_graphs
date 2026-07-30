@@ -30,11 +30,11 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
-#include <thread>
 #include <vector>
 
 #include "core/kernels.hpp"
 #include "core/types.hpp"
+#include "core/common/thread_pool.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -72,70 +72,64 @@ inline void runJinaRMSNorm_F32_3D(const KernelContext &ctx)
     if (num_threads > 12)
         num_threads = 12;
     uint32_t total_rows = B * S;
-    uint32_t rows_per_thread = (total_rows + num_threads - 1) / num_threads;
 
-    std::vector<std::thread> workers;
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() {
-            uint32_t start_row = t * rows_per_thread;
-            uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        uint32_t rows_per_thread = (total_rows + num_threads - 1) / num_threads;
+        uint32_t start_row = t * rows_per_thread;
+        uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
 
-            for (uint32_t r = start_row; r < end_row; ++r)
+        for (uint32_t r = start_row; r < end_row; ++r)
+        {
+            const float *row_x = x + (uint64_t)r * D;
+            float *row_out = out + (uint64_t)r * D;
+
+            // --- Pass 1: sum of squares ---
+            float32x4_t v_sum_sq = vdupq_n_f32(0.0f);
+            uint32_t d = 0;
+            for (; d + 8 <= D; d += 8)
             {
-                const float *row_x = x + (uint64_t)r * D;
-                float *row_out = out + (uint64_t)r * D;
-
-                // --- Pass 1: sum of squares ---
-                float32x4_t v_sum_sq = vdupq_n_f32(0.0f);
-                uint32_t d = 0;
-                for (; d + 8 <= D; d += 8)
-                {
-                    float32x4_t v_x0 = vld1q_f32(row_x + d);
-                    float32x4_t v_x1 = vld1q_f32(row_x + d + 4);
-                    v_sum_sq = vfmaq_f32(v_sum_sq, v_x0, v_x0);
-                    v_sum_sq = vfmaq_f32(v_sum_sq, v_x1, v_x1);
-                }
-                for (; d + 4 <= D; d += 4)
-                {
-                    float32x4_t v_x = vld1q_f32(row_x + d);
-                    v_sum_sq = vfmaq_f32(v_sum_sq, v_x, v_x);
-                }
-                float sum_sq = vaddvq_f32(v_sum_sq);
-                for (; d < D; ++d)
-                    sum_sq += row_x[d] * row_x[d];
-
-                float mean_sq = sum_sq * inv_D;
-                float inv_std = 1.0f / std::sqrt(mean_sq + eps);
-
-                // --- Pass 2: x * inv_std * w ---
-                float32x4_t v_inv_std = vdupq_n_f32(inv_std);
-                d = 0;
-                for (; d + 8 <= D; d += 8)
-                {
-                    float32x4_t v_x0 = vld1q_f32(row_x + d);
-                    float32x4_t v_x1 = vld1q_f32(row_x + d + 4);
-                    float32x4_t v_w0 = vld1q_f32(w + d);
-                    float32x4_t v_w1 = vld1q_f32(w + d + 4);
-                    float32x4_t v_n0 = vmulq_f32(v_x0, v_inv_std);
-                    float32x4_t v_n1 = vmulq_f32(v_x1, v_inv_std);
-                    vst1q_f32(row_out + d, vmulq_f32(v_n0, v_w0));
-                    vst1q_f32(row_out + d + 4, vmulq_f32(v_n1, v_w1));
-                }
-                for (; d + 4 <= D; d += 4)
-                {
-                    float32x4_t v_x = vld1q_f32(row_x + d);
-                    float32x4_t v_w = vld1q_f32(w + d);
-                    float32x4_t v_n = vmulq_f32(v_x, v_inv_std);
-                    vst1q_f32(row_out + d, vmulq_f32(v_n, v_w));
-                }
-                for (; d < D; ++d)
-                    row_out[d] = row_x[d] * inv_std * w[d];
+                float32x4_t v_x0 = vld1q_f32(row_x + d);
+                float32x4_t v_x1 = vld1q_f32(row_x + d + 4);
+                v_sum_sq = vfmaq_f32(v_sum_sq, v_x0, v_x0);
+                v_sum_sq = vfmaq_f32(v_sum_sq, v_x1, v_x1);
             }
-        });
-    }
-    for (auto &worker : workers)
-        worker.join();
+            for (; d + 4 <= D; d += 4)
+            {
+                float32x4_t v_x = vld1q_f32(row_x + d);
+                v_sum_sq = vfmaq_f32(v_sum_sq, v_x, v_x);
+            }
+            float sum_sq = vaddvq_f32(v_sum_sq);
+            for (; d < D; ++d)
+                sum_sq += row_x[d] * row_x[d];
+
+            float mean_sq = sum_sq * inv_D;
+            float inv_std = 1.0f / std::sqrt(mean_sq + eps);
+
+            // --- Pass 2: x * inv_std * w ---
+            float32x4_t v_inv_std = vdupq_n_f32(inv_std);
+            d = 0;
+            for (; d + 8 <= D; d += 8)
+            {
+                float32x4_t v_x0 = vld1q_f32(row_x + d);
+                float32x4_t v_x1 = vld1q_f32(row_x + d + 4);
+                float32x4_t v_w0 = vld1q_f32(w + d);
+                float32x4_t v_w1 = vld1q_f32(w + d + 4);
+                float32x4_t v_n0 = vmulq_f32(v_x0, v_inv_std);
+                float32x4_t v_n1 = vmulq_f32(v_x1, v_inv_std);
+                vst1q_f32(row_out + d, vmulq_f32(v_n0, v_w0));
+                vst1q_f32(row_out + d + 4, vmulq_f32(v_n1, v_w1));
+            }
+            for (; d + 4 <= D; d += 4)
+            {
+                float32x4_t v_x = vld1q_f32(row_x + d);
+                float32x4_t v_w = vld1q_f32(w + d);
+                float32x4_t v_n = vmulq_f32(v_x, v_inv_std);
+                vst1q_f32(row_out + d, vmulq_f32(v_n, v_w));
+            }
+            for (; d < D; ++d)
+                row_out[d] = row_x[d] * inv_std * w[d];
+        }
+    });
 }
 
 // Reference Factory — mirrors JinaV5OmniNanoRetrievalModel::rms_norm() exactly.

@@ -1,10 +1,10 @@
 #pragma once
 #include <algorithm>
-#include <thread>
 #include <vector>
 
 #include "core/kernels.hpp"
 #include "core/types.hpp"
+#include "core/common/thread_pool.hpp"
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 #endif
@@ -44,34 +44,28 @@ inline void runAddF32_3D_Broadcast0_Inplace(const KernelContext &ctx)
     if (num_threads > B)
         num_threads = B;
 
-    std::vector<std::thread> workers;
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() {
-            uint32_t start_b = (B * t) / num_threads;
-            uint32_t end_b = (B * (t + 1)) / num_threads;
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        uint32_t start_b = (B * t) / num_threads;
+        uint32_t end_b = (B * (t + 1)) / num_threads;
 
-            for (uint32_t batch = start_b; batch < end_b; ++batch)
-            {
-                float *out_batch = out + batch * mn_size;
-                uint32_t i = 0;
+        for (uint32_t batch = start_b; batch < end_b; ++batch)
+        {
+            float *out_batch = out + batch * mn_size;
+            uint32_t i = 0;
 #if defined(TG_HAS_NEON)
-                for (; i + 4 <= mn_size; i += 4)
-                {
-                    float32x4_t va = vld1q_f32(out_batch + i);
-                    float32x4_t vb = vld1q_f32(b + i);
-                    vst1q_f32(out_batch + i, vaddq_f32(va, vb));
-                }
-#endif
-                for (; i < mn_size; ++i)
-                {
-                    out_batch[i] += b[i];
-                }
+            for (; i + 4 <= mn_size; i += 4)
+            {
+                float32x4_t va = vld1q_f32(out_batch + i);
+                float32x4_t vb = vld1q_f32(b + i);
+                vst1q_f32(out_batch + i, vaddq_f32(va, vb));
             }
-        });
-    }
-    for (auto &w : workers)
-        w.join();
+#endif
+            for (; i < mn_size; ++i)
+            {
+                out_batch[i] += b[i];
+            }
+        }
+    });
 }
 
 inline LogicalId refFactoryAdd3D_Broadcast0_Inplace(const std::vector<LogicalId> &inputs, Graph &graph)

@@ -4,7 +4,9 @@
 
 #if defined(TG_HAS_NEON)
 #include <cstring>
-#include <thread>
+#include <vector>
+
+#include "core/common/thread_pool.hpp"
 
 inline bool matchConcatF32_Fast(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -28,30 +30,26 @@ inline void runConcatF32_Fast(const KernelContext &ctx)
         inner *= out_shape[i];
 
     uint32_t num_threads = std::thread::hardware_concurrency();
-    uint32_t chunk = (outer + num_threads - 1) / num_threads;
+    if (num_threads == 0)
+        num_threads = 1;
 
-    std::vector<std::thread> workers;
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() {
-            uint32_t o_start = t * chunk;
-            uint32_t o_end = std::min(o_start + chunk, (uint32_t)outer);
-            for (uint32_t o = o_start; o < o_end; ++o)
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        uint32_t chunk = (outer + num_threads - 1) / num_threads;
+        uint32_t o_start = t * chunk;
+        uint32_t o_end = std::min(o_start + chunk, (uint32_t)outer);
+        for (uint32_t o = o_start; o < o_end; ++o)
+        {
+            uint64_t out_axis_offset = 0;
+            for (uint64_t n = 1; n < ctx.inputs.size(); ++n)
             {
-                uint64_t out_axis_offset = 0;
-                for (uint64_t n = 1; n < ctx.inputs.size(); ++n)
-                {
-                    uint32_t axis_dim = ctx.inViews[n].getShape()[axis];
-                    const float *src = static_cast<const float *>(ctx.inputs[n]) + (o * axis_dim * inner);
-                    float *dst = out_ptr + (o * out_shape[axis] * inner) + (out_axis_offset * inner);
-                    std::memcpy(dst, src, axis_dim * inner * sizeof(float));
-                    out_axis_offset += axis_dim;
-                }
+                uint32_t axis_dim = ctx.inViews[n].getShape()[axis];
+                const float *src = static_cast<const float *>(ctx.inputs[n]) + (o * axis_dim * inner);
+                float *dst = out_ptr + (o * out_shape[axis] * inner) + (out_axis_offset * inner);
+                std::memcpy(dst, src, axis_dim * inner * sizeof(float));
+                out_axis_offset += axis_dim;
             }
-        });
-    }
-    for (auto &w : workers)
-        w.join();
+        }
+    });
 }
 
 inline LogicalId refFactoryConcatF32_Fast(const std::vector<LogicalId> &inputs, Graph &graph)

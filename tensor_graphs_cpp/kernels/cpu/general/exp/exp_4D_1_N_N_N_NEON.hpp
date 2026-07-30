@@ -1,11 +1,11 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
-#include <thread>
 #include <vector>
 
 #include "core/kernels.hpp"
 #include "core/types.hpp"
+#include "core/common/thread_pool.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -46,26 +46,19 @@ inline void runExpF32_4D_NEON(const KernelContext &ctx)
     uint32_t num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0)
         num_threads = 1;
-    uint64_t chunk = (n + num_threads - 1) / num_threads;
 
-    std::vector<std::thread> workers;
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() {
-            uint64_t start = t * chunk;
-            uint64_t end = std::min(start + chunk, n);
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        uint64_t chunk = (n + num_threads - 1) / num_threads;
+        uint64_t start = t * chunk;
+        uint64_t end = std::min(start + chunk, n);
 
-            // Note: Standard math library exp() is typically well-optimized by
-            // the compiler (cl.exe or g++) for the target architecture.
-            for (uint64_t i = start; i < end; ++i)
-            {
-                out[i] = std::exp(in[i]);
-            }
-        });
-    }
-
-    for (auto &w : workers)
-        w.join();
+        // Note: Standard math library exp() is typically well-optimized by
+        // the compiler (cl.exe or g++) for the target architecture.
+        for (uint64_t i = start; i < end; ++i)
+        {
+            out[i] = std::exp(in[i]);
+        }
+    });
 }
 
 /**

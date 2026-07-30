@@ -6,8 +6,9 @@
 #include <arm_neon.h>
 
 #include <algorithm>
-#include <thread>
 #include <vector>
+
+#include "core/common/thread_pool.hpp"
 
 /**
  * KERNEL: Mul_ND_NEON
@@ -43,9 +44,11 @@ inline void runMulF32_ND_NEON(const KernelContext &ctx)
     if (num_threads == 0)
         num_threads = 1;
 
-    uint64_t chunk_size = (n + num_threads - 1) / num_threads;
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        uint64_t chunk_size = (n + num_threads - 1) / num_threads;
+        uint64_t start = t * chunk_size;
+        uint64_t end = std::min(start + chunk_size, n);
 
-    auto worker = [=](uint64_t start, uint64_t end) {
         uint64_t i = start;
         // 1. NEON SIMD Loop (4 elements per step)
         for (; i + 4 <= end; i += 4)
@@ -59,21 +62,7 @@ inline void runMulF32_ND_NEON(const KernelContext &ctx)
         {
             out_base[i] = a_base[i] * b_base[i];
         }
-    };
-
-    std::vector<std::thread> threads;
-    threads.reserve(num_threads);
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        uint64_t start = t * chunk_size;
-        uint64_t end = std::min(start + chunk_size, n);
-        if (start < end)
-        {
-            threads.emplace_back(worker, start, end);
-        }
-    }
-    for (auto &th : threads)
-        th.join();
+    });
 }
 
 inline LogicalId refFactoryMulND_NEON(const std::vector<LogicalId> &inputs, Graph &graph)
