@@ -956,6 +956,7 @@ struct MemValidator : public ISelectionValidator
 
         if (alloc_ok)
         {
+#ifdef DEBUG
             std::unordered_map<BufferId, ParallelBuffer> id_to_buf;
             for (auto &buf : buffers)
             {
@@ -984,7 +985,7 @@ struct MemValidator : public ISelectionValidator
                     }
                 }
             }
-
+#endif
             return true;
         }
         reason = oom_reason;
