@@ -36,10 +36,17 @@ bool overlapsBuf(const ParallelBuffer &a, const ParallelBuffer &b)
 }
 
 float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
-               const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos)
+               const std::unordered_map<EClassId, uint32_t> &selection_map,
+               const std::vector<ENodeInfo> &enodeInfos,
+               bool print_utilization = true)
 {
     std::unordered_map<EClassId, float> birth_times;
     std::unordered_map<uint32_t, float> engine_finish;
+
+    // Accumulators to track total active time and types of each engine
+    std::unordered_map<uint32_t, float> engine_active_time;
+    std::unordered_map<uint32_t, EngineType> engine_types;
+
     for (EClassId eclass : ordered)
     {
         uint32_t sel = selection_map.at(eclass);
@@ -89,15 +96,48 @@ float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
         for (const auto &engine : node.getEngines())
         {
             engine_finish[engine.idx] = birth + cost;
+
+            // Accumulate active processing time for this device
+            engine_active_time[engine.idx] += cost;
+            engine_types[engine.idx] = engine.type;
         }
     }
 
-    float cost = 0.0f;
+    float total_cost = 0.0f;
     for (const auto &kv : engine_finish)
     {
-        cost = std::max(cost, kv.second);
+        total_cost = std::max(total_cost, kv.second);
     }
-    return cost;
+
+    // Print utilization reports if flagged and makespan is valid
+    if (print_utilization && total_cost > 0.0f)
+    {
+        std::cout << "\n==================================================\n";
+        std::cout << "[get_cost] Estimated Device/Engine Utilization Summary\n";
+        std::cout << "Total Makespan (Cost): " << total_cost << " ms\n";
+        std::cout << "--------------------------------------------------\n";
+        for (const auto &kv : engine_active_time)
+        {
+            uint32_t eng_idx = kv.first;
+            float active_duration = kv.second;
+            float percentage = (active_duration / total_cost) * 100.0f;
+
+            std::string type_str = "UNKNOWN_ENGINE";
+            auto type_it = engine_types.find(eng_idx);
+            if (type_it != engine_types.end())
+            {
+                type_str = toString(type_it->second);
+            }
+
+            std::cout << "  - Engine " << eng_idx << " (" << type_str << "): "
+                      << std::fixed << std::setprecision(2) << percentage << "% "
+                      << "(" << active_duration << " ms active)\n";
+        }
+        std::cout << "==================================================\n"
+                  << std::endl;
+    }
+
+    return total_cost;
 }
 
 inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,

@@ -5,6 +5,7 @@
 #include "core/kernels.hpp"
 #include "core/memory.hpp"
 #include "core/plan/planner.hpp"
+#include "core/synchronizer.hpp"
 #include "core/types.hpp"
 
 class Executor
@@ -26,9 +27,7 @@ public:
 #endif
         ProgressTimer timer(nInst, "running ", disableTimer);
 
-        bool cuda_busy = false;
-        bool opencl_busy = false;
-        std::unordered_map<uint32_t, EngineType> buffer_last_writer;
+        Synchronizer sync;
 
         for (uint64_t idx = 0; idx < nInst; ++idx)
         {
@@ -45,41 +44,7 @@ public:
             std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
             EngineType current_engine = kernel.engines.empty() ? EngineType::CPU : kernel.engines[0].type;
 
-            bool sync_cuda = false;
-            bool sync_opencl = false;
-
-            // Check if any input was last written by a different asynchronous engine
-            for (const ParallelBuffer &inBuf : inst.inBuffers)
-            {
-                auto it = buffer_last_writer.find(inBuf.id.value);
-                if (it != buffer_last_writer.end())
-                {
-                    EngineType writer_engine = it->second;
-                    if (writer_engine != current_engine)
-                    {
-                        if (writer_engine == EngineType::CUDA_GPU && cuda_busy)
-                            sync_cuda = true;
-                        if (writer_engine == EngineType::QUALCOMM_IGPU && opencl_busy)
-                            sync_opencl = true;
-                    }
-                }
-            }
-
-            if (sync_cuda)
-            {
-#ifdef USE_CUDA
-                cudaDeviceSynchronize();
-#endif
-                cuda_busy = false;
-            }
-            if (sync_opencl)
-            {
-                if (OpenCLState::get().initialized)
-                {
-                    clFinish(OpenCLState::get().queue);
-                }
-                opencl_busy = false;
-            }
+            sync.syncBefore(inst, current_engine);
 
             KernelContext ctx;
 
@@ -117,34 +82,18 @@ public:
                                    toString(kernel));
 #endif
 
+            bool issued_work = false;
             if (!kernel.is_view && kernel.run)
             {
                 kernel.run(ctx);
-                if (current_engine == EngineType::CUDA_GPU)
-                    cuda_busy = true;
-                if (current_engine == EngineType::QUALCOMM_IGPU)
-                    opencl_busy = true;
+                issued_work = true;
             }
 
-            // Track who wrote to this memory space
-            buffer_last_writer[inst.outBuffer.id.value] = current_engine;
+            sync.markExecuted(inst, current_engine, issued_work);
 
 #ifdef DEBUG
-            if (cuda_busy)
-            {
-#ifdef USE_CUDA
-                cudaDeviceSynchronize();
-#endif
-                cuda_busy = false;
-            }
-            if (opencl_busy)
-            {
-                if (OpenCLState::get().initialized)
-                {
-                    clFinish(OpenCLState::get().queue);
-                }
-                opencl_busy = false;
-            }
+            sync.syncAll();
+
             std::vector<const void *> c_outputs(ctx.outputs.begin(), ctx.outputs.end());
             Debug::checkValues(c_outputs, ctx.outViews, ctx.inputs, ctx.inViews, kernel,
                                "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
@@ -170,18 +119,6 @@ public:
         }
 
         // Final synchronization to ensure all pending work is completed before returning to Python/User
-        if (cuda_busy)
-        {
-#ifdef USE_CUDA
-            cudaDeviceSynchronize();
-#endif
-        }
-        if (opencl_busy)
-        {
-            if (OpenCLState::get().initialized)
-            {
-                clFinish(OpenCLState::get().queue);
-            }
-        }
+        sync.syncAll();
     }
 };

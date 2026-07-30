@@ -1,14 +1,14 @@
 #pragma once
+#include <algorithm>
+#include <vector>
+
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
+#include "core/common/thread_pool.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
-
-#include <algorithm>
-#include <thread>
-#include <vector>
 
 inline bool matchDotF32_3D_N64(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -63,14 +63,11 @@ inline void runDotF32_3D_N64(const KernelContext &ctx)
     if (num_threads == 0)
         num_threads = 1;
 
-    std::vector<std::thread> workers;
-
     uint32_t total_rows = B_count * M;
     uint32_t rows_per_thread = (total_rows + num_threads - 1) / num_threads;
 
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]() {
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t)
+                                   {
             uint32_t start_row = t * rows_per_thread;
             uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
             if (start_row >= end_row)
@@ -454,12 +451,7 @@ inline void runDotF32_3D_N64(const KernelContext &ctx)
                         }
                     }
                 }
-            }
-        });
-    }
-
-    for (auto &thread : workers)
-        thread.join();
+            } });
 }
 
 inline LogicalId refFactoryDotF32_3D_N64(const std::vector<LogicalId> &inputs, Graph &graph)
