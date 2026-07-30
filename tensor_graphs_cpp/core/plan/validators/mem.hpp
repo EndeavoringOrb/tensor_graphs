@@ -274,9 +274,9 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
         if (target_base != eclass)
         {
             if (birth_times.count(target_base))
-                birth_times[target_base] = std::min(birth_times[target_base], i);
+                birth_times[target_base] = std::min(birth_times[target_base], birth_times[base]);
             if (death_times.count(target_base))
-                death_times[target_base] = std::max(death_times[target_base], i + 1);
+                death_times[target_base] = std::max(death_times[target_base], death_times[base]);
         }
     }
 
