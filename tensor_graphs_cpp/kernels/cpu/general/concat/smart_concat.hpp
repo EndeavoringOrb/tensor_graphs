@@ -3,9 +3,9 @@
 #include <cstring>
 #include <vector>
 
+#include "core/common/thread_pool.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/thread_pool.hpp"
 
 inline bool matchSmartConcat(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {

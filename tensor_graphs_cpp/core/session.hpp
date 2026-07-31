@@ -155,7 +155,8 @@ struct Session
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
             Repo *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f)
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
-          nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching), minCompileSeconds(_minCompileSeconds)
+          nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
+          minCompileSeconds(_minCompileSeconds)
     {
         ensureOutputDirectories();
         loadCache();
@@ -321,8 +322,9 @@ struct Session
             {
                 const Bucket &bucket = manualBuckets[i];
 
-                CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes,
-                                                  i == fullBucketIdx ? false : doSaturate, false, repo, {}, minCompileSeconds);
+                CompiledGraph plan =
+                    planner.plan(rootId, graph, bucket, protectedCachedNodes, i == fullBucketIdx ? false : doSaturate,
+                                 false, repo, {}, minCompileSeconds);
 
                 for (const auto &inst : plan.instructions)
                 {
@@ -356,8 +358,8 @@ struct Session
         for (uint64_t i = 0; i < manualBuckets.size(); ++i)
         {
             const Bucket &bucket = manualBuckets[i];
-            CompiledGraph plan =
-                planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo, preallocatedBuffers, minCompileSeconds);
+            CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo,
+                                              preallocatedBuffers, minCompileSeconds);
             plan.bucket = bucket;
             cachedGraphs.push_back(plan);
         }

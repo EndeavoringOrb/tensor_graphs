@@ -10,10 +10,10 @@
 
 class Executor
 {
-private:
+  private:
     MemoryManager &memManager;
 
-public:
+  public:
     Executor(MemoryManager &mm) : memManager(mm)
     {
     }

@@ -85,9 +85,9 @@ int32_t perform_argmax(const float *logits, uint32_t vocab_size)
 template <typename ConfigClass>
 void run_autoregressive_llm(const std::string &model_name, const std::string &cache_file,
                             const std::vector<uint32_t> &initial_tokens, uint32_t vocab_size, uint32_t max_seq_len,
-                            uint32_t num_tokens_to_generate, bool only_plan, bool disable_caching, float min_compile_time,
-                            ModelGraphRoots (*builder)(Graph &, MemoryManager &), bool refOnly = false,
-                            bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
+                            uint32_t num_tokens_to_generate, bool only_plan, bool disable_caching,
+                            float min_compile_time, ModelGraphRoots (*builder)(Graph &, MemoryManager &),
+                            bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
                             Graph **activeGraphOut = nullptr)
 {
     KernelRegistry::get().setReferenceOnly(refOnly);
@@ -172,21 +172,21 @@ void run_autoregressive_llm(const std::string &model_name, const std::string &ca
     }
 }
 
-void run_gemma(bool only_plan, bool disable_caching, float min_compile_time, bool refOnly = false, bool doSaturate = true,
-               const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+void run_gemma(bool only_plan, bool disable_caching, float min_compile_time, bool refOnly = false,
+               bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
-    run_autoregressive_llm<Gemma3ModelConfig>("gemma-3-270m", "dirty_region_caches/gemma-3-270m-cpp.bin", {2, 9259},
-                                              Gemma3ModelConfig().vocab_size, 8, 6, only_plan, disable_caching, min_compile_time,
-                                              build_gemma_graph, refOnly, doSaturate, debugCb, activeGraphOut);
+    run_autoregressive_llm<Gemma3ModelConfig>(
+        "gemma-3-270m", "dirty_region_caches/gemma-3-270m-cpp.bin", {2, 9259}, Gemma3ModelConfig().vocab_size, 8, 6,
+        only_plan, disable_caching, min_compile_time, build_gemma_graph, refOnly, doSaturate, debugCb, activeGraphOut);
 }
 
-void run_qwen_35b(bool only_plan, bool disable_caching, float min_compile_time, bool refOnly = false, bool doSaturate = true,
-                  const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+void run_qwen_35b(bool only_plan, bool disable_caching, float min_compile_time, bool refOnly = false,
+                  bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
     run_autoregressive_llm<Qwen3_6_35B_A3B_Config>("qwen-3.6-35b-a3b", "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin",
                                                    {24227}, Qwen3_6_35B_A3B_Config().vocab_size, 8, 7, only_plan,
-                                                   disable_caching, min_compile_time, build_qwen_graph, refOnly, doSaturate, debugCb,
-                                                   activeGraphOut);
+                                                   disable_caching, min_compile_time, build_qwen_graph, refOnly,
+                                                   doSaturate, debugCb, activeGraphOut);
 }
 
 // void run_flux(bool only_plan, bool disable_caching, bool refOnly = false,

@@ -28,7 +28,8 @@ struct ProgressTimer
         : start(clock::now()), last_print(start), total(total_), minInterval(minInterval_), label(label_),
           has_total(total_ > 0), disable(disable_), disable_tick(disable_tick_)
     {
-        if (label.size() > 0) {
+        if (label.size() > 0)
+        {
             label += " ";
         }
     }

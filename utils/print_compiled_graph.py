@@ -35,7 +35,6 @@ def format_num_or_str(val):
 
 
 class NullValue:
-
     def __eq__(self, other):
         return False
 
@@ -62,7 +61,6 @@ class NullValue:
 
 
 class BufferProxy:
-
     def __init__(self, buf=None, view=None):
         buf = buf or {}
         view = view or {}
@@ -98,7 +96,6 @@ class BufferProxy:
 
 
 class NullBufferProxy:
-
     def __getattr__(self, name):
         return NullValue()
 
@@ -107,7 +104,6 @@ class NullBufferProxy:
 
 
 class AnyField:
-
     def __init__(self, field_name, items):
         self.field_name = field_name
         self.items = items
@@ -156,7 +152,6 @@ class AnyField:
 
 
 class InputListProxy:
-
     def __init__(self, inputs):
         self._inputs = inputs
 
@@ -174,7 +169,6 @@ class InputListProxy:
 
 
 class FilterScope(dict):
-
     def __missing__(self, key):
         if key in ("in", "inputs", "in_bufs"):
             return self.get("input")

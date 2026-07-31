@@ -28,9 +28,9 @@
 #include <cmath>
 #include <vector>
 
+#include "core/common/thread_pool.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/thread_pool.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -188,8 +188,8 @@ inline void runJinaGeluExact_F32_3D(const KernelContext &ctx)
             // Scalar erf using the same AS approximation
             float az = std::fabs(z);
             float t = 1.0f / (1.0f + 0.3275911f * az);
-            float poly = t * (0.254829592f +
-                              t * (-0.284496736f + t * (1.421413741f + t * (-1.453152027f + t * 1.061405429f))));
+            float poly =
+                t * (0.254829592f + t * (-0.284496736f + t * (1.421413741f + t * (-1.453152027f + t * 1.061405429f))));
             float erf_pos = 1.0f - poly * std::exp(-z * z);
             float erf_val = (z >= 0.0f) ? erf_pos : -erf_pos;
             out[i] = 0.5f * x * (1.0f + erf_val);

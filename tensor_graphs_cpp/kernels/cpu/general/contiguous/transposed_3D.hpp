@@ -2,9 +2,9 @@
 #include <algorithm>
 #include <vector>
 
+#include "core/common/thread_pool.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/thread_pool.hpp"
 
 /**
  * Highly optimized multi-threaded cache-blocked 3D Transposition / Contiguous

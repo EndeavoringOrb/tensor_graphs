@@ -4,9 +4,9 @@
 #include <cstring>
 #include <vector>
 
+#include "core/common/thread_pool.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/thread_pool.hpp"
 
 /**
  * KERNEL: RecursiveContiguous_ND
@@ -160,7 +160,8 @@ inline void runRecursiveContiguous_ND(const KernelContext &ctx)
                 {
                     uint32_t *local_dst = dst_ptr + (i * inner_elements);
                     const uint32_t *local_src = src_ptr + (i * dim0_stride);
-                    detail::copy_recursive_fast<uint32_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+                    detail::copy_recursive_fast<uint32_t>(1, local_src, local_dst, shape, strides, outer_rank,
+                                                          block_size);
                 }
             });
         }
@@ -187,7 +188,8 @@ inline void runRecursiveContiguous_ND(const KernelContext &ctx)
                 {
                     uint16_t *local_dst = dst_ptr + (i * inner_elements);
                     const uint16_t *local_src = src_ptr + (i * dim0_stride);
-                    detail::copy_recursive_fast<uint16_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+                    detail::copy_recursive_fast<uint16_t>(1, local_src, local_dst, shape, strides, outer_rank,
+                                                          block_size);
                 }
             });
         }
@@ -214,7 +216,8 @@ inline void runRecursiveContiguous_ND(const KernelContext &ctx)
                 {
                     uint64_t *local_dst = dst_ptr + (i * inner_elements);
                     const uint64_t *local_src = src_ptr + (i * dim0_stride);
-                    detail::copy_recursive_fast<uint64_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+                    detail::copy_recursive_fast<uint64_t>(1, local_src, local_dst, shape, strides, outer_rank,
+                                                          block_size);
                 }
             });
         }
@@ -241,7 +244,8 @@ inline void runRecursiveContiguous_ND(const KernelContext &ctx)
                 {
                     uint8_t *local_dst = dst_ptr + (i * inner_elements);
                     const uint8_t *local_src = src_ptr + (i * dim0_stride);
-                    detail::copy_recursive_fast<uint8_t>(1, local_src, local_dst, shape, strides, outer_rank, block_size);
+                    detail::copy_recursive_fast<uint8_t>(1, local_src, local_dst, shape, strides, outer_rank,
+                                                         block_size);
                 }
             });
         }

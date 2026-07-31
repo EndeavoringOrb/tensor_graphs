@@ -36,8 +36,7 @@ bool overlapsBuf(const ParallelBuffer &a, const ParallelBuffer &b)
 }
 
 float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
-               const std::unordered_map<EClassId, uint32_t> &selection_map,
-               const std::vector<ENodeInfo> &enodeInfos,
+               const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
                bool print_utilization = true)
 {
     std::unordered_map<EClassId, float> birth_times;
@@ -129,12 +128,11 @@ float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
                 type_str = toString(type_it->second);
             }
 
-            std::cout << "  - Engine " << eng_idx << " (" << type_str << "): "
-                      << std::fixed << std::setprecision(2) << percentage << "% "
+            std::cout << "  - Engine " << eng_idx << " (" << type_str << "): " << std::fixed << std::setprecision(2)
+                      << percentage << "% "
                       << "(" << active_duration << " ms active)\n";
         }
-        std::cout << "==================================================\n"
-                  << std::endl;
+        std::cout << "==================================================\n" << std::endl;
     }
 
     return total_cost;
@@ -192,7 +190,10 @@ static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egrap
             continue;
         }
 
-        float death = birth_times.at(node_eclass) + std::max(0.1f, cost); // TODO: this 0.1f is very hacky, do something better. maybe integer timing based on order?
+        float death =
+            birth_times.at(node_eclass) +
+            std::max(0.1f,
+                     cost); // TODO: this 0.1f is very hacky, do something better. maybe integer timing based on order?
         for (uint64_t j = i + 1; j < ordered.size(); ++j)
         {
             EClassId other_eclass = ordered[j];
@@ -213,7 +214,8 @@ static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egrap
             if (is_consumed)
             {
                 float other_cost = enodeInfos[other_enode_id.value].cost;
-                death = std::max(death, birth_times.at(other_eclass) + std::max(0.1f, other_cost)); // TODO: use std::nextafter
+                death = std::max(death,
+                                 birth_times.at(other_eclass) + std::max(0.1f, other_cost)); // TODO: use std::nextafter
             }
         }
         death_times[node_eclass] = death;
@@ -248,8 +250,7 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     }
 
     std::unordered_map<EClassId, EClassId> inplace_alias;
-    auto get_inplace_alias = [&](EClassId id)
-    {
+    auto get_inplace_alias = [&](EClassId id) {
         while (inplace_alias.count(id))
             id = inplace_alias.at(id);
         return id;
@@ -354,7 +355,8 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
             size_bytes = (size_bytes + 4095) & ~4095ULL;
 
             ParallelBuffer buf = {
-                buf_id, base_node.getMemSpace(), size_bytes, birth_times.at(target_base), death_times.at(target_base), -1};
+                buf_id, base_node.getMemSpace(), size_bytes, birth_times.at(target_base), death_times.at(target_base),
+                -1};
             buffers.push_back(std::move(buf));
         }
 
@@ -370,8 +372,7 @@ static bool malloc_recursive(uint64_t mem_cap, std::vector<ParallelBuffer> &unal
     if (unallocated.empty())
         return true;
 
-    auto get_min_height = [&]() -> int64_t
-    {
+    auto get_min_height = [&]() -> int64_t {
         int64_t min_height = std::numeric_limits<int64_t>::max();
         for (uint64_t i = 0; i < unallocated.size(); ++i)
         {
@@ -652,11 +653,11 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
     }
 
     // Process Ends before Starts to correctly simulate memory release
-    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b)
-              {
+    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b) {
         if (a.time != b.time)
             return a.time < b.time;
-        return a.type < b.type; });
+        return a.type < b.type;
+    });
 
     int64_t current_mem = 0;
     for (const auto &ev : events)
@@ -688,12 +689,11 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
     std::vector<ParallelBuffer> bufs = unallocated;
 
     // Heuristic: Place largest buffers first to minimize fragmentation
-    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
-                  if (a.size != b.size)
-                      return a.size > b.size;
-                  return a.id < b.id; // Deterministic tie-breaker
-              });
+    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
+        if (a.size != b.size)
+            return a.size > b.size;
+        return a.id < b.id; // Deterministic tie-breaker
+    });
 
     allocated.clear();
     allocated.reserve(bufs.size());
@@ -714,8 +714,7 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 
         // Sort overlapping buffers by their memory offset ascending
         std::sort(time_overlaps.begin(), time_overlaps.end(),
-                  [](const ParallelBuffer *a, const ParallelBuffer *b)
-                  { return a->offset < b->offset; });
+                  [](const ParallelBuffer *a, const ParallelBuffer *b) { return a->offset < b->offset; });
 
         // First-fit algorithm: push best_offset upwards if there's a memory
         // collision
@@ -750,11 +749,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
 
     // 1. Sort buffers by start time (and then end time to be deterministic)
     std::vector<ParallelBuffer> sorted_bufs = unallocated;
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
         if (a.start != b.start)
             return a.start < b.start;
-        return a.end < b.end; });
+        return a.end < b.end;
+    });
 
     if (sorted_bufs.empty())
         return true;
@@ -777,11 +776,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
     // OPTIMIZATION 3: Exact solver fallback with aggressive pruning ordering
     // Sorting by size descending forces the tree to hit conflict limits much
     // faster.
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
-            if (a.size != b.size)
-                return a.size > b.size;
-            return a.id < b.id; });
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
+        if (a.size != b.size)
+            return a.size > b.size;
+        return a.id < b.id;
+    });
 
     if (!malloc(mem_cap, sorted_bufs, comp_allocated))
     {
@@ -932,12 +931,11 @@ struct MemValidator : public ISelectionValidator
                 (cap == std::numeric_limits<uint64_t>::max()) ? cap : (cap > reserved ? cap - reserved : 0);
 
             std::vector<ParallelBuffer> allocated;
-            #ifdef DEBUG
+#ifdef DEBUG
             ProgressTimer t2 = ProgressTimer(
-                0,
-                "malloc mem_space=(" + std::to_string(ms.idx) + "," + std::to_string((int)ms.type) +
-                    "), n_bufs=" + std::to_string(bufs.size()) + ", reserved=" + std::to_string(reserved));
-                #endif
+                0, "malloc mem_space=(" + std::to_string(ms.idx) + "," + std::to_string((int)ms.type) +
+                       "), n_bufs=" + std::to_string(bufs.size()) + ", reserved=" + std::to_string(reserved));
+#endif
             if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow))
             {
                 alloc_ok = false;
@@ -982,9 +980,14 @@ struct MemValidator : public ISelectionValidator
                     if (!eclass_to_buf.count(child))
                         continue;
                     ParallelBuffer &child_buf = id_to_buf.at(eclass_to_buf.at(child));
-                    if (buf.offset == child_buf.offset && !(enode.getOpType() == OpType::PERMUTE || enode.getOpType() == OpType::REPEAT || enode.getOpType() == OpType::RESHAPE || enode.getOpType() == OpType::SLICE))
+                    if (buf.offset == child_buf.offset &&
+                        !(enode.getOpType() == OpType::PERMUTE || enode.getOpType() == OpType::REPEAT ||
+                          enode.getOpType() == OpType::RESHAPE || enode.getOpType() == OpType::SLICE))
                     {
-                        std::cout << "inplace op at " << toString(enode) << " " << (eclassToLogical.count(eclass_id) ? toString(eclassToLogical.at(eclass_id)) : "no logical id") << std::endl;
+                        std::cout << "inplace op at " << toString(enode) << " "
+                                  << (eclassToLogical.count(eclass_id) ? toString(eclassToLogical.at(eclass_id))
+                                                                       : "no logical id")
+                                  << std::endl;
                     }
                 }
             }

@@ -5,8 +5,8 @@
 #include <unordered_set>
 #include <vector>
 
-#include "core/types.hpp"
 #include "core/memory.hpp"
+#include "core/types.hpp"
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -15,11 +15,11 @@
 
 class Synchronizer
 {
-private:
+  private:
     std::unordered_map<uint32_t, EngineType> buffer_last_writer;
     std::unordered_set<EngineType> busy_engines;
 
-public:
+  public:
     Synchronizer() = default;
 
     // Checks if we need to synchronize any engines before executing an instruction

@@ -3,9 +3,9 @@
 #include <cstring>
 #include <vector>
 
+#include "core/common/thread_pool.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/thread_pool.hpp"
 
 inline bool matchDotTransposedBF16(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -39,8 +39,7 @@ inline void runDotTransposedBF16(const KernelContext &ctx)
     if (num_threads == 0)
         num_threads = 1;
 
-    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t)
-                                   {
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
         uint32_t rows_per_thread = (total_rows + num_threads - 1) / num_threads;
         uint32_t start_row = t * rows_per_thread;
         uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
@@ -64,7 +63,8 @@ inline void runDotTransposedBF16(const KernelContext &ctx)
                 }
                 out_row[o] = sum;
             }
-        } });
+        }
+    });
 }
 
 inline LogicalId refFactoryDotTransposedBF16(const std::vector<LogicalId> &inputs, Graph &graph)

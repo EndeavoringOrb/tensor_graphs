@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <vector>
 
+#include "core/common/thread_pool.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/thread_pool.hpp"
 
 inline bool matchMulFP32_3D_Scalar_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {

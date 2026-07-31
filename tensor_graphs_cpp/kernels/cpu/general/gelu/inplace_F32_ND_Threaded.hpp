@@ -3,9 +3,9 @@
 #include <cmath>
 #include <vector>
 
+#include "core/common/thread_pool.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/thread_pool.hpp"
 
 inline bool matchGeluF32_3D_Inplace_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {

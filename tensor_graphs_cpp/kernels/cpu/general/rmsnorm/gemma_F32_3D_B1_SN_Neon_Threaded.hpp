@@ -3,9 +3,9 @@
 #include <cmath>
 #include <vector>
 
+#include "core/common/thread_pool.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/thread_pool.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>

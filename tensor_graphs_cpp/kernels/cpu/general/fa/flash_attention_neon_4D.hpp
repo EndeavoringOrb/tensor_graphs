@@ -148,10 +148,8 @@ inline void runFlashAttentionNeon(const KernelContext &ctx)
 
                     for (uint32_t k = 0; k < BC; k += 2)
                     {
-                        float32x4_t a0 = vdupq_n_f32(0), a1 = vdupq_n_f32(0), a2 = vdupq_n_f32(0),
-                                    a3 = vdupq_n_f32(0);
-                        float32x4_t b0 = vdupq_n_f32(0), b1 = vdupq_n_f32(0), b2 = vdupq_n_f32(0),
-                                    b3 = vdupq_n_f32(0);
+                        float32x4_t a0 = vdupq_n_f32(0), a1 = vdupq_n_f32(0), a2 = vdupq_n_f32(0), a3 = vdupq_n_f32(0);
+                        float32x4_t b0 = vdupq_n_f32(0), b1 = vdupq_n_f32(0), b2 = vdupq_n_f32(0), b3 = vdupq_n_f32(0);
 
                         const float *k0_ptr = K_h + (k_start + k) * D;
                         const float *k1_ptr = K_h + (k_start + k + 1) * D;

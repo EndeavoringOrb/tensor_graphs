@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <vector>
 
+#include "core/common/thread_pool.hpp"
 #include "core/kernels.hpp"
 #include "core/types.hpp"
-#include "core/common/thread_pool.hpp"
 
 inline bool matchAddNC_F32_3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {

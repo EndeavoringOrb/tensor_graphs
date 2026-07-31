@@ -98,7 +98,7 @@ struct HardwareCaps
         return instance;
     }
 
-private:
+  private:
     void probe()
     {
         // 1. Detect CPU Architecture & SIMD

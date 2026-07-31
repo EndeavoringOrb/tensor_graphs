@@ -503,9 +503,8 @@ int main(int argc, char *argv[])
                     b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
                 }
 
-                auto cb = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx, const void *data) {
-                    verifier.verify(logicalId, kernel_name, ctx, data, cs.graph.get());
-                };
+                auto cb = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx,
+                              const void *data) { verifier.verify(logicalId, kernel_name, ctx, data, cs.graph.get()); };
 
                 const float *device_output_ptr = static_cast<const float *>(cs.session->run(b, cb));
                 cs.has_run = true; // Mark as run completed so subsequent passes bypass

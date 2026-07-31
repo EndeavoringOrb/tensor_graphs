@@ -11,7 +11,7 @@
 
 class ThreadPool
 {
-public:
+  public:
     static ThreadPool &get()
     {
         static ThreadPool instance;
@@ -37,8 +37,7 @@ public:
         auto state = std::make_shared<State>();
         state->task = task;
 
-        auto worker_task = [state, num_tasks]()
-        {
+        auto worker_task = [state, num_tasks]() {
             while (true)
             {
                 uint32_t idx = state->counter.fetch_add(1, std::memory_order_relaxed);
@@ -69,7 +68,7 @@ public:
         }
     }
 
-private:
+  private:
     ThreadPool() : stop(false)
     {
         uint32_t num_threads = std::thread::hardware_concurrency();
@@ -78,19 +77,21 @@ private:
 
         for (uint32_t i = 0; i < num_threads - 1; ++i)
         {
-            threads.emplace_back([this]
-                                 {
-                while (true) {
+            threads.emplace_back([this] {
+                while (true)
+                {
                     std::function<void()> task;
                     {
                         std::unique_lock<std::mutex> lock(this->queue_mutex);
                         this->condition.wait(lock, [this] { return this->stop || !this->tasks.empty(); });
-                        if (this->stop && this->tasks.empty()) return;
+                        if (this->stop && this->tasks.empty())
+                            return;
                         task = std::move(this->tasks.front());
                         this->tasks.pop();
                     }
                     task();
-                } });
+                }
+            });
         }
     }
 
