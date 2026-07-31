@@ -70,9 +70,7 @@ struct Planner
         uint64_t iterations = 0;
         bool changed = true;
         uint32_t nMatches = 0;
-#ifdef DEBUG
-        ProgressTimer timer(0, "saturating ");
-#endif
+        ProgressTimer timer(0, "saturating");
         while (changed)
         {
             if (InterruptManager::isInterrupted())
@@ -83,7 +81,6 @@ struct Planner
             }
             iterations++;
             uint32_t numENodes = egraph.getENodes().size();
-            ProgressTimer timer2(0, "saturation round " + std::to_string(iterations - 1) + " ");
             for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getENodes().size(); eNodeIdx++)
             {
                 for (const auto &rule : rules)
@@ -96,23 +93,19 @@ struct Planner
                     ruleMatchCounts[rule->name()]++;
                     nMatches++;
                 }
-                timer2.tick();
             }
             egraph.rebuild();
             changed = egraph.getENodes().size() != numENodes;
+#ifdef DEBUG
             std::cout << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
             for (auto const &[name, count] : ruleMatchCounts)
             {
                 std::cout << "  " << name << ": " << count << " matches" << std::endl;
             }
             std::cout << "Total Matches: " << nMatches << std::endl;
-#ifdef DEBUG
-            timer.tick();
-            std::cout << "# New enodes: " << egraph.getENodes().size() - numENodes << std::endl;
 #endif
+            timer.tick();
         }
-        std::cout << "Finished saturation in " << iterations << " iterations with " << nMatches << " matches\n"
-                  << std::flush;
     }
 
     ExtractionResult extractBest(const LogicalId rootId, const Graph &graph, EGraph &egraph,
@@ -153,7 +146,7 @@ struct Planner
             return false;
         };
 
-        ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info ");
+        ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info");
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
         for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
         {
@@ -391,15 +384,6 @@ struct Planner
         if (totalPruned > 0)
         {
             std::cout << "[Planner.extractBest] Pruned " << totalPruned << " dominated enodes from the search space."
-                      << std::endl;
-        }
-
-        if (droppedInf)
-        {
-            std::cout << "[Planner.extractBest] Warning: Filtered out nodes with "
-                         "infinite cost. "
-                      << "You may need to run 'bench' to gather missing kernel "
-                         "performance data."
                       << std::endl;
         }
 
@@ -773,7 +757,7 @@ struct Planner
 
         int max_iters = 10'000'000;
         int remaining_iters = max_iters;
-        ProgressTimer timer(max_iters, "extracting graphs ");
+        ProgressTimer timer(max_iters, "extracting graphs");
         ProgressTimer loopTimer(0, "", true);
         auto start_time = std::chrono::high_resolution_clock::now();
         while (remaining_iters-- > 0)
@@ -786,7 +770,6 @@ struct Planner
             }
             std::cout << std::endl;
             loopTimer.reset();
-            timer.tick();
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.getNextSelection();
 
@@ -844,10 +827,13 @@ struct Planner
                     break;
                 }
             }
-            std::cout << "[Planner.extractBest] iterated " << dispatch_iterator.getIter() << " dispatch orders"
-                      << std::endl;
 
-            if (valid)
+            if (valid && stopOnFirstValid)
+            {
+                break;
+            }
+
+            if (valid && minCompileSeconds > 0.0f)
             {
                 auto current_time = std::chrono::high_resolution_clock::now();
                 float elapsed = std::chrono::duration<float>(current_time - start_time).count();
@@ -856,11 +842,6 @@ struct Planner
                     std::cout << "cost=" << std::to_string(cost) << std::endl;
                     break;
                 }
-            }
-
-            if (valid && stopOnFirstValid)
-            {
-                break;
             }
 
             if (!valid)
@@ -878,6 +859,7 @@ struct Planner
             }
 
             extractor.ascend();
+            timer.tick();
         }
 
         if (best_cost == TGConstants::INF)
@@ -1663,7 +1645,6 @@ struct Planner
         }
 
         bool injected = dirtyInjected || neededInjected;
-        std::cout << "Injected: " << injected << std::endl;
 
         std::unordered_map<EClassId, LogicalId> updatedEClassToLogical;
         for (const auto &kv : eclassToLogical)
@@ -1673,7 +1654,7 @@ struct Planner
         eclassToLogical = std::move(updatedEClassToLogical);
 
         auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical,
-                                      preallocatedBuffers, true, strictCache, minCompileSeconds);
+                                      preallocatedBuffers, minCompileSeconds == 0.0f, strictCache, minCompileSeconds);
         return buildCompiledGraph(rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes,
                                   eclassToLogical);
     }

@@ -98,7 +98,7 @@ struct HardwareCaps
         return instance;
     }
 
-  private:
+private:
     void probe()
     {
         // 1. Detect CPU Architecture & SIMD
@@ -134,6 +134,13 @@ struct HardwareCaps
 
             for (auto platform : platforms)
             {
+                char platformName[256] = {0};
+                char platformVendor[256] = {0};
+                clGetPlatformInfo(platform, CL_PLATFORM_NAME, sizeof(platformName), platformName, nullptr);
+                clGetPlatformInfo(platform, CL_PLATFORM_VENDOR, sizeof(platformVendor), platformVendor, nullptr);
+
+                std::cout << "\n=== Platform: " << platformName << " (" << platformVendor << ") ===" << std::endl;
+
                 cl_uint numDevices = 0;
                 if (clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices) == CL_SUCCESS &&
                     numDevices > 0)

@@ -28,6 +28,9 @@ struct ProgressTimer
         : start(clock::now()), last_print(start), total(total_), minInterval(minInterval_), label(label_),
           has_total(total_ > 0), disable(disable_), disable_tick(disable_tick_)
     {
+        if (label.size() > 0) {
+            label += " ";
+        }
     }
 
     void reset()
@@ -95,7 +98,7 @@ struct ProgressTimer
         auto end = clock::now();
         double elapsed = std::chrono::duration<double>(end - start).count();
 
-        std::cout << "\n" << label;
+        std::cout << label;
 
         if (has_total)
         {

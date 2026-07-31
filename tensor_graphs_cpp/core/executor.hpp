@@ -25,7 +25,7 @@ public:
 #ifdef DEBUG
         disableTimer = false;
 #endif
-        ProgressTimer timer(nInst, "running ", disableTimer);
+        ProgressTimer timer(nInst, "running", disableTimer);
 
         Synchronizer sync;
 

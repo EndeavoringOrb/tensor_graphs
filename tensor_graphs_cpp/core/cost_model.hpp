@@ -449,7 +449,7 @@ struct CostModel
 
         BinaryReader br(file);
         uint32_t total = 0, valid = 0;
-        ProgressTimer timer(0, "loading records ");
+        ProgressTimer timer(0, "loading records");
         std::unordered_map<ModelKey, std::vector<Record>, ModelKeyHash> recordsByKey;
 
         while (file.peek() != EOF)
@@ -470,7 +470,7 @@ struct CostModel
 
         std::cout << "Loaded " << valid << " valid records from " << benchmarkPath << std::endl;
 
-        ProgressTimer timer2(recordsByKey.size(), "fitting interpolation models ");
+        ProgressTimer timer2(recordsByKey.size(), "fitting interpolation models");
         for (const auto &kv : recordsByKey)
         {
             timer2.tick();

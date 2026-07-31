@@ -226,7 +226,9 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
                                              const std::vector<ENodeInfo> &enodeInfos,
                                              std::unordered_map<EClassId, BufferId> &eclass_to_buf)
 {
-    ProgressTimer t = ProgressTimer(0, "bufferize ", false, true);
+#ifdef DEBUG
+    ProgressTimer t = ProgressTimer(0, "bufferize", false, true);
+#endif
 
     std::unordered_map<EClassId, uint32_t> birth_times;
     std::unordered_map<EClassId, uint32_t> death_times;
@@ -819,7 +821,7 @@ struct MemValidator : public ISelectionValidator
                   BufferId &overflow, float &cost, std::string &reason, bool &updated_buffers,
                   bool &updated_cost) override
     {
-        ProgressTimer t = ProgressTimer(0, "validate ", false, true);
+        ProgressTimer t = ProgressTimer(0, "validate", false, true);
         cost = get_cost(order, egraph, selection_map, enodeInfos);
         updated_cost = true;
         // bufferize: parallel schedule + per-node lifetimes
@@ -930,11 +932,12 @@ struct MemValidator : public ISelectionValidator
                 (cap == std::numeric_limits<uint64_t>::max()) ? cap : (cap > reserved ? cap - reserved : 0);
 
             std::vector<ParallelBuffer> allocated;
+            #ifdef DEBUG
             ProgressTimer t2 = ProgressTimer(
                 0,
                 "malloc mem_space=(" + std::to_string(ms.idx) + "," + std::to_string((int)ms.type) +
-                    "), n_bufs=" + std::to_string(bufs.size()) + ", reserved=" + std::to_string(reserved) + " ",
-                false, true);
+                    "), n_bufs=" + std::to_string(bufs.size()) + ", reserved=" + std::to_string(reserved));
+                #endif
             if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow))
             {
                 alloc_ok = false;
