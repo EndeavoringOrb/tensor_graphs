@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/core/synchronizer.hpp
 #pragma once
 
 #include <unordered_map>

@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/add/NC_F32_3D.hpp
 #pragma once
 #include <algorithm>
 #include <vector>

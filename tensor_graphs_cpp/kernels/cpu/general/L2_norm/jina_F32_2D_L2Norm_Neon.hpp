@@ -1,5 +1,4 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/layernorm/jina_F32_2D_L2Norm_Neon.hpp
+
 //
 // FUSED KERNEL: L2 Normalize for jina-embeddings-v5-omni-nano-retrieval output
 //

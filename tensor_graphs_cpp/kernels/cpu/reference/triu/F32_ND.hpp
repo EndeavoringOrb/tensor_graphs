@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/reference/triu/F32_ND.hpp
 #pragma once
 #include "core/kernels.hpp"
 #include "core/types.hpp"

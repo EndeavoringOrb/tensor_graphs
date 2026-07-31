@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/mul/F32_3D_scalar_Threaded.hpp
 #pragma once
 #include <algorithm>
 #include <vector>

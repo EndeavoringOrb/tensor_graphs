@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/reference/log/F32_ND.hpp
 #pragma once
 #include <cmath>
 

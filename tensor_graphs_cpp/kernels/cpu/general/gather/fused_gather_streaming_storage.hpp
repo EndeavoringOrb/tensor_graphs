@@ -1,5 +1,4 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/gather/fused_gather_streaming_storage.hpp
+
 //
 // Fused Streaming Storage Gather (BF16 -> FP32 Lookup)
 // ----------------------------------------------------

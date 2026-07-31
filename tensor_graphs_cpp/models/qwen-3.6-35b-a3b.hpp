@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/models/qwen-3.6-35b-a3b.hpp
 // ref:
 // https://github.com/huggingface/transformers/blob/1048e9af78a6045444244412dfe216ba5810e7fb/src/transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py
 #pragma once

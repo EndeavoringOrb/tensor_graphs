@@ -1,6 +1,3 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/swiglu/jina_F32_3D_Neon_Threaded.hpp
-//
 // FUSED KERNEL: SwiGLU for jina-embeddings-v5-omni-nano-retrieval text encoder
 //
 // Matches the subgraph produced by JinaV5OmniNanoRetrievalModel::text_mlp():

@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/models/flux-klein-4b-text_encoder.hpp
 #pragma once
 
 class FluxTextEncoder : public FluxGraphBase

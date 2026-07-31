@@ -1,5 +1,4 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/gather/fused_gather_streaming_storage_sorted.hpp
+
 //
 // Fused Streaming Storage Gather with Sorted & Deduplicated Loading
 // -----------------------------------------------------------------

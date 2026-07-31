@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/test.cpp
 #include <algorithm>
 #include <cassert>
 #include <cmath>

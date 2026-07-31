@@ -1,6 +1,3 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/dot/BF16_transposed_GEMM_NEON_v7.hpp
-//
 // BF16 Transposed GEMM, NEON v7 — BFDOT with round-to-nearest-even X cast
 // =======================================================================
 //

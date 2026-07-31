@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/bench.cpp
 #include <algorithm>
 #include <chrono>
 #include <cmath>

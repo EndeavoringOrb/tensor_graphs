@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/core/serialization.hpp
 #pragma once
 #include <fstream>
 #include <iostream>

@@ -1,5 +1,4 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/gelu/jina_F32_3D_Exact_Erf_Neon_Threaded.hpp
+
 //
 // FUSED KERNEL: Exact-erf GELU for jina-embeddings-v5-omni-nano-retrieval
 //

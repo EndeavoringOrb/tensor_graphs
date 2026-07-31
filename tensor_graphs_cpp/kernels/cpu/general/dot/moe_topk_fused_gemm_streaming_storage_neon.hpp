@@ -1,6 +1,3 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/dot/moe_topk_fused_gemm_streaming_storage_neon.hpp
-//
 // Fused Top-K MoE Expert FFN with Streaming Storage Loading
 // ---------------------------------------------------------
 //

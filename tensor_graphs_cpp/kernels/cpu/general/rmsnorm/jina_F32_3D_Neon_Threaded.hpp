@@ -1,5 +1,4 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/rmsnorm/jina_F32_3D_Neon_Threaded.hpp
+
 //
 // FUSED KERNEL: RMSNorm (plain, no bias) for
 // jina-embeddings-v5-omni-nano-retrieval

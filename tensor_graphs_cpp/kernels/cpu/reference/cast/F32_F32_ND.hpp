@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/reference/cast/F32_F32_ND.hpp
 #pragma once
 #include <cstring>
 

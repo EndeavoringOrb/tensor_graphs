@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/scatter/inplace_F32_ND_v3.hpp
 #pragma once
 #include <cstring>
 

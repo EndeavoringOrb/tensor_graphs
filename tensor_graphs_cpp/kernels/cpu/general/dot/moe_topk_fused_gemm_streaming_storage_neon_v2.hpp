@@ -1,6 +1,3 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/dot/moe_topk_fused_gemm_streaming_storage_neon_v2.hpp
-//
 // Fused Top-K MoE Expert FFN v2 — BFDOT-optimised
 // -----------------------------------------------
 //

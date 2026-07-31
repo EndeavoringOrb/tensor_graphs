@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/reference/slice/F32_ND.hpp
 // TODO: make view only
 #pragma once
 #include "core/kernels.hpp"

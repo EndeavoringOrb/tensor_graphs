@@ -609,12 +609,6 @@ body {
     border: 1px solid var(--color-copyto-border);
 }
 
-.op-TRANSFER {
-    background: var(--color-transfer-bg);
-    color: var(--color-transfer-text);
-    border: 1px solid var(--color-transfer-border);
-}
-
 .op-SQRT {
     background: var(--color-sqrt-bg);
     color: var(--color-sqrt-text);
@@ -636,10 +630,6 @@ body {
 
 .legend-dot.op-COPYTO {
     background: var(--color-copyto-text);
-}
-
-.legend-dot.op-TRANSFER {
-    background: var(--color-transfer-text);
 }
 
 .legend-dot.op-SQRT {

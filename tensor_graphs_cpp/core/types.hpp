@@ -91,7 +91,6 @@ enum class OpType : uint32_t
     AND,
     OR,
     NOT,
-    TRANSFER, // Transfer between HandleType on the same mem idx
 
     FUSED
 };
@@ -953,8 +952,6 @@ inline std::string toString(OpType op) // TODO: make build.py check that each op
         return "OR";
     case OpType::NOT:
         return "NOT";
-    case OpType::TRANSFER:
-        return "TRANSFER";
     case OpType::FUSED:
         return "FUSED";
     default:

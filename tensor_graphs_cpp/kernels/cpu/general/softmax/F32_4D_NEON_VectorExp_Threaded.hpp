@@ -1,5 +1,4 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/softmax/F32_4D_NEON_VectorExp_Threaded.hpp
+
 //
 // Vectorized 4D Softmax (NEON, threaded)
 // ======================================

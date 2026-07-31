@@ -1,5 +1,3 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/dot/arm_neon_F32_3D_TransposedB_v2.hpp
 #pragma once
 #include "core/kernels.hpp"
 #include "core/types.hpp"

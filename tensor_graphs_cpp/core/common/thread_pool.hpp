@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/core/common/thread_pool.hpp
 #pragma once
 #include <atomic>
 #include <condition_variable>

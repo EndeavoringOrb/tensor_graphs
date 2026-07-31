@@ -119,10 +119,8 @@ def get_read_benchmarks():
         for entry in cache_entries:
             if entry.get("type") == "compiled_bucket":
                 graph = entry["graph"]
-                node_views = graph.get("nodeViews", {})
                 for inst in graph["instructions"]:
                     uid = str(inst["kernelId"])
-                    eclass_id = inst["eclassId"]
                     # Map UID
                     uid_map[uid] = f"Kernel_{hex(inst['kernelId'])}"
 

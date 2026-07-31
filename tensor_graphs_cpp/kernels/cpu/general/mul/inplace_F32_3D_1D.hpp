@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/mul/inplace_FP32_3D_1D.hpp
 #pragma once
 #include <vector>
 

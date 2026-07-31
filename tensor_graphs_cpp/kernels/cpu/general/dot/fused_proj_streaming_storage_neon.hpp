@@ -1,6 +1,3 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/dot/fused_proj_streaming_storage_neon.hpp
-//
 // Fused 2D Projection GEMM with Streaming Storage Loading (BFDOT-optimised)
 // -----------------------------------------------------------------------
 //

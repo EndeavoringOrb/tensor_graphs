@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/gelu/F32_3D_Threaded.hpp
 #pragma once
 #include <algorithm>
 #include <cmath>

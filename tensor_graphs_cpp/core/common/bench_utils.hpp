@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/core/common/bench_utils.hpp
 #pragma once
 
 #include <algorithm>

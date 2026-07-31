@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/reference/argmax/I32_ND.hpp
 #pragma once
 #include <algorithm>
 #include <numeric>

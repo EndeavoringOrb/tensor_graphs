@@ -1,5 +1,4 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/silu/jina_F32_3D_Mul_Neg_Neon_Threaded.hpp
+
 //
 // FUSED KERNEL: SiLU for jina-embeddings-v5-omni-nano-retrieval
 //

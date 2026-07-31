@@ -1,6 +1,3 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/dot/batched_transposed_gemm_streaming_storage_neon.hpp
-//
 // Fused Batched Transposed GEMM with Streaming Storage Loading
 // ------------------------------------------------------------
 //

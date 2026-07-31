@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/swiglu/3D_NEON_F32_inplace.hpp
 #pragma once
 #include <algorithm>
 #include <cmath>

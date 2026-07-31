@@ -1,5 +1,4 @@
-// File:
-// tensor_graphs_cpp/kernels/cpu/general/layernorm/jina_F32_3D_Weight_Bias_Neon_Threaded.hpp
+
 //
 // FUSED KERNEL: LayerNorm (with weight + bias) for
 // jina-embeddings-v5-omni-nano-retrieval

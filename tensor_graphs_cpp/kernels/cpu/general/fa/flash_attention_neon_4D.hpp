@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/dot/flash_attention_neon_v2.hpp
 #pragma once
 #include "core/graph.hpp"
 #include "core/kernels.hpp"

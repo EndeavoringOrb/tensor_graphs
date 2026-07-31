@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/core/executor.hpp
 #pragma once
 #include "core/debug.hpp"
 #include "core/graph.hpp"

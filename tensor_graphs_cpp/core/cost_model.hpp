@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/core/cost_model.hpp
 #pragma once
 #include <algorithm>
 #include <cmath>

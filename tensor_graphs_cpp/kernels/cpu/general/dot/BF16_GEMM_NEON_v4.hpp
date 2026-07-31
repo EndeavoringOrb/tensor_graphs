@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/dot/BF16_GEMM_NEON_v4.hpp
 #pragma once
 #include "core/kernels.hpp"
 #include "core/types.hpp"

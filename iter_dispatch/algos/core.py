@@ -31,11 +31,8 @@ class Op(Enum):
     INPUT = 0
     ADD = 1
     MUL = 2
-    COPYTO = 3  # copy between two mem spaces with the same handle but different idxs
-    TRANSFER = (
-        4  # transfer between two mem spaces with the same idx but different handles
-    )
-    SQRT = 5
+    COPYTO = 3
+    SQRT = 4
 
 
 @prefixed_enum
@@ -63,8 +60,8 @@ class Engine:  # for cost estimation
 
 @dataclass(frozen=True)
 class MemSpace:  # an allocated buffer of memory
-    idx: int  # where is this physically. used for determining when to insert COPYTO ops. i.e. disk=0, cpu=1, gpu0=2, gpu1=3
-    handle_type: Handle  # how is this read/written. used for determining when to insert TRANSFER ops.
+    idx: int  # where is this physically.
+    handle_type: Handle  # how is this read/written.
 
 
 # system with disk, cpu, discrete gpu
@@ -85,7 +82,6 @@ op_costs = {
     Op.ADD: 1,
     Op.MUL: 2,
     Op.COPYTO: 10,
-    Op.TRANSFER: 1,
     Op.SQRT: 10,
     (Op.SQRT, EngineType.QUALCOMM_IGPU): 1,
 }

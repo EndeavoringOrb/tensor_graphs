@@ -1,4 +1,3 @@
-// File: tensor_graphs_cpp/models/flux-klein-4b-transformer.hpp
 #pragma once
 
 class FluxTransformer : public FluxGraphBase
