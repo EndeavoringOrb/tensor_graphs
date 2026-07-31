@@ -576,6 +576,15 @@ struct Graph
         TensorNode &node = allocateNode(OpType::NOT, "", DType::BOOL, {id0}, {}, {}, "", loc);
         return node.id;
     }
+
+    // Higher level stuff
+    LogicalId repeat(LogicalId id, uint32_t repeats, uint32_t axis)
+    {
+        if (repeats <= 1)
+            return id;
+        int32_t r = repeats, a = axis;
+        return repeat(id, constant({1}, &r, DType::INT32), constant({1}, &a, DType::INT32));
+    }
 };
 
 inline bool isIsomorphic(const Graph &g1, LogicalId root1, const Graph &g2, LogicalId root2)

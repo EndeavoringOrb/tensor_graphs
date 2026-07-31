@@ -48,28 +48,17 @@ class Gemma3Model
         return g.cast(raw_weight, DType::FLOAT32);
     }
 
-    LogicalId repeat_3d_axis(LogicalId tensor_id, uint32_t repeats, uint32_t axis)
-    {
-        if (repeats <= 1)
-            return tensor_id;
-        int32_t rep[] = {(int32_t)repeats};
-        LogicalId rep_node = g.constant({1}, rep, DType::INT32);
-        int32_t ax[] = {(int32_t)axis};
-        LogicalId ax_node = g.constant({1}, ax, DType::INT32);
-        return g.repeat(tensor_id, rep_node, ax_node);
-    }
-
     LogicalId expand_scalar_to_3d(LogicalId scalar_id, uint32_t dim0, uint32_t dim1, uint32_t dim2)
     {
         int32_t shape_3d[] = {1, 1, 1};
         LogicalId shape_3d_node = g.constant({3}, shape_3d, DType::INT32);
         LogicalId out = g.reshape(scalar_id, shape_3d_node);
         if (dim0 > 1)
-            out = repeat_3d_axis(out, dim0, 0);
+            out = g.repeat(out, dim0, 0);
         if (dim1 > 1)
-            out = repeat_3d_axis(out, dim1, 1);
+            out = g.repeat(out, dim1, 1);
         if (dim2 > 1)
-            out = repeat_3d_axis(out, dim2, 2);
+            out = g.repeat(out, dim2, 2);
         return out;
     }
 
@@ -79,9 +68,9 @@ class Gemma3Model
         LogicalId shape_3d_node = g.constant({3}, shape_3d, DType::INT32);
         LogicalId out = g.reshape(vec_id, shape_3d_node);
         if (dim0 > 1)
-            out = repeat_3d_axis(out, dim0, 0);
+            out = g.repeat(out, dim0, 0);
         if (dim1 > 1)
-            out = repeat_3d_axis(out, dim1, 1);
+            out = g.repeat(out, dim1, 1);
         return out;
     }
 
@@ -103,7 +92,7 @@ class Gemma3Model
         LogicalId std = g.pow(mean_sq_plus_eps, sqrt_node);
         LogicalId one_node = expand_scalar_to_3d(one_fp32, dim0, seq_len, 1);
         LogicalId inv_std = g.div(one_node, std);
-        LogicalId inv_std_expanded = repeat_3d_axis(inv_std, dim_size, 2);
+        LogicalId inv_std_expanded = g.repeat(inv_std, dim_size, 2);
         LogicalId x_norm = g.mul(x_id, inv_std_expanded);
         LogicalId weight_expanded = expand_1d_to_3d(weight_id, dim_size, dim0, seq_len);
         LogicalId one_node_full = expand_scalar_to_3d(one_fp32, dim0, seq_len, dim_size);
@@ -180,8 +169,8 @@ class Gemma3Model
         LogicalId pos_col = g.reshape(pos, g.constant({2}, pos_col_shape, DType::INT32));
         int32_t freq_row_shape[] = {1, (int32_t)cfg.head_dim / 2};
         LogicalId freq_row = g.reshape(inv_freq, g.constant({2}, freq_row_shape, DType::INT32));
-        LogicalId pos_col_expanded = repeat_3d_axis(pos_col, cfg.head_dim / 2, 1);
-        LogicalId freq_row_expanded = repeat_3d_axis(freq_row, seq_len, 0);
+        LogicalId pos_col_expanded = g.repeat(pos_col, cfg.head_dim / 2, 1);
+        LogicalId freq_row_expanded = g.repeat(freq_row, seq_len, 0);
         LogicalId angles_half = g.mul(pos_col_expanded, freq_row_expanded);
         int32_t axis_val = 1;
         LogicalId axis_node = g.constant({1}, &axis_val, DType::INT32);
@@ -210,8 +199,8 @@ class Gemma3Model
         LogicalId neg_x2 = g.neg(x2);
         int32_t axis = 2;
         LogicalId rotated = g.concat({neg_x2, x1}, g.constant({1}, &axis, DType::INT32));
-        LogicalId cos_expanded = repeat_3d_axis(cos_id, n_groups, 0);
-        LogicalId sin_expanded = repeat_3d_axis(sin_id, n_groups, 0);
+        LogicalId cos_expanded = g.repeat(cos_id, n_groups, 0);
+        LogicalId sin_expanded = g.repeat(sin_id, n_groups, 0);
         LogicalId term1 = g.mul(x_id, cos_expanded);
         LogicalId term2 = g.mul(rotated, sin_expanded);
         return g.add(term1, term2);
@@ -229,8 +218,8 @@ class Gemma3Model
         LogicalId neg_inf_node = g.constant({1}, &neg_inf_val, DType::FLOAT32);
         int32_t neg_inf_shape[] = {1, 1};
         LogicalId neg_inf_reshaped = g.reshape(neg_inf_node, g.constant({2}, neg_inf_shape, DType::INT32));
-        LogicalId neg_inf_expanded = repeat_3d_axis(neg_inf_reshaped, seq_len, 0);
-        neg_inf_expanded = repeat_3d_axis(neg_inf_expanded, seq_len, 1);
+        LogicalId neg_inf_expanded = g.repeat(neg_inf_reshaped, seq_len, 0);
+        neg_inf_expanded = g.repeat(neg_inf_expanded, seq_len, 1);
         LogicalId scaled_mask = g.mul(triu_mask, neg_inf_expanded);
         int32_t final_shape[] = {1, (int32_t)seq_len, (int32_t)seq_len};
         return g.reshape(scaled_mask, g.constant({3}, final_shape, DType::INT32));
@@ -314,12 +303,12 @@ class Gemma3Model
         k_t = g.contiguous(k_t);
 
         LogicalId scores = g.dot(scaled_q, k_t);
-        LogicalId mask_expanded = repeat_3d_axis(mask_id, cfg.n_heads, 0);
+        LogicalId mask_expanded = g.repeat(mask_id, cfg.n_heads, 0);
         scores = g.add(scores, mask_expanded);
 
         int32_t axis_val = -1;
         LogicalId max_scores = g.max(scores, g.constant({1}, &axis_val, DType::INT32));
-        max_scores = repeat_3d_axis(max_scores, seq_len, 2);
+        max_scores = g.repeat(max_scores, seq_len, 2);
         LogicalId shifted_scores = g.add(scores, g.neg(max_scores));
 
         float e_val = 2.718281828459045f;
@@ -327,7 +316,7 @@ class Gemma3Model
         LogicalId exp_scores = g.pow(e_node, shifted_scores);
 
         LogicalId sum_exp = g.sum(exp_scores, g.constant({1}, &axis_val, DType::INT32));
-        sum_exp = repeat_3d_axis(sum_exp, seq_len, 2);
+        sum_exp = g.repeat(sum_exp, seq_len, 2);
 
         LogicalId probs = g.div(exp_scores, sum_exp);
         LogicalId context = g.dot(probs, v);
