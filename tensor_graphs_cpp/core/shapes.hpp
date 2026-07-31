@@ -562,8 +562,7 @@ struct ShapePropagator
             break;
         }
         case OpType::FUSED:
-            break; // TODO: we should never hit this, only infer shapes for atomic,
-                   // fused should inherit from atomic that it is replacing
+            Error::throw_err("this should not happen. only atomic nodes should have their shape inferred.");
         default:
             break;
         }

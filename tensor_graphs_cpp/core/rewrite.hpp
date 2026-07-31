@@ -191,7 +191,8 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
         pRoot = pGraph.sum(pInputs[0], pInputs[1]);
     else if (op == OpType::MAX)
         pRoot = pGraph.max(pInputs[0], pInputs[1]);
-    // TODO: argmax
+    else if (op == OpType::ARGMAX)
+        pRoot = pGraph.argmax(pInputs[0], pInputs[1], pInputs[2]);
     else if (op == OpType::LT)
         pRoot = pGraph.lt(pInputs[0], pInputs[1]);
     else if (op == OpType::EQ)
