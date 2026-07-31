@@ -585,6 +585,13 @@ struct Graph
         int32_t r = repeats, a = axis;
         return repeat(id, constant({1}, &r, DType::INT32), constant({1}, &a, DType::INT32));
     }
+
+    LogicalId fill(const LogicalId scalar_id, const std::vector<uint32_t> &shape)
+    {
+        std::vector<int32_t> shape_int(shape.begin(), shape.end());
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
+        return fill(scalar_id, shape_node);
+    }
 };
 
 inline bool isIsomorphic(const Graph &g1, LogicalId root1, const Graph &g2, LogicalId root2)
