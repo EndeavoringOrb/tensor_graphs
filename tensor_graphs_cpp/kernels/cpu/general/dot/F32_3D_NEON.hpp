@@ -78,13 +78,12 @@ inline void runDotF32_3D_Neon(const KernelContext &ctx)
         }
 
         uint32_t actual_threads = m_split * n_split;
+        uint32_t m_chunk = (M + m_split - 1) / m_split;
+        uint32_t n_chunk = (N + n_split - 1) / n_split;
+        n_chunk = ((n_chunk + 15) / 16) * 16;
 
         ThreadPool::get().parallel_for(actual_threads, [=](uint32_t t)
                                        {
-            uint32_t m_chunk = (M + m_split - 1) / m_split;
-            uint32_t n_chunk = (N + n_split - 1) / n_split;
-            n_chunk = ((n_chunk + 15) / 16) * 16;
-
             uint32_t t_m = t / n_split;
             uint32_t t_n = t % n_split;
 
@@ -336,9 +335,9 @@ inline void runDotF32_3D_Neon(const KernelContext &ctx)
     else
     {
         uint32_t total_rows = B_count * M;
+        uint32_t rows_per_thread = (total_rows + num_threads - 1) / num_threads;
         ThreadPool::get().parallel_for(num_threads, [=](uint32_t t)
                                        {
-            uint32_t rows_per_thread = (total_rows + num_threads - 1) / num_threads;
             uint32_t start_row = t * rows_per_thread;
             uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
 

@@ -120,7 +120,7 @@ struct Planner
                                  const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
                                  const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
                                  const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers,
-                                 bool stopOnFirstValid = true, bool strictCache = false)
+                                 bool stopOnFirstValid = true, bool strictCache = false, float minCompileSeconds = 0.0f)
     {
         constexpr float EPS = 1e-6f;
 
@@ -775,6 +775,7 @@ struct Planner
         int remaining_iters = max_iters;
         ProgressTimer timer(max_iters, "extracting graphs ");
         ProgressTimer loopTimer(0, "", true);
+        auto start_time = std::chrono::high_resolution_clock::now();
         while (remaining_iters-- > 0)
         {
             std::cout << "loop " << std::to_string(loopTimer.getElapsed() * 1000) << "ms";
@@ -789,6 +790,29 @@ struct Planner
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.getNextSelection();
 
+            uint32_t first_engine = UINT32_MAX;
+            bool single_engine = true;
+            for (const auto &kv : selection_map)
+            {
+                uint32_t sel = kv.second;
+                ENodeId enode_id = egraph.getEClass(kv.first).enodes[sel];
+                const ENode &enode = egraph.getENode(enode_id);
+                for (const auto &eng : enode.getEngines())
+                {
+                    if (first_engine == UINT32_MAX)
+                    {
+                        first_engine = eng.idx;
+                    }
+                    else if (first_engine != eng.idx)
+                    {
+                        single_engine = false;
+                        break;
+                    }
+                }
+                if (!single_engine)
+                    break;
+            }
+
             DispatchIterator dispatch_iterator = DispatchIterator(egraph, selection_map);
             std::vector<EClassId> order;
             std::vector<ParallelBuffer> buffers;
@@ -796,6 +820,7 @@ struct Planner
             BufferId overflow;
             float cost;
             bool valid = false;
+            bool should_stop = false;
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
                 valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, overflow, cost, reason);
@@ -809,9 +834,8 @@ struct Planner
                         best_buffers = buffers;
                         best_eclass_to_buf = eclass_to_buf;
                     }
-                    if (stopOnFirstValid)
+                    if (stopOnFirstValid || single_engine)
                     {
-                        std::cout << "cost=" << std::to_string(cost) << std::endl;
                         break;
                     }
                 }
@@ -822,6 +846,17 @@ struct Planner
             }
             std::cout << "[Planner.extractBest] iterated " << dispatch_iterator.getIter() << " dispatch orders"
                       << std::endl;
+
+            if (valid)
+            {
+                auto current_time = std::chrono::high_resolution_clock::now();
+                float elapsed = std::chrono::duration<float>(current_time - start_time).count();
+                if (elapsed >= minCompileSeconds)
+                {
+                    std::cout << "cost=" << std::to_string(cost) << std::endl;
+                    break;
+                }
+            }
 
             if (valid && stopOnFirstValid)
             {
@@ -1541,7 +1576,7 @@ struct Planner
     CompiledGraph plan(LogicalId rootId, const Graph &graph, const Bucket &bucket,
                        const std::unordered_map<LogicalId, MemSpace> &cachedNodes, bool doSaturate = true,
                        bool strictCache = false, Repo *repo = nullptr,
-                       const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers = {})
+                       const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers = {}, float minCompileSeconds = 0.0f)
     {
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
@@ -1638,7 +1673,7 @@ struct Planner
         eclassToLogical = std::move(updatedEClassToLogical);
 
         auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical,
-                                      preallocatedBuffers, true, strictCache);
+                                      preallocatedBuffers, true, strictCache, minCompileSeconds);
         return buildCompiledGraph(rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes,
                                   eclassToLogical);
     }

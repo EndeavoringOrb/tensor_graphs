@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -27,24 +28,31 @@ public:
             return;
         }
 
-        std::atomic<uint32_t> counter{0};
-        std::atomic<uint32_t> completed{0};
+        struct State
+        {
+            std::atomic<uint32_t> counter{0};
+            std::atomic<uint32_t> completed{0};
+            std::function<void(uint32_t)> task;
+        };
+        auto state = std::make_shared<State>();
+        state->task = task;
 
-        auto worker_task = [&]()
+        auto worker_task = [state, num_tasks]()
         {
             while (true)
             {
-                uint32_t idx = counter.fetch_add(1, std::memory_order_relaxed);
+                uint32_t idx = state->counter.fetch_add(1, std::memory_order_relaxed);
                 if (idx >= num_tasks)
                     break;
-                task(idx);
-                completed.fetch_add(1, std::memory_order_release);
+                state->task(idx);
+                state->completed.fetch_add(1, std::memory_order_release);
             }
         };
 
         {
             std::lock_guard<std::mutex> lock(queue_mutex);
-            for (uint32_t i = 0; i < threads.size(); ++i)
+            uint32_t num_to_push = std::min(static_cast<uint32_t>(threads.size()), num_tasks);
+            for (uint32_t i = 0; i < num_to_push; ++i)
             {
                 tasks.push(worker_task);
             }
@@ -55,7 +63,7 @@ public:
         worker_task();
 
         // Spin-wait yield to minimize dispatch latency
-        while (completed.load(std::memory_order_acquire) < num_tasks)
+        while (state->completed.load(std::memory_order_acquire) < num_tasks)
         {
             std::this_thread::yield();
         }

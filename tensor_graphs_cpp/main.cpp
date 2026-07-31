@@ -85,7 +85,7 @@ int32_t perform_argmax(const float *logits, uint32_t vocab_size)
 template <typename ConfigClass>
 void run_autoregressive_llm(const std::string &model_name, const std::string &cache_file,
                             const std::vector<uint32_t> &initial_tokens, uint32_t vocab_size, uint32_t max_seq_len,
-                            uint32_t num_tokens_to_generate, bool only_plan, bool disable_caching,
+                            uint32_t num_tokens_to_generate, bool only_plan, bool disable_caching, float min_compile_time,
                             ModelGraphRoots (*builder)(Graph &, MemoryManager &), bool refOnly = false,
                             bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
                             Graph **activeGraphOut = nullptr)
@@ -108,7 +108,7 @@ void run_autoregressive_llm(const std::string &model_name, const std::string &ca
     std::string gHash = computeGraphHash(g, roots.roots);
     Repo repo("benchmarks/repo_" + model_name, gHash, true);
 
-    Session session(g, mem, logits_id, cache_file, 0, &repo, disable_caching);
+    Session session(g, mem, logits_id, cache_file, 0, &repo, disable_caching, min_compile_time);
 
     for (uint32_t i = tokens.size(); i < max_seq_len; ++i)
     {
@@ -172,20 +172,20 @@ void run_autoregressive_llm(const std::string &model_name, const std::string &ca
     }
 }
 
-void run_gemma(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true,
+void run_gemma(bool only_plan, bool disable_caching, float min_compile_time, bool refOnly = false, bool doSaturate = true,
                const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
     run_autoregressive_llm<Gemma3ModelConfig>("gemma-3-270m", "dirty_region_caches/gemma-3-270m-cpp.bin", {2, 9259},
-                                              Gemma3ModelConfig().vocab_size, 8, 6, only_plan, disable_caching,
+                                              Gemma3ModelConfig().vocab_size, 8, 6, only_plan, disable_caching, min_compile_time,
                                               build_gemma_graph, refOnly, doSaturate, debugCb, activeGraphOut);
 }
 
-void run_qwen_35b(bool only_plan, bool disable_caching, bool refOnly = false, bool doSaturate = true,
+void run_qwen_35b(bool only_plan, bool disable_caching, float min_compile_time, bool refOnly = false, bool doSaturate = true,
                   const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
 {
     run_autoregressive_llm<Qwen3_6_35B_A3B_Config>("qwen-3.6-35b-a3b", "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin",
                                                    {24227}, Qwen3_6_35B_A3B_Config().vocab_size, 8, 7, only_plan,
-                                                   disable_caching, build_qwen_graph, refOnly, doSaturate, debugCb,
+                                                   disable_caching, min_compile_time, build_qwen_graph, refOnly, doSaturate, debugCb,
                                                    activeGraphOut);
 }
 
@@ -341,6 +341,7 @@ int main(int argc, char *argv[])
     parser.add_flag({"--disable-caching"}, "Disable dirty region session caching.");
     parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
     parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
+    parser.add_option({"--min-compile-time"}, "Minimum compile time in seconds.", "0.0");
     parser.add_positional("model",
                           "Name of the target model (flux-klein-4b, "
                           "gemma-3-270m, qwen-3.6-35b-a3b).",
@@ -356,6 +357,7 @@ int main(int argc, char *argv[])
     bool disable_caching = parser.get_flag("--disable-caching");
     std::string write_refs = parser.get_option("--write-refs");
     std::string compare_refs = parser.get_option("--compare-refs");
+    float min_compile_time = std::stof(parser.get_option("--min-compile-time"));
 
     Debug::ReferenceVerifier verifier;
     if (!verifier.init(write_refs, compare_refs))
@@ -373,12 +375,12 @@ int main(int argc, char *argv[])
     };
 
     if (model == "gemma-3-270m")
-        run_gemma(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
+        run_gemma(only_plan, disable_caching, min_compile_time, refOnly, doSaturate, debugCb, &activeGraphPtr);
     // else if (model == "flux-klein-4b")
     //     run_flux(only_plan, disable_caching, refOnly, doSaturate, debugCb,
     //     &activeGraphPtr);
     else if (model == "qwen-3.6-35b-a3b")
-        run_qwen_35b(only_plan, disable_caching, refOnly, doSaturate, debugCb, &activeGraphPtr);
+        run_qwen_35b(only_plan, disable_caching, min_compile_time, refOnly, doSaturate, debugCb, &activeGraphPtr);
     else
         std::cout << "Model not implemented yet: " << model << std::endl;
 
