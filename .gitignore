@@ -35,7 +35,8 @@ tokenize_flux.py
 **/*.gguf
 **/*.safetensors
 .env
-models/*
+/models
+/models_meta
 .vs
 clean.txt
 OpenCL-SDK
