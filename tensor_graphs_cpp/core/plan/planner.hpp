@@ -758,6 +758,7 @@ struct Planner
         auto start_time = std::chrono::high_resolution_clock::now();
         while (remaining_iters-- > 0)
         {
+#ifdef DEBUG
             std::cout << "loop " << std::to_string(loopTimer.getElapsed() * 1000) << "ms";
             if (max_iters - (remaining_iters + 1) > 0)
             {
@@ -766,6 +767,7 @@ struct Planner
             }
             std::cout << std::endl;
             loopTimer.reset();
+#endif
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.getNextSelection();
 
@@ -798,30 +800,31 @@ struct Planner
             std::unordered_map<EClassId, BufferId> eclass_to_buf;
             BufferId overflow;
             float cost;
-            bool valid = false;
+            bool valid = true;
             bool should_stop = false;
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
                 valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, overflow, cost, reason);
-                if (valid)
+                if (!valid)
+                    break;
+                if (cost < best_cost)
                 {
-                    if (cost < best_cost)
-                    {
-                        best_cost = cost;
-                        best_selection_map = selection_map;
-                        best_order = order;
-                        best_buffers = buffers;
-                        best_eclass_to_buf = eclass_to_buf;
-                    }
-                    if (stopOnFirstValid || single_engine)
-                    {
-                        break;
-                    }
+                    best_cost = cost;
+                    best_selection_map = selection_map;
+                    best_order = order;
+                    best_buffers = buffers;
+                    best_eclass_to_buf = eclass_to_buf;
                 }
-                else
+                if (stopOnFirstValid || single_engine)
                 {
                     break;
                 }
+            }
+
+            if (extractor.to_process_enode.empty())
+            {
+                std::cout << "finished extracting: no more graphs" << std::endl;
+                break;
             }
 
             if (valid && stopOnFirstValid)
@@ -835,7 +838,7 @@ struct Planner
                 float elapsed = std::chrono::duration<float>(current_time - start_time).count();
                 if (elapsed >= minCompileSeconds)
                 {
-                    std::cout << "cost=" << std::to_string(cost) << std::endl;
+                    std::cout << "finished extracting: hit minimum required compile time" << std::endl;
                     break;
                 }
             }
@@ -845,9 +848,6 @@ struct Planner
                 std::cout << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
                           << "] invalid reason: " << reason << std::endl;
             }
-
-            if (extractor.to_process_enode.empty())
-                break; // Finished going through all graphs contained in egraph
 
             if (!valid)
             {
@@ -872,6 +872,7 @@ struct Planner
         }
         ExtractionResult result = {best_selection_map, best_order, best_buffers,
                                    best_eclass_to_buf, best_cost,  best_eclass_to_cost};
+        std::cout << "best_cost=" << std::to_string(best_cost) << std::endl;
 
         return result;
     }

@@ -111,10 +111,7 @@ float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
     // Print utilization reports if flagged and makespan is valid
     if (print_utilization && total_cost > 0.0f)
     {
-        std::cout << "\n==================================================\n";
-        std::cout << "[get_cost] Estimated Device/Engine Utilization Summary\n";
         std::cout << "Total Makespan (Cost): " << total_cost << " ms\n";
-        std::cout << "--------------------------------------------------\n";
         for (const auto &kv : engine_active_time)
         {
             uint32_t eng_idx = kv.first;
@@ -132,7 +129,6 @@ float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
                       << percentage << "% "
                       << "(" << active_duration << " ms active)\n";
         }
-        std::cout << "==================================================\n" << std::endl;
     }
 
     return total_cost;
@@ -820,7 +816,9 @@ struct MemValidator : public ISelectionValidator
                   BufferId &overflow, float &cost, std::string &reason, bool &updated_buffers,
                   bool &updated_cost) override
     {
-        ProgressTimer t = ProgressTimer(0, "validate", false, true);
+#ifdef DEBUG
+        ProgressTimer t = ProgressTimer(0, "validate");
+#endif
         cost = get_cost(order, egraph, selection_map, enodeInfos);
         updated_cost = true;
         // bufferize: parallel schedule + per-node lifetimes
