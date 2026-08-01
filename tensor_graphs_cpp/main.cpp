@@ -112,17 +112,17 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
 
     Session session(g, mem, logits_id, cache_file, 0, &repo, disable_caching, min_compile_time);
 
-    // for (uint32_t i = tokens.size(); i < max_seq_len; ++i)
-    // {
-    //     std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
-    //     Region inputRegion;
-    //     inputRegion.region = {{0, 1}, {i, i + 1}};
-    //     inputDirty[inputIdsId] = {inputRegion};
+    for (uint32_t i = tokens.size(); i < max_seq_len; ++i)
+    {
+        std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
+        Region inputRegion;
+        inputRegion.region = {{0, 1}, {i, i + 1}};
+        inputDirty[inputIdsId] = {inputRegion};
 
-    //     Region outputNeeded;
-    //     outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
-    //     session.addBucket(inputDirty, {outputNeeded});
-    // }
+        Region outputNeeded;
+        outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
+        session.addBucket(inputDirty, {outputNeeded});
+    }
 
     if (only_plan)
     {
@@ -215,8 +215,7 @@ int main(int argc, char *argv[])
     parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
     parser.add_option({"--min-compile-time"}, "Minimum required compile time per bucket in seconds.", "0.0");
     parser.add_positional("model",
-                          "Name of the target model (flux-klein-4b, "
-                          "gemma-3-270m, qwen-3.6-35b-a3b).",
+                          "Name of the target model (gemma-3-270m, qwen-3.6-35b-a3b).",
                           "gemma-3-270m");
     parser.add_positional("model_path", "Model file or directory containing model files.");
 

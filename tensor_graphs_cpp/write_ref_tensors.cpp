@@ -202,8 +202,9 @@ int main(int argc, char *argv[])
     ArgParser parser("write_ref_tensors", "Compute and write reference/clean tensors for a model.");
     parser.add_positional("model",
                           "Name of the target model (gemma-3-270m, "
-                          "flux-klein-4b, qwen-3.6-35b-a3b).",
+                          "qwen-3.6-35b-a3b).",
                           "gemma-3-270m");
+    parser.add_positional("model_path", "Model file or directory containing model files.");
 
     if (!parser.parse(argc, argv))
     {
@@ -211,26 +212,24 @@ int main(int argc, char *argv[])
     }
 
     std::string model = parser.get_positional("model");
+    std::string model_path = parser.get_positional("model_path");
 
     std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
     std::unordered_map<uint32_t, uint64_t> idxCaps = {{1, 24ULL * 1024 * 1024 * 1024}};
     MemoryManager mem(bufferSizes);
     Graph g;
 
+    uint32_t max_seq_len = 8;
     std::cout << "Building " << model << " Graph for Reference Tensors..." << std::endl;
     ModelGraphRoots roots;
 
     if (model == "gemma-3-270m")
     {
-        roots = build_gemma_graph(g, mem);
+        roots = build_gemma_graph(g, mem, model_path, max_seq_len);
     }
-    // else if (model == "flux-klein-4b")
-    // {
-    //     roots = build_flux_graph(g, mem);
-    // }
     else if (model == "qwen-3.6-35b-a3b")
     {
-        roots = build_qwen_graph(g, mem);
+        roots = build_qwen_graph(g, mem, model_path, max_seq_len);
     }
     else
     {

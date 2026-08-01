@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <algorithm>
 #include <vector>
 
 #include "core/memory.hpp"
@@ -26,7 +27,7 @@ struct ReferenceGraphEntry
 
 class ReferenceGraphRegistry
 {
-  public:
+public:
     static ReferenceGraphRegistry &get()
     {
         static ReferenceGraphRegistry instance;
@@ -58,7 +59,7 @@ class ReferenceGraphRegistry
         return factories;
     }
 
-  private:
+private:
     std::unordered_map<std::string, ReferenceGraphEntry> factories;
 };
 
@@ -115,24 +116,50 @@ struct KernelEntry
             }
         }
 
-        // 3. Check output memory space
-        if (!ignore_output_mem_space)
+        // 3 & 4. Check memory space topology.
+        //
+        // output_mem_space / input_mem_spaces on a KernelEntry are LOCAL to this
+        // registration: their numeric value carries no meaning on its own. Two
+        // slots that share a local idx must resolve to the SAME actual MemSpace;
+        // two slots with different local idxs must resolve to DIFFERENT actual
+        // MemSpaces. This lets a kernel registration pick any idxs it likes
+        // without coordinating with other kernels or with however many real
+        // devices of a given HandleType happen to exist at runtime.
+        if (!ignore_output_mem_space || !ignore_input_mem_spaces)
         {
-            if (this->output_mem_space != output_mem_space)
+            std::unordered_map<MemSpace, MemSpace> localToActual;
+            std::unordered_map<MemSpace, MemSpace> actualToLocal;
+
+            auto reconcile = [&](const MemSpace &local, const MemSpace &actual)
+            {
+                if (local.type != actual.type)
+                    return false;
+
+                auto [fwdIt, fwdInserted] = localToActual.try_emplace(local, actual);
+                if (!fwdInserted && !(fwdIt->second == actual))
+                    return false; // same local idx resolved two different ways
+
+                auto [bwdIt, bwdInserted] = actualToLocal.try_emplace(actual, local);
+                if (!bwdInserted && !(bwdIt->second == local))
+                    return false; // two different local idxs collapsed onto one actual space
+
+                return true;
+            };
+
+            if (!ignore_output_mem_space && !reconcile(this->output_mem_space, output_mem_space))
             {
                 return false;
             }
-        }
 
-        // 4. Check input memory spaces
-        if (!ignore_input_mem_spaces && !this->input_mem_spaces.empty())
-        {
-            for (uint64_t i = 0; i < inputs.size(); ++i)
+            if (!ignore_input_mem_spaces && !this->input_mem_spaces.empty())
             {
-                uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(this->input_mem_spaces.size() - 1));
-                if (i >= input_mem_spaces.size() || input_mem_spaces[i] != this->input_mem_spaces[ruleIdx])
+                for (uint64_t i = 0; i < inputs.size(); ++i)
                 {
-                    return false;
+                    uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(this->input_mem_spaces.size() - 1));
+                    if (i >= input_mem_spaces.size())
+                        return false;
+                    if (!reconcile(this->input_mem_spaces[ruleIdx], input_mem_spaces[i]))
+                        return false;
                 }
             }
         }
@@ -213,7 +240,7 @@ inline std::ostream &operator<<(std::ostream &os, const KernelEntry &entry)
 
 class KernelRegistry
 {
-  public:
+public:
     static KernelRegistry &get()
     {
         static KernelRegistry instance;
@@ -391,7 +418,7 @@ class KernelRegistry
         return entries.find(uid) != entries.end();
     }
 
-  private:
+private:
     std::unordered_map<KernelId, KernelEntry> entries;
     bool reference_only_mode = false;
 };
@@ -427,22 +454,22 @@ struct KernelRegistrar
 #define REGISTER_KERNEL_VIEW(opName, n_min, n_max, match, ref, inferView, ...)
 #endif
 
-#define REGISTER_REF_KERNEL_INTERNAL(uid, op, n_min, n_max, match, run, ...)                                           \
-    static KernelRegistrar _registrar_##run(uid, op, "", n_min, n_max, match, run, nullptr, {}, false, true, nullptr,  \
+#define REGISTER_REF_KERNEL_INTERNAL(uid, op, n_min, n_max, match, run, ...)                                          \
+    static KernelRegistrar _registrar_##run(uid, op, "", n_min, n_max, match, run, nullptr, {}, false, true, nullptr, \
                                             __VA_ARGS__)
 
-#define REGISTER_REF_KERNEL_VIEW_INTERNAL(uid, op, n_min, n_max, match, inferView, ...)                                \
-    static KernelRegistrar _registrar_##inferView(uid, op, "", n_min, n_max, match, nullptr, nullptr, {}, true, true,  \
+#define REGISTER_REF_KERNEL_VIEW_INTERNAL(uid, op, n_min, n_max, match, inferView, ...)                               \
+    static KernelRegistrar _registrar_##inferView(uid, op, "", n_min, n_max, match, nullptr, nullptr, {}, true, true, \
                                                   inferView, __VA_ARGS__)
 
-#define REGISTER_KERNEL_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...)                               \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory,    \
+#define REGISTER_KERNEL_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...)                            \
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory, \
                                                   {}, false, false, nullptr, __VA_ARGS__)
 
-#define REGISTER_KERNEL_INPLACE_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...)                       \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory,    \
+#define REGISTER_KERNEL_INPLACE_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...)                    \
+    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory, \
                                                   {0}, false, false, nullptr, __VA_ARGS__)
 
-#define REGISTER_KERNEL_VIEW_INTERNAL(uid, opName, n_min, n_max, match, refFactory, inferView, ...)                    \
-    static KernelRegistrar _registrar_fused_##inferView(uid, OpType::FUSED, opName, n_min, n_max, match, nullptr,      \
+#define REGISTER_KERNEL_VIEW_INTERNAL(uid, opName, n_min, n_max, match, refFactory, inferView, ...)               \
+    static KernelRegistrar _registrar_fused_##inferView(uid, OpType::FUSED, opName, n_min, n_max, match, nullptr, \
                                                         refFactory, {}, true, false, inferView, __VA_ARGS__)
