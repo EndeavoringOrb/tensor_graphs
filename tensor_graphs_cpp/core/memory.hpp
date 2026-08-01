@@ -257,7 +257,7 @@ struct CudaBuffer : public DeviceBuffer
     {
         Error::throw_err("writeInput is not supported on CudaBuffer");
     }
-    void setupInput(KernelContext &ctx, const TensorView &view, uint32_t logicalId) override
+    void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
         TensorView v = view;
         ctx.inViews.push_back(v);
@@ -265,7 +265,8 @@ struct CudaBuffer : public DeviceBuffer
         ctx.fd.push_back(-1);
         ctx.cl_inputs.push_back(nullptr);
     }
-    void setupOutput(KernelContext &ctx, const TensorView &view, uint32_t logicalId) override
+
+    void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
     {
         TensorView v = view;
         ctx.outViews.push_back(v);

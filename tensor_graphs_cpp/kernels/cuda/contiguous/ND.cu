@@ -92,7 +92,7 @@ inline void runContiguous_CUDA_ND(const KernelContext &ctx)
         return;
 
     ContiguousCUDA::ContiguousParams p;
-    p.rank = (uint32_t)outViews[0].getShape().size();
+    p.rank = (uint32_t)ctx.outViews[0].getShape().size();
 
     for (uint32_t i = 0; i < p.rank; ++i)
     {

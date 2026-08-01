@@ -45,7 +45,7 @@ struct Graph
         return nodes.at(id);
     }
 
-    const InputDataType getInputDataType(LogicalId id) const
+    InputDataType getInputDataType(LogicalId id) const
     {
         return input_data_types.at(id);
     }
