@@ -273,10 +273,9 @@ class Qwen3_6_35B_A3B_Model
         LogicalId t_pos_int = g.arange(zero_node, seq_len_int, one_int_node);
         LogicalId t_pos = g.cast(t_pos_int, DType::FLOAT32);
 
-        int32_t seq_shape_arr[] = {seq_len_i};
-        LogicalId seq_shape_node = g.constant({1}, seq_shape_arr, DType::INT32);
-        LogicalId h_pos = g.fill(one_node, seq_shape_node);
-        LogicalId w_pos = g.fill(one_node, seq_shape_node);
+        // For 1D text generation, the spatial features track the temporal sequence identically.
+        LogicalId h_pos = t_pos;
+        LogicalId w_pos = t_pos;
 
         // -------- 3. Compute full 32-element angles for T, H, W --------
         auto outer_full = [&](LogicalId pos_1d) -> LogicalId {

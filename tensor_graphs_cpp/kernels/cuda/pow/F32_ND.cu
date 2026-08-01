@@ -56,6 +56,6 @@ inline LogicalId refFactoryPowF32_ND_CUDA(const std::vector<LogicalId> &inputs, 
     return graph.pow(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Pow_F32_ND_CUDA", 2, 2, matchPowF32_CUDA_ND, runPowF32_CUDA_ND, refFactoryPowF32_ND_CUDA, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(1, HandleType::CUDA)}, {MemSpace(1, HandleType::CUDA)}});
+REGISTER_KERNEL("Pow_F32_ND_CUDA", 2, 2, matchPowF32_CUDA_ND, runPowF32_CUDA_ND, refFactoryPowF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif

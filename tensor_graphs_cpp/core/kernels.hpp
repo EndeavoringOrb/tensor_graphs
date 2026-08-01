@@ -1,6 +1,7 @@
 #pragma once
 #include <CL/cl.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -115,24 +116,49 @@ struct KernelEntry
             }
         }
 
-        // 3. Check output memory space
-        if (!ignore_output_mem_space)
+        // 3 & 4. Check memory space topology.
+        //
+        // output_mem_space / input_mem_spaces on a KernelEntry are LOCAL to this
+        // registration: their numeric value carries no meaning on its own. Two
+        // slots that share a local idx must resolve to the SAME actual MemSpace;
+        // two slots with different local idxs must resolve to DIFFERENT actual
+        // MemSpaces. This lets a kernel registration pick any idxs it likes
+        // without coordinating with other kernels or with however many real
+        // devices of a given HandleType happen to exist at runtime.
+        if (!ignore_output_mem_space || !ignore_input_mem_spaces)
         {
-            if (this->output_mem_space != output_mem_space)
+            std::unordered_map<MemSpace, MemSpace> localToActual;
+            std::unordered_map<MemSpace, MemSpace> actualToLocal;
+
+            auto reconcile = [&](const MemSpace &local, const MemSpace &actual) {
+                if (local.type != actual.type)
+                    return false;
+
+                auto [fwdIt, fwdInserted] = localToActual.try_emplace(local, actual);
+                if (!fwdInserted && !(fwdIt->second == actual))
+                    return false; // same local idx resolved two different ways
+
+                auto [bwdIt, bwdInserted] = actualToLocal.try_emplace(actual, local);
+                if (!bwdInserted && !(bwdIt->second == local))
+                    return false; // two different local idxs collapsed onto one actual space
+
+                return true;
+            };
+
+            if (!ignore_output_mem_space && !reconcile(this->output_mem_space, output_mem_space))
             {
                 return false;
             }
-        }
 
-        // 4. Check input memory spaces
-        if (!ignore_input_mem_spaces && !this->input_mem_spaces.empty())
-        {
-            for (uint64_t i = 0; i < inputs.size(); ++i)
+            if (!ignore_input_mem_spaces && !this->input_mem_spaces.empty())
             {
-                uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(this->input_mem_spaces.size() - 1));
-                if (i >= input_mem_spaces.size() || input_mem_spaces[i] != this->input_mem_spaces[ruleIdx])
+                for (uint64_t i = 0; i < inputs.size(); ++i)
                 {
-                    return false;
+                    uint64_t ruleIdx = std::min(i, static_cast<uint64_t>(this->input_mem_spaces.size() - 1));
+                    if (i >= input_mem_spaces.size())
+                        return false;
+                    if (!reconcile(this->input_mem_spaces[ruleIdx], input_mem_spaces[i]))
+                        return false;
                 }
             }
         }

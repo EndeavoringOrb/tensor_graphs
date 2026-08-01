@@ -42,6 +42,6 @@ inline void runCopyTo_CUDA_CPU(const KernelContext &ctx)
         Error::throw_err(cudaGetErrorString(err));
 }
 
-REGISTER_REF_KERNEL(OpType::COPY_TO, 1, 1, matchCopyTo_CUDA_CPU, runCopyTo_CUDA_CPU, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {false}, {{MemSpace(1, HandleType::CUDA)}});
+REGISTER_REF_KERNEL(OpType::COPY_TO, 1, 1, matchCopyTo_CUDA_CPU, runCopyTo_CUDA_CPU, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {false}, {{MemSpace(2, HandleType::CUDA)}});
 
 #endif

@@ -48,6 +48,6 @@ inline LogicalId refFactoryAddF32_ND_CUDA(const std::vector<LogicalId> &inputs, 
     return graph.add(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Add_F32_ND_CUDA", 2, 2, matchAddF32_CUDA_ND, runAddF32_CUDA_ND, refFactoryAddF32_ND_CUDA, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(1, HandleType::CUDA)}, {MemSpace(1, HandleType::CUDA)}});
+REGISTER_KERNEL("Add_F32_ND_CUDA", 2, 2, matchAddF32_CUDA_ND, runAddF32_CUDA_ND, refFactoryAddF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif

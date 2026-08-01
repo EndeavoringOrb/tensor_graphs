@@ -104,9 +104,9 @@ inline LogicalId refFactoryDotF32_3D_CUDA(const std::vector<LogicalId> &inputs, 
  * Inputs: 2
  * Backend: CUDA
  */
-REGISTER_KERNEL("Dot_F32_3D_CUDA", 2, 2, matchDotF32_3D_CUDA, runDotF32_3D_CUDA, refFactoryDotF32_3D_CUDA, MemSpace(1, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)},
+REGISTER_KERNEL("Dot_F32_3D_CUDA", 2, 2, matchDotF32_3D_CUDA, runDotF32_3D_CUDA, refFactoryDotF32_3D_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)},
     {DType::FLOAT32, DType::FLOAT32},
-    {{2, 8, 16}, {2, 16, 8}}, {true, true}, {{MemSpace(1, HandleType::CUDA)}, {MemSpace(1, HandleType::CUDA)}});
+    {{2, 8, 16}, {2, 16, 8}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif
 

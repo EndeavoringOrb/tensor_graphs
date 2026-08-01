@@ -10,6 +10,9 @@
 #include <fcntl.h>
 #include <io.h>
 #include <share.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 class FileRegistry

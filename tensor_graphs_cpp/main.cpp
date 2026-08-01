@@ -28,6 +28,7 @@
 #include "core/debug.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
+#include "core/logging.hpp"
 #include "core/memory.hpp"
 #include "core/repo.hpp"
 #include "core/session.hpp"
@@ -86,7 +87,9 @@ template <typename ConfigClass>
 void run_autoregressive_llm(const std::string &model_path, const std::string &model_name, const std::string &cache_file,
                             const std::vector<uint32_t> &initial_tokens, uint32_t vocab_size, uint32_t max_seq_len,
                             uint32_t num_tokens_to_generate, bool only_plan, bool disable_caching,
-                            float min_compile_time, ModelGraphRoots (*builder)(Graph &, MemoryManager &, const std::string &model_path),
+                            float min_compile_time,
+                            ModelGraphRoots (*builder)(Graph &, MemoryManager &, const std::string &model_path,
+                                                       uint32_t max_seq_len),
                             bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
                             Graph **activeGraphOut = nullptr)
 {
@@ -100,8 +103,8 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
         *activeGraphOut = &g;
     }
 
-    std::cout << "Building " << model_name << " Graph..." << std::endl;
-    auto roots = builder(g, mem, model_path);
+    LOG(INFO) << "Building " << model_name << " Graph...";
+    auto roots = builder(g, mem, model_path, max_seq_len);
     LogicalId logits_id = roots.roots[0];
     LogicalId inputIdsId = roots.inputs[0];
 
@@ -172,21 +175,24 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
     }
 }
 
-void run_gemma(const std::string &model_path, bool only_plan, bool disable_caching, float min_compile_time, bool refOnly = false,
-               bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+void run_gemma(const std::string &model_path, bool only_plan, bool disable_caching, float min_compile_time,
+               bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
+               Graph **activeGraphOut = nullptr)
 {
-    run_autoregressive_llm<Gemma3ModelConfig>(
-        model_path, "gemma-3-270m", "dirty_region_caches/gemma-3-270m-cpp.bin", {2, 9259}, Gemma3ModelConfig().vocab_size, 8, 6,
-        only_plan, disable_caching, min_compile_time, build_gemma_graph, refOnly, doSaturate, debugCb, activeGraphOut);
+    run_autoregressive_llm<Gemma3ModelConfig>(model_path, "gemma-3-270m", "dirty_region_caches/gemma-3-270m-cpp.bin",
+                                              {2, 9259}, Gemma3ModelConfig().vocab_size, 8, 6, only_plan,
+                                              disable_caching, min_compile_time, build_gemma_graph, refOnly, doSaturate,
+                                              debugCb, activeGraphOut);
 }
 
-void run_qwen_35b(const std::string &model_path, bool only_plan, bool disable_caching, float min_compile_time, bool refOnly = false,
-                  bool doSaturate = true, const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+void run_qwen_35b(const std::string &model_path, bool only_plan, bool disable_caching, float min_compile_time,
+                  bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
+                  Graph **activeGraphOut = nullptr)
 {
-    run_autoregressive_llm<Qwen3_6_35B_A3B_Config>(model_path, "qwen-3.6-35b-a3b", "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin",
-                                                   {24227}, Qwen3_6_35B_A3B_Config().vocab_size, 8, 7, only_plan,
-                                                   disable_caching, min_compile_time, build_qwen_graph, refOnly,
-                                                   doSaturate, debugCb, activeGraphOut);
+    run_autoregressive_llm<Qwen3_6_35B_A3B_Config>(
+        model_path, "qwen-3.6-35b-a3b", "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin", {24227},
+        Qwen3_6_35B_A3B_Config().vocab_size, 32, 31, only_plan, disable_caching, min_compile_time, build_qwen_graph,
+        refOnly, doSaturate, debugCb, activeGraphOut);
 }
 
 int main(int argc, char *argv[])
@@ -209,10 +215,7 @@ int main(int argc, char *argv[])
     parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
     parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
     parser.add_option({"--min-compile-time"}, "Minimum required compile time per bucket in seconds.", "0.0");
-    parser.add_positional("model",
-                          "Name of the target model (flux-klein-4b, "
-                          "gemma-3-270m, qwen-3.6-35b-a3b).",
-                          "gemma-3-270m");
+    parser.add_positional("model", "Name of the target model (gemma-3-270m, qwen-3.6-35b-a3b).", "gemma-3-270m");
     parser.add_positional("model_path", "Model file or directory containing model files.");
 
     if (!parser.parse(argc, argv))
@@ -239,15 +242,16 @@ int main(int argc, char *argv[])
     bool doSaturate = write_refs.empty();
 
     Graph *activeGraphPtr = nullptr;
-    auto debugCb = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx, const void *data)
-    {
+    auto debugCb = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx, const void *data) {
         verifier.verify(logicalId, kernel_name, ctx, data, activeGraphPtr);
     };
 
     if (model == "gemma-3-270m")
-        run_gemma(model_path, only_plan, disable_caching, min_compile_time, refOnly, doSaturate, debugCb, &activeGraphPtr);
+        run_gemma(model_path, only_plan, disable_caching, min_compile_time, refOnly, doSaturate, debugCb,
+                  &activeGraphPtr);
     else if (model == "qwen-3.6-35b-a3b")
-        run_qwen_35b(model_path, only_plan, disable_caching, min_compile_time, refOnly, doSaturate, debugCb, &activeGraphPtr);
+        run_qwen_35b(model_path, only_plan, disable_caching, min_compile_time, refOnly, doSaturate, debugCb,
+                     &activeGraphPtr);
     else
         std::cout << "Model not implemented yet: " << model << std::endl;
 

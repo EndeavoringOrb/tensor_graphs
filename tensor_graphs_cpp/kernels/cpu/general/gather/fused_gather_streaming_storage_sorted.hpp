@@ -90,7 +90,7 @@ static inline bool gather_sorted_readFromFileAtOffset(int fd, uint64_t offset, v
 #else
     while (remaining > 0)
     {
-        suint64_t n = pread(fd, p, remaining, cur);
+        int64_t n = pread(fd, p, remaining, cur);
         if (n <= 0)
             return false;
         p += n;

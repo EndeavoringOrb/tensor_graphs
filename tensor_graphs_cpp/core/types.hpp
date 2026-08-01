@@ -192,6 +192,13 @@ struct MemSpace
     uint32_t idx;
     HandleType type;
 
+    MemSpace() : idx(0), type(HandleType::STORAGE)
+    {
+    }
+    MemSpace(uint32_t idx, HandleType type) : idx(idx), type(type)
+    {
+    }
+
     bool operator==(const MemSpace &other) const
     {
         return idx == other.idx && type == other.type;
@@ -254,6 +261,14 @@ struct Engine
     uint32_t idx;
     EngineType type;
     std::unordered_set<MemSpace> supported;
+
+    Engine() : idx(0), type(EngineType::CPU)
+    {
+    }
+    Engine(uint32_t idx, EngineType type, std::unordered_set<MemSpace> supported = {})
+        : idx(idx), type(type), supported(std::move(supported))
+    {
+    }
 
     bool operator==(const Engine &other) const
     {
@@ -1053,14 +1068,14 @@ inline std::ostream &operator<<(std::ostream &os, EngineType engine_type)
     return os << toString(engine_type);
 }
 
-std::string toString(const MemSpace &mem_space)
+inline std::string toString(const MemSpace &mem_space)
 {
     std::stringstream ss;
     ss << "MemSpace(idx=" << mem_space.idx << ", type=" << mem_space.type << ")";
     return ss.str();
 }
 
-std::string toString(const Engine &engine)
+inline std::string toString(const Engine &engine)
 {
     std::stringstream ss;
     ss << "Engine(idx=" << engine.idx << ", type=" << engine.type << ")";

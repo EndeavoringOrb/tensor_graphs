@@ -470,8 +470,8 @@ struct Session
             buf.id = nextId++;
             buf.mem_space = e.memSpace;
             buf.size = size_bytes;
-            buf.start = 0.0f; // INPUT/CACHE buffers are alive forever.
-            buf.end = std::numeric_limits<float>::infinity();
+            buf.start = 0; // INPUT/CACHE buffers are alive forever.
+            buf.end = std::numeric_limits<uint32_t>::max();
             buf.offset = static_cast<int64_t>(offset);
             out[e.logicalId] = std::move(buf);
         }
