@@ -39,7 +39,7 @@ inline void runCopyTo_STORAGE_CPU_POSIX(const KernelContext &ctx)
         return;
 
     // Use pread for thread-safe, stateless reading at an absolute offset
-    ssize_t bytesRead = ::pread(fd, dst, sizeBytes, static_cast<off_t>(fileOffset));
+    int64_t bytesRead = ::pread(fd, dst, sizeBytes, static_cast<off_t>(fileOffset));
     if (bytesRead < 0)
     {
         Error::throw_err("STORAGE_CPU_POSIX: pread failed at offset " + std::to_string(fileOffset) +

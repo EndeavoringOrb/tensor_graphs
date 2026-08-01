@@ -188,7 +188,7 @@ static inline bool readFromFileAtOffset(int fd, uint64_t offset, void *buf, uint
 #else
     while (remaining > 0)
     {
-        suint64_t n = pread(fd, p, remaining, cur);
+        int64_t n = pread(fd, p, remaining, cur);
         if (n <= 0)
             return false;
         p += n;
