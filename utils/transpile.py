@@ -30,9 +30,7 @@ class TensorGraphCodeEmitter:
         self.model_name = model_name
         self.weight_path = weight_path
         self.code_lines: List[str] = []
-        self.node_vars: Dict[str, Any] = (
-            {}
-        )  # FX Node Name -> C++ LogicalId variable or tuple/list
+        self.node_vars: Dict[str, Any] = {}  # FX Node Name -> C++ LogicalId variable or tuple/list
         self.var_counter = 0
 
     def get_unique_var(self, prefix: str = "tmp") -> str:
@@ -80,6 +78,9 @@ class TensorGraphCodeEmitter:
                     return res[0]
                 return str(res)
             return f"var_{arg.name.replace('.', '_')}"
+        elif isinstance(arg, (list, tuple)):
+            items = [self.ensure_logical_id(item) for item in arg]
+            return f"{{{', '.join(items)}}}"
         elif isinstance(arg, bool):
             v_name = self.get_unique_var("bool")
             val_str = "true" if arg else "false"
@@ -102,11 +103,7 @@ class TensorGraphCodeEmitter:
                 f"        LogicalId {v_name} = g.constant({{1}}, &val_{v_name}, DType::FLOAT32);"
             )
             return v_name
-        elif isinstance(arg, str) and (
-            arg in self.node_vars.values()
-            or arg.startswith("var_")
-            or arg == "input_ids"
-        ):
+        elif isinstance(arg, str) and (arg in self.node_vars.values() or arg.startswith("var_") or arg == "input_ids"):
             return arg
         else:
             v_name = self.get_unique_var("val")
@@ -117,6 +114,87 @@ class TensorGraphCodeEmitter:
                 f"        LogicalId {v_name} = g.constant({{1}}, &val_{v_name}, DType::FLOAT32);"
             )
             return v_name
+
+    def transpile_tensor_to_constant(self, node_name: str, tensor: torch.Tensor) -> str:
+        """Formats and emits a PyTorch tensor as a C++ g.constant(...) call."""
+        shape = list(tensor.shape)
+        dtype = tensor.dtype
+
+        if dtype in (torch.float32, torch.float16, torch.bfloat16):
+            cpp_dtype = "DType::FLOAT32"
+            cpp_type = "float"
+            suffix = "f"
+            zero_val = "0.0f"
+        elif dtype in (torch.int32, torch.int16, torch.uint8, torch.int8):
+            cpp_dtype = "DType::INT32"
+            cpp_type = "int32_t"
+            suffix = ""
+            zero_val = "0"
+        elif dtype in (torch.int64,):
+            cpp_dtype = "DType::INT64"
+            cpp_type = "int64_t"
+            suffix = "LL"
+            zero_val = "0LL"
+        elif dtype in (torch.bool,):
+            cpp_dtype = "DType::BOOL"
+            cpp_type = "bool"
+            suffix = ""
+            zero_val = "false"
+        else:
+            cpp_dtype = "DType::FLOAT32"
+            cpp_type = "float"
+            suffix = "f"
+            zero_val = "0.0f"
+
+        cpp_var = self.register_node(node_name)
+        shape_str = f"{{{', '.join(map(str, shape))}}}"
+        num_elements = tensor.numel()
+
+        # If it's on the meta device or it's a huge array of zeros, just use g.fill with 0
+        if getattr(tensor, "is_meta", False) or tensor.device.type == "meta" or num_elements > 1024:
+            zero_var = self.get_unique_var("zero")
+            shape_var = self.get_unique_var("sh")
+            shape_arr = f"shape_arr_{cpp_var}"
+
+            self.code_lines.append(f"        {cpp_type} val_{zero_var} = {zero_val};")
+            self.code_lines.append(f"        LogicalId {zero_var} = g.constant({{1}}, &val_{zero_var}, {cpp_dtype});")
+            
+            if num_elements == 0:
+                self.code_lines.append(f"        LogicalId {cpp_var} = g.constant({shape_str}, nullptr, {cpp_dtype});")
+            else:
+                self.code_lines.append(f"        int32_t {shape_arr}[] = {shape_str};")
+                self.code_lines.append(f"        LogicalId {shape_var} = g.constant({{ {len(shape)} }}, {shape_arr}, DType::INT32);")
+                self.code_lines.append(f"        LogicalId {cpp_var} = g.fill({zero_var}, {shape_var});")
+            return cpp_var
+
+        # Extract actual data for small real tensors
+        tensor_cpu = tensor.cpu().resolve_conj().resolve_neg()
+        
+        if cpp_type == "float":
+            flat_data = tensor_cpu.to(torch.float32).numpy().flatten()
+        elif cpp_type == "int32_t":
+            flat_data = tensor_cpu.to(torch.int32).numpy().flatten()
+        elif cpp_type == "int64_t":
+            flat_data = tensor_cpu.to(torch.int64).numpy().flatten()
+        elif cpp_type == "bool":
+            flat_data = tensor_cpu.to(torch.bool).numpy().flatten()
+        else:
+            flat_data = tensor_cpu.to(torch.float32).numpy().flatten()
+        
+        if len(flat_data) == 0:
+            self.code_lines.append(f"        LogicalId {cpp_var} = g.constant({shape_str}, nullptr, {cpp_dtype});")
+            return cpp_var
+            
+        arr_name = f"arr_{cpp_var}"
+        
+        if cpp_type == "bool":
+            elements_str = ", ".join("true" if val else "false" for val in flat_data)
+        else:
+            elements_str = ", ".join(f"{val}{suffix}" for val in flat_data)
+            
+        self.code_lines.append(f"        {cpp_type} {arr_name}[] = {{ {elements_str} }};")
+        self.code_lines.append(f"        LogicalId {cpp_var} = g.constant({shape_str}, {arr_name}, {cpp_dtype});")
+        return cpp_var
 
 
 # 1. Define a clean wrapper to strip HF custom classes & disable KV Cache
@@ -187,7 +265,7 @@ def transpile_gemma_3():
 
     # Traverse FX graph nodes in topological execution order
     for node in graph_module.graph.nodes:
-        # A. Placeholder Nodes (Inputs vs Weights)
+        # A. Placeholder Nodes (Inputs vs Weights vs Constants)
         if node.op == "placeholder":
             if node.name in signature.user_inputs:
                 # Runtime input (e.g. input_ids)
@@ -201,6 +279,21 @@ def transpile_gemma_3():
                 emitter.code_lines.append(
                     f'        LogicalId {cpp_var} = g.cast(g.weight(w_path, "{hf_weight_key}"), DType::FLOAT32);'
                 )
+            elif node.name in getattr(signature, "inputs_to_lifted_tensor_constants", {}):
+                # Lifted tensor constant!
+                const_name = signature.inputs_to_lifted_tensor_constants[node.name]
+                if hasattr(exported_program, "constants") and exported_program.constants is not None and const_name in exported_program.constants:
+                    tensor = exported_program.constants[const_name]
+                    emitter.transpile_tensor_to_constant(node.name, tensor)
+                else:
+                    cpp_var = emitter.register_node(node.name)
+                    emitter.code_lines.append(f"        float val_{cpp_var} = 0.0f;")
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.constant({{1}}, &val_{cpp_var}, DType::FLOAT32);")
+            else:
+                # Default fallback for unknown placeholders to avoid undefined variables
+                cpp_var = emitter.register_node(node.name)
+                emitter.code_lines.append(f"        float val_{cpp_var} = 0.0f;")
+                emitter.code_lines.append(f"        LogicalId {cpp_var} = g.constant({{1}}, &val_{cpp_var}, DType::FLOAT32);")
 
         # B. Call Function Nodes (ATen Ops)
         elif node.op == "call_function":
@@ -223,9 +316,7 @@ def transpile_gemma_3():
                 if node.args:
                     first_arg = node.args[0]
                     if isinstance(first_arg, torch.fx.Node):
-                        emitter.node_vars[node.name] = emitter.ensure_logical_id(
-                            first_arg
-                        )
+                        emitter.node_vars[node.name] = emitter.ensure_logical_id(first_arg)
                 continue
 
             # Getitem (Tuple unpacking / Indexing)
@@ -253,9 +344,7 @@ def transpile_gemma_3():
             # Contiguous
             if "contiguous" in op_target_str:
                 id0 = emitter.ensure_logical_id(node.args[0])
-                emitter.code_lines.append(
-                    f"        LogicalId {cpp_var} = g.contiguous({id0});"
-                )
+                emitter.code_lines.append(f"        LogicalId {cpp_var} = g.contiguous({id0});")
                 continue
 
             # 1. Embedding / Gather
@@ -268,38 +357,19 @@ def transpile_gemma_3():
                 continue
 
             # 2. Cast / To DType
-            if any(
-                c_op in op_target_str
-                for c_op in ("to.dtype", "type_as", "cast", "_to_copy")
-            ):
+            if any(c_op in op_target_str for c_op in ("to.dtype", "type_as", "cast", "_to_copy")):
                 id0 = emitter.ensure_logical_id(node.args[0])
                 target_dtype = "DType::FLOAT32"
                 if len(node.args) > 1 and isinstance(node.args[1], torch.dtype):
                     target_dtype = TORCH_DTYPE_TO_TG.get(node.args[1], "DType::FLOAT32")
-                elif "dtype" in node.kwargs and isinstance(
-                    node.kwargs["dtype"], torch.dtype
-                ):
-                    target_dtype = TORCH_DTYPE_TO_TG.get(
-                        node.kwargs["dtype"], "DType::FLOAT32"
-                    )
-                elif (
-                    hasattr(node, "meta")
-                    and "val" in node.meta
-                    and hasattr(node.meta["val"], "dtype")
-                ):
-                    target_dtype = TORCH_DTYPE_TO_TG.get(
-                        node.meta["val"].dtype, "DType::FLOAT32"
-                    )
+                elif "dtype" in node.kwargs and isinstance(node.kwargs["dtype"], torch.dtype):
+                    target_dtype = TORCH_DTYPE_TO_TG.get(node.kwargs["dtype"], "DType::FLOAT32")
+                elif hasattr(node, "meta") and "val" in node.meta and hasattr(node.meta["val"], "dtype"):
+                    target_dtype = TORCH_DTYPE_TO_TG.get(node.meta["val"].dtype, "DType::FLOAT32")
                 elif len(node.args) > 1 and isinstance(node.args[1], torch.fx.Node):
                     other_node = node.args[1]
-                    if (
-                        hasattr(other_node, "meta")
-                        and "val" in other_node.meta
-                        and hasattr(other_node.meta["val"], "dtype")
-                    ):
-                        target_dtype = TORCH_DTYPE_TO_TG.get(
-                            other_node.meta["val"].dtype, "DType::FLOAT32"
-                        )
+                    if hasattr(other_node, "meta") and "val" in other_node.meta and hasattr(other_node.meta["val"], "dtype"):
+                        target_dtype = TORCH_DTYPE_TO_TG.get(other_node.meta["val"].dtype, "DType::FLOAT32")
                 emitter.code_lines.append(
                     f"        LogicalId {cpp_var} = g.cast({id0}, {target_dtype});"
                 )
@@ -310,10 +380,7 @@ def transpile_gemma_3():
                 id0 = emitter.ensure_logical_id(node.args[0])
                 dim = -1
                 if len(node.args) > 1 and node.args[1] is not None:
-                    if (
-                        isinstance(node.args[1], (list, tuple))
-                        and len(node.args[1]) > 0
-                    ):
+                    if isinstance(node.args[1], (list, tuple)) and len(node.args[1]) > 0:
                         dim = int(node.args[1][0])
                     elif isinstance(node.args[1], int):
                         dim = int(node.args[1])
@@ -325,11 +392,7 @@ def transpile_gemma_3():
                         dim = int(d)
 
                 dim_size = 1.0
-                if (
-                    hasattr(node.args[0], "meta")
-                    and "val" in node.args[0].meta
-                    and hasattr(node.args[0].meta["val"], "shape")
-                ):
+                if hasattr(node.args[0], "meta") and "val" in node.args[0].meta and hasattr(node.args[0].meta["val"], "shape"):
                     in_shape = node.args[0].meta["val"].shape
                     if dim < 0:
                         dim += len(in_shape)
@@ -340,12 +403,8 @@ def transpile_gemma_3():
                 sum_var = emitter.get_unique_var("sum")
                 size_var = emitter.ensure_logical_id(dim_size)
 
-                emitter.code_lines.append(
-                    f"        LogicalId {sum_var} = g.sum({id0}, {dim_id});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {cpp_var} = g.div({sum_var}, {size_var});"
-                )
+                emitter.code_lines.append(f"        LogicalId {sum_var} = g.sum({id0}, {dim_id});")
+                emitter.code_lines.append(f"        LogicalId {cpp_var} = g.div({sum_var}, {size_var});")
                 continue
 
             # GELU
@@ -372,45 +431,19 @@ def transpile_gemma_3():
                 one_p_tanh = emitter.get_unique_var("one_p_tanh")
                 half_x = emitter.get_unique_var("half_x")
 
-                emitter.code_lines.append(
-                    f"        LogicalId {x_sq} = g.mul({x_id}, {x_id});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {x_cube} = g.mul({x_sq}, {x_id});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {t1} = g.mul({x_cube}, {c1});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {t2} = g.add({x_id}, {t1});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {t3} = g.mul({t2}, {c2});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {two_u} = g.mul({t3}, {two});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {exp_2u} = g.pow({e_const}, {two_u});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {num} = g.add({exp_2u}, {neg_one});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {den} = g.add({exp_2u}, {one});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {tanh_v} = g.div({num}, {den});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {one_p_tanh} = g.add({one}, {tanh_v});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {half_x} = g.mul({x_id}, {half});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {cpp_var} = g.mul({half_x}, {one_p_tanh});"
-                )
+                emitter.code_lines.append(f"        LogicalId {x_sq} = g.mul({x_id}, {x_id});")
+                emitter.code_lines.append(f"        LogicalId {x_cube} = g.mul({x_sq}, {x_id});")
+                emitter.code_lines.append(f"        LogicalId {t1} = g.mul({x_cube}, {c1});")
+                emitter.code_lines.append(f"        LogicalId {t2} = g.add({x_id}, {t1});")
+                emitter.code_lines.append(f"        LogicalId {t3} = g.mul({t2}, {c2});")
+                emitter.code_lines.append(f"        LogicalId {two_u} = g.mul({t3}, {two});")
+                emitter.code_lines.append(f"        LogicalId {exp_2u} = g.pow({e_const}, {two_u});")
+                emitter.code_lines.append(f"        LogicalId {num} = g.add({exp_2u}, {neg_one});")
+                emitter.code_lines.append(f"        LogicalId {den} = g.add({exp_2u}, {one});")
+                emitter.code_lines.append(f"        LogicalId {tanh_v} = g.div({num}, {den});")
+                emitter.code_lines.append(f"        LogicalId {one_p_tanh} = g.add({one}, {tanh_v});")
+                emitter.code_lines.append(f"        LogicalId {half_x} = g.mul({x_id}, {half});")
+                emitter.code_lines.append(f"        LogicalId {cpp_var} = g.mul({half_x}, {one_p_tanh});")
                 continue
 
             # Expand
@@ -419,49 +452,29 @@ def transpile_gemma_3():
                 target_shape = []
                 if len(node.args) > 1 and isinstance(node.args[1], (list, tuple)):
                     target_shape = [int(s) for s in node.args[1]]
-                elif (
-                    hasattr(node, "meta")
-                    and "val" in node.meta
-                    and hasattr(node.meta["val"], "shape")
-                ):
+                elif hasattr(node, "meta") and "val" in node.meta and hasattr(node.meta["val"], "shape"):
                     target_shape = [int(s) for s in node.meta["val"].shape]
 
                 in_shape = []
-                if (
-                    hasattr(node.args[0], "meta")
-                    and "val" in node.args[0].meta
-                    and hasattr(node.args[0].meta["val"], "shape")
-                ):
+                if hasattr(node.args[0], "meta") and "val" in node.args[0].meta and hasattr(node.args[0].meta["val"], "shape"):
                     in_shape = [int(s) for s in node.args[0].meta["val"].shape]
 
                 curr_var = id0
                 if target_shape and in_shape:
                     if len(in_shape) < len(target_shape):
-                        padded_in_shape = [1] * (
-                            len(target_shape) - len(in_shape)
-                        ) + in_shape
+                        padded_in_shape = [1] * (len(target_shape) - len(in_shape)) + in_shape
                         sh_var = f"shape_{cpp_var}_pad"
-                        emitter.code_lines.append(
-                            f"        int32_t {sh_var}[] = {{ {', '.join(map(str, padded_in_shape))} }};"
-                        )
+                        emitter.code_lines.append(f"        int32_t {sh_var}[] = {{ {', '.join(map(str, padded_in_shape))} }};")
                         curr_var = emitter.get_unique_var("pad")
-                        emitter.code_lines.append(
-                            f"        LogicalId {curr_var} = g.reshape({id0}, g.constant({{ {len(padded_in_shape)} }}, {sh_var}, DType::INT32));"
-                        )
+                        emitter.code_lines.append(f"        LogicalId {curr_var} = g.reshape({id0}, g.constant({{ {len(padded_in_shape)} }}, {sh_var}, DType::INT32));")
                         curr_shape = padded_in_shape
                     else:
                         curr_shape = list(in_shape)
 
                     for d in range(len(target_shape)):
-                        if (
-                            d < len(curr_shape)
-                            and curr_shape[d] == 1
-                            and target_shape[d] > 1
-                        ):
+                        if d < len(curr_shape) and curr_shape[d] == 1 and target_shape[d] > 1:
                             next_var = emitter.get_unique_var("rep")
-                            emitter.code_lines.append(
-                                f"        LogicalId {next_var} = g.repeat({curr_var}, {target_shape[d]}, {d});"
-                            )
+                            emitter.code_lines.append(f"        LogicalId {next_var} = g.repeat({curr_var}, {target_shape[d]}, {d});")
                             curr_var = next_var
                             curr_shape[d] = target_shape[d]
 
@@ -469,26 +482,10 @@ def transpile_gemma_3():
                 continue
 
             # Ones / Zeros / Full
-            if any(
-                f_op in op_target_str
-                for f_op in (
-                    "new_ones",
-                    "ones",
-                    "new_zeros",
-                    "zeros",
-                    "full",
-                    "new_full",
-                )
-            ):
+            if any(f_op in op_target_str for f_op in ("new_ones", "ones", "new_zeros", "zeros", "full", "new_full")):
                 target_dtype = "DType::FLOAT32"
-                if (
-                    hasattr(node, "meta")
-                    and "val" in node.meta
-                    and hasattr(node.meta["val"], "dtype")
-                ):
-                    target_dtype = TORCH_DTYPE_TO_TG.get(
-                        node.meta["val"].dtype, "DType::FLOAT32"
-                    )
+                if hasattr(node, "meta") and "val" in node.meta and hasattr(node.meta["val"], "dtype"):
+                    target_dtype = TORCH_DTYPE_TO_TG.get(node.meta["val"].dtype, "DType::FLOAT32")
 
                 fill_val = 1.0
                 if "zero" in op_target_str:
@@ -502,37 +499,23 @@ def transpile_gemma_3():
                 val_id = emitter.ensure_logical_id(fill_val)
 
                 target_shape = [1]
-                if (
-                    hasattr(node, "meta")
-                    and "val" in node.meta
-                    and hasattr(node.meta["val"], "shape")
-                ):
+                if hasattr(node, "meta") and "val" in node.meta and hasattr(node.meta["val"], "shape"):
                     target_shape = [int(s) for s in node.meta["val"].shape]
                 elif len(node.args) > 1 and isinstance(node.args[1], (list, tuple)):
                     target_shape = [int(s) for s in node.args[1]]
 
                 shape_arr_var = f"shape_{cpp_var}"
-                emitter.code_lines.append(
-                    f"        int32_t {shape_arr_var}[] = {{ {', '.join(map(str, target_shape))} }};"
-                )
+                emitter.code_lines.append(f"        int32_t {shape_arr_var}[] = {{ {', '.join(map(str, target_shape))} }};")
                 shape_id = emitter.get_unique_var("sh")
-                emitter.code_lines.append(
-                    f"        LogicalId {shape_id} = g.constant({{ {len(target_shape)} }}, {shape_arr_var}, DType::INT32);"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {cpp_var} = g.fill({val_id}, {shape_id});"
-                )
+                emitter.code_lines.append(f"        LogicalId {shape_id} = g.constant({{ {len(target_shape)} }}, {shape_arr_var}, DType::INT32);")
+                emitter.code_lines.append(f"        LogicalId {cpp_var} = g.fill({val_id}, {shape_id});")
                 continue
 
             # Diff
             if "diff" in op_target_str:
                 id0 = emitter.ensure_logical_id(node.args[0])
                 rank = 2
-                if (
-                    hasattr(node.args[0], "meta")
-                    and "val" in node.args[0].meta
-                    and hasattr(node.args[0].meta["val"], "shape")
-                ):
+                if hasattr(node.args[0], "meta") and "val" in node.args[0].meta and hasattr(node.args[0].meta["val"], "shape"):
                     rank = len(node.args[0].meta["val"].shape)
 
                 dim = -1
@@ -558,112 +541,58 @@ def transpile_gemma_3():
                 s0_var = emitter.get_unique_var("s0")
                 neg_s0 = emitter.get_unique_var("neg_s0")
 
-                emitter.code_lines.append(
-                    f"        int32_t starts1_{cpp_var}[] = {{ {', '.join(map(str, starts1))} }};"
-                )
-                emitter.code_lines.append(
-                    f"        int32_t ends1_{cpp_var}[] = {{ {', '.join(map(str, ends1))} }};"
-                )
-                emitter.code_lines.append(
-                    f"        int32_t steps1_{cpp_var}[] = {{ {', '.join(map(str, steps1))} }};"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {s1_var} = g.slice({id0}, g.constant({{ {rank} }}, starts1_{cpp_var}, DType::INT32), g.constant({{ {rank} }}, ends1_{cpp_var}, DType::INT32), g.constant({{ {rank} }}, steps1_{cpp_var}, DType::INT32));"
-                )
+                emitter.code_lines.append(f"        int32_t starts1_{cpp_var}[] = {{ {', '.join(map(str, starts1))} }};")
+                emitter.code_lines.append(f"        int32_t ends1_{cpp_var}[] = {{ {', '.join(map(str, ends1))} }};")
+                emitter.code_lines.append(f"        int32_t steps1_{cpp_var}[] = {{ {', '.join(map(str, steps1))} }};")
+                emitter.code_lines.append(f"        LogicalId {s1_var} = g.slice({id0}, g.constant({{ {rank} }}, starts1_{cpp_var}, DType::INT32), g.constant({{ {rank} }}, ends1_{cpp_var}, DType::INT32), g.constant({{ {rank} }}, steps1_{cpp_var}, DType::INT32));")
 
-                emitter.code_lines.append(
-                    f"        int32_t starts0_{cpp_var}[] = {{ {', '.join(map(str, starts0))} }};"
-                )
-                emitter.code_lines.append(
-                    f"        int32_t ends0_{cpp_var}[] = {{ {', '.join(map(str, ends0))} }};"
-                )
-                emitter.code_lines.append(
-                    f"        int32_t steps0_{cpp_var}[] = {{ {', '.join(map(str, steps0))} }};"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {s0_var} = g.slice({id0}, g.constant({{ {rank} }}, starts0_{cpp_var}, DType::INT32), g.constant({{ {rank} }}, ends0_{cpp_var}, DType::INT32), g.constant({{ {rank} }}, steps0_{cpp_var}, DType::INT32));"
-                )
+                emitter.code_lines.append(f"        int32_t starts0_{cpp_var}[] = {{ {', '.join(map(str, starts0))} }};")
+                emitter.code_lines.append(f"        int32_t ends0_{cpp_var}[] = {{ {', '.join(map(str, ends0))} }};")
+                emitter.code_lines.append(f"        int32_t steps0_{cpp_var}[] = {{ {', '.join(map(str, steps0))} }};")
+                emitter.code_lines.append(f"        LogicalId {s0_var} = g.slice({id0}, g.constant({{ {rank} }}, starts0_{cpp_var}, DType::INT32), g.constant({{ {rank} }}, ends0_{cpp_var}, DType::INT32), g.constant({{ {rank} }}, steps0_{cpp_var}, DType::INT32));")
 
-                emitter.code_lines.append(
-                    f"        LogicalId {neg_s0} = g.neg({s0_var});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {cpp_var} = g.add({s1_var}, {neg_s0});"
-                )
+                emitter.code_lines.append(f"        LogicalId {neg_s0} = g.neg({s0_var});")
+                emitter.code_lines.append(f"        LogicalId {cpp_var} = g.add({s1_var}, {neg_s0});")
                 continue
 
             # Comparisons
-            if any(
-                cmp in op_target_str for cmp in ("eq", "ne", "lt", "le", "gt", "ge")
-            ):
+            if any(f"aten.{cmp}" in op_target_str for cmp in ("eq", "ne", "lt", "le", "gt", "ge")):
                 id0 = emitter.ensure_logical_id(node.args[0])
-                id1 = (
-                    emitter.ensure_logical_id(node.args[1])
-                    if len(node.args) > 1
-                    else emitter.ensure_logical_id(0)
-                )
+                id1 = emitter.ensure_logical_id(node.args[1]) if len(node.args) > 1 else emitter.ensure_logical_id(0)
 
-                if (
-                    "eq" in op_target_str
-                    and "ne" not in op_target_str
-                    and "seq" not in op_target_str
-                ):
-                    emitter.code_lines.append(
-                        f"        LogicalId {cpp_var} = g.eq({id0}, {id1});"
-                    )
+                if "eq" in op_target_str and "ne" not in op_target_str and "seq" not in op_target_str:
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.eq({id0}, {id1});")
                 elif "ne" in op_target_str:
                     eq_var = emitter.get_unique_var("eq")
-                    emitter.code_lines.append(
-                        f"        LogicalId {eq_var} = g.eq({id0}, {id1});"
-                    )
-                    emitter.code_lines.append(
-                        f"        LogicalId {cpp_var} = g.logical_not({eq_var});"
-                    )
+                    emitter.code_lines.append(f"        LogicalId {eq_var} = g.eq({id0}, {id1});")
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.logical_not({eq_var});")
                 elif "lt" in op_target_str:
-                    emitter.code_lines.append(
-                        f"        LogicalId {cpp_var} = g.lt({id0}, {id1});"
-                    )
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.lt({id0}, {id1});")
                 elif "le" in op_target_str:
                     gt_var = emitter.get_unique_var("gt")
-                    emitter.code_lines.append(
-                        f"        LogicalId {gt_var} = g.lt({id1}, {id0});"
-                    )
-                    emitter.code_lines.append(
-                        f"        LogicalId {cpp_var} = g.logical_not({gt_var});"
-                    )
+                    emitter.code_lines.append(f"        LogicalId {gt_var} = g.lt({id1}, {id0});")
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.logical_not({gt_var});")
                 elif "gt" in op_target_str:
-                    emitter.code_lines.append(
-                        f"        LogicalId {cpp_var} = g.lt({id1}, {id0});"
-                    )
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.lt({id1}, {id0});")
                 elif "ge" in op_target_str:
                     lt_var = emitter.get_unique_var("lt")
-                    emitter.code_lines.append(
-                        f"        LogicalId {lt_var} = g.lt({id0}, {id1});"
-                    )
-                    emitter.code_lines.append(
-                        f"        LogicalId {cpp_var} = g.logical_not({lt_var});"
-                    )
+                    emitter.code_lines.append(f"        LogicalId {lt_var} = g.lt({id0}, {id1});")
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.logical_not({lt_var});")
                 continue
 
             # Logical / Bitwise
-            if any(l_op in op_target_str for l_op in ("and", "or", "not", "bitwise")):
+            if any(f"aten.{l_op}" in op_target_str or f"__{l_op}__" in op_target_str for l_op in ("and", "or", "not", "bitwise")):
                 if "not" in op_target_str:
                     id0 = emitter.ensure_logical_id(node.args[0])
-                    emitter.code_lines.append(
-                        f"        LogicalId {cpp_var} = g.logical_not({id0});"
-                    )
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.logical_not({id0});")
                 elif "and" in op_target_str:
                     id0 = emitter.ensure_logical_id(node.args[0])
                     id1 = emitter.ensure_logical_id(node.args[1])
-                    emitter.code_lines.append(
-                        f"        LogicalId {cpp_var} = g.logical_and({id0}, {id1});"
-                    )
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.logical_and({id0}, {id1});")
                 elif "or" in op_target_str:
                     id0 = emitter.ensure_logical_id(node.args[0])
                     id1 = emitter.ensure_logical_id(node.args[1])
-                    emitter.code_lines.append(
-                        f"        LogicalId {cpp_var} = g.logical_or({id0}, {id1});"
-                    )
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.logical_or({id0}, {id1});")
                 continue
 
             # Where
@@ -673,14 +602,8 @@ def transpile_gemma_3():
                 y_id = emitter.ensure_logical_id(node.args[2])
 
                 target_dtype = "DType::FLOAT32"
-                if (
-                    hasattr(node, "meta")
-                    and "val" in node.meta
-                    and hasattr(node.meta["val"], "dtype")
-                ):
-                    target_dtype = TORCH_DTYPE_TO_TG.get(
-                        node.meta["val"].dtype, "DType::FLOAT32"
-                    )
+                if hasattr(node, "meta") and "val" in node.meta and hasattr(node.meta["val"], "dtype"):
+                    target_dtype = TORCH_DTYPE_TO_TG.get(node.meta["val"].dtype, "DType::FLOAT32")
 
                 cond_bool = emitter.get_unique_var("c_bool")
                 cond_float = emitter.get_unique_var("c_flt")
@@ -689,24 +612,12 @@ def transpile_gemma_3():
                 t1 = emitter.get_unique_var("t1")
                 t2 = emitter.get_unique_var("t2")
 
-                emitter.code_lines.append(
-                    f"        LogicalId {cond_bool} = g.cast({cond_id}, DType::BOOL);"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {cond_float} = g.cast({cond_bool}, {target_dtype});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {not_cond} = g.add({one_id}, g.neg({cond_float}));"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {t1} = g.mul({cond_float}, {x_id});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {t2} = g.mul({not_cond}, {y_id});"
-                )
-                emitter.code_lines.append(
-                    f"        LogicalId {cpp_var} = g.add({t1}, {t2});"
-                )
+                emitter.code_lines.append(f"        LogicalId {cond_bool} = g.cast({cond_id}, DType::BOOL);")
+                emitter.code_lines.append(f"        LogicalId {cond_float} = g.cast({cond_bool}, {target_dtype});")
+                emitter.code_lines.append(f"        LogicalId {not_cond} = g.add({one_id}, g.neg({cond_float}));")
+                emitter.code_lines.append(f"        LogicalId {t1} = g.mul({cond_float}, {x_id});")
+                emitter.code_lines.append(f"        LogicalId {t2} = g.mul({not_cond}, {y_id});")
+                emitter.code_lines.append(f"        LogicalId {cpp_var} = g.add({t1}, {t2});")
                 continue
 
             # Index
@@ -724,9 +635,7 @@ def transpile_gemma_3():
 
                 if idx_tensor is not None:
                     idx_id = emitter.ensure_logical_id(idx_tensor)
-                    emitter.code_lines.append(
-                        f"        LogicalId {cpp_var} = g.gather({data_id}, {idx_id});"
-                    )
+                    emitter.code_lines.append(f"        LogicalId {cpp_var} = g.gather({data_id}, {idx_id});")
                     continue
 
             # 3. Addition
@@ -850,11 +759,7 @@ def transpile_gemma_3():
                 continue
 
             # 12. Permute / Transpose
-            if (
-                "permute" in op_target_str
-                or "transpose" in op_target_str
-                or op_target_str.endswith(".t")
-            ):
+            if "permute" in op_target_str or "transpose" in op_target_str or op_target_str.endswith(".t"):
                 id0 = emitter.ensure_logical_id(node.args[0])
                 if "transpose" in op_target_str or op_target_str.endswith(".t"):
                     rank = 4
@@ -969,7 +874,8 @@ def transpile_gemma_3():
             if "cat" in op_target_str or "concat" in op_target_str:
                 tensor_nodes = (
                     node.args[0]
-                    if len(node.args) > 0 and isinstance(node.args[0], (list, tuple))
+                    if len(node.args) > 0
+                    and isinstance(node.args[0], (list, tuple))
                     else []
                 )
                 cpp_tensors = [emitter.ensure_logical_id(t) for t in tensor_nodes]
@@ -980,7 +886,9 @@ def transpile_gemma_3():
                 )
 
                 axis_var = f"axis_{cpp_var}"
-                emitter.code_lines.append(f"        int32_t {axis_var} = {dim};")
+                emitter.code_lines.append(
+                    f"        int32_t {axis_var} = {dim};"
+                )
                 emitter.code_lines.append(
                     f"        LogicalId {cpp_var} = g.concat({{ {', '.join(cpp_tensors)} }}, "
                     f"g.constant({{ 1 }}, &{axis_var}, DType::INT32));"
@@ -991,12 +899,24 @@ def transpile_gemma_3():
             if "arange" in op_target_str:
                 start, stop, step = 0, 10, 1
                 if len(node.args) == 1:
-                    stop = int(node.args[0]) if isinstance(node.args[0], int) else 10
+                    stop = (
+                        int(node.args[0])
+                        if isinstance(node.args[0], int)
+                        else 10
+                    )
                 elif len(node.args) >= 2:
-                    start = int(node.args[0]) if isinstance(node.args[0], int) else 0
-                    stop = int(node.args[1]) if isinstance(node.args[1], int) else 10
+                    start = (
+                        int(node.args[0]) if isinstance(node.args[0], int) else 0
+                    )
+                    stop = (
+                        int(node.args[1])
+                        if isinstance(node.args[1], int)
+                        else 10
+                    )
                 if len(node.args) >= 3:
-                    step = int(node.args[2]) if isinstance(node.args[2], int) else 1
+                    step = (
+                        int(node.args[2]) if isinstance(node.args[2], int) else 1
+                    )
 
                 start_id = emitter.ensure_logical_id(start)
                 stop_id = emitter.ensure_logical_id(stop)
@@ -1039,9 +959,7 @@ def transpile_gemma_3():
             emitter.code_lines.append(
                 f"        // UNHANDLED ATen Op: {op_target_str} for node {node.name}"
             )
-            fallback_arg = (
-                emitter.ensure_logical_id(node.args[0]) if node.args else "LogicalId()"
-            )
+            fallback_arg = emitter.ensure_logical_id(node.args[0]) if node.args else "LogicalId()"
             emitter.code_lines.append(f"        LogicalId {cpp_var} = {fallback_arg};")
 
         # C. Output Node
