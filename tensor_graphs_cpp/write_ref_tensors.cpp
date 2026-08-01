@@ -97,6 +97,21 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
             {
                 rawBytes = *graph.constantStaging.at(nodeId);
             }
+            else if (graph.input_data_types.count(nodeId) && graph.input_data_types.at(nodeId) == InputDataType::STORAGE)
+            {
+                // Fetch file paths and offsets registered in the FileRegistry
+                TensorMetadata meta = FileRegistry::get().getNodeMeta(nodeId);
+                uint64_t sizeBytes = meta.dataOffsetEnd - meta.dataOffsetStart;
+                rawBytes.resize(sizeBytes);
+
+                std::ifstream file(meta.filePath, std::ios::binary);
+                if (!file.is_open())
+                {
+                    Error::throw_err("[computeAndWriteCleanTensors] Failed to open model file: " + meta.filePath);
+                }
+                file.seekg(meta.dataOffsetStart, std::ios::beg);
+                file.read(reinterpret_cast<char *>(rawBytes.data()), sizeBytes);
+            }
             else
             {
                 Error::throw_err("[computeAndWriteCleanTensors] input node value not "

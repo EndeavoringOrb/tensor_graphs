@@ -34,7 +34,8 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     std::vector<MemSpace> current_path = {src};
     std::unordered_set<MemSpace> visited = {src};
 
-    std::function<void(MemSpace)> dfs = [&](MemSpace curr) {
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
+    {
         if (curr == dst)
         {
             all_paths.push_back(current_path);
@@ -883,18 +884,15 @@ struct InfinityDomination : public Rule
         if (nonInfRegions.empty())
         {
             EClassId currentTarget = constClass;
-            if (cClass.mem_space != outClass.mem_space || cClass.strides != contigStrides)
+            if (cClass.strides != contigStrides)
             {
-                if (cClass.mem_space != outClass.mem_space)
-                {
-                    currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {constClass}, outClass.shape, contigStrides,
-                                                  outClass.dtype, outClass.mem_space);
-                }
-                else
-                {
-                    currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {constClass}, outClass.shape,
-                                                  contigStrides, outClass.dtype, outClass.mem_space);
-                }
+                currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentTarget}, outClass.shape,
+                                              contigStrides, outClass.dtype, outClass.mem_space);
+            }
+            if (cClass.mem_space != outClass.mem_space)
+            {
+                currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {currentTarget}, outClass.shape, contigStrides,
+                                              outClass.dtype, outClass.mem_space);
             }
             egraph.merge(e_class_id, currentTarget);
             return;
@@ -916,15 +914,15 @@ struct InfinityDomination : public Rule
                 return;
         }
 
-        EClassId currentTarget;
+        EClassId currentTarget = constClass;
+        if (cClass.strides != contigStrides)
+        {
+            currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {currentTarget}, outClass.shape,
+                                          contigStrides, outClass.dtype, outClass.mem_space);
+        }
         if (cClass.mem_space != outClass.mem_space)
         {
-            currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {constClass}, outClass.shape, contigStrides,
-                                          outClass.dtype, outClass.mem_space);
-        }
-        else
-        {
-            currentTarget = addOpToEGraph(egraph, OpType::CONTIGUOUS, {constClass}, outClass.shape, contigStrides,
+            currentTarget = addOpToEGraph(egraph, OpType::COPY_TO, {currentTarget}, outClass.shape, contigStrides,
                                           outClass.dtype, outClass.mem_space);
         }
 
@@ -961,7 +959,7 @@ struct InfinityDomination : public Rule
             {
                 sliceStridesC[d] *= steps[d];
             }
-            EClassId sliceC = addOpToEGraph(egraph, OpType::SLICE, {constClass, startsId, endsId, stepsId}, sliceShape,
+            EClassId sliceC = addOpToEGraph(egraph, OpType::SLICE, {currentTarget, startsId, endsId, stepsId}, sliceShape,
                                             sliceStridesC, cClass.dtype, cClass.mem_space);
 
             std::vector<uint64_t> sliceContigStrides = calcContiguousStrides(sliceShape);
@@ -1437,7 +1435,8 @@ struct SlicePushDownDot : public Rule
                 EClassId stepsIdB = addIntConst(egraph, stepsB);
 
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en,
-                                       EClassId stId, EClassId enId, EClassId stepId) {
+                                       EClassId stId, EClassId enId, EClassId stepId)
+                {
                     EClassId canonId = egraph.findConst(classId);
                     const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;
