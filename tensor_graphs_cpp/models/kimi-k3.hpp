@@ -66,7 +66,7 @@ struct KimiK3Config
 
 class KimiK3Model
 {
-  private:
+private:
     KimiK3Config cfg;
     Graph &g;
     MemoryManager &mem;
@@ -81,7 +81,11 @@ class KimiK3Model
     LogicalId e_fp32;
     LogicalId neg_1e9_fp32;
 
-  public:
+public:
+    LogicalId input_ids_id;
+    LogicalId image_indices_id;
+    LogicalId image_features_id;
+
     KimiK3Model(KimiK3Config config, uint32_t sequence_length, Graph &graph, MemoryManager &memory,
                 const std::string &weight_path)
         : cfg(config), g(graph), mem(memory), w_path(weight_path), seq_len(sequence_length)
@@ -281,7 +285,8 @@ class KimiK3Model
         LogicalId g10 = g.gather(pos_table, idx10_node);
         LogicalId g11 = g.gather(pos_table, idx11_node);
 
-        auto make_weight_2d = [&](const std::vector<float> &w_data) -> LogicalId {
+        auto make_weight_2d = [&](const std::vector<float> &w_data) -> LogicalId
+        {
             LogicalId w_1d = g.constant({h * w}, w_data.data(), DType::FLOAT32);
             int32_t sh2_w[] = {(int32_t)(h * w), 1};
             LogicalId w_2d = g.reshape(w_1d, g.constant({2}, sh2_w, DType::INT32));
@@ -493,8 +498,8 @@ class KimiK3Model
         int32_t ax = 0;
         LogicalId sum = g.sum(permuted, g.constant({1}, &ax, DType::INT32));
         LogicalId mean = g.mul(sum, g.fill(1.0f / t, g.getNode(sum).getShape()));
-        int32_t sh2[] = {(int32_t)(new_h * new_w), (int32_t)(4 * cfg.vt_hidden_size)};
-        LogicalId merged = g.reshape(mean, g.constant({2}, sh2, DType::INT32));
+        int32_t merged_shape[] = {(int32_t)(new_h * new_w), (int32_t)(4 * cfg.vt_hidden_size)};
+        LogicalId merged = g.reshape(mean, g.constant({2}, merged_shape, DType::INT32));
 
         // PatchMergerMLPV2
         LogicalId p_proj0 =
@@ -552,7 +557,8 @@ class KimiK3Model
         LogicalId t3_q = g.slice(pad_q, g.constant({3}, st3, DType::INT32), g.constant({3}, en3, DType::INT32),
                                  g.constant({3}, step, DType::INT32));
 
-        auto apply_conv = [&](LogicalId t0, LogicalId t1, LogicalId t2, LogicalId t3, const std::string &name) {
+        auto apply_conv = [&](LogicalId t0, LogicalId t1, LogicalId t2, LogicalId t3, const std::string &name)
+        {
             LogicalId w = weight(prefix + "self_attn." + name + ".weight");
             int32_t ws0[] = {0, 0, 0}, we0[] = {(int32_t)qkv_dim, 1, 1};
             LogicalId w0 = g.reshape(
@@ -607,7 +613,8 @@ class KimiK3Model
         LogicalId v = apply_conv(t0_v, t1_v, t2_v, t3_v, "v_conv1d");
 
         // SiLU
-        auto silu = [&](LogicalId x) { return g.mul(x, sigmoid(x)); };
+        auto silu = [&](LogicalId x)
+        { return g.mul(x, sigmoid(x)); };
         q = silu(q);
         k = silu(k);
         v = silu(v);
@@ -884,8 +891,35 @@ class KimiK3Model
 
     LogicalId build_text_graph()
     {
-        LogicalId inputs_embeds = g.input({1, seq_len, cfg.hidden_size}, DType::FLOAT32);
-        LogicalId x = inputs_embeds;
+        input_ids_id = g.input({1, seq_len}, DType::INT32);
+        image_indices_id = g.input({1, seq_len}, DType::INT32);
+        image_features_id = g.input({seq_len, cfg.hidden_size}, DType::FLOAT32);
+
+        LogicalId w_emb = weight("language_model.model.embed_tokens.weight");
+        LogicalId text_embeds = g.gather(w_emb, input_ids_id);
+
+        LogicalId gathered_img_feats = g.gather(image_features_id, image_indices_id);
+
+        int32_t img_tok_val = 163605;
+        LogicalId img_tok_scalar = g.constant({1}, &img_tok_val, DType::INT32);
+        int32_t sh2[] = {1, (int32_t)seq_len};
+        LogicalId img_tok = g.fill(img_tok_scalar, g.constant({2}, sh2, DType::INT32));
+
+        LogicalId is_img_mask = g.eq(input_ids_id, img_tok);
+        LogicalId is_img_float = g.cast(is_img_mask, DType::FLOAT32);
+
+        int32_t sh3[] = {1, (int32_t)seq_len, 1};
+        LogicalId is_img_float_3d = g.reshape(is_img_float, g.constant({3}, sh3, DType::INT32));
+        LogicalId is_img_exp = g.repeat(is_img_float_3d, cfg.hidden_size, 2);
+
+        LogicalId one_node = g.fill(1.0f, {1, seq_len, 1});
+        LogicalId not_img_float = g.add(one_node, g.neg(is_img_float_3d));
+        LogicalId not_img_exp = g.repeat(not_img_float, cfg.hidden_size, 2);
+
+        LogicalId text_features = g.mul(text_embeds, not_img_exp);
+        LogicalId img_features = g.mul(gathered_img_feats, is_img_exp);
+
+        LogicalId x = g.add(text_features, img_features);
 
         // Attn residual buffer
         LogicalId block_residual;

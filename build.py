@@ -30,6 +30,7 @@ CORE_DEPENDENCIES = [
 
 ALL_TARGETS = [
     "bench.cpp",
+    "chat.cpp",
     "embed.cpp",
     "main.cpp",
     "test.cpp",

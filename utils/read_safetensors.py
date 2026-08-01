@@ -6,22 +6,30 @@ import struct
 import sys
 from functools import reduce
 
+from rich import box
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+console_err = Console(stderr=True)
+
 
 def get_header(file_path):
     """
     Reads and parses the JSON header from a .safetensors file.
     """
     if not os.path.exists(file_path):
-        print(f"Error: File '{file_path}' does not exist.", file=sys.stderr)
+        console_err.print(
+            f"[bold red]Error:[/bold red] File '{file_path}' does not exist."
+        )
         sys.exit(1)
 
     try:
         with open(file_path, "rb") as f:
             header_size_bytes = f.read(8)
             if len(header_size_bytes) < 8:
-                print(
-                    f"Error: File '{file_path}' is too short to be a valid .safetensors file.",
-                    file=sys.stderr,
+                console_err.print(
+                    f"[bold red]Error:[/bold red] File '{file_path}' is too short to be a valid .safetensors file."
                 )
                 sys.exit(1)
 
@@ -31,9 +39,8 @@ def get_header(file_path):
             # Read the header JSON content
             header_bytes = f.read(header_size)
             if len(header_bytes) < header_size:
-                print(
-                    f"Error: Failed to read the full header of size {header_size} bytes.",
-                    file=sys.stderr,
+                console_err.print(
+                    f"[bold red]Error:[/bold red] Failed to read the full header of size {header_size} bytes."
                 )
                 sys.exit(1)
 
@@ -41,7 +48,9 @@ def get_header(file_path):
             return json.loads(header_str), header_size
 
     except Exception as e:
-        print(f"Error reading safetensors file: {e}", file=sys.stderr)
+        console_err.print(
+            f"[bold red]Error reading safetensors file:[/bold red] {e}"
+        )
         sys.exit(1)
 
 
@@ -110,7 +119,7 @@ def main():
     header, header_size = get_header(args.file)
 
     if args.json:
-        print(json.dumps(header, indent=2))
+        console.print_json(data=header)
         return
 
     # Safetensors allow an optional global metadata dictionary under '__metadata__'
@@ -118,44 +127,56 @@ def main():
 
     if args.meta_only:
         if metadata:
-            print(json.dumps(metadata, indent=2))
+            console.print_json(data=metadata)
         else:
-            print("No global metadata (__metadata__) found in this file.")
+            console.print(
+                "[yellow]No global metadata (__metadata__) found in this file.[/yellow]"
+            )
         return
 
     if args.name_only:
         for name in header.keys():
-            print(name)
+            console.print(name)
         return
 
     # Standard detailed visualization output
-    print("=" * 85)
-    print(f"File: {args.file}")
-    print(f"Header Size: {format_size(header_size)} ({header_size} bytes)")
+    console.print(f"[bold cyan]File:[/bold cyan] {args.file}")
+    console.print(
+        f"[bold cyan]Header Size:[/bold cyan] {format_size(header_size)} [dim]({header_size:,} bytes)[/dim]"
+    )
 
     if metadata:
-        print("-" * 85)
-        print("Global Metadata (__metadata__):")
+        console.print()
+        meta_table = Table(
+            title="Global Metadata (__metadata__)",
+            box=box.SIMPLE,
+            show_header=True,
+            header_style="bold cyan",
+        )
+        meta_table.add_column("Key", style="bold yellow")
+        meta_table.add_column("Value", style="white")
         for k, v in metadata.items():
-            print(f"  {k}: {v}")
+            meta_table.add_row(str(k), str(v))
+        console.print(meta_table)
 
-    print("-" * 85)
-    print("Tensors:")
+    console.print()
 
     names = list(header.keys())
     if not names:
-        print("  No tensors found.")
+        console.print("[yellow]No tensors found.[/yellow]")
     else:
-        # Determine comfortable column width for alignment
-        max_name_len = max(len(n) for n in names)
-        max_name_len = max(max_name_len, 11)  # Minimum width matching "Tensor Name"
-        max_name_len = min(
-            max_name_len, 60
-        )  # Soft limit to prevent overflow of wide terminal views
-
-        header_line = f"  {'Tensor Name':<{max_name_len}} | {'Dtype':<8} | {'Shape':<25} | {'Elements':<10} | {'Byte Size':<10}"
-        print(header_line)
-        print("  " + "-" * (len(header_line) - 2))
+        table = Table(
+            box=box.SIMPLE,
+            show_header=True,
+            header_style="bold cyan",
+            padding=(0, 1),
+            collapse_padding=True,
+        )
+        table.add_column("Tensor Name", style="bold yellow", justify="left")
+        table.add_column("Dtype", style="green", justify="left")
+        table.add_column("Shape", style="magenta", justify="left")
+        table.add_column("Elements", style="cyan", justify="right")
+        table.add_column("Byte Size", style="blue", justify="right")
 
         total_elements = 0
         total_bytes = 0
@@ -173,28 +194,30 @@ def main():
 
             # Format shape to prevent rendering excessively long lists
             shape_str = str(shape)
-            if len(shape_str) > 25:
-                shape_str = shape_str[:22] + "..."
+            if len(shape_str) > 30:
+                shape_str = shape_str[:27] + "..."
 
-            display_name = name
-            if len(display_name) > max_name_len:
-                display_name = display_name[: max_name_len - 3] + "..."
-
-            print(
-                f"  {display_name:<{max_name_len}} | {dtype:<8} | {shape_str:<25} | {format_params(elements):<10} | {format_size(byte_size):<10}"
+            table.add_row(
+                name,
+                dtype,
+                shape_str,
+                format_params(elements),
+                format_size(byte_size),
             )
+
+        console.print(table)
 
         if not args.no_summary:
-            print("-" * 85)
-            print("Summary:")
-            print(f"  Total Tensors:    {len(header)}")
-            print(
-                f"  Total Parameters: {format_params(total_elements)} ({total_elements:,} elements)"
+            console.print("\n[bold cyan]Summary:[/bold cyan]")
+            console.print(
+                f"  [bold white]Total Tensors:[/bold white]    [yellow]{len(header)}[/yellow]"
             )
-            print(
-                f"  Total Data Size:  {format_size(total_bytes)} ({total_bytes:,} bytes)"
+            console.print(
+                f"  [bold white]Total Parameters:[/bold white] [cyan]{format_params(total_elements)}[/cyan] [dim]({total_elements:,} elements)[/dim]"
             )
-    print("=" * 85)
+            console.print(
+                f"  [bold white]Total Data Size:[/bold white]  [blue]{format_size(total_bytes)}[/blue] [dim]({total_bytes:,} bytes)[/dim]"
+            )
 
 
 if __name__ == "__main__":
