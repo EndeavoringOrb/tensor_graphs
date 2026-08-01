@@ -28,6 +28,7 @@
 #include "core/debug.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
+#include "core/logging.hpp"
 #include "core/memory.hpp"
 #include "core/repo.hpp"
 #include "core/session.hpp"
@@ -102,7 +103,7 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
         *activeGraphOut = &g;
     }
 
-    std::cout << "Building " << model_name << " Graph..." << std::endl;
+    LOG(INFO) << "Building " << model_name << " Graph..." << std::endl;
     auto roots = builder(g, mem, model_path, max_seq_len);
     LogicalId logits_id = roots.roots[0];
     LogicalId inputIdsId = roots.inputs[0];
