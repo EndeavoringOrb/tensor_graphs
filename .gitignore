@@ -40,7 +40,7 @@ tokenize_flux.py
 .vs
 clean.txt
 OpenCL-SDK
-analysis.txt
+analysis*.txt
 reference_tensors
 
 # Profiling artifacts

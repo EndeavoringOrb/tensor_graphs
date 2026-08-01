@@ -104,10 +104,10 @@ struct Planner
                 ss << "  " << name << ": " << count << " matches\n";
             }
             ss << "Total Matches: " << nMatches;
-            LOG(DEBUG) << ss;
+            LOG(DEBUG) << ss.str();
             if (!changed)
             {
-                LOG(INFO) << ss;
+                LOG(INFO) << ss.str();
             }
             timer.tick();
         }
