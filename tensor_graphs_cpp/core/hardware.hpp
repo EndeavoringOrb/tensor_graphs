@@ -11,7 +11,7 @@
 
 #include <CL/cl.h>
 
-void queryOpenCLDeviceLimits(cl_device_id device)
+inline void queryOpenCLDeviceLimits(cl_device_id device)
 {
     // Query and print the Device Name
     char deviceName[256] = {0};

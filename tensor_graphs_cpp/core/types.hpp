@@ -47,13 +47,12 @@ using json = nlohmann::json;
 
 namespace Error
 {
-    template <typename T = std::runtime_error, typename... Args>
-    [[noreturn]] inline void throw_err(const std::string &msg, Args &&...args)
-    {
-        std::cerr << "\n[TensorGraph Error] " << msg << std::endl
-                  << std::flush;
-        throw T(msg, std::forward<Args>(args)...);
-    }
+template <typename T = std::runtime_error, typename... Args>
+[[noreturn]] inline void throw_err(const std::string &msg, Args &&...args)
+{
+    std::cerr << "\n[TensorGraph Error] " << msg << std::endl << std::flush;
+    throw T(msg, std::forward<Args>(args)...);
+}
 } // namespace Error
 
 enum class OpType : uint32_t
@@ -126,7 +125,7 @@ struct LogicalId
 
 class LogicalIdAllocator
 {
-public:
+  public:
     LogicalIdAllocator(const LogicalIdAllocator &) = delete;
     LogicalIdAllocator &operator=(const LogicalIdAllocator &) = delete;
     LogicalIdAllocator(LogicalIdAllocator &&) = delete;
@@ -137,7 +136,7 @@ public:
         return instance()._allocate();
     }
 
-private:
+  private:
     LogicalIdAllocator() = default;
     ~LogicalIdAllocator() = default;
 
@@ -193,8 +192,12 @@ struct MemSpace
     uint32_t idx;
     HandleType type;
 
-    MemSpace() : idx(0), type(HandleType::STORAGE) {}
-    MemSpace(uint32_t idx, HandleType type) : idx(idx), type(type) {}
+    MemSpace() : idx(0), type(HandleType::STORAGE)
+    {
+    }
+    MemSpace(uint32_t idx, HandleType type) : idx(idx), type(type)
+    {
+    }
 
     bool operator==(const MemSpace &other) const
     {
@@ -204,59 +207,53 @@ struct MemSpace
 
 namespace std
 {
-    template <>
-    struct hash<LogicalId>
+template <> struct hash<LogicalId>
+{
+    std::uint64_t operator()(const LogicalId &id) const noexcept
     {
-        std::uint64_t operator()(const LogicalId &id) const noexcept
-        {
-            return std::hash<uint32_t>()(id.value);
-        }
-    };
+        return std::hash<uint32_t>()(id.value);
+    }
+};
 
-    template <>
-    struct hash<EClassId>
+template <> struct hash<EClassId>
+{
+    std::uint64_t operator()(const EClassId &id) const noexcept
     {
-        std::uint64_t operator()(const EClassId &id) const noexcept
-        {
-            return std::hash<uint32_t>()(id.value);
-        }
-    };
+        return std::hash<uint32_t>()(id.value);
+    }
+};
 
-    template <>
-    struct hash<ENodeId>
+template <> struct hash<ENodeId>
+{
+    std::uint64_t operator()(const ENodeId &id) const noexcept
     {
-        std::uint64_t operator()(const ENodeId &id) const noexcept
-        {
-            return std::hash<uint32_t>()(id.value);
-        }
-    };
+        return std::hash<uint32_t>()(id.value);
+    }
+};
 
-    template <>
-    struct hash<KernelId>
+template <> struct hash<KernelId>
+{
+    std::uint64_t operator()(const KernelId &id) const noexcept
     {
-        std::uint64_t operator()(const KernelId &id) const noexcept
-        {
-            return std::hash<uint64_t>()(id.value);
-        }
-    };
+        return std::hash<uint64_t>()(id.value);
+    }
+};
 
-    template <>
-    struct hash<BufferId>
+template <> struct hash<BufferId>
+{
+    std::uint64_t operator()(const BufferId &id) const noexcept
     {
-        std::uint64_t operator()(const BufferId &id) const noexcept
-        {
-            return std::hash<uint32_t>()(id.value);
-        }
-    };
+        return std::hash<uint32_t>()(id.value);
+    }
+};
 
-    template <>
-    struct hash<MemSpace>
+template <> struct hash<MemSpace>
+{
+    uint64_t operator()(const MemSpace &ms) const noexcept
     {
-        uint64_t operator()(const MemSpace &ms) const noexcept
-        {
-            return std::hash<uint32_t>()(ms.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
-        }
-    };
+        return std::hash<uint32_t>()(ms.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
+    }
+};
 } // namespace std
 
 struct Engine
@@ -265,9 +262,13 @@ struct Engine
     EngineType type;
     std::unordered_set<MemSpace> supported;
 
-    Engine() : idx(0), type(EngineType::CPU) {}
+    Engine() : idx(0), type(EngineType::CPU)
+    {
+    }
     Engine(uint32_t idx, EngineType type, std::unordered_set<MemSpace> supported = {})
-        : idx(idx), type(type), supported(std::move(supported)) {}
+        : idx(idx), type(type), supported(std::move(supported))
+    {
+    }
 
     bool operator==(const Engine &other) const
     {
@@ -359,10 +360,10 @@ static std::vector<uint64_t> calcContiguousStrides(const std::vector<uint32_t> &
 
 struct TensorNode
 {
-private:
+  private:
     std::vector<uint32_t> shape;
 
-public:
+  public:
     LogicalId id;
     OpType opType;
     std::string opName; // Used if opType == OpType::FUSED
@@ -422,10 +423,10 @@ inline uint64_t countElements(const TensorNode &node)
 
 struct TensorView
 {
-private:
+  private:
     std::vector<uint32_t> shape;
 
-public:
+  public:
     uint64_t offset = 0;           // Offset into the MemoryManager's DeviceBuffer
     std::vector<uint64_t> strides; // Strides in terms of elements, not bytes
     DType dtype;
@@ -505,56 +506,54 @@ struct GraphPatternCacheKey
 
 namespace std
 {
-    template <>
-    struct hash<GraphPatternCacheKey>
+template <> struct hash<GraphPatternCacheKey>
+{
+    uint64_t operator()(const GraphPatternCacheKey &k) const noexcept
     {
-        uint64_t operator()(const GraphPatternCacheKey &k) const noexcept
+        uint64_t h = 0;
+        auto combine = [&](uint64_t val) { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
+
+        combine(static_cast<uint64_t>(k.pOpType));
+        if (!k.pOpName.empty())
+            combine(std::hash<std::string>()(k.pOpName));
+        combine(static_cast<uint64_t>(k.reference_only));
+        combine(static_cast<uint64_t>(k.ignore_output_mem_space));
+        combine(static_cast<uint64_t>(k.ignore_input_mem_spaces));
+        combine(static_cast<uint64_t>(k.ignore_engines));
+
+        if (!k.ignore_output_mem_space)
+            combine(std::hash<MemSpace>()(k.output_mem_space));
+
+        if (!k.ignore_engines)
         {
-            uint64_t h = 0;
-            auto combine = [&](uint64_t val)
-            { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
-
-            combine(static_cast<uint64_t>(k.pOpType));
-            if (!k.pOpName.empty())
-                combine(std::hash<std::string>()(k.pOpName));
-            combine(static_cast<uint64_t>(k.reference_only));
-            combine(static_cast<uint64_t>(k.ignore_output_mem_space));
-            combine(static_cast<uint64_t>(k.ignore_input_mem_spaces));
-            combine(static_cast<uint64_t>(k.ignore_engines));
-
-            if (!k.ignore_output_mem_space)
-                combine(std::hash<MemSpace>()(k.output_mem_space));
-
-            if (!k.ignore_engines)
+            for (const auto &eng : k.engines)
             {
-                for (const auto &eng : k.engines)
-                {
-                    combine(static_cast<uint64_t>(eng.idx));
-                    combine(static_cast<uint64_t>(eng.type));
-                }
+                combine(static_cast<uint64_t>(eng.idx));
+                combine(static_cast<uint64_t>(eng.type));
             }
-
-            for (uint64_t i = 0; i < k.inputs.size(); ++i)
-            {
-                if (!k.ignore_input_mem_spaces && i < k.input_mem_spaces.size())
-                    combine(std::hash<MemSpace>()(k.input_mem_spaces[i]));
-                auto &in = k.inputs[i];
-                combine(static_cast<uint64_t>(in.dtype));
-                for (auto s : in.getShape())
-                    combine(static_cast<uint64_t>(s));
-                for (auto s : in.strides)
-                    combine(static_cast<uint64_t>(s));
-            }
-
-            combine(static_cast<uint64_t>(k.output.dtype));
-            for (auto s : k.output.getShape())
-                combine(static_cast<uint64_t>(s));
-            for (auto s : k.output.strides)
-                combine(static_cast<uint64_t>(s));
-
-            return h;
         }
-    };
+
+        for (uint64_t i = 0; i < k.inputs.size(); ++i)
+        {
+            if (!k.ignore_input_mem_spaces && i < k.input_mem_spaces.size())
+                combine(std::hash<MemSpace>()(k.input_mem_spaces[i]));
+            auto &in = k.inputs[i];
+            combine(static_cast<uint64_t>(in.dtype));
+            for (auto s : in.getShape())
+                combine(static_cast<uint64_t>(s));
+            for (auto s : in.strides)
+                combine(static_cast<uint64_t>(s));
+        }
+
+        combine(static_cast<uint64_t>(k.output.dtype));
+        for (auto s : k.output.getShape())
+            combine(static_cast<uint64_t>(s));
+        for (auto s : k.output.strides)
+            combine(static_cast<uint64_t>(s));
+
+        return h;
+    }
+};
 } // namespace std
 
 inline void tg_serialize(BinaryWriter &bw, const LogicalId &val)
@@ -797,8 +796,7 @@ inline std::string encodeRegion(const Region &r)
 
 inline std::vector<Region> normalizeRegions(std::vector<Region> regions)
 {
-    std::sort(regions.begin(), regions.end(), [](const Region &a, const Region &b)
-              {
+    std::sort(regions.begin(), regions.end(), [](const Region &a, const Region &b) {
         if (a.region.size() != b.region.size())
             return a.region.size() < b.region.size();
         for (uint64_t i = 0; i < a.region.size(); ++i)
@@ -808,11 +806,11 @@ inline std::vector<Region> normalizeRegions(std::vector<Region> regions)
             if (a.region[i].stop != b.region[i].stop)
                 return a.region[i].stop < b.region[i].stop;
         }
-        return false; });
+        return false;
+    });
 
     regions.erase(std::unique(regions.begin(), regions.end(),
-                              [](const Region &a, const Region &b)
-                              { return regionsMatch(a, b); }),
+                              [](const Region &a, const Region &b) { return regionsMatch(a, b); }),
                   regions.end());
     return regions;
 }
@@ -854,8 +852,7 @@ inline uint64_t getSizeBytes(const std::vector<uint32_t> &shape,
     return countElements(shape) * getDTypeSize(dtype);
 }
 
-template <typename T>
-inline std::string toString(const std::vector<T> &vec)
+template <typename T> inline std::string toString(const std::vector<T> &vec)
 {
     std::stringstream ss;
     ss << "[";
@@ -1071,14 +1068,14 @@ inline std::ostream &operator<<(std::ostream &os, EngineType engine_type)
     return os << toString(engine_type);
 }
 
-std::string toString(const MemSpace &mem_space)
+inline std::string toString(const MemSpace &mem_space)
 {
     std::stringstream ss;
     ss << "MemSpace(idx=" << mem_space.idx << ", type=" << mem_space.type << ")";
     return ss.str();
 }
 
-std::string toString(const Engine &engine)
+inline std::string toString(const Engine &engine)
 {
     std::stringstream ss;
     ss << "Engine(idx=" << engine.idx << ", type=" << engine.type << ")";
@@ -1096,7 +1093,7 @@ inline std::ostream &operator<<(std::ostream &os, Engine engine)
 
 class SHA256
 {
-private:
+  private:
     uint32_t state[8];
     uint64_t bitlen;
     uint8_t data[64];
@@ -1177,7 +1174,7 @@ private:
         state[7] += h;
     }
 
-public:
+  public:
     SHA256()
     {
         state[0] = 0x6a09e667;

@@ -501,6 +501,10 @@ def compile_project(targets=None):
             run_cmd(cmd)
 
             cmd = [nvcc] + [main_obj, cuda_obj, "-o", out_name]
+            if os.name == "nt":
+                cmd.extend(["-L./OpenCL-SDK/install/lib", "-lOpenCL"])
+            else:
+                cmd.append("-lOpenCL")
             if os.name == "nt" and DEBUG_MODE:
                 cmd.append("-g")
             result = run_cmd(cmd)

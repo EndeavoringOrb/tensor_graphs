@@ -2,10 +2,10 @@
 
 #ifndef TG_OS_WINDOWS
 
-#include <unistd.h>
 #include <cerrno>
 #include <cstring>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "core/kernels.hpp"
@@ -54,11 +54,7 @@ inline void runCopyTo_STORAGE_CPU_POSIX(const KernelContext &ctx)
 }
 
 REGISTER_REF_KERNEL(OpType::COPY_TO, 1, 1, matchCopyTo_STORAGE_CPU_POSIX, runCopyTo_STORAGE_CPU_POSIX,
-                    MemSpace(1, HandleType::CPP),
-                    {Engine(0, EngineType::CPU)},
-                    {DType::ANY},
-                    {{8, 32}},
-                    {true},
+                    MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {true},
                     {{MemSpace(0, HandleType::STORAGE)}});
 
 #endif // !TG_OS_WINDOWS

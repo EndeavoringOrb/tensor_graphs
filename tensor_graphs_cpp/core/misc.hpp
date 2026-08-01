@@ -7,7 +7,7 @@
 #include "core/timer.hpp"
 #include "core/types.hpp"
 
-bool overlapsBuf(const ParallelBuffer &a, const ParallelBuffer &b)
+inline bool overlapsBuf(const ParallelBuffer &a, const ParallelBuffer &b)
 {
     ParallelBuffer x = a, y = b;
     if (y.start < x.start)
