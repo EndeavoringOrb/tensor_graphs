@@ -19,6 +19,7 @@ dependencies = [
     "safetensors",
     "hf_xet",
     "rich>=15.0.0",
+    "ruff>=0.16.1",
 ]
 
 [tool.setuptools.packages.find]
