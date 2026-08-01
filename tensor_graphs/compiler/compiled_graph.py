@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Callable, Any, Optional
-from ..ir.node import TensorNode
+from typing import Any, Callable, Dict, List, Optional
+
+from ..backend.registry import KernelRegistry
 from ..ir.dtypes import Backend
 from ..ir.graph import graph_to_json
-from ..backend.registry import KernelRegistry
+from ..ir.node import TensorNode
 
 
 @dataclass

@@ -1,11 +1,13 @@
-import time
-import numpy as np
 import json
-from typing import Dict, Any, List
-from ..ir.node import TensorNode
-from ..ir.dtypes import DType
-from ..ops.atomic_types import OpType
+import time
+from typing import Any, Dict, List
+
+import numpy as np
+
 from ..backend.executor import Executor
+from ..ir.dtypes import DType
+from ..ir.node import TensorNode
+from ..ops.atomic_types import OpType
 from .db import BenchmarkDB
 from .env import EnvironmentSniffer
 

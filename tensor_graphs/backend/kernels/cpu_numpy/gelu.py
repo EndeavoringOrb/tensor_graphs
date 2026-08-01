@@ -1,7 +1,8 @@
 import numpy as np
-from ...registry import KernelRegistry
+
 from ....ir.dtypes import DType, TensorSignature
 from ....ops.fused.gelu import gelu_decomposition
+from ...registry import KernelRegistry
 
 
 # --- GELU ---

@@ -1,37 +1,38 @@
 import copy
-from typing import Dict, Optional, List, Any
-from dataclasses import dataclass, field
 import itertools
-from tqdm import tqdm
-import torch  # Import torch to check for CUDA availability
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
-from ..ir.node import TensorNode
-from ..ir.dtypes import Backend, TensorSignature
-from ..ir.hashing import get_structural_hash
-from ..benchmark.db import BenchmarkDB
-from .cost_model import CostModel
+import torch  # Import torch to check for CUDA availability
+from tqdm import tqdm
+
 from ..backend.registry import KernelRegistry
-from ..ops.registry import get_reference_factory
-from ..ops.atomic_types import OpType
-from ..ir.graph import topological_sort
-from .propagation import GraphPropagator
+from ..benchmark.db import BenchmarkDB
 from ..config import DEBUG_EXECUTION, PLANNER_BEAM_WIDTH
-from .compiled_graph import CompiledGraph, OpInstruction
 from ..ir.buffer import StorageType
+from ..ir.dtypes import Backend, TensorSignature
+from ..ir.graph import topological_sort
+from ..ir.hashing import get_structural_hash
+from ..ir.node import TensorNode
 from ..ir.rewrite import (
+    AssociativeRule,
     CommutativeRule,
     DistributiveRule,
-    FactoringRule,
-    AssociativeRule,
-    DoubleNegationRule,
-    NegateAddRule,
-    DivMulRule,
     DivAddRule,
-    ExpAddRule,
+    DivMulRule,
+    DoubleNegationRule,
     ExpAddReverseRule,
+    ExpAddRule,
+    FactoringRule,
+    NegateAddRule,
     generate_all_equivalents,
     match_pattern,
 )
+from ..ops.atomic_types import OpType
+from ..ops.registry import get_reference_factory
+from .compiled_graph import CompiledGraph, OpInstruction
+from .cost_model import CostModel
+from .propagation import GraphPropagator
 
 
 @dataclass

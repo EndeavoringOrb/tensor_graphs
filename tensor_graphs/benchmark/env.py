@@ -1,7 +1,8 @@
-import platform
-import psutil
 import importlib.metadata
-from typing import Dict, Any
+import platform
+from typing import Any, Dict
+
+import psutil
 
 
 class EnvironmentSniffer:

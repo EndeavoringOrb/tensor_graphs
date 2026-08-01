@@ -1,8 +1,9 @@
 # tensor_graphs/backend/kernels/cpu_numpy/rms_norm.py
 import numpy as np
-from ...registry import KernelRegistry
-from ....ir.dtypes import DType, TensorSignature, Backend
+
+from ....ir.dtypes import Backend, DType, TensorSignature
 from ....ops.fused.rms_norm import rms_norm_decomposition
+from ...registry import KernelRegistry
 
 
 @KernelRegistry.register(

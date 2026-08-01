@@ -1,11 +1,13 @@
 import os
-import torch
 from typing import Any, cast
+
+import torch
 from torch.utils.cpp_extension import load
-from ...registry import KernelRegistry
-from ....ir.dtypes import DType, TensorSignature, Backend, KernelUnavailableError
+
+from ....ir.dtypes import Backend, DType, KernelUnavailableError, TensorSignature
 from ....ops.atomic.dot import dot_ref
 from ....ops.atomic_types import OpType
+from ...registry import KernelRegistry
 
 # JIT Compile
 _CUR_DIR = os.path.dirname(os.path.abspath(__file__))

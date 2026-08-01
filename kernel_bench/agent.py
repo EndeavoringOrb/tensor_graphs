@@ -1,7 +1,8 @@
 # File: kernel_bench/agent.py
 import json
-import time
 import threading
+import time
+
 import requests
 
 BENCH_API_URL = "http://127.0.0.1:8080"
@@ -170,7 +171,7 @@ class WorkerAgent(threading.Thread):
                 res = requests.post(url, json=json_data)
             return res.json()
         except Exception as e:
-            return {"error": f"Failed to reach Benchmark API: {str(e)}"}
+            return {"error": f"Failed to reach Benchmark API: {e!s}"}
 
     def handle_tool_call(self, tool_call):
         name = tool_call["function"]["name"]

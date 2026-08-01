@@ -809,10 +809,9 @@ class Qwen3_6_35B_A3B_Model
         LogicalId q_sum = g.sum(q_sq, g.constant({1}, &ax_neg1, DType::INT32));
         LogicalId q_std = g.pow(g.add(q_sum, expand_scalar_to_4d(1e-6f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1)),
                                 expand_scalar_to_4d(0.5f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1));
-        LogicalId q_norm =
-            g.mul(q_heads_exp,
-                  g.repeat(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), q_std),
-                                 (int32_t)cfg.linear_head_dim, 3));
+        LogicalId q_norm = g.mul(
+            q_heads_exp, g.repeat(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), q_std),
+                                  (int32_t)cfg.linear_head_dim, 3));
 
         float scale_factor = 1.0f / std::sqrt((float)cfg.linear_head_dim);
         q_norm = g.mul(q_norm, expand_scalar_to_4d(scale_factor, 1, (int32_t)cfg.linear_n_v_heads, seq_len,
@@ -822,10 +821,9 @@ class Qwen3_6_35B_A3B_Model
         LogicalId k_sum = g.sum(k_sq, g.constant({1}, &ax_neg1, DType::INT32));
         LogicalId k_std = g.pow(g.add(k_sum, expand_scalar_to_4d(1e-6f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1)),
                                 expand_scalar_to_4d(0.5f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1));
-        LogicalId k_norm =
-            g.mul(k_heads_exp,
-                  g.repeat(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), k_std),
-                                 (int32_t)cfg.linear_head_dim, 3));
+        LogicalId k_norm = g.mul(
+            k_heads_exp, g.repeat(g.div(expand_scalar_to_4d(1.0f, 1, (int32_t)cfg.linear_n_v_heads, seq_len, 1), k_std),
+                                  (int32_t)cfg.linear_head_dim, 3));
 
         // 5. Gated Delta Rule Recurrence Loop
         int32_t s_shape[] = {(int32_t)cfg.linear_n_v_heads, (int32_t)cfg.linear_head_dim, (int32_t)cfg.linear_head_dim};
@@ -882,8 +880,8 @@ class Qwen3_6_35B_A3B_Model
             LogicalId outer_prod = g.contiguous(g.dot(k_t_t, delta));
 
             // 4. Apply decay AND write in one expression: S = g*S + outer
-            LogicalId a_t_exp = g.repeat(g.repeat(a_t_flat, (int32_t)cfg.linear_head_dim, 1),
-                                               (int32_t)cfg.linear_head_dim, 2);
+            LogicalId a_t_exp =
+                g.repeat(g.repeat(a_t_flat, (int32_t)cfg.linear_head_dim, 1), (int32_t)cfg.linear_head_dim, 2);
             S = g.add(g.mul(S, a_t_exp), outer_prod);
 
             // 5. Read output from the fully updated state

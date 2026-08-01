@@ -1,8 +1,9 @@
 import numpy as np
+
 from ....backend.registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
-from ....ops.atomic_types import OpType
 from ....ops.atomic.cast import cast_ref
+from ....ops.atomic_types import OpType
 
 
 def _dtype_to_numpy(dtype_enum):

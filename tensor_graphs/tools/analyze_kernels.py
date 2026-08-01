@@ -4,10 +4,10 @@ Analyze kernel launch recordings from .jsonl files.
 Usage: python tensor_graphs/tools/analyze_kernels.py [file]
 """
 
-import json
 import argparse
-from pathlib import Path
+import json
 from collections import defaultdict
+from pathlib import Path
 
 
 def load_jsonl(filepath):

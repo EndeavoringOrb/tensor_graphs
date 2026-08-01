@@ -3,7 +3,7 @@
 # +memory counting
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Dict, Set
+from typing import Dict, List, Set
 
 
 @dataclass
@@ -222,8 +222,7 @@ def extract_all(egraph: EGraph, root_id: int, max_mem_size: int):
                 break
             else:
                 # exhausted this eclass
-                if current in selection_map:
-                    del selection_map[current]
+                selection_map.pop(current, None)
 
                 if current in to_process_enode:
                     to_process_enode.remove(current)

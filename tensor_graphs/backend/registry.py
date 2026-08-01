@@ -1,7 +1,8 @@
 # tensor_graphs/backend/registry.py
-from typing import Dict, List, Callable, Optional, Tuple
-from ..ir.dtypes import DType, TensorSignature, Backend
-from ..ops.registry import register_reference_factory, get_reference_factory
+from typing import Callable, Dict, List, Optional, Tuple
+
+from ..ir.dtypes import Backend, DType, TensorSignature
+from ..ops.registry import get_reference_factory, register_reference_factory
 
 # Backend, Input Signatures, Target DType, Inplace Flag, Kernel Function
 KernelEntry = Tuple[

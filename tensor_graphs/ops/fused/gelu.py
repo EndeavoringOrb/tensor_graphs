@@ -1,7 +1,8 @@
+import numpy as np
+
 from ...ir.node import TensorNode
 from ..atomic_types import OpType
 from ..registry import register_reference_factory
-import numpy as np
 from .tanh import tanh_decomposition
 
 

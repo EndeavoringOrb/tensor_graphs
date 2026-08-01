@@ -1,5 +1,6 @@
-from ..config import DEBUG_EXECUTION
 import time
+
+from ..config import DEBUG_EXECUTION
 
 
 class Timer:

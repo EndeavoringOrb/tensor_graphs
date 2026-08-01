@@ -122,8 +122,7 @@ struct Planner
     {
         constexpr float EPS = 1e-6f;
 
-        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool
-        {
+        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool {
             if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
                 return true;
             if (op == OpType::RESHAPE && inputIdx == 1)
@@ -236,8 +235,7 @@ struct Planner
                     {
                         if (refEntry && pGraph)
                         {
-                            auto traceToInputIdx = [&](LogicalId pid) -> int
-                            {
+                            auto traceToInputIdx = [&](LogicalId pid) -> int {
                                 LogicalId curr = pid;
                                 while (pGraph->hasNode(curr) && (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
                                                                  pGraph->getNode(curr).opType == OpType::CAST ||
@@ -416,16 +414,14 @@ struct Planner
         const uint64_t numCanonical = canonicalClasses.size();
         const uint64_t bitWords = numCanonical == 0 ? 0 : (numCanonical + 63) >> 6;
 
-        auto bitTest = [&](const std::vector<uint64_t> &bits, EClassId e_class_id) -> bool
-        {
+        auto bitTest = [&](const std::vector<uint64_t> &bits, EClassId e_class_id) -> bool {
             uint32_t idx = classToBitIdx[e_class_id.value];
             if (idx == UINT32_MAX || bits.empty())
                 return false;
             return (bits[idx >> 6] >> (idx & 63)) & 1ULL;
         };
 
-        auto bitSet = [&](std::vector<uint64_t> &bits, EClassId e_class_id)
-        {
+        auto bitSet = [&](std::vector<uint64_t> &bits, EClassId e_class_id) {
             uint32_t idx = classToBitIdx[e_class_id.value];
             if (idx != UINT32_MAX && !bits.empty())
             {
@@ -709,8 +705,7 @@ struct Planner
         for (EClassId e_class_id : canonicalClasses)
         {
             EClass &cls = egraph.getEClass(e_class_id);
-            std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b)
-                      {
+            std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b) {
                 float costA = optimisticEnodeDagCost[a.value];
                 float costB = optimisticEnodeDagCost[b.value];
 
@@ -718,7 +713,8 @@ struct Planner
                     return true;
                 if (costA > costB)
                     return false;
-                return a < b; });
+                return a < b;
+            });
         }
 
         if (egraph.getEClass(rootEClassId).enodes.size() == 0)
@@ -892,7 +888,7 @@ struct Planner
                 enodeInfos[egraph.getEClass(pair.first).enodes[best_selection_map.at(pair.first)].value].cost;
         }
         ExtractionResult result = {best_selection_map, best_order, best_buffers,
-                                   best_eclass_to_buf, best_cost, best_eclass_to_cost};
+                                   best_eclass_to_buf, best_cost,  best_eclass_to_cost};
         std::cout << "best_cost=" << std::to_string(best_cost) << std::endl;
 
         return result;
@@ -1245,8 +1241,7 @@ struct Planner
         eclassToLogical[E_Cache] = logicalId;
         EClassId current_E = E_Cache;
 
-        auto addConst = [&](const std::vector<int32_t> &vals)
-        {
+        auto addConst = [&](const std::vector<int32_t> &vals) {
             return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
         };
 

@@ -1,8 +1,9 @@
+import numpy as np
+
+from ...ir.dtypes import DType
 from ...ir.node import TensorNode
 from ..atomic_types import OpType
 from ..registry import register_reference_factory
-import numpy as np
-from ...ir.dtypes import DType
 
 
 def rope_2d_consecutive_decomposition(inputs, attrs={}):

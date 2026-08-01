@@ -1,7 +1,8 @@
 # File: utils/binary.py
-import torch
-import struct
 import os
+import struct
+
+import torch
 
 OP_TYPES = [
     "INPUT",

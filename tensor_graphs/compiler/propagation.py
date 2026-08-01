@@ -12,19 +12,20 @@ the reference factory is used to decompose it into a subgraph, and propagation
 recurses through that subgraph.
 """
 
-from typing import Dict, List, Tuple, Optional, Callable, Any, NamedTuple
 import math
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+
 import numpy as np
+from line_profiler import profile
 from tqdm import tqdm
 
-from ..ir.node import TensorNode
-from ..ir.dtypes import DType, TensorSignature, Backend
+from ..backend.registry import KernelRegistry
+from ..config import DEBUG_DETAILED, DEBUG_EXECUTION, USE_CONTIGUOUS_APPROXIMATION
+from ..ir.dtypes import Backend, DType, TensorSignature
 from ..ir.graph import topological_sort
+from ..ir.node import TensorNode
 from ..ops.atomic_types import OpType
 from ..ops.registry import get_reference_factory
-from ..backend.registry import KernelRegistry
-from ..config import DEBUG_EXECUTION, DEBUG_DETAILED, USE_CONTIGUOUS_APPROXIMATION
-from line_profiler import profile
 
 # ---------------------------------------------------------------------------
 # Types
@@ -114,9 +115,7 @@ def _broadcast_shapes(
     for d1, d2 in zip(s1, s2):
         if d1 == 1:
             out_shape.append(d2)
-        elif d2 == 1:
-            out_shape.append(d1)
-        elif d1 == d2:
+        elif d2 == 1 or d1 == d2:
             out_shape.append(d1)
         elif d1 is None or d2 is None:
             out_shape.append(None)
@@ -247,9 +246,9 @@ class GraphPropagator:
                 return computed_values[node.name]
             if node.op_type == OpType.CONSTANT:
                 val = node.attrs.get("value")
-                if isinstance(val, (int, float, bool)):
-                    val = np.array(val)
-                elif isinstance(val, (list, tuple)):
+                if isinstance(val, (int, float, bool)) or isinstance(
+                    val, (list, tuple)
+                ):
                     val = np.array(val)
                 computed_values[node.name] = val
                 return val

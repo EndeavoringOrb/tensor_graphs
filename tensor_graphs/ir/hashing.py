@@ -1,7 +1,9 @@
 import hashlib
 import json
-import numpy as np
 from typing import Any
+
+import numpy as np
+
 from ..ops.atomic_types import OpType
 
 

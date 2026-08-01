@@ -1,8 +1,9 @@
 import numpy as np
+
 from ....backend.registry import KernelRegistry
-from ....ir.dtypes import DType, Backend, TensorSignature
-from ....ops.atomic_types import OpType
+from ....ir.dtypes import Backend, DType, TensorSignature
 from ....ops.atomic.exp import exp_ref
+from ....ops.atomic_types import OpType
 
 
 @KernelRegistry.register(

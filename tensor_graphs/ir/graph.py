@@ -1,12 +1,13 @@
-from .node import TensorNode
-from .dtypes import DType
-from ..ops.atomic_types import OpType
-from .buffer import StorageType
-import numpy as np
-from typing import Set, Dict, List, Optional
-from .dtypes import Backend
 import json
 from enum import Enum
+from typing import Dict, List, Optional, Set
+
+import numpy as np
+
+from ..ops.atomic_types import OpType
+from .buffer import StorageType
+from .dtypes import Backend, DType
+from .node import TensorNode
 
 
 def topological_sort(root: TensorNode) -> List[TensorNode]:
@@ -39,8 +40,8 @@ def normalize_graph(root: TensorNode):
     Recursively normalizes the graph in-place by sorting commutative inputs (Add, Mul)
     based on their structural hashes.
     """
-    from .hashing import get_structural_hash
     from ..ops.atomic_types import OpType
+    from .hashing import get_structural_hash
 
     visited = set()
 
@@ -66,8 +67,8 @@ def find_subgraph(large_graph: TensorNode, subgraph: TensorNode) -> List[TensorN
     Finds all nodes in large_graph that are roots of a subgraph structurally
     identical to 'subgraph'.
     """
-    from .hashing import get_structural_hash
     from .graph import topological_sort
+    from .hashing import get_structural_hash
 
     sub_hash = get_structural_hash(subgraph)
     matches = []

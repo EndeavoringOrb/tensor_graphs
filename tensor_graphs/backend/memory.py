@@ -1,11 +1,13 @@
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 import torch
-from typing import Dict, Optional, List, Tuple, Any
-from dataclasses import dataclass
+
+from ..config import DEBUG_DETAILED, DEBUG_EXECUTION
 from ..ir.buffer import StorageType
-from ..ir.node import TensorNode
 from ..ir.dtypes import DType, get_buffer_size, get_size_bytes
-from ..config import DEBUG_EXECUTION, DEBUG_DETAILED
+from ..ir.node import TensorNode
 
 DEBUG = DEBUG_EXECUTION and DEBUG_DETAILED
 

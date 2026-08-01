@@ -1,10 +1,12 @@
-import numpy as np
 import random
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
-from ..ir.dtypes import DType, Backend, TensorSignature
-from ..ops.atomic_types import OpType
+
+from ..ir.dtypes import Backend, DType, TensorSignature
 from ..ir.node import TensorNode
+from ..ops.atomic_types import OpType
 
 
 class DataGenerator:

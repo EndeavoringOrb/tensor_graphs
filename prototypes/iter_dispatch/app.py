@@ -1,11 +1,11 @@
-from flask import Flask, render_template, jsonify
-from pydantic import TypeAdapter
 from collections import defaultdict
 
-from algos.core import Node, Buffer
-from algos.iter_dispatch import iter_dispatch_orders, graphs
 from algos.bufferize import bufferize
+from algos.core import Buffer, Node
+from algos.iter_dispatch import graphs, iter_dispatch_orders
 from algos.malloc import malloc
+from flask import Flask, jsonify, render_template
+from pydantic import TypeAdapter
 
 app = Flask(__name__)
 

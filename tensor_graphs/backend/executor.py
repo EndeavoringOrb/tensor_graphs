@@ -1,26 +1,28 @@
-import numpy as np
-import time
-from typing import Dict, Any, List, Tuple, Optional
+import json
 import math
+import os
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+from line_profiler import profile
+from tqdm import tqdm
+
 from ..compiler.compiled_graph import CompiledGraph
+from ..compiler.dirty_propagation import DirtyPropagator
+from ..config import (
+    DEBUG_DETAILED,
+    DEBUG_EXECUTION,
+    RECORD_KERNEL_LAUNCHES,
+    RECORD_KERNEL_LAUNCHES_FOLDER,
+)
 from ..ir.buffer import StorageType
 from ..ir.dtypes import get_buffer_size
 from ..ir.graph import GraphEncoder
 from ..ops import OpType
-from ..compiler.dirty_propagation import DirtyPropagator
-from .memory import MemoryManager
-from ..config import (
-    DEBUG_EXECUTION,
-    DEBUG_DETAILED,
-    RECORD_KERNEL_LAUNCHES,
-    RECORD_KERNEL_LAUNCHES_FOLDER,
-)
 from ..tools.timer import Timer
-from tqdm import tqdm
-import os
-import json
-from datetime import datetime
-from line_profiler import profile
+from .memory import MemoryManager
 
 
 class Executor:

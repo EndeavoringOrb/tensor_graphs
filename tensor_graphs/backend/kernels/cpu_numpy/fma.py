@@ -1,6 +1,6 @@
-from ...registry import KernelRegistry
 from ....ir.dtypes import DType, TensorSignature
 from ....ops.fused.fma import fma_decomposition
+from ...registry import KernelRegistry
 
 
 @KernelRegistry.register(

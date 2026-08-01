@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-import os
 import argparse
 import json
+import os
 import re
 import struct
-from binary import load_cache_file, BinaryReader
+
+from binary import BinaryReader, load_cache_file
 
 
 def _format_constants(raw_bytes, dtype):

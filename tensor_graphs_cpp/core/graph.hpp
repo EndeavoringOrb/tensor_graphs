@@ -578,19 +578,35 @@ struct Graph
     }
 
     // Higher level stuff
-    LogicalId repeat(LogicalId id, uint32_t repeats, uint32_t axis)
+    LogicalId repeat(LogicalId id, uint32_t repeats, uint32_t axis,
+                     std::source_location loc = std::source_location::current())
     {
         if (repeats <= 1)
             return id;
         int32_t r = repeats, a = axis;
-        return repeat(id, constant({1}, &r, DType::INT32), constant({1}, &a, DType::INT32));
+        return repeat(id, constant({1}, &r, DType::INT32), constant({1}, &a, DType::INT32), loc);
     }
 
-    LogicalId fill(const LogicalId scalar_id, const std::vector<uint32_t> &shape)
+    LogicalId fill(const LogicalId scalar_id, const std::vector<uint32_t> &shape,
+                   std::source_location loc = std::source_location::current())
     {
         std::vector<int32_t> shape_int(shape.begin(), shape.end());
         LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
-        return fill(scalar_id, shape_node);
+        return fill(scalar_id, shape_node, loc);
+    }
+
+    LogicalId fill(const float value, const std::vector<uint32_t> &shape,
+                   std::source_location loc = std::source_location::current())
+    {
+        std::vector<int32_t> shape_int(shape.begin(), shape.end());
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
+        return fill(constant({1}, &value, DType::FLOAT32), shape_node, loc);
+    }
+
+    LogicalId concat(std::vector<LogicalId> ids, uint32_t axis,
+                     std::source_location loc = std::source_location::current())
+    {
+        return concat(ids, constant({1}, &axis, DType::INT32), loc);
     }
 };
 

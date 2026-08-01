@@ -611,7 +611,7 @@ class JinaV5OmniNanoRetrievalModel
 
         w_pos_2d = g.reshape(w_pos, g.constant({2}, sh_S_1, DType::INT32));
         LogicalId w_pos_exp = g.repeat(w_pos_2d, quarter, 1);
-        LogicalId invf_w_exp = g.repeat(invf_2d, S, 0);   // SAME inv_freq
+        LogicalId invf_w_exp = g.repeat(invf_2d, S, 0);    // SAME inv_freq
         LogicalId angles_w = g.mul(w_pos_exp, invf_w_exp); // (S, quarter)
 
         // ---- angles = cat([angles_h, angles_w], -1)  (S, half)

@@ -1,7 +1,6 @@
-from . import rms_norm
-from . import dot
+from . import dot, rms_norm
 
 __all__ = [
-    "rms_norm",
     "dot",
+    "rms_norm",
 ]

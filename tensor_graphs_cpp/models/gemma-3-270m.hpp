@@ -19,7 +19,7 @@ struct Gemma3ModelConfig
 
 class Gemma3Model
 {
-private:
+  private:
     Gemma3ModelConfig cfg;
     Graph &g;
     MemoryManager &mem;
@@ -30,7 +30,7 @@ private:
     LogicalId eps_fp32;
     LogicalId half_fp32;
 
-public:
+  public:
     Gemma3Model(Gemma3ModelConfig config, uint32_t sequence_length, Graph &graph, MemoryManager &memory,
                 const std::string &weight_path)
         : cfg(config), g(graph), mem(memory), w_path(weight_path), eps(1e-6f), seq_len(sequence_length)
@@ -212,13 +212,12 @@ public:
     }
 
     std::tuple<LogicalId, LogicalId, LogicalId> attention_qkv_atomic(LogicalId x, const std::string &prefix,
-                                   LogicalId rope_cos, LogicalId rope_sin)
+                                                                     LogicalId rope_cos, LogicalId rope_sin)
     {
         int32_t perm_dims[] = {1, 0};
         LogicalId dims_node = g.constant({2}, perm_dims, DType::INT32);
 
-        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
-        {
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d) {
             LogicalId w = weight(w_path, prefix + suffix);
             LogicalId w_t = g.permute(w, dims_node);
             w_t = g.contiguous(w_t);
@@ -333,8 +332,7 @@ public:
         int32_t perm_dims[] = {1, 0};
         LogicalId p_node = g.constant({2}, perm_dims, DType::INT32);
 
-        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d)
-        {
+        auto project = [&](const std::string &suffix, uint32_t in_d, uint32_t out_d) {
             LogicalId w = weight(w_path, prefix + suffix);
             LogicalId w_t = g.permute(w, p_node);
             w_t = g.contiguous(w_t);
@@ -358,8 +356,7 @@ public:
         LogicalId w_emb = weight(w_path, "model.embed_tokens.weight");
         LogicalId x = g.gather(w_emb, input_ids_id);
         float scale_val = std::sqrt((float)cfg.emb_dim);
-        LogicalId scale_node =
-            g.fill(g.constant({1}, &scale_val, DType::FLOAT32), {1, seq_len, cfg.emb_dim});
+        LogicalId scale_node = g.fill(g.constant({1}, &scale_val, DType::FLOAT32), {1, seq_len, cfg.emb_dim});
         x = g.mul(x, scale_node);
 
         auto rope = compute_rope();

@@ -1,8 +1,10 @@
-from .node import TensorNode
-from ..ops.atomic_types import OpType
-from typing import List, Set, Dict
-from .hashing import get_pattern_hash
+from typing import Dict, List, Set
+
 import numpy as np
+
+from ..ops.atomic_types import OpType
+from .hashing import get_pattern_hash
+from .node import TensorNode
 
 
 class RewriteRule:

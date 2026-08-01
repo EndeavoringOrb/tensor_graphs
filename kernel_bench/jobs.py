@@ -1,12 +1,12 @@
 # kernel_bench/jobs.py
 import json
 import os
+import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
-import re
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,19 +38,17 @@ report_lock = threading.Lock()
 
 
 def save_report(report_data):
-    with report_lock:
-        with open(REPORTS_FILE, "a") as f:
-            f.write(json.dumps(report_data) + "\n")
+    with report_lock, open(REPORTS_FILE, "a") as f:
+        f.write(json.dumps(report_data) + "\n")
 
 
 def load_reports():
     reports = []
     if REPORTS_FILE.exists():
-        with report_lock:
-            with open(REPORTS_FILE, "r") as f:
-                for line in f:
-                    if line.strip():
-                        reports.append(json.loads(line))
+        with report_lock, open(REPORTS_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    reports.append(json.loads(line))
     return list(reversed(reports))
 
 

@@ -1,8 +1,9 @@
 # tensor_graphs/weights/safetensors_source.py
 import os
+from typing import Any, Dict, List, Tuple
+
 import torch
 from safetensors import safe_open
-from typing import Any, Tuple, List, Dict
 
 from .interface import WeightSource
 

@@ -1,5 +1,5 @@
-from .iter_dispatch import MemSpace, Handle
 from .bufferize import Buffer, overlaps
+from .iter_dispatch import Handle, MemSpace
 
 
 def test_overlaps():

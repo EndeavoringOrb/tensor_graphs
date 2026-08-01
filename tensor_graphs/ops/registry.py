@@ -1,4 +1,5 @@
-from typing import Dict, Any, Callable, Optional, List
+from typing import Any, Callable, Dict, List, Optional
+
 from ..ir.node import TensorNode
 
 # Maps OpType (str) -> Reference Factory Function

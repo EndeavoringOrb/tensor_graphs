@@ -1,8 +1,9 @@
 import numpy as np
+
 from ....backend.registry import KernelRegistry
-from ....ir.dtypes import DType, TensorSignature, Backend
-from ....ops.atomic_types import OpType
+from ....ir.dtypes import Backend, DType, TensorSignature
 from ....ops.atomic.im2col import im2col_ref
+from ....ops.atomic_types import OpType
 
 
 def _im2col_indices(x_shape, kernel_size, stride, padding):

@@ -1,23 +1,25 @@
 # tensor_graphs/tools/bench_kernels.py
-import json
 import glob
+import json
 import os
 import time
+from collections import defaultdict
+
 import numpy as np
 import torch
-from collections import defaultdict
+
 from tensor_graphs.backend.registry import KernelRegistry
-from tensor_graphs.benchmark.db import BenchmarkDB
 from tensor_graphs.benchmark.data_gen import DataGenerator
+from tensor_graphs.benchmark.db import BenchmarkDB
+from tensor_graphs.compiler.propagation import GraphPropagator
+from tensor_graphs.config import RECORD_KERNEL_LAUNCHES_FOLDER
 from tensor_graphs.ir.dtypes import (
-    KernelUnavailableError,
     Backend,
     DType,
+    KernelUnavailableError,
     TensorSignature,
 )
 from tensor_graphs.ir.node import TensorNode
-from tensor_graphs.compiler.propagation import GraphPropagator
-from tensor_graphs.config import RECORD_KERNEL_LAUNCHES_FOLDER
 from tensor_graphs.ops.atomic_types import OpType
 
 

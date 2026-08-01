@@ -1,15 +1,16 @@
+import argparse
 import json
 import struct
-import argparse
-from tqdm import tqdm
 from pathlib import Path
+
 from huggingface_hub import (
     HfApi,
-    hf_hub_download,
-    get_token,
     ModelInfo,
     get_safetensors_metadata,
+    get_token,
+    hf_hub_download,
 )
+from tqdm import tqdm
 
 
 def format_size(size_bytes):

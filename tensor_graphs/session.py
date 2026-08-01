@@ -1,22 +1,24 @@
-from typing import Dict, Any, Optional, Union, List
-from .ir.node import TensorNode
-from .compiler.planner import Planner
-from .compiler.compiled_graph import CompiledGraph
+import itertools
+import json
+import os
+from typing import Any, Dict, List, Optional, Union
+
+import numpy as np
+from tqdm import tqdm
+
 from .backend.executor import Executor
 from .backend.memory import MemoryManager
-from .ir.graph import topological_sort, GraphEncoder
-from .ops.atomic_types import OpType
+from .backend.registry import KernelRegistry
+from .compiler.compiled_graph import CompiledGraph
+from .compiler.dirty_propagation import DirtyPropagator
+from .compiler.planner import Planner
+from .compiler.propagation import GraphPropagator
 from .config import DEBUG_EXECUTION
 from .ir.dtypes import Backend, TensorSignature
+from .ir.graph import GraphEncoder, topological_sort
+from .ir.node import TensorNode
+from .ops.atomic_types import OpType
 from .weights import SafetensorsSource, WeightSource
-from .compiler.dirty_propagation import DirtyPropagator
-from .compiler.propagation import GraphPropagator
-from .backend.registry import KernelRegistry
-import os
-import json
-import itertools
-from tqdm import tqdm
-import numpy as np
 
 
 class GraphSession:

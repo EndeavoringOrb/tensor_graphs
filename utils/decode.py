@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-import sys
-import os
 import argparse
+import os
+import sys
 
 
 def load_tokenizer(model_name_or_path: str):
@@ -119,7 +119,7 @@ def main():
         output_text = tokenizer.decode(args.tokens)
         print(f"Tokens to decode: {args.tokens}")
         print(
-            f"Decoded Text: {repr(output_text)}"
+            f"Decoded Text: {output_text!r}"
         )  # repr() helps visually identify newlines (\n) or trailing spaces
     except Exception as e:
         print(f"Error decoding tokens: {e}", file=sys.stderr)
@@ -132,12 +132,12 @@ def main():
                 decoded_tok = tokenizer.decode([tok], skip_special_tokens=False)
             else:
                 decoded_tok = tokenizer.decode([tok], False)
-            print(f"  {tok} = {repr(decoded_tok)}")
+            print(f"  {tok} = {decoded_tok!r}")
         except Exception as e:
             print(f"  {tok} = <Error decoding: {e}>")
 
     # 5. Encode the test text
-    print(f"\nEncoding test text: {repr(args.text)}")
+    print(f"\nEncoding test text: {args.text!r}")
     try:
         encoded_obj = tokenizer.encode(args.text)
         # Check if the returned object has an .ids attribute (native Tokenizer)

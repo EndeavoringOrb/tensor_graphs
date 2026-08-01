@@ -1,9 +1,10 @@
 # tensor_graphs/backend/kernels/cpu_numpy/add.py
 import numpy as np
+
 from ....backend.registry import KernelRegistry
-from ....ir.dtypes import DType, TensorSignature, Backend
-from ....ops.atomic_types import OpType
+from ....ir.dtypes import Backend, DType, TensorSignature
 from ....ops.atomic.add import add_ref
+from ....ops.atomic_types import OpType
 
 
 @KernelRegistry.register(

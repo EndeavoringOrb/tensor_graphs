@@ -1,5 +1,7 @@
-from typing import Tuple, Optional, List, Any
+from typing import Any, List, Optional, Tuple
+
 import numpy as np
+
 from ..ir.node import TensorNode
 from .propagation import GraphPropagator
 

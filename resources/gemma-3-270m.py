@@ -12,7 +12,7 @@ for p in pkgs:
 USE_INSTRUCT_MODEL = True
 print("importing torch")
 import torch
-import torch.nn as nn
+from torch import nn
 
 print("finished")
 
@@ -590,8 +590,9 @@ def load_weights_into_gemma(model, param_config, params):
 import json
 import os
 from pathlib import Path
-from safetensors.torch import load_file
+
 from huggingface_hub import hf_hub_download, snapshot_download
+from safetensors.torch import load_file
 
 CHOOSE_MODEL = "270m"
 

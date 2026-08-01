@@ -1,9 +1,10 @@
 # tensor_graphs/benchmark/db.py
-import sqlite3
 import json
 import math
+import sqlite3
 import uuid
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
+
 from ..ir.graph import GraphEncoder
 
 
@@ -19,8 +20,8 @@ class BenchmarkDB:
         platform_info: str,
         libs_info: str,
     ) -> str:
-        import uuid
         import datetime
+        import uuid
 
         env_id = str(uuid.uuid4())
         with self._get_connection() as conn:
@@ -48,8 +49,8 @@ class BenchmarkDB:
         return env_id
 
     def add_canonical_graph(self, structural_hash: str) -> str:
-        import uuid
         import datetime
+        import uuid
 
         graph_id = str(uuid.uuid4())
         with self._get_connection() as conn:
@@ -78,8 +79,8 @@ class BenchmarkDB:
         source_hash: str,
         requirements: Dict[str, Any],
     ) -> str:
-        import uuid
         import datetime
+        import uuid
 
         impl_id = str(uuid.uuid4())
         with self._get_connection() as conn:
@@ -111,8 +112,8 @@ class BenchmarkDB:
     def add_workload(
         self, graph_id: str, workload_axes_hash: str, axes_json: Dict[str, Any]
     ) -> str:
-        import uuid
         import datetime
+        import uuid
 
         workload_id = str(uuid.uuid4())
         with self._get_connection() as conn:

@@ -3,8 +3,8 @@ from .fma import fma_decomposition
 from .gelu import gelu_decomposition
 from .groupnorm import groupnorm_decomposition
 from .rms_norm import rms_norm_decomposition
-from .rope_2d_consecutive import rope_2d_consecutive_decomposition
 from .rope import rope_decomposition
+from .rope_2d_consecutive import rope_2d_consecutive_decomposition
 from .sigmoid import sigmoid_decomposition
 from .silu import silu_decomposition
 from .softmax import softmax_decomposition

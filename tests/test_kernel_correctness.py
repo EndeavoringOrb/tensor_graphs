@@ -1,18 +1,19 @@
-import pytest
-import numpy as np
-import torch
+import numbers
 from typing import Tuple, cast
 
-import numbers
-from tensor_graphs.ir.node import TensorNode
-from tensor_graphs.ir.dtypes import DType, Backend
-from tensor_graphs.ops.atomic_types import OpType
+import numpy as np
+import pytest
+import torch
+
 from tensor_graphs.backend.registry import KernelRegistry
-from tensor_graphs.session import GraphSession
-from tensor_graphs.ops.registry import get_reference_factory
 from tensor_graphs.benchmark.data_gen import DataGenerator
 from tensor_graphs.compiler.propagation import GraphPropagator
+from tensor_graphs.ir.dtypes import Backend, DType
 from tensor_graphs.ir.graph import topological_sort
+from tensor_graphs.ir.node import TensorNode
+from tensor_graphs.ops.atomic_types import OpType
+from tensor_graphs.ops.registry import get_reference_factory
+from tensor_graphs.session import GraphSession
 
 # Ensure all kernels are loaded
 

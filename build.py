@@ -9,11 +9,11 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from tqdm import tqdm
+from typing import Dict, List, Tuple
 
 from rich.console import Console
 from rich.panel import Panel
+from tqdm import tqdm
 
 console = Console()
 
@@ -212,7 +212,10 @@ class KernelLinter:
             return
 
         for val_idx, (dir, func) in enumerate(self.VALIDATORS):
-            with tqdm(list(dir.rglob("*")), desc=f"linting [{val_idx+1}/{len(self.VALIDATORS)}]") as pbar:
+            with tqdm(
+                list(dir.rglob("*")),
+                desc=f"linting [{val_idx + 1}/{len(self.VALIDATORS)}]",
+            ) as pbar:
                 for path in pbar:
                     pbar.set_postfix_str(path.as_posix())
                     self._validate_kernel_file(path)
@@ -373,8 +376,7 @@ class CodeGenerator:
 
             for inc_path, uid in sorted(entries):
                 f.write(f"// --- {inc_path} ---\n")
-                for macro in REGISTER_MACROS:
-                    f.write(f"#undef {macro}\n")
+                f.writelines(f"#undef {macro}\n" for macro in REGISTER_MACROS)
 
                 uid_str = f"KernelId{{{uid}}}"
                 f.write(
@@ -395,8 +397,7 @@ class CodeGenerator:
                 f.write(f'#include "{inc_path}"\n\n')
 
             f.write("// --- Clean up macros ---\n")
-            for macro in REGISTER_MACROS:
-                f.write(f"#undef {macro}\n")
+            f.writelines(f"#undef {macro}\n" for macro in REGISTER_MACROS)
 
 
 # =============================================================================
