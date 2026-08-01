@@ -26,6 +26,28 @@ class Executor
 #endif
         ProgressTimer timer(nInst, "running", disableTimer);
 
+        // Restore bucket-local EGraph constants into the scratchpad
+        std::unordered_set<EClassId> restored_constants;
+        for (const auto &inst : compiled.instructions)
+        {
+            for (size_t i = 0; i < inst.children.size(); ++i)
+            {
+                EClassId child = inst.children[i];
+
+                // If it has no LogicalId but exists in staging, it's an EGraph-generated constant
+                if (!compiled.has_logical_id(child) && compiled.constantStaging.count(child))
+                {
+                    if (restored_constants.insert(child).second)
+                    {
+                        const ParallelBuffer &buf = inst.inBuffers[i];
+                        memManager.write(buf.mem_space, buf.offset, compiled.constantStaging.at(child)->data(),
+                                         compiled.constantStaging.at(child)->size());
+                    }
+                }
+            }
+        }
+        std::cout << "restored " << std::to_string(restored_constants.size()) << " generated constants" << std::endl;
+
         Synchronizer sync;
 
         for (uint64_t idx = 0; idx < nInst; ++idx)

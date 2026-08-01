@@ -97,7 +97,8 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &roo
             {
                 rawBytes = *graph.constantStaging.at(nodeId);
             }
-            else if (graph.input_data_types.count(nodeId) && graph.input_data_types.at(nodeId) == InputDataType::STORAGE)
+            else if (graph.input_data_types.count(nodeId) &&
+                     graph.input_data_types.at(nodeId) == InputDataType::STORAGE)
             {
                 // Fetch file paths and offsets registered in the FileRegistry
                 TensorMetadata meta = FileRegistry::get().getNodeMeta(nodeId);
