@@ -42,6 +42,8 @@ ATEN_LOWERING = {
     "aten.max.dim": "max",
     "aten.embedding.default": "gather",
     "aten.select.int": "slice",
+
+    "aten.to.dtype": "cast",
 }
 
 
