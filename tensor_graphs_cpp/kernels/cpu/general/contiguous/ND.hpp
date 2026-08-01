@@ -1,19 +1,20 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
+#include <algorithm>
 #include <cstring>
 #include <vector>
-#include <algorithm>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 /**
  * KERNEL: FastContiguous_ND
  *
  * Optimization Strategy:
- * Instead of element-wise copying, this kernel analyzes the tensor strides to find the
- * largest contiguous "suffix" of the tensor.
+ * Instead of element-wise copying, this kernel analyzes the tensor strides to
+ * find the largest contiguous "suffix" of the tensor.
  *
- * If the innermost dimensions are contiguous, it collapses those dimensions into
- * a single large std::memcpy call, significantly reducing overhead.
+ * If the innermost dimensions are contiguous, it collapses those dimensions
+ * into a single large std::memcpy call, significantly reducing overhead.
  */
 
 inline bool matchFastContiguous_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
@@ -135,7 +136,7 @@ inline void runFastContiguous_ND(const KernelContext &ctx)
     }
 }
 
-inline uint32_t refFactoryFastContiguous_ND(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryFastContiguous_ND(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 1)
         Error::throw_err("FastContiguous requires exactly 1 input");
@@ -143,14 +144,6 @@ inline uint32_t refFactoryFastContiguous_ND(const std::vector<uint32_t> &inputs,
     return graph.contiguous(inputs[0]);
 }
 
-REGISTER_KERNEL(
-    "FastContiguous_ND",
-    1,
-    matchFastContiguous_ND,
-    runFastContiguous_ND,
-    refFactoryFastContiguous_ND,
-    {Backend::CPU},
-    {DType::ANY},
-    {{8, 32}},
-    {false},
-    {{Backend::CPU}});
+REGISTER_KERNEL("FastContiguous_ND", 1, 1, matchFastContiguous_ND, runFastContiguous_ND, refFactoryFastContiguous_ND,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {false},
+                {{MemSpace(1, HandleType::CPP)}});

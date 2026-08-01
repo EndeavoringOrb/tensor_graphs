@@ -1,14 +1,15 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include "core/graph.hpp"
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchRepeatView(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // Inputs: Data (0), Repeats (1), Axis (2)
 
-    // Strides can only natively represent repeating a dimension if it originally had size 1.
-    for (size_t d = 0; d < inputs[0].getShape().size(); ++d)
+    // Strides can only natively represent repeating a dimension if it originally
+    // had size 1.
+    for (uint64_t d = 0; d < inputs[0].getShape().size(); ++d)
     {
         if (inputs[0].getShape()[d] != output.getShape()[d])
         {
@@ -19,18 +20,20 @@ inline bool matchRepeatView(const std::vector<TensorNode> &inputs, const TensorN
     return true;
 }
 
-inline void inferViewRepeat(TensorNode &node, const std::vector<TensorNode> &inputs, const Graph &graph)
+inline void inferViewRepeat(const std::vector<TensorNode> &inputs, TensorView &output, const Graph &graph)
 {
-    node.strides = inputs[0].strides;
+    output.strides = inputs[0].strides;
 
-    for (size_t d = 0; d < node.getShape().size(); ++d)
+    for (uint64_t d = 0; d < output.getShape().size(); ++d)
     {
-        if (inputs[0].getShape()[d] != node.getShape()[d])
+        if (inputs[0].getShape()[d] != output.getShape()[d])
         {
-            node.strides[d] = 0;
+            output.strides[d] = 0;
         }
     }
-    node.viewOffset = inputs[0].viewOffset;
 }
 
-REGISTER_REF_KERNEL_VIEW(OpType::REPEAT, 3, matchRepeatView, inferViewRepeat, {Backend::CPU, Backend::CUDA}, {DType::ANY, DType::INT32, DType::INT32}, {{1}, {1}, {1}}, {false, false, false}, {{Backend::CPU, Backend::CUDA}, {Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL_VIEW(OpType::REPEAT, 3, 3, matchRepeatView, inferViewRepeat, MemSpace(1, HandleType::CPP),
+                         {Engine(0, EngineType::CPU)}, {DType::ANY, DType::INT32, DType::INT32}, {{1}, {1}, {1}},
+                         {false, false, false},
+                         {MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP)});

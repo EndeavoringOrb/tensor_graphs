@@ -1,45 +1,59 @@
-// tensor_graphs_cpp/core/executor.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/graph.hpp"
-#include "core/planner.hpp"
-#include "core/memory.hpp"
-#include "core/kernels.hpp"
 #include "core/debug.hpp"
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-#include <cstring>
-#include <stdexcept>
-#include <functional>
+#include "core/graph.hpp"
+#include "core/kernels.hpp"
+#include "core/memory.hpp"
+#include "core/plan/planner.hpp"
+#include "core/synchronizer.hpp"
+#include "core/types.hpp"
 
 class Executor
 {
-private:
+  private:
     MemoryManager &memManager;
-    std::unordered_map<uint32_t, float> nodeCosts;
 
-public:
-    Executor(MemoryManager &mm)
-        : memManager(mm) {}
-
-    void run(const CompiledGraph &compiled,
-             const Debug::Callback &debugCallback = nullptr)
+  public:
+    Executor(MemoryManager &mm) : memManager(mm)
     {
-        double totalKernelTime = 0.0f;
+    }
 
-        uint32_t instIdx = 0;
+    void run(const CompiledGraph &compiled, const Debug::Callback &debugCallback = nullptr)
+    {
         uint32_t nInst = compiled.instructions.size();
         bool disableTimer = true;
 #ifdef DEBUG
         disableTimer = false;
 #endif
-        ProgressTimer timer(nInst, "running ", disableTimer);
-        for (size_t idx = 0; idx < nInst; ++idx)
+        ProgressTimer timer(nInst, "running", disableTimer);
+
+        // Restore bucket-local EGraph constants into the scratchpad
+        std::unordered_set<EClassId> restored_constants;
+        for (const auto &inst : compiled.instructions)
+        {
+            for (size_t i = 0; i < inst.children.size(); ++i)
+            {
+                EClassId child = inst.children[i];
+
+                // If it has no LogicalId but exists in staging, it's an EGraph-generated constant
+                if (!compiled.has_logical_id(child) && compiled.constantStaging.count(child))
+                {
+                    if (restored_constants.insert(child).second)
+                    {
+                        const ParallelBuffer &buf = inst.inBuffers[i];
+                        memManager.write(buf.mem_space, buf.offset, compiled.constantStaging.at(child)->data(),
+                                         compiled.constantStaging.at(child)->size());
+                    }
+                }
+            }
+        }
+        std::cout << "restored " << std::to_string(restored_constants.size()) << " generated constants" << std::endl;
+
+        Synchronizer sync;
+
+        for (uint64_t idx = 0; idx < nInst; ++idx)
         {
             const OpInstruction &inst = compiled.instructions[idx];
 
-            // Check for interrupt signal at each instruction boundary
             if (InterruptManager::isInterrupted())
             {
                 std::cerr << "\n[Executor] Interrupt detected, aborting execution..." << std::endl;
@@ -47,350 +61,85 @@ public:
                 std::exit(SIGINT);
             }
 
-            const uint32_t nodeId = inst.nodeId;
-            uint32_t logicalId = compiled.getLogicalId(nodeId);
-            const TensorNode &node = compiled.nodesMap.at(nodeId);
-            if (node.backend == Backend::STORAGE)
-            {
-                Error::throw_err("[Executor.run] should not be executing anything on Backend::STORAGE");
-            }
+            const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
+            std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
+            EngineType current_engine = kernel.engines.empty() ? EngineType::CPU : kernel.engines[0].type;
 
-            const bool isEndOfLogicalChain = (idx + 1 == nInst) ||
-                                             (compiled.instructions[idx + 1].logicalNodeId != logicalId);
-            const uint32_t outputMemId = (logicalId != UINT32_MAX && (logicalId == nodeId || isEndOfLogicalChain))
-                                             ? logicalId
-                                             : nodeId;
-
-            if (inst.inplaceInputIndex < 0 && inst.viewInputIndex < 0)
-            {
-                uint64_t sizeBytes = getSizeBytes(node.getShape(), node.dtype);
-                float cost = compiled.nodeCosts.at(inst.nodeId);
-                memManager.allocate(inst.backend, outputMemId, sizeBytes, inst.outputStorageType, compiled.refCounts.at(inst.nodeId), cost);
-            }
+            sync.syncBefore(inst, current_engine);
 
             KernelContext ctx;
-            for (uint32_t inId : inst.inputNodeIds)
+
+            for (uint64_t i = 0; i < inst.children.size(); ++i)
             {
-                const TensorNode &inNode = compiled.nodesMap.at(inId);
+                const TensorView &inView = compiled.nodeViews.at(inst.children[i]);
+                const ParallelBuffer &inBuf = inst.inBuffers[i];
+                DeviceBuffer *inBufObj = memManager.getBuffer(inBuf.mem_space);
+                if (!inBufObj)
+                    Error::throw_err("Input DeviceBuffer not found");
 
-                if (inNode.backend == Backend::STORAGE)
+                LogicalId logical_id;
+                if (compiled.has_logical_id(inst.children[i]))
                 {
-                    uint32_t logicalInId = compiled.getLogicalId(inId);
-                    TensorMetadata meta = FileRegistry::get().getNodeMeta(logicalInId);
-                    TensorView view;
-                    view.baseOffset = meta.dataOffsetStart;
-                    view.dtype = meta.dtype;
-                    view.setShape(meta.shape);
-                    ctx.inViews.push_back(view);
-                    ctx.inputs.push_back(nullptr);
-                    ctx.fd.push_back(FileRegistry::get().getNodeFd(logicalInId));
-                    ctx.cl_inputs.push_back(nullptr);
+                    logical_id = compiled.get_logical_id(inst.children[i]);
                 }
-                else
-                {
-                    uint32_t activeInId = inId;
-                    uint32_t inLogicalId = compiled.getLogicalId(inId);
-                    if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
-                    {
-                        activeInId = inLogicalId;
-                    }
-
-                    // Resolve the actual physical backend for this input
-                    uint32_t targetInId = activeInId;
-                    while (memManager.aliasMap.find(targetInId) != memManager.aliasMap.end())
-                    {
-                        targetInId = memManager.aliasMap.at(targetInId);
-                    }
-
-                    Backend actualInBackend = inNode.backend;
-                    if (memManager.buffers.count(Backend::CUDA) && memManager.buffers.at(Backend::CUDA).allocationMap.count(targetInId))
-                        actualInBackend = Backend::CUDA;
-                    else if (memManager.buffers.count(Backend::CPU) && memManager.buffers.at(Backend::CPU).allocationMap.count(targetInId))
-                        actualInBackend = Backend::CPU;
-                    else if (memManager.buffers.count(Backend::OPENCL) && memManager.buffers.at(Backend::OPENCL).allocationMap.count(targetInId))
-                        actualInBackend = Backend::OPENCL;
-
-                    TensorView view = memManager.getView(inNode, activeInId);
-                    ctx.inViews.push_back(view);
-                    void *host_ptr = memManager.buffers.at(actualInBackend).arena_ptr + view.baseOffset;
-                    ctx.inputs.push_back(host_ptr);
-                    ctx.fd.push_back(-1);
-
-                    if (actualInBackend == Backend::OPENCL)
-                    {
-                        size_t size = countElements(view) * getDTypeSize(view.dtype);
-                        if (size == 0)
-                            size = 1;
-
-                        // Deduplicate inplace or duplicate inputs to avoid overlapping cl_mem creation
-                        cl_mem buf = nullptr;
-                        for (size_t i = 0; i < ctx.cl_inputs.size(); i++)
-                        {
-                            if (ctx.inputs[i] == host_ptr && ctx.cl_inputs[i] != nullptr)
-                            {
-                                buf = ctx.cl_inputs[i];
-                                clRetainMemObject(buf); // Retain so the release loop balances out
-                                break;
-                            }
-                        }
-                        if (!buf)
-                        {
-                            cl_buffer_region region;
-                            region.origin = view.baseOffset;
-                            region.size = size;
-
-                            cl_int err;
-                            buf = clCreateSubBuffer(
-                                memManager.buffers.at(actualInBackend).arena_ptr_cl_mem,
-                                CL_MEM_READ_WRITE,
-                                CL_BUFFER_CREATE_TYPE_REGION,
-                                &region,
-                                &err);
-
-                            if (err != CL_SUCCESS)
-                            {
-                                Error::throw_err("OpenCL: Failed to create sub-buffer for input. Error code: " + std::to_string(err));
-                            }
-                        }
-                        ctx.cl_inputs.push_back(buf);
-                    }
-                    else
-                    {
-                        ctx.cl_inputs.push_back(nullptr);
-                    }
-                }
+                inBufObj->setupInput(ctx, inView, logical_id);
             }
 
-#ifdef DEBUG_CHECKNAN
-            for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
+            const TensorView &outView = compiled.nodeViews.at(inst.eclass_id);
+            DeviceBuffer *outBufObj = memManager.getBuffer(inst.outBuffer.mem_space);
+            if (!outBufObj)
+                Error::throw_err("Output DeviceBuffer not found");
+
+            LogicalId logical_id;
+            if (compiled.has_logical_id(inst.eclass_id))
             {
-                const uint32_t inId = inst.inputNodeIds[i];
-                const TensorNode &inNode = compiled.nodesMap.at(inId);
-                if (inNode.backend != Backend::STORAGE)
-                {
-                    uint32_t activeInId = inId;
-                    uint32_t inLogicalId = compiled.getLogicalId(inId);
-                    if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
-                    {
-                        activeInId = inLogicalId;
-                    }
-                    TensorNode debugInput = inNode;
-                    debugInput.id = activeInId;
-                    Debug::checkNan(debugInput, memManager, "Kernel Input: " + std::to_string(inId));
-                }
+                logical_id = compiled.get_logical_id(inst.eclass_id);
             }
+            outBufObj->setupOutput(ctx, outView, logical_id);
+
+#ifdef DEBUG
+            Debug::checkValues(ctx.inputs, ctx.inViews,
+                               "(inputs) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
+                                   toString(kernel));
 #endif
 
-            if (inst.inplaceInputIndex >= 0)
+            bool issued_work = false;
+            if (!kernel.is_view && kernel.run)
             {
-                uint32_t inId = inst.inputNodeIds[inst.inplaceInputIndex];
-                const TensorNode &inNode = compiled.nodesMap.at(inId);
-                uint32_t srcId = inId;
-                uint32_t inLogicalId = compiled.getLogicalId(inId);
-                if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
-                {
-                    srcId = inLogicalId;
-                }
-                memManager.transferOwnership(inNode.backend, srcId, outputMemId);
-            }
-            else if (inst.viewInputIndex >= 0)
-            {
-                uint32_t inId = inst.inputNodeIds[inst.viewInputIndex];
-                const TensorNode &inNode = compiled.nodesMap.at(inId);
-                uint32_t srcId = inId;
-                uint32_t inLogicalId = compiled.getLogicalId(inId);
-                if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
-                {
-                    srcId = inLogicalId;
-                }
-                memManager.addAlias(inNode.backend, srcId, outputMemId, compiled.refCounts.at(inst.nodeId), inst.outputStorageType);
-            }
-
-            auto it = memManager.buffers.find(node.backend);
-            if (it == memManager.buffers.end())
-            {
-                Error::throw_err("[Executor.run] Backend buffer not initialized for " + toString(node.backend));
-            }
-            uint32_t targetId = memManager.resolveAlias(outputMemId);
-            Backend actualBackend = node.backend;
-            if (memManager.buffers.count(actualBackend) == 0 ||
-                memManager.buffers.at(actualBackend).allocationMap.count(targetId) == 0)
-            {
-                bool found = false;
-                for (auto const &pair : memManager.buffers)
-                {
-                    if (pair.second.allocationMap.count(targetId))
-                    {
-                        actualBackend = pair.first;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found)
-                {
-                    Error::throw_err("[Executor.run] Physical allocation " + std::to_string(targetId) + " not found in any backend buffer.");
-                }
-            }
-
-            auto &actualBuf = memManager.buffers.at(actualBackend);
-            uint64_t arenaOffset = actualBuf.getOffset(targetId);
-
-            // Create views and pointers relative to the actual physical buffer
-            ctx.outViews = {TensorView(node, arenaOffset + node.viewOffset * getDTypeSize(node.dtype))};
-            void *host_ptr = actualBuf.arena_ptr + ctx.outViews[0].baseOffset;
-            ctx.outputs = {host_ptr};
-
-            if (node.backend == Backend::OPENCL)
-            {
-                size_t size = countElements(ctx.outViews[0]) * getDTypeSize(ctx.outViews[0].dtype);
-                if (size == 0)
-                    size = 1;
-
-                cl_mem buf = nullptr;
-                // Check if this output aliases a just-wrapped input (inplace memory operation)
-                for (size_t i = 0; i < ctx.cl_inputs.size(); i++)
-                {
-                    if (ctx.inputs[i] == host_ptr && ctx.cl_inputs[i] != nullptr)
-                    {
-                        buf = ctx.cl_inputs[i];
-                        clRetainMemObject(buf);
-                        break;
-                    }
-                }
-                if (!buf)
-                {
-                    cl_buffer_region region;
-                    region.origin = ctx.outViews[0].baseOffset;
-                    region.size = size;
-
-                    cl_int err;
-                    buf = clCreateSubBuffer(
-                        memManager.buffers.at(actualBackend).arena_ptr_cl_mem,
-                        CL_MEM_READ_WRITE,
-                        CL_BUFFER_CREATE_TYPE_REGION,
-                        &region,
-                        &err);
-
-                    if (err != CL_SUCCESS)
-                    {
-                        Error::throw_err("OpenCL: Failed to create sub-buffer for output. Error code: " + std::to_string(err));
-                    }
-                }
-                ctx.cl_outputs.push_back(buf);
-            }
-            else
-            {
-                ctx.cl_outputs.push_back(nullptr);
-            }
-
-            if (inst.viewInputIndex < 0)
-            {
-                if (memManager.aliasMap.find(outputMemId) != memManager.aliasMap.end())
-                {
-                    memManager.aliasRefCounts[outputMemId] = compiled.refCounts.at(inst.nodeId);
-                    memManager.aliasStorageTypes[outputMemId] = inst.outputStorageType;
-                }
-                else
-                {
-                    MemBlock &outBlock = memManager.getBlock(node.backend, outputMemId);
-                    outBlock.refCount = compiled.refCounts.at(inst.nodeId);
-                    outBlock.storageType = inst.outputStorageType;
-                    outBlock.isLocked = true;
-                }
-            }
-
-            const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.fullKernelId);
-
-            if (!kernel.isView)
-            {
-                // ProgressTimer kernelTimer(0, "", true);
                 kernel.run(ctx);
-                // totalKernelTime += kernelTimer.getElapsed();
+                issued_work = true;
             }
 
-            // Cleanup OpenCL sub-buffers created during this step
-            for (cl_mem sub : ctx.cl_inputs)
-            {
-                if (sub)
-                    clReleaseMemObject(sub);
-            }
-            for (cl_mem sub : ctx.cl_outputs)
-            {
-                if (sub)
-                    clReleaseMemObject(sub);
-            }
+            sync.markExecuted(inst, current_engine, issued_work);
+
+#ifdef DEBUG
+            sync.syncAll();
+
+            std::vector<const void *> c_outputs(ctx.outputs.begin(), ctx.outputs.end());
+            Debug::checkValues(c_outputs, ctx.outViews, ctx.inputs, ctx.inViews, kernel,
+                               "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
+                                   toString(kernel));
+#endif
 
             if (debugCallback)
             {
-                const uint8_t *basePtr = actualBuf.arena_ptr + ctx.outViews[0].baseOffset;
-                uint64_t maxOffset = 0;
-                for (size_t d = 0; d < ctx.outViews[0].getShape().size(); ++d)
+                if (outBufObj->mem_space.type == HandleType::CPP)
                 {
-                    if (ctx.outViews[0].getShape()[d] > 0)
-                    {
-                        maxOffset += (ctx.outViews[0].getShape()[d] - 1) * ctx.outViews[0].strides[d];
-                    }
-                }
-                uint64_t bytesToCopy = (ctx.outViews[0].getShape().empty() ? 1 : (maxOffset + 1)) * getDTypeSize(ctx.outViews[0].dtype);
-
-#ifdef USE_CUDA
-                if (actualBackend == Backend::CUDA)
-                {
-                    cudaDeviceSynchronize();
-                    std::vector<uint8_t> hostData(bytesToCopy);
-                    cudaMemcpy(hostData.data(), basePtr, bytesToCopy, cudaMemcpyDeviceToHost);
-                    debugCallback(logicalId, node, ctx, hostData.data());
-                }
-                else
-#endif
-                {
-                    if (actualBackend == Backend::OPENCL)
-                    {
-                        clFinish(OpenCLState::get().queue);
-                    }
-                    debugCallback(logicalId, node, ctx, basePtr);
+                    debugCallback(logical_id, kernel_name, ctx, ctx.outputs[0]);
                 }
             }
 
-            TensorNode debugOutput = compiled.nodesMap.at(inst.nodeId);
-            debugOutput.id = outputMemId;
-            if (actualBackend == Backend::OPENCL)
+            // Cleanup Context
+            for (const ParallelBuffer &inBuf : inst.inBuffers)
             {
-                clFinish(OpenCLState::get().queue);
+                memManager.getBuffer(inBuf.mem_space)->cleanupContext(ctx);
             }
-            Debug::checkNan(debugOutput, memManager, "Kernel Output: " + std::to_string(inst.nodeId));
+            outBufObj->cleanupContext(ctx);
 
-            for (size_t i = 0; i < inst.inputNodeIds.size(); ++i)
-            {
-                if (static_cast<int>(i) == inst.inplaceInputIndex)
-                    continue;
-                if (static_cast<int>(i) == inst.viewInputIndex)
-                    continue;
-
-                uint32_t inId = inst.inputNodeIds[i];
-                const TensorNode &inNode = compiled.nodesMap.at(inId);
-                if (inNode.backend == Backend::STORAGE)
-                    continue;
-                uint32_t activeInId = inId;
-                uint32_t inLogicalId = compiled.getLogicalId(inId);
-                if (!memManager.has(inNode.backend, inId) && memManager.has(inNode.backend, inLogicalId))
-                {
-                    activeInId = inLogicalId;
-                }
-                memManager.release(inNode.backend, activeInId);
-            }
-
-            if (outputMemId == inst.nodeId && inst.logicalNodeId != UINT32_MAX && inst.logicalNodeId != inst.nodeId)
-            {
-                if (isEndOfLogicalChain && memManager.has(inst.backend, inst.nodeId))
-                {
-                    memManager.transferOwnership(inst.backend, inst.nodeId, inst.logicalNodeId);
-                }
-            }
-
-            instIdx++;
             timer.tick();
         }
-        // std::cout << "\nTotal Kernel Time: " << std::to_string(totalKernelTime * 1000) << "ms" << std::endl;
+
+        // Final synchronization to ensure all pending work is completed before returning to Python/User
+        sync.syncAll();
     }
 };

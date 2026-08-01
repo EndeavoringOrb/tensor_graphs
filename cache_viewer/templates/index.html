@@ -399,8 +399,8 @@
             // Parent dependencies list
             const pDiv = document.getElementById("inspectParents");
             pDiv.innerHTML = "";
-            if (data.node.parentIds.length === 0) pDiv.innerHTML = '<span class="text-slate-500 italic">None</span>';
-            data.node.parentIds.forEach(pId => {
+            if (data.node.child_ids.length === 0) pDiv.innerHTML = '<span class="text-slate-500 italic">None</span>';
+            data.node.child_ids.forEach(pId => {
                 const el = document.createElement("button");
                 el.className = "w-full text-left bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-300 font-mono hover:bg-slate-800 hover:text-white";
                 el.textContent = `#${pId}`;

@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchSumF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -37,7 +37,8 @@ inline void runSumF32_ND(const KernelContext &ctx)
         {
             uint32_t coord = temp % inShape[d];
             temp /= inShape[d];
-            // If d is the reduction axis, it contributes to output coord 0 (since dim is 1)
+            // If d is the reduction axis, it contributes to output coord 0 (since dim
+            // is 1)
             uint32_t out_coord = (d == axis) ? 0 : coord;
             out_phys_idx += (uint64_t)out_coord * ctx.outViews[0].strides[d];
         }
@@ -46,4 +47,6 @@ inline void runSumF32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::SUM, 2, matchSumF32_ND, runSumF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::SUM, 2, 2, matchSumF32_ND, runSumF32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {false, false},
+                    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

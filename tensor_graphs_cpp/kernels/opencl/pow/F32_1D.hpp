@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #include "kernels/opencl/opencl_utils.hpp"
 
 inline bool matchPowF32_OpenCL_1D(const std::vector<TensorNode> &inputs, const TensorNode &output)
@@ -26,18 +26,22 @@ inline void runPowF32_OpenCL_1D(const KernelContext &ctx)
     OpenCL::setArgBuffer(k, 2, ctx.cl_outputs[0]);
     clSetKernelArg(k, 3, sizeof(uint64_t), &n);
 
-    size_t local_work_size = 256;
-    size_t global_work_size = ((n + local_work_size - 1) / local_work_size) * local_work_size;
-    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0, nullptr, nullptr);
+    uint64_t local_work_size = 256;
+    uint64_t global_work_size = ((n + local_work_size - 1) / local_work_size) * local_work_size;
+    cl_int err = clEnqueueNDRangeKernel(OpenCLState::get().queue, k, 1, nullptr, &global_work_size, &local_work_size, 0,
+                                        nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Pow_F32_1D");
 
     clFinish(OpenCLState::get().queue);
 }
 
-inline uint32_t refFactoryPowF32_1D_OpenCL(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryPowF32_1D_OpenCL(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.pow(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Pow_F32_1D_OpenCL", 2, matchPowF32_OpenCL_1D, runPowF32_OpenCL_1D, refFactoryPowF32_1D_OpenCL, {Backend::OPENCL}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{Backend::OPENCL}, {Backend::OPENCL}});
+REGISTER_KERNEL("Pow_F32_1D_OpenCL", 2, 2, matchPowF32_OpenCL_1D, runPowF32_OpenCL_1D, refFactoryPowF32_1D_OpenCL,
+                MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true},
+                {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});

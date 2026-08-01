@@ -1,5 +1,5 @@
 __kernel void mul_f32_nd(__global const float* A, __global const float* B, __global float* Out, ulong n) {
-    size_t idx = get_global_id(0);
+    ulong idx = get_global_id(0);
     if (idx < n) {
         Out[idx] = A[idx] * B[idx];
     }

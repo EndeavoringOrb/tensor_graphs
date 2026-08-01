@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
 
@@ -32,7 +32,8 @@ inline void runQwenOuterProd(const KernelContext &ctx)
 
     uint64_t strA_B = vA.strides[0], strA_M = vA.strides[1];
     uint64_t strB_B = vB.strides[0], strB_N = vB.strides[2];
-    uint64_t strO_B = ctx.outViews[0].strides[0], strO_M = ctx.outViews[0].strides[1], strO_N = ctx.outViews[0].strides[2];
+    uint64_t strO_B = ctx.outViews[0].strides[0], strO_M = ctx.outViews[0].strides[1],
+             strO_N = ctx.outViews[0].strides[2];
 
     for (uint32_t b = 0; b < B_batch; ++b)
     {
@@ -61,9 +62,12 @@ inline void runQwenOuterProd(const KernelContext &ctx)
         }
     }
 }
-inline uint32_t refQwenOuterProd(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refQwenOuterProd(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.dot(inputs[0], inputs[1]);
 }
-REGISTER_KERNEL("Qwen_OuterProd_NEON", 2, matchQwenOuterProd, runQwenOuterProd, refQwenOuterProd, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{32, 128, 1}, {32, 1, 128}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Qwen_OuterProd_NEON", 2, 2, matchQwenOuterProd, runQwenOuterProd, refQwenOuterProd,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {{32, 128, 1}, {32, 1, 128}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

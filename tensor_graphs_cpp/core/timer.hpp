@@ -13,23 +13,26 @@ struct ProgressTimer
     clock::time_point start;
     clock::time_point last_print;
 
-    size_t total;
-    size_t current = 0;
+    uint64_t total;
+    uint64_t current = 0;
 
     double minInterval; // seconds
     std::string label;
 
     bool has_total;
     bool disable;
+    bool disable_tick;
 
-    ProgressTimer(size_t total_ = 0, std::string label_ = "", bool disable_ = false, double minInterval_ = 2)
-        : start(clock::now()),
-          last_print(start),
-          total(total_),
-          minInterval(minInterval_),
-          label(label_),
-          has_total(total_ > 0),
-          disable(disable_) {}
+    ProgressTimer(uint64_t total_ = 0, std::string label_ = "", bool disable_ = false, bool disable_tick_ = false,
+                  double minInterval_ = 2)
+        : start(clock::now()), last_print(start), total(total_), minInterval(minInterval_), label(label_),
+          has_total(total_ > 0), disable(disable_), disable_tick(disable_tick_)
+    {
+        if (label.size() > 0)
+        {
+            label += " ";
+        }
+    }
 
     void reset()
     {
@@ -39,9 +42,9 @@ struct ProgressTimer
         has_total = total > 0;
     }
 
-    inline void tick(size_t increment = 1)
+    inline void tick(uint64_t increment = 1)
     {
-        if (disable)
+        if (disable || disable_tick)
             return;
         current += increment;
 
@@ -71,14 +74,11 @@ struct ProgressTimer
         {
             double eta = (total > current) ? (total - current) / rate : 0.0;
 
-            std::cout << current << "/" << total
-                      << " ETA: " << eta << "s";
+            std::cout << current << "/" << total << " ETA: " << eta << "s";
         }
         else
         {
-            std::cout << current
-                      << " (" << rate << " it/s, "
-                      << elapsed << "s)";
+            std::cout << current << " (" << rate << " it/s, " << elapsed << "s)";
         }
 
         std::cout << "\r" << std::flush;
@@ -99,8 +99,7 @@ struct ProgressTimer
         auto end = clock::now();
         double elapsed = std::chrono::duration<double>(end - start).count();
 
-        std::cout << "\n"
-                  << label;
+        std::cout << label;
 
         if (has_total)
         {
@@ -119,8 +118,12 @@ struct ProgressTimer
 
 struct ProgressTimer
 {
-    ProgressTimer(size_t, const char * = "", double = 0.0) {}
-    inline void tick(size_t = 1) {}
+    ProgressTimer(uint64_t, const char * = "", double = 0.0)
+    {
+    }
+    inline void tick(uint64_t = 1)
+    {
+    }
 };
 
 #endif

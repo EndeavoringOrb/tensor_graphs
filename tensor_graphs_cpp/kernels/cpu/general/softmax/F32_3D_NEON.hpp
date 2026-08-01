@@ -1,14 +1,16 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
-#include <cmath>
+
 #include <algorithm>
+#include <cmath>
 
 inline bool matchSoftmaxF32_NEON(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    // Softmax typically operates on the last dimension of a 3D tensor [Batch, Seq, Hidden]
+    // Softmax typically operates on the last dimension of a 3D tensor [Batch,
+    // Seq, Hidden]
     if (inputs[0].getShape().size() != 3 || !isContiguous(output))
         return false;
     return true;
@@ -64,34 +66,34 @@ inline void runSoftmaxF32_NEON(const KernelContext &ctx)
  * Unsimplified Ref Factory
  * This mirrors the exact structure of attention_output_atomic in main.cpp
  */
-inline uint32_t refFactorySoftmax(const std::vector<uint32_t> &inputs, Graph &g)
+inline LogicalId refFactorySoftmax(const std::vector<LogicalId> &inputs, Graph &g)
 {
-    uint32_t x = inputs[0]; // The scores tensor [Heads, Seq, Seq]
+    LogicalId x = inputs[0]; // The scores tensor [Heads, Seq, Seq]
     auto shape = g.getNode(x).getShape();
     uint32_t H = shape[0];
     uint32_t S = shape[1];
 
     // --- Part 1: Safe Softmax Shift (Max reduction) ---
     int32_t axis_val = -1;
-    uint32_t axis_node = g.constant({1}, &axis_val, DType::INT32);
-    uint32_t max_scores = g.max(x, axis_node);
+    LogicalId axis_node = g.constant({1}, &axis_val, DType::INT32);
+    LogicalId max_scores = g.max(x, axis_node);
 
     // repeat_3d_axis(max_scores, seq_len, 2)
     int32_t s_rep_val = (int32_t)S;
-    uint32_t s_rep_node = g.constant({1}, &s_rep_val, DType::INT32);
+    LogicalId s_rep_node = g.constant({1}, &s_rep_val, DType::INT32);
     int32_t ax2_val = 2;
-    uint32_t ax2_node = g.constant({1}, &ax2_val, DType::INT32);
-    uint32_t max_expanded = g.repeat(max_scores, s_rep_node, ax2_node);
+    LogicalId ax2_node = g.constant({1}, &ax2_val, DType::INT32);
+    LogicalId max_expanded = g.repeat(max_scores, s_rep_node, ax2_node);
 
-    uint32_t shifted_scores = g.add(x, g.neg(max_expanded));
+    LogicalId shifted_scores = g.add(x, g.neg(max_expanded));
 
     // --- Part 2: Exponentiate (expand_scalar_to_3d for e_node) ---
     float e_val = 2.718281828459045f;
-    uint32_t e_scalar = g.constant({1}, &e_val, DType::FLOAT32);
+    LogicalId e_scalar = g.constant({1}, &e_val, DType::FLOAT32);
     int32_t shape_3d_const[] = {1, 1, 1};
-    uint32_t e_reshaped = g.reshape(e_scalar, g.constant({3}, shape_3d_const, DType::INT32));
+    LogicalId e_reshaped = g.reshape(e_scalar, g.constant({3}, shape_3d_const, DType::INT32));
 
-    uint32_t e_node = e_reshaped;
+    LogicalId e_node = e_reshaped;
     if (H > 1)
     {
         int32_t h_rep = (int32_t)H;
@@ -111,17 +113,19 @@ inline uint32_t refFactorySoftmax(const std::vector<uint32_t> &inputs, Graph &g)
         e_node = g.repeat(e_node, g.constant({1}, &s_rep, DType::INT32), g.constant({1}, &ax2, DType::INT32));
     }
 
-    uint32_t exp_scores = g.pow(e_node, shifted_scores);
+    LogicalId exp_scores = g.pow(e_node, shifted_scores);
 
     // --- Part 3: Normalize (Sum reduction) ---
-    uint32_t sum_exp = g.sum(exp_scores, g.constant({1}, &axis_val, DType::INT32));
+    LogicalId sum_exp = g.sum(exp_scores, g.constant({1}, &axis_val, DType::INT32));
 
     // repeat_3d_axis(sum_exp, seq_len, 2)
-    uint32_t sum_exp_expanded = g.repeat(sum_exp, s_rep_node, ax2_node);
+    LogicalId sum_exp_expanded = g.repeat(sum_exp, s_rep_node, ax2_node);
 
     return g.div(exp_scores, sum_exp_expanded);
 }
 
-REGISTER_KERNEL("Softmax_NEON", 1, matchSoftmaxF32_NEON, runSoftmaxF32_NEON, refFactorySoftmax, {Backend::CPU}, {DType::FLOAT32}, {{4, 8, 8}}, {true}, {{Backend::CPU}});
+REGISTER_KERNEL("Softmax_NEON", 1, 1, matchSoftmaxF32_NEON, runSoftmaxF32_NEON, refFactorySoftmax,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{4, 8, 8}}, {true},
+                {{MemSpace(1, HandleType::CPP)}});
 
 #endif

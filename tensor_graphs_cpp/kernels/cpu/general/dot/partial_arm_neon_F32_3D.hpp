@@ -1,13 +1,13 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/dot/partial_arm_neon_F32_3D.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
-#include "core/graph.hpp"
-#include <cstring>
-#include <cmath>
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <thread>
 #include <vector>
+
+#include "core/graph.hpp"
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
@@ -21,9 +21,8 @@
 
 inline bool matchScatterDotF32_3D_Optimized_Inplace(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    // Signature: [cache, A, B, starts, ends, steps, startsA, endsA, stepsA, startsB, endsB, stepsB] (12 inputs)
-
-
+    // Signature: [cache, A, B, starts, ends, steps, startsA, endsA, stepsA,
+    // startsB, endsB, stepsB] (12 inputs)
 
     const auto &shape_A = inputs[1].getShape();
     const auto &shape_B = inputs[2].getShape();
@@ -52,7 +51,8 @@ inline void runScatterDotF32_3D_Optimized_Inplace(const KernelContext &ctx)
 
     float *out_cache_ptr = static_cast<float *>(ctx.outputs[0]);
 
-    if (target_ptr != out_cache_ptr) {
+    if (target_ptr != out_cache_ptr)
+    {
         Error::throw_err("[runScatterDotF32_3D_Optimized_Inplace] target_ptr != out_cache_ptr");
     }
 
@@ -67,20 +67,24 @@ inline void runScatterDotF32_3D_Optimized_Inplace(const KernelContext &ctx)
     for (int i = 0; i < 3; ++i)
     {
         starts[i] = (ctx.inViews[3].getShape().empty() || i >= (int)ctx.inViews[3].getShape()[0]) ? 0 : starts_raw[i];
-        ends[i] = (ctx.inViews[4].getShape().empty() || i >= (int)ctx.inViews[4].getShape()[0]) ? view_cache.getShape()[i] : ends_raw[i];
+        ends[i] = (ctx.inViews[4].getShape().empty() || i >= (int)ctx.inViews[4].getShape()[0])
+                      ? view_cache.getShape()[i]
+                      : ends_raw[i];
         steps[i] = (ctx.inViews[5].getShape().empty() || i >= (int)ctx.inViews[5].getShape()[0]) ? 1 : steps_raw[i];
 
         startsA[i] = (ctx.inViews[6].getShape().empty() || i >= (int)ctx.inViews[6].getShape()[0]) ? 0 : startsA_raw[i];
-        endsA[i] = (ctx.inViews[7].getShape().empty() || i >= (int)ctx.inViews[7].getShape()[0]) ? view_A.getShape()[i] : endsA_raw[i];
+        endsA[i] = (ctx.inViews[7].getShape().empty() || i >= (int)ctx.inViews[7].getShape()[0]) ? view_A.getShape()[i]
+                                                                                                 : endsA_raw[i];
         stepsA[i] = (ctx.inViews[8].getShape().empty() || i >= (int)ctx.inViews[8].getShape()[0]) ? 1 : stepsA_raw[i];
 
         startsB[i] = (ctx.inViews[9].getShape().empty() || i >= (int)ctx.inViews[9].getShape()[0]) ? 0 : startsB_raw[i];
-        endsB[i] = (ctx.inViews[10].getShape().empty() || i >= (int)ctx.inViews[10].getShape()[0]) ? view_B.getShape()[i] : endsB_raw[i];
+        endsB[i] = (ctx.inViews[10].getShape().empty() || i >= (int)ctx.inViews[10].getShape()[0])
+                       ? view_B.getShape()[i]
+                       : endsB_raw[i];
         stepsB[i] = (ctx.inViews[11].getShape().empty() || i >= (int)ctx.inViews[11].getShape()[0]) ? 1 : stepsB_raw[i];
     }
 
-    auto get_dim = [](int32_t s, int32_t e, int32_t st, uint32_t dim_len) -> uint32_t
-    {
+    auto get_dim = [](int32_t s, int32_t e, int32_t st, uint32_t dim_len) -> uint32_t {
         if (s < 0)
             s += dim_len;
         if (e < 0)
@@ -156,12 +160,12 @@ inline void runScatterDotF32_3D_Optimized_Inplace(const KernelContext &ctx)
     std::vector<std::thread> workers;
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             uint32_t start_flat = t * rows_per_thread;
-            uint32_t end_flat   = std::min(start_flat + rows_per_thread, total_work);
+            uint32_t end_flat = std::min(start_flat + rows_per_thread, total_work);
 
-            for (uint32_t flat = start_flat; flat < end_flat; ++flat) {
+            for (uint32_t flat = start_flat; flat < end_flat; ++flat)
+            {
                 uint32_t b_idx = flat / slice_M;
                 uint32_t m_idx = flat % slice_M;
 
@@ -172,79 +176,98 @@ inline void runScatterDotF32_3D_Optimized_Inplace(const KernelContext &ctx)
                 const float *rowA = A_ptr + (b_idx * stride_A_B) + (m_idx * stride_A_M);
 
                 // Zero-out destination chunk before dot product accumulation
-                if (can_simd) {
+                if (can_simd)
+                {
                     uint32_t n = 0;
                     float32x4_t vZero = vdupq_n_f32(0.0f);
-                    for (; n + 4 <= slice_N; n += 4) {
+                    for (; n + 4 <= slice_N; n += 4)
+                    {
                         uint32_t col = start_n + n;
                         vst1q_f32(row_out + col, vZero);
                     }
-                    for (; n < slice_N; ++n) {
+                    for (; n < slice_N; ++n)
+                    {
                         row_out[start_n + n] = 0.0f;
                     }
-                } else {
-                    for (uint32_t n = 0; n < slice_N; ++n) {
+                }
+                else
+                {
+                    for (uint32_t n = 0; n < slice_N; ++n)
+                    {
                         row_out[(start_n + n * step_n) * stride_C_N] = 0.0f;
                     }
                 }
 
                 // SIMD / Scalar inner dot loop
-                for (uint32_t k = 0; k < K; ++k) {
+                for (uint32_t k = 0; k < K; ++k)
+                {
                     float a_val = rowA[k * stride_A_K];
                     const float *k_B = B_ptr + (b_idx * stride_B_B) + (k * stride_B_K);
 
-                    if (can_simd) {
+                    if (can_simd)
+                    {
                         float32x4_t vA = vdupq_n_f32(a_val);
                         uint32_t n = 0;
-                        for (; n + 4 <= slice_N; n += 4) {
+                        for (; n + 4 <= slice_N; n += 4)
+                        {
                             uint32_t col = start_n + n;
                             float32x4_t vB = vld1q_f32(k_B + n);
                             float32x4_t vOut = vld1q_f32(row_out + col);
                             vOut = vfmaq_f32(vOut, vA, vB);
                             vst1q_f32(row_out + col, vOut);
                         }
-                        for (; n < slice_N; ++n) {
+                        for (; n < slice_N; ++n)
+                        {
                             row_out[start_n + n] += a_val * k_B[n];
                         }
-                    } else {
-                        for (uint32_t n = 0; n < slice_N; ++n) {
+                    }
+                    else
+                    {
+                        for (uint32_t n = 0; n < slice_N; ++n)
+                        {
                             row_out[(start_n + n * step_n) * stride_C_N] += a_val * k_B[n * stride_B_N];
                         }
                     }
                 }
-            } });
+            }
+        });
     }
     for (auto &th : workers)
         th.join();
 }
 
-inline uint32_t refFactoryScatterDotF32_3D_Optimized_Inplace(const std::vector<uint32_t> &inIds, Graph &graph)
+inline LogicalId refFactoryScatterDotF32_3D_Optimized_Inplace(const std::vector<LogicalId> &inIds, Graph &graph)
 {
     // inIds: [cache, A, B, sS, eS, tS, sA, eA, tA, sB, eB, tB]
-    uint32_t sliceA = graph.slice(inIds[1], inIds[6], inIds[7], inIds[8]);
-    uint32_t sliceB = graph.slice(inIds[2], inIds[9], inIds[10], inIds[11]);
+    LogicalId sliceA = graph.slice(inIds[1], inIds[6], inIds[7], inIds[8]);
+    LogicalId sliceB = graph.slice(inIds[2], inIds[9], inIds[10], inIds[11]);
 
-    uint32_t contigA = graph.contiguous(sliceA);
-    uint32_t contigB = graph.contiguous(sliceB);
+    LogicalId contigA = graph.contiguous(sliceA);
+    LogicalId contigB = graph.contiguous(sliceB);
 
-    uint32_t dot = graph.dot(contigA, contigB);
-    uint32_t contigDot = graph.contiguous(dot);
+    LogicalId dot = graph.dot(contigA, contigB);
+    LogicalId contigDot = graph.contiguous(dot);
 
     return graph.scatter(inIds[0], contigDot, inIds[3], inIds[4], inIds[5]);
 }
 
-REGISTER_KERNEL_INPLACE(
-    "Scatter_Dot_F32_3D_CPU_Optimized_inplace",
-    12,
-    matchScatterDotF32_3D_Optimized_Inplace,
-    runScatterDotF32_3D_Optimized_Inplace,
-    refFactoryScatterDotF32_3D_Optimized_Inplace,
-    {Backend::CPU},
-    {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32,
-     DType::INT32, DType::INT32, DType::INT32,
-     DType::INT32, DType::INT32, DType::INT32,
-     DType::INT32, DType::INT32, DType::INT32},
-    {{1, 4, 8}, {1, 4, 8}, {1, 8, 8}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}},
-    {false, false, false, false, false, false, false, false, false, false, false, false},
-    {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL_INPLACE("Scatter_Dot_F32_3D_CPU_Optimized_inplace", 12, 12, matchScatterDotF32_3D_Optimized_Inplace,
+                        runScatterDotF32_3D_Optimized_Inplace, refFactoryScatterDotF32_3D_Optimized_Inplace,
+                        MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                        {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32,
+                         DType::INT32, DType::INT32, DType::INT32, DType::INT32, DType::INT32, DType::INT32},
+                        {{1, 4, 8}, {1, 4, 8}, {1, 8, 8}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}},
+                        {false, false, false, false, false, false, false, false, false, false, false, false},
+                        {{MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)}});
 #endif // TG_HAS_NEON

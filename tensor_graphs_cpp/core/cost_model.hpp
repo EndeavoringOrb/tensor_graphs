@@ -1,20 +1,20 @@
-// File: tensor_graphs_cpp/core/cost_model.hpp
 #pragma once
-#include "core/types.hpp"
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
+#include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
-#include <vector>
-#include <unordered_map>
-#include <unordered_set>
-#include <fstream>
-#include <iostream>
-#include <cmath>
-#include <limits>
-#include <filesystem>
-#include <mutex>
-#include <algorithm>
 
 // TODO: make hardware detection better
 #if defined(USE_CUDA)
@@ -43,58 +43,62 @@
 #define HW_TAG PLAT_OS_STR "_" PLAT_ARCH_STR
 #endif
 
-// Uncomment the following line to enable logging calls to `benchmarks/calls.bin`
+// Uncomment the following line to enable logging calls to
+// `benchmarks/calls.bin`
 #define TENSOR_GRAPHS_LOG_COST_CALLS
 
 struct Record
 {
-    uint64_t kernelUid;
+    KernelId kernelId;
     uint64_t buildContextId;
     std::string hwTag;
 
     std::vector<std::vector<uint32_t>> inputShapes;
-    std::vector<std::vector<uint32_t>> outputShapes;
+    std::vector<uint32_t> outputShape;
     std::vector<std::vector<uint64_t>> inputStrides;
-    std::vector<std::vector<uint64_t>> outputStrides;
+    std::vector<uint64_t> outputStrides;
     std::vector<DType> inputDTypes;
-    std::vector<DType> outputDTypes;
+    DType outputDType;
     std::vector<std::vector<uint8_t>> inputConstants;
-    std::vector<Backend> backends;
-    std::vector<std::vector<Backend>> inputBackends;
+    MemSpace output_mem_space;
+    std::vector<Engine> engines;
+    std::vector<MemSpace> input_mem_spaces;
     float runTime;
 };
 
 inline void tg_serialize(BinaryWriter &bw, const Record &val)
 {
-    bw.write(val.kernelUid);
+    bw.write(val.kernelId);
     bw.write(val.buildContextId);
     bw.write(val.hwTag);
     bw.write(val.inputShapes);
-    bw.write(val.outputShapes);
+    bw.write(val.outputShape);
     bw.write(val.inputStrides);
     bw.write(val.outputStrides);
     bw.write(val.inputDTypes);
-    bw.write(val.outputDTypes);
+    bw.write(val.outputDType);
     bw.write(val.inputConstants);
-    bw.write(val.backends);
-    bw.write(val.inputBackends);
+    bw.write(val.output_mem_space);
+    bw.write(val.engines);
+    bw.write(val.input_mem_spaces);
     bw.write(val.runTime);
 }
 
 inline void tg_deserialize(BinaryReader &br, Record &val)
 {
-    br.read(val.kernelUid);
+    br.read(val.kernelId);
     br.read(val.buildContextId);
     br.read(val.hwTag);
     br.read(val.inputShapes);
-    br.read(val.outputShapes);
+    br.read(val.outputShape);
     br.read(val.inputStrides);
     br.read(val.outputStrides);
     br.read(val.inputDTypes);
-    br.read(val.outputDTypes);
+    br.read(val.outputDType);
     br.read(val.inputConstants);
-    br.read(val.backends);
-    br.read(val.inputBackends);
+    br.read(val.output_mem_space);
+    br.read(val.engines);
+    br.read(val.input_mem_spaces);
     br.read(val.runTime);
 }
 
@@ -102,19 +106,19 @@ struct CostModel
 {
     struct ModelKey
     {
-        uint64_t kernelUid;
-        size_t numInputs;
+        KernelId kernelId;
+        uint64_t numInputs;
         bool operator==(const ModelKey &o) const
         {
-            return kernelUid == o.kernelUid && numInputs == o.numInputs;
+            return kernelId == o.kernelId && numInputs == o.numInputs;
         }
     };
 
     struct ModelKeyHash
     {
-        size_t operator()(const ModelKey &k) const
+        uint64_t operator()(const ModelKey &k) const
         {
-            return std::hash<uint64_t>()(k.kernelUid) ^ (std::hash<size_t>()(k.numInputs) << 1);
+            return std::hash<KernelId>()(k.kernelId) ^ (std::hash<uint64_t>()(k.numInputs) << 1);
         }
     };
 
@@ -122,9 +126,17 @@ struct CostModel
     {
         int rows, cols;
         std::vector<double> data;
-        Matrix(int r, int c) : rows(r), cols(c), data(r * c, 0.0) {}
-        double &operator()(int r, int c) { return data[r * cols + c]; }
-        double operator()(int r, int c) const { return data[r * cols + c]; }
+        Matrix(int r, int c) : rows(r), cols(c), data(r * c, 0.0)
+        {
+        }
+        double &operator()(int r, int c)
+        {
+            return data[r * cols + c];
+        }
+        double operator()(int r, int c) const
+        {
+            return data[r * cols + c];
+        }
     };
 
     static Matrix transpose(const Matrix &A)
@@ -216,25 +228,25 @@ struct CostModel
             if (valid && weights.size() == features.size())
             {
                 double y = 0.0;
-                for (size_t i = 0; i < weights.size(); ++i)
+                for (uint64_t i = 0; i < weights.size(); ++i)
                 {
                     double val = features[i];
                     if (scale[i] > 0)
                         val /= scale[i];
                     y += weights[i] * val;
                 }
-                return static_cast<float>(std::max(0.0, y));
+                return static_cast<float>(std::max(1e-6, y));
             }
             // Linear Fallback
             if (fallbackElements > 0)
                 return static_cast<float>(fallbackTime * (static_cast<double>(targetElements) / fallbackElements));
-            return 0.0f;
+            return 1e-6f;
         }
     };
 
-    std::unordered_map<uint64_t, std::vector<Record>> records;
+    std::unordered_map<KernelId, std::vector<Record>> records;
     std::unordered_map<ModelKey, LinearModel, ModelKeyHash> models;
-    std::unordered_set<size_t> loggedCalls;
+    std::unordered_set<uint64_t> loggedCalls;
     std::ofstream callFile;
     std::mutex logMtx;
     bool doneWarning = false;
@@ -264,20 +276,65 @@ struct CostModel
 #endif
     }
 
-    std::vector<double> extractFeatures(
-        const std::vector<std::vector<uint32_t>> &inShapes,
-        const std::vector<std::vector<uint64_t>> &inStrides,
-        const std::vector<DType> &inDTypes,
-        const std::vector<std::vector<uint32_t>> &outShapes,
-        const std::vector<std::vector<uint64_t>> &outStrides,
-        const std::vector<DType> &outDTypes) const
+    void log_call(KernelId kernelId, const std::vector<uint32_t> &outShape, const std::vector<uint64_t> &outStrides,
+                  DType outDType, const std::vector<std::vector<uint32_t>> &inShapes,
+                  const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
+                  const std::vector<std::vector<uint8_t>> &inConstants)
+    {
+        Record r;
+        r.kernelId = kernelId;
+        r.buildContextId = BUILD_CONTEXT_ID;
+        r.hwTag = HW_TAG;
+        r.inputShapes = inShapes;
+        r.outputShape = outShape;
+        r.inputStrides = inStrides;
+        r.outputStrides = outStrides;
+        r.inputDTypes = inDTypes;
+        r.outputDType = outDType;
+        r.inputConstants = inConstants;
+        const auto &entry = KernelRegistry::get().getKernel(kernelId);
+        r.output_mem_space = entry.output_mem_space;
+        r.engines = entry.engines;
+        r.input_mem_spaces.clear();
+        for (size_t i = 0; i < inShapes.size(); ++i)
+        {
+            size_t ruleIdx = std::min(i, entry.input_mem_spaces.empty() ? 0 : entry.input_mem_spaces.size() - 1);
+            if (ruleIdx < entry.input_mem_spaces.size())
+            {
+                r.input_mem_spaces.push_back(entry.input_mem_spaces[ruleIdx]);
+            }
+            else
+            {
+                r.input_mem_spaces.push_back(MemSpace{1, HandleType::CPP});
+            }
+        }
+        r.runTime = 0.0f;
+
+        std::string callStr = serializeToString(r);
+        uint64_t callHash = std::hash<std::string>{}(callStr);
+
+        std::lock_guard<std::mutex> lock(logMtx);
+        if (loggedCalls.find(callHash) == loggedCalls.end())
+        {
+            loggedCalls.insert(callHash);
+            if (callFile.is_open())
+            {
+                BinaryWriter bw(callFile);
+                bw.write(r);
+                callFile.flush();
+            }
+        }
+    }
+
+    std::vector<double> extractFeatures(const std::vector<std::vector<uint32_t>> &inShapes,
+                                        const std::vector<std::vector<uint64_t>> &inStrides,
+                                        const std::vector<DType> &inDTypes, const std::vector<uint32_t> &outShape,
+                                        const std::vector<uint64_t> &outStrides, const DType &outDType) const
     {
         std::vector<double> features;
         features.push_back(1.0); // Bias
 
-        double outElements = 0.0;
-        for (const auto &s : outShapes)
-            outElements += static_cast<double>(countElements(s));
+        double outElements = static_cast<double>(countElements(outShape));
 
         double inElements = 0.0;
         for (const auto &s : inShapes)
@@ -287,7 +344,7 @@ struct CostModel
         features.push_back(inElements);
 
         // Expand per input details
-        for (size_t i = 0; i < inShapes.size(); ++i)
+        for (uint64_t i = 0; i < inShapes.size(); ++i)
         {
             double elements = static_cast<double>(countElements(inShapes[i]));
             double bytes = elements * getDTypeSize(inDTypes[i]);
@@ -296,15 +353,11 @@ struct CostModel
             features.push_back(contig ? 1.0 : 0.0);
         }
 
-        // Expand per output details
-        for (size_t i = 0; i < outShapes.size(); ++i)
-        {
-            double elements = static_cast<double>(countElements(outShapes[i]));
-            double bytes = elements * getDTypeSize(outDTypes[i]);
-            bool contig = isContiguous(outStrides[i], outShapes[i]);
-            features.push_back(bytes);
-            features.push_back(contig ? 1.0 : 0.0);
-        }
+        double elements = static_cast<double>(countElements(outShape));
+        double bytes = elements * getDTypeSize(outDType);
+        bool contig = isContiguous(outStrides, outShape);
+        features.push_back(bytes);
+        features.push_back(contig ? 1.0 : 0.0);
 
         return features;
     }
@@ -316,9 +369,7 @@ struct CostModel
         if (!recs.empty())
         {
             model.fallbackTime = recs[0].runTime;
-            uint64_t e = 0;
-            for (const auto &s : recs[0].outputShapes)
-                e += countElements(s);
+            uint64_t e = countElements(recs[0].outputShape);
             model.fallbackElements = e > 0 ? static_cast<double>(e) : 1.0;
         }
 
@@ -329,9 +380,8 @@ struct CostModel
         }
 
         int K = static_cast<int>(recs.size());
-        auto sample_feat = extractFeatures(
-            recs[0].inputShapes, recs[0].inputStrides, recs[0].inputDTypes,
-            recs[0].outputShapes, recs[0].outputStrides, recs[0].outputDTypes);
+        auto sample_feat = extractFeatures(recs[0].inputShapes, recs[0].inputStrides, recs[0].inputDTypes,
+                                           recs[0].outputShape, recs[0].outputStrides, recs[0].outputDType);
         int D = static_cast<int>(sample_feat.size());
 
         Matrix X(K, D);
@@ -341,9 +391,8 @@ struct CostModel
 
         for (int i = 0; i < K; ++i)
         {
-            auto feat = extractFeatures(
-                recs[i].inputShapes, recs[i].inputStrides, recs[i].inputDTypes,
-                recs[i].outputShapes, recs[i].outputStrides, recs[i].outputDTypes);
+            auto feat = extractFeatures(recs[i].inputShapes, recs[i].inputStrides, recs[i].inputDTypes,
+                                        recs[i].outputShape, recs[i].outputStrides, recs[i].outputDType);
             for (int j = 0; j < D && j < static_cast<int>(feat.size()); ++j)
             {
                 X(i, j) = feat[j];
@@ -399,7 +448,7 @@ struct CostModel
 
         BinaryReader br(file);
         uint32_t total = 0, valid = 0;
-        ProgressTimer timer(0, "loading records ");
+        ProgressTimer timer(0, "loading records");
         std::unordered_map<ModelKey, std::vector<Record>, ModelKeyHash> recordsByKey;
 
         while (file.peek() != EOF)
@@ -408,18 +457,19 @@ struct CostModel
             Record r;
             br.read(r);
             total++;
-            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID || !KernelRegistry::get().hasKernel(r.kernelUid))
+            if (r.hwTag != HW_TAG || r.buildContextId != BUILD_CONTEXT_ID ||
+                !KernelRegistry::get().hasKernel(r.kernelId))
                 continue;
             valid++;
-            records[r.kernelUid].push_back(r);
+            records[r.kernelId].push_back(r);
 
-            ModelKey mk = {r.kernelUid, r.inputShapes.size()};
+            ModelKey mk = {r.kernelId, r.inputShapes.size()};
             recordsByKey[mk].push_back(std::move(r));
         }
 
         std::cout << "Loaded " << valid << " valid records from " << benchmarkPath << std::endl;
 
-        ProgressTimer timer2(recordsByKey.size(), "fitting interpolation models ");
+        ProgressTimer timer2(recordsByKey.size(), "fitting interpolation models");
         for (const auto &kv : recordsByKey)
         {
             timer2.tick();
@@ -427,60 +477,21 @@ struct CostModel
         }
     }
 
-    float estimateCost(
-        uint64_t kernelUid,
-        const std::vector<uint32_t> &outShape,
-        const std::vector<uint64_t> &_outStrides,
-        DType outDType,
-        const std::vector<std::vector<uint32_t>> &inShapes,
-        const std::vector<std::vector<uint64_t>> &inStrides,
-        const std::vector<DType> &inDTypes,
-        const std::vector<std::vector<uint8_t>> &inConstants)
+    float estimateCost(KernelId kernelId, const std::vector<uint32_t> &outShape,
+                       const std::vector<uint64_t> &outStrides, DType outDType,
+                       const std::vector<std::vector<uint32_t>> &inShapes,
+                       const std::vector<std::vector<uint64_t>> &inStrides, const std::vector<DType> &inDTypes,
+                       const std::vector<std::vector<uint8_t>> &inConstants)
     {
-        std::vector<std::vector<uint32_t>> outShapes = {outShape};
-        std::vector<DType> outDTypes = {outDType};
-        const std::vector<std::vector<uint64_t>> outStrides = {_outStrides};
-
-        auto it = records.find(kernelUid);
+        auto it = records.find(kernelId);
         if (it == records.end() || it->second.empty())
         {
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS
-            {
-                Record r;
-                r.kernelUid = kernelUid;
-                r.buildContextId = BUILD_CONTEXT_ID;
-                r.hwTag = HW_TAG;
-                r.inputShapes = inShapes;
-                r.outputShapes = outShapes;
-                r.inputStrides = inStrides;
-                r.outputStrides = outStrides;
-                r.inputDTypes = inDTypes;
-                r.outputDTypes = outDTypes;
-                r.inputConstants = inConstants;
-                const auto &entry = KernelRegistry::get().getKernel(kernelUid);
-                r.backends = entry.backends;
-                r.inputBackends = entry.inputBackends;
-                r.runTime = 0.0f;
-                std::string callStr = serializeToString(r);
-                size_t callHash = std::hash<std::string>{}(callStr);
-
-                std::lock_guard<std::mutex> lock(logMtx);
-                if (loggedCalls.find(callHash) == loggedCalls.end())
-                {
-                    loggedCalls.insert(callHash);
-                    if (callFile.is_open())
-                    {
-                        BinaryWriter bw(callFile);
-                        bw.write(r);
-                        callFile.flush();
-                    }
-                }
-            }
+            log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
 #endif
             if (!doneWarning)
             {
-                std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n"
-                          << std::flush;
+                std::cout << "\nWARNING INF COST ESTIMATION DUE TO MISSING RECORDS\n" << std::flush;
                 doneWarning = true;
             }
             return std::numeric_limits<float>::infinity();
@@ -489,55 +500,23 @@ struct CostModel
         // Exact match short-circuit
         for (const auto &r : it->second)
         {
-            if (r.inputShapes == inShapes && r.outputShapes == outShapes &&
-                r.inputStrides == inStrides && r.outputStrides == outStrides &&
-                r.inputDTypes == inDTypes && r.outputDTypes == outDTypes &&
+            if (r.inputShapes == inShapes && r.outputShape == outShape && r.inputStrides == inStrides &&
+                r.outputStrides == outStrides && r.inputDTypes == inDTypes && r.outputDType == outDType &&
                 r.inputConstants == inConstants)
             {
-                return r.runTime;
+                return std::max(1e-6f, r.runTime);
             }
         }
 
 #ifdef TENSOR_GRAPHS_LOG_COST_CALLS
-        {
-            Record r;
-            r.kernelUid = kernelUid;
-            r.buildContextId = BUILD_CONTEXT_ID;
-            r.hwTag = HW_TAG;
-            r.inputShapes = inShapes;
-            r.outputShapes = outShapes;
-            r.inputStrides = inStrides;
-            r.outputStrides = outStrides;
-            r.inputDTypes = inDTypes;
-            r.outputDTypes = outDTypes;
-            r.inputConstants = inConstants;
-            const auto &entry = KernelRegistry::get().getKernel(kernelUid);
-            r.backends = entry.backends;
-            r.inputBackends = entry.inputBackends;
-            r.runTime = 0.0f;
-
-            std::string callStr = serializeToString(r);
-            size_t callHash = std::hash<std::string>{}(callStr);
-
-            std::lock_guard<std::mutex> lock(logMtx);
-            if (loggedCalls.find(callHash) == loggedCalls.end())
-            {
-                loggedCalls.insert(callHash);
-                if (callFile.is_open())
-                {
-                    BinaryWriter bw(callFile);
-                    bw.write(r);
-                    callFile.flush();
-                }
-            }
-        }
+        log_call(kernelId, outShape, outStrides, outDType, inShapes, inStrides, inDTypes, inConstants);
 #endif
 
-        ModelKey mk = {kernelUid, inShapes.size()};
+        ModelKey mk = {kernelId, inShapes.size()};
         auto modelIt = models.find(mk);
         if (modelIt != models.end())
         {
-            auto features = extractFeatures(inShapes, inStrides, inDTypes, outShapes, outStrides, outDTypes);
+            auto features = extractFeatures(inShapes, inStrides, inDTypes, outShape, outStrides, outDType);
             uint64_t targetElements = countElements(outShape);
             return modelIt->second.predict(features, targetElements);
         }

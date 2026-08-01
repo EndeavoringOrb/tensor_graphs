@@ -1,10 +1,10 @@
-// File: tensor_graphs_cpp/kernels/cpu/reference/argmax/I32_ND.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
-#include <vector>
-#include <numeric>
 #include <algorithm>
+#include <numeric>
+#include <vector>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchArgmaxI32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -41,10 +41,10 @@ inline void runArgmaxI32_ND(const KernelContext &ctx)
                 candidates[m] = {in[inIdx], static_cast<int32_t>(m)};
             }
 
-            // Sort descending by value, stable sort to preserve order of equal elements
+            // Sort descending by value, stable sort to preserve order of equal
+            // elements
             std::stable_sort(candidates.begin(), candidates.end(),
-                             [](const std::pair<float, int32_t> &a, const std::pair<float, int32_t> &b)
-                             {
+                             [](const std::pair<float, int32_t> &a, const std::pair<float, int32_t> &b) {
                                  return a.first > b.first;
                              });
 
@@ -58,4 +58,7 @@ inline void runArgmaxI32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::ARGMAX, 3, matchArgmaxI32_ND, runArgmaxI32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32, DType::INT32}, {{8, 32}, {1}, {1}}, {true, false, false}, {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::ARGMAX, 3, 3, matchArgmaxI32_ND, runArgmaxI32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32, DType::INT32}, {{8, 32}, {1}, {1}},
+                    {true, false, false},
+                    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

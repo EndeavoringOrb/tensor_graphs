@@ -1,9 +1,10 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
-#include <thread>
-#include <vector>
 #include <algorithm>
+#include <vector>
+
+#include "core/common/thread_pool.hpp"
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 // =============================================================================
 // FUSED KERNEL: Negate F32 ND (NEON + Multi-threaded)
@@ -13,7 +14,8 @@
 // multi-threading for near-linear scaling across all 12 cores.
 //
 // Expected savings: ~580ms remaining after softmax fusion (RoPE neg patterns)
-// But also critical for enabling correct fusion of other subgraphs containing neg.
+// But also critical for enabling correct fusion of other subgraphs containing
+// neg.
 // =============================================================================
 
 #if defined(TG_HAS_NEON)
@@ -36,41 +38,38 @@ inline void runNegF32_ND_NEON_Threaded(const KernelContext &ctx)
     if (n == 0)
         return;
 
-    const uint32_t num_threads = std::max(1u, std::thread::hardware_concurrency());
-    const uint64_t chunk = (n + num_threads - 1) / num_threads;
+    uint32_t num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0)
+        num_threads = 1;
 
-    std::vector<std::thread> workers;
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]()
-                             {
-            const uint64_t start = t * chunk;
-            const uint64_t end = std::min(start + chunk, n);
-            uint64_t i = start;
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        const uint64_t chunk = (n + num_threads - 1) / num_threads;
+        const uint64_t start = t * chunk;
+        const uint64_t end = std::min(start + chunk, n);
+        uint64_t i = start;
 
-            // NEON path: negate 4 floats at a time
-            for (; i + 4 <= end; i += 4)
-            {
-                float32x4_t vx = vld1q_f32(x + i);
-                vst1q_f32(out + i, vnegq_f32(vx));
-            }
-            // Scalar tail
-            for (; i < end; ++i)
-            {
-                out[i] = -x[i];
-            } });
-    }
-    for (auto &w : workers)
-        w.join();
+        // NEON path: negate 4 floats at a time
+        for (; i + 4 <= end; i += 4)
+        {
+            float32x4_t vx = vld1q_f32(x + i);
+            vst1q_f32(out + i, vnegq_f32(vx));
+        }
+        // Scalar tail
+        for (; i < end; ++i)
+        {
+            out[i] = -x[i];
+        }
+    });
 }
 
 // Reference factory: same as the reference negate - just graph.neg(x)
-inline uint32_t refFactoryNegND_NEON_Threaded(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryNegND_NEON_Threaded(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.neg(inputs[0]);
 }
 
-REGISTER_KERNEL("Neg_F32_ND_NEON_Threaded", 1, matchNegF32_ND_NEON_Threaded, runNegF32_ND_NEON_Threaded, refFactoryNegND_NEON_Threaded,
-                {Backend::CPU}, {DType::FLOAT32}, {{1536}}, {true}, {{Backend::CPU}});
+REGISTER_KERNEL("Neg_F32_ND_NEON_Threaded", 1, 1, matchNegF32_ND_NEON_Threaded, runNegF32_ND_NEON_Threaded,
+                refFactoryNegND_NEON_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32}, {{1536}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

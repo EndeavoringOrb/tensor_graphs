@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchOr_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -24,5 +24,6 @@ inline void runOr_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::OR, 2, matchOr_ND, runOr_ND, {Backend::CPU}, {DType::BOOL, DType::BOOL}, {{8, 32}, {8, 32}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
-
+REGISTER_REF_KERNEL(OpType::OR, 2, 2, matchOr_ND, runOr_ND, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                    {DType::BOOL, DType::BOOL}, {{8, 32}, {8, 32}}, {true, true},
+                    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

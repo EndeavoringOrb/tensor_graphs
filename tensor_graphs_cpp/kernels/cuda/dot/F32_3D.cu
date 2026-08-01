@@ -90,7 +90,7 @@ void runDotF32_3D_CUDA(const KernelContext &ctx)
  * Reference Factory: Defines how this kernel relates to high-level graph operations.
  * Since this is a standard Dot implementation, it simply maps to the dot operation.
  */
-inline uint32_t refFactoryDotF32_3D_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryDotF32_3D_CUDA(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Dot 3D requires 2 inputs");
@@ -104,9 +104,9 @@ inline uint32_t refFactoryDotF32_3D_CUDA(const std::vector<uint32_t> &inputs, Gr
  * Inputs: 2
  * Backend: CUDA
  */
-REGISTER_KERNEL("Dot_F32_3D_CUDA", 2, matchDotF32_3D_CUDA, runDotF32_3D_CUDA, refFactoryDotF32_3D_CUDA, {Backend::CUDA},
+REGISTER_KERNEL("Dot_F32_3D_CUDA", 2, 2, matchDotF32_3D_CUDA, runDotF32_3D_CUDA, refFactoryDotF32_3D_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)},
     {DType::FLOAT32, DType::FLOAT32},
-    {{2, 8, 16}, {2, 16, 8}}, {true, true}, {{Backend::CUDA}, {Backend::CUDA}});
+    {{2, 8, 16}, {2, 16, 8}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif
 

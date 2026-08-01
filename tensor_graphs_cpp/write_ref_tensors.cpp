@@ -1,45 +1,47 @@
 // tensor_graphs_cpp/write_ref_tensors.cpp
-#include <iostream>
-#include <vector>
-#include <string>
 #include <chrono>
 #include <cmath>
-#include <unordered_map>
-#include <unordered_set>
 #include <filesystem>
 #include <fstream>
-#include "core/types.hpp"
-#include "core/memory.hpp"
+#include <iostream>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include "core/argparse.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
+#include "core/memory.hpp"
 #include "core/misc.hpp"
 #include "core/repo.hpp"
-#include "core/argparse.hpp"
-#include "models/run_models.hpp"
+#include "core/types.hpp"
 #include "generated/kernels_all.gen.hpp"
+#include "models/run_models.hpp"
 
 // We use a custom version of executeReferenceGraph for clean tensors
-void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &rootIds, const std::vector<uint32_t> &dynamicInputs, Repo &repo)
+void computeAndWriteCleanTensors(Graph &graph, const std::vector<LogicalId> &rootIds,
+                                 const std::vector<LogicalId> &dynamicInputs, Repo &repo)
 {
-    std::vector<uint32_t> topo = topologicalSort(rootIds, graph);
+    std::vector<LogicalId> topo = topologicalSort(rootIds, graph);
 
     // Create a set for O(1) lookup of dynamic model inputs
-    std::unordered_set<uint32_t> dynamicInputSet(dynamicInputs.begin(), dynamicInputs.end());
+    std::unordered_set<LogicalId> dynamicInputSet(dynamicInputs.begin(), dynamicInputs.end());
 
     // 1. Identify "clean" nodes
-    std::unordered_map<uint32_t, bool> is_clean;
-    for (uint32_t nodeId : topo)
+    std::unordered_map<LogicalId, bool> is_clean;
+    for (LogicalId nodeId : topo)
     {
         const TensorNode &node = graph.getNode(nodeId);
         if (node.opType == OpType::INPUT)
         {
             // If the node is a dynamic input, it is not considered clean/static
-            is_clean[nodeId] = (node.storageType == StorageType::PERSISTENT && node.backend == Backend::CPU && dynamicInputSet.count(nodeId) == 0);
+            is_clean[nodeId] = (dynamicInputSet.count(nodeId) == 0);
         }
         else
         {
             bool all_clean = true;
-            for (uint32_t pid : node.parentIds)
+            for (LogicalId pid : node.child_ids)
             {
                 if (!is_clean[pid])
                 {
@@ -52,7 +54,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
     }
 
     // 2. Infer shapes only for clean nodes
-    for (uint32_t nodeId : topo)
+    for (LogicalId nodeId : topo)
     {
         if (!is_clean[nodeId])
             continue;
@@ -69,7 +71,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
     int computed = 0;
     int skipped = 0;
 
-    for (uint32_t nodeId : topo)
+    for (LogicalId nodeId : topo)
     {
         if (!is_clean[nodeId])
             continue;
@@ -86,30 +88,45 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
         if (node.opType == OpType::INPUT || node.opType == OpType::CACHE)
         {
             TensorView view = makeView(node);
-            views[nodeId] = view;
-            size_t bufElements = getRequiredBufferSize(view);
-            results[nodeId].resize(bufElements * elemSize, 0);
+            views[nodeId.value] = view;
+            uint64_t bufElements = getRequiredBufferSize(view);
+            results[nodeId.value].resize(bufElements * elemSize, 0);
 
             std::vector<uint8_t> rawBytes;
             if (graph.constantStaging.count(nodeId))
             {
                 rawBytes = *graph.constantStaging.at(nodeId);
             }
+            else if (graph.input_data_types.count(nodeId) &&
+                     graph.input_data_types.at(nodeId) == InputDataType::STORAGE)
+            {
+                // Fetch file paths and offsets registered in the FileRegistry
+                TensorMetadata meta = FileRegistry::get().getNodeMeta(nodeId);
+                uint64_t sizeBytes = meta.dataOffsetEnd - meta.dataOffsetStart;
+                rawBytes.resize(sizeBytes);
+
+                std::ifstream file(meta.filePath, std::ios::binary);
+                if (!file.is_open())
+                {
+                    Error::throw_err("[computeAndWriteCleanTensors] Failed to open model file: " + meta.filePath);
+                }
+                file.seekg(meta.dataOffsetStart, std::ios::beg);
+                file.read(reinterpret_cast<char *>(rawBytes.data()), sizeBytes);
+            }
             else
             {
-                Error::throw_err("[computeAndWriteCleanTensors] input node value not found in constantStaging");
+                Error::throw_err("[computeAndWriteCleanTensors] input node value not "
+                                 "found in constantStaging");
             }
 
             uint64_t numElements = countElements(view);
-            for (size_t i = 0; i < numElements; ++i)
+            for (uint64_t i = 0; i < numElements; ++i)
             {
                 uint64_t idx = getStridedIndex(i, view.getShape(), view.strides);
-                std::memcpy(results[nodeId].data() + idx * elemSize,
-                            rawBytes.data() + i * elemSize,
-                            elemSize);
+                std::memcpy(results[nodeId.value].data() + idx * elemSize, rawBytes.data() + i * elemSize, elemSize);
             }
 
-            repo.write(nodeId, node, results[nodeId].data(), results[nodeId].size());
+            repo.write(nodeId, view, results[nodeId.value].data(), results[nodeId.value].size());
             computed++;
             continue;
         }
@@ -117,70 +134,71 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
         std::vector<const void *> inputPtrs;
         std::vector<TensorView> inputViews;
         std::vector<TensorNode> inputNodes;
-        for (uint32_t pid : node.parentIds)
+        for (LogicalId pid : node.child_ids)
         {
-            if (results.find(pid) == results.end())
+            if (results.find(pid.value) == results.end())
             {
                 if (repo.has(pid))
                 {
-                    results[pid] = repo.read(pid);
-                    views[pid] = makeView(graph.getNode(pid));
+                    results[pid.value] = repo.read(pid);
+                    views[pid.value] = makeView(graph.getNode(pid));
                 }
                 else
                 {
-                    Error::throw_err("Parent node " + std::to_string(pid) + " not found in results or repo");
+                    Error::throw_err("Parent node " + std::to_string(pid.value) + " not found in results or repo");
                 }
             }
-            inputPtrs.push_back(results[pid].data());
-            inputViews.push_back(views[pid]);
+            inputPtrs.push_back(results[pid.value].data());
+            inputViews.push_back(views[pid.value]);
             TensorNode inNode = graph.getNode(pid);
-            inNode.strides = views[pid].strides;
-            inNode.viewOffset = views[pid].baseOffset / getDTypeSize(inNode.dtype);
+            inNode.strides = views[pid.value].strides;
             inputNodes.push_back(inNode);
         }
 
         TensorView outViewContig = makeView(node);
         TensorNode outNodeC = node;
-        auto refs_c = KernelRegistry::get().findMatchingKernels(
-            node.opType, node.opName, node.backend,
-            inputNodes, outNodeC, true);
+        auto refs_c = KernelRegistry::get().findMatchingKernels(node.opType, node.opName, inputNodes, outNodeC, true,
+                                                                MemSpace{1, HandleType::CPP}, {},
+                                                                {Engine{0, EngineType::CPU}}, false, true, false, true);
 
         if (refs_c.empty())
         {
-            Error::throw_err("No reference kernel found for node " + std::to_string(nodeId) + " op=" + toString(node.opType));
+            Error::throw_err("No reference kernel found for node " + std::to_string(nodeId.value) +
+                             " op=" + toString(node.opType));
         }
 
         TensorView chosenOutView = outViewContig;
-        uint64_t chosenKernelUid = refs_c.front();
+        KernelId chosenKernelUid = refs_c.front();
         const KernelEntry &kernel = KernelRegistry::get().getKernel(chosenKernelUid);
 
-        if (kernel.isView)
+        if (kernel.is_view)
         {
-            TensorNode dummyOutNode = node;
-            kernel.inferView(dummyOutNode, inputNodes, graph);
-            uint32_t parentId = node.parentIds[0];
-            results[nodeId] = results[parentId];
-            chosenOutView.strides = dummyOutNode.strides;
-            chosenOutView.baseOffset = dummyOutNode.viewOffset * elemSize;
-            views[nodeId] = chosenOutView;
+            TensorView dummyOutView(node, 0);
+            kernel.inferView(inputNodes, dummyOutView, graph);
+            LogicalId parentId = node.child_ids[0];
+            results[nodeId.value] = results[parentId.value];
+            chosenOutView.strides = dummyOutView.strides;
+            chosenOutView.offset = dummyOutView.offset;
+            views[nodeId.value] = chosenOutView;
 
-            TensorView contigView = makeView(dummyOutNode);
+            TensorView contigView = dummyOutView;
+            contigView.strides = calcContiguousStrides(dummyOutView.getShape());
             std::vector<uint8_t> contigData(countElements(contigView) * elemSize);
-            const uint8_t *srcData = results[parentId].data() + chosenOutView.baseOffset;
-            for (size_t i = 0; i < countElements(contigView); ++i)
+            const uint8_t *srcData = results[parentId.value].data() + chosenOutView.offset;
+            for (uint64_t i = 0; i < countElements(contigView); ++i)
             {
                 uint64_t srcIdx = getStridedIndex(i, chosenOutView.getShape(), chosenOutView.strides);
                 std::memcpy(contigData.data() + i * elemSize, srcData + srcIdx * elemSize, elemSize);
             }
-            repo.write(nodeId, dummyOutNode, contigData.data(), contigData.size());
+            repo.write(nodeId, contigView, contigData.data(), contigData.size());
             computed++;
             continue;
         }
 
-        views[nodeId] = chosenOutView;
-        size_t bufElements = getRequiredBufferSize(chosenOutView);
-        results[nodeId].resize(bufElements * elemSize, 0);
-        std::vector<void *> outputPtrs = {results[nodeId].data()};
+        views[nodeId.value] = chosenOutView;
+        uint64_t bufElements = getRequiredBufferSize(chosenOutView);
+        results[nodeId.value].resize(bufElements * elemSize, 0);
+        std::vector<void *> outputPtrs = {results[nodeId.value].data()};
         std::vector<TensorView> outputViews = {chosenOutView};
 
         if (kernel.run)
@@ -188,7 +206,7 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
             kernel.run(KernelContext(inputPtrs, outputPtrs, inputViews, outputViews));
         }
 
-        repo.write(nodeId, node, results[nodeId].data(), results[nodeId].size());
+        repo.write(nodeId, chosenOutView, results[nodeId.value].data(), results[nodeId.value].size());
         computed++;
     }
 
@@ -198,7 +216,11 @@ void computeAndWriteCleanTensors(Graph &graph, const std::vector<uint32_t> &root
 int main(int argc, char *argv[])
 {
     ArgParser parser("write_ref_tensors", "Compute and write reference/clean tensors for a model.");
-    parser.add_positional("model", "Name of the target model (gemma-3-270m, flux-klein-4b, qwen-3.6-35b-a3b).", "gemma-3-270m");
+    parser.add_positional("model",
+                          "Name of the target model (gemma-3-270m, "
+                          "qwen-3.6-35b-a3b).",
+                          "gemma-3-270m");
+    parser.add_positional("model_path", "Model file or directory containing model files.");
 
     if (!parser.parse(argc, argv))
     {
@@ -206,25 +228,24 @@ int main(int argc, char *argv[])
     }
 
     std::string model = parser.get_positional("model");
+    std::string model_path = parser.get_positional("model_path");
 
-    std::unordered_map<Backend, uint64_t> bufferSizes = {{Backend::CPU, 24ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<uint32_t, uint64_t> idxCaps = {{1, 24ULL * 1024 * 1024 * 1024}};
     MemoryManager mem(bufferSizes);
     Graph g;
 
+    uint32_t max_seq_len = 8;
     std::cout << "Building " << model << " Graph for Reference Tensors..." << std::endl;
     ModelGraphRoots roots;
 
     if (model == "gemma-3-270m")
     {
-        roots = build_gemma_graph(g, mem);
-    }
-    else if (model == "flux-klein-4b")
-    {
-        roots = build_flux_graph(g, mem);
+        roots = build_gemma_graph(g, mem, model_path, max_seq_len);
     }
     else if (model == "qwen-3.6-35b-a3b")
     {
-        roots = build_qwen_graph(g, mem);
+        roots = build_qwen_graph(g, mem, model_path, max_seq_len);
     }
     else
     {

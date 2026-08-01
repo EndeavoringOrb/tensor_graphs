@@ -1,13 +1,15 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
-#include <thread>
-#include <vector>
 #include <algorithm>
+#include <vector>
+
+#include "core/common/thread_pool.hpp"
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 /**
- * Highly optimized multi-threaded cache-blocked 3D Transposition / Contiguous kernel.
- * Replaces the slow, recursive fallback for [B, M, N] transposed strides.
+ * Highly optimized multi-threaded cache-blocked 3D Transposition / Contiguous
+ * kernel. Replaces the slow, recursive fallback for [B, M, N] transposed
+ * strides.
  */
 
 inline bool matchContiguousTransposed3D(const std::vector<TensorNode> &inputs, const TensorNode &output)
@@ -56,61 +58,45 @@ inline void runContiguousTransposed3D(const KernelContext &ctx)
     if (num_threads > B)
         num_threads = B;
 
-    std::vector<std::thread> workers;
-    uint32_t b_per_thread = (B + num_threads - 1) / num_threads;
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
+        uint32_t b_per_thread = (B + num_threads - 1) / num_threads;
+        uint32_t b_start = t * b_per_thread;
+        uint32_t b_end = std::min(b_start + b_per_thread, B);
 
-    for (uint32_t t = 0; t < num_threads; ++t)
-    {
-        workers.emplace_back([=]()
-                             {
-            uint32_t b_start = t * b_per_thread;
-            uint32_t b_end = std::min(b_start + b_per_thread, B);
+        // 32x32 block tile size keeps memory chunks entirely within L1/L2 caches
+        constexpr uint32_t BLOCK = 32;
 
-            // 32x32 block tile size keeps memory chunks entirely within L1/L2 caches
-            constexpr uint32_t BLOCK = 32;
+        for (uint32_t b = b_start; b < b_end; ++b)
+        {
+            uint64_t batch_offset = (uint64_t)b * M * N;
+            const float *in_batch = in + batch_offset;
+            float *out_batch = out + batch_offset;
 
-            for (uint32_t b = b_start; b < b_end; ++b)
+            for (uint32_t m_outer = 0; m_outer < M; m_outer += BLOCK)
             {
-                uint64_t batch_offset = (uint64_t)b * M * N;
-                const float *in_batch = in + batch_offset;
-                float *out_batch = out + batch_offset;
-
-                for (uint32_t m_outer = 0; m_outer < M; m_outer += BLOCK)
+                uint32_t m_end = std::min(m_outer + BLOCK, M);
+                for (uint32_t n_outer = 0; n_outer < N; n_outer += BLOCK)
                 {
-                    uint32_t m_end = std::min(m_outer + BLOCK, M);
-                    for (uint32_t n_outer = 0; n_outer < N; n_outer += BLOCK)
+                    uint32_t n_end = std::min(n_outer + BLOCK, N);
+                    for (uint32_t m = m_outer; m < m_end; ++m)
                     {
-                        uint32_t n_end = std::min(n_outer + BLOCK, N);
-                        for (uint32_t m = m_outer; m < m_end; ++m)
+                        uint32_t n = n_outer;
+                        for (; n < n_end; ++n)
                         {
-                            uint32_t n = n_outer;
-                            for (; n < n_end; ++n)
-                            {
-                                out_batch[m * N + n] = in_batch[n * M + m];
-                            }
+                            out_batch[m * N + n] = in_batch[n * M + m];
                         }
                     }
                 }
-            } });
-    }
-
-    for (auto &worker : workers)
-        worker.join();
+            }
+        }
+    });
 }
 
-inline uint32_t refFactoryContiguousTransposed3D(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryContiguousTransposed3D(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.contiguous(inputs[0]);
 }
 
-REGISTER_KERNEL(
-    "Contiguous_Transposed_3D",
-    1,
-    matchContiguousTransposed3D,
-    runContiguousTransposed3D,
-    refFactoryContiguousTransposed3D,
-    {Backend::CPU},
-    {DType::FLOAT32},
-    {{256, 2048, 1024}},
-    {false},
-    {{Backend::CPU}});
+REGISTER_KERNEL("Contiguous_Transposed_3D", 1, 1, matchContiguousTransposed3D, runContiguousTransposed3D,
+                refFactoryContiguousTransposed3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32}, {{256, 2048, 1024}}, {false}, {{MemSpace(1, HandleType::CPP)}});

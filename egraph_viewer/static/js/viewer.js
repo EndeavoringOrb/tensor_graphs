@@ -183,21 +183,21 @@ class EGraphViewer {
         }
     }
 
-    async focusEclass(eclassId) {
-        if (this.focusedEclass === eclassId) return;
+    async focusEclass(e_class_id) {
+        if (this.focusedEclass === e_class_id) return;
 
-        this.focusedEclass = eclassId;
+        this.focusedEclass = e_class_id;
 
         // Update navigation path
-        const existingIdx = this.navigationPath.indexOf(eclassId);
+        const existingIdx = this.navigationPath.indexOf(e_class_id);
         if (existingIdx >= 0) {
             this.navigationPath = this.navigationPath.slice(0, existingIdx + 1);
         } else {
-            this.navigationPath.push(eclassId);
+            this.navigationPath.push(e_class_id);
         }
 
         try {
-            const response = await fetch(`/api/eclass/${this.currentFile}/${eclassId}`);
+            const response = await fetch(`/api/eclass/${this.currentFile}/${e_class_id}`);
             if (!response.ok) {
                 this.focusedEnodes = [];
                 this.focusedEclassData = null;
@@ -220,14 +220,14 @@ class EGraphViewer {
         }
     }
 
-    async selectEnode(eclassId, enodeId, children) {
-        if (this.selectionMap[eclassId] === enodeId) {
+    async selectEnode(e_class_id, enodeId, children) {
+        if (this.selectionMap[e_class_id] === enodeId) {
             // Deselect
-            delete this.selectionMap[eclassId];
-            delete this.childCache[eclassId];
+            delete this.selectionMap[e_class_id];
+            delete this.childCache[e_class_id];
         } else {
-            this.selectionMap[eclassId] = enodeId;
-            this.childCache[eclassId] = children || [];
+            this.selectionMap[e_class_id] = enodeId;
+            this.childCache[e_class_id] = children || [];
         }
 
         this.updateVisibleEclasses();
@@ -254,11 +254,11 @@ class EGraphViewer {
             return;
         }
 
-        container.innerHTML = this.navigationPath.map((eclassId, idx) => {
+        container.innerHTML = this.navigationPath.map((e_class_id, idx) => {
             const isLast = idx === this.navigationPath.length - 1;
             const sep = idx > 0 ? '<span class="breadcrumb-sep">›</span>' : '';
             const cls = isLast ? 'breadcrumb-item active' : 'breadcrumb-item';
-            return `${sep}<span class="${cls}" onclick="viewer.focusEclass(${eclassId})">EC${eclassId}</span>`;
+            return `${sep}<span class="${cls}" onclick="viewer.focusEclass(${e_class_id})">EC${e_class_id}</span>`;
         }).join('');
     }
 
@@ -385,14 +385,14 @@ class EGraphViewer {
         } else {
             this.focusedEnodes.forEach(enode => {
                 const isSelected = selectedEnodeId === enode.id;
-                const childrenStr = JSON.stringify(enode.children);
+                const childrenStr = JSON.stringify(enode.getChildren());
                 html += `
                     <div class="enode-item ${isSelected ? 'selected' : ''}"
                          onclick="viewer.selectEnode(${this.focusedEclass}, ${enode.id}, ${childrenStr})">
                         <span class="dot ${isSelected ? 'selected' : 'enode'}"></span>
                         <span class="enode-id">EN${enode.id}</span>
                         <span class="op-name">${enode.op_name}</span>
-                        <span class="child-count">${enode.children.length}↓</span>
+                        <span class="child-count">${enode.getChildren().length}↓</span>
                     </div>
                 `;
             });

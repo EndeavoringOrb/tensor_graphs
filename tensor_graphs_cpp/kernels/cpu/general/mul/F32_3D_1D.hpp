@@ -1,8 +1,8 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/mul/FP32_3D_1D.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <vector>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchMulFP32_3D_1D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -32,7 +32,7 @@ inline void runMulFP32_3D_1D(const KernelContext &ctx)
         out[i] = data3D[i] * data1D[i % D];
 }
 
-inline uint32_t refFactoryMul3D_1D(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryMul3D_1D(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Fused Mul 3D+1D requires 2 inputs");
@@ -42,7 +42,7 @@ inline uint32_t refFactoryMul3D_1D(const std::vector<uint32_t> &inputs, Graph &g
 
     // 1. Reshape [D] -> [1, 1, D]
     int32_t reshape_dims[] = {1, 1, (int32_t)shape1D[0]};
-    uint32_t out = graph.reshape(inputs[1], graph.constant({3}, reshape_dims, DType::INT32));
+    LogicalId out = graph.reshape(inputs[1], graph.constant({3}, reshape_dims, DType::INT32));
 
     // 2. Repeat axis 0 (Batch)
     int32_t b_rep = (int32_t)shape3D[0];
@@ -57,4 +57,6 @@ inline uint32_t refFactoryMul3D_1D(const std::vector<uint32_t> &inputs, Graph &g
     return graph.mul(inputs[0], out);
 }
 
-REGISTER_KERNEL("Mul_3D_1D", 2, matchMulFP32_3D_1D, runMulFP32_3D_1D, refFactoryMul3D_1D, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 640}, {640}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Mul_3D_1D", 2, 2, matchMulFP32_3D_1D, runMulFP32_3D_1D, refFactoryMul3D_1D,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {{1, 1, 640}, {640}}, {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

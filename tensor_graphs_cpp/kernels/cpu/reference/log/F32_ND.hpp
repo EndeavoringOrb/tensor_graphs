@@ -1,8 +1,8 @@
-// File: tensor_graphs_cpp/kernels/cpu/reference/log/F32_ND.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cmath>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchLogF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -18,4 +18,6 @@ inline void runLogF32_ND(const KernelContext &ctx)
         out[i] = std::log(in[i]);
 }
 
-REGISTER_REF_KERNEL(OpType::LOG, 1, matchLogF32_ND, runLogF32_ND, {Backend::CPU}, {DType::FLOAT32}, {{8, 32}}, {true}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::LOG, 1, 1, matchLogF32_ND, runLogF32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{8, 32}}, {true},
+                    {{MemSpace(1, HandleType::CPP)}});

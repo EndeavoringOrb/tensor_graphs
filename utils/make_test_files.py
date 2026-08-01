@@ -1,5 +1,4 @@
 import os
-import struct
 import torch
 import torch.nn.functional as F
 import shutil
@@ -85,7 +84,7 @@ add_test("PERMUTE", [a_perm, perm], a_perm.permute(0, 2, 1))
 a_cat = torch.rand((2, 4), dtype=torch.float32)
 b_cat = torch.rand((2, 4), dtype=torch.float32)
 axis_cat = torch.tensor([1], dtype=torch.int32)
-add_test("CONCAT", [a_cat, b_cat, axis_cat], torch.cat([a_cat, b_cat], dim=1))
+add_test("CONCAT", [axis_cat, a_cat, b_cat], torch.cat([a_cat, b_cat], dim=1))
 
 # --- Cast ---
 a_cast = torch.randint(1, 10, (4, 8), dtype=torch.int32)
@@ -158,7 +157,7 @@ for i, (op, inputs, output) in enumerate(tests):
     os.makedirs(test_dir, exist_ok=True)
 
     record = {
-        "kernelUid": OP_TYPES.index(op),
+        "kernelId": OP_TYPES.index(op),
         "buildContextId": 0,
         "hwTag": "",
         "inputShapes": [list(inp.shape) for inp in inputs],

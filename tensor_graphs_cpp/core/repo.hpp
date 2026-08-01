@@ -1,18 +1,19 @@
 // tensor_graphs_cpp/core/repo.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/graph.hpp"
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iostream>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <fstream>
-#include <iostream>
-#include <filesystem>
-#include <functional>
+
+#include "core/graph.hpp"
+#include "core/types.hpp"
 
 struct RefMetaEntry
 {
-    uint32_t logicalId;
+    LogicalId logicalId;
     uint64_t offset;
     uint64_t sizeBytes;
     DType dtype;
@@ -37,11 +38,10 @@ inline void tg_deserialize(BinaryReader &br, RefMetaEntry &val)
     br.read(val.shape);
 }
 
-inline std::string computeGraphHash(const Graph &graph, const std::vector<uint32_t> &rootIds)
+inline std::string computeGraphHash(const Graph &graph, const std::vector<LogicalId> &rootIds)
 {
-    std::unordered_map<uint32_t, std::string> memo;
-    std::function<std::string(uint32_t)> hashNode = [&](uint32_t id)
-    {
+    std::unordered_map<LogicalId, std::string> memo;
+    std::function<std::string(LogicalId)> hashNode = [&](LogicalId id) {
         if (memo.count(id))
             return memo[id];
         const TensorNode &n = graph.getNode(id);
@@ -54,12 +54,12 @@ inline std::string computeGraphHash(const Graph &graph, const std::vector<uint32
         }
         sha.update(":");
         sha.update(toString(n.dtype));
-        if (n.opType == OpType::INPUT && n.storageType == StorageType::PERSISTENT && n.backend == Backend::CPU && graph.constantStaging.count(id))
+        if (graph.constantStaging.count(id))
         {
             sha.update(":");
             sha.update(n.contentHash);
         }
-        for (uint32_t pid : n.parentIds)
+        for (LogicalId pid : n.child_ids)
         {
             sha.update(":");
             sha.update(hashNode(pid));
@@ -69,7 +69,7 @@ inline std::string computeGraphHash(const Graph &graph, const std::vector<uint32
     };
 
     SHA256 finalSha;
-    for (uint32_t r : rootIds)
+    for (LogicalId r : rootIds)
     {
         finalSha.update(hashNode(r));
     }
@@ -81,16 +81,15 @@ class Repo
     std::string metaPath;
     std::string dataPath;
     std::string graphHash;
-    std::unordered_map<uint32_t, RefMetaEntry> entries;
+    std::unordered_map<LogicalId, RefMetaEntry> entries;
     std::ofstream dataOut;
     std::ofstream metaOut;
     mutable std::ifstream dataIn;
     bool readOnly;
     bool valid = false;
 
-public:
-    Repo(const std::string &path, const std::string &gHash, bool ro = true)
-        : graphHash(gHash), readOnly(ro)
+  public:
+    Repo(const std::string &path, const std::string &gHash, bool ro = true) : graphHash(gHash), readOnly(ro)
     {
         metaPath = path + ".refmeta";
         dataPath = path + ".reftensors";
@@ -141,14 +140,17 @@ public:
         }
     }
 
-    bool isValid() const { return valid; }
+    bool isValid() const
+    {
+        return valid;
+    }
 
-    bool has(uint32_t logicalId) const
+    bool has(LogicalId logicalId) const
     {
         return entries.count(logicalId) > 0;
     }
 
-    std::vector<uint8_t> read(uint32_t logicalId) const
+    std::vector<uint8_t> read(LogicalId logicalId) const
     {
         if (!has(logicalId))
             return {};
@@ -159,7 +161,7 @@ public:
         return data;
     }
 
-    void write(uint32_t logicalId, const TensorNode &node, const void *data, uint64_t sizeBytes)
+    void write(LogicalId logicalId, const TensorView &view, const void *data, uint64_t sizeBytes)
     {
         if (readOnly || !valid)
             return;
@@ -174,8 +176,8 @@ public:
         e.logicalId = logicalId;
         e.offset = offset;
         e.sizeBytes = sizeBytes;
-        e.dtype = node.dtype;
-        e.shape = node.getShape();
+        e.dtype = view.dtype;
+        e.shape = view.getShape();
         entries[logicalId] = e;
 
         BinaryWriter bw(metaOut);

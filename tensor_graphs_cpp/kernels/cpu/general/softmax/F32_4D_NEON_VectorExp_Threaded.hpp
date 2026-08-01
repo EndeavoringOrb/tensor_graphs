@@ -1,4 +1,4 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/softmax/F32_4D_NEON_VectorExp_Threaded.hpp
+
 //
 // Vectorized 4D Softmax (NEON, threaded)
 // ======================================
@@ -19,7 +19,8 @@
 // this stage runs at scalar throughput (~5 ns/exp on Cortex-X class cores).
 //
 // For the jina-v5 vision tower this is the #2 hottest kernel:
-//   12 layers x 1 call x 12*5040*5040 = 305M exps/call  ->  50 ms/call  ->  604 ms total
+//   12 layers x 1 call x 12*5040*5040 = 305M exps/call  ->  50 ms/call  ->  604
+//   ms total
 //
 // WHAT THIS KERNEL DOES
 // ---------------------
@@ -60,15 +61,16 @@
 // preserved to >0.999 vs the scalar-std::exp reference.
 
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h>
+
+#include <algorithm>
 #include <cmath>
 #include <thread>
 #include <vector>
-#include <algorithm>
 
 // ---------------------------------------------------------------------------
 // Vectorized fast expf for NEON (identical to the one in
@@ -101,11 +103,8 @@ static inline float32x4_t softmax_vexpq_f32(float32x4_t x)
     float32x4_t f3 = vmulq_f32(f2, f);
     float32x4_t f4 = vmulq_f32(f3, f);
 
-    float32x4_t poly = vaddq_f32(c0,
-                                 vaddq_f32(vmulq_f32(c1, f),
-                                           vaddq_f32(vmulq_f32(c2, f2),
-                                                     vaddq_f32(vmulq_f32(c3, f3),
-                                                               vmulq_f32(c4, f4)))));
+    float32x4_t poly = vaddq_f32(
+        c0, vaddq_f32(vmulq_f32(c1, f), vaddq_f32(vmulq_f32(c2, f2), vaddq_f32(vmulq_f32(c3, f3), vmulq_f32(c4, f4)))));
 
     int32x4_t v_n = vcvtq_s32_f32(n);
     int32x4_t exp_bits = vshlq_n_s32(vaddq_s32(v_n, vdupq_n_s32(127)), 23);
@@ -118,8 +117,7 @@ static inline float32x4_t softmax_vexpq_f32(float32x4_t x)
 // Match function: same as existing SOFTMAX_F32_4D_THREADED — accepts any
 // 4D input with a contiguous output.
 // ---------------------------------------------------------------------------
-inline bool matchSoftmaxF32_4D_VectorExp_Threaded(
-    const std::vector<TensorNode> &inputs, const TensorNode &output)
+inline bool matchSoftmaxF32_4D_VectorExp_Threaded(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     return inputs[0].getShape().size() == 4 && isContiguous(output);
 }
@@ -146,27 +144,30 @@ inline void runSoftmaxF32_4D_VectorExp_Threaded(const KernelContext &ctx)
 
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=]()
-                             {
+        workers.emplace_back([=]() {
             const uint32_t start = t * chunk;
-            const uint32_t end   = std::min(start + chunk, outer_size);
-            if (start >= end) return;
+            const uint32_t end = std::min(start + chunk, outer_size);
+            if (start >= end)
+                return;
 
             // Pre-compute dim_size rounded down to a multiple of 4 (NEON width)
             const uint32_t dim_v = dim_size & ~3u;
 
-            for (uint32_t i = start; i < end; ++i) {
-                const float *r_in  = in  + i * dim_size;
-                float       *r_out = out + i * dim_size;
+            for (uint32_t i = start; i < end; ++i)
+            {
+                const float *r_in = in + i * dim_size;
+                float *r_out = out + i * dim_size;
 
                 // ---- Pass 1: row max (vectorized + tail) ----
                 float32x4_t v_max = vdupq_n_f32(-1e30f);
                 uint32_t d = 0;
-                for (; d < dim_v; d += 4) {
+                for (; d < dim_v; d += 4)
+                {
                     v_max = vmaxq_f32(v_max, vld1q_f32(r_in + d));
                 }
                 float max_val = vmaxvq_f32(v_max);
-                for (; d < dim_size; ++d) {
+                for (; d < dim_size; ++d)
+                {
                     max_val = std::max(max_val, r_in[d]);
                 }
 
@@ -174,14 +175,15 @@ inline void runSoftmaxF32_4D_VectorExp_Threaded(const KernelContext &ctx)
                 const float32x4_t v_max_b = vdupq_n_f32(max_val);
                 float32x4_t v_sum = vdupq_n_f32(0);
                 d = 0;
-                for (; d < dim_v; d += 4) {
-                    float32x4_t e = softmax_vexpq_f32(
-                        vsubq_f32(vld1q_f32(r_in + d), v_max_b));
+                for (; d < dim_v; d += 4)
+                {
+                    float32x4_t e = softmax_vexpq_f32(vsubq_f32(vld1q_f32(r_in + d), v_max_b));
                     vst1q_f32(r_out + d, e);
                     v_sum = vaddq_f32(v_sum, e);
                 }
                 float sum_val = vaddvq_f32(v_sum);
-                for (; d < dim_size; ++d) {
+                for (; d < dim_size; ++d)
+                {
                     float e = std::exp(r_in[d] - max_val);
                     r_out[d] = e;
                     sum_val += e;
@@ -191,14 +193,16 @@ inline void runSoftmaxF32_4D_VectorExp_Threaded(const KernelContext &ctx)
                 float inv_sum = 1.0f / sum_val;
                 const float32x4_t v_inv_sum = vdupq_n_f32(inv_sum);
                 d = 0;
-                for (; d < dim_v; d += 4) {
-                    vst1q_f32(r_out + d,
-                              vmulq_f32(vld1q_f32(r_out + d), v_inv_sum));
+                for (; d < dim_v; d += 4)
+                {
+                    vst1q_f32(r_out + d, vmulq_f32(vld1q_f32(r_out + d), v_inv_sum));
                 }
-                for (; d < dim_size; ++d) {
+                for (; d < dim_size; ++d)
+                {
                     r_out[d] *= inv_sum;
                 }
-            } });
+            }
+        });
     }
 
     for (auto &w : workers)
@@ -208,48 +212,39 @@ inline void runSoftmaxF32_4D_VectorExp_Threaded(const KernelContext &ctx)
 // Same refFactory as the existing SOFTMAX_F32_4D_THREADED — produces the
 // identical IR decomposition so the FusionRule can pick this kernel as an
 // alternative.
-inline uint32_t refFactorySoftmax4D_VectorExp(
-    const std::vector<uint32_t> &inputs, Graph &g)
+inline LogicalId refFactorySoftmax4D_VectorExp(const std::vector<LogicalId> &inputs, Graph &g)
 {
-    uint32_t x = inputs[0];
+    LogicalId x = inputs[0];
     auto s = g.getNode(x).getShape();
     int32_t ax = -1;
-    uint32_t axis_node = g.constant({1}, &ax, DType::INT32);
-    uint32_t m_rep = g.constant({1}, (int32_t *)&s[3], DType::INT32);
-    uint32_t ax_rep = g.constant({1}, (int32_t *)&ax, DType::INT32);
+    LogicalId axis_node = g.constant({1}, &ax, DType::INT32);
+    LogicalId m_rep = g.constant({1}, (int32_t *)&s[3], DType::INT32);
+    LogicalId ax_rep = g.constant({1}, (int32_t *)&ax, DType::INT32);
 
-    uint32_t max_s = g.repeat(g.max(x, axis_node), m_rep, ax_rep);
-    uint32_t shifted = g.add(x, g.neg(max_s));
+    LogicalId max_s = g.repeat(g.max(x, axis_node), m_rep, ax_rep);
+    LogicalId shifted = g.add(x, g.neg(max_s));
 
     float e_v = 2.718281828f;
-    uint32_t e_n = g.constant({1}, &e_v, DType::FLOAT32);
+    LogicalId e_n = g.constant({1}, &e_v, DType::FLOAT32);
     int32_t sh4[] = {1, 1, 1, 1};
-    uint32_t e_b = g.reshape(e_n, g.constant({4}, sh4, DType::INT32));
+    LogicalId e_b = g.reshape(e_n, g.constant({4}, sh4, DType::INT32));
     for (int i = 0; i < 4; ++i)
     {
         int32_t r = (int32_t)s[i];
         if (r <= 1)
             continue;
         int32_t a = i;
-        e_b = g.repeat(e_b, g.constant({1}, &r, DType::INT32),
-                       g.constant({1}, &a, DType::INT32));
+        e_b = g.repeat(e_b, g.constant({1}, &r, DType::INT32), g.constant({1}, &a, DType::INT32));
     }
 
-    uint32_t exps = g.pow(e_b, shifted);
-    uint32_t sums = g.repeat(g.sum(exps, axis_node), m_rep, ax_rep);
+    LogicalId exps = g.pow(e_b, shifted);
+    LogicalId sums = g.repeat(g.sum(exps, axis_node), m_rep, ax_rep);
     return g.div(exps, sums);
 }
 
-REGISTER_KERNEL(
-    "Softmax_4D_VectorExp_Threaded",
-    1,
-    matchSoftmaxF32_4D_VectorExp_Threaded,
-    runSoftmaxF32_4D_VectorExp_Threaded,
-    refFactorySoftmax4D_VectorExp,
-    {Backend::CPU},
-    {DType::FLOAT32},
-    {{1, 24, 1536, 1536}},
-    {true},
-    {{Backend::CPU}});
+REGISTER_KERNEL("Softmax_4D_VectorExp_Threaded", 1, 1, matchSoftmaxF32_4D_VectorExp_Threaded,
+                runSoftmaxF32_4D_VectorExp_Threaded, refFactorySoftmax4D_VectorExp, MemSpace(1, HandleType::CPP),
+                {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 24, 1536, 1536}}, {true},
+                {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

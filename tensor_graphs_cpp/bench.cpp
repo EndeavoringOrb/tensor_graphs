@@ -1,31 +1,28 @@
-// File: tensor_graphs_cpp/bench.cpp
-#include <iostream>
-#include <fstream>
-#include <string>
-#include <vector>
-#include <unordered_set>
-#include <chrono>
-#include <filesystem>
-#include <cstring>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
-#include "core/types.hpp"
-#include "core/memory.hpp"
+#include "core/argparse.hpp"
+#include "core/common/bench_utils.hpp"
+#include "core/cost_model.hpp"
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
-#include "core/cost_model.hpp"
+#include "core/memory.hpp"
 #include "core/misc.hpp"
-#include "core/argparse.hpp"
-
-#include "core/common/bench_utils.hpp"
-
-#include "generated/kernels_all.gen.hpp"
+#include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
+#include "generated/kernels_all.gen.hpp"
 
 int main(int argc, char *argv[])
 {
@@ -72,7 +69,10 @@ int main(int argc, char *argv[])
     std::ifstream callsFile(callsPath, std::ios::binary);
     if (!callsFile.is_open())
     {
-        std::cerr << "No calls file found at " << callsPath << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference pass first." << std::endl;
+        std::cerr << "No calls file found at " << callsPath
+                  << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference "
+                     "pass first."
+                  << std::endl;
         return 0;
     }
 
@@ -92,9 +92,9 @@ int main(int argc, char *argv[])
         if (recordedKeys.find(key) == recordedKeys.end() && seenCalls.find(key) == seenCalls.end())
         {
             seenCalls.insert(key);
-            if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelUid))
+            if (r.hwTag == HW_TAG && KernelRegistry::get().hasKernel(r.kernelId))
             {
-                const auto &kernel = KernelRegistry::get().getKernel(r.kernelUid);
+                const auto &kernel = KernelRegistry::get().getKernel(r.kernelId);
                 std::string name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
 
                 if (!targetKernel.empty() && name.find(targetKernel) == std::string::npos)
@@ -114,40 +114,42 @@ int main(int argc, char *argv[])
     for (uint32_t i = 0; i < toBenchmark.size(); i++)
     {
         Record &r = toBenchmark[i];
-        float cost = costModel.estimateCost(
-            r.kernelUid, r.outputShapes[0], r.outputStrides[0], r.outputDTypes[0],
-            r.inputShapes, r.inputStrides, r.inputDTypes, r.inputConstants);
+        float cost = costModel.estimateCost(r.kernelId, r.outputShape, r.outputStrides, r.outputDType, r.inputShapes,
+                                            r.inputStrides, r.inputDTypes, r.inputConstants);
         r.runTime = std::isinf(cost) ? -1.0f : cost;
     }
 
-    std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb)
-                     {
+    std::stable_sort(toBenchmark.begin(), toBenchmark.end(), [&](const Record &ra, const Record &rb) {
         float costA = ra.runTime;
         float costB = rb.runTime;
 
-        if (std::abs(costA - costB) < 1e-7) {
-            bool isRefA = KernelRegistry::get().getKernel(ra.kernelUid).isReference;
-            bool isRefB = KernelRegistry::get().getKernel(rb.kernelUid).isReference;
-            if (isRefA != isRefB) return !isRefA;
+        if (std::abs(costA - costB) < 1e-7)
+        {
+            bool isRefA = KernelRegistry::get().getKernel(ra.kernelId).isReference;
+            bool isRefB = KernelRegistry::get().getKernel(rb.kernelId).isReference;
+            if (isRefA != isRefB)
+                return !isRefA;
 
-            auto getVolume = [](const Record& r) {
+            auto getVolume = [](const Record &r) {
                 uint64_t v = 1;
-                for (const auto& shape : r.outputShapes)
-                    for (uint32_t d : shape) v *= d;
+                for (uint32_t d : r.outputShape)
+                    v *= d;
                 return v;
             };
             return getVolume(ra) < getVolume(rb);
         }
-        return costA < costB; });
+        return costA < costB;
+    });
 
-    size_t startIdx = (skipCount > (int)toBenchmark.size()) ? toBenchmark.size() : (size_t)std::max(0, skipCount);
+    uint64_t startIdx = (skipCount > (int)toBenchmark.size()) ? toBenchmark.size() : (uint64_t)std::max(0, skipCount);
 
     if (startIdx > 0)
     {
         std::cout << "Skipping the first " << startIdx << " kernels..." << std::endl;
     }
 
-    std::cout << (listOnly ? "Listing " : "Benchmarking ") << toBenchmark.size() - startIdx << " configurations..." << std::endl;
+    std::cout << (listOnly ? "Listing " : "Benchmarking ") << toBenchmark.size() - startIdx << " configurations..."
+              << std::endl;
 
     std::ofstream outFile;
     if (!listOnly)
@@ -156,36 +158,32 @@ int main(int argc, char *argv[])
     }
     BinaryWriter bw(outFile);
 
-    for (size_t i = startIdx; i < toBenchmark.size(); ++i)
+    for (uint64_t i = startIdx; i < toBenchmark.size(); ++i)
     {
         Record &r = toBenchmark[i];
-        uint64_t kernelUid = r.kernelUid;
-        const KernelEntry &kernel = KernelRegistry::get().getKernel(kernelUid);
+        uint64_t kernelId = r.kernelId.value;
+        const KernelEntry &kernel = KernelRegistry::get().getKernel(r.kernelId);
 
         std::cout << "[" << (i + 1) << "/" << toBenchmark.size() << "][";
-        for (size_t bidx = 0; bidx < kernel.backends.size(); ++bidx)
+        for (uint64_t bidx = 0; bidx < kernel.engines.size(); ++bidx)
         {
             if (bidx > 0)
                 std::cout << ",";
-            std::cout << toString(kernel.backends[bidx]);
+            std::cout << toString(kernel.engines[bidx].type);
         }
-        std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "")
-                  << " (0x" << std::hex << kernelUid << std::dec << ")"
+        std::cout << "] " << kernel.opName << (kernel.opName.empty() ? toString(kernel.opType) : "") << " (0x"
+                  << std::hex << kernelId << std::dec << ")"
                   << " est " << std::to_string(r.runTime) << " ms\n";
 
-        for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+        for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
         {
             std::cout << "  In  #" << idx << ": dtype=" << toString(r.inputDTypes[idx])
-                      << ", shape=" << toString(r.inputShapes[idx])
-                      << ", strides=" << toString(r.inputStrides[idx]) << "\n";
+                      << ", shape=" << toString(r.inputShapes[idx]) << ", strides=" << toString(r.inputStrides[idx])
+                      << "\n";
         }
 
-        for (size_t idx = 0; idx < r.outputShapes.size(); ++idx)
-        {
-            std::cout << "  Out #" << idx << ": dtype=" << toString(r.outputDTypes[idx])
-                      << ", shape=" << toString(r.outputShapes[idx])
-                      << ", strides=" << toString(r.outputStrides[idx]) << "\n";
-        }
+        std::cout << "  Out #0: dtype=" << toString(r.outputDType) << ", shape=" << toString(r.outputShape)
+                  << ", strides=" << toString(r.outputStrides) << "\n";
 
         if (listOnly)
         {
@@ -195,36 +193,23 @@ int main(int argc, char *argv[])
         try
         {
             std::vector<TensorNode> dummyInputs(r.inputShapes.size());
-            for (size_t idx = 0; idx < r.inputShapes.size(); ++idx)
+            for (uint64_t idx = 0; idx < r.inputShapes.size(); ++idx)
             {
                 dummyInputs[idx].setShape(r.inputShapes[idx]);
                 dummyInputs[idx].strides = r.inputStrides[idx];
                 dummyInputs[idx].dtype = r.inputDTypes[idx];
-
-                Backend b = Backend::CPU;
-                size_t ruleIdx = idx;
-                if (kernel.isVariadic)
-                {
-                    ruleIdx = (idx == r.inputShapes.size() - 1) ? (kernel.inputBackends.empty() ? 0 : kernel.inputBackends.size() - 1) : 0;
-                }
-
-                if (!r.inputBackends.empty() && ruleIdx < r.inputBackends.size() && !r.inputBackends[ruleIdx].empty())
-                    b = r.inputBackends[ruleIdx][0];
-                dummyInputs[idx].backend = b;
             }
 
             TensorNode dummyOutput;
-            if (!r.outputShapes.empty())
-            {
-                dummyOutput.setShape(r.outputShapes[0]);
-                dummyOutput.strides = r.outputStrides[0];
-                dummyOutput.dtype = r.outputDTypes[0];
-                dummyOutput.backend = r.backends.empty() ? Backend::CPU : r.backends[0];
-            }
+            dummyOutput.setShape(r.outputShape);
+            dummyOutput.strides = r.outputStrides;
+            dummyOutput.dtype = r.outputDType;
 
-            if (!kernel.matches(dummyInputs, dummyOutput))
+            if (!kernel.matches(dummyInputs, dummyOutput, r.output_mem_space, r.input_mem_spaces, r.engines, false,
+                                false, false, true))
             {
-                std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelUid << "): record fails matches() validity check." << std::endl;
+                std::cerr << "Skipping kernel " << kernel.getName() << " (0x" << std::hex << kernelId
+                          << "): record fails matches() validity check." << std::endl;
                 continue;
             }
 
@@ -234,7 +219,7 @@ int main(int argc, char *argv[])
             std::cout << "  Benchmarking..." << std::flush;
 
             // Warmup
-            if (!kernel.isView)
+            if (!kernel.is_view)
             {
                 pk.updateStorageContext(kernel, r, 0);
                 pk.run(kernel);
@@ -246,13 +231,13 @@ int main(int argc, char *argv[])
             latencies.reserve(iters);
             for (int it = 0; it < iters; ++it)
             {
-                if (!kernel.isView)
+                if (!kernel.is_view)
                 {
                     pk.updateStorageContext(kernel, r, it + 1);
                 }
 
                 auto iterStart = std::chrono::high_resolution_clock::now();
-                if (!kernel.isView)
+                if (!kernel.is_view)
                 {
                     pk.run(kernel);
                 }
@@ -294,7 +279,7 @@ int main(int argc, char *argv[])
         }
         catch (const std::exception &e)
         {
-            std::cerr << "Failed to benchmark kernel " << kernelUid << ": " << e.what() << std::endl;
+            std::cerr << "Failed to benchmark kernel " << kernelId << ": " << e.what() << std::endl;
         }
     }
 

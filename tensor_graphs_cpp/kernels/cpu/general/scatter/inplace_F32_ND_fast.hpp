@@ -1,7 +1,8 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cstring>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -15,119 +16,117 @@
  *    O(Rank) division/modulo per element for index unraveling.
  * 2. Contiguity Analysis: Identifies contiguous suffixes in updates to avoid
  *    getStridedIndex calls and enable direct indexing.
- * 3. Pre-computed Multipliers: Output index computed as base_offset + sum(coord * multiplier),
- *    avoiding repeated multiplication of (start + coord * step) * stride.
+ * 3. Pre-computed Multipliers: Output index computed as base_offset + sum(coord
+ * * multiplier), avoiding repeated multiplication of (start + coord * step) *
+ * stride.
  * 4. Fast Copy Paths: Uses memcpy for contiguous tensors, recursive copy for
  *    partially contiguous, and incremental copy for fully strided.
- * 5. Parallelization: OpenMP parallelization on outermost dimension for large updates.
+ * 5. Parallelization: OpenMP parallelization on outermost dimension for large
+ * updates.
  * 6. Small-Block Optimization: Direct assignment for block_size == 1 in copy.
  */
 
 namespace scatter_detail
 {
 
-    // Find start dimension of contiguous suffix. Returns rank if no contiguity.
-    inline int findContiguousSuffix(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
+// Find start dimension of contiguous suffix. Returns rank if no contiguity.
+inline int findContiguousSuffix(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides)
+{
+    int rank = static_cast<int>(shape.size());
+    if (rank == 0)
+        return 0;
+    if (strides[rank - 1] != 1)
+        return rank;
+
+    int contig_start = rank - 1;
+    for (int d = rank - 2; d >= 0; --d)
     {
-        int rank = static_cast<int>(shape.size());
-        if (rank == 0)
-            return 0;
-        if (strides[rank - 1] != 1)
-            return rank;
-
-        int contig_start = rank - 1;
-        for (int d = rank - 2; d >= 0; --d)
+        if (strides[d] == strides[d + 1] * shape[d + 1])
         {
-            if (strides[d] == strides[d + 1] * shape[d + 1])
-            {
-                contig_start = d;
-            }
-            else
-            {
-                break;
-            }
+            contig_start = d;
         }
-        return contig_start;
-    }
-
-    // Recursive copy for strided source to contiguous destination
-    inline void copyStridedToContiguous(int dim, const float *src, float *&dst,
-                                        const std::vector<uint32_t> &shape,
-                                        const std::vector<uint64_t> &src_strides,
-                                        int contig_start, uint64_t block_size)
-    {
-        if (dim == contig_start)
+        else
         {
-            if (block_size == 1)
-            {
-                *dst = *src;
-            }
-            else
-            {
-                std::memcpy(dst, src, block_size * sizeof(float));
-            }
-            dst += block_size;
-            return;
-        }
-
-        uint32_t dim_size = shape[dim];
-        uint64_t src_stride = src_strides[dim];
-
-        for (uint32_t i = 0; i < dim_size; ++i)
-        {
-            copyStridedToContiguous(dim + 1, src + i * src_stride, dst,
-                                    shape, src_strides, contig_start, block_size);
+            break;
         }
     }
+    return contig_start;
+}
 
-    // General strided copy using O(1) incremental coordinates
-    inline void copyStridedGeneral(const float *src, float *dst,
-                                   const std::vector<uint32_t> &shape,
-                                   const std::vector<uint64_t> &src_strides,
-                                   const std::vector<uint64_t> &dst_strides)
+// Recursive copy for strided source to contiguous destination
+inline void copyStridedToContiguous(int dim, const float *src, float *&dst, const std::vector<uint32_t> &shape,
+                                    const std::vector<uint64_t> &src_strides, int contig_start, uint64_t block_size)
+{
+    if (dim == contig_start)
     {
-        int rank = static_cast<int>(shape.size());
-        if (rank == 0)
+        if (block_size == 1)
         {
             *dst = *src;
-            return;
         }
-
-        uint64_t total = countElements(shape);
-        uint32_t coords[8] = {0};
-        uint64_t src_idx = 0;
-        uint64_t dst_idx = 0;
-
-        for (uint64_t i = 0; i < total; ++i)
+        else
         {
-            dst[dst_idx] = src[src_idx];
+            std::memcpy(dst, src, block_size * sizeof(float));
+        }
+        dst += block_size;
+        return;
+    }
 
-            int d = rank - 1;
-            while (d >= 0)
+    uint32_t dim_size = shape[dim];
+    uint64_t src_stride = src_strides[dim];
+
+    for (uint32_t i = 0; i < dim_size; ++i)
+    {
+        copyStridedToContiguous(dim + 1, src + i * src_stride, dst, shape, src_strides, contig_start, block_size);
+    }
+}
+
+// General strided copy using O(1) incremental coordinates
+inline void copyStridedGeneral(const float *src, float *dst, const std::vector<uint32_t> &shape,
+                               const std::vector<uint64_t> &src_strides, const std::vector<uint64_t> &dst_strides)
+{
+    int rank = static_cast<int>(shape.size());
+    if (rank == 0)
+    {
+        *dst = *src;
+        return;
+    }
+
+    uint64_t total = countElements(shape);
+    uint32_t coords[8] = {0};
+    uint64_t src_idx = 0;
+    uint64_t dst_idx = 0;
+
+    for (uint64_t i = 0; i < total; ++i)
+    {
+        dst[dst_idx] = src[src_idx];
+
+        int d = rank - 1;
+        while (d >= 0)
+        {
+            uint32_t old_coord = coords[d];
+            coords[d]++;
+
+            if (coords[d] < shape[d])
             {
-                uint32_t old_coord = coords[d];
-                coords[d]++;
-
-                if (coords[d] < shape[d])
-                {
-                    src_idx += src_strides[d];
-                    dst_idx += dst_strides[d];
-                    break;
-                }
-
-                coords[d] = 0;
-                src_idx -= (uint64_t)old_coord * src_strides[d];
-                dst_idx -= (uint64_t)old_coord * dst_strides[d];
-                d--;
+                src_idx += src_strides[d];
+                dst_idx += dst_strides[d];
+                break;
             }
+
+            coords[d] = 0;
+            src_idx -= (uint64_t)old_coord * src_strides[d];
+            dst_idx -= (uint64_t)old_coord * dst_strides[d];
+            d--;
         }
     }
+}
 
 } // namespace scatter_detail
 
 inline bool matchScatterF32_ND_Inplace_Fast(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    // Ensure target (inputs[0]), updates (inputs[1]), and output have identical ranks
+    // Ensure target (inputs[0]), updates (inputs[1]), and output have identical
+    // ranks
     if (inputs[0].getShape().size() != inputs[1].getShape().size() ||
         inputs[0].getShape().size() != output.getShape().size())
     {
@@ -184,14 +183,13 @@ inline void runInplaceScatterF32_ND_Fast(const KernelContext &ctx)
                 block_size *= out_shape[d];
             }
             float *temp_dst = out;
-            scatter_detail::copyStridedToContiguous(0, target, temp_dst, out_shape,
-                                                    tgt_strides, tgt_contig, block_size);
+            scatter_detail::copyStridedToContiguous(0, target, temp_dst, out_shape, tgt_strides, tgt_contig,
+                                                    block_size);
         }
         else
         {
             // Both strided - use incremental copy
-            scatter_detail::copyStridedGeneral(target, out, out_shape,
-                                               tgt_strides, out_strides);
+            scatter_detail::copyStridedGeneral(target, out, out_shape, tgt_strides, out_strides);
         }
     }
 
@@ -315,9 +313,18 @@ inline void runInplaceScatterF32_ND_Fast(const KernelContext &ctx)
     }
 }
 
-uint32_t refFactoryScatterF32_ND_Inplace_Fast(const std::vector<uint32_t> &inputs, Graph &graph)
+LogicalId refFactoryScatterF32_ND_Inplace_Fast(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     return graph.scatter(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
 }
 
-REGISTER_KERNEL_INPLACE("SCATTER_inplace_fast", 5, matchScatterF32_ND_Inplace_Fast, runInplaceScatterF32_ND_Fast, refFactoryScatterF32_ND_Inplace_Fast, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false}, {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL_INPLACE("SCATTER_inplace_fast", 5, 5, matchScatterF32_ND_Inplace_Fast, runInplaceScatterF32_ND_Fast,
+                        refFactoryScatterF32_ND_Inplace_Fast, MemSpace(1, HandleType::CPP),
+                        {Engine(0, EngineType::CPU)},
+                        {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32},
+                        {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false},
+                        {{MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)},
+                         {MemSpace(1, HandleType::CPP)}});

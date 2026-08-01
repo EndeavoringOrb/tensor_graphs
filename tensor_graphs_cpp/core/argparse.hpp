@@ -1,15 +1,15 @@
 #pragma once
-#include <string>
-#include <vector>
-#include <unordered_map>
-#include <iostream>
-#include <iomanip>
 #include <algorithm>
 #include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 class ArgParser
 {
-public:
+  public:
     struct ArgOption
     {
         std::string primary_name;
@@ -21,7 +21,9 @@ public:
     };
 
     ArgParser(const std::string &program_name, const std::string &description = "")
-        : prog_name(program_name), desc(description) {}
+        : prog_name(program_name), desc(description)
+    {
+    }
 
     void add_flag(const std::vector<std::string> &names, const std::string &help)
     {
@@ -33,7 +35,8 @@ public:
         ordered_options.push_back(opt);
     }
 
-    void add_option(const std::vector<std::string> &names, const std::string &help, const std::string &default_val = "", bool required = false)
+    void add_option(const std::vector<std::string> &names, const std::string &help, const std::string &default_val = "",
+                    bool required = false)
     {
         ArgOption opt{names[0], names, help, false, default_val, required};
         for (const auto &name : names)
@@ -43,7 +46,8 @@ public:
         ordered_options.push_back(opt);
     }
 
-    void add_positional(const std::string &name, const std::string &help, const std::string &default_val = "", bool required = false)
+    void add_positional(const std::string &name, const std::string &help, const std::string &default_val = "",
+                        bool required = false)
     {
         positional_options.push_back({name, {name}, help, false, default_val, required});
     }
@@ -66,13 +70,12 @@ public:
                 std::cout << " [" << pos.primary_name << "]";
             }
         }
-        std::cout << "\n\n"
-                  << desc << "\n\nOptions:\n";
+        std::cout << "\n\n" << desc << "\n\nOptions:\n";
         std::cout << "  --help, -h               Show this help message and exit\n";
         for (const auto &opt : ordered_options)
         {
             std::string names_str = "";
-            for (size_t i = 0; i < opt.all_names.size(); ++i)
+            for (uint64_t i = 0; i < opt.all_names.size(); ++i)
             {
                 if (i > 0)
                     names_str += ", ";
@@ -122,8 +125,8 @@ public:
             }
         }
 
-        size_t positional_idx = 0;
-        for (size_t i = 0; i < args.size(); ++i)
+        uint64_t positional_idx = 0;
+        for (uint64_t i = 0; i < args.size(); ++i)
         {
             const std::string &arg = args[i];
             if (arg.rfind("-", 0) == 0)
@@ -214,7 +217,10 @@ public:
         }
         for (const auto &pos : positional_options)
         {
-            std::cout << "  <" << pos.primary_name << ">: " << (parsed_positionals[pos.primary_name].empty() ? "(empty)" : parsed_positionals[pos.primary_name]) << "\n";
+            std::cout << "  <" << pos.primary_name << ">: "
+                      << (parsed_positionals[pos.primary_name].empty() ? "(empty)"
+                                                                       : parsed_positionals[pos.primary_name])
+                      << "\n";
         }
         if (!extra_positionals.empty())
         {
@@ -263,7 +269,7 @@ public:
         return extra_positionals;
     }
 
-private:
+  private:
     std::string prog_name;
     std::string desc;
     std::unordered_map<std::string, ArgOption> options;

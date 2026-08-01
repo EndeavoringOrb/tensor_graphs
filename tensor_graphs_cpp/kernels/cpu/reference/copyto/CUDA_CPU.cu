@@ -35,13 +35,13 @@ inline void runCopyTo_CUDA_CPU(const KernelContext &ctx)
 
     uint64_t numElements = countElements(ctx.inViews[0].getShape());
     uint64_t elemSize = getDTypeSize(ctx.inViews[0].dtype);
-    size_t bytes = numElements * elemSize;
+    uint64_t bytes = numElements * elemSize;
 
     cudaError_t err = cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost);
     if (err != cudaSuccess)
         Error::throw_err(cudaGetErrorString(err));
 }
 
-REGISTER_REF_KERNEL(OpType::COPY_TO, 1, matchCopyTo_CUDA_CPU, runCopyTo_CUDA_CPU, {Backend::CPU}, {DType::ANY}, {{8, 32}}, {false}, {{Backend::CUDA}});
+REGISTER_REF_KERNEL(OpType::COPY_TO, 1, 1, matchCopyTo_CUDA_CPU, runCopyTo_CUDA_CPU, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::ANY}, {{8, 32}}, {false}, {{MemSpace(2, HandleType::CUDA)}});
 
 #endif

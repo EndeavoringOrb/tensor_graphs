@@ -1,7 +1,8 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cfloat>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchMaxF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -60,4 +61,6 @@ inline void runMaxF32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::MAX, 2, matchMaxF32_ND, runMaxF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {false, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::MAX, 2, 2, matchMaxF32_ND, runMaxF32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {false, false},
+                    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

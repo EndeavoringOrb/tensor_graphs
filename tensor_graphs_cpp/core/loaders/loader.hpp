@@ -1,14 +1,18 @@
 #pragma once
-#include <vector>
-#include <string>
 #include <mutex>
-#include "core/types.hpp"
+#include <string>
+#include <vector>
+
 #include "core/loaders/safetensors.hpp"
+#include "core/types.hpp"
 
 #ifdef TG_OS_WINDOWS
-#include <io.h>
 #include <fcntl.h>
+#include <io.h>
 #include <share.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 class FileRegistry
@@ -16,8 +20,10 @@ class FileRegistry
     std::vector<int> openFiles; // Store OS file descriptors, not FILE*
     std::unordered_map<std::string, uint32_t> pathToId;
     std::mutex mtx;
-    std::unordered_map<std::string, std::shared_ptr<ModelLoader>> loaders;           // Mapping of path -> polymorphic Loader instance
-    std::unordered_map<uint32_t, std::pair<std::string, std::string>> weightSources; // Mapping of nodeId -> {path, tensor_name}
+    std::unordered_map<std::string, std::shared_ptr<ModelLoader>>
+        loaders; // Mapping of path -> polymorphic Loader instance
+    std::unordered_map<LogicalId, std::pair<std::string, std::string>>
+        weightSources; // Mapping of nodeId -> {path, tensor_name}
 
     uint32_t getFileId(const std::string &path)
     {
@@ -40,9 +46,12 @@ class FileRegistry
         return id;
     }
 
-    int getFd(uint32_t id) { return openFiles[id]; }
+    int getFd(uint32_t id)
+    {
+        return openFiles[id];
+    }
 
-public:
+  public:
     static FileRegistry &get()
     {
         static FileRegistry fr;
@@ -117,28 +126,32 @@ public:
         Error::throw_err("[FileRegistry.getMetadata] Tensor not found: " + name);
     }
 
-    void registerNode(uint32_t nodeId, const std::string &path, const std::string &name)
+    void registerNode(LogicalId nodeId, const std::string &path, const std::string &name)
     {
         weightSources[nodeId] = {path, name};
     }
 
-    TensorMetadata getNodeMeta(uint32_t nodeId)
+    TensorMetadata getNodeMeta(LogicalId nodeId)
     {
         const auto &it = weightSources.find(nodeId);
         if (it == weightSources.end())
         {
-            Error::throw_err("[FileRegistry.getNodeMeta] node id " + std::to_string(nodeId) + " is not registered"); // TODO: make build.py linter check if Error::throw_err calls inside a function start with [struct.func]
+            Error::throw_err("[FileRegistry.getNodeMeta] node id " + toString(nodeId) +
+                             " is not registered"); // TODO: make build.py linter check if
+                                                    // Error::throw_err calls inside a function
+                                                    // start with [struct.func]. just use
+                                                    // std::source_location
         }
         const auto &pair = weightSources.at(nodeId);
         return getMetadata(pair.first, pair.second);
     }
 
-    int getNodeFd(uint32_t nodeId)
+    int getNodeFd(LogicalId nodeId)
     {
         const auto &it = weightSources.find(nodeId);
         if (it == weightSources.end())
         {
-            Error::throw_err("[FileRegistry.getNodeFd] node id " + std::to_string(nodeId) + " is not registered");
+            Error::throw_err("[FileRegistry.getNodeFd] node id " + toString(nodeId) + " is not registered");
         }
         const auto &pair = weightSources.at(nodeId);
 

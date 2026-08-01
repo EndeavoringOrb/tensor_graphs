@@ -1,7 +1,8 @@
 #pragma once
-#include <string>
 #include <iostream>
+#include <string>
 #include <thread>
+
 #include "core/types.hpp"
 
 #ifdef USE_CUDA
@@ -10,7 +11,7 @@
 
 #include <CL/cl.h>
 
-void queryOpenCLDeviceLimits(cl_device_id device)
+inline void queryOpenCLDeviceLimits(cl_device_id device)
 {
     // Query and print the Device Name
     char deviceName[256] = {0};
@@ -51,7 +52,9 @@ void queryOpenCLDeviceLimits(cl_device_id device)
         }
         if (svm_caps == 0)
         {
-            std::cout << "  - No SVM capabilities supported on this device/driver configuration." << std::endl;
+            std::cout << "  - No SVM capabilities supported on this device/driver "
+                         "configuration."
+                      << std::endl;
         }
     }
     else
@@ -64,8 +67,7 @@ void queryOpenCLDeviceLimits(cl_device_id device)
     err = clGetDeviceInfo(device, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(max_alloc), &max_alloc, nullptr);
     if (err == CL_SUCCESS)
     {
-        std::cout << "Max Single Allocation Size (CL_DEVICE_MAX_MEM_ALLOC_SIZE): "
-                  << max_alloc << " bytes ("
+        std::cout << "Max Single Allocation Size (CL_DEVICE_MAX_MEM_ALLOC_SIZE): " << max_alloc << " bytes ("
                   << (double)max_alloc / (1024.0 * 1024.0) << " MB)" << std::endl;
     }
     else
@@ -82,7 +84,7 @@ struct HardwareCaps
     bool has_opencl = false; // New
     bool is_adreno = false;  // New
     std::string hw_tag;
-    size_t num_threads = 1;
+    uint64_t num_threads = 1;
 
     static HardwareCaps &get()
     {
@@ -96,7 +98,7 @@ struct HardwareCaps
         return instance;
     }
 
-private:
+  private:
     void probe()
     {
         // 1. Detect CPU Architecture & SIMD
@@ -132,8 +134,16 @@ private:
 
             for (auto platform : platforms)
             {
+                char platformName[256] = {0};
+                char platformVendor[256] = {0};
+                clGetPlatformInfo(platform, CL_PLATFORM_NAME, sizeof(platformName), platformName, nullptr);
+                clGetPlatformInfo(platform, CL_PLATFORM_VENDOR, sizeof(platformVendor), platformVendor, nullptr);
+
+                std::cout << "\n=== Platform: " << platformName << " (" << platformVendor << ") ===" << std::endl;
+
                 cl_uint numDevices = 0;
-                if (clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices) == CL_SUCCESS && numDevices > 0)
+                if (clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices) == CL_SUCCESS &&
+                    numDevices > 0)
                 {
                     std::vector<cl_device_id> devices(numDevices);
                     clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, numDevices, devices.data(), nullptr);

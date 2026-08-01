@@ -1,11 +1,12 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 #if defined(TG_HAS_NEON)
 #include <arm_neon.h> // ARM SIMD Intrinsics
+
+#include <algorithm>
 #include <thread>
 #include <vector>
-#include <algorithm>
 
 /**
  * Optimized ARM NEON Dot Product for Snapdragon X Elite
@@ -14,7 +15,6 @@
  */
 inline bool matchDotF32_3D_Optimized(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-
     const auto &s0 = inputs[0].getShape();
     const auto &s1 = inputs[1].getShape();
     const auto &so = output.getShape();
@@ -26,7 +26,8 @@ inline bool matchDotF32_3D_Optimized(const std::vector<TensorNode> &inputs, cons
     if (so[0] != s0[0] || so[1] != s0[1] || so[2] != s1[2])
         return false;
 
-    // For SIMD optimization, we require the inner-most dimension (N) to be contiguous
+    // For SIMD optimization, we require the inner-most dimension (N) to be
+    // contiguous
     if (!isContiguous(output))
         return false;
 
@@ -71,59 +72,64 @@ inline void runDotF32_3D_Optimized(const KernelContext &ctx)
 
     for (uint32_t t = 0; t < num_threads; ++t)
     {
-        workers.emplace_back([=, &viewA, &viewB, &viewOut]()
-                             {
+        workers.emplace_back([=, &viewA, &viewB, &viewOut]() {
             uint32_t start_row = t * rows_per_thread;
             uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
 
-            for (uint32_t row_idx = start_row; row_idx < end_row; ++row_idx) {
+            for (uint32_t row_idx = start_row; row_idx < end_row; ++row_idx)
+            {
                 // Decompose linear row index back into batch (b) and row (m)
                 uint32_t b = row_idx / M;
                 uint32_t m = row_idx % M;
 
-                const float* rowA = A_ptr + (b * strideA_B) + (m * strideA_M);
-                const float* batchB = B_ptr + (b * strideB_B);
-                float* rowOut = Out_ptr + (b * strideO_B) + (m * strideO_M);
+                const float *rowA = A_ptr + (b * strideA_B) + (m * strideA_M);
+                const float *batchB = B_ptr + (b * strideB_B);
+                float *rowOut = Out_ptr + (b * strideO_B) + (m * strideO_M);
 
                 // Initialize output row to zero
-                for (uint32_t n = 0; n < N; ++n) rowOut[n * strideO_N] = 0.0f;
+                for (uint32_t n = 0; n < N; ++n)
+                    rowOut[n * strideO_N] = 0.0f;
 
                 // IKJ Loop Order: This is the key for performance.
                 // We fix one element of A and multiply it across a whole row of B.
-                for (uint32_t k = 0; k < K; ++k) {
+                for (uint32_t k = 0; k < K; ++k)
+                {
                     float valA = rowA[k * strideA_K];
                     float32x4_t vA = vdupq_n_f32(valA); // Broadcast A[b,m,k] to all 4 slots
-                    
-                    const float* rowB = batchB + (k * strideB_K);
+
+                    const float *rowB = batchB + (k * strideB_K);
                     uint32_t n = 0;
 
                     // SIMD loop: Process 4 columns of B at a time
-                    for (; n + 4 <= N; n += 4) {
+                    for (; n + 4 <= N; n += 4)
+                    {
                         // Load 4 elements of B
-                        // Note: Assuming strideB_N is 1 for maximum speed. 
+                        // Note: Assuming strideB_N is 1 for maximum speed.
                         // If B is not contiguous, this needs vld1q_f32 replacement.
                         float32x4_t vB = vld1q_f32(rowB + (n * strideB_N));
                         float32x4_t vOut = vld1q_f32(rowOut + (n * strideO_N));
-                        
+
                         // Fused Multiply-Add: Out = Out + (A * B)
                         vOut = vfmaq_f32(vOut, vA, vB);
-                        
+
                         vst1q_f32(rowOut + (n * strideO_N), vOut);
                     }
 
                     // Tail loop for remaining N elements
-                    for (; n < N; ++n) {
+                    for (; n < N; ++n)
+                    {
                         rowOut[n * strideO_N] += valA * rowB[n * strideB_N];
                     }
                 }
-            } });
+            }
+        });
     }
 
     for (auto &thread : workers)
         thread.join();
 }
 
-inline uint32_t refFactoryDotF32_3D_Optimized(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryDotF32_3D_Optimized(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Dot 3D requires 2 inputs");
@@ -132,6 +138,9 @@ inline uint32_t refFactoryDotF32_3D_Optimized(const std::vector<uint32_t> &input
 }
 
 // Register as a high-performance kernel instead of a reference kernel
-REGISTER_KERNEL("Dot_F32_3D_CPU_Optimized", 2, matchDotF32_3D_Optimized, runDotF32_3D_Optimized, refFactoryDotF32_3D_Optimized, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("Dot_F32_3D_CPU_Optimized", 2, 2, matchDotF32_3D_Optimized, runDotF32_3D_Optimized,
+                refFactoryDotF32_3D_Optimized, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

@@ -1,12 +1,14 @@
 // tensor_graphs_cpp/kernels/cpu/reference/scatter/F32_ND.hpp
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cstring>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchScatterF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    // Ensure target (inputs[0]), updates (inputs[1]), and output have the same rank
+    // Ensure target (inputs[0]), updates (inputs[1]), and output have the same
+    // rank
     if (inputs[0].getShape().size() != inputs[1].getShape().size() ||
         inputs[0].getShape().size() != output.getShape().size())
     {
@@ -56,7 +58,8 @@ inline void runScatterF32_ND(const KernelContext &ctx)
         // 1. Get update value safely
         float val = updates[getStridedIndex(i, upd_shape, ctx.inViews[1].strides)];
 
-        // 2. Unravel flat index 'i' into update coordinates, map to target, and calculate output offset
+        // 2. Unravel flat index 'i' into update coordinates, map to target, and
+        // calculate output offset
         uint64_t temp = i;
         uint64_t out_phys_idx = 0;
 
@@ -78,4 +81,12 @@ inline void runScatterF32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::SCATTER, 5, matchScatterF32_ND, runScatterF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false}, {{Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::SCATTER, 5, 5, matchScatterF32_ND, runScatterF32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)},
+                    {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32},
+                    {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false},
+                    {{MemSpace(1, HandleType::CPP)},
+                     {MemSpace(1, HandleType::CPP)},
+                     {MemSpace(1, HandleType::CPP)},
+                     {MemSpace(1, HandleType::CPP)},
+                     {MemSpace(1, HandleType::CPP)}});

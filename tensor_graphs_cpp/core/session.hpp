@@ -1,23 +1,23 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/graph.hpp"
-#include "core/memory.hpp"
-#include "core/cost_model.hpp"
-#include "core/planner.hpp"
-#include "core/executor.hpp"
-#include "core/shapes.hpp"
-#include "core/repo.hpp"
-#include <unordered_map>
-#include <memory>
-#include <string>
 #include <algorithm>
 #include <cstring>
-#include <set>
-#include <queue>
 #include <filesystem>
+#include <memory>
+#include <queue>
+#include <set>
+#include <string>
+#include <unordered_map>
 
-static std::string encodeCacheKey(
-    const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)
+#include "core/cost_model.hpp"
+#include "core/executor.hpp"
+#include "core/graph.hpp"
+#include "core/memory.hpp"
+#include "core/plan/planner.hpp"
+#include "core/repo.hpp"
+#include "core/shapes.hpp"
+#include "core/types.hpp"
+
+static std::string encodeCacheKey(const std::unordered_map<uint32_t, std::vector<Region>> &inputRegions)
 {
     std::vector<uint32_t> ids;
     ids.reserve(inputRegions.size());
@@ -28,7 +28,7 @@ static std::string encodeCacheKey(
     std::sort(ids.begin(), ids.end());
 
     std::stringstream ss;
-    for (size_t i = 0; i < ids.size(); ++i)
+    for (uint64_t i = 0; i < ids.size(); ++i)
     {
         if (i > 0)
             ss << ";";
@@ -36,7 +36,7 @@ static std::string encodeCacheKey(
 
         const auto &regions = inputRegions.at(ids[i]);
         const std::vector<Region> canonicalRegions = normalizeRegions(regions);
-        for (size_t r = 0; r < canonicalRegions.size(); ++r)
+        for (uint64_t r = 0; r < canonicalRegions.size(); ++r)
         {
             if (r > 0)
                 ss << ",";
@@ -55,7 +55,7 @@ struct Session
     MemoryManager &memManager;
     CostModel costModel;
     std::unique_ptr<Executor> executor;
-    uint32_t rootId;
+    LogicalId rootId;
     bool isPlanned;
     bool isCompiled;
     uint32_t nBucketSizes = 0;
@@ -63,7 +63,7 @@ struct Session
 
     std::string cachePath;
     std::vector<CompiledGraph> cachedGraphs;
-    std::unordered_map<uint32_t, Backend> selectedCachedNodes;
+    std::unordered_map<LogicalId, MemSpace> selectedCachedNodes;
 
     std::unordered_map<std::string, uint64_t> bucketCallCounts;
     std::string bucketCountsPath = "benchmarks/bucket_counts.bin";
@@ -72,6 +72,7 @@ struct Session
     uint32_t fullBucketIdx;
     Repo *repo;
     bool disableCaching = false;
+    float minCompileSeconds = 0.0f;
 
     void ensureOutputDirectories() const
     {
@@ -92,9 +93,9 @@ struct Session
         }
     }
 
-    std::vector<uint32_t> collectInputNodeIds() const
+    std::vector<LogicalId> collectInputNodeIds() const
     {
-        std::vector<uint32_t> inputNodeIds;
+        std::vector<LogicalId> inputNodeIds;
         for (const auto &pair : graph.nodes)
         {
             if (pair.second.opType == OpType::INPUT)
@@ -118,7 +119,7 @@ struct Session
 
         bw.write<uint8_t>(0); // Metadata block type
         bw.write<uint32_t>(kCacheFileVersion);
-        bw.write<uint32_t>(rootId);
+        bw.write<LogicalId>(rootId);
         bw.write(selectedCachedNodes);
 
         for (const CompiledGraph &g : cachedGraphs)
@@ -128,35 +129,34 @@ struct Session
         }
 
         bw.write<uint8_t>(2); // Constants block type
-        std::unordered_set<uint32_t> neededConstants;
-        for (const CompiledGraph &g : cachedGraphs)
+        std::unordered_set<LogicalId> neededConstants;
+        for (const auto &pair : graph.constantStaging)
         {
-            for (const auto &nodePair : g.nodesMap)
-            {
-                uint32_t logicalId = g.getLogicalId(nodePair.first);
-                if (logicalId != UINT32_MAX && graph.constantStaging.count(logicalId))
-                    neededConstants.insert(logicalId);
-            }
+            neededConstants.insert(pair.first);
         }
 
-        std::vector<uint32_t> orderedConstants(neededConstants.begin(), neededConstants.end());
+        std::vector<LogicalId> orderedConstants(neededConstants.begin(), neededConstants.end());
         std::sort(orderedConstants.begin(), orderedConstants.end());
 
         bw.write<uint32_t>(static_cast<uint32_t>(orderedConstants.size()));
-        for (uint32_t logicalId : orderedConstants)
+        for (LogicalId logicalId : orderedConstants)
         {
             bw.write(logicalId);
             bw.write(*graph.constantStaging.at(logicalId));
         }
     }
 
-    void addBucket(const std::unordered_map<uint32_t, std::vector<Region>> &inputDirtyRegions, const std::vector<Region> &outputNeededRegion)
+    void addBucket(const std::unordered_map<LogicalId, std::vector<Region>> &inputDirtyRegions,
+                   const std::vector<Region> &outputNeededRegion)
     {
         manualBuckets.push_back({inputDirtyRegions, outputNeededRegion});
     }
 
-    Session(Graph &g, MemoryManager &mem, uint32_t root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0, Repo *_repo = nullptr, bool _disableCaching = false)
-        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile), nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching)
+    Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
+            Repo *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f)
+        : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
+          nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
+          minCompileSeconds(_minCompileSeconds)
     {
         ensureOutputDirectories();
         loadCache();
@@ -166,8 +166,8 @@ struct Session
     {
         Bucket bucket;
         bucket.outputNeededRegion = {makeFull(graph.getNode(rootId).getShape())};
-        std::vector<uint32_t> inputNodeIds = collectInputNodeIds();
-        for (uint32_t nodeId : inputNodeIds)
+        std::vector<LogicalId> inputNodeIds = collectInputNodeIds();
+        for (LogicalId nodeId : inputNodeIds)
         {
             bucket.inputDirtyRegions[nodeId] = {makeFull(graph.getNode(nodeId).getShape())};
         }
@@ -221,73 +221,59 @@ struct Session
         std::cout << "[Session.compile] Materializing persistent memory..." << std::endl;
         memManager.init();
 
-        std::unordered_set<uint32_t> countSet;
+        std::unordered_set<LogicalId> written;
         for (const CompiledGraph &g : cachedGraphs)
         {
-            for (const auto &nodePair : g.nodesMap)
+            for (const auto &inst : g.instructions)
             {
-                const TensorNode &node = nodePair.second;
-
-                uint32_t logicalId = g.getLogicalId(node.id);
-
-                if ((node.opType == OpType::INPUT || node.opType == OpType::CACHE) && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
+                for (uint32_t i = 0; i < inst.children.size(); i++)
                 {
-                    uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : node.id;
-                    countSet.insert(memId);
-                }
-            }
-        }
-
-        ProgressTimer timer(countSet.size(), "");
-        std::unordered_set<uint32_t> materialized;
-        std::unordered_set<uint32_t> written;
-
-        for (const CompiledGraph &g : cachedGraphs)
-        {
-            for (const auto &nodePair : g.nodesMap)
-            {
-                const TensorNode &node = nodePair.second;
-                uint32_t physId = node.id;
-                uint32_t logicalId = g.getLogicalId(physId);
-
-                if ((node.opType == OpType::INPUT || node.opType == OpType::CACHE) && (node.storageType == StorageType::PERSISTENT || node.storageType == StorageType::PINNED))
-                {
-                    uint32_t memId = (logicalId != UINT32_MAX) ? logicalId : physId;
-
-                    uint64_t sizeBytes = countElements(node.getShape()) * getDTypeSize(node.dtype);
-
-                    if (materialized.insert(memId).second)
+                    EClassId child = inst.children[i];
+                    if (!g.has_logical_id(child))
+                        continue;
+                    LogicalId logical_id = g.get_logical_id(child);
+                    if (graph.constantStaging.count(logical_id))
                     {
-                        timer.tick();
-                        if (node.backend != Backend::STORAGE)
+                        if (written.insert(logical_id).second)
                         {
-                            uint64_t offset = memManager.allocate(node.backend, memId, sizeBytes, node.storageType);
-                        }
-                    }
-
-                    if (written.find(memId) == written.end())
-                    {
-                        if (logicalId != UINT32_MAX && graph.constantStaging.count(logicalId))
-                        {
-                            memManager.write(node.backend, memId, graph.constantStaging.at(logicalId)->data(), sizeBytes);
-                            written.insert(memId);
-                        }
-                        else if (g.constantStaging.count(physId))
-                        {
-                            memManager.write(node.backend, memId, g.constantStaging.at(physId)->data(), sizeBytes);
-                            written.insert(memId);
+                            const TensorNode &node = graph.getNode(logical_id);
+                            const ParallelBuffer &buf = inst.inBuffers[i];
+                            memManager.write(buf.mem_space, buf.offset, graph.constantStaging.at(logical_id)->data(),
+                                             node.getSizeBytes());
                         }
                     }
                 }
             }
         }
+        std::cout << "Wrote " << written.size() << " constants to memory. Graph has " << graph.constantStaging.size()
+                  << " constants." << std::endl;
 
         executor = std::make_unique<Executor>(memManager);
         isCompiled = true;
     }
 
-    const void *run(Bucket bucket = {}, Debug::Callback debugCallback = nullptr,
-                    bool doSaturate = true)
+    void writeInput(LogicalId logicalId, const void *data, uint64_t size)
+    {
+        for (const CompiledGraph &g : cachedGraphs)
+        {
+            for (const auto &inst : g.instructions)
+            {
+                for (uint32_t i = 0; i < inst.children.size(); i++)
+                {
+                    EClassId child = inst.children[i];
+                    if (g.has_logical_id(child) && g.get_logical_id(child) == logicalId)
+                    {
+                        memManager.write(inst.inBuffers[i].mem_space, inst.inBuffers[i].offset, data, size);
+                        return;
+                    }
+                }
+            }
+        }
+        Error::throw_err("Logical Node ID " + toString(logicalId) +
+                         " not found in compiled instructions during Session::writeInput");
+    }
+
+    const void *run(Bucket bucket = {}, Debug::Callback debugCallback = nullptr, bool doSaturate = true)
     {
         if (!isCompiled)
         {
@@ -311,24 +297,11 @@ struct Session
         }
 
         const uint32_t graphIdx = getBestGraphIdx(bucket);
-        std::cout << "[Session.run] chose graph: " << std::to_string(graphIdx) << std::endl;
-
-        ProgressTimer runTimer(0, "", true);
         executor->run(cachedGraphs[graphIdx], debugCallback);
-        double elapsed = runTimer.getElapsed();
-        std::cout << "[Session.run] execution finished in " << std::to_string(elapsed * 1000) << "ms" << std::endl;
 
-        const OpInstruction &lastInst = cachedGraphs[graphIdx].instructions[cachedGraphs[graphIdx].instructions.size() - 1];
-        Backend backend = lastInst.backend;
-        uint32_t outLogicalId = cachedGraphs[graphIdx].getLogicalId(lastInst.nodeId);
-        if (!memManager.has(backend, outLogicalId))
-        {
-            Error::throw_err("[Session.run] execution output nodeId " + std::to_string(outLogicalId) + " not found in memory");
-        }
-        TensorView view = memManager.getView(cachedGraphs[graphIdx].nodesMap.at(lastInst.nodeId), outLogicalId);
-        std::cout << "final output view: " << toString(view) << "\n"
-                  << std::flush;
-        return memManager.buffers.at(backend).arena_ptr + view.baseOffset;
+        const OpInstruction &lastInst = cachedGraphs[graphIdx].instructions.back();
+        DeviceBuffer *buf = memManager.getBuffer(lastInst.outBuffer.mem_space);
+        return buf->getBasePtr() + lastInst.outBuffer.offset;
     }
 
     void ensureCacheCoverage(bool doSaturate)
@@ -336,50 +309,57 @@ struct Session
         cachedGraphs.clear();
         selectedCachedNodes.clear();
 
-        std::cout << "[Session.ensureCacheCoverage] Starting iterative cache optimization..." << std::endl;
-        Planner planner(costModel, memManager.getBufferSizes());
+        std::cout << "[Session.ensureCacheCoverage] Starting iterative cache "
+                     "optimization..."
+                  << std::endl;
+        Planner planner(costModel, memManager.getMemCaps());
 
-        std::unordered_map<uint32_t, Backend> protectedCachedNodes;
+        std::unordered_map<LogicalId, MemSpace> protectedCachedNodes;
 
         if (!disableCaching)
         {
-            for (size_t i = 0; i < manualBuckets.size(); ++i)
+            for (uint64_t i = 0; i < manualBuckets.size(); ++i)
             {
                 const Bucket &bucket = manualBuckets[i];
 
-                CompiledGraph plan = planner.plan(
-                    rootId, graph,
-                    bucket,
-                    protectedCachedNodes,
-                    i == fullBucketIdx ? false : doSaturate,
-                    false,
-                    repo);
+                CompiledGraph plan =
+                    planner.plan(rootId, graph, bucket, protectedCachedNodes, i == fullBucketIdx ? false : doSaturate,
+                                 false, repo, {}, minCompileSeconds);
 
-                for (const auto &pair : plan.nodesMap)
+                for (const auto &inst : plan.instructions)
                 {
-                    if (pair.second.opType == OpType::CACHE)
+                    if (plan.has_logical_id(inst.eclass_id))
                     {
-                        uint32_t logicalId = plan.getLogicalId(pair.first);
-                        if (logicalId != UINT32_MAX)
+                        LogicalId logical_id = plan.get_logical_id(inst.eclass_id);
+                        OpType op_type = graph.getNode(logical_id).opType;
+                        if (op_type == OpType::CACHE)
                         {
-                            protectedCachedNodes[logicalId] = pair.second.backend;
+                            protectedCachedNodes[logical_id] = inst.outBuffer.mem_space;
                         }
                     }
                 }
             }
         }
 
-        std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size() << " protected eclasses..." << std::endl;
-        for (size_t i = 0; i < manualBuckets.size(); ++i)
+        // ------------------------------------------------------------------
+        // Pre-allocate ParallelBuffers for INPUT and CACHE logical nodes
+        // *outside* of Planner, before the Final replanning. This guarantees
+        // that the byte offset of every persistent INPUT/CACHE buffer is
+        // identical across all buckets, so Session::writeInput and the
+        // constant-staging writes in Session::compile land at the same
+        // physical offset regardless of which bucket's compiled graph is
+        // selected at run time.
+        // ------------------------------------------------------------------
+        std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
+        preallocateLogicalBuffers(protectedCachedNodes, preallocatedBuffers);
+
+        std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size()
+                  << " protected eclasses..." << std::endl;
+        for (uint64_t i = 0; i < manualBuckets.size(); ++i)
         {
             const Bucket &bucket = manualBuckets[i];
-            CompiledGraph plan = planner.plan(
-                rootId, graph,
-                bucket,
-                protectedCachedNodes,
-                doSaturate,
-                true,
-                repo);
+            CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo,
+                                              preallocatedBuffers, minCompileSeconds);
             plan.bucket = bucket;
             cachedGraphs.push_back(plan);
         }
@@ -395,8 +375,117 @@ struct Session
         persistCache();
     }
 
-    const uint32_t getBestGraphIdx(
-        const Bucket &bucket) const
+    // Allocate stable ParallelBuffers for every logical INPUT node and every
+    // node in `cachedNodes` (the protected CACHE set discovered during the
+    // first planning pass). STORAGE-backed INPUTs are skipped because their
+    // offset is resolved dynamically inside StorageBuffer::setupInput.
+    //
+    // Buffers within a MemSpace are placed contiguously starting at offset 0,
+    // sorted by LogicalId for determinism. The MemValidator will reduce the
+    // malloc solver's mem_cap by max(offset+size) of these buffers so the
+    // transient buffers land strictly above the pre-allocated region.
+    void preallocateLogicalBuffers(const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                                   std::unordered_map<LogicalId, ParallelBuffer> &out) const
+    {
+        out.clear();
+
+        // Collect (LogicalId, MemSpace, shape, dtype) tuples for every logical
+        // node that needs a stable buffer.
+        struct PreAllocEntry
+        {
+            LogicalId logicalId;
+            MemSpace memSpace;
+            std::vector<uint32_t> shape;
+            DType dtype;
+        };
+        std::vector<PreAllocEntry> entries;
+
+        MemSpace storage = MemSpace{0, HandleType::STORAGE};
+        MemSpace ram = MemSpace{1, HandleType::CPP};
+
+        // 1. All logical INPUT nodes (constants + runtime inputs + weights).
+        for (const auto &pair : graph.nodes)
+        {
+            const TensorNode &node = pair.second;
+            if (node.opType != OpType::INPUT)
+                continue;
+
+            // STORAGE-backed INPUTs (file weights) bypass the arena entirely.
+            auto idtIt = graph.input_data_types.find(node.id);
+            if (idtIt != graph.input_data_types.end() && idtIt->second == InputDataType::STORAGE)
+                continue;
+
+            entries.push_back({node.id, ram, node.getShape(), node.dtype});
+        }
+
+        // 2. All protected CACHE nodes (computed tensors that survived the
+        // first-pass cache selection). Their MemSpace comes from the first
+        // pass's `inst.outBuffer.mem_space`; if missing, default to RAM.
+        for (const auto &kv : cachedNodes)
+        {
+            LogicalId logicalId = kv.first;
+            MemSpace ms = kv.second;
+            if (!graph.hasNode(logicalId))
+                continue;
+            const TensorNode &node = graph.getNode(logicalId);
+            // Skip if this logical id is also an INPUT we already added above
+            // (an INPUT can also be a cache source). Prefer the INPUT memspace.
+            bool alreadyAdded = false;
+            for (const auto &e : entries)
+            {
+                if (e.logicalId == logicalId)
+                {
+                    alreadyAdded = true;
+                    break;
+                }
+            }
+            if (alreadyAdded)
+                continue;
+            entries.push_back({logicalId, ms, node.getShape(), node.dtype});
+        }
+
+        // Stable ordering: sort by LogicalId so the layout is identical across
+        // runs even if iteration order over `graph.nodes` differs.
+        std::sort(entries.begin(), entries.end(),
+                  [](const PreAllocEntry &a, const PreAllocEntry &b) { return a.logicalId < b.logicalId; });
+
+        // Assign offsets per MemSpace, contiguously from offset 0, with the
+        // same 4096-byte alignment used by bufferize().
+        std::unordered_map<MemSpace, uint64_t> cursor;
+        BufferId nextId{0};
+        for (const auto &e : entries)
+        {
+            if (e.memSpace == storage)
+                continue;
+
+            uint64_t size_bytes = getSizeBytes(e.shape, e.dtype);
+            if (size_bytes == 0)
+                continue;
+            size_bytes = (size_bytes + 4095) & ~4095ULL;
+
+            uint64_t offset = cursor[e.memSpace];
+            cursor[e.memSpace] = offset + size_bytes;
+
+            ParallelBuffer buf;
+            buf.id = nextId++;
+            buf.mem_space = e.memSpace;
+            buf.size = size_bytes;
+            buf.start = 0; // INPUT/CACHE buffers are alive forever.
+            buf.end = std::numeric_limits<uint32_t>::max();
+            buf.offset = static_cast<int64_t>(offset);
+            out[e.logicalId] = std::move(buf);
+        }
+
+        std::cout << "[Session.preallocateLogicalBuffers] Pre-allocated " << out.size() << " INPUT/CACHE buffers.";
+        for (const auto &kv : cursor)
+        {
+            std::cout << " MemSpace(idx=" << kv.first.idx << ",type=" << static_cast<int>(kv.first.type)
+                      << ") reserved=" << kv.second << " bytes.";
+        }
+        std::cout << std::endl;
+    }
+
+    const uint32_t getBestGraphIdx(const Bucket &bucket) const
     {
         uint32_t bestIdx = UINT32_MAX;
         float bestCost = std::numeric_limits<float>::max();
@@ -464,7 +553,7 @@ struct Session
         bool hasInvalidCache = false;
         std::string invalidCacheReason = "";
         std::vector<CompiledGraph> tempGraphs;
-        std::unordered_map<uint32_t, Backend> tempSelectedCachedNodes;
+        std::unordered_map<LogicalId, MemSpace> tempSelectedCachedNodes;
 
         while (file.peek() != EOF)
         {
@@ -474,7 +563,7 @@ struct Session
             if (type == 0)
             {
                 uint32_t version;
-                uint32_t cachedRootId;
+                LogicalId cachedRootId;
                 br.read(version);
                 br.read(cachedRootId);
                 br.read(tempSelectedCachedNodes);
@@ -494,17 +583,11 @@ struct Session
                 bool valid = true;
                 for (const auto &inst : cg.instructions)
                 {
-                    if (inst.fullKernelId == 0 || !KernelRegistry::get().hasKernel(inst.fullKernelId))
+                    if (inst.kernel_id == KernelId{0} || !KernelRegistry::get().hasKernel(inst.kernel_id))
                     {
                         valid = false;
                         break;
                     }
-                    for (uint64_t kid : inst.cachedKernelIds)
-                        if (kid == 0 || !KernelRegistry::get().hasKernel(kid))
-                        {
-                            valid = false;
-                            break;
-                        }
                     if (!valid)
                         break;
                 }
@@ -514,7 +597,6 @@ struct Session
                     invalidCacheReason = "Invalid Kernel ID";
                     break;
                 }
-                cg.remapPhysIds();
                 tempGraphs.push_back(cg);
             }
             else if (type == 2)
@@ -523,7 +605,7 @@ struct Session
                 br.read(count);
                 for (uint32_t i = 0; i < count; ++i)
                 {
-                    uint32_t nodeId;
+                    LogicalId nodeId;
                     std::vector<uint8_t> data;
                     br.read(nodeId);
                     br.read(data);

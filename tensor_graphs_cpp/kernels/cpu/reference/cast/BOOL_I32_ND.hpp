@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchCastBOOL_I32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -23,5 +23,5 @@ inline void runCastBOOL_I32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastBOOL_I32_ND, runCastBOOL_I32_ND, {Backend::CPU}, {DType::BOOL}, {{8, 32}}, {true}, {{Backend::CPU}});
-
+REGISTER_REF_KERNEL(OpType::CAST, 1, 1, matchCastBOOL_I32_ND, runCastBOOL_I32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::BOOL}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});

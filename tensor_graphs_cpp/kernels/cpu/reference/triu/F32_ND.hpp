@@ -1,7 +1,6 @@
-// File: tensor_graphs_cpp/kernels/cpu/reference/triu/F32_ND.hpp
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchTriuF32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -31,4 +30,6 @@ inline void runTriuF32_ND(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::TRIU, 2, matchTriuF32_ND, runTriuF32_ND, {Backend::CPU}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {true, false}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::TRIU, 2, 2, matchTriuF32_ND, runTriuF32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {true, false},
+                    {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -1,5 +1,6 @@
 // =============================================================================
-// embed.cpp — jina-embeddings-v5-omni-nano-retrieval image embedding entry point
+// embed.cpp — jina-embeddings-v5-omni-nano-retrieval image embedding entry
+// point
 // =============================================================================
 //
 // UPDATED for smart_resize: the server now accepts variable image dimensions
@@ -13,8 +14,8 @@
 // 1536-dim per patch) and runs the model.
 //
 // Shared memory layout (SharedMemoryPayload):
-//   [0..19]             header: state, width, height, channels, status (5 × int32)
-//   [20..20+MAX_PIX*3]  pixel_data (H×W×3 uint8, row-major)
+//   [0..19]             header: state, width, height, channels, status (5 ×
+//   int32) [20..20+MAX_PIX*3]  pixel_data (H×W×3 uint8, row-major)
 //   [emb_off..emb_off+3072]  embedding (768 × float32)
 //
 // Changes from the original:
@@ -28,43 +29,42 @@
 //      for repeated sizes.
 // =============================================================================
 
-#include <iostream>
-#include <vector>
-#include <string>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <iomanip>
-#include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <cstring>
-#include <thread>
-#include <memory>
-#include <utility>
-#include <unordered_map>
+#include <iomanip>
+#include <iostream>
 #include <limits>
+#include <memory>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
-#include "core/types.hpp"
-#include "core/memory.hpp"
-#include "core/graph.hpp"
-#include "core/session.hpp"
-#include "core/kernels.hpp"
-#include "core/misc.hpp"
-#include "core/repo.hpp"
-#include "core/shapes.hpp"
 #include "core/argparse.hpp"
 #include "core/debug.hpp"
-
-#include "models/jina-embeddings-v5-omni-nano-retrieval.hpp"
-#include "generated/kernels_all.gen.hpp"
+#include "core/graph.hpp"
+#include "core/kernels.hpp"
+#include "core/memory.hpp"
+#include "core/misc.hpp"
+#include "core/repo.hpp"
+#include "core/session.hpp"
+#include "core/shapes.hpp"
+#include "core/types.hpp"
 #include "generated/build_context.gen.hpp"
+#include "generated/kernels_all.gen.hpp"
+#include "models/jina-embeddings-v5-omni-nano-retrieval.hpp"
 
 #ifdef TG_OS_WINDOWS
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -78,9 +78,9 @@ static constexpr int PATCH_SIZE = 16;
 static constexpr int TEMPORAL_PATCH_SIZE = 2;
 static constexpr int IN_CHANNELS = 3;
 static constexpr int SPATIAL_MERGE_SIZE = 2;
-static constexpr int SMART_RESIZE_FACTOR = PATCH_SIZE * SPATIAL_MERGE_SIZE;                   // 32
-static constexpr int MIN_PIXELS = 262144;                                                     // from preprocessor_config.json
-static constexpr int MAX_PIXELS = 1310720;                                                    // from preprocessor_config.json
+static constexpr int SMART_RESIZE_FACTOR = PATCH_SIZE * SPATIAL_MERGE_SIZE; // 32
+static constexpr int MIN_PIXELS = 262144;                                   // from preprocessor_config.json
+static constexpr int MAX_PIXELS = 1310720;                                  // from preprocessor_config.json
 static constexpr int PATCH_DIM = TEMPORAL_PATCH_SIZE * PATCH_SIZE * PATCH_SIZE * IN_CHANNELS; // 1536
 static constexpr int EMBEDDING_DIM = 768;
 static constexpr float IMAGE_MEAN = 0.5f;
@@ -112,18 +112,15 @@ struct SharedMemoryPayload
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SharedMemoryPayload) == SHM_TOTAL_SIZE,
-              "SharedMemoryPayload size mismatch");
+static_assert(sizeof(SharedMemoryPayload) == SHM_TOTAL_SIZE, "SharedMemoryPayload size mismatch");
 
 // -----------------------------------------------------------------------------
 // smart_resize — mirrors Qwen2VL's algorithm with factor=32 for Qwen3VL.
 // Returns (new_height, new_width) where both are divisible by 32 and total
 // pixels are within [min_pixels, max_pixels], preserving aspect ratio.
 // -----------------------------------------------------------------------------
-static std::pair<int, int> smart_resize(int height, int width,
-                                        int factor = SMART_RESIZE_FACTOR,
-                                        int min_pixels = MIN_PIXELS,
-                                        int max_pixels = MAX_PIXELS)
+static std::pair<int, int> smart_resize(int height, int width, int factor = SMART_RESIZE_FACTOR,
+                                        int min_pixels = MIN_PIXELS, int max_pixels = MAX_PIXELS)
 {
     if (height <= 0 || width <= 0)
         throw std::runtime_error("smart_resize: invalid dimensions");
@@ -164,8 +161,8 @@ struct CompiledSession
     std::unique_ptr<Graph> graph;
     std::unique_ptr<Session> session;
     std::unique_ptr<JinaV5Config> cfg;
-    uint32_t patch_input_id = 0;
-    uint32_t root_id = 0;
+    LogicalId patch_input_id;
+    LogicalId root_id;
     int width = 0;
     int height = 0;
     bool has_run = false;
@@ -177,10 +174,8 @@ struct CompiledSession
 };
 
 // Build (or rebuild) the graph + session for the given image dimensions.
-static void build_session(CompiledSession &cs, MemoryManager &mem,
-                          int width, int height,
-                          const std::string &weights_path,
-                          bool disable_caching = false)
+static void build_session(CompiledSession &cs, MemoryManager &mem, int width, int height,
+                          const std::string &weights_path, bool disable_caching = false)
 {
     int grid_h = height / PATCH_SIZE;
     int grid_w = width / PATCH_SIZE;
@@ -192,9 +187,7 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
     cs.graph = std::make_unique<Graph>();
     cs.cfg = std::make_unique<JinaV5Config>((uint32_t)height, (uint32_t)width);
 
-    cs.patch_input_id = cs.graph->input(
-        inShape,
-        DType::FLOAT32, {}, StorageType::PERSISTENT);
+    cs.patch_input_id = cs.graph->input(inShape, DType::FLOAT32, {});
 
     JinaV5OmniNanoRetrievalModel model(*cs.cfg, *cs.graph, mem, weights_path);
     cs.root_id = model.build_graph(cs.patch_input_id);
@@ -202,19 +195,20 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
     std::string gHash = computeGraphHash(*cs.graph, {cs.root_id});
     Repo repo("benchmarks/repo_jina-embeddings-v5-omni-nano-retrieval", gHash, true);
 
-    std::string cache_file = "dirty_region_caches/jina-v5-" +
-                             std::to_string(width) + "x" + std::to_string(height) + ".bin";
+    std::string cache_file =
+        "dirty_region_caches/jina-v5-" + std::to_string(width) + "x" + std::to_string(height) + ".bin";
 
-    cs.session = std::make_unique<Session>(*cs.graph, mem, cs.root_id,
-                                           cache_file, 0, &repo, disable_caching);
+    cs.session = std::make_unique<Session>(*cs.graph, mem, cs.root_id, cache_file, 0, &repo, disable_caching);
 
-    // Register a bucket where ONLY the image input is dirty (all weights are clean/static)
-    std::unordered_map<uint32_t, std::vector<Region>> inputDirty;
+    // Register a bucket where ONLY the image input is dirty (all weights are
+    // clean/static)
+    std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
     inputDirty[cs.patch_input_id] = makeFull(inShape);
 
     std::vector<Region> outputNeeded = makeFull(outShape);
 
-    std::cout << "[build_session] added bucket in: " << toString(inShape) << ", out: " << toString(outShape) << std::endl;
+    std::cout << "[build_session] added bucket in: " << toString(inShape) << ", out: " << toString(outShape)
+              << std::endl;
     cs.session->addBucket(inputDirty, outputNeeded);
 
     cs.session->compile(true);
@@ -225,12 +219,11 @@ static void build_session(CompiledSession &cs, MemoryManager &mem,
 
     // Pre-allocate reusable staging buffers for this image size so the polling
     // loop doesn't allocate/free on every single image.
-    cs.norm_image.assign((size_t)IN_CHANNELS * width * height, 0.0f);
-    cs.patch_input.assign((size_t)1 * num_patches * PATCH_DIM, 0.0f);
+    cs.norm_image.assign((uint64_t)IN_CHANNELS * width * height, 0.0f);
+    cs.patch_input.assign((uint64_t)1 * num_patches * PATCH_DIM, 0.0f);
 }
 
-static void build_patch_input_inplace(const std::vector<float> &norm_image,
-                                      int width, int height,
+static void build_patch_input_inplace(const std::vector<float> &norm_image, int width, int height,
                                       std::vector<float> &patch_input)
 {
     int grid_h = height / PATCH_SIZE;
@@ -238,11 +231,12 @@ static void build_patch_input_inplace(const std::vector<float> &norm_image,
     int num_patches = grid_h * grid_w;
 
     if ((int)patch_input.size() != 1 * num_patches * PATCH_DIM)
-        patch_input.assign((size_t)1 * num_patches * PATCH_DIM, 0.0f);
+        patch_input.assign((uint64_t)1 * num_patches * PATCH_DIM, 0.0f);
 
-    // Per-patch flat layout: c * (T * P * Q) + t * (P * Q) + p * Q + q  ← (C, T, P, Q)
-    // The HF processor flattens patches as (C, T, P, Q), matching the layout expected
-    // by PyTorch when F.linear is applied to a Conv3d weight viewed as (Out, In).
+    // Per-patch flat layout: c * (T * P * Q) + t * (P * Q) + p * Q + q  ← (C, T,
+    // P, Q) The HF processor flattens patches as (C, T, P, Q), matching the
+    // layout expected by PyTorch when F.linear is applied to a Conv3d weight
+    // viewed as (Out, In).
     int spatial_stride = PATCH_SIZE * PATCH_SIZE;
     int temporal_stride = TEMPORAL_PATCH_SIZE * spatial_stride;
 
@@ -279,9 +273,9 @@ static void build_patch_input_inplace(const std::vector<float> &norm_image,
     }
 }
 
-// Backwards-compatible wrapper (still allocates) — used by standalone file mode.
-static std::vector<float> build_patch_input(const std::vector<float> &norm_image,
-                                            int width, int height)
+// Backwards-compatible wrapper (still allocates) — used by standalone file
+// mode.
+static std::vector<float> build_patch_input(const std::vector<float> &norm_image, int width, int height)
 {
     std::vector<float> out;
     build_patch_input_inplace(norm_image, width, height, out);
@@ -289,12 +283,11 @@ static std::vector<float> build_patch_input(const std::vector<float> &norm_image
 }
 
 // In-place normalize: writes directly into cs.norm_image, no per-call alloc.
-static void normalize_image_inplace(const uint8_t *pixel_data,
-                                    int width, int height, int channels,
+static void normalize_image_inplace(const uint8_t *pixel_data, int width, int height, int channels,
                                     std::vector<float> &norm_image)
 {
     if ((int)norm_image.size() != IN_CHANNELS * width * height)
-        norm_image.assign((size_t)IN_CHANNELS * width * height, 0.0f);
+        norm_image.assign((uint64_t)IN_CHANNELS * width * height, 0.0f);
 
     for (int c = 0; c < IN_CHANNELS; ++c)
     {
@@ -317,8 +310,7 @@ static void normalize_image_inplace(const uint8_t *pixel_data,
 // Wrapper kept for backwards compatibility — internally delegates to the
 // in-place variant so both code paths produce identical output.  Prefer
 // normalize_image_inplace() in new code to avoid the per-call allocation.
-static std::vector<float> normalize_image(const uint8_t *pixel_data,
-                                          int width, int height, int channels)
+static std::vector<float> normalize_image(const uint8_t *pixel_data, int width, int height, int channels)
 {
     std::vector<float> out;
     normalize_image_inplace(pixel_data, width, height, channels, out);
@@ -359,8 +351,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    static const std::string WEIGHTS_PATH =
-        "models/jinaai/jina-embeddings-v5-omni-nano-retrieval/model.safetensors";
+    static const std::string WEIGHTS_PATH = "models/jinaai/jina-embeddings-v5-omni-nano-retrieval/model.safetensors";
 
     // Initialize the ReferenceVerifier
     Debug::ReferenceVerifier verifier;
@@ -373,15 +364,14 @@ int main(int argc, char *argv[])
     // -----------------------------------------------------------------------
     // Memory manager (shared across all compiled sessions)
     // -----------------------------------------------------------------------
-    // TODO: make this and get_default_buffer_sizes load from some common place
-    std::unordered_map<Backend, uint64_t> bufferSizes = {
-        {Backend::CPU, 16ULL * 1024 * 1024 * 1024}};
+    // TODO: make this and getDefaultBufferSizes load from some common place
+    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
 #ifdef USE_CUDA
-    bufferSizes[Backend::CUDA] = 16ULL * 1024 * 1024 * 1024;
+    bufferSizes[MemSpace{2, HandleType::CUDA}] = 16ULL * 1024 * 1024 * 1024;
 #endif
     if (HardwareCaps::get().has_opencl)
     {
-        bufferSizes[Backend::OPENCL] = 1ULL * 1024 * 1024 * 1024;
+        bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
     }
     MemoryManager mem(bufferSizes);
 
@@ -403,8 +393,8 @@ int main(int argc, char *argv[])
             hMapFile = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, "tg_embed_shm");
             if (hMapFile != NULL)
                 break;
-            hMapFile = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
-                                          0, sizeof(SharedMemoryPayload), "tg_embed_shm");
+            hMapFile = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(SharedMemoryPayload),
+                                          "tg_embed_shm");
             if (hMapFile != NULL)
                 break;
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -414,8 +404,8 @@ int main(int argc, char *argv[])
             std::cerr << "[Server Error] Failed to open/create shared memory" << std::endl;
             return 1;
         }
-        shm_payload = (SharedMemoryPayload *)MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS,
-                                                           0, 0, sizeof(SharedMemoryPayload));
+        shm_payload =
+            (SharedMemoryPayload *)MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedMemoryPayload));
         if (shm_payload == nullptr)
         {
             std::cerr << "[Server Error] MapViewOfFile failed" << std::endl;
@@ -442,8 +432,7 @@ int main(int argc, char *argv[])
             std::cerr << "[Server Error] Failed to open/create shared memory" << std::endl;
             return 1;
         }
-        shm_payload = (SharedMemoryPayload *)mmap(NULL, sizeof(SharedMemoryPayload),
-                                                  PROT_READ | PROT_WRITE, MAP_SHARED,
+        shm_payload = (SharedMemoryPayload *)mmap(NULL, sizeof(SharedMemoryPayload), PROT_READ | PROT_WRITE, MAP_SHARED,
                                                   shm_fd, 0);
         if (shm_payload == MAP_FAILED)
         {
@@ -479,46 +468,34 @@ int main(int argc, char *argv[])
                 {
                     if (width % SMART_RESIZE_FACTOR != 0 || height % SMART_RESIZE_FACTOR != 0)
                     {
-                        throw std::runtime_error(
-                            "Image dimensions must be divisible by " +
-                            std::to_string(SMART_RESIZE_FACTOR) +
-                            " (got " + std::to_string(width) + "x" +
-                            std::to_string(height) + ")");
+                        throw std::runtime_error("Image dimensions must be divisible by " +
+                                                 std::to_string(SMART_RESIZE_FACTOR) + " (got " +
+                                                 std::to_string(width) + "x" + std::to_string(height) + ")");
                     }
                     int total_pixels = width * height;
                     if (total_pixels < MIN_PIXELS || total_pixels > MAX_PIXELS)
                     {
-                        throw std::runtime_error(
-                            "Image pixel count " + std::to_string(total_pixels) +
-                            " is outside [" + std::to_string(MIN_PIXELS) + ", " +
-                            std::to_string(MAX_PIXELS) + "]");
+                        throw std::runtime_error("Image pixel count " + std::to_string(total_pixels) + " is outside [" +
+                                                 std::to_string(MIN_PIXELS) + ", " + std::to_string(MAX_PIXELS) + "]");
                     }
 
-                    std::cout << "[Server] Building graph for "
-                              << width << "x" << height << "..." << std::endl;
+                    std::cout << "[Server] Building graph for " << width << "x" << height << "..." << std::endl;
                     build_session(cs, mem, width, height, WEIGHTS_PATH, disable_caching);
-                    std::cout << "[Server] Graph ready ("
-                              << cs.cfg->num_patches << " patches, "
-                              << cs.cfg->num_merged << " merged tokens, "
-                              << cs.cfg->text_seq_len << " text tokens)"
-                              << std::endl;
+                    std::cout << "[Server] Graph ready (" << cs.cfg->num_patches << " patches, " << cs.cfg->num_merged
+                              << " merged tokens, " << cs.cfg->text_seq_len << " text tokens)" << std::endl;
                 }
 
                 // 1. Normalize image in-place
-                normalize_image_inplace(
-                    shm_payload->pixel_data, width, height, channels,
-                    cs.norm_image);
+                normalize_image_inplace(shm_payload->pixel_data, width, height, channels, cs.norm_image);
 
                 // 2. Build patch input in-place
-                build_patch_input_inplace(cs.norm_image, width, height,
-                                          cs.patch_input);
+                build_patch_input_inplace(cs.norm_image, width, height, cs.patch_input);
 
                 // 3. Write input and run
-                cs.session->memManager.write(Backend::CPU, cs.patch_input_id,
-                                             cs.patch_input.data(),
-                                             cs.patch_input.size() * sizeof(float));
+                cs.session->writeInput(cs.patch_input_id, cs.patch_input.data(), cs.patch_input.size() * sizeof(float));
 
-                // Use the incremental bucket if we have already loaded the static weights on the first run
+                // Use the incremental bucket if we have already loaded the static
+                // weights on the first run
                 Bucket b;
                 if (cs.has_run)
                 {
@@ -526,13 +503,12 @@ int main(int argc, char *argv[])
                     b.outputNeededRegion = makeFull(cs.graph->getNode(cs.root_id).getShape());
                 }
 
-                auto cb = [&](uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)
-                {
-                    verifier.verify(logicalId, node, ctx, data, cs.graph.get());
-                };
+                auto cb = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx,
+                              const void *data) { verifier.verify(logicalId, kernel_name, ctx, data, cs.graph.get()); };
 
                 const float *device_output_ptr = static_cast<const float *>(cs.session->run(b, cb));
-                cs.has_run = true; // Mark as run completed so subsequent passes bypass weight copy
+                cs.has_run = true; // Mark as run completed so subsequent passes bypass
+                                   // weight copy
 
                 // 4. Copy embedding back
                 float host_output[EMBEDDING_DIM];
@@ -541,21 +517,17 @@ int main(int argc, char *argv[])
                 if (cudaPointerGetAttributes(&attrs, device_output_ptr) == cudaSuccess &&
                     attrs.type == cudaMemoryTypeDevice)
                 {
-                    cudaMemcpy(host_output, device_output_ptr,
-                               EMBEDDING_DIM * sizeof(float), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(host_output, device_output_ptr, EMBEDDING_DIM * sizeof(float), cudaMemcpyDeviceToHost);
                 }
                 else
                 {
-                    std::memcpy(host_output, device_output_ptr,
-                                EMBEDDING_DIM * sizeof(float));
+                    std::memcpy(host_output, device_output_ptr, EMBEDDING_DIM * sizeof(float));
                 }
 #else
-                std::memcpy(host_output, device_output_ptr,
-                            EMBEDDING_DIM * sizeof(float));
+                std::memcpy(host_output, device_output_ptr, EMBEDDING_DIM * sizeof(float));
 #endif
 
-                std::memcpy(shm_payload->embedding, host_output,
-                            EMBEDDING_DIM * sizeof(float));
+                std::memcpy(shm_payload->embedding, host_output, EMBEDDING_DIM * sizeof(float));
                 shm_payload->status = 0;
                 shm_payload->state = 2;
             }
@@ -591,15 +563,15 @@ int main(int argc, char *argv[])
         }
         channels = 3;
 
-        std::cout << "Loaded image: " << image_path << " ("
-                  << width << "x" << height << ", " << channels << " channels)" << std::endl;
+        std::cout << "Loaded image: " << image_path << " (" << width << "x" << height << ", " << channels
+                  << " channels)" << std::endl;
 
         // smart_resize to model-compatible dimensions
         auto [new_h, new_w] = smart_resize(height, width);
-        std::cout << "smart_resize: " << width << "x" << height
-                  << " -> " << new_w << "x" << new_h << std::endl;
+        std::cout << "smart_resize: " << width << "x" << height << " -> " << new_w << "x" << new_h << std::endl;
 
-        // If the image needs resizing, do it with a simple bilinear via stb_image_resize
+        // If the image needs resizing, do it with a simple bilinear via
+        // stb_image_resize
         unsigned char *resized_data = img_data;
         int final_w = width, final_h = height;
         bool needs_resize = (new_w != width || new_h != height);
@@ -610,8 +582,7 @@ int main(int argc, char *argv[])
 // nearest-neighbor.  For production, install stb_image_resize2.h.
 #ifdef STB_IMAGE_RESIZE_IMPLEMENTATION
             resized_data = (unsigned char *)malloc(new_w * new_h * 3);
-            stbir_resize_uint8(img_data, width, height, 0,
-                               resized_data, new_w, new_h, 0, 3);
+            stbir_resize_uint8(img_data, width, height, 0, resized_data, new_w, new_h, 0, 3);
             stbi_image_free(img_data);
 #else
             // Simple nearest-neighbor fallback
@@ -638,8 +609,7 @@ int main(int argc, char *argv[])
         }
 
         std::cout << "Preprocessing (" << final_w << "x" << final_h << ", "
-                  << (final_w / PATCH_SIZE) * (final_h / PATCH_SIZE) << " patches)..."
-                  << std::endl;
+                  << (final_w / PATCH_SIZE) * (final_h / PATCH_SIZE) << " patches)..." << std::endl;
 
         // Build graph for this image's dimensions (build_session also
         // pre-allocates cs.norm_image and cs.patch_input for reuse).
@@ -654,15 +624,12 @@ int main(int argc, char *argv[])
 
         // Run
         std::cout << "Running inference..." << std::endl;
-        cs.session->memManager.write(Backend::CPU, cs.patch_input_id,
-                                     cs.patch_input.data(),
-                                     cs.patch_input.size() * sizeof(float));
+        cs.session->writeInput(cs.patch_input_id, cs.patch_input.data(), cs.patch_input.size() * sizeof(float));
 
         auto start = std::chrono::high_resolution_clock::now();
 
-        auto cb = [&](uint32_t logicalId, const TensorNode &node, const KernelContext &ctx, const void *data)
-        {
-            verifier.verify(logicalId, node, ctx, data, cs.graph.get());
+        auto cb = [&](LogicalId logicalId, std::string &kernel_name, const KernelContext &ctx, const void *data) {
+            verifier.verify(logicalId, kernel_name, ctx, data, cs.graph.get());
         };
 
         Bucket b;
@@ -674,11 +641,9 @@ int main(int argc, char *argv[])
         float host_output[EMBEDDING_DIM];
 #ifdef USE_CUDA
         cudaPointerAttributes attrs;
-        if (cudaPointerGetAttributes(&attrs, device_output_ptr) == cudaSuccess &&
-            attrs.type == cudaMemoryTypeDevice)
+        if (cudaPointerGetAttributes(&attrs, device_output_ptr) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
         {
-            cudaMemcpy(host_output, device_output_ptr,
-                       EMBEDDING_DIM * sizeof(float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(host_output, device_output_ptr, EMBEDDING_DIM * sizeof(float), cudaMemcpyDeviceToHost);
         }
         else
         {
@@ -705,8 +670,7 @@ int main(int argc, char *argv[])
         for (int i = 0; i < EMBEDDING_DIM; ++i)
             l2_norm += host_output[i] * host_output[i];
         l2_norm = std::sqrt(l2_norm);
-        std::cout << "L2 norm: " << std::fixed << std::setprecision(6) << l2_norm
-                  << " (should be ~1.0)" << std::endl;
+        std::cout << "L2 norm: " << std::fixed << std::setprecision(6) << l2_norm << " (should be ~1.0)" << std::endl;
     }
 
     verifier.printSummary();

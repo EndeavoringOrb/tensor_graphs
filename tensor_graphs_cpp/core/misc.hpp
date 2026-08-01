@@ -1,15 +1,25 @@
 // tensor_graphs_cpp/core/misc.hpp
 #pragma once
-#include "core/types.hpp"
+#include <unordered_set>
+
+#include "core/egraph.hpp"
 #include "core/graph.hpp"
 #include "core/timer.hpp"
-#include <unordered_set>
+#include "core/types.hpp"
+
+inline bool overlapsBuf(const ParallelBuffer &a, const ParallelBuffer &b)
+{
+    ParallelBuffer x = a, y = b;
+    if (y.start < x.start)
+        std::swap(x, y);
+    return y.start <= x.end;
+}
 
 inline std::string toString(const std::vector<uint32_t> &shape)
 {
     std::stringstream ss;
     ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
+    for (uint64_t i = 0; i < shape.size(); ++i)
     {
         if (i > 0)
             ss << ", ";
@@ -23,7 +33,7 @@ inline std::string toString(const std::vector<int32_t> &shape)
 {
     std::stringstream ss;
     ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
+    for (uint64_t i = 0; i < shape.size(); ++i)
     {
         if (i > 0)
             ss << ", ";
@@ -37,7 +47,7 @@ inline std::string toString(const std::vector<uint64_t> &shape)
 {
     std::stringstream ss;
     ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
+    for (uint64_t i = 0; i < shape.size(); ++i)
     {
         if (i > 0)
             ss << ", ";
@@ -51,7 +61,7 @@ inline std::string toString(const std::vector<int64_t> &shape)
 {
     std::stringstream ss;
     ss << "[";
-    for (size_t i = 0; i < shape.size(); ++i)
+    for (uint64_t i = 0; i < shape.size(); ++i)
     {
         if (i > 0)
             ss << ", ";
@@ -73,15 +83,14 @@ inline std::string toString(const TensorNode &node, const std::string &prefix = 
        << prefix << "  DType:        " << toString(node.dtype) << "\n"
        << prefix << "  Shape:        " << toString(node.getShape()) << "\n"
        << prefix << "  Strides:      " << toString(node.strides) << "\n"
-       << prefix << "  Backend:      " << node.backend << "\n"
-       << prefix << "  Contiguous:   " << (isContiguous(node) ? "true" : "false") << "\n"
-       << prefix << "  Storage Type: " << toString(node.storageType);
+       << prefix << "  Contiguous:   " << (isContiguous(node) ? "true" : "false") << "\n";
     return ss.str();
 }
 
 /**
- * Helper to format a TensorNode's metadata and its parents' metadata into a string.
- * This encapsulates the logging logic used in estimateCost and interpolate.
+ * Helper to format a TensorNode's metadata and its parents' metadata into a
+ * string. This encapsulates the logging logic used in estimateCost and
+ * interpolate.
  */
 inline std::string toString(const TensorNode &node, const Graph &graph, const std::string &prefix = "")
 {
@@ -91,31 +100,28 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
        << prefix << "  DType:      " << toString(node.dtype) << "\n"
        << prefix << "  Shape:      " << toString(node.getShape()) << "\n"
        << prefix << "  Strides:    " << toString(node.strides) << "\n"
-       << prefix << "  Backend:    " << node.backend << "\n"
        << prefix << "  Contiguous: " << (isContiguous(node) ? "true" : "false") << "\n"
-       << prefix << "  Parents (" << node.parentIds.size() << "):";
+       << prefix << "  Parents (" << node.child_ids.size() << "):";
 
-    if (node.parentIds.empty())
+    if (node.child_ids.empty())
     {
         ss << " None";
     }
     else
     {
-        for (size_t i = 0; i < node.parentIds.size(); ++i)
+        for (uint64_t i = 0; i < node.child_ids.size(); ++i)
         {
-            uint32_t pid = node.parentIds[i];
+            LogicalId pid = node.child_ids[i];
             if (graph.hasNode(pid))
             {
                 const auto &parent = graph.getNode(pid);
                 ss << "\n"
-                   << prefix << "    [" << i << "] Parent ID " << pid
-                   << "\n"
+                   << prefix << "    [" << i << "] Parent ID " << pid.value << "\n"
                    << toString(parent, (std::string) "    ");
             }
             else
             {
-                ss << "\n"
-                   << prefix << "[" << i << "] Parent ID " << pid << " [OUT OF BOUNDS/NOT FOUND]";
+                ss << "\n" << prefix << "[" << i << "] Parent ID " << pid.value << " [OUT OF BOUNDS/NOT FOUND]";
             }
         }
     }
@@ -127,9 +133,7 @@ inline std::string toString(const TensorNode &node, const Graph &graph, const st
  */
 inline void printNode(const TensorNode &node, const Graph &graph, const std::string &label = "NODE INFO")
 {
-    std::cout << "--- " << label << " ---\n"
-              << toString(node, graph)
-              << "\n-----------------------" << std::endl;
+    std::cout << "--- " << label << " ---\n" << toString(node, graph) << "\n-----------------------" << std::endl;
 }
 
 inline std::string toString(const Region &reg)
@@ -148,15 +152,33 @@ inline std::string toString(const Region &reg)
     return ss.str();
 }
 
+inline std::string toString(const ParallelBuffer &buf)
+{
+    std::stringstream ss;
+    ss << "Buffer(id=" << buf.id << ", mem_space=" << buf.mem_space << ", size=" << buf.size << ", lifetime=["
+       << buf.start << ", " << buf.end << "], offset=" << buf.offset << ")";
+    return ss.str();
+}
+
 inline std::string toString(const OpInstruction &inst)
 {
     std::stringstream ss;
-    ss << "OpInstruction\n"
-       << "  Node ID: " << inst.nodeId << "\n"
-       << "  Full Kernel ID: " << inst.fullKernelId << "\n"
-       << "  Input Node IDs: " << toString(inst.inputNodeIds) << "\n"
-       << "  Inplace Input Index: " << inst.inplaceInputIndex << "\n"
-       << "  Backend: " << inst.backend << "\n";
+    ss << "OpInstruction {\n"
+       << "  EClass ID:    " << inst.eclass_id << "\n"
+       << "  Logical ID:   " << inst.logical_id << "\n"
+       << "  Kernel ID:    " << inst.kernel_id << "\n"
+       << "  Children:     " << toString(inst.children) << "\n"
+       << "  Out Buffer:   " << toString(inst.outBuffer) << "\n"
+       << "  In Buffers:   [";
+    for (uint64_t i = 0; i < inst.inBuffers.size(); ++i)
+    {
+        if (i > 0)
+            ss << ", ";
+        ss << toString(inst.inBuffers[i]);
+    }
+    ss << "]\n"
+       << "  Debug Origin: " << (inst.debugOrigin.empty() ? "N/A" : inst.debugOrigin) << "\n"
+       << "}";
     return ss.str();
 }
 
@@ -164,7 +186,7 @@ inline std::string toString(const TensorView &view)
 {
     std::stringstream ss;
     ss << "TensorView\n"
-       << "  baseOffset: " << view.baseOffset << "\n"
+       << "  baseOffset: " << view.offset << "\n"
        << "  shape: " << toString(view.getShape()) << "\n"
        << "  strides: " << toString(view.strides) << "\n"
        << "  dtype: " << view.dtype << "\n";
@@ -184,7 +206,7 @@ inline Region intersectRegions(const Region &r1, const Region &r2)
         return Region(); // Rank mismatch
 
     Region result;
-    for (size_t i = 0; i < r1.region.size(); ++i)
+    for (uint64_t i = 0; i < r1.region.size(); ++i)
     {
         result.region.push_back(intersectDims(r1.region[i], r2.region[i]));
     }
@@ -195,10 +217,9 @@ inline bool regionsMatch(const Region &r1, const Region &r2)
 {
     if (r1.region.size() != r2.region.size())
         return false;
-    for (size_t i = 0; i < r1.region.size(); ++i)
+    for (uint64_t i = 0; i < r1.region.size(); ++i)
     {
-        if (r1.region[i].start != r2.region[i].start ||
-            r1.region[i].stop != r2.region[i].stop)
+        if (r1.region[i].start != r2.region[i].start || r1.region[i].stop != r2.region[i].stop)
         {
             return false;
         }
@@ -215,7 +236,7 @@ inline bool coversRegion(const Region &outer, const Region &inner)
 {
     if (outer.region.size() != inner.region.size())
         return false;
-    for (size_t i = 0; i < outer.region.size(); i++)
+    for (uint64_t i = 0; i < outer.region.size(); i++)
     {
         if (!coversDim(outer.region[i], inner.region[i]))
             return false;
@@ -250,10 +271,10 @@ inline bool intervalsOverlapOrAdjacent(const Dim &a, const Dim &b)
     return a.stop >= b.start && b.stop >= a.start;
 }
 
-inline std::string regionGroupKeyExcludingDim(const Region &region, size_t excludeDim)
+inline std::string regionGroupKeyExcludingDim(const Region &region, uint64_t excludeDim)
 {
     std::stringstream ss;
-    for (size_t i = 0; i < region.region.size(); ++i)
+    for (uint64_t i = 0; i < region.region.size(); ++i)
     {
         if (i == excludeDim)
             continue;
@@ -262,7 +283,7 @@ inline std::string regionGroupKeyExcludingDim(const Region &region, size_t exclu
     return ss.str();
 }
 
-inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regions, size_t mergeDim)
+inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regions, uint64_t mergeDim)
 {
     if (regions.empty())
         return {};
@@ -277,29 +298,30 @@ inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regio
     for (const auto &groupPair : groups)
     {
         std::vector<Region> group = groupPair.second;
-        std::sort(group.begin(), group.end(), [mergeDim](const Region &a, const Region &b)
-                  {
-                      if (a.region.size() != b.region.size())
-                          return a.region.size() < b.region.size();
-                      for (size_t i = 0; i < a.region.size(); ++i)
-                      {
-                          if (i == mergeDim)
-                              continue;
-                          if (a.region[i].start != b.region[i].start)
-                              return a.region[i].start < b.region[i].start;
-                          if (a.region[i].stop != b.region[i].stop)
-                              return a.region[i].stop < b.region[i].stop;
-                      }
-                      if (a.region[mergeDim].start != b.region[mergeDim].start)
-                          return a.region[mergeDim].start < b.region[mergeDim].start;
-                      return a.region[mergeDim].stop < b.region[mergeDim].stop; });
+        std::sort(group.begin(), group.end(), [mergeDim](const Region &a, const Region &b) {
+            if (a.region.size() != b.region.size())
+                return a.region.size() < b.region.size();
+            for (uint64_t i = 0; i < a.region.size(); ++i)
+            {
+                if (i == mergeDim)
+                    continue;
+                if (a.region[i].start != b.region[i].start)
+                    return a.region[i].start < b.region[i].start;
+                if (a.region[i].stop != b.region[i].stop)
+                    return a.region[i].stop < b.region[i].stop;
+            }
+            if (a.region[mergeDim].start != b.region[mergeDim].start)
+                return a.region[mergeDim].start < b.region[mergeDim].start;
+            return a.region[mergeDim].stop < b.region[mergeDim].stop;
+        });
 
         Region current = group.front();
-        for (size_t i = 1; i < group.size(); ++i)
+        for (uint64_t i = 1; i < group.size(); ++i)
         {
             if (intervalsOverlapOrAdjacent(current.region[mergeDim], group[i].region[mergeDim]))
             {
-                current.region[mergeDim].start = std::min(current.region[mergeDim].start, group[i].region[mergeDim].start);
+                current.region[mergeDim].start =
+                    std::min(current.region[mergeDim].start, group[i].region[mergeDim].start);
                 current.region[mergeDim].stop = std::max(current.region[mergeDim].stop, group[i].region[mergeDim].stop);
             }
             else
@@ -319,8 +341,9 @@ inline std::vector<Region> mergeRegionsAlongDim(const std::vector<Region> &regio
 //
 // Examples:
 // f([(0,2),(2,4)]) -> [(0,4)]
-// f([((0,4),(0,2)),((0,2),(2,4)),((2,4),(2,4))]) -> [((0,4),(0,2)),((0,4),(2,4))]
-// f([((0,4),(0,2)),((0,4),(2,4))]) -> [((0,4),(0,4))]
+// f([((0,4),(0,2)),((0,2),(2,4)),((2,4),(2,4))]) ->
+// [((0,4),(0,2)),((0,4),(2,4))] f([((0,4),(0,2)),((0,4),(2,4))]) ->
+// [((0,4),(0,4))]
 inline std::vector<Region> mergeRegions(const std::vector<Region> &regions)
 {
     if (regions.empty())
@@ -331,7 +354,9 @@ inline std::vector<Region> mergeRegions(const std::vector<Region> &regions)
         return result;
 
     const int rank = result.front().region.size();
-    for (int dim = rank - 1; dim >= 0; dim--) // TODO: maybe merge top down? could discover different optimizations in InfinityDomination if we merge different ways?
+    for (int dim = rank - 1; dim >= 0; dim--) // TODO: maybe merge top down? could discover different
+                                              // optimizations in InfinityDomination if we merge different
+                                              // ways?
     {
         std::vector<Region> next = mergeRegionsAlongDim(result, dim);
         if (encodeRegionList(next) != encodeRegionList(result))
@@ -375,20 +400,6 @@ inline std::vector<Region> intersectRegionLists(const std::vector<Region> &list1
     return mergeRegions(intersections);
 }
 
-inline std::string toString(const std::unordered_map<Backend, uint64_t> &map)
-{
-    std::stringstream ss;
-    ss << "{";
-    for (auto it = map.begin(); it != map.end(); ++it)
-    {
-        ss << toString(it->first) << ": " << it->second << " bytes";
-        if (std::next(it) != map.end())
-            ss << ", ";
-    }
-    ss << "}";
-    return ss.str();
-}
-
 inline std::string toStringHex(uint64_t val)
 {
     std::stringstream ss;
@@ -397,25 +408,24 @@ inline std::string toStringHex(uint64_t val)
 }
 
 // Topological sort of graph nodes from given roots
-inline std::vector<uint32_t> topologicalSort(const std::vector<uint32_t> &roots, const Graph &graph)
+inline std::vector<LogicalId> topologicalSort(const std::vector<LogicalId> &roots, const Graph &graph)
 {
-    std::vector<uint32_t> order;
-    std::unordered_set<uint32_t> visited;
-    auto visit = [&](auto &self, uint32_t node) -> void
-    {
+    std::vector<LogicalId> order;
+    std::unordered_set<LogicalId> visited;
+    auto visit = [&](auto &self, LogicalId node) -> void {
         if (visited.count(node))
             return;
         visited.insert(node);
         if (graph.hasNode(node))
         {
-            for (uint32_t pid : graph.getNode(node).parentIds)
+            for (LogicalId pid : graph.getNode(node).child_ids)
             {
                 self(self, pid);
             }
         }
         order.push_back(node);
     };
-    for (uint32_t root : roots)
+    for (LogicalId root : roots)
     {
         visit(visit, root);
     }
@@ -427,7 +437,7 @@ inline TensorView makeView(const TensorNode &node)
 {
     TensorView view;
     view.setShape(node.getShape());
-    view.baseOffset = 0;
+    view.offset = 0;
     view.dtype = node.dtype;
     if (!node.strides.empty())
         view.strides = node.strides;
@@ -436,12 +446,12 @@ inline TensorView makeView(const TensorNode &node)
     return view;
 }
 
-inline size_t getRequiredBufferSize(const TensorView &view)
+inline uint64_t getRequiredBufferSize(const TensorView &view)
 {
     if (view.getShape().empty())
         return 1;
-    size_t maxOffset = 0;
-    for (size_t i = 0; i < view.getShape().size(); ++i)
+    uint64_t maxOffset = 0;
+    for (uint64_t i = 0; i < view.getShape().size(); ++i)
     {
         if (view.getShape()[i] > 0)
         {

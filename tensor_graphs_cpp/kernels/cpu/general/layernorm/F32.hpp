@@ -1,7 +1,8 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cmath>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 // =============================================================================
 // FUSED KERNEL: LayerNorm F32 (no affine parameters)
@@ -87,11 +88,11 @@ inline void runLayerNormF32_3D(const KernelContext &ctx)
 // Helper: expand a scalar to shape {1, S, 1} (matching expand_scalar_to_3d
 // with d0=1, d1=S, d2=1 as used in layer_norm_atomic)
 // ---------------------------------------------------------------------------
-inline uint32_t ref_ln_expand_scalar_1S1(Graph &g, float val, uint32_t S)
+inline LogicalId ref_ln_expand_scalar_1S1(Graph &g, float val, uint32_t S)
 {
-    uint32_t node = g.constant({1}, &val, DType::FLOAT32);
+    LogicalId node = g.constant({1}, &val, DType::FLOAT32);
     int32_t sh3[] = {1, 1, 1};
-    uint32_t out = g.reshape(node, g.constant({3}, sh3, DType::INT32));
+    LogicalId out = g.reshape(node, g.constant({3}, sh3, DType::INT32));
     if (S > 1)
     {
         int32_t rep = (int32_t)S;
@@ -105,7 +106,7 @@ inline uint32_t ref_ln_expand_scalar_1S1(Graph &g, float val, uint32_t S)
 // Helper: repeat along axis 2 to expand {B, S, 1} -> {B, S, D}
 // (mirrors repeat_ax(node, D, 2) used in layer_norm_atomic)
 // ---------------------------------------------------------------------------
-inline uint32_t ref_ln_repeat_ax2(Graph &g, uint32_t node, uint32_t D)
+inline LogicalId ref_ln_repeat_ax2(Graph &g, LogicalId node, uint32_t D)
 {
     if (D <= 1)
         return node;
@@ -137,9 +138,9 @@ inline uint32_t ref_ln_repeat_ax2(Graph &g, uint32_t node, uint32_t D)
 // Note: expand_scalar_to_3d(val, 1, seq, 1) creates shape {1, seq, 1}
 //       repeat_ax(node, D, 2) broadcasts axis 2 by D
 // ---------------------------------------------------------------------------
-inline uint32_t refFactoryLayerNorm(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryLayerNorm(const std::vector<LogicalId> &inputs, Graph &graph)
 {
-    uint32_t x_id = inputs[0];
+    LogicalId x_id = inputs[0];
     const auto &shape = graph.getNode(x_id).getShape();
     uint32_t B = shape[0];
     uint32_t S = shape[1];
@@ -147,60 +148,61 @@ inline uint32_t refFactoryLayerNorm(const std::vector<uint32_t> &inputs, Graph &
 
     // axis = -1 (reduce over last dimension)
     int32_t ax_val = -1;
-    uint32_t ax_node = graph.constant({1}, &ax_val, DType::INT32);
+    LogicalId ax_node = graph.constant({1}, &ax_val, DType::INT32);
 
     // --- Mean ---
     // sum(x, axis=-1) -> {B, S, 1}
-    uint32_t sum_x = graph.sum(x_id, ax_node);
+    LogicalId sum_x = graph.sum(x_id, ax_node);
 
     // D as float, expanded to {1, S, 1}
     float d_float = (float)D;
-    uint32_t d_node = ref_ln_expand_scalar_1S1(graph, d_float, S);
+    LogicalId d_node = ref_ln_expand_scalar_1S1(graph, d_float, S);
 
     // mean_val = sum(x, -1) / D -> {B, S, 1}
-    uint32_t mean_val = graph.div(sum_x, d_node);
+    LogicalId mean_val = graph.div(sum_x, d_node);
 
     // mean = repeat_ax(mean_val, D, 2) -> {B, S, D}
-    uint32_t mean = ref_ln_repeat_ax2(graph, mean_val, D);
+    LogicalId mean = ref_ln_repeat_ax2(graph, mean_val, D);
 
     // --- Centered ---
     // x_sub = x + neg(mean) = x - mean
-    uint32_t x_sub = graph.add(x_id, graph.neg(mean));
+    LogicalId x_sub = graph.add(x_id, graph.neg(mean));
 
     // --- Variance ---
     // sq = x_sub * x_sub
-    uint32_t sq = graph.mul(x_sub, x_sub);
+    LogicalId sq = graph.mul(x_sub, x_sub);
 
     // sum(sq, axis=-1) -> {B, S, 1}
-    uint32_t sum_sq = graph.sum(sq, ax_node);
+    LogicalId sum_sq = graph.sum(sq, ax_node);
 
     // var = sum(sq, -1) / D -> {B, S, 1}
-    uint32_t var = graph.div(sum_sq, d_node);
+    LogicalId var = graph.div(sum_sq, d_node);
 
     // --- Standard Deviation ---
     // var + eps -> {B, S, 1}
     float eps = LAYERNORM_DEFAULT_EPS;
-    uint32_t eps_node = ref_ln_expand_scalar_1S1(graph, eps, S);
-    uint32_t var_plus_eps = graph.add(var, eps_node);
+    LogicalId eps_node = ref_ln_expand_scalar_1S1(graph, eps, S);
+    LogicalId var_plus_eps = graph.add(var, eps_node);
 
     // std = pow(var + eps, 0.5) -> {B, S, 1}
     float half_val = 0.5f;
-    uint32_t sqrt_exp = ref_ln_expand_scalar_1S1(graph, half_val, S);
-    uint32_t std_dev = graph.pow(var_plus_eps, sqrt_exp);
+    LogicalId sqrt_exp = ref_ln_expand_scalar_1S1(graph, half_val, S);
+    LogicalId std_dev = graph.pow(var_plus_eps, sqrt_exp);
 
     // --- Inverse Std ---
     // 1.0 / std -> {B, S, 1}
     float one_val = 1.0f;
-    uint32_t one_node = ref_ln_expand_scalar_1S1(graph, one_val, S);
-    uint32_t inv_std = graph.div(one_node, std_dev);
+    LogicalId one_node = ref_ln_expand_scalar_1S1(graph, one_val, S);
+    LogicalId inv_std = graph.div(one_node, std_dev);
 
     // repeat_ax(inv_std, D, 2) -> {B, S, D}
-    uint32_t inv_std_expanded = ref_ln_repeat_ax2(graph, inv_std, D);
+    LogicalId inv_std_expanded = ref_ln_repeat_ax2(graph, inv_std, D);
 
     // --- Result ---
     // x_sub * inv_std_expanded
     return graph.mul(x_sub, inv_std_expanded);
 }
 
-REGISTER_KERNEL("LayerNorm", 1, matchLayerNormF32_3D, runLayerNormF32_3D, refFactoryLayerNorm,
-                {Backend::CPU}, {DType::FLOAT32}, {{1, 1, 3072}}, {true}, {{Backend::CPU}});
+REGISTER_KERNEL("LayerNorm", 1, 1, matchLayerNormF32_3D, runLayerNormF32_3D, refFactoryLayerNorm,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 3072}}, {true},
+                {{MemSpace(1, HandleType::CPP)}});

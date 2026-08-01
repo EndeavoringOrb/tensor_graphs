@@ -1,7 +1,3 @@
-[build-system]
-requires = ["setuptools>=61.0", "pybind11", "ninja"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "tensor_graphs"
 version = "0.1.0"
@@ -18,17 +14,12 @@ dependencies = [
     "numpy",
     "tqdm",
     "tokenizers",
-    "huggingface_hub",
+    "huggingface-hub",
     "torch",
     "safetensors",
     "hf_xet",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest",
-    "pytest-cov",
-    "rich",
+    "rich>=15.0.0",
+    "ruff>=0.16.1",
 ]
 
 [tool.setuptools.packages.find]

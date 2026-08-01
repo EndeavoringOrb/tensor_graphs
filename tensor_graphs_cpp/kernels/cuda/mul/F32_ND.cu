@@ -40,7 +40,7 @@ inline void runMulF32_CUDA_ND(const KernelContext &ctx) {
 /**
  * Reference Factory
  */
-inline uint32_t refFactoryMulF32_ND_CUDA(const std::vector<uint32_t> &inputs, Graph &graph)
+inline LogicalId refFactoryMulF32_ND_CUDA(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     if (inputs.size() != 2)
         Error::throw_err("Mul ND requires 2 inputs");
@@ -48,6 +48,6 @@ inline uint32_t refFactoryMulF32_ND_CUDA(const std::vector<uint32_t> &inputs, Gr
     return graph.mul(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Mul_F32_ND_CUDA", 2, matchMulF32_CUDA_ND, runMulF32_CUDA_ND, refFactoryMulF32_ND_CUDA, {Backend::CUDA}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{Backend::CUDA}, {Backend::CUDA}});
+REGISTER_KERNEL("Mul_F32_ND_CUDA", 2, 2, matchMulF32_CUDA_ND, runMulF32_CUDA_ND, refFactoryMulF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif

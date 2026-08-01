@@ -1,5 +1,3 @@
-// File: tensor_graphs_cpp/kernels/cpu/general/dot/moe_topk_fused_gemm_streaming_storage_neon_v2.hpp
-//
 // Fused Top-K MoE Expert FFN v2 — BFDOT-optimised
 // -----------------------------------------------
 //
@@ -65,25 +63,26 @@
 //   approaches 2x.
 
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 #if defined(TG_HAS_NEON) && defined(__ARM_FEATURE_BF16)
 
 #include <arm_neon.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
-#include <algorithm>
-#include <cstring>
-#include <cmath>
-#include <string>
 
 #ifdef TG_OS_WINDOWS
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
 #include <io.h>
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -102,9 +101,7 @@
 //   - No isContiguous(inputs[i]) / isContiguous(inViews[i]) check
 //   - No inputs[i].dtype check
 // ---------------------------------------------------------------------------
-inline bool matchMoETopKFusedGEMM_StreamingStorage_v2(
-    const std::vector<TensorNode> &inputs,
-    const TensorNode &output)
+inline bool matchMoETopKFusedGEMM_StreamingStorage_v2(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
     // X: [1, S, H], W_gu: [E, 2I, H], W_dn: [E, H, I],
     // router_probs: [1, S, E], sel: [1, S, K], Out: [1, S, H]
@@ -163,13 +160,12 @@ inline bool matchMoETopKFusedGEMM_StreamingStorage_v2(
 // ---------------------------------------------------------------------------
 // Portable positional disk read (renamed to avoid ODR collision with v1)
 // ---------------------------------------------------------------------------
-static inline bool moeTopK_v2_readFromFileAtOffset(
-    int fd, uint64_t offset, void *buf, size_t bytes)
+static inline bool moeTopK_v2_readFromFileAtOffset(int fd, uint64_t offset, void *buf, uint64_t bytes)
 {
     if (bytes == 0)
         return true;
     uint8_t *p = static_cast<uint8_t *>(buf);
-    size_t remaining = bytes;
+    uint64_t remaining = bytes;
     uint64_t cur = offset;
 
 #ifdef TG_OS_WINDOWS
@@ -181,8 +177,7 @@ static inline bool moeTopK_v2_readFromFileAtOffset(
         OVERLAPPED ov = {};
         ov.Offset = static_cast<DWORD>(cur & 0xFFFFFFFFull);
         ov.OffsetHigh = static_cast<DWORD>((cur >> 32) & 0xFFFFFFFFull);
-        DWORD toRead = static_cast<DWORD>(
-            std::min<size_t>(remaining, 0x40000000ull));
+        DWORD toRead = static_cast<DWORD>(std::min<uint64_t>(remaining, 0x40000000ull));
         DWORD bytesRead = 0;
         if (!ReadFile(hFile, p, toRead, &bytesRead, &ov))
             return false;
@@ -196,12 +191,12 @@ static inline bool moeTopK_v2_readFromFileAtOffset(
 #else
     while (remaining > 0)
     {
-        ssize_t n = pread(fd, p, remaining, cur);
+        int64_t n = pread(fd, p, remaining, cur);
         if (n <= 0)
             return false;
         p += n;
         cur += n;
-        remaining -= static_cast<size_t>(n);
+        remaining -= static_cast<uint64_t>(n);
     }
     return true;
 #endif
@@ -221,15 +216,14 @@ static inline uint16x8_t moe_v2_fp32x8_to_bf16_u16x8(float32x4_t lo, float32x4_t
 // BFDOT vec-mat-mul: y[N] = sum_k x[K] * W[N, K]
 //
 // x is bf16 (stored as uint16_t), W is bf16 (stored as uint16_t), y is fp32.
-// Uses vbfdotq_f32 for 2x throughput over the v1 vfmaq_f32 + vshll_n_u16 approach.
+// Uses vbfdotq_f32 for 2x throughput over the v1 vfmaq_f32 + vshll_n_u16
+// approach.
 //
 // Handles BOTH the gate_up GEMM and the down GEMM:
 //   gate_up: x=X_s_bf16[H], W=W_gu[2I, H], y=gate_proj[2I]   (K=H, N=2I)
 //   down:    x=inter_bf16[I], W=W_dn[H, I],  y=down_out[H]    (K=I, N=H)
 // ---------------------------------------------------------------------------
-static inline void moeTopK_v2_vecMatMul_BFDOT(
-    const uint16_t *x, const uint16_t *W, float *y,
-    uint32_t K, uint32_t N)
+static inline void moeTopK_v2_vecMatMul_BFDOT(const uint16_t *x, const uint16_t *W, float *y, uint32_t K, uint32_t N)
 {
     const uint32_t K8 = K & ~7u; // BFDOT processes 8 K-elements per inst
     const uint32_t N4 = N & ~3u; // 4 output rows at a time
@@ -271,7 +265,8 @@ static inline void moeTopK_v2_vecMatMul_BFDOT(
         float s2 = vaddvq_f32(acc2);
         float s3 = vaddvq_f32(acc3);
 
-        // K-tail (only triggers when K % 8 != 0; for H=2048, I=512 the tail is empty)
+        // K-tail (only triggers when K % 8 != 0; for H=2048, I=512 the tail is
+        // empty)
         for (uint32_t k = K8; k < K; ++k)
         {
             uint32_t x_bits = static_cast<uint32_t>(x[k]) << 16;
@@ -335,9 +330,9 @@ static inline void moeTopK_v2_vecMatMul_BFDOT(
 //              - Reads gate_up[e] and down[e] from disk (sequential per thread)
 //              - For each (s,k) using expert e:
 //                  gate_proj = X_bf16[s] @ W_gu[e]^T   (BFDOT, 8 K-elem/inst)
-//                  inter[i]  = silu(gate_proj[i]) * gate_proj[I+i]  (scalar, fp32)
-//                  inter_bf16[i] = trunc_fp32_to_bf16(inter[i])     (in-register)
-//                  down_out  = inter_bf16 @ W_dn[e]^T              (BFDOT)
+//                  inter[i]  = silu(gate_proj[i]) * gate_proj[I+i]  (scalar,
+//                  fp32) inter_bf16[i] = trunc_fp32_to_bf16(inter[i])
+//                  (in-register) down_out  = inter_bf16 @ W_dn[e]^T (BFDOT)
 //                  thread_acc[s] += w * down_out                   (fp32 FMA)
 //
 //   Phase 3: Reduce thread_acc into Out.
@@ -364,18 +359,17 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
     const int fd_dn = ctx.fd[2];
     if (fd_gu < 0 || fd_dn < 0)
     {
-        Error::throw_err(
-            "MoE_TopK_FusedGEMM_StreamingStorage_NEON_v2: expected STORAGE "
-            "inputs for W_gu (fd[1] >= 0) and W_dn (fd[2] >= 0).");
+        Error::throw_err("MoE_TopK_FusedGEMM_StreamingStorage_NEON_v2: expected STORAGE "
+                         "inputs for W_gu (fd[1] >= 0) and W_dn (fd[2] >= 0).");
     }
 
-    const uint64_t off_gu = viewWgu.baseOffset;
-    const uint64_t off_dn = viewWdn.baseOffset;
+    const uint64_t off_gu = viewWgu.offset;
+    const uint64_t off_dn = viewWdn.offset;
     const uint64_t gu_expert_bytes = static_cast<uint64_t>(I2) * H * sizeof(uint16_t);
     const uint64_t dn_expert_bytes = static_cast<uint64_t>(H) * I * sizeof(uint16_t);
 
     // Zero the output
-    std::memset(Out, 0, static_cast<size_t>(S) * H * sizeof(float));
+    std::memset(Out, 0, static_cast<uint64_t>(S) * H * sizeof(float));
 
     // -------- Phase 0: Convert X fp32 -> bf16 (once per token) --------
     //
@@ -383,7 +377,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
     // Reused across ALL experts and ALL output rows — pays for itself many
     // times over by avoiding repeated fp32 reads in the GEMM inner loop.
     // Stored as uint16_t to match the existing codebase convention.
-    std::vector<uint16_t> X_bf16(static_cast<size_t>(S) * H);
+    std::vector<uint16_t> X_bf16(static_cast<uint64_t>(S) * H);
     {
         const float *x_src = X;
         uint16_t *x_dst = X_bf16.data();
@@ -434,16 +428,13 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
     uint32_t hw_threads = std::thread::hardware_concurrency();
     if (hw_threads == 0)
         hw_threads = 1;
-    uint32_t num_threads = std::min(static_cast<uint32_t>(unique_experts.size()),
-                                    hw_threads);
+    uint32_t num_threads = std::min(static_cast<uint32_t>(unique_experts.size()), hw_threads);
     if (num_threads == 0)
         num_threads = 1;
 
-    std::vector<std::vector<float>> thread_acc(num_threads,
-                                               std::vector<float>(static_cast<size_t>(S) * H, 0.0f));
+    std::vector<std::vector<float>> thread_acc(num_threads, std::vector<float>(static_cast<uint64_t>(S) * H, 0.0f));
 
-    auto worker = [&](uint32_t tid, uint32_t start, uint32_t end)
-    {
+    auto worker = [&](uint32_t tid, uint32_t start, uint32_t end) {
         // Per-thread scratch buffers (allocated once, reused across experts)
         std::vector<uint8_t> gu_buf(gu_expert_bytes);
         std::vector<uint8_t> dn_buf(dn_expert_bytes);
@@ -462,14 +453,12 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
 
             // Read gate_up[e] from disk — 4 MB per expert
             uint64_t gu_off = off_gu + static_cast<uint64_t>(e) * gu_expert_bytes;
-            if (!moeTopK_v2_readFromFileAtOffset(fd_gu, gu_off,
-                                                 gu_buf.data(), gu_expert_bytes))
+            if (!moeTopK_v2_readFromFileAtOffset(fd_gu, gu_off, gu_buf.data(), gu_expert_bytes))
                 std::memset(gu_buf.data(), 0, gu_expert_bytes);
 
             // Read down[e] from disk — 2 MB per expert
             uint64_t dn_off = off_dn + static_cast<uint64_t>(e) * dn_expert_bytes;
-            if (!moeTopK_v2_readFromFileAtOffset(fd_dn, dn_off,
-                                                 dn_buf.data(), dn_expert_bytes))
+            if (!moeTopK_v2_readFromFileAtOffset(fd_dn, dn_off, dn_buf.data(), dn_expert_bytes))
                 std::memset(dn_buf.data(), 0, dn_expert_bytes);
 
             const uint16_t *W_gu = reinterpret_cast<const uint16_t *>(gu_buf.data());
@@ -503,8 +492,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
                     float32x4_t u_hi = vld1q_f32(gate_proj.data() + I + i + 4);
 
                     // silu(g) = g / (1 + exp(-g)) = g * sigmoid(g)
-                    auto silu_4 = [](float32x4_t g, float32x4_t u) -> float32x4_t
-                    {
+                    auto silu_4 = [](float32x4_t g, float32x4_t u) -> float32x4_t {
                         float32x4_t neg_g = vnegq_f32(g);
                         float32x4_t exp_neg_g;
                         {
@@ -525,8 +513,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
                     float32x4_t inter_hi = vmulq_f32(silu_4(g_hi, u_hi), u_hi);
 
                     // Truncate fp32 -> bf16 and store as uint16x8
-                    vst1q_u16(inter_bf16.data() + i,
-                              moe_v2_fp32x8_to_bf16_u16x8(inter_lo, inter_hi));
+                    vst1q_u16(inter_bf16.data() + i, moe_v2_fp32x8_to_bf16_u16x8(inter_lo, inter_hi));
                 }
                 // I-tail (only when I % 8 != 0; for I=512 the tail is empty)
                 for (uint32_t i = I8; i < I; ++i)
@@ -545,9 +532,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
                 moeTopK_v2_vecMatMul_BFDOT(inter_bf16.data(), W_dn, down_out.data(), I, H);
 
                 // --- Weighted accumulate into thread-local accumulator ---
-                float w = (prob_sum[s] > 0.0f)
-                              ? (router_probs[static_cast<uint64_t>(s) * E + e] / prob_sum[s])
-                              : 0.0f;
+                float w = (prob_sum[s] > 0.0f) ? (router_probs[static_cast<uint64_t>(s) * E + e] / prob_sum[s]) : 0.0f;
 
                 // NEON-accelerated fp32 FMA: acc[s] += w * down_out (H elements)
                 float *acc_s = acc + static_cast<uint64_t>(s) * H;
@@ -608,8 +593,7 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
     else
     {
         // Single-thread: just memcpy the accumulator (no reduction needed)
-        std::memcpy(Out, thread_acc[0].data(),
-                    static_cast<size_t>(S) * H * sizeof(float));
+        std::memcpy(Out, thread_acc[0].data(), static_cast<uint64_t>(S) * H * sizeof(float));
     }
 }
 
@@ -627,24 +611,26 @@ inline void runMoETopKFusedGEMM_StreamingStorage_v2(const KernelContext &ctx)
 //   3. row_sum = sum(gated_probs, axis=-1), broadcast to [1, S, E]
 //   4. normalized_probs = gated_probs / row_sum
 //   5. x_expanded = contiguous(repeat(reshape(X, [1,S,H]), E, axis=0))  [E,S,H]
-//   6. fused_gate_up_t = contiguous(permute(cast(copyto(W_gu, CPU), F32), [0,2,1]))  [E,H,2I]
+//   6. fused_gate_up_t = contiguous(permute(cast(copyto(W_gu, CPU), F32),
+//   [0,2,1]))  [E,H,2I]
 //   7. gate_up_proj = dot(x_expanded, fused_gate_up_t)  [E, S, 2I]
 //   8. exp_gate = contiguous(slice(gate_up_proj, [0,0,0]:[E,S,I]))
 //   9. exp_up = contiguous(slice(gate_up_proj, [0,0,I]:[E,S,2I]))
 //  10. exp_gate_silu = silu_atomic(exp_gate, E, S, I)
 //  11. exp_gate_up = mul(exp_gate_silu, exp_up)  [E, S, I]
-//  12. fused_down_t = contiguous(permute(cast(copyto(W_dn, CPU), F32), [0,2,1]))  [E, I, H]
+//  12. fused_down_t = contiguous(permute(cast(copyto(W_dn, CPU), F32),
+//  [0,2,1]))  [E, I, H]
 //  13. exp_down = dot(exp_gate_up, fused_down_t)  [E, S, H]
 //  14. exp_down_perm = contiguous(permute(exp_down, [1,0,2]))  [S, E, H]
-//  15. normalized_probs_perm = contiguous(permute(normalized_probs, [1,2,0]))  [S, E, 1]
-//  16. normalized_probs_exp = contiguous(repeat(normalized_probs_perm, H, axis=2))  [S, E, H]
+//  15. normalized_probs_perm = contiguous(permute(normalized_probs, [1,2,0]))
+//  [S, E, 1]
+//  16. normalized_probs_exp = contiguous(repeat(normalized_probs_perm, H,
+//  axis=2))  [S, E, H]
 //  17. weighted_outputs = mul(exp_down_perm, normalized_probs_exp)  [S, E, H]
 //  18. routed_out_sum = sum(weighted_outputs, axis=1)  [S, 1, H]
 //  19. routed_out = reshape(routed_out_sum, [1, S, H])
 // ===========================================================================
-inline uint32_t refFactoryMoETopKFusedGEMM_StreamingStorage_v2(
-    const std::vector<uint32_t> &inputs,
-    Graph &graph)
+inline LogicalId refFactoryMoETopKFusedGEMM_StreamingStorage_v2(const std::vector<LogicalId> &inputs, Graph &graph)
 {
     // inputs[0]: X            [1, S, H]      fp32 CPU
     // inputs[1]: W_gu         [E, 2I, H]     bf16 STORAGE
@@ -652,11 +638,11 @@ inline uint32_t refFactoryMoETopKFusedGEMM_StreamingStorage_v2(
     // inputs[3]: router_probs [1, S, E]      fp32 CPU
     // inputs[4]: sel          [1, S, K]      int32 CPU
 
-    const uint32_t X_id = inputs[0];
-    const uint32_t W_gu_id = inputs[1];
-    const uint32_t W_dn_id = inputs[2];
-    const uint32_t RP_id = inputs[3];
-    const uint32_t sel_id = inputs[4];
+    const LogicalId X_id = inputs[0];
+    const LogicalId W_gu_id = inputs[1];
+    const LogicalId W_dn_id = inputs[2];
+    const LogicalId RP_id = inputs[3];
+    const LogicalId sel_id = inputs[4];
 
     const auto sX = graph.getNode(X_id).getShape();
     const auto sWgu = graph.getNode(W_gu_id).getShape();
@@ -669,21 +655,17 @@ inline uint32_t refFactoryMoETopKFusedGEMM_StreamingStorage_v2(
     const uint32_t I = I2 / 2;
     const uint32_t K = sSel[2];
 
-    auto rep_axis = [&](uint32_t id, uint32_t repeats, uint32_t axis) -> uint32_t
-    {
+    auto rep_axis = [&](LogicalId id, uint32_t repeats, uint32_t axis) -> LogicalId {
         if (repeats <= 1)
             return id;
         int32_t r = static_cast<int32_t>(repeats);
         int32_t a = static_cast<int32_t>(axis);
-        return graph.repeat(id,
-                            graph.constant({1}, &r, DType::INT32),
-                            graph.constant({1}, &a, DType::INT32));
+        return graph.repeat(id, graph.constant({1}, &r, DType::INT32), graph.constant({1}, &a, DType::INT32));
     };
 
-    auto expand_scalar_3d = [&](uint32_t sid, uint32_t d0, uint32_t d1, uint32_t d2) -> uint32_t
-    {
+    auto expand_scalar_3d = [&](LogicalId sid, uint32_t d0, uint32_t d1, uint32_t d2) -> LogicalId {
         int32_t sh3[] = {1, 1, 1};
-        uint32_t out = graph.reshape(sid, graph.constant({3}, sh3, DType::INT32));
+        LogicalId out = graph.reshape(sid, graph.constant({3}, sh3, DType::INT32));
         if (d0 > 1)
             out = rep_axis(out, d0, 0);
         if (d1 > 1)
@@ -693,147 +675,127 @@ inline uint32_t refFactoryMoETopKFusedGEMM_StreamingStorage_v2(
         return out;
     };
 
-    auto expand_float_3d = [&](float val, uint32_t d0, uint32_t d1, uint32_t d2) -> uint32_t
-    {
-        return expand_scalar_3d(
-            graph.constant({1}, &val, DType::FLOAT32), d0, d1, d2);
+    auto expand_float_3d = [&](float val, uint32_t d0, uint32_t d1, uint32_t d2) -> LogicalId {
+        return expand_scalar_3d(graph.constant({1}, &val, DType::FLOAT32), d0, d1, d2);
     };
 
     // STEP 1: Build router_mask [1, S, E] from sel [1, S, K]
     int32_t sh4_sel[] = {1, static_cast<int32_t>(S), static_cast<int32_t>(K), 1};
-    uint32_t sel_reshaped = graph.reshape(sel_id,
-                                          graph.constant({4}, sh4_sel, DType::INT32));
-    uint32_t sel_expanded = graph.contiguous(rep_axis(sel_reshaped, E, 3));
+    LogicalId sel_reshaped = graph.reshape(sel_id, graph.constant({4}, sh4_sel, DType::INT32));
+    LogicalId sel_expanded = graph.contiguous(rep_axis(sel_reshaped, E, 3));
 
     int32_t arange_start = 0;
     int32_t arange_stop = static_cast<int32_t>(E);
     int32_t arange_step = 1;
-    uint32_t range_1d = graph.arange(
-        graph.constant({1}, &arange_start, DType::INT32),
-        graph.constant({1}, &arange_stop, DType::INT32),
-        graph.constant({1}, &arange_step, DType::INT32));
+    LogicalId range_1d =
+        graph.arange(graph.constant({1}, &arange_start, DType::INT32), graph.constant({1}, &arange_stop, DType::INT32),
+                     graph.constant({1}, &arange_step, DType::INT32));
     int32_t sh4_range[] = {1, 1, 1, static_cast<int32_t>(E)};
-    uint32_t range_reshaped = graph.reshape(range_1d,
-                                            graph.constant({4}, sh4_range, DType::INT32));
-    uint32_t range_expanded = graph.contiguous(
-        rep_axis(rep_axis(range_reshaped, S, 1), K, 2));
+    LogicalId range_reshaped = graph.reshape(range_1d, graph.constant({4}, sh4_range, DType::INT32));
+    LogicalId range_expanded = graph.contiguous(rep_axis(rep_axis(range_reshaped, S, 1), K, 2));
 
-    uint32_t mask_bool = graph.eq(sel_expanded, range_expanded);
-    uint32_t mask_float = graph.cast(mask_bool, DType::FLOAT32);
+    LogicalId mask_bool = graph.eq(sel_expanded, range_expanded);
+    LogicalId mask_float = graph.cast(mask_bool, DType::FLOAT32);
 
     int32_t ax2_4d = 2;
-    uint32_t mask_reduced = graph.sum(mask_float,
-                                      graph.constant({1}, &ax2_4d, DType::INT32));
+    LogicalId mask_reduced = graph.sum(mask_float, graph.constant({1}, &ax2_4d, DType::INT32));
 
     int32_t sh3_mask[] = {1, static_cast<int32_t>(S), static_cast<int32_t>(E)};
-    uint32_t router_mask = graph.reshape(mask_reduced,
-                                         graph.constant({3}, sh3_mask, DType::INT32));
+    LogicalId router_mask = graph.reshape(mask_reduced, graph.constant({3}, sh3_mask, DType::INT32));
 
     // STEPS 2-4: Normalize probs
-    uint32_t gated_probs = graph.mul(RP_id, router_mask);
+    LogicalId gated_probs = graph.mul(RP_id, router_mask);
 
     int32_t axis_neg1 = -1;
-    uint32_t row_sum = graph.sum(gated_probs,
-                                 graph.constant({1}, &axis_neg1, DType::INT32));
+    LogicalId row_sum = graph.sum(gated_probs, graph.constant({1}, &axis_neg1, DType::INT32));
     row_sum = graph.contiguous(rep_axis(row_sum, E, 2));
 
-    uint32_t normalized_probs = graph.div(gated_probs, row_sum);
+    LogicalId normalized_probs = graph.div(gated_probs, row_sum);
 
     // STEP 5: Expand X to [E, S, H]
     int32_t sh3_x[] = {1, static_cast<int32_t>(S), static_cast<int32_t>(H)};
-    uint32_t x_reshaped = graph.reshape(X_id,
-                                        graph.constant({3}, sh3_x, DType::INT32));
-    uint32_t x_expanded = graph.contiguous(rep_axis(x_reshaped, E, 0));
+    LogicalId x_reshaped = graph.reshape(X_id, graph.constant({3}, sh3_x, DType::INT32));
+    LogicalId x_expanded = graph.contiguous(rep_axis(x_reshaped, E, 0));
 
     // STEP 6: fused_gate_up_t
-    uint32_t w_gu_cpu = graph.copyto(W_gu_id, Backend::CPU);
-    uint32_t w_gu_f32 = graph.cast(w_gu_cpu, DType::FLOAT32);
+    LogicalId w_gu_cpu = graph._copyto(W_gu_id);
+    LogicalId w_gu_f32 = graph.cast(w_gu_cpu, DType::FLOAT32);
     int32_t perm_w_3d[] = {0, 2, 1};
-    uint32_t fused_gate_up_t = graph.permute(w_gu_f32,
-                                             graph.constant({3}, perm_w_3d, DType::INT32));
+    LogicalId fused_gate_up_t = graph.permute(w_gu_f32, graph.constant({3}, perm_w_3d, DType::INT32));
     fused_gate_up_t = graph.contiguous(fused_gate_up_t);
 
     // STEP 7: gate_up_proj = dot(x_expanded, fused_gate_up_t)
-    uint32_t gate_up_proj = graph.dot(x_expanded, fused_gate_up_t);
+    LogicalId gate_up_proj = graph.dot(x_expanded, fused_gate_up_t);
 
     // STEPS 8-9: Slice gate and up
     int32_t steps_3d[] = {1, 1, 1};
     int32_t starts_gate[] = {0, 0, 0};
-    int32_t ends_gate[] = {static_cast<int32_t>(E),
-                           static_cast<int32_t>(S),
-                           static_cast<int32_t>(I)};
-    uint32_t exp_gate = graph.slice(gate_up_proj,
-                                    graph.constant({3}, starts_gate, DType::INT32),
-                                    graph.constant({3}, ends_gate, DType::INT32),
-                                    graph.constant({3}, steps_3d, DType::INT32));
+    int32_t ends_gate[] = {static_cast<int32_t>(E), static_cast<int32_t>(S), static_cast<int32_t>(I)};
+    LogicalId exp_gate =
+        graph.slice(gate_up_proj, graph.constant({3}, starts_gate, DType::INT32),
+                    graph.constant({3}, ends_gate, DType::INT32), graph.constant({3}, steps_3d, DType::INT32));
     exp_gate = graph.contiguous(exp_gate);
 
     int32_t starts_up[] = {0, 0, static_cast<int32_t>(I)};
-    int32_t ends_up[] = {static_cast<int32_t>(E),
-                         static_cast<int32_t>(S),
-                         static_cast<int32_t>(I * 2)};
-    uint32_t exp_up = graph.slice(gate_up_proj,
-                                  graph.constant({3}, starts_up, DType::INT32),
-                                  graph.constant({3}, ends_up, DType::INT32),
-                                  graph.constant({3}, steps_3d, DType::INT32));
+    int32_t ends_up[] = {static_cast<int32_t>(E), static_cast<int32_t>(S), static_cast<int32_t>(I * 2)};
+    LogicalId exp_up =
+        graph.slice(gate_up_proj, graph.constant({3}, starts_up, DType::INT32),
+                    graph.constant({3}, ends_up, DType::INT32), graph.constant({3}, steps_3d, DType::INT32));
     exp_up = graph.contiguous(exp_up);
 
     // STEP 10: silu_atomic (model's exact formulation: pow(e,-x) -> div -> mul)
     float neg_one_val = -1.0f;
-    uint32_t neg_one = expand_float_3d(neg_one_val, E, S, I);
-    uint32_t neg_x = graph.mul(exp_gate, neg_one);
+    LogicalId neg_one = expand_float_3d(neg_one_val, E, S, I);
+    LogicalId neg_x = graph.mul(exp_gate, neg_one);
 
     float e_val = 2.718281828459045f;
-    uint32_t e_node = expand_float_3d(e_val, E, S, I);
-    uint32_t exp_neg_x = graph.pow(e_node, neg_x);
+    LogicalId e_node = expand_float_3d(e_val, E, S, I);
+    LogicalId exp_neg_x = graph.pow(e_node, neg_x);
 
     float one_val = 1.0f;
-    uint32_t one_node = expand_float_3d(one_val, E, S, I);
-    uint32_t den = graph.add(one_node, exp_neg_x);
-    uint32_t sigmoid_val = graph.div(one_node, den);
-    uint32_t exp_gate_silu = graph.mul(exp_gate, sigmoid_val);
+    LogicalId one_node = expand_float_3d(one_val, E, S, I);
+    LogicalId den = graph.add(one_node, exp_neg_x);
+    LogicalId sigmoid_val = graph.div(one_node, den);
+    LogicalId exp_gate_silu = graph.mul(exp_gate, sigmoid_val);
 
     // STEP 11: exp_gate_up = mul(exp_gate_silu, exp_up)
-    uint32_t exp_gate_up = graph.mul(exp_gate_silu, exp_up);
+    LogicalId exp_gate_up = graph.mul(exp_gate_silu, exp_up);
 
     // STEP 12: fused_down_t
-    uint32_t w_dn_cpu = graph.copyto(W_dn_id, Backend::CPU);
-    uint32_t w_dn_f32 = graph.cast(w_dn_cpu, DType::FLOAT32);
-    uint32_t fused_down_t = graph.permute(w_dn_f32,
-                                          graph.constant({3}, perm_w_3d, DType::INT32));
+    LogicalId w_dn_cpu = graph._copyto(W_dn_id);
+    LogicalId w_dn_f32 = graph.cast(w_dn_cpu, DType::FLOAT32);
+    LogicalId fused_down_t = graph.permute(w_dn_f32, graph.constant({3}, perm_w_3d, DType::INT32));
     fused_down_t = graph.contiguous(fused_down_t);
 
     // STEP 13: exp_down = dot(exp_gate_up, fused_down_t)
-    uint32_t exp_down = graph.dot(exp_gate_up, fused_down_t);
+    LogicalId exp_down = graph.dot(exp_gate_up, fused_down_t);
 
     // STEP 14: exp_down_perm = contiguous(permute(exp_down, [1,0,2]))
     int32_t perm_esh[] = {1, 0, 2};
-    uint32_t exp_down_perm = graph.permute(exp_down,
-                                           graph.constant({3}, perm_esh, DType::INT32));
+    LogicalId exp_down_perm = graph.permute(exp_down, graph.constant({3}, perm_esh, DType::INT32));
     exp_down_perm = graph.contiguous(exp_down_perm);
 
-    // STEP 15: normalized_probs_perm = contiguous(permute(normalized_probs, [1,2,0]))
+    // STEP 15: normalized_probs_perm = contiguous(permute(normalized_probs,
+    // [1,2,0]))
     int32_t perm_1se[] = {1, 2, 0};
-    uint32_t normalized_probs_perm = graph.permute(normalized_probs,
-                                                   graph.constant({3}, perm_1se, DType::INT32));
+    LogicalId normalized_probs_perm = graph.permute(normalized_probs, graph.constant({3}, perm_1se, DType::INT32));
     normalized_probs_perm = graph.contiguous(normalized_probs_perm);
 
-    // STEP 16: normalized_probs_exp = contiguous(repeat(normalized_probs_perm, H, axis=2))
-    uint32_t normalized_probs_exp = rep_axis(normalized_probs_perm, H, 2);
+    // STEP 16: normalized_probs_exp = contiguous(repeat(normalized_probs_perm, H,
+    // axis=2))
+    LogicalId normalized_probs_exp = rep_axis(normalized_probs_perm, H, 2);
     normalized_probs_exp = graph.contiguous(normalized_probs_exp);
 
     // STEP 17: weighted_outputs = mul(exp_down_perm, normalized_probs_exp)
-    uint32_t weighted_outputs = graph.mul(exp_down_perm, normalized_probs_exp);
+    LogicalId weighted_outputs = graph.mul(exp_down_perm, normalized_probs_exp);
 
     // STEP 18: routed_out_sum = sum(weighted_outputs, axis=1)
     int32_t sum_ax1[] = {1};
-    uint32_t routed_out_sum = graph.sum(weighted_outputs,
-                                        graph.constant({1}, sum_ax1, DType::INT32));
+    LogicalId routed_out_sum = graph.sum(weighted_outputs, graph.constant({1}, sum_ax1, DType::INT32));
 
     // STEP 19: routed_out = reshape(routed_out_sum, [1, S, H])
     int32_t final_shape[] = {1, static_cast<int32_t>(S), static_cast<int32_t>(H)};
-    uint32_t routed_out = graph.reshape(routed_out_sum,
-                                        graph.constant({3}, final_shape, DType::INT32));
+    LogicalId routed_out = graph.reshape(routed_out_sum, graph.constant({3}, final_shape, DType::INT32));
 
     return routed_out;
 }
@@ -844,16 +806,16 @@ inline uint32_t refFactoryMoETopKFusedGEMM_StreamingStorage_v2(
 // The only difference from v1 is the kernel name (so the build system
 // generates a unique UID) and the run function (which uses BFDOT).
 // ---------------------------------------------------------------------------
-REGISTER_KERNEL(
-    "MoE_TopK_FusedGEMM_StreamingStorage_NEON_v2",
-    5,
-    matchMoETopKFusedGEMM_StreamingStorage_v2,
-    runMoETopKFusedGEMM_StreamingStorage_v2,
-    refFactoryMoETopKFusedGEMM_StreamingStorage_v2,
-    {Backend::CPU}, // output backend
-    {DType::FLOAT32, DType::BF16, DType::BF16, DType::FLOAT32, DType::INT32},
-    {{1, 8, 2048}, {256, 1024, 2048}, {256, 2048, 512}, {1, 8, 256}, {1, 8, 8}},
-    {true, true, true, true, true}, // all inputs contiguous
-    {{Backend::CPU}, {Backend::STORAGE}, {Backend::STORAGE}, {Backend::CPU}, {Backend::CPU}});
+REGISTER_KERNEL("MoE_TopK_FusedGEMM_StreamingStorage_NEON_v2", 5, 5, matchMoETopKFusedGEMM_StreamingStorage_v2,
+                runMoETopKFusedGEMM_StreamingStorage_v2, refFactoryMoETopKFusedGEMM_StreamingStorage_v2,
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, // output backend
+                {DType::FLOAT32, DType::BF16, DType::BF16, DType::FLOAT32, DType::INT32},
+                {{1, 8, 2048}, {256, 1024, 2048}, {256, 2048, 512}, {1, 8, 256}, {1, 8, 8}},
+                {true, true, true, true, true}, // all inputs contiguous
+                {{MemSpace(1, HandleType::CPP)},
+                 {MemSpace(0, HandleType::STORAGE)},
+                 {MemSpace(0, HandleType::STORAGE)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON && __ARM_FEATURE_BF16

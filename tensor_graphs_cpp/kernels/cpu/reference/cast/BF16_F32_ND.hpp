@@ -1,7 +1,8 @@
 #pragma once
-#include "core/types.hpp"
-#include "core/kernels.hpp"
 #include <cstring>
+
+#include "core/kernels.hpp"
+#include "core/types.hpp"
 
 /**
  * ---------------------------------------------------------
@@ -14,11 +15,11 @@
 
 /**
  * Match Function:
- * Validates that input is BF16, output is F32, shapes match, and both are contiguous.
+ * Validates that input is BF16, output is F32, shapes match, and both are
+ * contiguous.
  */
 inline bool matchCastBF16_F32_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-
     // Check Shape Identity
     if (inputs[0].getShape() != output.getShape())
         return false;
@@ -56,4 +57,5 @@ inline void runCastBF16_F32_ND(const KernelContext &ctx)
 }
 
 // Register as a CPU kernel for the CAST operation
-REGISTER_REF_KERNEL(OpType::CAST, 1, matchCastBF16_F32_ND, runCastBF16_F32_ND, {Backend::CPU}, {DType::BF16}, {{8, 32}}, {true}, {{Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::CAST, 1, 1, matchCastBF16_F32_ND, runCastBF16_F32_ND, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::BF16}, {{8, 32}}, {true}, {{MemSpace(1, HandleType::CPP)}});

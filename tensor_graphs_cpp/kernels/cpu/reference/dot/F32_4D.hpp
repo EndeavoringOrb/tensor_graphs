@@ -1,6 +1,6 @@
 #pragma once
-#include "core/types.hpp"
 #include "core/kernels.hpp"
+#include "core/types.hpp"
 
 inline bool matchDotF32_4D(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
@@ -10,14 +10,9 @@ inline bool matchDotF32_4D(const std::vector<TensorNode> &inputs, const TensorNo
     if (sA.size() != 4 || sB.size() != 4 || sC.size() != 4)
         return false;
     // A: [B, H, M, K], B: [B, H, K, N], C: [B, H, M, N]
-    if (sA[0] != sB[0] ||
-        sA[1] != sB[1] ||
-        sA[3] != sB[2])
+    if (sA[0] != sB[0] || sA[1] != sB[1] || sA[3] != sB[2])
         return false;
-    if (sC[0] != sA[0] ||
-        sC[1] != sA[1] ||
-        sC[2] != sA[2] ||
-        sC[3] != sB[3])
+    if (sC[0] != sA[0] || sC[1] != sA[1] || sC[2] != sA[2] || sC[3] != sB[3])
         return false;
     return true;
 }
@@ -86,4 +81,6 @@ inline void runDotF32_4D(const KernelContext &ctx)
     }
 }
 
-REGISTER_REF_KERNEL(OpType::DOT, 2, matchDotF32_4D, runDotF32_4D, {Backend::CPU}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}}, {true, true}, {{Backend::CPU}, {Backend::CPU}});
+REGISTER_REF_KERNEL(OpType::DOT, 2, 2, matchDotF32_4D, runDotF32_4D, MemSpace(1, HandleType::CPP),
+                    {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}},
+                    {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
