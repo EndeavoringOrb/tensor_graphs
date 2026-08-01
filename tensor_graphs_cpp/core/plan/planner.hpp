@@ -744,6 +744,8 @@ struct Planner
         extractor.registerValidator(
             std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical, preallocatedBuffers));
 
+        CycleValidator cycleValidator(egraph);
+
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
         std::vector<EClassId> best_order;
@@ -771,53 +773,63 @@ struct Planner
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.getNextSelection();
 
-            uint32_t first_engine = UINT32_MAX;
-            bool single_engine = true;
-            for (const auto &kv : selection_map)
-            {
-                uint32_t sel = kv.second;
-                ENodeId enode_id = egraph.getEClass(kv.first).enodes[sel];
-                const ENode &enode = egraph.getENode(enode_id);
-                for (const auto &eng : enode.getEngines())
-                {
-                    if (first_engine == UINT32_MAX)
-                    {
-                        first_engine = eng.idx;
-                    }
-                    else if (first_engine != eng.idx)
-                    {
-                        single_engine = false;
-                        break;
-                    }
-                }
-                if (!single_engine)
-                    break;
-            }
-
-            DispatchIterator dispatch_iterator = DispatchIterator(egraph, selection_map);
+            reason.clear();
+            bool valid = true;
             std::vector<EClassId> order;
             std::vector<ParallelBuffer> buffers;
             std::unordered_map<EClassId, BufferId> eclass_to_buf;
             BufferId overflow;
-            float cost;
-            bool valid = true;
-            bool should_stop = false;
-            while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
+            float cost = TGConstants::INF;
+
+            // 1. Validate for cycles FIRST before building DispatchIterator
+            if (cycleValidator.detectCycles(selection_map, reason))
             {
-                valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, overflow, cost, reason);
-                if (!valid)
-                    break;
-                if (cost < best_cost)
+                valid = false; // reason is set to "cycle" by detectCycles
+            }
+            else
+            {
+                // 2. Compute dispatch order if graph is a valid DAG
+                uint32_t first_engine = UINT32_MAX;
+                bool single_engine = true;
+                for (const auto &kv : selection_map)
                 {
-                    best_cost = cost;
-                    best_selection_map = selection_map;
-                    best_order = order;
-                    best_buffers = buffers;
-                    best_eclass_to_buf = eclass_to_buf;
+                    uint32_t sel = kv.second;
+                    ENodeId enode_id = egraph.getEClass(kv.first).enodes[sel];
+                    const ENode &enode = egraph.getENode(enode_id);
+                    for (const auto &eng : enode.getEngines())
+                    {
+                        if (first_engine == UINT32_MAX)
+                        {
+                            first_engine = eng.idx;
+                        }
+                        else if (first_engine != eng.idx)
+                        {
+                            single_engine = false;
+                            break;
+                        }
+                    }
+                    if (!single_engine)
+                        break;
                 }
-                if (stopOnFirstValid || single_engine)
+
+                DispatchIterator dispatch_iterator = DispatchIterator(egraph, selection_map);
+                while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
                 {
-                    break;
+                    valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, overflow, cost, reason);
+                    if (!valid)
+                        break;
+                    if (cost < best_cost)
+                    {
+                        best_cost = cost;
+                        best_selection_map = selection_map;
+                        best_order = order;
+                        best_buffers = buffers;
+                        best_eclass_to_buf = eclass_to_buf;
+                    }
+                    if (stopOnFirstValid || single_engine)
+                    {
+                        break;
+                    }
                 }
             }
 
@@ -851,7 +863,7 @@ struct Planner
 
             if (!valid)
             {
-                extractor.backtrack(reason, eclass_to_buf, overflow);
+                extractor.backtrack(reason, eclass_to_buf, buffers, overflow);
             }
 
             extractor.ascend();

@@ -7,6 +7,14 @@
 #include "core/timer.hpp"
 #include "core/types.hpp"
 
+bool overlapsBuf(const ParallelBuffer &a, const ParallelBuffer &b)
+{
+    ParallelBuffer x = a, y = b;
+    if (y.start < x.start)
+        std::swap(x, y);
+    return y.start <= x.end;
+}
+
 inline std::string toString(const std::vector<uint32_t> &shape)
 {
     std::stringstream ss;

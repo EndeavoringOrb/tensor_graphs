@@ -26,15 +26,6 @@
 #include "core/shapes.hpp"
 #include "core/types.hpp"
 
-// Interval overlap test
-bool overlapsBuf(const ParallelBuffer &a, const ParallelBuffer &b)
-{
-    ParallelBuffer x = a, y = b;
-    if (y.start < x.start)
-        std::swap(x, y);
-    return y.start <= x.end;
-}
-
 float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
                const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
                bool print_utilization = true)
@@ -921,6 +912,7 @@ struct MemValidator : public ISelectionValidator
 #endif
             return true;
         }
+        buffers.insert(buffers.end(), unallocated_buffers.begin(), unallocated_buffers.end());
         reason = oom_reason;
         return false;
     }

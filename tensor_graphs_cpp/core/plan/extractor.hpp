@@ -291,18 +291,17 @@ struct Extractor
     }
 
     void backtrack(const std::string reason, const std::unordered_map<EClassId, BufferId> &eclass_to_buf,
-                   const BufferId overflow)
+                   const std::vector<ParallelBuffer> &buffers, const BufferId overflow)
     {
         target_backtrack_eclass = EClassId{UINT32_MAX};
-        int best_backtrack_idx = std::numeric_limits<int>::max();
+
         if (reason == "cycle")
         {
-            // Compute SCCs of the selection-induced subgraph using Tarjan's
-            // algorithm. For each SCC of size > 1 (or size == 1 with a self-loop,
-            // i.e. a true cycle):
-            //   collect members that are in `path` and have >= 1 alternative.
-            // Among all such members across all non-trivial SCCs, pick the one
-            // with the smallest path index. That's the backtrack target.
+            int best_backtrack_idx = std::numeric_limits<int>::max();
+            // Compute SCCs of the graph using Tarjan's algorithm.
+            // For each SCC of size > 1 (or size == 1 with a self-loop,
+            // i.e. a true cycle) choose a representative (max path idx)
+            // Backtrack target is min of all representatives
 
             std::vector<int> path_idx(numClasses, -1);
             for (int i = 0; i < (int)path.size(); ++i)
@@ -384,6 +383,7 @@ struct Extractor
 
                     if (is_cycle)
                     {
+                        int32_t scc_highest = -1;
                         for (EClassId v : scc)
                         {
                             if (path_idx[v.value] != -1)
@@ -395,13 +395,17 @@ struct Extractor
                                     const auto &enodes = egraph.getEClass(v).enodes;
                                     if (sel + 1 < enodes.size())
                                     {
-                                        if (path_idx[v.value] < best_backtrack_idx)
+                                        if (path_idx[v.value] > scc_highest)
                                         {
-                                            best_backtrack_idx = path_idx[v.value];
+                                            scc_highest = path_idx[v.value];
                                         }
                                     }
                                 }
                             }
+                        }
+                        if (scc_highest != -1)
+                        {
+                            best_backtrack_idx = std::min(scc_highest, best_backtrack_idx);
                         }
                     }
                 }
@@ -424,26 +428,53 @@ struct Extractor
         }
         else if (reason.rfind("OOM", 0) == 0)
         {
-            // Search path from deepest to highest for an eclass with alternatives
-            // that uses failed_ms
-            for (int i = 0; i < path.size(); i++)
+            int best_backtrack_idx = -1;
+
+            // Find all buffers overlapping with the overflow buffer
+            int buf_idx = -1;
+            for (int i = 0; i < buffers.size(); i++)
             {
-                EClassId ec = path[i];
-                auto selIt = selection_map.find(ec);
-                if (selIt == selection_map.end())
-                    continue;
+                if (buffers[i].id == overflow)
+                {
+                    buf_idx = i;
+                }
+            }
+            std::unordered_set<BufferId> overflows;
+            if (buf_idx != -1)
+            {
+                for (int i = 0; i < buffers.size(); i++)
+                {
+                    if (overlapsBuf(buffers[buf_idx], buffers[i]))
+                    {
+                        overflows.insert(buffers[i].id);
+                    }
+                }
+            }
+            std::cout << "got " << std::to_string(overflows.size()) << " buffers at overflow" << std::endl;
 
-                auto bufIt = eclass_to_buf.find(ec);
-                if (bufIt == eclass_to_buf.end())
-                    Error::throw_err("eclass has no buffer");
+            // Search path from deepest to highest for an eclass that was in the overflow buffer
+            if (overflows.size() > 0)
+            {
+                for (int i = path.size() - 1; i >= 0; --i)
+                {
+                    EClassId ec = path[i];
+                    auto selIt = selection_map.find(ec);
+                    if (selIt == selection_map.end())
+                        continue;
 
-                if (bufIt->second != overflow)
-                    continue;
+                    auto bufIt = eclass_to_buf.find(ec);
+                    if (bufIt == eclass_to_buf.end())
+                        Error::throw_err("eclass has no buffer");
 
-                best_backtrack_idx = std::min(best_backtrack_idx, i);
+                    if (!overflows.count(bufIt->second))
+                        continue;
+
+                    best_backtrack_idx = i;
+                    break;
+                }
             }
 
-            if (best_backtrack_idx != std::numeric_limits<int>::max())
+            if (best_backtrack_idx != -1)
             {
                 target_backtrack_eclass = path[best_backtrack_idx];
                 std::cout << "[Planner.extractBest] OOM: backtracking to eclass " << toString(target_backtrack_eclass)

@@ -229,7 +229,12 @@ class Qwen3_6_35B_A3B_Model
         LogicalId x_norm = g.mul(x_id, inv_std_expanded);
         LogicalId weight_expanded = expand_1d_to_3d(weight_id, dim_size, dim0, seq_len);
 
-        return g.mul(x_norm, weight_expanded);
+        // Qwen3.5 MoE / Qwen2 RMSNorm adds 1.0 to the weights (which are
+        // initialized to 0)
+        LogicalId one_full = expand_scalar_to_3d(one_fp32, dim0, seq_len, dim_size);
+        LogicalId weight_plus_one = g.add(weight_expanded, one_full);
+
+        return g.mul(x_norm, weight_plus_one);
     }
 
     LogicalId gated_rms_norm(LogicalId x, LogicalId z, const std::string &w_name, uint32_t dims, uint32_t cur_seq_len)
