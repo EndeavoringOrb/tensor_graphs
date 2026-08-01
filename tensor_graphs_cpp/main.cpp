@@ -214,9 +214,7 @@ int main(int argc, char *argv[])
     parser.add_option({"--write-refs"}, "Write reference/clean tensors to file.", "");
     parser.add_option({"--compare-refs"}, "Compare and validate outputs against reference file.", "");
     parser.add_option({"--min-compile-time"}, "Minimum required compile time per bucket in seconds.", "0.0");
-    parser.add_positional("model",
-                          "Name of the target model (gemma-3-270m, qwen-3.6-35b-a3b).",
-                          "gemma-3-270m");
+    parser.add_positional("model", "Name of the target model (gemma-3-270m, qwen-3.6-35b-a3b).", "gemma-3-270m");
     parser.add_positional("model_path", "Model file or directory containing model files.");
 
     if (!parser.parse(argc, argv))
