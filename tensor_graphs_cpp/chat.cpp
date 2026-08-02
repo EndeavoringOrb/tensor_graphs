@@ -67,7 +67,10 @@ int main(int argc, char *argv[])
         (SharedMemoryPayload *)MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedMemoryPayload));
 #else
     int shm_fd = shm_open("/tg_chat_shm", O_CREAT | O_RDWR, 0666);
-    ftruncate(shm_fd, sizeof(SharedMemoryPayload));
+    if (ftruncate(shm_fd, sizeof(SharedMemoryPayload)) == -1)
+    {
+        Error::throw_err("[Server Warning] ftruncate failed");
+    }
     shm_payload =
         (SharedMemoryPayload *)mmap(NULL, sizeof(SharedMemoryPayload), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
 #endif

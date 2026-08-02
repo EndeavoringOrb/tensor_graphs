@@ -131,7 +131,7 @@ class Repo
     bool readOnly;
     bool valid = false;
 
-public:
+  public:
     Repo(const std::string &path, const std::string &gHash, bool ro = true) : graphHash(gHash), readOnly(ro)
     {
         metaPath = path + ".refmeta";

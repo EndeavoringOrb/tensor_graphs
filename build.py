@@ -673,15 +673,11 @@ class Toolchain:
                 )
 
             opencl_inc = f"{self.platform.opencl_sdk_path}/include"
-            opencl_lib = f"{self.platform.opencl_sdk_path}/lib"
             flags.extend(
                 [
                     "-std=c++20",
                     f"-I{opencl_inc}",
-                    f"-L{opencl_lib}",
-                    "-lOpenCL",
                     "-DCL_TARGET_OPENCL_VERSION=310",
-                    "-v",
                 ]
             )
             if self.config.debug:
@@ -689,9 +685,9 @@ class Toolchain:
             else:
                 flags.append("-O3")
                 if self.config.profile:
-                    flags.extend(["-g", "-gcodeview", "-Wl,-debug"])
+                    flags.extend(["-g", "-gcodeview"])
         else:
-            flags.extend(["-std=c++20", "-lOpenCL"])
+            flags.extend(["-std=c++20", "-DCL_TARGET_OPENCL_VERSION=310"])
             if self.platform.is_arm64:
                 flags.append("-march=armv8.6-a+bf16+i8mm")
 
@@ -712,6 +708,18 @@ class Toolchain:
         if self.config.disable_opencl:
             flags.append("-DTG_DISABLE_OPENCL")
 
+        return flags
+
+    def get_ld_flags(self) -> List[str]:
+        flags = []
+        if not self.config.disable_opencl:
+            if self.platform.is_windows:
+                opencl_lib = f"{self.platform.opencl_sdk_path}/lib"
+                flags.extend([f"-L{opencl_lib}", "-lOpenCL"])
+                if self.config.profile:
+                    flags.append("-Wl,-debug")
+            else:
+                flags.append("-lOpenCL")
         return flags
 
     def get_nvcc_flags(self) -> List[str]:
@@ -849,13 +857,7 @@ class BuildOrchestrator:
                     cuda_obj,
                     "-o",
                     out_name,
-                ]
-                if self.platform.is_windows:
-                    opencl_lib = f"{self.platform.opencl_sdk_path}/lib"
-                    cmd.extend([f"-L{opencl_lib}", "-lOpenCL"])
-                else:
-                    cmd.append("-lOpenCL")
-
+                ] + self.toolchain.get_ld_flags()
                 if self.platform.is_windows and self.config.debug:
                     cmd.append("-g")
 
@@ -866,6 +868,7 @@ class BuildOrchestrator:
                     [self.toolchain.get_cxx_binary()]
                     + self.toolchain.get_cxx_flags()
                     + [main_src, "-o", out_name]
+                    + self.toolchain.get_ld_flags()
                 )
                 res = self.toolchain.run_cmd(cmd)
 

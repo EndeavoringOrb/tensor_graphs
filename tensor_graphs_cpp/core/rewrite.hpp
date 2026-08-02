@@ -34,8 +34,7 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     std::vector<MemSpace> current_path = {src};
     std::unordered_set<MemSpace> visited = {src};
 
-    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
-    {
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr) {
         if (curr == dst)
         {
             all_paths.push_back(current_path);
@@ -1175,7 +1174,8 @@ struct SlicePushDownElementwise : public Rule
                         const auto &kernel = KernelRegistry::get().getKernel(opNode.getKernelId());
                         if (!kernel.requiresContiguous.empty())
                         {
-                            uint64_t ruleIdx = std::min(childIdx, static_cast<uint64_t>(kernel.requiresContiguous.size() - 1));
+                            uint64_t ruleIdx =
+                                std::min(childIdx, static_cast<uint64_t>(kernel.requiresContiguous.size() - 1));
                             reqContig = kernel.requiresContiguous[ruleIdx];
                         }
                     }
@@ -1433,8 +1433,7 @@ struct SlicePushDownDot : public Rule
                 EClassId stepsIdB = egraph.addIntConst(stepsB);
 
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en,
-                                       EClassId stId, EClassId enId, EClassId stepId)
-                {
+                                       EClassId stId, EClassId enId, EClassId stepId) {
                     EClassId canonId = egraph.findConst(classId);
                     const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;
@@ -1768,10 +1767,10 @@ struct DotSplitRule : public Rule
                                            calcContiguousStrides({B, K, N2}), bCls.dtype, bCls.mem_space);
 
         // C1 = A * B1, C2 = A * B2
-        EClassId c1 = addOpToEGraph(egraph, OpType::DOT, {aClass, b1_contig}, {B, M, N1}, calcContiguousStrides({B, M, N1}),
-                                    dotNode.getDType(), dotNode.getMemSpace());
-        EClassId c2 = addOpToEGraph(egraph, OpType::DOT, {aClass, b2_contig}, {B, M, N2}, calcContiguousStrides({B, M, N2}),
-                                    dotNode.getDType(), dotNode.getMemSpace());
+        EClassId c1 = addOpToEGraph(egraph, OpType::DOT, {aClass, b1_contig}, {B, M, N1},
+                                    calcContiguousStrides({B, M, N1}), dotNode.getDType(), dotNode.getMemSpace());
+        EClassId c2 = addOpToEGraph(egraph, OpType::DOT, {aClass, b2_contig}, {B, M, N2},
+                                    calcContiguousStrides({B, M, N2}), dotNode.getDType(), dotNode.getMemSpace());
 
         // C = CONCAT([C1, C2], axis=2)
         EClassId axis2 = egraph.addIntConst({2});
@@ -1862,13 +1861,13 @@ struct DotSplitRule : public Rule
 
         if (!isContiguous(aCls))
         {
-            aClass = addOpToEGraph(egraph, OpType::CONTIGUOUS, {aClass}, aCls.shape,
-                                   calcContiguousStrides(aCls.shape), aCls.dtype, aCls.mem_space);
+            aClass = addOpToEGraph(egraph, OpType::CONTIGUOUS, {aClass}, aCls.shape, calcContiguousStrides(aCls.shape),
+                                   aCls.dtype, aCls.mem_space);
         }
         if (!isContiguous(bCls))
         {
-            bClass = addOpToEGraph(egraph, OpType::CONTIGUOUS, {bClass}, bCls.shape,
-                                   calcContiguousStrides(bCls.shape), bCls.dtype, bCls.mem_space);
+            bClass = addOpToEGraph(egraph, OpType::CONTIGUOUS, {bClass}, bCls.shape, calcContiguousStrides(bCls.shape),
+                                   bCls.dtype, bCls.mem_space);
         }
 
         uint32_t K = aCls.shape[2];
@@ -1985,8 +1984,7 @@ struct RemoveContiguous : public Rule
         std::vector<std::vector<EClassId>> childCombinations;
         std::vector<EClassId> currentCombination(children.size());
 
-        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped)
-        {
+        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped) {
             if (pos == children.size())
             {
                 if (hasUnwrapped)

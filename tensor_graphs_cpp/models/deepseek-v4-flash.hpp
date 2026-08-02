@@ -40,14 +40,14 @@ struct DeepSeekV4FlashConfig
     float route_scale = 1.5f;
     float swiglu_limit = 10.0f;
     float compress_rope_theta = 160000.0f;
-    std::vector<uint32_t> compress_ratios = {0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4,
-                                             128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128,
-                                             4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4};
+    std::vector<uint32_t> compress_ratios = {0,   0,   4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,
+                                             128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128,
+                                             4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4};
 };
 
 class DeepSeekV4FlashModel
 {
-private:
+  private:
     DeepSeekV4FlashConfig cfg;
     Graph &g;
     MemoryManager &mem;
@@ -56,7 +56,7 @@ private:
     LogicalId one_fp32;
     LogicalId eps_fp32;
 
-public:
+  public:
     DeepSeekV4FlashModel(DeepSeekV4FlashConfig config, uint32_t sequence_length, Graph &graph, MemoryManager &memory,
                          const std::string &weight_path)
         : cfg(config), g(graph), mem(memory), w_path(weight_path), seq_len(sequence_length)
@@ -208,16 +208,14 @@ public:
         LogicalId hc_scale = weight(prefix + "scale");
         LogicalId hc_base = weight(prefix + "base");
 
-        auto slice_last_dim = [&](LogicalId t, int32_t st, int32_t en)
-        {
+        auto slice_last_dim = [&](LogicalId t, int32_t st, int32_t en) {
             int32_t starts[] = {0, 0, st};
             int32_t ends[] = {1, (int32_t)seq_len, en};
             int32_t steps[] = {1, 1, 1};
             return g.slice(t, g.constant({3}, starts, DType::INT32), g.constant({3}, ends, DType::INT32),
                            g.constant({3}, steps, DType::INT32));
         };
-        auto slice_1d = [&](LogicalId t, int32_t st, int32_t en)
-        {
+        auto slice_1d = [&](LogicalId t, int32_t st, int32_t en) {
             int32_t starts[] = {st}, ends[] = {en}, steps[] = {1};
             return g.slice(t, g.constant({1}, starts, DType::INT32), g.constant({1}, ends, DType::INT32),
                            g.constant({1}, steps, DType::INT32));
@@ -231,8 +229,7 @@ public:
         LogicalId scale1 = g.fill(slice_1d(hc_scale, 1, 2), {1, seq_len, hc});
         LogicalId scale2 = g.fill(slice_1d(hc_scale, 2, 3), {1, seq_len, hc * hc});
 
-        auto expand_base = [&](LogicalId b, uint32_t dim)
-        {
+        auto expand_base = [&](LogicalId b, uint32_t dim) {
             int32_t sh[] = {1, 1, (int32_t)dim};
             return g.repeat(g.reshape(b, g.constant({3}, sh, DType::INT32)), seq_len, 1);
         };
@@ -240,8 +237,7 @@ public:
         LogicalId base1 = expand_base(slice_1d(hc_base, hc, 2 * hc), hc);
         LogicalId base2 = expand_base(slice_1d(hc_base, 2 * hc, 2 * hc + hc * hc), hc * hc);
 
-        auto sigmoid = [&](LogicalId t, uint32_t last_dim)
-        {
+        auto sigmoid = [&](LogicalId t, uint32_t last_dim) {
             LogicalId neg_one = g.fill(-1.0f, {1, seq_len, last_dim});
             LogicalId neg_t = g.mul(t, neg_one);
             float e_val = TGConstants::E;
@@ -492,8 +488,7 @@ public:
             LogicalId ape_exp = g.repeat(g.reshape(ape, g.constant({4}, sh4_ape, DType::INT32)), S_r, 1);
             score_unflat = g.add(score_unflat, ape_exp);
 
-            auto overlap_transform = [&](LogicalId t, float pad_val)
-            {
+            auto overlap_transform = [&](LogicalId t, float pad_val) {
                 int32_t s0[] = {0, 0, 0, (int32_t)comp_head_dim};
                 int32_t e0[] = {1, (int32_t)S_r, (int32_t)ratio, (int32_t)comp_dim};
                 int32_t st[] = {1, 1, 1, 1};
@@ -647,7 +642,8 @@ public:
 
         // Mask out padding bounds (index == -1)
         int32_t neg_one = -1;
-        LogicalId is_invalid = g.eq(topk_idxs, g.fill(g.constant({1}, &neg_one, DType::INT32), {1, seq_len, topk_total}));
+        LogicalId is_invalid =
+            g.eq(topk_idxs, g.fill(g.constant({1}, &neg_one, DType::INT32), {1, seq_len, topk_total}));
         LogicalId penalty_3d = g.mul(g.cast(is_invalid, DType::FLOAT32), g.fill(-1e9f, {1, seq_len, topk_total}));
 
         int32_t sh_p1[] = {1, (int32_t)seq_len, 1, (int32_t)topk_total};
@@ -655,7 +651,8 @@ public:
 
         int32_t rep_h[] = {(int32_t)cfg.n_heads};
         int32_t ax_2[] = {2};
-        LogicalId penalty_rep = g.repeat(penalty_4d, g.constant({1}, rep_h, DType::INT32), g.constant({1}, ax_2, DType::INT32));
+        LogicalId penalty_rep =
+            g.repeat(penalty_4d, g.constant({1}, rep_h, DType::INT32), g.constant({1}, ax_2, DType::INT32));
 
         int32_t sh_p2[] = {(int32_t)(seq_len * cfg.n_heads), 1, (int32_t)topk_total};
         LogicalId penalty_flat = g.reshape(g.contiguous(penalty_rep), g.constant({3}, sh_p2, DType::INT32));
@@ -665,10 +662,11 @@ public:
         // Include standalone attn_sink
         int32_t sh_s1[] = {1, (int32_t)cfg.n_heads, 1};
         LogicalId sink_3d = g.reshape(attn_sink, g.constant({3}, sh_s1, DType::INT32));
-        
+
         int32_t rep_s[] = {(int32_t)seq_len};
         int32_t ax_0[] = {0};
-        LogicalId sink_rep = g.repeat(sink_3d, g.constant({1}, rep_s, DType::INT32), g.constant({1}, ax_0, DType::INT32));
+        LogicalId sink_rep =
+            g.repeat(sink_3d, g.constant({1}, rep_s, DType::INT32), g.constant({1}, ax_0, DType::INT32));
 
         int32_t sh_s2[] = {(int32_t)(seq_len * cfg.n_heads), 1, 1};
         LogicalId sink_flat = g.reshape(g.contiguous(sink_rep), g.constant({3}, sh_s2, DType::INT32));
@@ -846,12 +844,13 @@ public:
             LogicalId probs_flat = g.reshape(router_probs, g.constant({1}, sh_flat, DType::INT32));
 
             int32_t start_val = 0, stop_val = (int32_t)seq_len, step_val = 1;
-            LogicalId row_idx = g.arange(g.constant({1}, &start_val, DType::INT32),
-                                         g.constant({1}, &stop_val, DType::INT32),
-                                         g.constant({1}, &step_val, DType::INT32));
+            LogicalId row_idx =
+                g.arange(g.constant({1}, &start_val, DType::INT32), g.constant({1}, &stop_val, DType::INT32),
+                         g.constant({1}, &step_val, DType::INT32));
             int32_t n_exp_i = cfg.n_routed_experts;
             int32_t seq_len_sh[] = {(int32_t)seq_len};
-            LogicalId n_exp_i_node = g.fill(g.constant({1}, &n_exp_i, DType::INT32), g.constant({1}, seq_len_sh, DType::INT32));
+            LogicalId n_exp_i_node =
+                g.fill(g.constant({1}, &n_exp_i, DType::INT32), g.constant({1}, seq_len_sh, DType::INT32));
             LogicalId row_offset = g.mul(row_idx, n_exp_i_node); // [seq_len]
 
             int32_t sh_ro[] = {1, (int32_t)seq_len, 1};
@@ -859,7 +858,8 @@ public:
 
             int32_t rep_k_ro[] = {topk_exp};
             int32_t ax_2_ro[] = {2};
-            LogicalId row_offset_rep = g.repeat(row_offset_3d, g.constant({1}, rep_k_ro, DType::INT32), g.constant({1}, ax_2_ro, DType::INT32));
+            LogicalId row_offset_rep = g.repeat(row_offset_3d, g.constant({1}, rep_k_ro, DType::INT32),
+                                                g.constant({1}, ax_2_ro, DType::INT32));
 
             LogicalId flat_idxs = g.add(row_offset_rep, top_k_idxs);
             LogicalId topk_weights = g.gather(probs_flat, flat_idxs); // [1, seq_len, top_k]
@@ -867,11 +867,13 @@ public:
             int32_t ax_2_val = 2;
             LogicalId sum_weights = g.sum(topk_weights, g.constant({1}, &ax_2_val, DType::INT32)); // [1, seq_len]
             LogicalId sum_weights_3d = g.reshape(sum_weights, g.constant({3}, sh_ro, DType::INT32));
-            LogicalId sum_weights_rep = g.repeat(sum_weights_3d, g.constant({1}, rep_k_ro, DType::INT32), g.constant({1}, ax_2_ro, DType::INT32));
+            LogicalId sum_weights_rep = g.repeat(sum_weights_3d, g.constant({1}, rep_k_ro, DType::INT32),
+                                                 g.constant({1}, ax_2_ro, DType::INT32));
 
             LogicalId norm_weights = g.div(topk_weights, sum_weights_rep);
             int32_t sh_topk[] = {1, (int32_t)seq_len, (int32_t)topk_exp};
-            LogicalId route_scale_node = g.fill(g.constant({1}, &cfg.route_scale, DType::FLOAT32), g.constant({3}, sh_topk, DType::INT32));
+            LogicalId route_scale_node =
+                g.fill(g.constant({1}, &cfg.route_scale, DType::FLOAT32), g.constant({3}, sh_topk, DType::INT32));
             norm_weights = g.mul(norm_weights, route_scale_node);
 
             // Fetch and stack expert weights
@@ -921,7 +923,8 @@ public:
             int32_t sh_x_1[] = {1, (int32_t)seq_len, 1, (int32_t)cfg.dim};
             LogicalId x_ffn_1 = g.reshape(x_ffn, g.constant({4}, sh_x_1, DType::INT32));
 
-            LogicalId x_ffn_rep = g.repeat(x_ffn_1, g.constant({1}, rep_k_ro, DType::INT32), g.constant({1}, ax_2_ro, DType::INT32));
+            LogicalId x_ffn_rep =
+                g.repeat(x_ffn_1, g.constant({1}, rep_k_ro, DType::INT32), g.constant({1}, ax_2_ro, DType::INT32));
 
             int32_t sh_x_2[] = {1, (int32_t)(seq_len * topk_exp), 1, (int32_t)cfg.dim};
             LogicalId x_ffn_ready = g.reshape(x_ffn_rep, g.constant({4}, sh_x_2, DType::INT32));
@@ -930,8 +933,10 @@ public:
             LogicalId w1_out = g.dot(x_ffn_ready, W1_active_r);
             LogicalId w3_out = g.dot(x_ffn_ready, W3_active_r);
 
-            LogicalId clamped_w1 = clamp_max(w1_out, cfg.swiglu_limit, {1, (uint32_t)(seq_len * topk_exp), 1, cfg.moe_inter_dim});
-            LogicalId clamped_w3 = clamp(w3_out, -cfg.swiglu_limit, cfg.swiglu_limit, {1, (uint32_t)(seq_len * topk_exp), 1, cfg.moe_inter_dim});
+            LogicalId clamped_w1 =
+                clamp_max(w1_out, cfg.swiglu_limit, {1, (uint32_t)(seq_len * topk_exp), 1, cfg.moe_inter_dim});
+            LogicalId clamped_w3 = clamp(w3_out, -cfg.swiglu_limit, cfg.swiglu_limit,
+                                         {1, (uint32_t)(seq_len * topk_exp), 1, cfg.moe_inter_dim});
 
             LogicalId gate_silu = silu(clamped_w1, {1, seq_len * topk_exp, 1, cfg.moe_inter_dim});
             LogicalId gate_up = g.mul(gate_silu, clamped_w3);
@@ -944,14 +949,16 @@ public:
 
             int32_t rep_dim[] = {(int32_t)cfg.dim};
             int32_t ax_3[] = {3};
-            LogicalId norm_weights_exp = g.repeat(norm_weights_reshaped, g.constant({1}, rep_dim, DType::INT32), g.constant({1}, ax_3, DType::INT32));
+            LogicalId norm_weights_exp = g.repeat(norm_weights_reshaped, g.constant({1}, rep_dim, DType::INT32),
+                                                  g.constant({1}, ax_3, DType::INT32));
 
             LogicalId weighted_expert_out = g.mul(expert_out, norm_weights_exp);
 
             // Reduce
             int32_t sh_weo[] = {1, (int32_t)seq_len, (int32_t)topk_exp, (int32_t)cfg.dim};
             LogicalId weo_reshaped = g.reshape(weighted_expert_out, g.constant({4}, sh_weo, DType::INT32));
-            LogicalId routed_out_4d = g.sum(weo_reshaped, g.constant({1}, ax_2_ro, DType::INT32)); // [1, seq_len, 1, dim]
+            LogicalId routed_out_4d =
+                g.sum(weo_reshaped, g.constant({1}, ax_2_ro, DType::INT32)); // [1, seq_len, 1, dim]
 
             LogicalId routed_out = g.reshape(routed_out_4d, g.constant({1, (int32_t)seq_len, (int32_t)cfg.dim}));
 
@@ -960,7 +967,8 @@ public:
             LogicalId shared_up = linear(x_ffn, prefix + "ffn.shared_experts.w3.weight", cfg.dim, cfg.moe_inter_dim);
 
             LogicalId clamped_sgate = clamp_max(shared_gate, cfg.swiglu_limit, {1, seq_len, cfg.moe_inter_dim});
-            LogicalId clamped_sup = clamp(shared_up, -cfg.swiglu_limit, cfg.swiglu_limit, {1, seq_len, cfg.moe_inter_dim});
+            LogicalId clamped_sup =
+                clamp(shared_up, -cfg.swiglu_limit, cfg.swiglu_limit, {1, seq_len, cfg.moe_inter_dim});
 
             LogicalId shared_silu = silu(clamped_sgate, {1, seq_len, cfg.moe_inter_dim});
             LogicalId shared_out = g.mul(shared_silu, clamped_sup);

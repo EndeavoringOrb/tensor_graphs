@@ -60,8 +60,7 @@ inline void runDotF32_3D_NC(const KernelContext &ctx)
     if (num_threads > total_rows)
         num_threads = total_rows;
 
-    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t)
-                                   {
+    ThreadPool::get().parallel_for(num_threads, [=](uint32_t t) {
         uint32_t rows_per_thread = (total_rows + num_threads - 1) / num_threads;
         uint32_t start_row = t * rows_per_thread;
         uint32_t end_row = std::min(start_row + rows_per_thread, total_rows);
@@ -87,7 +86,8 @@ inline void runDotF32_3D_NC(const KernelContext &ctx)
                     c_row[n] += a_val * b_row[n];
                 }
             }
-        } });
+        }
+    });
 }
 
 inline LogicalId refDotF32_3D_NC(const std::vector<LogicalId> &inputs, Graph &graph)
@@ -96,6 +96,6 @@ inline LogicalId refDotF32_3D_NC(const std::vector<LogicalId> &inputs, Graph &gr
 }
 
 REGISTER_KERNEL("Dot_F32_3D_NC", 2, 2, matchDotF32_3D_NC, runDotF32_3D_NC, refDotF32_3D_NC,
-                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 8}},
-                {false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
+                {{1, 8, 8}, {1, 8, 8}}, {false, false},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

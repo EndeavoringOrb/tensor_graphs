@@ -324,9 +324,8 @@ struct Session
                     continue;
                 const Bucket &bucket = manualBuckets[i];
 
-                CompiledGraph plan =
-                    planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate,
-                                 false, repo, {}, minCompileSeconds);
+                CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, false, repo,
+                                                  {}, minCompileSeconds);
 
                 for (const auto &inst : plan.instructions)
                 {

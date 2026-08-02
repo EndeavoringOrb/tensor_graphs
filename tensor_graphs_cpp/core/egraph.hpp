@@ -13,7 +13,7 @@
 
 class ENode
 {
-public:
+  public:
     ENode(KernelId kernelId, OpType opType, std::string opName, std::vector<EClassId> children,
           std::vector<uint32_t> shape, std::vector<uint64_t> strides, DType dtype, MemSpace mem_space,
           std::vector<Engine> engines, std::string contentHash = "", uint64_t sig = 0)
@@ -86,7 +86,7 @@ public:
         sig = newSig;
     }
 
-private:
+  private:
     KernelId kernelId;
     OpType opType;
     std::string opName;
@@ -452,7 +452,7 @@ struct EGraph
         return nodeToEClass[enodeId.value];
     }
 
-private:
+  private:
     static inline uint64_t mix64(uint64_t x) noexcept
     {
         x += 0x9e3779b97f4a7c15ull;
@@ -641,8 +641,7 @@ inline std::string toString(const ENode &node, const EGraph &egraph, const std::
             // Resolve the canonical EClass from the graph
             const EClass &childCls = egraph.getEClass(EClassId{childClassId});
 
-            ss << "\n"
-               << prefix << "    [" << i << "] EClass " << childClassId;
+            ss << "\n" << prefix << "    [" << i << "] EClass " << childClassId;
 
             // If the ID we have isn't the canonical one, note the redirect
             uint32_t canonicalId = egraph.findConst(EClassId{childClassId}).value;
@@ -651,8 +650,7 @@ inline std::string toString(const ENode &node, const EGraph &egraph, const std::
                 ss << " -> (Canonical: " << canonicalId << ")";
             }
 
-            ss << "\n"
-               << toString(childCls, prefix + "    ");
+            ss << "\n" << toString(childCls, prefix + "    ");
         }
     }
     return ss.str();
