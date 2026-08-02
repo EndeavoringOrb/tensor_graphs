@@ -30,6 +30,6 @@ inline void inferViewSlice(const std::vector<TensorNode> &inputs, TensorView &ou
 
 REGISTER_REF_KERNEL_VIEW(OpType::SLICE, 4, 4, matchSliceView, inferViewSlice, MemSpace(1, HandleType::CPP),
                          {Engine(0, EngineType::CPU)}, {DType::ANY, DType::INT32, DType::INT32, DType::INT32},
-                         {{1}, {1}, {1}, {1}}, {true, false, false, false},
+                         {{1}, {1}, {1}, {1}}, {false, false, false, false},
                          {MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP), MemSpace(1, HandleType::CPP),
                           MemSpace(1, HandleType::CPP)});

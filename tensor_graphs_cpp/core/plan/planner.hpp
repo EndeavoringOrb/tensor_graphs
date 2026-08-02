@@ -61,6 +61,7 @@ struct Planner
         rules.emplace_back(std::make_unique<FlattenBatchDot>());
         rules.emplace_back(std::make_unique<FlattenElementwise>());
         rules.emplace_back(std::make_unique<DotSplitRule>());
+        rules.emplace_back(std::make_unique<RemoveContiguous>());
         if (injected)
         {
             rules.emplace_back(std::make_unique<InfinityDomination>());
@@ -82,7 +83,7 @@ struct Planner
                 std::exit(SIGINT);
             }
             iterations++;
-            uint32_t numENodes = egraph.getENodes().size();
+            uint32_t preUniqueNodes = egraph.getNumUniqueENodes();
             for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getENodes().size(); eNodeIdx++)
             {
                 for (const auto &rule : rules)
@@ -95,9 +96,21 @@ struct Planner
                     ruleMatchCounts[rule->name()]++;
                     nMatches++;
                 }
+                // if (eNodeIdx % 10000 == 0)
+                // {
+                //     std::stringstream ss;
+                //     ss << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
+                //     for (auto const &[name, count] : ruleMatchCounts)
+                //     {
+                //         ss << "  " << name << ": " << count << " matches\n";
+                //     }
+                //     ss << "Total Matches: " << nMatches;
+                //     LOG(L_INFO) << ss.str();
+                // }
             }
             egraph.rebuild();
-            changed = egraph.getENodes().size() != numENodes;
+            uint32_t postUniqueNodes = egraph.getNumUniqueENodes();
+            changed = preUniqueNodes != postUniqueNodes;
             std::stringstream ss;
             ss << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
             for (auto const &[name, count] : ruleMatchCounts)
@@ -217,7 +230,8 @@ struct Planner
     {
         constexpr float EPS = 1e-6f;
 
-        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool {
+        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool
+        {
             if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
                 return true;
             if (op == OpType::RESHAPE && inputIdx == 1)
@@ -330,7 +344,8 @@ struct Planner
                     {
                         if (refEntry && pGraph)
                         {
-                            auto traceToInputIdx = [&](LogicalId pid) -> int {
+                            auto traceToInputIdx = [&](LogicalId pid) -> int
+                            {
                                 LogicalId curr = pid;
                                 while (pGraph->hasNode(curr) && (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
                                                                  pGraph->getNode(curr).opType == OpType::CAST ||
@@ -506,7 +521,8 @@ struct Planner
             if (e_class_id != EClassId{i})
                 continue;
             EClass &cls = egraph.getEClass(e_class_id);
-            std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b) {
+            std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b)
+                      {
                 float costA = enodeInfos[a.value].cost;
                 float costB = enodeInfos[b.value].cost;
 
@@ -514,8 +530,7 @@ struct Planner
                     return true;
                 if (costA > costB)
                     return false;
-                return a < b;
-            });
+                return a < b; });
         }
 
         LOG(L_INFO) << "finished sorting enodes";
@@ -664,7 +679,7 @@ struct Planner
                 enodeInfos[egraph.getEClass(pair.first).enodes[best_selection_map.at(pair.first)].value].cost;
         }
         ExtractionResult result = {best_selection_map, best_order, best_buffers,
-                                   best_eclass_to_buf, best_cost,  best_eclass_to_cost};
+                                   best_eclass_to_buf, best_cost, best_eclass_to_cost};
         std::cout << "best_cost=" << std::to_string(best_cost) << std::endl;
 
         return result;
@@ -1017,7 +1032,8 @@ struct Planner
         eclassToLogical[E_Cache] = logicalId;
         EClassId current_E = E_Cache;
 
-        auto addConst = [&](const std::vector<int32_t> &vals) {
+        auto addConst = [&](const std::vector<int32_t> &vals)
+        {
             return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
         };
 
@@ -1094,7 +1110,7 @@ struct Planner
                 {
                     LogicalId parentLogicalId = sourceNode.child_ids[p_idx];
                     EClassId E_parent = egraph.find(nodeToEClass.at(parentLogicalId));
-                    const EClass &pClass = egraph.getEClass(E_parent);
+                    const EClass pClass = egraph.getEClass(E_parent);
 
                     std::vector<Region> inputSliceRegions = dirtyInputRegions[p_idx];
                     if (inputSliceRegions.size() != 1)

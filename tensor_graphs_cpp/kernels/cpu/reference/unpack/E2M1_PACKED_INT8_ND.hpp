@@ -4,7 +4,7 @@
 
 inline bool matchUnpackE2M1_PACKED_INT8_ND(const std::vector<TensorNode> &inputs, const TensorNode &output)
 {
-    if (inputs[0].dtype != DType::E2M1_PACKED_INT8 || output.dtype != DType::E2M1)
+    if (output.dtype != DType::E2M1)
         return false;
     if (!isContiguous(output))
         return false;

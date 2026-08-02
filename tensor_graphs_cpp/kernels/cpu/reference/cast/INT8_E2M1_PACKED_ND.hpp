@@ -6,7 +6,7 @@ inline bool matchCastINT8_E2M1_PACKED_INT8(const std::vector<TensorNode> &inputs
 {
     if (inputs[0].getShape() != output.getShape())
         return false;
-    if (inputs[0].dtype != DType::INT8 || output.dtype != DType::E2M1_PACKED_INT8)
+    if (output.dtype != DType::E2M1_PACKED_INT8)
         return false;
     return true;
 }

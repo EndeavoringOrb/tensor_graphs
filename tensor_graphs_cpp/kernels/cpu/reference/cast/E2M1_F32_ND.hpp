@@ -6,7 +6,7 @@ inline bool matchCastE2M1_F32_ND(const std::vector<TensorNode> &inputs, const Te
 {
     if (inputs[0].getShape() != output.getShape())
         return false;
-    if (inputs[0].dtype != DType::E2M1 || output.dtype != DType::FLOAT32)
+    if (output.dtype != DType::FLOAT32)
         return false;
     if (!isContiguous(output))
         return false;

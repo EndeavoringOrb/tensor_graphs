@@ -8,7 +8,7 @@ inline bool matchCastF8_E4M3_F32_ND(const std::vector<TensorNode> &inputs, const
 {
     if (inputs[0].getShape() != output.getShape())
         return false;
-    if (inputs[0].dtype != DType::F8_E4M3 || output.dtype != DType::FLOAT32)
+    if (output.dtype != DType::FLOAT32)
         return false;
     if (!isContiguous(output))
         return false;
