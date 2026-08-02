@@ -10,6 +10,7 @@
 #include "core/memory.hpp"
 #include "core/session.hpp"
 #include "core/types.hpp"
+#include "generated/kernels_all.gen.hpp"
 #include "models/deepseek-v4-flash.hpp"
 
 #ifdef TG_OS_WINDOWS

@@ -622,6 +622,23 @@ struct Graph
     {
         return concat(ids, constant({1}, &axis, DType::INT32), loc);
     }
+
+    LogicalId relu(LogicalId scores, const std::vector<uint32_t> &shape, std::source_location loc = std::source_location::current())
+    {
+        // 1. Create a zero tensor with matching shape
+        LogicalId zeros = fill(0.0f, shape);
+
+        // 2. Element-wise comparison: (0 < scores) -> BOOL tensor
+        LogicalId is_positive = lt(zeros, scores);
+
+        // 3. Cast BOOL -> FLOAT32 (1.0f for true, 0.0f for false)
+        LogicalId mask_f32 = cast(is_positive, DType::FLOAT32);
+
+        // 4. Element-wise multiply: x * (x > 0)
+        LogicalId relu_scores = mul(scores, mask_f32);
+
+        return relu_scores;
+    }
 };
 
 inline bool isIsomorphic(const Graph &g1, LogicalId root1, const Graph &g2, LogicalId root2)

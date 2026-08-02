@@ -308,9 +308,9 @@ struct ShapePropagator
                 ss << "[ShapePropagator.inferShape] nodeId=" + toString(nodeId) + " DOT requires equal ranks. Got "
                    << r0 << " (" + toString(s0) + ") and " << r1
                    << " (" + toString(s1) +
-                          "). Implicit broadcasting is disabled; use explicit "
+                          "). Implicit broadcasting is not supported; use explicit "
                           "reshape "
-                          "to align ranks.";
+                          "to align ranks. debugOrigin=" + graph.getNode(nodeId).debugOrigin;
                 Error::throw_err(ss.str());
             }
 
