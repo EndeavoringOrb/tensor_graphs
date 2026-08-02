@@ -5,8 +5,8 @@ import json
 import os
 import platform
 import re
-import subprocess
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -176,9 +176,7 @@ class PlatformInfo:
 
         # 1. Detect CUDA availability on host system
         has_cuda = False
-        if shutil.which("nvcc") is not None:
-            has_cuda = True
-        elif Path(cuda_path).exists() and (Path(cuda_path) / "include").exists():
+        if shutil.which("nvcc") is not None or Path(cuda_path).exists() and (Path(cuda_path) / "include").exists():
             has_cuda = True
 
         # 2. Detect OpenCL availability on host system
@@ -553,6 +551,9 @@ class KernelLinter:
 class CodeGenerator:
     """Handles static code and header generation prior to compilation."""
 
+    def __init__(self, config: BuildConfig):
+        self.config = config
+
     @staticmethod
     def get_file_hash(filepath: Path) -> str:
         h = hashlib.sha256()
@@ -615,13 +616,19 @@ class CodeGenerator:
 
         for path in kernel_files:
             rel_path = path.relative_to(ROOT_DIR)
+            inc_path = rel_path.as_posix()
+
+            if not self.config.use_opencl and ("kernels/opencl" in inc_path.lower()):
+                continue
+            if not self.config.use_cuda and ("kernels/cuda" in inc_path.lower()):
+                continue
+
             file_hash = self.get_file_hash(path)
             combined_hash = hashlib.sha256(
                 (core_seed + file_hash).encode("utf-8")
             ).hexdigest()
             uid_hex = f"0x{combined_hash[:16]}"
             uid_val = f"{uid_hex}ULL"
-            inc_path = rel_path.as_posix()
 
             if path.suffix == ".hpp":
                 kernel_entries_cpu.append((inc_path, uid_val))
@@ -748,11 +755,10 @@ class Toolchain:
         flags = [f"-I{ROOT_DIR}", f"-DTG_LOG_LEVEL={self.config.log_level_val}"]
 
         if self.config.use_opencl:
+            flags.append("-DTG_USE_OPENCL")
             flags.append("-DCL_TARGET_OPENCL_VERSION=310")
             if self.platform.opencl_inc_dir:
                 flags.append(f"-I{self.platform.opencl_inc_dir}")
-        else:
-            flags.append("-DTG_DISABLE_OPENCL")
 
         if self.platform.is_windows:
             if not self.config.use_cuda:
@@ -814,8 +820,8 @@ class Toolchain:
             if not self.platform.is_windows and self.platform.is_arm64:
                 flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
-        if not self.config.use_opencl:  # TODO: make opt in
-            flags.append("-DTG_DISABLE_OPENCL")
+        if self.config.use_opencl:  # TODO: make opt in
+            flags.append("-DTG_USE_OPENCL")
 
         return flags
 
@@ -865,7 +871,7 @@ class BuildOrchestrator:
         self.config = config
         self.toolchain = Toolchain(config, self.platform)
         self.linter = KernelLinter()
-        self.code_gen = CodeGenerator()
+        self.code_gen = CodeGenerator(config)
 
     def run(self) -> None:
         console.print(

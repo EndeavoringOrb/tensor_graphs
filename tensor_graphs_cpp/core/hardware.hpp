@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 #endif
 
+#ifdef TG_USE_OPENCL
 inline void queryOpenCLDeviceLimits(cl_device_id device)
 {
     // Query and print the Device Name
@@ -73,6 +74,7 @@ inline void queryOpenCLDeviceLimits(cl_device_id device)
         std::cout << "Failed to query maximum allocation size. Error code: " << err << std::endl;
     }
 }
+#endif
 
 struct HardwareCaps
 {
@@ -123,7 +125,7 @@ struct HardwareCaps
 #endif
 
         // 3. Detect OpenCL & Adreno GPU
-#ifndef TG_DISABLE_OPENCL
+#ifdef TG_USE_OPENCL
         cl_uint numPlatforms = 0;
         if (clGetPlatformIDs(0, nullptr, &numPlatforms) == CL_SUCCESS && numPlatforms > 0)
         {

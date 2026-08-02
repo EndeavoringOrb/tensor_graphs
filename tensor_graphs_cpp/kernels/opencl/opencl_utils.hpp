@@ -5,7 +5,7 @@
 
 #include "core/memory.hpp"
 #include "generated/opencl_kernels.gen.hpp"
-
+#ifdef TG_USE_OPENCL
 namespace OpenCL
 {
 inline cl_program buildProgram(const std::string &source)
@@ -78,3 +78,4 @@ inline void setArgBuffer(cl_kernel k, cl_uint index, cl_mem buffer)
     }
 }
 } // namespace OpenCL
+#endif // TG_USE_OPENCL

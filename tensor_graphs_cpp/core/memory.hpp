@@ -25,7 +25,7 @@ struct OpenCLState
 
     void init()
     {
-#ifndef TG_DISABLE_OPENCL
+#ifdef TG_USE_OPENCL
         if (initialized)
             return;
         cl_uint numPlatforms = 0;
@@ -284,6 +284,7 @@ struct CudaBuffer : public DeviceBuffer
 };
 #endif
 
+#ifdef TG_USE_OPENCL
 struct OpenCLBuffer : public DeviceBuffer
 {
     cl_mem arena_ptr_cl_mem = nullptr;
@@ -402,6 +403,7 @@ struct OpenCLBuffer : public DeviceBuffer
         return nullptr;
     }
 };
+#endif // TG_USE_OPENCL
 
 struct MemoryManager
 {

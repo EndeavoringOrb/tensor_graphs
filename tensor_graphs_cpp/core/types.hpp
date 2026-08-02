@@ -1,6 +1,6 @@
 #pragma once
 #pragma once
-#ifndef TG_DISABLE_OPENCL
+#ifdef TG_USE_OPENCL
 #include <CL/cl.h>
 #else
 typedef void *cl_mem;
