@@ -430,7 +430,11 @@ struct MemoryManager
             }
             else if (ms.type == HandleType::OPENCL)
             {
+#ifdef USE_OPENCL
                 buffers[ms] = std::make_unique<OpenCLBuffer>(ms, size);
+#else
+                Error::throw_err("OPENCL requested but USE_OPENCL not defined");
+#endif
             }
             else if (ms.type == HandleType::CUDA)
             {
