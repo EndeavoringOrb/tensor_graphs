@@ -94,6 +94,7 @@ struct BenchBuffer
         }
         else if (mem_space.type == HandleType::OPENCL)
         {
+#ifdef USE_OPENCL
             OpenCLState::get().init();
             cl_context ctx = OpenCLState::get().context;
             if (!ctx)
@@ -108,6 +109,9 @@ struct BenchBuffer
                 Error::throw_err("clCreateBuffer failed to allocate memory of size " + std::to_string(bytes) +
                                  ". Error: " + std::to_string(err));
             }
+#else
+            Error::throw_err("OPENCL backend requested but USE_OPENCL is not defined.");
+#endif
         }
         else
         {
@@ -129,6 +133,7 @@ struct BenchBuffer
         }
         else if (mem_space.type == HandleType::OPENCL)
         {
+#ifdef USE_OPENCL
             if (clMem && !hostData.empty())
             {
                 cl_int err = clEnqueueWriteBuffer(OpenCLState::get().queue, clMem,
@@ -139,6 +144,9 @@ struct BenchBuffer
                     Error::throw_err("clEnqueueWriteBuffer failed with error: " + std::to_string(err));
                 }
             }
+#else
+            Error::throw_err("OPENCL backend requested but USE_OPENCL is not defined.");
+#endif
         }
     }
 
@@ -156,6 +164,7 @@ struct BenchBuffer
         }
         else if (mem_space.type == HandleType::OPENCL)
         {
+#ifdef USE_OPENCL
             if (clMem && !hostData.empty())
             {
                 cl_int err = clEnqueueReadBuffer(OpenCLState::get().queue, clMem,
@@ -166,6 +175,9 @@ struct BenchBuffer
                     Error::throw_err("clEnqueueReadBuffer failed with error: " + std::to_string(err));
                 }
             }
+#else
+            Error::throw_err("OPENCL backend requested but USE_OPENCL is not defined.");
+#endif
         }
     }
 
@@ -181,11 +193,15 @@ struct BenchBuffer
             }
             else if (mem_space.type == HandleType::OPENCL)
             {
+#ifdef USE_OPENCL
                 if (clMem)
                 {
                     clReleaseMemObject(clMem);
                     clMem = nullptr;
                 }
+#else
+                Error::throw_err("OPENCL backend requested but USE_OPENCL is not defined.");
+#endif
             }
             devicePtr = nullptr;
         }
@@ -332,11 +348,17 @@ inline void synchronizeHandle(HandleType handle)
         {
             Error::throw_err("CUDA Synchronization failed: " + std::string(cudaGetErrorString(err)));
         }
+#else
+        Error::throw_err("CUDA backend requested but USE_CUDA is not defined.");
 #endif
     }
     else if (handle == HandleType::OPENCL)
     {
+#ifdef USE_OPENCL
         clFinish(OpenCLState::get().queue);
+#else
+        Error::throw_err("OPENCL backend requested but USE_OPENCL is not defined.");
+#endif
     }
 }
 
