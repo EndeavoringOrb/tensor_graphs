@@ -34,7 +34,8 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     std::vector<MemSpace> current_path = {src};
     std::unordered_set<MemSpace> visited = {src};
 
-    std::function<void(MemSpace)> dfs = [&](MemSpace curr) {
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
+    {
         if (curr == dst)
         {
             all_paths.push_back(current_path);
@@ -451,7 +452,7 @@ struct FusionRule : public Rule
                 pattern.graph, pattern.rootId, inputNodes, outputNode, false, matchedClass.mem_space, {}, {}, true,
                 ignoreInputMemSpaces, true, true);
 
-            for (KernelId uid : kernelMatches)
+            for (KernelId uid : kernelMatches) // TODO: only add the fastest one?
             {
                 const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
                 addFusedNode(ctx, kernel, kernel.output_mem_space, inputs, ENodeId{eNodeIdx});
@@ -823,11 +824,6 @@ struct InfinityDomination : public Rule
         return false;
     }
 
-    EClassId addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
-    {
-        return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
-    }
-
     void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         EGraph &egraph = ctx.egraph;
@@ -935,9 +931,9 @@ struct InfinityDomination : public Rule
                 steps.push_back(1);
             }
 
-            EClassId startsId = addIntConst(egraph, starts);
-            EClassId endsId = addIntConst(egraph, ends);
-            EClassId stepsId = addIntConst(egraph, steps);
+            EClassId startsId = egraph.addIntConst(starts);
+            EClassId endsId = egraph.addIntConst(ends);
+            EClassId stepsId = egraph.addIntConst(steps);
 
             std::vector<uint32_t> sliceShape;
             for (uint64_t d = 0; d < starts.size(); ++d)
@@ -1238,11 +1234,6 @@ struct SlicePushDownDot : public Rule
         return "SlicePushDownDot";
     }
 
-    EClassId addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
-    {
-        return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
-    }
-
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         const EGraph &egraph = ctx.egraph;
@@ -1425,16 +1416,17 @@ struct SlicePushDownDot : public Rule
                     Error::throw_err("[SlicePushDownDot.apply] expected rank=2,3,4 got rank=" + std::to_string(rank));
                 }
 
-                EClassId startsIdA = addIntConst(egraph, startsA);
-                EClassId endsIdA = addIntConst(egraph, endsA);
-                EClassId stepsIdA = addIntConst(egraph, stepsA);
+                EClassId startsIdA = egraph.addIntConst(startsA);
+                EClassId endsIdA = egraph.addIntConst(endsA);
+                EClassId stepsIdA = egraph.addIntConst(stepsA);
 
-                EClassId startsIdB = addIntConst(egraph, startsB);
-                EClassId endsIdB = addIntConst(egraph, endsB);
-                EClassId stepsIdB = addIntConst(egraph, stepsB);
+                EClassId startsIdB = egraph.addIntConst(startsB);
+                EClassId endsIdB = egraph.addIntConst(endsB);
+                EClassId stepsIdB = egraph.addIntConst(stepsB);
 
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en,
-                                       EClassId stId, EClassId enId, EClassId stepId) {
+                                       EClassId stId, EClassId enId, EClassId stepId)
+                {
                     EClassId canonId = egraph.findConst(classId);
                     const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;
@@ -1479,6 +1471,7 @@ struct SlicePushDownDot : public Rule
     }
 };
 
+// Flatten rank4@rank4 -> rank3@rank3 when the first dim of rank4 is 1 for A and B
 struct FlattenBatchDot : public Rule
 {
     std::unordered_set<uint32_t> visited;
@@ -1488,18 +1481,13 @@ struct FlattenBatchDot : public Rule
         return "FlattenBatchDot";
     }
 
-    EClassId addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
-    {
-        return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
-    }
-
     bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
     {
         const EGraph &egraph = ctx.egraph;
         if (eNodeIdx >= egraph.getENodes().size())
             return false;
         const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
-        if (enode.getOpType() != OpType::DOT || enode.getChildren().size() != 2)
+        if (enode.getOpType() != OpType::DOT)
             return false;
 
         if (visited.count(eNodeIdx))
@@ -1556,9 +1544,9 @@ struct FlattenBatchDot : public Rule
         std::vector<int32_t> b3_int(b3.begin(), b3.end());
         std::vector<int32_t> y3_int(y3.begin(), y3.end());
 
-        EClassId a3_shape_id = addIntConst(egraph, a3_int);
-        EClassId b3_shape_id = addIntConst(egraph, b3_int);
-        EClassId y3_shape_id = addIntConst(egraph, y3_int);
+        EClassId a3_shape_id = egraph.addIntConst(a3_int);
+        EClassId b3_shape_id = egraph.addIntConst(b3_int);
+        EClassId y3_shape_id = egraph.addIntConst(y3_int);
 
         std::vector<uint64_t> a3_strides = calcContiguousStrides(a3);
         EClassId rA = addOpToEGraph(egraph, OpType::RESHAPE, {aClass, a3_shape_id}, a3, a3_strides, dotNode.getDType(),
@@ -1574,7 +1562,7 @@ struct FlattenBatchDot : public Rule
 
         const EClass outCls = egraph.getEClass(egraph.findConst(e_class_id));
         std::vector<int32_t> out4_int(outCls.shape.begin(), outCls.shape.end());
-        EClassId out4_shape_id = addIntConst(egraph, out4_int);
+        EClassId out4_shape_id = egraph.addIntConst(out4_int);
         EClassId outReshape = addOpToEGraph(egraph, OpType::RESHAPE, {rY, out4_shape_id}, outCls.shape, outCls.strides,
                                             dotNode.getDType(), dotNode.getMemSpace());
 
@@ -1589,11 +1577,6 @@ struct FlattenElementwise : public Rule
     std::string name() const override
     {
         return "FlattenElementwise";
-    }
-
-    EClassId addIntConst(EGraph &egraph, const std::vector<int32_t> &vals) const
-    {
-        return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
     }
 
     static bool isSupportedOp(OpType op)
@@ -1671,8 +1654,8 @@ struct FlattenElementwise : public Rule
         std::vector<uint32_t> flatShape = {(uint32_t)total};
         std::vector<int32_t> flat_int = {(int32_t)total};
         std::vector<int32_t> out_int(outShape.begin(), outShape.end());
-        EClassId flat_shape_id = addIntConst(egraph, flat_int);
-        EClassId out_shape_id = addIntConst(egraph, out_int);
+        EClassId flat_shape_id = egraph.addIntConst(flat_int);
+        EClassId out_shape_id = egraph.addIntConst(out_int);
 
         std::vector<uint64_t> flatStrides = {1};
 
@@ -1693,5 +1676,157 @@ struct FlattenElementwise : public Rule
                                             outCls.strides, opNode.getDType(), opNode.getMemSpace());
 
         egraph.merge(e_class_id, outReshape);
+    }
+};
+
+// Splits up dot into 2 smaller dots. Can reduce peak memory usage, and combined with FusionRule naturally discovers tensor parallism across engines.
+struct DotSplitRule : public Rule
+{
+    uint32_t splitThreshold = 1024; // Only split dimensions >= 2048 (e.g. 2048 -> 1024 x 2)
+    std::unordered_set<uint32_t> visited;
+
+    std::string name() const override
+    {
+        return "DotSplitRule";
+    }
+
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        if (visited.count(eNodeIdx))
+            return false;
+
+        const EGraph &egraph = ctx.egraph;
+        if (eNodeIdx >= egraph.getENodes().size())
+            return false;
+
+        const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
+        if (enode.getOpType() != OpType::DOT)
+            return false;
+
+        EClassId aClass = egraph.findConst(enode.getChildren()[0]);
+        EClassId bClass = egraph.findConst(enode.getChildren()[1]);
+        const EClass &aCls = egraph.getEClass(aClass);
+        const EClass &bCls = egraph.getEClass(bClass);
+
+        // Rank 2: A [M, K], B [K, N]
+        if (aCls.shape.size() == 2 && bCls.shape.size() == 2)
+        {
+            uint32_t N = bCls.shape[1];
+            uint32_t K = aCls.shape[1];
+            // Match if Column dimension N or Reduction dimension K is large
+            if (N >= splitThreshold * 2 || K >= splitThreshold * 2)
+                return true;
+        }
+
+        return false;
+    }
+
+    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        EGraph &egraph = ctx.egraph;
+        visited.insert(eNodeIdx);
+
+        const ENode dotNode = egraph.getENode(ENodeId{eNodeIdx});
+        EClassId e_class_id = egraph.getENodeEClass(ENodeId{eNodeIdx});
+
+        EClassId aClass = egraph.findConst(dotNode.getChildren()[0]);
+        EClassId bClass = egraph.findConst(dotNode.getChildren()[1]);
+        const EClass aCls = egraph.getEClass(aClass);
+        const EClass bCls = egraph.getEClass(bClass);
+
+        if (aCls.shape.size() != 2 || bCls.shape.size() != 2)
+            return;
+
+        uint32_t M = aCls.shape[0];
+        uint32_t K = aCls.shape[1];
+        uint32_t N = bCls.shape[1];
+
+        // -----------------------------------------------------------------
+        // Strategy A: Column-Parallel Split (Split N -> N1, N2)
+        // A [M, K] * B1 [K, N1] -> C1 [M, N1]
+        // A [M, K] * B2 [K, N2] -> C2 [M, N2]
+        // C = CONCAT([C1, C2], axis=1)
+        // -----------------------------------------------------------------
+        if (N >= splitThreshold * 2)
+        {
+            uint32_t N1 = N / 2;
+            uint32_t N2 = N - N1;
+
+            // B1 Slice: [0..K, 0..N1]
+            EClassId st1 = egraph.addIntConst({0, 0});
+            EClassId en1 = egraph.addIntConst({(int32_t)K, (int32_t)N1});
+            EClassId step = egraph.addIntConst({1, 1});
+
+            EClassId b1 = addOpToEGraph(egraph, OpType::SLICE, {bClass, st1, en1, step},
+                                        {K, N1}, {bCls.strides[0], bCls.strides[1]}, bCls.dtype, bCls.mem_space);
+
+            // B2 Slice: [0..K, N1..N]
+            EClassId st2 = egraph.addIntConst({0, (int32_t)N1});
+            EClassId en2 = egraph.addIntConst({(int32_t)K, (int32_t)N});
+
+            EClassId b2 = addOpToEGraph(egraph, OpType::SLICE, {bClass, st2, en2, step},
+                                        {K, N2}, {bCls.strides[0], bCls.strides[1]}, bCls.dtype, bCls.mem_space);
+
+            // C1 = A * B1, C2 = A * B2
+            EClassId c1 = addOpToEGraph(egraph, OpType::DOT, {aClass, b1},
+                                        {M, N1}, calcContiguousStrides({M, N1}), dotNode.getDType(), dotNode.getMemSpace());
+            EClassId c2 = addOpToEGraph(egraph, OpType::DOT, {aClass, b2},
+                                        {M, N2}, calcContiguousStrides({M, N2}), dotNode.getDType(), dotNode.getMemSpace());
+
+            // C = CONCAT([C1, C2], axis=1)
+            EClassId axis1 = egraph.addIntConst({1});
+            EClassId c_concat = addOpToEGraph(egraph, OpType::CONCAT, {axis1, c1, c2},
+                                              {M, N}, calcContiguousStrides({M, N}), dotNode.getDType(), dotNode.getMemSpace());
+
+            egraph.merge(e_class_id, c_concat);
+        }
+
+        // -----------------------------------------------------------------
+        // Strategy B: Row-Parallel Split (Split K -> K1, K2)
+        // A1 [M, K1] * B1 [K1, N] -> C1 [M, N]
+        // A2 [M, K2] * B2 [K2, N] -> C2 [M, N]
+        // C = ADD(C1, C2)
+        // -----------------------------------------------------------------
+        if (K >= splitThreshold * 2)
+        {
+            uint32_t K1 = K / 2;
+            uint32_t K2 = K - K1;
+
+            EClassId step = egraph.addIntConst({1, 1});
+
+            // A1 Slice [0..M, 0..K1], A2 Slice [0..M, K1..K]
+            EClassId a_st1 = egraph.addIntConst({0, 0});
+            EClassId a_en1 = egraph.addIntConst({(int32_t)M, (int32_t)K1});
+            EClassId a_st2 = egraph.addIntConst({0, (int32_t)K1});
+            EClassId a_en2 = egraph.addIntConst({(int32_t)M, (int32_t)K});
+
+            EClassId a1 = addOpToEGraph(egraph, OpType::SLICE, {aClass, a_st1, a_en1, step},
+                                        {M, K1}, {aCls.strides[0], aCls.strides[1]}, aCls.dtype, aCls.mem_space);
+            EClassId a2 = addOpToEGraph(egraph, OpType::SLICE, {aClass, a_st2, a_en2, step},
+                                        {M, K2}, {aCls.strides[0], aCls.strides[1]}, aCls.dtype, aCls.mem_space);
+
+            // B1 Slice [0..K1, 0..N], B2 Slice [K1..K, 0..N]
+            EClassId b_st1 = egraph.addIntConst({0, 0});
+            EClassId b_en1 = egraph.addIntConst({(int32_t)K1, (int32_t)N});
+            EClassId b_st2 = egraph.addIntConst({(int32_t)K1, 0});
+            EClassId b_en2 = egraph.addIntConst({(int32_t)K, (int32_t)N});
+
+            EClassId b1 = addOpToEGraph(egraph, OpType::SLICE, {bClass, b_st1, b_en1, step},
+                                        {K1, N}, {bCls.strides[0], bCls.strides[1]}, bCls.dtype, bCls.mem_space);
+            EClassId b2 = addOpToEGraph(egraph, OpType::SLICE, {bClass, b_st2, b_en2, step},
+                                        {K2, N}, {bCls.strides[0], bCls.strides[1]}, bCls.dtype, bCls.mem_space);
+
+            // C1 = A1 * B1, C2 = A2 * B2
+            EClassId c1 = addOpToEGraph(egraph, OpType::DOT, {a1, b1},
+                                        {M, N}, calcContiguousStrides({M, N}), dotNode.getDType(), dotNode.getMemSpace());
+            EClassId c2 = addOpToEGraph(egraph, OpType::DOT, {a2, b2},
+                                        {M, N}, calcContiguousStrides({M, N}), dotNode.getDType(), dotNode.getMemSpace());
+
+            // C = ADD(C1, C2)
+            EClassId c_add = addOpToEGraph(egraph, OpType::ADD, {c1, c2},
+                                           {M, N}, calcContiguousStrides({M, N}), dotNode.getDType(), dotNode.getMemSpace());
+
+            egraph.merge(e_class_id, c_add);
+        }
     }
 };

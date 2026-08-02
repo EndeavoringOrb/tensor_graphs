@@ -206,6 +206,11 @@ struct EGraph
         return getOrAddConstant(shape, strides, dtype, bytes);
     }
 
+    EClassId addIntConst(const std::vector<int32_t> &vals)
+    {
+        return getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
+    }
+
     EClassId addEClass(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides, DType dtype,
                        MemSpace mem_space)
     {
