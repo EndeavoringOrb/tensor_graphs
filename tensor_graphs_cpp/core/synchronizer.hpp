@@ -13,11 +13,11 @@
 
 class Synchronizer
 {
-  private:
+private:
     std::unordered_map<uint32_t, EngineType> buffer_last_writer;
     std::unordered_set<EngineType> busy_engines;
 
-  public:
+public:
     Synchronizer() = default;
 
     // Checks if we need to synchronize any engines before executing an instruction
@@ -71,12 +71,13 @@ class Synchronizer
         }
         else if (engine == EngineType::QUALCOMM_IGPU)
         {
+#ifndef TG_DISABLE_OPENCL
             if (OpenCLState::get().initialized)
             {
                 clFinish(OpenCLState::get().queue);
             }
+#endif
         }
-        // Future async engines can be added here
 
         busy_engines.erase(engine);
     }

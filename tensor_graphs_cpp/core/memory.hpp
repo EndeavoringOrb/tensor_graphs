@@ -25,6 +25,7 @@ struct OpenCLState
 
     void init()
     {
+#ifndef TG_DISABLE_OPENCL
         if (initialized)
             return;
         cl_uint numPlatforms = 0;
@@ -53,6 +54,7 @@ struct OpenCLState
             queue = clCreateCommandQueueWithProperties(context, device, nullptr, &err);
             initialized = true;
         }
+#endif
     }
 
     static OpenCLState &get()
