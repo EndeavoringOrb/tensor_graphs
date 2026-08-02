@@ -17,7 +17,7 @@
 #include "generated/build_context.gen.hpp"
 
 // TODO: make hardware detection better
-#if defined(USE_CUDA)
+#if defined(TG_USE_CUDA)
 #define HW_TAG "CUDA_Enabled"
 #else
 // Determine OS String

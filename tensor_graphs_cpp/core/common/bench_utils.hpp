@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
@@ -82,19 +82,19 @@ struct BenchBuffer
 
         if (mem_space.type == HandleType::CUDA)
         {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
             cudaError_t err = cudaMalloc(&devicePtr, bytes);
             if (err != cudaSuccess)
             {
                 Error::throw_err("cudaMalloc failed: " + std::string(cudaGetErrorString(err)));
             }
 #else
-            Error::throw_err("CUDA backend requested but USE_CUDA is not defined.");
+            Error::throw_err("CUDA backend requested but TG_USE_CUDA is not defined.");
 #endif
         }
         else if (mem_space.type == HandleType::OPENCL)
         {
-#ifdef USE_OPENCL
+#ifdef TG_USE_OPENCL
             OpenCLState::get().init();
             cl_context ctx = OpenCLState::get().context;
             if (!ctx)
@@ -110,7 +110,7 @@ struct BenchBuffer
                                  ". Error: " + std::to_string(err));
             }
 #else
-            Error::throw_err("OPENCL backend requested but USE_OPENCL is not defined.");
+            Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
 #endif
         }
         else
@@ -123,7 +123,7 @@ struct BenchBuffer
     {
         if (mem_space.type == HandleType::CUDA)
         {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
             cudaError_t err = cudaMemcpy(devicePtr, hostData.data(), bytes, cudaMemcpyHostToDevice);
             if (err != cudaSuccess)
             {
@@ -133,7 +133,7 @@ struct BenchBuffer
         }
         else if (mem_space.type == HandleType::OPENCL)
         {
-#ifdef USE_OPENCL
+#ifdef TG_USE_OPENCL
             if (clMem && !hostData.empty())
             {
                 cl_int err = clEnqueueWriteBuffer(OpenCLState::get().queue, clMem,
@@ -145,7 +145,7 @@ struct BenchBuffer
                 }
             }
 #else
-            Error::throw_err("OPENCL backend requested but USE_OPENCL is not defined.");
+            Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
 #endif
         }
     }
@@ -154,7 +154,7 @@ struct BenchBuffer
     {
         if (mem_space.type == HandleType::CUDA)
         {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
             cudaError_t err = cudaMemcpy(hostData.data(), devicePtr, bytes, cudaMemcpyDeviceToHost);
             if (err != cudaSuccess)
             {
@@ -164,7 +164,7 @@ struct BenchBuffer
         }
         else if (mem_space.type == HandleType::OPENCL)
         {
-#ifdef USE_OPENCL
+#ifdef TG_USE_OPENCL
             if (clMem && !hostData.empty())
             {
                 cl_int err = clEnqueueReadBuffer(OpenCLState::get().queue, clMem,
@@ -176,7 +176,7 @@ struct BenchBuffer
                 }
             }
 #else
-            Error::throw_err("OPENCL backend requested but USE_OPENCL is not defined.");
+            Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
 #endif
         }
     }
@@ -187,20 +187,20 @@ struct BenchBuffer
         {
             if (mem_space.type == HandleType::CUDA)
             {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
                 cudaFree(devicePtr);
 #endif
             }
             else if (mem_space.type == HandleType::OPENCL)
             {
-#ifdef USE_OPENCL
+#ifdef TG_USE_OPENCL
                 if (clMem)
                 {
                     clReleaseMemObject(clMem);
                     clMem = nullptr;
                 }
 #else
-                Error::throw_err("OPENCL backend requested but USE_OPENCL is not defined.");
+                Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
 #endif
             }
             devicePtr = nullptr;
@@ -342,22 +342,22 @@ inline void synchronizeHandle(HandleType handle)
 {
     if (handle == HandleType::CUDA)
     {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
         cudaError_t err = cudaDeviceSynchronize();
         if (err != cudaSuccess)
         {
             Error::throw_err("CUDA Synchronization failed: " + std::string(cudaGetErrorString(err)));
         }
 #else
-        Error::throw_err("CUDA backend requested but USE_CUDA is not defined.");
+        Error::throw_err("CUDA backend requested but TG_USE_CUDA is not defined.");
 #endif
     }
     else if (handle == HandleType::OPENCL)
     {
-#ifdef USE_OPENCL
+#ifdef TG_USE_OPENCL
         clFinish(OpenCLState::get().queue);
 #else
-        Error::throw_err("OPENCL backend requested but USE_OPENCL is not defined.");
+        Error::throw_err("OPENCL backend requested but TG_USE_OPENCL is not defined.");
 #endif
     }
 }

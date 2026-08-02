@@ -113,6 +113,24 @@ enum class OpType : uint32_t
     FUSED
 };
 
+// When you add a new DType, remember to update getDTypeSize and toString(DType
+// dtype)
+enum class DType : uint32_t
+{
+    FLOAT32,
+    INT32,
+    INT64,
+    BF16,
+    BOOL,
+    ANY,
+    INT8,
+    E2M1_PACKED_INT8,
+    E2M1,
+    F8_E8M0,
+    F8_E4M3,
+    _COUNT
+};
+
 struct BufferId
 {
     uint32_t value = UINT32_MAX;
@@ -223,6 +241,66 @@ struct MemSpace
     }
 };
 
+namespace tg_hash
+{
+inline uint64_t mix64(uint64_t x) noexcept
+{
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
+}
+
+inline void hashCombine(uint64_t &h, uint64_t v) noexcept
+{
+    h ^= mix64(v) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+}
+
+inline uint64_t computeConstantHash(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides,
+                                    DType dtype, const void *dataPtr, uint64_t sizeBytes) noexcept
+{
+    uint64_t h = static_cast<uint64_t>(dtype);
+
+    for (uint32_t s : shape)
+        hashCombine(h, static_cast<uint64_t>(s));
+
+    for (uint64_t s : strides)
+        hashCombine(h, s);
+
+    const uint8_t *ptr = static_cast<const uint8_t *>(dataPtr);
+    uint64_t i = 0;
+
+    for (; i + 8 <= sizeBytes; i += 8)
+    {
+        uint64_t val;
+        std::memcpy(&val, ptr + i, 8);
+        hashCombine(h, val);
+    }
+
+    if (i < sizeBytes)
+    {
+        uint64_t val = 0;
+        std::memcpy(&val, ptr + i, sizeBytes - i);
+        hashCombine(h, val);
+    }
+
+    return h;
+}
+
+inline uint64_t computeConstantHash(const std::vector<uint32_t> &shape, const std::vector<uint64_t> &strides,
+                                    DType dtype, const std::vector<uint8_t> &data) noexcept
+{
+    return computeConstantHash(shape, strides, dtype, data.data(), data.size());
+}
+
+inline uint64_t computeConstantHash(const std::vector<uint32_t> &shape, DType dtype, const void *dataPtr,
+                                    uint64_t sizeBytes) noexcept
+{
+    static const std::vector<uint64_t> emptyStrides{};
+    return computeConstantHash(shape, emptyStrides, dtype, dataPtr, sizeBytes);
+}
+} // namespace tg_hash
+
 namespace std
 {
 template <> struct hash<LogicalId>
@@ -292,24 +370,6 @@ struct Engine
     {
         return idx == other.idx && type == other.type;
     }
-};
-
-// When you add a new DType, remember to update getDTypeSize and toString(DType
-// dtype)
-enum class DType : uint32_t
-{
-    FLOAT32,
-    INT32,
-    INT64,
-    BF16,
-    BOOL,
-    ANY,
-    INT8,
-    E2M1_PACKED_INT8,
-    E2M1,
-    F8_E8M0,
-    F8_E4M3,
-    _COUNT
 };
 
 inline uint32_t getDTypeNBits(DType dtype)
@@ -550,7 +610,7 @@ template <> struct hash<GraphPatternCacheKey>
     uint64_t operator()(const GraphPatternCacheKey &k) const noexcept
     {
         uint64_t h = 0;
-        auto combine = [&](uint64_t val) { h ^= val + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); };
+        auto combine = [&](uint64_t val) { tg_hash::hashCombine(h, val); };
 
         combine(static_cast<uint64_t>(k.pOpType));
         if (!k.pOpName.empty())

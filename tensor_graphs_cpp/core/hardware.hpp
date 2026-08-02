@@ -5,7 +5,7 @@
 
 #include "core/types.hpp"
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
@@ -108,7 +108,7 @@ struct HardwareCaps
         num_threads = std::thread::hardware_concurrency();
 
         // 2. Detect CUDA
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
         int deviceCount = 0;
         if (cudaGetDeviceCount(&deviceCount) == cudaSuccess && deviceCount > 0)
         {

@@ -16,7 +16,7 @@
 #include <float.h>
 #endif
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
@@ -43,7 +43,7 @@ namespace fs = std::filesystem;
 std::unordered_map<MemSpace, uint64_t> getDefaultBufferSizes()
 {
     std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
     bufferSizes[MemSpace{2, HandleType::CUDA}] = 24ULL * 1024 * 1024 * 1024;
 #endif
     if (HardwareCaps::get().has_opencl)
@@ -56,7 +56,7 @@ std::unordered_map<MemSpace, uint64_t> getDefaultBufferSizes()
 const float *sync_output_to_host(const float *device_ptr, uint64_t num_elements, std::vector<float> &host_buffer)
 {
     const float *output_ptr = device_ptr;
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
     cudaPointerAttributes attrs;
     if (cudaPointerGetAttributes(&attrs, device_ptr) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
     {

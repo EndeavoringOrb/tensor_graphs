@@ -611,7 +611,14 @@ struct Session
                     std::vector<uint8_t> data;
                     br.read(nodeId);
                     br.read(data);
-                    graph.constantStaging[nodeId] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                    auto buf = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                    graph.constantStaging[nodeId] = buf;
+                    if (graph.hasNode(nodeId))
+                    {
+                        const TensorNode &node = graph.getNode(nodeId);
+                        uint64_t dataHash = tg_hash::computeConstantHash(node.getShape(), node.dtype, buf->data(), buf->size());
+                        graph.constantHashIndex[dataHash].push_back(nodeId);
+                    }
                 }
             }
             else

@@ -176,7 +176,11 @@ class PlatformInfo:
 
         # 1. Detect CUDA availability on host system
         has_cuda = False
-        if shutil.which("nvcc") is not None or Path(cuda_path).exists() and (Path(cuda_path) / "include").exists():
+        if (
+            shutil.which("nvcc") is not None
+            or Path(cuda_path).exists()
+            and (Path(cuda_path) / "include").exists()
+        ):
             has_cuda = True
 
         # 2. Detect OpenCL availability on host system
@@ -752,7 +756,7 @@ class Toolchain:
         return "nvcc"
 
     def get_cxx_flags(self) -> list[str]:
-        flags = [f"-I{ROOT_DIR}", f"-DTG_LOG_LEVEL={self.config.log_level_val}"]
+        flags = [f"-I{ROOT_DIR}", "-std=c++20",f"-DTG_LOG_LEVEL={self.config.log_level_val}"]
 
         if self.config.use_opencl:
             flags.append("-DTG_USE_OPENCL")
@@ -773,7 +777,6 @@ class Toolchain:
                 if self.config.profile:
                     flags.extend(["-g", "-gcodeview"])
         else:
-            flags.append("-std=c++20")
             if self.platform.is_arm64:
                 flags.append("-march=armv8.6-a+bf16+i8mm")
 
@@ -783,7 +786,7 @@ class Toolchain:
                 flags.append("-O3")
 
         if self.config.use_cuda:
-            flags.append("-DUSE_CUDA")
+            flags.append("-DTG_USE_CUDA")
             cuda_inc = Path(self.platform.cuda_path) / "include"
             if cuda_inc.exists():
                 flags.append(f"-I{cuda_inc}")
@@ -816,7 +819,7 @@ class Toolchain:
             flags.append("-O3")
 
         if self.config.use_cuda:
-            flags.append("-DUSE_CUDA")
+            flags.append("-DTG_USE_CUDA")
             if not self.platform.is_windows and self.platform.is_arm64:
                 flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 

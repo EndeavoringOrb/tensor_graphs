@@ -9,7 +9,7 @@
 #include <unordered_set>
 #include <vector>
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
 #endif
 

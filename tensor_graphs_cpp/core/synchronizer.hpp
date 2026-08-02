@@ -7,7 +7,7 @@
 #include "core/memory.hpp"
 #include "core/types.hpp"
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
@@ -65,7 +65,7 @@ class Synchronizer
 
         if (engine == EngineType::CUDA_GPU)
         {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
             cudaDeviceSynchronize();
 #endif
         }

@@ -25,6 +25,7 @@ struct Graph
 
     std::unordered_map<LogicalId, InputDataType> input_data_types;
     std::unordered_map<LogicalId, std::shared_ptr<std::vector<uint8_t>>> constantStaging;
+    std::unordered_map<uint64_t, std::vector<LogicalId>> constantHashIndex;
 
     Graph()
     {
@@ -87,6 +88,25 @@ struct Graph
                        std::source_location loc = std::source_location::current())
     {
         uint64_t sizeBytes = getSizeBytes(shape, dtype);
+        uint64_t dataHash = tg_hash::computeConstantHash(shape, dtype, dataPtr, sizeBytes);
+
+        auto it = constantHashIndex.find(dataHash);
+        if (it != constantHashIndex.end())
+        {
+            for (LogicalId candidateId : it->second)
+            {
+                auto stagingIt = constantStaging.find(candidateId);
+                if (stagingIt == constantStaging.end())
+                    continue;
+
+                const TensorNode &node = getNode(candidateId);
+                if (node.dtype == dtype && node.getShape() == shape && stagingIt->second->size() == sizeBytes &&
+                    (sizeBytes == 0 || std::memcmp(stagingIt->second->data(), dataPtr, sizeBytes) == 0))
+                {
+                    return candidateId;
+                }
+            }
+        }
 
         SHA256 sha;
         sha.update(static_cast<const uint8_t *>(dataPtr), sizeBytes);
@@ -95,10 +115,14 @@ struct Graph
         LogicalId id = node.id;
 
         auto buffer = std::make_shared<std::vector<uint8_t>>(sizeBytes);
-        std::memcpy(buffer->data(), dataPtr, sizeBytes);
+        if (sizeBytes > 0)
+        {
+            std::memcpy(buffer->data(), dataPtr, sizeBytes);
+        }
         constantStaging[id] = buffer;
 
         input_data_types[id] = InputDataType::CONSTANT;
+        constantHashIndex[dataHash].push_back(id);
 
         return id;
     }

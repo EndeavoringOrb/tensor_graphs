@@ -12,7 +12,7 @@
 #include "core/loaders/loader.hpp"
 #include "core/types.hpp"
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
 #endif
 
@@ -216,7 +216,7 @@ struct CppBuffer : public DeviceBuffer
     }
 };
 
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
 struct CudaBuffer : public DeviceBuffer
 {
     uint8_t *arena_ptr = nullptr;
@@ -430,18 +430,18 @@ struct MemoryManager
             }
             else if (ms.type == HandleType::OPENCL)
             {
-#ifdef USE_OPENCL
+#ifdef TG_USE_OPENCL
                 buffers[ms] = std::make_unique<OpenCLBuffer>(ms, size);
 #else
-                Error::throw_err("OPENCL requested but USE_OPENCL not defined");
+                Error::throw_err("OPENCL requested but TG_USE_OPENCL not defined");
 #endif
             }
             else if (ms.type == HandleType::CUDA)
             {
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
                 buffers[ms] = std::make_unique<CudaBuffer>(ms, size);
 #else
-                Error::throw_err("CUDA requested but USE_CUDA not defined");
+                Error::throw_err("CUDA requested but TG_USE_CUDA not defined");
 #endif
             }
         }

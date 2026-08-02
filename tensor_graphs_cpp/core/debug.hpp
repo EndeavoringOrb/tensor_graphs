@@ -33,7 +33,7 @@ inline void _checkValues(const std::vector<const void *> &ptrs, const std::vecto
         uint64_t numElements = countElements(views[i]);
 
         const void *host_ptr = ptrs[i];
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
         std::vector<uint8_t> temp_host_data;
         cudaPointerAttributes attrs;
         if (cudaPointerGetAttributes(&attrs, ptrs[i]) == cudaSuccess && attrs.type == cudaMemoryTypeDevice)
@@ -114,7 +114,7 @@ inline void checkValues(const std::vector<const void *> &out_ptrs, const std::ve
                     continue;
 
                 const void *in_host_ptr = in_ptrs[in_i];
-#ifdef USE_CUDA
+#ifdef TG_USE_CUDA
                 std::vector<uint8_t> temp_in_host_data;
                 cudaPointerAttributes in_attrs;
                 if (cudaPointerGetAttributes(&in_attrs, in_ptrs[in_i]) == cudaSuccess &&
