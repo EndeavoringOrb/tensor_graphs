@@ -2,8 +2,6 @@
 import os
 import struct
 
-import torch
-
 OP_TYPES = [
     "INPUT",
     "CACHE",
@@ -41,17 +39,21 @@ OP_TYPES = [
     "FUSED",
 ]
 
-DTYPES = ["FLOAT32", "INT32", "INT64", "BF16", "BOOL", "ANY"]
+DTYPES = [
+    "FLOAT32",
+    "INT32",
+    "INT64",
+    "BF16",
+    "BOOL",
+    "ANY",
+    "INT8",
+    "E2M1_PACKED_INT8",
+    "E2M1",
+    "F8_E8M0",
+    "F8_E4M3",
+]
 BACKENDS = ["STORAGE", "CPU", "CUDA", "OPENCL"]
 STORAGE_TYPES = ["TRANSIENT", "PERSISTENT", "PINNED"]
-
-DTYPE_MAP = {
-    torch.float32: 0,  # FLOAT32
-    torch.int32: 1,  # INT32
-    torch.int64: 2,  # INT64
-    torch.bfloat16: 3,  # BF16
-    torch.bool: 4,  # BOOL
-}
 
 
 def make_enum_mapper(enum_list):

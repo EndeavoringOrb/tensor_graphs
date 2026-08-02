@@ -561,6 +561,25 @@ struct ShapePropagator
             graph.getNode(nodeId).setShape(new_shape);
             break;
         }
+        case OpType::UNPACK: {
+            auto s0 = graph.getNode(graph.getNode(nodeId).child_ids[0]).getShape();
+            DType in_dtype = graph.getNode(graph.getNode(nodeId).child_ids[0]).dtype;
+            DType out_dtype = graph.getNode(nodeId).dtype;
+            uint32_t in_bits = getDTypeNBits(in_dtype);
+            uint32_t out_bits = getDTypeNBits(out_dtype);
+            if (in_bits % out_bits != 0)
+            {
+                Error::throw_err("UNPACK requires input bits to be divisible by output bits.");
+            }
+            uint32_t factor = in_bits / out_bits;
+            std::vector<uint32_t> out_shape = s0;
+            if (!out_shape.empty())
+            {
+                out_shape.back() *= factor;
+            }
+            graph.getNode(nodeId).setShape(out_shape);
+            break;
+        }
         case OpType::FUSED:
             Error::throw_err("this should not happen. only atomic nodes should have their shape inferred.");
         default:
@@ -1497,6 +1516,7 @@ struct ShapePropagator
         case OpType::ARANGE:
         case OpType::FILL:
         case OpType::IM2COL:
+        case OpType::UNPACK: // TODO: make more conservative
             return forwardFull(node, graph, parentRegions);
         case OpType::SLICE:
             return forwardSlice(node, graph, parentRegions);
@@ -1579,6 +1599,7 @@ struct ShapePropagator
         case OpType::ARANGE:
         case OpType::FILL:
         case OpType::IM2COL:
+        case OpType::UNPACK: // TODO: make more conservative
             return backwardFull(node, graph, outputRegions);
         case OpType::SLICE:
             return backwardSlice(node, graph, outputRegions);

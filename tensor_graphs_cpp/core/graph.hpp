@@ -236,7 +236,7 @@ struct Graph
         {
             std::stringstream ss;
             ss << "[Graph.sum] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
-            Error::throw_err(ss.str());
+            Error::throw_err(ss.str(), loc);
         }
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::SUM, "", dtype, {id0, id1}, {}, {}, "", loc);
@@ -249,7 +249,7 @@ struct Graph
         {
             std::stringstream ss;
             ss << "[Graph.max] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
-            Error::throw_err(ss.str());
+            Error::throw_err(ss.str(), loc);
         }
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::MAX, "", dtype, {id0, id1}, {}, {}, "", loc);
@@ -262,7 +262,7 @@ struct Graph
         {
             std::stringstream ss;
             ss << "[Graph.reshape] Expected " << DType::INT32 << " for input 1, got: " << getNode(id1).dtype;
-            Error::throw_err(ss.str());
+            Error::throw_err(ss.str(), loc);
         }
         DType dtype = getNode(id0).dtype;
         TensorNode &node = allocateNode(OpType::RESHAPE, "", dtype, {id0, id1}, {}, {}, "", loc);
@@ -577,6 +577,12 @@ struct Graph
         return node.id;
     }
 
+    LogicalId unpack(LogicalId id0, DType dtype, std::source_location loc = std::source_location::current())
+    {
+        TensorNode &node = allocateNode(OpType::UNPACK, "", dtype, {id0}, {}, {}, "", loc);
+        return node.id;
+    }
+
     // Higher level stuff
     LogicalId repeat(LogicalId id, uint32_t repeats, uint32_t axis,
                      std::source_location loc = std::source_location::current())
@@ -601,6 +607,14 @@ struct Graph
         std::vector<int32_t> shape_int(shape.begin(), shape.end());
         LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
         return fill(constant({1}, &value, DType::FLOAT32), shape_node, loc);
+    }
+
+    LogicalId fill(const int32_t value, const std::vector<uint32_t> &shape,
+                   std::source_location loc = std::source_location::current())
+    {
+        std::vector<int32_t> shape_int(shape.begin(), shape.end());
+        LogicalId shape_node = constant({(uint32_t)shape_int.size()}, shape_int.data(), DType::INT32);
+        return fill(constant({1}, &value, DType::INT32), shape_node, loc);
     }
 
     LogicalId concat(std::vector<LogicalId> ids, uint32_t axis,

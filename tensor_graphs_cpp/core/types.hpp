@@ -45,12 +45,18 @@ using json = nlohmann::json;
 #define TG_ARCH_X64
 #endif
 
+inline std::string toString(std::source_location loc)
+{
+    return std::string(loc.file_name()) + ":" + std::to_string(loc.line());
+}
+
 namespace Error
 {
 template <typename T = std::runtime_error, typename... Args>
-[[noreturn]] inline void throw_err(const std::string &msg, Args &&...args)
+[[noreturn]] inline void throw_err(const std::string &msg, Args &&...args,
+                                   std::source_location loc = std::source_location::current())
 {
-    std::cerr << "\n[TensorGraph Error] " << msg << std::endl << std::flush;
+    std::cerr << "\n[TensorGraph Error] (" << toString(loc) << ") " << msg << std::endl << std::flush;
     throw T(msg, std::forward<Args>(args)...);
 }
 } // namespace Error
@@ -75,6 +81,7 @@ enum class OpType : uint32_t
     SLICE,
     CONCAT,
     CAST,
+    UNPACK,
     REPEAT,
     ARANGE,
     TRIU,
@@ -286,28 +293,49 @@ enum class DType : uint32_t
     BF16,
     BOOL,
     ANY,
+    INT8,
+    E2M1_PACKED_INT8,
+    E2M1,
+    F8_E8M0,
+    F8_E4M3,
     _COUNT
 };
 
-inline uint64_t getDTypeSize(DType dtype)
+inline uint32_t getDTypeNBits(DType dtype)
 {
     switch (dtype)
     {
     case DType::FLOAT32:
-        return 4;
+        return 32;
     case DType::INT32:
-        return 4;
+        return 32;
     case DType::INT64:
-        return 8;
+        return 64;
     case DType::BF16:
-        return 2;
+        return 16;
     case DType::BOOL:
-        return 1;
+        return 8;
     case DType::ANY:
         return 0;
+    case DType::INT8:
+        return 8;
+    case DType::E2M1_PACKED_INT8:
+        return 8;
+    case DType::E2M1:
+        return 4;
+    case DType::F8_E8M0:
+        return 8;
+    case DType::F8_E4M3:
+        return 8;
     default:
-        Error::throw_err("Unknown DType size");
+        Error::throw_err("Unknown DType bits");
     }
+}
+
+inline uint64_t getDTypeSize(DType dtype)
+{
+    uint32_t bits = getDTypeNBits(dtype);
+    return (bits + 7) / 8;
 }
 
 struct ParallelBuffer
@@ -880,6 +908,16 @@ inline std::string toString(DType dtype)
         return "BOOL";
     case DType::ANY:
         return "ANY";
+    case DType::INT8:
+        return "I8";
+    case DType::E2M1_PACKED_INT8:
+        return "E2M1_PACKED_I8";
+    case DType::E2M1:
+        return "E2M1";
+    case DType::F8_E8M0:
+        return "F8_E8M0";
+    case DType::F8_E4M3:
+        return "F8_E4M3";
     default:
         return "UNKNOWN_DTYPE";
     }
@@ -887,14 +925,27 @@ inline std::string toString(DType dtype)
 
 inline DType fromString(const std::string &str)
 {
-    for (uint32_t i = 0; i < static_cast<uint32_t>(DType::_COUNT); ++i)
-    {
-        DType dtype = static_cast<DType>(i);
-        if (toString(dtype) == str)
-            return dtype;
-    }
-    Error::throw_err("Unknown dtype: " + str); // TODO: make this throw custom error, and catch for
-                                               // that instead of generic runtime_error
+    if (str == "F32")
+        return DType::FLOAT32;
+    if (str == "I32")
+        return DType::INT32;
+    if (str == "I64")
+        return DType::INT64;
+    if (str == "BF16")
+        return DType::BF16;
+    if (str == "BOOL")
+        return DType::BOOL;
+    if (str == "I8")
+        return DType::INT8;
+    if (str == "E2M1")
+        return DType::E2M1;
+    if (str == "E2M1_PACKED_I8")
+        return DType::E2M1_PACKED_INT8;
+    if (str == "F8_E8M0")
+        return DType::F8_E8M0;
+    if (str == "F8_E4M3")
+        return DType::F8_E4M3;
+    Error::throw_err("Unknown dtype: " + str);
 }
 
 inline std::string toString(OpType op) // TODO: make build.py check that each op has a case here
@@ -935,6 +986,8 @@ inline std::string toString(OpType op) // TODO: make build.py check that each op
         return "CONCAT";
     case OpType::CAST:
         return "CAST";
+    case OpType::UNPACK:
+        return "UNPACK";
     case OpType::REPEAT:
         return "REPEAT";
     case OpType::ARANGE:
@@ -1528,8 +1581,3 @@ struct KernelContext
         }
     }
 };
-
-inline std::string toString(std::source_location loc)
-{
-    return std::string(loc.file_name()) + ":" + std::to_string(loc.line());
-}

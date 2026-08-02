@@ -1,7 +1,8 @@
-#!/usr/bin/env python3
+#!/usrKey/env python3
 import argparse
 import json
 import os
+import re
 import struct
 import sys
 from functools import reduce
@@ -12,6 +13,15 @@ from rich.table import Table
 
 console = Console()
 console_err = Console(stderr=True)
+
+
+def natural_sort_key(s):
+    """
+    Sort key for natural sorting (e.g., '1', '2', '10' instead of '1', '10', '2').
+    """
+    return [
+        int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", s)
+    ]
 
 
 def get_header(file_path):
@@ -33,10 +43,7 @@ def get_header(file_path):
                 )
                 sys.exit(1)
 
-            # Read the 8-byte little-endian header length
             header_size = struct.unpack("<Q", header_size_bytes)[0]
-
-            # Read the header JSON content
             header_bytes = f.read(header_size)
             if len(header_bytes) < header_size:
                 console_err.print(
@@ -48,9 +55,7 @@ def get_header(file_path):
             return json.loads(header_str), header_size
 
     except Exception as e:
-        console_err.print(
-            f"[bold red]Error reading safetensors file:[/bold red] {e}"
-        )
+        console_err.print(f"[bold red]Error reading safetensors file:[/bold red] {e}")
         sys.exit(1)
 
 
@@ -60,7 +65,6 @@ def num_elements(shape):
     """
     if not shape:
         return 0
-    # Multiplies all dimensions together
     return reduce(lambda x, y: x * y, shape, 1)
 
 
@@ -88,6 +92,165 @@ def format_params(num):
     return str(num)
 
 
+class TensorNode:
+    """
+    Prefix tree node representing tensor name components.
+    """
+
+    def __init__(self, name=""):
+        self.name = name
+        self.children = {}  # key -> TensorNode (insertion order)
+        self.info = None  # Dict with metadata if this is a leaf tensor node
+
+    def add_tensor(self, path_parts, info):
+        if not path_parts:
+            self.info = info
+            return
+        head = path_parts[0]
+        if head not in self.children:
+            self.children[head] = TensorNode(head)
+        self.children[head].add_tensor(path_parts[1:], info)
+
+    def get_structure_signature(self):
+        """
+        Generates a structural signature to determine if sibling sub-trees are identical.
+        Numeric key components are wildcards (*) so 'experts.0' matches 'experts.1'.
+        """
+        if self.info is not None:
+            return ("leaf", self.info.get("dtype"), tuple(self.info.get("shape", [])))
+
+        child_sigs = []
+        for k, child in self.children.items():
+            key_pattern = "*" if k.isdigit() else k
+            child_sigs.append((key_pattern, child.get_structure_signature()))
+        return tuple(child_sigs)
+
+    def get_stats(self):
+        """
+        Recursively calculates total elements, bytes, and total leaf tensors.
+        """
+        if self.info is not None:
+            shape = self.info.get("shape", [])
+            offsets = self.info.get("data_offsets", [0, 0])
+            elems = num_elements(shape)
+            bytes_sz = offsets[1] - offsets[0]
+            return elems, bytes_sz, 1
+
+        tot_elems, tot_bytes, tot_tensors = 0, 0, 0
+        for child in self.children.values():
+            e, b, t = child.get_stats()
+            tot_elems += e
+            tot_bytes += b
+            tot_tensors += t
+        return tot_elems, tot_bytes, tot_tensors
+
+
+def process_tree_nodes(node, current_path, no_group, rows):
+    """
+    Traverses tree nodes to produce display rows. Expands the first instance
+    of repeating structures and collapses subsequent identical siblings.
+    """
+    if node.info is not None:
+        full_name = ".".join(current_path)
+        dtype = node.info.get("dtype", "UNKNOWN")
+        shape = node.info.get("shape", [])
+        offsets = node.info.get("data_offsets", [0, 0])
+        elements = num_elements(shape)
+        byte_size = offsets[1] - offsets[0]
+
+        rows.append(
+            {
+                "type": "tensor",
+                "name": full_name,
+                "dtype": dtype,
+                "shape": str(shape),
+                "elements": elements,
+                "byte_size": byte_size,
+            }
+        )
+        return
+
+    if no_group or len(node.children) <= 1:
+        for child_key, child_node in node.children.items():
+            process_tree_nodes(child_node, current_path + [child_key], no_group, rows)
+        return
+
+    # Check for numeric sibling components eligible for grouping (e.g. expert IDs)
+    numeric_children = [k for k in node.children.keys() if k.isdigit()]
+
+    if len(numeric_children) > 1:
+        # Group numeric children by structural signature
+        sig_groups = {}
+        for k in numeric_children:
+            sig = node.children[k].get_structure_signature()
+            sig_groups.setdefault(sig, []).append(k)
+
+        handled_keys = set()
+        for child_key, child_node in node.children.items():
+            if child_key in handled_keys:
+                continue
+
+            if child_key in numeric_children:
+                sig = child_node.get_structure_signature()
+                group_keys = sig_groups.get(sig, [])
+
+                if len(group_keys) > 1 and group_keys[0] == child_key:
+                    # Render the first instance fully expanded
+                    process_tree_nodes(
+                        child_node, current_path + [child_key], no_group, rows
+                    )
+                    handled_keys.add(child_key)
+
+                    # Group remaining identical siblings into a single summary row
+                    collapsed_keys = group_keys[1:]
+                    for ck in collapsed_keys:
+                        handled_keys.add(ck)
+
+                    tot_elems, tot_bytes, tot_tensors = 0, 0, 0
+                    dtypes = set()
+
+                    for ck in collapsed_keys:
+                        e, b, t = node.children[ck].get_stats()
+                        tot_elems += e
+                        tot_bytes += b
+                        tot_tensors += t
+
+                        def collect_dtypes(n):
+                            if n.info:
+                                dtypes.add(n.info.get("dtype", "UNKNOWN"))
+                            for c in n.children.values():
+                                collect_dtypes(c)
+
+                        collect_dtypes(node.children[ck])
+
+                    first_idx = collapsed_keys[0]
+                    last_idx = collapsed_keys[-1]
+                    count = len(collapsed_keys)
+                    group_path_str = ".".join(
+                        current_path + [f"[{first_idx}..{last_idx}]"]
+                    )
+                    dtype_str = list(dtypes)[0] if len(dtypes) == 1 else "MIXED"
+                    tensors_per_item = tot_tensors // count
+
+                    rows.append(
+                        {
+                            "type": "summary",
+                            "name": f"{group_path_str} ({count} similar structures collapsed)",
+                            "dtype": dtype_str,
+                            "shape": f"[{count} items, {tensors_per_item} tensors/item]",
+                            "elements": tot_elems,
+                            "byte_size": tot_bytes,
+                        }
+                    )
+                    continue
+
+            process_tree_nodes(child_node, current_path + [child_key], no_group, rows)
+            handled_keys.add(child_key)
+    else:
+        for child_key, child_node in node.children.items():
+            process_tree_nodes(child_node, current_path + [child_key], no_group, rows)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Inspect and pretty-print metadata and tensor layouts of a .safetensors file.",
@@ -110,6 +273,11 @@ def main():
         help="Do not display the final summary statistics.",
     )
     parser.add_argument(
+        "--no-group",
+        action="store_true",
+        help="Do not group/collapse repetitive tensor structures (e.g. MoE experts).",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Output the raw parsed header as JSON.",
@@ -122,7 +290,6 @@ def main():
         console.print_json(data=header)
         return
 
-    # Safetensors allow an optional global metadata dictionary under '__metadata__'
     metadata = header.pop("__metadata__", None)
 
     if args.meta_only:
@@ -134,12 +301,14 @@ def main():
             )
         return
 
+    # Sort all keys naturally
+    sorted_keys = sorted(header.keys(), key=natural_sort_key)
+
     if args.name_only:
-        for name in header.keys():
+        for name in sorted_keys:
             console.print(name)
         return
 
-    # Standard detailed visualization output
     console.print(f"[bold cyan]File:[/bold cyan] {args.file}")
     console.print(
         f"[bold cyan]Header Size:[/bold cyan] {format_size(header_size)} [dim]({header_size:,} bytes)[/dim]"
@@ -161,8 +330,7 @@ def main():
 
     console.print()
 
-    names = list(header.keys())
-    if not names:
+    if not sorted_keys:
         console.print("[yellow]No tensors found.[/yellow]")
     else:
         table = Table(
@@ -178,36 +346,50 @@ def main():
         table.add_column("Elements", style="cyan", justify="right")
         table.add_column("Byte Size", style="blue", justify="right")
 
-        total_elements = 0
-        total_bytes = 0
+        # Build prefix tree using naturally ordered tensor paths
+        root = TensorNode("root")
+        for name in sorted_keys:
+            parts = name.split(".")
+            root.add_tensor(parts, header[name])
 
-        for name, info in header.items():
-            dtype = info.get("dtype", "UNKNOWN")
-            shape = info.get("shape", [])
-            offsets = info.get("data_offsets", [0, 0])
+        rows = []
+        process_tree_nodes(root, [], args.no_group, rows)
 
-            elements = num_elements(shape)
-            byte_size = offsets[1] - offsets[0]
-
-            total_elements += elements
-            total_bytes += byte_size
-
-            # Format shape to prevent rendering excessively long lists
-            shape_str = str(shape)
-            if len(shape_str) > 30:
+        for row in rows:
+            shape_str = row["shape"]
+            if len(shape_str) > 30 and row["type"] == "tensor":
                 shape_str = shape_str[:27] + "..."
 
-            table.add_row(
-                name,
-                dtype,
-                shape_str,
-                format_params(elements),
-                format_size(byte_size),
-            )
+            if row["type"] == "summary":
+                # Styled subtly for collapsed summary rows
+                table.add_row(
+                    f"[dim yellow]{row['name']}[/dim yellow]",
+                    f"[dim green]{row['dtype']}[/dim green]",
+                    f"[dim magenta]{shape_str}[/dim magenta]",
+                    f"[dim cyan]{format_params(row['elements'])}[/dim cyan]",
+                    f"[dim blue]{format_size(row['byte_size'])}[/dim blue]",
+                )
+            else:
+                table.add_row(
+                    row["name"],
+                    row["dtype"],
+                    shape_str,
+                    format_params(row["elements"]),
+                    format_size(row["byte_size"]),
+                )
 
         console.print(table)
 
         if not args.no_summary:
+            total_elements = sum(
+                num_elements(info.get("shape", [])) for info in header.values()
+            )
+            total_bytes = sum(
+                info.get("data_offsets", [0, 0])[1]
+                - info.get("data_offsets", [0, 0])[0]
+                for info in header.values()
+            )
+
             console.print("\n[bold cyan]Summary:[/bold cyan]")
             console.print(
                 f"  [bold white]Total Tensors:[/bold white]    [yellow]{len(header)}[/yellow]"
