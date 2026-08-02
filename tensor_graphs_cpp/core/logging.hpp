@@ -8,26 +8,26 @@
 #include <string>
 
 // Numeric representations for log levels
-#define LOG_LEVEL_DEBUG 0
-#define LOG_LEVEL_INFO 1
-#define LOG_LEVEL_WARNING 2
-#define LOG_LEVEL_ERROR 3
-#define LOG_LEVEL_CRITICAL 4
-#define LOG_LEVEL_OFF 5
+#define LOG_LEVEL_L_DEBUG 0
+#define LOG_LEVEL_L_INFO 1
+#define LOG_LEVEL_L_WARNING 2
+#define LOG_LEVEL_L_ERROR 3
+#define LOG_LEVEL_L_CRITICAL 4
+#define LOG_LEVEL_L_OFF 5
 
 // Default log level if not supplied at compile time via -DTG_LOG_LEVEL
 #ifndef TG_LOG_LEVEL
-#define TG_LOG_LEVEL LOG_LEVEL_INFO
+#define TG_LOG_LEVEL LOG_LEVEL_L_INFO
 #endif
 
 enum class LogLevel : int
 {
-    DEBUG = LOG_LEVEL_DEBUG,
-    INFO = LOG_LEVEL_INFO,
-    WARNING = LOG_LEVEL_WARNING,
-    ERROR = LOG_LEVEL_ERROR,
-    CRITICAL = LOG_LEVEL_CRITICAL,
-    OFF = LOG_LEVEL_OFF
+    L_DEBUG = LOG_LEVEL_L_DEBUG,
+    L_INFO = LOG_LEVEL_L_INFO,
+    L_WARNING = LOG_LEVEL_L_WARNING,
+    L_ERROR = LOG_LEVEL_L_ERROR,
+    L_CRITICAL = LOG_LEVEL_L_CRITICAL,
+    L_OFF = LOG_LEVEL_L_OFF
 };
 
 namespace tg_log
@@ -37,15 +37,15 @@ inline const char *logLevelToString(LogLevel level)
 {
     switch (level)
     {
-    case LogLevel::DEBUG:
+    case LogLevel::L_DEBUG:
         return "DEBUG";
-    case LogLevel::INFO:
+    case LogLevel::L_INFO:
         return "INFO";
-    case LogLevel::WARNING:
+    case LogLevel::L_WARNING:
         return "WARNING";
-    case LogLevel::ERROR:
+    case LogLevel::L_ERROR:
         return "ERROR";
-    case LogLevel::CRITICAL:
+    case LogLevel::L_CRITICAL:
         return "CRITICAL";
     default:
         return "UNKNOWN";
@@ -67,7 +67,7 @@ class LogMessage
         stream_ << "\n";
         static std::mutex log_mutex;
         std::lock_guard<std::mutex> lock(log_mutex);
-        if (level_ >= LogLevel::ERROR)
+        if (level_ >= LogLevel::L_ERROR)
         {
             std::cerr << stream_.str() << std::flush;
         }

@@ -37,14 +37,17 @@ struct DeepSeekV4FlashConfig
     uint32_t hc_sinkhorn_iters = 20;
     float hc_eps = 1e-6f;
     float norm_eps = 1e-6f;
-    std::vector<uint32_t> compress_ratios = {0,   0,   4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,
-                                             128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128,
-                                             4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4};
+    float route_scale = 1.5f;
+    float swiglu_limit = 10.0f;
+    float compress_rope_theta = 160000.0f;
+    std::vector<uint32_t> compress_ratios = {0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4,
+                                             128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128,
+                                             4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4};
 };
 
 class DeepSeekV4FlashModel
 {
-  private:
+private:
     DeepSeekV4FlashConfig cfg;
     Graph &g;
     MemoryManager &mem;
@@ -53,7 +56,7 @@ class DeepSeekV4FlashModel
     LogicalId one_fp32;
     LogicalId eps_fp32;
 
-  public:
+public:
     DeepSeekV4FlashModel(DeepSeekV4FlashConfig config, uint32_t sequence_length, Graph &graph, MemoryManager &memory,
                          const std::string &weight_path)
         : cfg(config), g(graph), mem(memory), w_path(weight_path), seq_len(sequence_length)
@@ -153,6 +156,43 @@ class DeepSeekV4FlashModel
         return g.mul(g.mul(x_id, inv_std), w_exp);
     }
 
+    LogicalId clamp_max(LogicalId x, float max_val, const std::vector<uint32_t> &shape)
+    {
+        LogicalId max_node = g.fill(max_val, shape);
+        LogicalId is_less = g.lt(x, max_node);
+        LogicalId is_less_f = g.cast(is_less, DType::FLOAT32);
+        LogicalId not_less_f = g.add(g.fill(1.0f, shape), g.neg(is_less_f));
+        return g.add(g.mul(x, is_less_f), g.mul(max_node, not_less_f));
+    }
+
+    LogicalId clamp_min(LogicalId x, float min_val, const std::vector<uint32_t> &shape)
+    {
+        LogicalId min_node = g.fill(min_val, shape);
+        LogicalId is_greater = g.lt(min_node, x); // x > min_val => min_node < x
+        LogicalId is_greater_f = g.cast(is_greater, DType::FLOAT32);
+        LogicalId not_greater_f = g.add(g.fill(1.0f, shape), g.neg(is_greater_f));
+        return g.add(g.mul(x, is_greater_f), g.mul(min_node, not_greater_f));
+    }
+
+    LogicalId clamp(LogicalId x, float min_val, float max_val, const std::vector<uint32_t> &shape)
+    {
+        return clamp_min(clamp_max(x, max_val, shape), min_val, shape);
+    }
+
+    LogicalId silu(LogicalId x, const std::vector<uint32_t> &shape)
+    {
+        LogicalId neg_one = g.fill(-1.0f, shape);
+        LogicalId neg_x = g.mul(x, neg_one);
+
+        LogicalId e_node = g.fill(TGConstants::E, shape);
+        LogicalId exp_neg_x = g.pow(e_node, neg_x);
+
+        LogicalId one_node = g.fill(1.0f, shape);
+        LogicalId den = g.add(one_node, exp_neg_x);
+        LogicalId sig = g.div(one_node, den);
+        return g.mul(x, sig);
+    }
+
     LogicalId linear(LogicalId x, const std::string &w_name, uint32_t in_d, uint32_t out_d)
     {
         LogicalId w = weight(w_name, in_d, out_d);
@@ -168,14 +208,16 @@ class DeepSeekV4FlashModel
         LogicalId hc_scale = weight(prefix + "scale");
         LogicalId hc_base = weight(prefix + "base");
 
-        auto slice_last_dim = [&](LogicalId t, int32_t st, int32_t en) {
+        auto slice_last_dim = [&](LogicalId t, int32_t st, int32_t en)
+        {
             int32_t starts[] = {0, 0, st};
             int32_t ends[] = {1, (int32_t)seq_len, en};
             int32_t steps[] = {1, 1, 1};
             return g.slice(t, g.constant({3}, starts, DType::INT32), g.constant({3}, ends, DType::INT32),
                            g.constant({3}, steps, DType::INT32));
         };
-        auto slice_1d = [&](LogicalId t, int32_t st, int32_t en) {
+        auto slice_1d = [&](LogicalId t, int32_t st, int32_t en)
+        {
             int32_t starts[] = {st}, ends[] = {en}, steps[] = {1};
             return g.slice(t, g.constant({1}, starts, DType::INT32), g.constant({1}, ends, DType::INT32),
                            g.constant({1}, steps, DType::INT32));
@@ -189,7 +231,8 @@ class DeepSeekV4FlashModel
         LogicalId scale1 = g.fill(slice_1d(hc_scale, 1, 2), {1, seq_len, hc});
         LogicalId scale2 = g.fill(slice_1d(hc_scale, 2, 3), {1, seq_len, hc * hc});
 
-        auto expand_base = [&](LogicalId b, uint32_t dim) {
+        auto expand_base = [&](LogicalId b, uint32_t dim)
+        {
             int32_t sh[] = {1, 1, (int32_t)dim};
             return g.repeat(g.reshape(b, g.constant({3}, sh, DType::INT32)), seq_len, 1);
         };
@@ -197,7 +240,8 @@ class DeepSeekV4FlashModel
         LogicalId base1 = expand_base(slice_1d(hc_base, hc, 2 * hc), hc);
         LogicalId base2 = expand_base(slice_1d(hc_base, 2 * hc, 2 * hc + hc * hc), hc * hc);
 
-        auto sigmoid = [&](LogicalId t, uint32_t last_dim) {
+        auto sigmoid = [&](LogicalId t, uint32_t last_dim)
+        {
             LogicalId neg_one = g.fill(-1.0f, {1, seq_len, last_dim});
             LogicalId neg_t = g.mul(t, neg_one);
             float e_val = TGConstants::E;
@@ -376,7 +420,7 @@ class DeepSeekV4FlashModel
         {
             for (uint32_t d = 0; d < cfg.rope_head_dim; d += 2)
             {
-                float freq = 1.0f / std::pow(cfg.rope_theta, (float)d / cfg.rope_head_dim);
+                float freq = 1.0f / std::pow(cfg.compress_rope_theta, (float)d / cfg.rope_head_dim);
                 float val = s * ratio * freq;
                 freqs_cos[s * cfg.rope_head_dim + d] = std::cos(val);
                 freqs_cos[s * cfg.rope_head_dim + d + 1] = std::cos(val);
@@ -448,7 +492,8 @@ class DeepSeekV4FlashModel
             LogicalId ape_exp = g.repeat(g.reshape(ape, g.constant({4}, sh4_ape, DType::INT32)), S_r, 1);
             score_unflat = g.add(score_unflat, ape_exp);
 
-            auto overlap_transform = [&](LogicalId t, float pad_val) {
+            auto overlap_transform = [&](LogicalId t, float pad_val)
+            {
                 int32_t s0[] = {0, 0, 0, (int32_t)comp_head_dim};
                 int32_t e0[] = {1, (int32_t)S_r, (int32_t)ratio, (int32_t)comp_dim};
                 int32_t st[] = {1, 1, 1, 1};
@@ -576,7 +621,7 @@ class DeepSeekV4FlashModel
     }
 
     LogicalId sparse_attn(LogicalId q, LogicalId full_kv, LogicalId topk_idxs, uint32_t total_kv_len,
-                          uint32_t topk_total)
+                          uint32_t topk_total, LogicalId attn_sink)
     {
         int32_t sh3_q[] = {(int32_t)(seq_len * cfg.n_heads), 1, (int32_t)cfg.head_dim};
         LogicalId q_3d = g.reshape(q, g.constant({3}, sh3_q, DType::INT32));
@@ -600,11 +645,45 @@ class DeepSeekV4FlashModel
         float scale = 1.0f / std::sqrt((float)cfg.head_dim);
         scores = g.mul(scores, g.fill(scale, {seq_len * cfg.n_heads, 1, topk_total}));
 
+        // Mask out padding bounds (index == -1)
+        int32_t neg_one = -1;
+        LogicalId is_invalid = g.eq(topk_idxs, g.fill(g.constant({1}, &neg_one, DType::INT32), {1, seq_len, topk_total}));
+        LogicalId penalty_3d = g.mul(g.cast(is_invalid, DType::FLOAT32), g.fill(-1e9f, {1, seq_len, topk_total}));
+
+        int32_t sh_p1[] = {1, (int32_t)seq_len, 1, (int32_t)topk_total};
+        LogicalId penalty_4d = g.reshape(penalty_3d, g.constant({4}, sh_p1, DType::INT32));
+
+        int32_t rep_h[] = {(int32_t)cfg.n_heads};
+        int32_t ax_2[] = {2};
+        LogicalId penalty_rep = g.repeat(penalty_4d, g.constant({1}, rep_h, DType::INT32), g.constant({1}, ax_2, DType::INT32));
+
+        int32_t sh_p2[] = {(int32_t)(seq_len * cfg.n_heads), 1, (int32_t)topk_total};
+        LogicalId penalty_flat = g.reshape(g.contiguous(penalty_rep), g.constant({3}, sh_p2, DType::INT32));
+
+        scores = g.add(scores, penalty_flat);
+
+        // Include standalone attn_sink
+        int32_t sh_s1[] = {1, (int32_t)cfg.n_heads, 1};
+        LogicalId sink_3d = g.reshape(attn_sink, g.constant({3}, sh_s1, DType::INT32));
+        
+        int32_t rep_s[] = {(int32_t)seq_len};
+        int32_t ax_0[] = {0};
+        LogicalId sink_rep = g.repeat(sink_3d, g.constant({1}, rep_s, DType::INT32), g.constant({1}, ax_0, DType::INT32));
+
+        int32_t sh_s2[] = {(int32_t)(seq_len * cfg.n_heads), 1, 1};
+        LogicalId sink_flat = g.reshape(g.contiguous(sink_rep), g.constant({3}, sh_s2, DType::INT32));
+
         int32_t ax_last = -1;
-        LogicalId max_s = g.repeat(g.max(scores, g.constant({1}, &ax_last, DType::INT32)), topk_total, 2);
+        LogicalId scores_with_sink = g.concat({scores, sink_flat}, 2); // [S*h, 1, topk_total + 1]
+        LogicalId max_s_val = g.max(scores_with_sink, g.constant({1}, &ax_last, DType::INT32)); // [S*h, 1, 1]
+        LogicalId max_s = g.repeat(max_s_val, topk_total, 2);
+
         float e_val = TGConstants::E;
         LogicalId exps = g.pow(g.fill(e_val, {seq_len * cfg.n_heads, 1, topk_total}), g.add(scores, g.neg(max_s)));
-        LogicalId sum_exps = g.repeat(g.sum(exps, g.constant({1}, &ax_last, DType::INT32)), topk_total, 2);
+        LogicalId sink_exp = g.pow(g.fill(e_val, {seq_len * cfg.n_heads, 1, 1}), g.add(sink_flat, g.neg(max_s_val)));
+
+        LogicalId sum_exps_val = g.add(g.sum(exps, g.constant({1}, &ax_last, DType::INT32)), sink_exp);
+        LogicalId sum_exps = g.repeat(sum_exps_val, topk_total, 2);
         LogicalId probs = g.div(exps, sum_exps);
 
         int32_t st_v[] = {0, 0, 0};
@@ -639,6 +718,17 @@ class DeepSeekV4FlashModel
             LogicalId q = linear(qr, prefix + "attn.wq_b.weight", cfg.q_lora_rank, cfg.n_heads * cfg.head_dim);
             int32_t sh4_q[] = {1, (int32_t)seq_len, (int32_t)cfg.n_heads, (int32_t)cfg.head_dim};
             q = g.reshape(q, g.constant({4}, sh4_q, DType::INT32));
+
+            // Secondary Per-Head Norm on Q
+            LogicalId q_sq = g.mul(q, q);
+            int32_t ax_last = -1;
+            LogicalId q_sum_sq = g.sum(q_sq, g.constant({1}, &ax_last, DType::INT32));
+            LogicalId q_mean_sq = g.div(q_sum_sq, g.fill((float)cfg.head_dim, {1, seq_len, cfg.n_heads, 1}));
+            LogicalId q_var = g.add(q_mean_sq, g.fill(cfg.norm_eps, {1, seq_len, cfg.n_heads, 1}));
+            LogicalId q_std = g.pow(q_var, g.fill(0.5f, {1, seq_len, cfg.n_heads, 1}));
+            LogicalId q_inv_std = g.div(g.fill(1.0f, {1, seq_len, cfg.n_heads, 1}), q_std);
+            q = g.mul(q, g.repeat(q_inv_std, cfg.head_dim, 3));
+
             q = apply_rope(q, cfg.n_heads, cfg.head_dim);
 
             LogicalId kv = linear(x_attn, prefix + "attn.wkv.weight", cfg.dim, cfg.head_dim);
@@ -723,7 +813,8 @@ class DeepSeekV4FlashModel
                 total_kv_len += S_r;
             }
 
-            LogicalId o = sparse_attn(q, full_kv, all_topk_idxs, total_kv_len, topk_total);
+            LogicalId attn_sink = weight(prefix + "attn.attn_sink");
+            LogicalId o = sparse_attn(q, full_kv, all_topk_idxs, total_kv_len, topk_total, attn_sink);
 
             int32_t sh3_o[] = {1, (int32_t)seq_len, (int32_t)(cfg.n_heads * cfg.v_head_dim)};
             o = g.reshape(o, g.constant({3}, sh3_o, DType::INT32));
@@ -736,10 +827,7 @@ class DeepSeekV4FlashModel
             auto [x_ffn, post_ffn, comb_ffn] = hc_pre(h, prefix + "hc_ffn_");
             x_ffn = rms_norm(x_ffn, weight(prefix + "ffn_norm.weight"), 1, cfg.dim);
 
-            LogicalId gate_weight = weight(prefix + "ffn.gate.weight");
-            int32_t permute_order[] = {1, 0};
-            LogicalId router_logits =
-                g.dot(x_ffn, g.contiguous(g.permute(gate_weight, g.constant({2}, permute_order, DType::INT32))));
+            LogicalId router_logits = linear(x_ffn, prefix + "ffn.gate.weight", cfg.dim, cfg.n_routed_experts);
 
             float eps_val = 1e-6f;
             LogicalId route_eps = g.fill(eps_val, {1, seq_len, cfg.n_routed_experts});
@@ -749,33 +837,143 @@ class DeepSeekV4FlashModel
                 g.pow(g.add(router_logits, g.pow(g.add(g.mul(router_logits, router_logits), route_eps), route_half)),
                       route_half);
 
-            int32_t ax_last = -1;
             int32_t topk_exp = cfg.n_activated_experts;
             LogicalId top_k_idxs = g.argmax(router_probs, g.constant({1}, &ax_last, DType::INT32),
                                             g.constant({1}, &topk_exp, DType::INT32));
 
+            // Normalize weights and compute flat indices
+            int32_t sh_flat[] = {(int32_t)(seq_len * cfg.n_routed_experts)};
+            LogicalId probs_flat = g.reshape(router_probs, g.constant({1}, sh_flat, DType::INT32));
+
+            int32_t start_val = 0, stop_val = (int32_t)seq_len, step_val = 1;
+            LogicalId row_idx = g.arange(g.constant({1}, &start_val, DType::INT32),
+                                         g.constant({1}, &stop_val, DType::INT32),
+                                         g.constant({1}, &step_val, DType::INT32));
+            int32_t n_exp_i = cfg.n_routed_experts;
+            int32_t seq_len_sh[] = {(int32_t)seq_len};
+            LogicalId n_exp_i_node = g.fill(g.constant({1}, &n_exp_i, DType::INT32), g.constant({1}, seq_len_sh, DType::INT32));
+            LogicalId row_offset = g.mul(row_idx, n_exp_i_node); // [seq_len]
+
+            int32_t sh_ro[] = {1, (int32_t)seq_len, 1};
+            LogicalId row_offset_3d = g.reshape(row_offset, g.constant({3}, sh_ro, DType::INT32));
+
+            int32_t rep_k_ro[] = {topk_exp};
+            int32_t ax_2_ro[] = {2};
+            LogicalId row_offset_rep = g.repeat(row_offset_3d, g.constant({1}, rep_k_ro, DType::INT32), g.constant({1}, ax_2_ro, DType::INT32));
+
+            LogicalId flat_idxs = g.add(row_offset_rep, top_k_idxs);
+            LogicalId topk_weights = g.gather(probs_flat, flat_idxs); // [1, seq_len, top_k]
+
+            int32_t ax_2_val = 2;
+            LogicalId sum_weights = g.sum(topk_weights, g.constant({1}, &ax_2_val, DType::INT32)); // [1, seq_len]
+            LogicalId sum_weights_3d = g.reshape(sum_weights, g.constant({3}, sh_ro, DType::INT32));
+            LogicalId sum_weights_rep = g.repeat(sum_weights_3d, g.constant({1}, rep_k_ro, DType::INT32), g.constant({1}, ax_2_ro, DType::INT32));
+
+            LogicalId norm_weights = g.div(topk_weights, sum_weights_rep);
+            int32_t sh_topk[] = {1, (int32_t)seq_len, (int32_t)topk_exp};
+            LogicalId route_scale_node = g.fill(g.constant({1}, &cfg.route_scale, DType::FLOAT32), g.constant({3}, sh_topk, DType::INT32));
+            norm_weights = g.mul(norm_weights, route_scale_node);
+
+            // Fetch and stack expert weights
+            std::vector<LogicalId> w1_list, w2_list, w3_list;
+            int32_t p[] = {1, 0};
+            LogicalId p_node = g.constant({2}, p, DType::INT32);
+            int32_t sh_1_dim_inter[] = {1, (int32_t)cfg.dim, (int32_t)cfg.moe_inter_dim};
+            LogicalId sh_1_dim_inter_node = g.constant({3}, sh_1_dim_inter, DType::INT32);
+            int32_t sh_1_inter_dim[] = {1, (int32_t)cfg.moe_inter_dim, (int32_t)cfg.dim};
+            LogicalId sh_1_inter_dim_node = g.constant({3}, sh_1_inter_dim, DType::INT32);
+
+            for (uint32_t e = 0; e < cfg.n_routed_experts; ++e)
+            {
+                std::string e_str = std::to_string(e);
+                LogicalId w1 = weight(prefix + "ffn.experts." + e_str + ".w1.weight", cfg.dim, cfg.moe_inter_dim);
+                LogicalId w1_t = g.contiguous(g.permute(w1, p_node));
+                w1_list.push_back(g.reshape(w1_t, sh_1_dim_inter_node));
+
+                LogicalId w2 = weight(prefix + "ffn.experts." + e_str + ".w2.weight", cfg.moe_inter_dim, cfg.dim);
+                LogicalId w2_t = g.contiguous(g.permute(w2, p_node));
+                w2_list.push_back(g.reshape(w2_t, sh_1_inter_dim_node));
+
+                LogicalId w3 = weight(prefix + "ffn.experts." + e_str + ".w3.weight", cfg.dim, cfg.moe_inter_dim);
+                LogicalId w3_t = g.contiguous(g.permute(w3, p_node));
+                w3_list.push_back(g.reshape(w3_t, sh_1_dim_inter_node));
+            }
+
+            int32_t ax_0_val = 0;
+            LogicalId ax_0_node = g.constant({1}, &ax_0_val, DType::INT32);
+            LogicalId W1_stacked = g.concat(w1_list, ax_0_node);
+            LogicalId W2_stacked = g.concat(w2_list, ax_0_node);
+            LogicalId W3_stacked = g.concat(w3_list, ax_0_node);
+
+            // Gather active weights
+            LogicalId W1_active = g.gather(W1_stacked, top_k_idxs); // [1, seq_len, top_k, dim, inter_dim]
+            LogicalId W2_active = g.gather(W2_stacked, top_k_idxs);
+            LogicalId W3_active = g.gather(W3_stacked, top_k_idxs);
+
+            int32_t sh_active_w13[] = {1, (int32_t)(seq_len * topk_exp), (int32_t)cfg.dim, (int32_t)cfg.moe_inter_dim};
+            int32_t sh_active_w2[] = {1, (int32_t)(seq_len * topk_exp), (int32_t)cfg.moe_inter_dim, (int32_t)cfg.dim};
+
+            LogicalId W1_active_r = g.reshape(W1_active, g.constant({4}, sh_active_w13, DType::INT32));
+            LogicalId W2_active_r = g.reshape(W2_active, g.constant({4}, sh_active_w2, DType::INT32));
+            LogicalId W3_active_r = g.reshape(W3_active, g.constant({4}, sh_active_w13, DType::INT32));
+
+            // Prepare x_ffn
+            int32_t sh_x_1[] = {1, (int32_t)seq_len, 1, (int32_t)cfg.dim};
+            LogicalId x_ffn_1 = g.reshape(x_ffn, g.constant({4}, sh_x_1, DType::INT32));
+
+            LogicalId x_ffn_rep = g.repeat(x_ffn_1, g.constant({1}, rep_k_ro, DType::INT32), g.constant({1}, ax_2_ro, DType::INT32));
+
+            int32_t sh_x_2[] = {1, (int32_t)(seq_len * topk_exp), 1, (int32_t)cfg.dim};
+            LogicalId x_ffn_ready = g.reshape(x_ffn_rep, g.constant({4}, sh_x_2, DType::INT32));
+
+            // Apply experts
+            LogicalId w1_out = g.dot(x_ffn_ready, W1_active_r);
+            LogicalId w3_out = g.dot(x_ffn_ready, W3_active_r);
+
+            LogicalId clamped_w1 = clamp_max(w1_out, cfg.swiglu_limit, {1, (uint32_t)(seq_len * topk_exp), 1, cfg.moe_inter_dim});
+            LogicalId clamped_w3 = clamp(w3_out, -cfg.swiglu_limit, cfg.swiglu_limit, {1, (uint32_t)(seq_len * topk_exp), 1, cfg.moe_inter_dim});
+
+            LogicalId gate_silu = silu(clamped_w1, {1, seq_len * topk_exp, 1, cfg.moe_inter_dim});
+            LogicalId gate_up = g.mul(gate_silu, clamped_w3);
+
+            LogicalId expert_out = g.dot(gate_up, W2_active_r); // [1, seq_len * topk, 1, dim]
+
+            // Apply weights
+            int32_t sh_nw_1[] = {1, (int32_t)(seq_len * topk_exp), 1, 1};
+            LogicalId norm_weights_reshaped = g.reshape(norm_weights, g.constant({4}, sh_nw_1, DType::INT32));
+
+            int32_t rep_dim[] = {(int32_t)cfg.dim};
+            int32_t ax_3[] = {3};
+            LogicalId norm_weights_exp = g.repeat(norm_weights_reshaped, g.constant({1}, rep_dim, DType::INT32), g.constant({1}, ax_3, DType::INT32));
+
+            LogicalId weighted_expert_out = g.mul(expert_out, norm_weights_exp);
+
+            // Reduce
+            int32_t sh_weo[] = {1, (int32_t)seq_len, (int32_t)topk_exp, (int32_t)cfg.dim};
+            LogicalId weo_reshaped = g.reshape(weighted_expert_out, g.constant({4}, sh_weo, DType::INT32));
+            LogicalId routed_out_4d = g.sum(weo_reshaped, g.constant({1}, ax_2_ro, DType::INT32)); // [1, seq_len, 1, dim]
+
+            LogicalId routed_out = g.reshape(routed_out_4d, g.constant({1, (int32_t)seq_len, (int32_t)cfg.dim}));
+
             // Shared experts
-            LogicalId shared_out = linear(x_ffn, prefix + "ffn.shared_experts.w1.weight", cfg.dim, cfg.moe_inter_dim);
+            LogicalId shared_gate = linear(x_ffn, prefix + "ffn.shared_experts.w1.weight", cfg.dim, cfg.moe_inter_dim);
+            LogicalId shared_up = linear(x_ffn, prefix + "ffn.shared_experts.w3.weight", cfg.dim, cfg.moe_inter_dim);
 
-            LogicalId sig_one = g.fill(one_fp32, {1, seq_len, cfg.moe_inter_dim});
-            float neg_one_val = -1.0f;
-            LogicalId sig_neg_one = g.fill(neg_one_val, {1, seq_len, cfg.moe_inter_dim});
-            float e_val = TGConstants::E;
-            LogicalId sig_e = g.fill(e_val, {1, seq_len, cfg.moe_inter_dim});
-            LogicalId shared_sig = g.div(sig_one, g.add(sig_one, g.pow(sig_e, g.mul(shared_out, sig_neg_one))));
-            shared_out = g.mul(shared_out, shared_sig);
+            LogicalId clamped_sgate = clamp_max(shared_gate, cfg.swiglu_limit, {1, seq_len, cfg.moe_inter_dim});
+            LogicalId clamped_sup = clamp(shared_up, -cfg.swiglu_limit, cfg.swiglu_limit, {1, seq_len, cfg.moe_inter_dim});
 
-            shared_out =
-                g.mul(shared_out, linear(x_ffn, prefix + "ffn.shared_experts.w3.weight", cfg.dim, cfg.moe_inter_dim));
+            LogicalId shared_silu = silu(clamped_sgate, {1, seq_len, cfg.moe_inter_dim});
+            LogicalId shared_out = g.mul(shared_silu, clamped_sup);
+
             shared_out = linear(shared_out, prefix + "ffn.shared_experts.w2.weight", cfg.moe_inter_dim, cfg.dim);
 
-            h = hc_post(shared_out, residual, post_ffn, comb_ffn);
+            LogicalId ffn_out = g.add(routed_out, shared_out);
+            h = hc_post(ffn_out, residual, post_ffn, comb_ffn);
         }
 
         // Final HC head
         uint32_t hc_dim = cfg.hc_mult * cfg.dim;
-        int32_t sh3_final[] = {1, (int32_t)seq_len, (int32_t)hc_dim};
-        LogicalId x_flat = g.reshape(h, g.constant({3}, sh3_final, DType::INT32));
+        LogicalId x_flat = g.reshape(h, g.constant({1, (int32_t)seq_len, (int32_t)hc_dim}));
 
         // 1. Linear projection for mixes -> [1, seq_len, hc_mult]
         LogicalId hc_head_fn = weight("hc_head_fn");

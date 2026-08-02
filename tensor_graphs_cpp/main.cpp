@@ -103,7 +103,7 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
         *activeGraphOut = &g;
     }
 
-    LOG(INFO) << "Building " << model_name << " Graph...";
+    LOG(L_INFO) << "Building " << model_name << " Graph...";
     auto roots = builder(g, mem, model_path, max_seq_len);
     LogicalId logits_id = roots.roots[0];
     LogicalId inputIdsId = roots.inputs[0];

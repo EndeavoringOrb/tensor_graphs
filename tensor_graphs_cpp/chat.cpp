@@ -77,7 +77,7 @@ int main(int argc, char *argv[])
     Graph g;
 
     DeepSeekV4FlashConfig cfg;
-    uint32_t max_seq_len = 4096;
+    uint32_t max_seq_len = 128;
     LogicalId inputIdsId = g.input({1, max_seq_len}, DType::INT32);
     DeepSeekV4FlashModel model(cfg, max_seq_len, g, mem, model_path);
     LogicalId logits_id = model.build_graph(inputIdsId);
@@ -86,17 +86,17 @@ int main(int argc, char *argv[])
     Repo repo("benchmarks/repo_deepseek-v4", gHash, true);
     Session session(g, mem, logits_id, "dirty_region_caches/deepseek-v4-flash.bin", 0, &repo);
 
-    for (uint32_t i = 1; i <= max_seq_len; ++i)
-    {
-        std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
-        Region inR;
-        inR.region = {{0, 1}, {i - 1, i}};
-        inputDirty[inputIdsId] = {inR};
+    // for (uint32_t i = 1; i <= max_seq_len; ++i)
+    // {
+    //     std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
+    //     Region inR;
+    //     inR.region = {{0, 1}, {i - 1, i}};
+    //     inputDirty[inputIdsId] = {inR};
 
-        Region outR;
-        outR.region = {{0, 1}, {i - 1, i}, {0, cfg.vocab_size}};
-        session.addBucket(inputDirty, {outR});
-    }
+    //     Region outR;
+    //     outR.region = {{0, 1}, {i - 1, i}, {0, cfg.vocab_size}};
+    //     session.addBucket(inputDirty, {outR});
+    // }
 
     session.compile(true);
 

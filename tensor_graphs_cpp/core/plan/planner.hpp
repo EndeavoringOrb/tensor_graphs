@@ -105,10 +105,10 @@ struct Planner
                 ss << "  " << name << ": " << count << " matches\n";
             }
             ss << "Total Matches: " << nMatches;
-            LOG(DEBUG) << ss.str();
+            LOG(L_DEBUG) << ss.str();
             if (!changed)
             {
-                LOG(INFO) << ss.str();
+                LOG(L_INFO) << ss.str();
             }
             timer.tick();
         }
@@ -518,7 +518,7 @@ struct Planner
             });
         }
 
-        LOG(INFO) << "finished sorting enodes";
+        LOG(L_INFO) << "finished sorting enodes";
 
         Extractor extractor = Extractor(egraph, rootEClassId);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));

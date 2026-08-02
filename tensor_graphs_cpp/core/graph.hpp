@@ -640,6 +640,10 @@ struct Graph
 
         return relu_scores;
     }
+
+    LogicalId constant(const std::vector<int32_t> &vals) {
+        return constant({(uint32_t)vals.size()}, vals.data(), DType::INT32);
+    }
 };
 
 inline bool isIsomorphic(const Graph &g1, LogicalId root1, const Graph &g2, LogicalId root2)

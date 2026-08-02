@@ -320,10 +320,12 @@ struct Session
         {
             for (uint64_t i = 0; i < manualBuckets.size(); ++i)
             {
+                if (i == fullBucketIdx)
+                    continue;
                 const Bucket &bucket = manualBuckets[i];
 
                 CompiledGraph plan =
-                    planner.plan(rootId, graph, bucket, protectedCachedNodes, i == fullBucketIdx ? false : doSaturate,
+                    planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate,
                                  false, repo, {}, minCompileSeconds);
 
                 for (const auto &inst : plan.instructions)
@@ -387,6 +389,7 @@ struct Session
     void preallocateLogicalBuffers(const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
                                    std::unordered_map<LogicalId, ParallelBuffer> &out) const
     {
+        // TODO: deduplicate or something, this is adding way too many buffers
         out.clear();
 
         // Collect (LogicalId, MemSpace, shape, dtype) tuples for every logical
