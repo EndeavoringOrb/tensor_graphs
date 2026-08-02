@@ -34,8 +34,7 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     std::vector<MemSpace> current_path = {src};
     std::unordered_set<MemSpace> visited = {src};
 
-    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
-    {
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr) {
         if (curr == dst)
         {
             all_paths.push_back(current_path);
@@ -1425,8 +1424,7 @@ struct SlicePushDownDot : public Rule
                 EClassId stepsIdB = egraph.addIntConst(stepsB);
 
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en,
-                                       EClassId stId, EClassId enId, EClassId stepId)
-                {
+                                       EClassId stId, EClassId enId, EClassId stepId) {
                     EClassId canonId = egraph.findConst(classId);
                     const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;
@@ -1679,7 +1677,8 @@ struct FlattenElementwise : public Rule
     }
 };
 
-// Splits up dot into 2 smaller dots. Can reduce peak memory usage, and combined with FusionRule naturally discovers tensor parallism across engines.
+// Splits up dot into 2 smaller dots. Can reduce peak memory usage, and combined with FusionRule naturally discovers
+// tensor parallism across engines.
 struct DotSplitRule : public Rule
 {
     uint32_t splitThreshold = 1024; // Only split dimensions >= 2048 (e.g. 2048 -> 1024 x 2)
@@ -1708,17 +1707,117 @@ struct DotSplitRule : public Rule
         const EClass &aCls = egraph.getEClass(aClass);
         const EClass &bCls = egraph.getEClass(bClass);
 
-        // Rank 2: A [M, K], B [K, N]
-        if (aCls.shape.size() == 2 && bCls.shape.size() == 2)
+        // Rank 3: A [B, M, K], B [B, K, N]
+        if (aCls.shape.size() == 3 && bCls.shape.size() == 3)
         {
-            uint32_t N = bCls.shape[1];
-            uint32_t K = aCls.shape[1];
+            uint32_t K = aCls.shape[2];
+            uint32_t N = bCls.shape[2];
             // Match if Column dimension N or Reduction dimension K is large
             if (N >= splitThreshold * 2 || K >= splitThreshold * 2)
                 return true;
         }
 
         return false;
+    }
+
+    // -----------------------------------------------------------------
+    // Strategy A: Column-Parallel Split (Split N -> N1, N2)
+    // A [B, M, K] * B1 [B, K, N1] -> C1 [B, M, N1]
+    // A [B, M, K] * B2 [B, K, N2] -> C2 [B, M, N2]
+    // C = CONCAT([C1, C2], axis=2)
+    // -----------------------------------------------------------------
+    void applyStrategyA(EGraph &egraph, EClassId e_class_id, const ENode &dotNode, EClassId aClass, EClassId bClass,
+                        const EClass &aCls, const EClass &bCls)
+    {
+        uint32_t B = aCls.shape[0];
+        uint32_t M = aCls.shape[1];
+        uint32_t K = aCls.shape[2];
+        uint32_t N = bCls.shape[2];
+
+        uint32_t N1 = N / 2;
+        uint32_t N2 = N - N1;
+
+        // B1 Slice: [0..B, 0..K, 0..N1]
+        EClassId st1 = egraph.addIntConst({0, 0, 0});
+        EClassId en1 = egraph.addIntConst({(int32_t)B, (int32_t)K, (int32_t)N1});
+        EClassId step = egraph.addIntConst({1, 1, 1});
+
+        EClassId b1 = addOpToEGraph(egraph, OpType::SLICE, {bClass, st1, en1, step}, {B, K, N1},
+                                    {bCls.strides[0], bCls.strides[1], bCls.strides[2]}, bCls.dtype, bCls.mem_space);
+
+        // B2 Slice: [0..B, 0..K, N1..N]
+        EClassId st2 = egraph.addIntConst({0, 0, (int32_t)N1});
+        EClassId en2 = egraph.addIntConst({(int32_t)B, (int32_t)K, (int32_t)N});
+
+        EClassId b2 = addOpToEGraph(egraph, OpType::SLICE, {bClass, st2, en2, step}, {B, K, N2},
+                                    {bCls.strides[0], bCls.strides[1], bCls.strides[2]}, bCls.dtype, bCls.mem_space);
+
+        // C1 = A * B1, C2 = A * B2
+        EClassId c1 = addOpToEGraph(egraph, OpType::DOT, {aClass, b1}, {B, M, N1}, calcContiguousStrides({B, M, N1}),
+                                    dotNode.getDType(), dotNode.getMemSpace());
+        EClassId c2 = addOpToEGraph(egraph, OpType::DOT, {aClass, b2}, {B, M, N2}, calcContiguousStrides({B, M, N2}),
+                                    dotNode.getDType(), dotNode.getMemSpace());
+
+        // C = CONCAT([C1, C2], axis=2)
+        EClassId axis2 = egraph.addIntConst({2});
+        EClassId c_concat = addOpToEGraph(egraph, OpType::CONCAT, {axis2, c1, c2}, {B, M, N},
+                                          calcContiguousStrides({B, M, N}), dotNode.getDType(), dotNode.getMemSpace());
+
+        egraph.merge(e_class_id, c_concat);
+    }
+
+    // -----------------------------------------------------------------
+    // Strategy B: Row-Parallel Split (Split K -> K1, K2)
+    // A1 [B, M, K1] * B1 [B, K1, N] -> C1 [B, M, N]
+    // A2 [B, M, K2] * B2 [B, K2, N] -> C2 [B, M, N]
+    // C = ADD(C1, C2)
+    // -----------------------------------------------------------------
+    void applyStrategyB(EGraph &egraph, EClassId e_class_id, const ENode &dotNode, EClassId aClass, EClassId bClass,
+                        const EClass &aCls, const EClass &bCls)
+    {
+        uint32_t B = aCls.shape[0];
+        uint32_t M = aCls.shape[1];
+        uint32_t K = aCls.shape[2];
+        uint32_t N = bCls.shape[2];
+
+        uint32_t K1 = K / 2;
+        uint32_t K2 = K - K1;
+
+        EClassId step = egraph.addIntConst({1, 1, 1});
+
+        // A1 Slice [0..B, 0..M, 0..K1], A2 Slice [0..B, 0..M, K1..K]
+        EClassId a_st1 = egraph.addIntConst({0, 0, 0});
+        EClassId a_en1 = egraph.addIntConst({(int32_t)B, (int32_t)M, (int32_t)K1});
+        EClassId a_st2 = egraph.addIntConst({0, 0, (int32_t)K1});
+        EClassId a_en2 = egraph.addIntConst({(int32_t)B, (int32_t)M, (int32_t)K});
+
+        EClassId a1 = addOpToEGraph(egraph, OpType::SLICE, {aClass, a_st1, a_en1, step}, {B, M, K1},
+                                    {aCls.strides[0], aCls.strides[1], aCls.strides[2]}, aCls.dtype, aCls.mem_space);
+        EClassId a2 = addOpToEGraph(egraph, OpType::SLICE, {aClass, a_st2, a_en2, step}, {B, M, K2},
+                                    {aCls.strides[0], aCls.strides[1], aCls.strides[2]}, aCls.dtype, aCls.mem_space);
+
+        // B1 Slice [0..B, 0..K1, 0..N], B2 Slice [0..B, K1..K, 0..N]
+        EClassId b_st1 = egraph.addIntConst({0, 0, 0});
+        EClassId b_en1 = egraph.addIntConst({(int32_t)B, (int32_t)K1, (int32_t)N});
+        EClassId b_st2 = egraph.addIntConst({0, (int32_t)K1, 0});
+        EClassId b_en2 = egraph.addIntConst({(int32_t)B, (int32_t)K, (int32_t)N});
+
+        EClassId b1 = addOpToEGraph(egraph, OpType::SLICE, {bClass, b_st1, b_en1, step}, {B, K1, N},
+                                    {bCls.strides[0], bCls.strides[1], bCls.strides[2]}, bCls.dtype, bCls.mem_space);
+        EClassId b2 = addOpToEGraph(egraph, OpType::SLICE, {bClass, b_st2, b_en2, step}, {B, K2, N},
+                                    {bCls.strides[0], bCls.strides[1], bCls.strides[2]}, bCls.dtype, bCls.mem_space);
+
+        // C1 = A1 * B1, C2 = A2 * B2
+        EClassId c1 = addOpToEGraph(egraph, OpType::DOT, {a1, b1}, {B, M, N}, calcContiguousStrides({B, M, N}),
+                                    dotNode.getDType(), dotNode.getMemSpace());
+        EClassId c2 = addOpToEGraph(egraph, OpType::DOT, {a2, b2}, {B, M, N}, calcContiguousStrides({B, M, N}),
+                                    dotNode.getDType(), dotNode.getMemSpace());
+
+        // C = ADD(C1, C2)
+        EClassId c_add = addOpToEGraph(egraph, OpType::ADD, {c1, c2}, {B, M, N}, calcContiguousStrides({B, M, N}),
+                                       dotNode.getDType(), dotNode.getMemSpace());
+
+        egraph.merge(e_class_id, c_add);
     }
 
     void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
@@ -1734,99 +1833,20 @@ struct DotSplitRule : public Rule
         const EClass aCls = egraph.getEClass(aClass);
         const EClass bCls = egraph.getEClass(bClass);
 
-        if (aCls.shape.size() != 2 || bCls.shape.size() != 2)
+        if (aCls.shape.size() != 3 || bCls.shape.size() != 3)
             return;
 
-        uint32_t M = aCls.shape[0];
-        uint32_t K = aCls.shape[1];
-        uint32_t N = bCls.shape[1];
+        uint32_t K = aCls.shape[2];
+        uint32_t N = bCls.shape[2];
 
-        // -----------------------------------------------------------------
-        // Strategy A: Column-Parallel Split (Split N -> N1, N2)
-        // A [M, K] * B1 [K, N1] -> C1 [M, N1]
-        // A [M, K] * B2 [K, N2] -> C2 [M, N2]
-        // C = CONCAT([C1, C2], axis=1)
-        // -----------------------------------------------------------------
         if (N >= splitThreshold * 2)
         {
-            uint32_t N1 = N / 2;
-            uint32_t N2 = N - N1;
-
-            // B1 Slice: [0..K, 0..N1]
-            EClassId st1 = egraph.addIntConst({0, 0});
-            EClassId en1 = egraph.addIntConst({(int32_t)K, (int32_t)N1});
-            EClassId step = egraph.addIntConst({1, 1});
-
-            EClassId b1 = addOpToEGraph(egraph, OpType::SLICE, {bClass, st1, en1, step},
-                                        {K, N1}, {bCls.strides[0], bCls.strides[1]}, bCls.dtype, bCls.mem_space);
-
-            // B2 Slice: [0..K, N1..N]
-            EClassId st2 = egraph.addIntConst({0, (int32_t)N1});
-            EClassId en2 = egraph.addIntConst({(int32_t)K, (int32_t)N});
-
-            EClassId b2 = addOpToEGraph(egraph, OpType::SLICE, {bClass, st2, en2, step},
-                                        {K, N2}, {bCls.strides[0], bCls.strides[1]}, bCls.dtype, bCls.mem_space);
-
-            // C1 = A * B1, C2 = A * B2
-            EClassId c1 = addOpToEGraph(egraph, OpType::DOT, {aClass, b1},
-                                        {M, N1}, calcContiguousStrides({M, N1}), dotNode.getDType(), dotNode.getMemSpace());
-            EClassId c2 = addOpToEGraph(egraph, OpType::DOT, {aClass, b2},
-                                        {M, N2}, calcContiguousStrides({M, N2}), dotNode.getDType(), dotNode.getMemSpace());
-
-            // C = CONCAT([C1, C2], axis=1)
-            EClassId axis1 = egraph.addIntConst({1});
-            EClassId c_concat = addOpToEGraph(egraph, OpType::CONCAT, {axis1, c1, c2},
-                                              {M, N}, calcContiguousStrides({M, N}), dotNode.getDType(), dotNode.getMemSpace());
-
-            egraph.merge(e_class_id, c_concat);
+            applyStrategyA(egraph, e_class_id, dotNode, aClass, bClass, aCls, bCls);
         }
 
-        // -----------------------------------------------------------------
-        // Strategy B: Row-Parallel Split (Split K -> K1, K2)
-        // A1 [M, K1] * B1 [K1, N] -> C1 [M, N]
-        // A2 [M, K2] * B2 [K2, N] -> C2 [M, N]
-        // C = ADD(C1, C2)
-        // -----------------------------------------------------------------
         if (K >= splitThreshold * 2)
         {
-            uint32_t K1 = K / 2;
-            uint32_t K2 = K - K1;
-
-            EClassId step = egraph.addIntConst({1, 1});
-
-            // A1 Slice [0..M, 0..K1], A2 Slice [0..M, K1..K]
-            EClassId a_st1 = egraph.addIntConst({0, 0});
-            EClassId a_en1 = egraph.addIntConst({(int32_t)M, (int32_t)K1});
-            EClassId a_st2 = egraph.addIntConst({0, (int32_t)K1});
-            EClassId a_en2 = egraph.addIntConst({(int32_t)M, (int32_t)K});
-
-            EClassId a1 = addOpToEGraph(egraph, OpType::SLICE, {aClass, a_st1, a_en1, step},
-                                        {M, K1}, {aCls.strides[0], aCls.strides[1]}, aCls.dtype, aCls.mem_space);
-            EClassId a2 = addOpToEGraph(egraph, OpType::SLICE, {aClass, a_st2, a_en2, step},
-                                        {M, K2}, {aCls.strides[0], aCls.strides[1]}, aCls.dtype, aCls.mem_space);
-
-            // B1 Slice [0..K1, 0..N], B2 Slice [K1..K, 0..N]
-            EClassId b_st1 = egraph.addIntConst({0, 0});
-            EClassId b_en1 = egraph.addIntConst({(int32_t)K1, (int32_t)N});
-            EClassId b_st2 = egraph.addIntConst({(int32_t)K1, 0});
-            EClassId b_en2 = egraph.addIntConst({(int32_t)K, (int32_t)N});
-
-            EClassId b1 = addOpToEGraph(egraph, OpType::SLICE, {bClass, b_st1, b_en1, step},
-                                        {K1, N}, {bCls.strides[0], bCls.strides[1]}, bCls.dtype, bCls.mem_space);
-            EClassId b2 = addOpToEGraph(egraph, OpType::SLICE, {bClass, b_st2, b_en2, step},
-                                        {K2, N}, {bCls.strides[0], bCls.strides[1]}, bCls.dtype, bCls.mem_space);
-
-            // C1 = A1 * B1, C2 = A2 * B2
-            EClassId c1 = addOpToEGraph(egraph, OpType::DOT, {a1, b1},
-                                        {M, N}, calcContiguousStrides({M, N}), dotNode.getDType(), dotNode.getMemSpace());
-            EClassId c2 = addOpToEGraph(egraph, OpType::DOT, {a2, b2},
-                                        {M, N}, calcContiguousStrides({M, N}), dotNode.getDType(), dotNode.getMemSpace());
-
-            // C = ADD(C1, C2)
-            EClassId c_add = addOpToEGraph(egraph, OpType::ADD, {c1, c2},
-                                           {M, N}, calcContiguousStrides({M, N}), dotNode.getDType(), dotNode.getMemSpace());
-
-            egraph.merge(e_class_id, c_add);
+            applyStrategyB(egraph, e_class_id, dotNode, aClass, bClass, aCls, bCls);
         }
     }
 };

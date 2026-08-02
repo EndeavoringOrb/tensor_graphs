@@ -310,7 +310,8 @@ struct ShapePropagator
                    << " (" + toString(s1) +
                           "). Implicit broadcasting is not supported; use explicit "
                           "reshape "
-                          "to align ranks. debugOrigin=" + graph.getNode(nodeId).debugOrigin;
+                          "to align ranks. debugOrigin=" +
+                          graph.getNode(nodeId).debugOrigin;
                 Error::throw_err(ss.str());
             }
 

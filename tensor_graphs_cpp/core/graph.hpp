@@ -623,7 +623,8 @@ struct Graph
         return concat(ids, constant({1}, &axis, DType::INT32), loc);
     }
 
-    LogicalId relu(LogicalId scores, const std::vector<uint32_t> &shape, std::source_location loc = std::source_location::current())
+    LogicalId relu(LogicalId scores, const std::vector<uint32_t> &shape,
+                   std::source_location loc = std::source_location::current())
     {
         // 1. Create a zero tensor with matching shape
         LogicalId zeros = fill(0.0f, shape);

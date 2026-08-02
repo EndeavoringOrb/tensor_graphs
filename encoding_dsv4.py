@@ -434,7 +434,13 @@ def render_message(
     elif messages[index].get("role") in ["user", "developer"]:
         # Normal generation: append Assistant + thinking token
         prompt += ASSISTANT_SP_TOKEN
-        if not drop_thinking and thinking_mode == "thinking" or drop_thinking and thinking_mode == "thinking" and index >= last_user_idx:
+        if (
+            not drop_thinking
+            and thinking_mode == "thinking"
+            or drop_thinking
+            and thinking_mode == "thinking"
+            and index >= last_user_idx
+        ):
             prompt += thinking_start_token
         else:
             prompt += thinking_end_token

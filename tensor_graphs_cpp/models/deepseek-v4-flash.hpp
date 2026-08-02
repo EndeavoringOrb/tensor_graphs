@@ -37,14 +37,14 @@ struct DeepSeekV4FlashConfig
     uint32_t hc_sinkhorn_iters = 20;
     float hc_eps = 1e-6f;
     float norm_eps = 1e-6f;
-    std::vector<uint32_t> compress_ratios = {0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4,
-                                             128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128,
-                                             4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4};
+    std::vector<uint32_t> compress_ratios = {0,   0,   4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,
+                                             128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128,
+                                             4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4,   128, 4};
 };
 
 class DeepSeekV4FlashModel
 {
-private:
+  private:
     DeepSeekV4FlashConfig cfg;
     Graph &g;
     MemoryManager &mem;
@@ -53,7 +53,7 @@ private:
     LogicalId one_fp32;
     LogicalId eps_fp32;
 
-public:
+  public:
     DeepSeekV4FlashModel(DeepSeekV4FlashConfig config, uint32_t sequence_length, Graph &graph, MemoryManager &memory,
                          const std::string &weight_path)
         : cfg(config), g(graph), mem(memory), w_path(weight_path), seq_len(sequence_length)
@@ -143,8 +143,7 @@ public:
         LogicalId mean_sq = g.div(sum_sq, n_node);
         LogicalId eps_node = g.fill(eps_fp32, {dim0, curr_seq_len, 1});
         float half_val = 0.5f;
-        LogicalId std = g.pow(g.add(mean_sq, eps_node),
-                              g.fill(half_val, {dim0, curr_seq_len, 1}));
+        LogicalId std = g.pow(g.add(mean_sq, eps_node), g.fill(half_val, {dim0, curr_seq_len, 1}));
         LogicalId inv_std = g.repeat(g.div(g.fill(one_fp32, {dim0, curr_seq_len, 1}), std), dim_size, 2);
 
         int32_t w_shape[] = {1, 1, (int32_t)dim_size};
@@ -169,16 +168,14 @@ public:
         LogicalId hc_scale = weight(prefix + "scale");
         LogicalId hc_base = weight(prefix + "base");
 
-        auto slice_last_dim = [&](LogicalId t, int32_t st, int32_t en)
-        {
+        auto slice_last_dim = [&](LogicalId t, int32_t st, int32_t en) {
             int32_t starts[] = {0, 0, st};
             int32_t ends[] = {1, (int32_t)seq_len, en};
             int32_t steps[] = {1, 1, 1};
             return g.slice(t, g.constant({3}, starts, DType::INT32), g.constant({3}, ends, DType::INT32),
                            g.constant({3}, steps, DType::INT32));
         };
-        auto slice_1d = [&](LogicalId t, int32_t st, int32_t en)
-        {
+        auto slice_1d = [&](LogicalId t, int32_t st, int32_t en) {
             int32_t starts[] = {st}, ends[] = {en}, steps[] = {1};
             return g.slice(t, g.constant({1}, starts, DType::INT32), g.constant({1}, ends, DType::INT32),
                            g.constant({1}, steps, DType::INT32));
@@ -192,8 +189,7 @@ public:
         LogicalId scale1 = g.fill(slice_1d(hc_scale, 1, 2), {1, seq_len, hc});
         LogicalId scale2 = g.fill(slice_1d(hc_scale, 2, 3), {1, seq_len, hc * hc});
 
-        auto expand_base = [&](LogicalId b, uint32_t dim)
-        {
+        auto expand_base = [&](LogicalId b, uint32_t dim) {
             int32_t sh[] = {1, 1, (int32_t)dim};
             return g.repeat(g.reshape(b, g.constant({3}, sh, DType::INT32)), seq_len, 1);
         };
@@ -201,10 +197,8 @@ public:
         LogicalId base1 = expand_base(slice_1d(hc_base, hc, 2 * hc), hc);
         LogicalId base2 = expand_base(slice_1d(hc_base, 2 * hc, 2 * hc + hc * hc), hc * hc);
 
-        auto sigmoid = [&](LogicalId t, uint32_t last_dim)
-        {
-            LogicalId neg_one =
-                g.fill(-1.0f, {1, seq_len, last_dim});
+        auto sigmoid = [&](LogicalId t, uint32_t last_dim) {
+            LogicalId neg_one = g.fill(-1.0f, {1, seq_len, last_dim});
             LogicalId neg_t = g.mul(t, neg_one);
             float e_val = TGConstants::E;
             LogicalId e_node = g.fill(TGConstants::E, {1, seq_len, last_dim});
@@ -213,8 +207,7 @@ public:
             return g.div(one_node, g.add(one_node, exp_neg_t));
         };
 
-        LogicalId pre =
-            g.add(sigmoid(g.add(g.mul(mixes_pre, scale0), base0), hc), g.fill(eps_fp32, {1, seq_len, hc}));
+        LogicalId pre = g.add(sigmoid(g.add(g.mul(mixes_pre, scale0), base0), hc), g.fill(eps_fp32, {1, seq_len, hc}));
         LogicalId two = g.fill(2.0f, {1, seq_len, hc});
         LogicalId post = g.mul(two, sigmoid(g.add(g.mul(mixes_post, scale1), base1), hc));
         LogicalId comb = g.add(g.mul(mixes_comb, scale2), base2);
@@ -403,8 +396,7 @@ public:
         int32_t sh4_r[] = {1, (int32_t)S_r, 1, (int32_t)cfg.rope_head_dim};
         rope_part = g.reshape(rope_part, g.constant({4}, sh4_r, DType::INT32));
 
-        int32_t s_half1[] = {0, 0, 0, 0},
-                e_half1[] = {1, (int32_t)S_r, 1, (int32_t)cfg.rope_head_dim / 2};
+        int32_t s_half1[] = {0, 0, 0, 0}, e_half1[] = {1, (int32_t)S_r, 1, (int32_t)cfg.rope_head_dim / 2};
         int32_t s_half2[] = {0, 0, 0, (int32_t)cfg.rope_head_dim / 2},
                 e_half2[] = {1, (int32_t)S_r, 1, (int32_t)cfg.rope_head_dim};
         int32_t steps4[] = {1, 1, 1, 1};
@@ -456,8 +448,7 @@ public:
             LogicalId ape_exp = g.repeat(g.reshape(ape, g.constant({4}, sh4_ape, DType::INT32)), S_r, 1);
             score_unflat = g.add(score_unflat, ape_exp);
 
-            auto overlap_transform = [&](LogicalId t, float pad_val)
-            {
+            auto overlap_transform = [&](LogicalId t, float pad_val) {
                 int32_t s0[] = {0, 0, 0, (int32_t)comp_head_dim};
                 int32_t e0[] = {1, (int32_t)S_r, (int32_t)ratio, (int32_t)comp_dim};
                 int32_t st[] = {1, 1, 1, 1};
@@ -470,7 +461,8 @@ public:
                                          g.constant({4}, st, DType::INT32));
 
                 int32_t pad_sh[] = {1, 1, (int32_t)ratio, (int32_t)comp_head_dim};
-                LogicalId pad = g.fill(g.constant({1}, &pad_val, DType::FLOAT32), g.constant({4}, pad_sh, DType::INT32));
+                LogicalId pad =
+                    g.fill(g.constant({1}, &pad_val, DType::FLOAT32), g.constant({4}, pad_sh, DType::INT32));
 
                 int32_t ax1 = 1, ax2 = 2;
                 LogicalId prev_padded = g.concat({pad, prev}, g.constant({1}, &ax1, DType::INT32));
@@ -482,13 +474,12 @@ public:
 
             int32_t ax2_val = 2;
             LogicalId max_s = g.repeat(g.max(score_unflat, g.constant({1}, &ax2_val, DType::INT32)), 2 * ratio, 2);
-            LogicalId exps = g.pow(g.fill(TGConstants::E, {1, S_r, 2 * ratio, comp_head_dim}),
-                                   g.add(score_unflat, g.neg(max_s)));
+            LogicalId exps =
+                g.pow(g.fill(TGConstants::E, {1, S_r, 2 * ratio, comp_head_dim}), g.add(score_unflat, g.neg(max_s)));
             LogicalId sum_exps = g.repeat(g.sum(exps, g.constant({1}, &ax2_val, DType::INT32)), 2 * ratio, 2);
             LogicalId probs = g.div(exps, sum_exps);
 
-            LogicalId compressed =
-                g.sum(g.mul(kv_unflat, probs), g.constant({1}, &ax2_val, DType::INT32));
+            LogicalId compressed = g.sum(g.mul(kv_unflat, probs), g.constant({1}, &ax2_val, DType::INT32));
             int32_t sh3_comp[] = {1, (int32_t)S_r, (int32_t)comp_head_dim};
             compressed = g.reshape(compressed, g.constant({3}, sh3_comp, DType::INT32));
 
@@ -512,13 +503,12 @@ public:
 
             int32_t ax2_val = 2;
             LogicalId max_s = g.repeat(g.max(score_unflat, g.constant({1}, &ax2_val, DType::INT32)), ratio, 2);
-            LogicalId exps = g.pow(g.fill(TGConstants::E, {1, S_r, ratio, comp_dim}),
-                                   g.add(score_unflat, g.neg(max_s)));
+            LogicalId exps =
+                g.pow(g.fill(TGConstants::E, {1, S_r, ratio, comp_dim}), g.add(score_unflat, g.neg(max_s)));
             LogicalId sum_exps = g.repeat(g.sum(exps, g.constant({1}, &ax2_val, DType::INT32)), ratio, 2);
             LogicalId probs = g.div(exps, sum_exps);
 
-            LogicalId compressed =
-                g.sum(g.mul(kv_unflat, probs), g.constant({1}, &ax2_val, DType::INT32));
+            LogicalId compressed = g.sum(g.mul(kv_unflat, probs), g.constant({1}, &ax2_val, DType::INT32));
             int32_t sh3_comp[] = {1, (int32_t)S_r, (int32_t)comp_dim};
             compressed = g.reshape(compressed, g.constant({3}, sh3_comp, DType::INT32));
 
@@ -613,9 +603,7 @@ public:
         int32_t ax_last = -1;
         LogicalId max_s = g.repeat(g.max(scores, g.constant({1}, &ax_last, DType::INT32)), topk_total, 2);
         float e_val = TGConstants::E;
-        LogicalId exps =
-            g.pow(g.fill(e_val, {seq_len * cfg.n_heads, 1, topk_total}),
-                  g.add(scores, g.neg(max_s)));
+        LogicalId exps = g.pow(g.fill(e_val, {seq_len * cfg.n_heads, 1, topk_total}), g.add(scores, g.neg(max_s)));
         LogicalId sum_exps = g.repeat(g.sum(exps, g.constant({1}, &ax_last, DType::INT32)), topk_total, 2);
         LogicalId probs = g.div(exps, sum_exps);
 
@@ -688,18 +676,15 @@ public:
                 LogicalId compress_topk_idxs = Indexer(x_attn, qr, i, indexer_compressed_kv);
 
                 int32_t offset_val = seq_len;
-                LogicalId offset =
-                    g.fill(g.constant({1}, &offset_val, DType::INT32), {1, seq_len, cfg.index_topk});
+                LogicalId offset = g.fill(g.constant({1}, &offset_val, DType::INT32), {1, seq_len, cfg.index_topk});
                 LogicalId shifted_idxs = g.add(compress_topk_idxs, offset);
 
                 int32_t neg_one = -1;
-                LogicalId neg_one_node =
-                    g.fill(g.constant({1}, &neg_one, DType::INT32), {1, seq_len, cfg.index_topk});
+                LogicalId neg_one_node = g.fill(g.constant({1}, &neg_one, DType::INT32), {1, seq_len, cfg.index_topk});
                 LogicalId is_neg_one = g.eq(compress_topk_idxs, neg_one_node);
 
                 LogicalId is_neg_one_f = g.cast(is_neg_one, DType::FLOAT32);
-                LogicalId not_neg_one_f =
-                    g.add(g.fill(one_fp32, {1, seq_len, cfg.index_topk}), g.neg(is_neg_one_f));
+                LogicalId not_neg_one_f = g.add(g.fill(one_fp32, {1, seq_len, cfg.index_topk}), g.neg(is_neg_one_f));
 
                 LogicalId final_shifted = g.cast(g.add(g.mul(is_neg_one_f, g.cast(neg_one_node, DType::FLOAT32)),
                                                        g.mul(not_neg_one_f, g.cast(shifted_idxs, DType::FLOAT32))),
@@ -814,15 +799,17 @@ public:
         // 4. Pre scaling and sigmoid
         LogicalId scale = g.fill(weight("hc_head_scale"), {1, seq_len, cfg.hc_mult});
         int32_t sh3_base[] = {1, 1, (int32_t)cfg.hc_mult};
-        LogicalId base = g.repeat(g.reshape(weight("hc_head_base"), g.constant({3}, sh3_base, DType::INT32)), seq_len, 1);
+        LogicalId base =
+            g.repeat(g.reshape(weight("hc_head_base"), g.constant({3}, sh3_base, DType::INT32)), seq_len, 1);
 
         LogicalId sig_one = g.fill(1.0f, {1, seq_len, cfg.hc_mult});
         float neg_one_val = -1.0f;
         LogicalId sig_neg_one = g.fill(neg_one_val, {1, seq_len, cfg.hc_mult});
         float e_val = TGConstants::E;
         LogicalId sig_e = g.fill(e_val, {1, seq_len, cfg.hc_mult});
-        LogicalId pre = g.add(g.div(sig_one, g.add(sig_one, g.pow(sig_e, g.mul(g.add(g.mul(mixes, scale), base), sig_neg_one)))),
-                              g.fill(cfg.hc_eps, {1, seq_len, cfg.hc_mult}));
+        LogicalId pre =
+            g.add(g.div(sig_one, g.add(sig_one, g.pow(sig_e, g.mul(g.add(g.mul(mixes, scale), base), sig_neg_one)))),
+                  g.fill(cfg.hc_eps, {1, seq_len, cfg.hc_mult}));
 
         // 5. Apply pre to h and sum across hc_mult
         int32_t sh4_pre[] = {1, (int32_t)seq_len, (int32_t)cfg.hc_mult, 1};
