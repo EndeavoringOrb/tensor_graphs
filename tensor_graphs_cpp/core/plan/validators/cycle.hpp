@@ -17,6 +17,7 @@ struct CycleValidator : public ISelectionValidator
     //   Returns true and sets reason="cycle" if a cycle is found.
     bool detectCycles(const std::unordered_map<EClassId, uint32_t> &selection_map, std::string &reason)
     {
+        ProgressTimer t(0, "detectCycles", false, true);
         std::fill(indegree.begin(), indegree.end(), 0);
         for (const auto &kv : selection_map)
         {

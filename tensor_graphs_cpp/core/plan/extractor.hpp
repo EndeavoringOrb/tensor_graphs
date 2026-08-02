@@ -236,6 +236,7 @@ struct Extractor
     // Returns the next graph contained in the egraph
     const std::unordered_map<EClassId, uint32_t> &getNextSelection()
     {
+        ProgressTimer t(0, "getNextSelection", false, true);
         while (!to_process.empty())
         {
             EClassId current = to_process.front();
@@ -293,6 +294,7 @@ struct Extractor
     void backtrack(const std::string reason, const std::unordered_map<EClassId, BufferId> &eclass_to_buf,
                    const std::vector<ParallelBuffer> &buffers, const BufferId overflow)
     {
+        ProgressTimer t(0, "backtrack", false, true);
         target_backtrack_eclass = EClassId{UINT32_MAX};
 
         if (reason == "cycle")
@@ -485,6 +487,7 @@ struct Extractor
 
     void ascend()
     {
+        ProgressTimer t(0, "ascend", false, true);
         bool skip_increment = (target_backtrack_eclass != EClassId{UINT32_MAX});
 
         while (!path.empty())
