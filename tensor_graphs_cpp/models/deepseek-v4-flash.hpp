@@ -250,31 +250,35 @@ public:
 
     std::tuple<LogicalId, LogicalId, LogicalId> hc_pre(LogicalId x, const std::string &prefix)
     {
-        LogicalId x_sq = g.mul(x, x);
-        int32_t ax_last = -1;
-        LogicalId var = g.div(g.sum(x_sq, g.constant({1}, &ax_last, DType::INT32)),
-                              g.fill((float)cfg.dim, {1, seq_len, cfg.hc_mult, 1}));
-        LogicalId std = g.pow(g.add(var, g.fill(cfg.norm_eps, {1, seq_len, cfg.hc_mult, 1})),
-                              g.fill(0.5f, {1, seq_len, cfg.hc_mult, 1}));
-        LogicalId rsqrt = g.repeat(g.div(g.fill(1.0f, {1, seq_len, cfg.hc_mult, 1}), std), cfg.dim, 3);
+        uint32_t hc_dim = cfg.hc_mult * cfg.dim;
+        uint32_t mix_hc = cfg.hc_mult * (2 + cfg.hc_mult);
 
-        int32_t sh3[] = {1, (int32_t)seq_len, (int32_t)(cfg.hc_mult * cfg.dim)};
+        // 1. Reshape x to flat feature space [1, seq_len, hc_mult * dim]
+        int32_t sh3[] = {1, (int32_t)seq_len, (int32_t)hc_dim};
         LogicalId x_flat = g.reshape(x, g.constant({3}, sh3, DType::INT32));
 
+        // 2. Compute rsqrt across all hc_dim features -> [1, seq_len, 1]
+        LogicalId x_sq = g.mul(x_flat, x_flat);
+        int32_t ax_last = -1;
+        LogicalId sum_sq = g.sum(x_sq, g.constant({1}, &ax_last, DType::INT32));
+        LogicalId mean_sq = g.div(sum_sq, g.fill((float)hc_dim, {1, seq_len, 1}));
+        LogicalId std = g.pow(g.add(mean_sq, g.fill(cfg.norm_eps, {1, seq_len, 1})), g.fill(0.5f, {1, seq_len, 1}));
+        LogicalId rsqrt = g.div(g.fill(1.0f, {1, seq_len, 1}), std);
+
+        // 3. Project x_flat -> mixes [1, seq_len, mix_hc]
         LogicalId fn_w = weight(prefix + "fn");
         int32_t p[] = {1, 0};
         LogicalId w_t = g.contiguous(g.permute(fn_w, g.constant({2}, p, DType::INT32)));
-        int32_t sh3_mix[] = {1, (int32_t)(cfg.hc_mult * cfg.dim), (int32_t)(cfg.hc_mult * (2 + cfg.hc_mult))};
+        int32_t sh3_mix[] = {1, (int32_t)hc_dim, (int32_t)mix_hc};
         LogicalId mixes = g.dot(x_flat, g.reshape(w_t, g.constant({3}, sh3_mix, DType::INT32)));
 
-        int32_t sh3_r[] = {1, (int32_t)seq_len, 1};
-        LogicalId rsqrt_flat = g.repeat(g.reshape(g.div(g.fill(1.0f, {1, seq_len, cfg.hc_mult, 1}), std),
-                                                  g.constant({3}, sh3_r, DType::INT32)),
-                                        cfg.hc_mult * (2 + cfg.hc_mult), 2);
-        mixes = g.mul(mixes, rsqrt_flat);
+        // 4. Multiply mixes by rsqrt
+        LogicalId rsqrt_exp = g.repeat(rsqrt, mix_hc, 2);
+        mixes = g.mul(mixes, rsqrt_exp);
 
         auto [pre, post, comb] = hc_split_sinkhorn(mixes, prefix);
 
+        // 5. Apply pre weights back to x and sum over hc_mult
         int32_t sh4[] = {1, (int32_t)seq_len, (int32_t)cfg.hc_mult, 1};
         LogicalId pre_exp = g.repeat(g.reshape(pre, g.constant({4}, sh4, DType::INT32)), cfg.dim, 3);
         LogicalId y = g.mul(x, pre_exp);
@@ -533,14 +537,25 @@ public:
         q = apply_rope(q, cfg.index_n_heads, cfg.index_head_dim); // rope on indexer Q
 
         uint32_t S_r = seq_len / cfg.compress_ratios[layer_idx];
-        int32_t sh2_q[] = {(int32_t)(seq_len * cfg.index_n_heads), (int32_t)cfg.index_head_dim};
-        LogicalId q_2d = g.reshape(q, g.constant({2}, sh2_q, DType::INT32));
-        int32_t sh2_kv[] = {(int32_t)S_r, (int32_t)cfg.index_head_dim};
-        LogicalId kv_2d = g.reshape(compressed_kv, g.constant({2}, sh2_kv, DType::INT32));
-        int32_t permute_order[] = {1, 0};
-        LogicalId scores_2d = g.dot(q_2d, g.contiguous(g.permute(kv_2d, g.constant({2}, permute_order, DType::INT32))));
+
+        // Reshape Q into a 3D tensor: [1, seq_len * index_n_heads, index_head_dim]
+        int32_t sh3_q[] = {1, (int32_t)(seq_len * cfg.index_n_heads), (int32_t)cfg.index_head_dim};
+        LogicalId q_3d = g.reshape(q, g.constant({3}, sh3_q, DType::INT32));
+
+        // Reshape KV into a 3D tensor: [1, S_r, index_head_dim]
+        int32_t sh3_kv[] = {1, (int32_t)S_r, (int32_t)cfg.index_head_dim};
+        LogicalId kv_3d = g.reshape(compressed_kv, g.constant({3}, sh3_kv, DType::INT32));
+
+        // Permute 3D KV last two dims: [1, S_r, index_head_dim] -> [1, index_head_dim, S_r]
+        int32_t permute_order[] = {0, 2, 1};
+        LogicalId kv_3d_t = g.contiguous(g.permute(kv_3d, g.constant({3}, permute_order, DType::INT32)));
+
+        // 3D Batched Dot: [1, seq_len * index_n_heads, 128] x [1, 128, S_r] -> [1, seq_len * index_n_heads, S_r]
+        LogicalId scores_3d = g.dot(q_3d, kv_3d_t);
+
+        // Reshape scores back to 4D: [1, seq_len, index_n_heads, S_r]
         int32_t sh4_s[] = {1, (int32_t)seq_len, (int32_t)cfg.index_n_heads, (int32_t)S_r};
-        LogicalId scores = g.reshape(scores_2d, g.constant({4}, sh4_s, DType::INT32));
+        LogicalId scores = g.reshape(scores_3d, g.constant({4}, sh4_s, DType::INT32));
 
         LogicalId weights = linear(x, prefix + "weights_proj.weight", cfg.dim, cfg.index_n_heads);
 
