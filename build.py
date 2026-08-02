@@ -178,17 +178,19 @@ class PlatformInfo:
         is_windows = os_name == "nt"
         is_arm64 = machine in ("aarch64", "arm64")
 
-        # Environment path resolution with sensible fallbacks
         vcvars_path = os.environ.get(
             "VCVARS_PATH",
             r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat",
         )
         cuda_path = os.environ.get(
             "CUDA_PATH",
-            (
-                r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0"
-                if is_windows
-                else "/usr/local/cuda"
+            os.environ.get(
+                "CUDA_HOME",
+                (
+                    r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0"
+                    if is_windows
+                    else "/usr/local/cuda"
+                ),
             ),
         )
         opencl_sdk_path = os.environ.get("OPENCL_SDK_ROOT", "./OpenCL-SDK/install")
@@ -665,6 +667,17 @@ class Toolchain:
 
     def get_cxx_flags(self) -> List[str]:
         flags = [f"-I{ROOT_DIR}", f"-DTG_LOG_LEVEL={self.config.log_level_val}"]
+        flags.append("-DCL_TARGET_OPENCL_VERSION=310")
+
+        # Automatically discover OpenCL / CUDA include directories if present
+        inc_candidates = [
+            Path(self.platform.opencl_sdk_path) / "include",
+            Path(self.platform.cuda_path) / "include",
+            Path("/usr/local/cuda/include"),
+        ]
+        for inc_dir in inc_candidates:
+            if inc_dir.exists():
+                flags.append(f"-I{inc_dir}")
 
         if self.platform.is_windows:
             if not self.config.use_cuda:
@@ -672,14 +685,6 @@ class Toolchain:
                     ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
                 )
 
-            opencl_inc = f"{self.platform.opencl_sdk_path}/include"
-            flags.extend(
-                [
-                    "-std=c++20",
-                    f"-I{opencl_inc}",
-                    "-DCL_TARGET_OPENCL_VERSION=310",
-                ]
-            )
             if self.config.debug:
                 flags.extend(["-g", "-O0", "-DDEBUG"])
             else:
@@ -687,7 +692,7 @@ class Toolchain:
                 if self.config.profile:
                     flags.extend(["-g", "-gcodeview"])
         else:
-            flags.extend(["-std=c++20", "-DCL_TARGET_OPENCL_VERSION=310"])
+            flags.append("-std=c++20")
             if self.platform.is_arm64:
                 flags.append("-march=armv8.6-a+bf16+i8mm")
 
@@ -698,12 +703,6 @@ class Toolchain:
 
         if self.config.use_cuda:
             flags.append("-DUSE_CUDA")
-            cuda_inc = (
-                f'"{self.platform.cuda_path}\\include"'
-                if self.platform.is_windows
-                else f"-I{self.platform.cuda_path}/include"
-            )
-            flags.append(cuda_inc)
 
         if self.config.disable_opencl:
             flags.append("-DTG_DISABLE_OPENCL")
@@ -713,13 +712,22 @@ class Toolchain:
     def get_ld_flags(self) -> List[str]:
         flags = []
         if not self.config.disable_opencl:
-            if self.platform.is_windows:
-                opencl_lib = f"{self.platform.opencl_sdk_path}/lib"
-                flags.extend([f"-L{opencl_lib}", "-lOpenCL"])
-                if self.config.profile:
-                    flags.append("-Wl,-debug")
-            else:
-                flags.append("-lOpenCL")
+            lib_candidates = [
+                Path(self.platform.opencl_sdk_path) / "lib",
+                Path(self.platform.opencl_sdk_path) / "lib64",
+                Path(self.platform.cuda_path) / "lib64",
+                Path(self.platform.cuda_path) / "lib",
+                Path(self.platform.cuda_path) / "lib/x64",
+                Path("/usr/local/cuda/lib64"),
+            ]
+            for lib_dir in lib_candidates:
+                if lib_dir.exists():
+                    flags.append(f"-L{lib_dir}")
+
+            flags.append("-lOpenCL")
+
+            if self.platform.is_windows and self.config.profile:
+                flags.append("-Wl,-debug")
         return flags
 
     def get_nvcc_flags(self) -> List[str]:

@@ -1,5 +1,4 @@
 #pragma once
-#include <CL/cl.h>
 
 #include <algorithm>
 #include <stdexcept>

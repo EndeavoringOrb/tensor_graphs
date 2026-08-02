@@ -10,7 +10,6 @@
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
-#include <CL/cl.h>
 
 class Synchronizer
 {

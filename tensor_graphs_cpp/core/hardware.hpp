@@ -9,8 +9,6 @@
 #include <cuda_runtime.h>
 #endif
 
-#include <CL/cl.h>
-
 inline void queryOpenCLDeviceLimits(cl_device_id device)
 {
     // Query and print the Device Name

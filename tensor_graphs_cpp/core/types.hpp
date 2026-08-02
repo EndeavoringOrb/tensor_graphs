@@ -1,5 +1,16 @@
 #pragma once
+#pragma once
+#ifndef TG_DISABLE_OPENCL
 #include <CL/cl.h>
+#else
+typedef void *cl_mem;
+typedef void *cl_context;
+typedef void *cl_command_queue;
+typedef void *cl_device_id;
+typedef int cl_int;
+typedef uint64_t cl_ulong;
+typedef uint32_t cl_uint;
+#endif
 
 #include <algorithm>
 #include <cctype>
