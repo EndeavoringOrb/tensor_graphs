@@ -478,6 +478,7 @@ struct ShapePropagator
                 out_shape[i] = target_dims[i];
             }
             graph.getNode(nodeId).setShape(out_shape);
+            graph.getNode(nodeId).strides.assign(out_shape.size(), 0);
             break;
         }
         case OpType::IM2COL: {
