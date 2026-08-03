@@ -908,7 +908,6 @@ struct MemValidator : public ISelectionValidator
             }
         }
 
-        // Find the earliest path index where unique overlapping buffers sum to > failed_reduced_cap
         std::unordered_set<BufferId> seen_bufs;
         uint64_t running_sum = 0;
 
@@ -918,6 +917,7 @@ struct MemValidator : public ISelectionValidator
             if (it == eclass_to_buf.end())
                 continue;
 
+            bool added = false;
             BufferId buf_id = it->second;
             auto size_it = overlapping_buf_sizes.find(buf_id);
             if (size_it != overlapping_buf_sizes.end())
@@ -926,13 +926,30 @@ struct MemValidator : public ISelectionValidator
                 {
                     running_sum += size_it->second;
                     conflict_nodes.push_back(node_in_path);
+                    added = true;
+                }
+            }
 
-                    if (failed_reduced_cap != std::numeric_limits<uint64_t>::max() &&
-                        running_sum > failed_reduced_cap)
+            if (!added)
+            {
+                uint32_t sel = selection_map.at(node_in_path);
+                ENodeId enode_id = egraph.getEClass(node_in_path).enodes[sel];
+                const ENode &node = egraph.getENode(enode_id);
+                for (EClassId child : node.getChildren())
+                {
+                    EClassId canon_child = egraph.findConst(child);
+                    auto child_buf_it = eclass_to_buf.find(canon_child);
+                    if (child_buf_it != eclass_to_buf.end() && overflows.count(child_buf_it->second))
                     {
+                        conflict_nodes.push_back(node_in_path);
                         break;
                     }
                 }
+            }
+
+            if (failed_reduced_cap != std::numeric_limits<uint64_t>::max() && running_sum > failed_reduced_cap)
+            {
+                break;
             }
         }
 

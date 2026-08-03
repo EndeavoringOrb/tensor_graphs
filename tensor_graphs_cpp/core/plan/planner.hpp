@@ -554,8 +554,6 @@ struct Planner
         ProgressTimer loopTimer(0, "", true);
         auto start_time = std::chrono::high_resolution_clock::now();
 
-        
-
         while (remaining_iters-- > 0)
         {
 #ifdef DEBUG
@@ -654,22 +652,46 @@ struct Planner
             if (!valid)
             {
                 int max_conflict_path_pos = -1;
+                int best_conflict_pos = -1;
+
                 for (EClassId c_node : conflict_nodes)
                 {
-                    if (extractor.path_pos[c_node.value] != -1)
+                    int pos = extractor.path_pos[c_node.value];
+                    if (pos != -1)
                     {
-                        if (extractor.path_pos[c_node.value] > max_conflict_path_pos)
+                        if (pos > max_conflict_path_pos)
                         {
-                            max_conflict_path_pos = extractor.path_pos[c_node.value];
+                            max_conflict_path_pos = pos;
+                        }
+
+                        auto sel_it = selection_map.find(c_node);
+                        if (sel_it != selection_map.end())
+                        {
+                            uint32_t sel_idx = sel_it->second;
+                            if (sel_idx + 1 < egraph.getEClass(c_node).enodes.size())
+                            {
+                                if (pos > best_conflict_pos)
+                                {
+                                    best_conflict_pos = pos;
+                                }
+                            }
                         }
                     }
                 }
-                if (max_conflict_path_pos != -1)
+
+                if (best_conflict_pos != -1)
+                {
+                    extractor.target_backtrack_eclass = extractor.path[best_conflict_pos];
+                    LOG(L_DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                                 << "] backjumping to eclass " << toString(extractor.target_backtrack_eclass)
+                                 << " (path index " << best_conflict_pos << ") to resolve OOM.";
+                }
+                else if (max_conflict_path_pos != -1)
                 {
                     extractor.target_backtrack_eclass = extractor.path[max_conflict_path_pos];
-                    std::cout << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
-                              << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
-                              << " (path index " << max_conflict_path_pos << ")" << std::endl;
+                    LOG(L_DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                                 << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
+                                 << " (path index " << max_conflict_path_pos << ")";
                 }
             }
 

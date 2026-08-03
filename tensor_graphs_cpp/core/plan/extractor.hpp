@@ -297,6 +297,7 @@ public:
 
             bool found_valid = false;
             int max_conflict_path_pos = -1;
+            std::vector<EClassId> aggregate_conflicts;
 
             for (; sel < enodes.size(); ++sel)
             {
@@ -322,6 +323,7 @@ public:
                 }
                 else
                 {
+                    aggregate_conflicts.insert(aggregate_conflicts.end(), conflict_nodes.begin(), conflict_nodes.end());
                     for (EClassId c_node : conflict_nodes)
                     {
                         if (c_node != current && path_pos[c_node.value] != -1)
@@ -338,9 +340,35 @@ public:
 
             if (!found_valid)
             {
-                if (max_conflict_path_pos != -1)
+                int best_conflict_pos = -1;
+                for (EClassId c_node : aggregate_conflicts)
                 {
-                    target_backtrack_eclass = path[max_conflict_path_pos];
+                    int pos = path_pos[c_node.value];
+                    if (pos != -1 && c_node != current)
+                    {
+                        auto sel_it = selection_map.find(c_node);
+                        if (sel_it != selection_map.end())
+                        {
+                            uint32_t sel_idx = sel_it->second;
+                            if (sel_idx + 1 < egraph.getEClass(c_node).enodes.size())
+                            {
+                                if (pos > best_conflict_pos)
+                                {
+                                    best_conflict_pos = pos;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (best_conflict_pos != -1)
+                {
+                    target_backtrack_eclass = path[best_conflict_pos];
+                }
+                else
+                {
+                    if (max_conflict_path_pos != -1)
+                        target_backtrack_eclass = path[max_conflict_path_pos];
                 }
                 return false;
             }
