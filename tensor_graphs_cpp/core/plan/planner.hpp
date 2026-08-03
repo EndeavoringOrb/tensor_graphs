@@ -539,8 +539,8 @@ struct Planner
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
         extractor.registerValidator(
             std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical, preallocatedBuffers));
-
         CycleValidator cycleValidator(egraph);
+        DispatchIterator dispatch_iterator(egraph);
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
@@ -554,6 +554,9 @@ struct Planner
         ProgressTimer timer(max_iters, "extracting graphs");
         ProgressTimer loopTimer(0, "", true);
         auto start_time = std::chrono::high_resolution_clock::now();
+
+        
+
         while (remaining_iters-- > 0)
         {
 #ifdef DEBUG
@@ -607,7 +610,7 @@ struct Planner
                     break;
             }
 
-            DispatchIterator dispatch_iterator = DispatchIterator(egraph, selection_map);
+            dispatch_iterator.initOrderState(selection_map);
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
                 valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);

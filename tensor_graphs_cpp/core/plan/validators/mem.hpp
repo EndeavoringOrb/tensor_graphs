@@ -356,6 +356,7 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
 static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
                    std::vector<ParallelBuffer> &allocated)
 {
+    LOG(L_INFO) << "malloc";
     ProgressTimer t(0, "malloc", false, true);
     if (unallocated.empty())
         return true;
@@ -587,6 +588,7 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
             if (current_mem > static_cast<int64_t>(mem_cap))
             {
                 overflow = ev.buffer_id;
+                LOG(L_INFO) << "[check_peak_memory] OOM error at idx=" << ev.time << std::endl;
                 return false;
             }
         }

@@ -42,15 +42,15 @@ public:
     bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
                               std::vector<EClassId> &out_order)
     {
+        LOG(L_INFO) << "getNextDispatchOrder";
         ProgressTimer t(0, "getNextDispatchOrder", false, true);
+
         if (is_done)
             return false;
 
-        if (!first_yield) // The first time we are at the root we don't want to
-                          // exit
+        if (!first_yield)
         {
-            if (!ascend()) // If we are back at the root, we have gone through all
-                           // dispatch orders
+            if (!ascend())
             {
                 is_done = true;
                 return false;
@@ -58,123 +58,172 @@ public:
         }
         first_yield = false;
 
+        uint32_t total_nodes = static_cast<uint32_t>(num_nodes_in_selection);
+        if (total_nodes == 0)
+        {
+            is_done = true;
+            return false;
+        }
+
         while (true)
         {
-            while (true)
-            {
-                std::vector<EClassId> ready = get_ready(selection_map);
+            uint32_t pos = static_cast<uint32_t>(ordered.size());
 
-                // Safety check for dependency cycles (though CycleValidator handles
-                // most of this)
-                if (ready.empty() && !remaining.empty())
+            if (pos == total_nodes)
+            {
+                out_order = ordered;
+                iter++;
+                return true;
+            }
+
+            const auto &ready = ready_stack[pos];
+            uint32_t choice = selection_at_pos[pos];
+
+            if (choice < ready.size())
+            {
+                selection_at_pos[pos] = choice + 1;
+                EClassId node = ready[choice];
+                ordered.push_back(node);
+
+                if (pos + 1 >= ready_stack.size())
+                {
+                    ready_stack.resize(pos + 2);
+                }
+                ready_stack[pos + 1].clear();
+
+                for (uint32_t i = 0; i < ready.size(); ++i)
+                {
+                    if (i != choice)
+                    {
+                        ready_stack[pos + 1].push_back(ready[i]);
+                    }
+                }
+
+                for (EClassId dep : dependents[node.value])
+                {
+                    current_in_degree[dep.value]--;
+                    if (current_in_degree[dep.value] == 0)
+                    {
+                        ready_stack[pos + 1].push_back(dep);
+                    }
+                }
+            }
+            else
+            {
+                selection_at_pos[pos] = 0;
+                if (!ascend())
                 {
                     is_done = true;
                     return false;
                 }
-
-                uint32_t pos = static_cast<uint32_t>(ordered.size());
-                uint32_t choice = 0;
-                auto it = selection_at_pos.find(pos);
-                if (it != selection_at_pos.end())
-                {
-                    choice = it->second + 1;
-                }
-
-                if (choice < ready.size())
-                {
-                    selection_at_pos[pos] = choice;
-                    EClassId node = ready[choice];
-                    ordered.push_back(node);
-                    remaining.erase(node);
-                }
-                else
-                {
-                    if (ordered.empty())
-                    {
-                        is_done = true;
-                        return false;
-                    }
-                    if (!ascend())
-                    {
-                        is_done = true;
-                        return false;
-                    }
-                }
-
-                if (remaining.empty())
-                {
-                    break;
-                }
             }
-
-            out_order = ordered;
-            iter++;
-            return true;
         }
     }
 
-    uint32_t getIter()
+    uint32_t getIter() const
     {
         return iter;
     }
 
 private:
     const EGraph &egraph;
-    std::unordered_set<EClassId> remaining;
+    size_t num_nodes_in_selection = 0;
     std::vector<EClassId> ordered;
-    std::unordered_map<uint32_t, uint32_t> selection_at_pos;
+    std::vector<int32_t> current_in_degree;
+    std::vector<std::vector<EClassId>> dependents;
+    std::vector<std::vector<EClassId>> ready_stack;
+    std::vector<uint32_t> selection_at_pos;
     bool is_done = false;
     bool first_yield = true;
     uint32_t iter = 0;
 
     void initOrderState(const std::unordered_map<EClassId, uint32_t> &selection_map)
     {
-        remaining.clear();
-        for (const auto &kv : selection_map)
-        {
-            remaining.insert(kv.first);
-        }
+        num_nodes_in_selection = selection_map.size();
         ordered.clear();
-        selection_at_pos.clear();
+        ordered.reserve(num_nodes_in_selection);
         is_done = false;
         first_yield = true;
-    }
+        iter = 0;
 
-    std::vector<EClassId> get_ready(const std::unordered_map<EClassId, uint32_t> &selection_map)
-    {
-        std::vector<EClassId> ready;
-        for (EClassId node : remaining)
+        uint32_t max_class_id = static_cast<uint32_t>(egraph.getClasses().size());
+
+        current_in_degree.assign(max_class_id, 0);
+        dependents.clear();
+        dependents.resize(max_class_id);
+
+        ready_stack.clear();
+        ready_stack.resize(num_nodes_in_selection + 1);
+
+        selection_at_pos.assign(num_nodes_in_selection + 1, 0);
+
+        std::vector<EClassId> initial_ready;
+        initial_ready.reserve(1024);
+
+        std::vector<uint8_t> in_selection(max_class_id, 0);
+        for (const auto &kv : selection_map)
         {
-            uint32_t sel = selection_map.at(node);
+            EClassId canon_key = egraph.findConst(kv.first);
+            if (canon_key.value < max_class_id)
+            {
+                in_selection[canon_key.value] = 1;
+            }
+        }
+
+        std::vector<EClassId> unique_children;
+        for (const auto &kv : selection_map)
+        {
+            EClassId node = egraph.findConst(kv.first);
+            if (node.value >= max_class_id)
+                continue;
+
+            uint32_t sel = kv.second;
             ENodeId enode_id = egraph.getEClass(node).enodes[sel];
             const ENode &enode = egraph.getENode(enode_id);
 
-            bool node_ready = true;
+            unique_children.clear();
             for (EClassId child : enode.getChildren())
             {
                 EClassId canon_child = egraph.findConst(child);
-                if (remaining.find(canon_child) != remaining.end())
+                if (canon_child.value < max_class_id && in_selection[canon_child.value] && canon_child != node)
                 {
-                    node_ready = false;
-                    break;
+                    if (std::find(unique_children.begin(), unique_children.end(), canon_child) == unique_children.end())
+                    {
+                        unique_children.push_back(canon_child);
+                    }
                 }
             }
-            if (node_ready)
+
+            current_in_degree[node.value] = static_cast<int32_t>(unique_children.size());
+            if (current_in_degree[node.value] == 0)
             {
-                ready.push_back(node);
+                initial_ready.push_back(node);
+            }
+
+            for (EClassId canon_child : unique_children)
+            {
+                dependents[canon_child.value].push_back(node);
             }
         }
-        return ready;
+
+        ready_stack[0] = std::move(initial_ready);
     }
 
     bool ascend()
     {
-        selection_at_pos.erase(static_cast<uint32_t>(ordered.size()));
+        uint32_t pos = static_cast<uint32_t>(ordered.size());
+        selection_at_pos[pos] = 0;
         if (ordered.empty())
             return false;
+
         EClassId last = ordered.back();
         ordered.pop_back();
-        remaining.insert(last);
+
+        for (EClassId dep : dependents[last.value])
+        {
+            current_in_degree[dep.value]++;
+        }
+
         return true;
     }
 };
@@ -249,7 +298,7 @@ public:
             }
 
             const auto &enodes = egraph.getEClass(current).enodes;
-            
+
             bool found_valid = false;
             int max_conflict_path_pos = -1;
 
@@ -257,10 +306,10 @@ public:
             {
                 ENodeId enode_id = enodes[sel];
                 selection_map[current] = sel;
-                
+
                 bool step_valid = true;
                 std::vector<EClassId> conflict_nodes;
-                
+
                 for (const auto &validator : validators)
                 {
                     if (!validator->validateStep(current, enode_id, selection_map, conflict_nodes))
@@ -269,7 +318,7 @@ public:
                         break;
                     }
                 }
-                
+
                 if (step_valid)
                 {
                     found_valid = true;
