@@ -42,6 +42,6 @@ inline LogicalId refFactoryPowF32_1D_OpenCL(const std::vector<LogicalId> &inputs
 }
 
 REGISTER_KERNEL("Pow_F32_1D_OpenCL", 2, 2, matchPowF32_OpenCL_1D, runPowF32_OpenCL_1D, refFactoryPowF32_1D_OpenCL,
-                MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
+                MemSpace(1, HandleType::OPENCL), {Engine(1, EngineType::QUALCOMM_IGPU)},
                 {DType::FLOAT32, DType::FLOAT32}, {{1024}, {1024}}, {true, true},
                 {{MemSpace(1, HandleType::OPENCL)}, {MemSpace(1, HandleType::OPENCL)}});

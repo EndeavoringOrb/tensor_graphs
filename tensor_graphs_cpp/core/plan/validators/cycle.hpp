@@ -1,4 +1,4 @@
-// tensor_graphs_cpp/core/plan/validators/cycle.hpp
+// File: tensor_graphs_cpp/core/plan/validators/cycle.hpp
 #pragma once
 #include <vector>
 #include <unordered_map>
@@ -84,7 +84,9 @@ struct CycleValidator : public ISelectionValidator
         return true;
     }
 
-    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
+    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map,
+                  const std::vector<EClassId> &order,
+                  const std::vector<EClassId> &path,
                   std::vector<ParallelBuffer> &buffers, std::unordered_map<EClassId, BufferId> &eclass_to_buf,
                   float &cost, std::vector<EClassId> &conflict_nodes) override
     {

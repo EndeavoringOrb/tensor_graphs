@@ -540,7 +540,6 @@ struct Planner
         extractor.registerValidator(
             std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical, preallocatedBuffers));
         CycleValidator cycleValidator(egraph);
-        DispatchIterator dispatch_iterator(egraph);
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
@@ -610,7 +609,7 @@ struct Planner
                     break;
             }
 
-            dispatch_iterator.initOrderState(selection_map);
+            DispatchIterator dispatch_iterator(egraph, selection_map);
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
                 valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);
@@ -867,8 +866,9 @@ struct Planner
                 input_mem_spaces.push_back(baseState.egraph.getEClass(pid_eclass).mem_space);
             }
 
+            bool ignore_in_ms = (node.opType != OpType::COPY_TO);
             std::vector<KernelId> refs = KernelRegistry::get().findMatchingKernels(
-                node.opType, node.opName, inputs, node, true, ram, input_mem_spaces, {cpu}, false, true, false, true);
+                node.opType, node.opName, inputs, node, true, ram, input_mem_spaces, {cpu}, false, ignore_in_ms, false, true);
 
             if (refs.size() == 0)
             {

@@ -62,5 +62,5 @@ inline LogicalId refFactorySoftmax4D_OpenCL(const std::vector<LogicalId> &inputs
 }
 
 REGISTER_KERNEL("Softmax_4D_OpenCL", 1, 1, matchSoftmaxF32_4D_OpenCL, runSoftmaxF32_4D_OpenCL,
-                refFactorySoftmax4D_OpenCL, MemSpace(1, HandleType::OPENCL), {Engine(0, EngineType::QUALCOMM_IGPU)},
+                refFactorySoftmax4D_OpenCL, MemSpace(1, HandleType::OPENCL), {Engine(1, EngineType::QUALCOMM_IGPU)},
                 {DType::FLOAT32}, {{1, 24, 1536, 1536}}, {true}, {{MemSpace(1, HandleType::OPENCL)}});

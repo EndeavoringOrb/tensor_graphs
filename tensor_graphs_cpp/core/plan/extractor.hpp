@@ -42,9 +42,6 @@ public:
     bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
                               std::vector<EClassId> &out_order)
     {
-        LOG(L_INFO) << "getNextDispatchOrder";
-        ProgressTimer t(0, "getNextDispatchOrder", false, true);
-
         if (is_done)
             return false;
 
@@ -263,7 +260,7 @@ public:
     {
         for (const auto &validator : validators)
         {
-            if (!validator->validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes))
+            if (!validator->validate(selection_map, order, path, buffers, eclass_to_buf, cost, conflict_nodes))
             {
                 return false;
             }
@@ -274,7 +271,6 @@ public:
     // Returns true if successfully formed a selection map, false if it needs to backtrack
     bool getNextSelection()
     {
-        ProgressTimer t(0, "getNextSelection", false, true);
         while (!to_process.empty())
         {
             EClassId current = to_process.back();
@@ -375,7 +371,6 @@ public:
 
     void ascend()
     {
-        ProgressTimer t(0, "ascend", false, true);
         bool skip_increment = (target_backtrack_eclass != EClassId{UINT32_MAX});
 
         while (!path.empty())
@@ -389,7 +384,7 @@ public:
 
             if (skip_increment && current == target_backtrack_eclass)
             {
-                std::cout << "skipped back to path size " << std::to_string(path.size()) << std::endl;
+                LOG(L_DEBUG) << "skipped back to path size " << std::to_string(path.size()) << std::endl;
                 skip_increment = false;
             }
 

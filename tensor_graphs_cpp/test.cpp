@@ -412,9 +412,10 @@ std::vector<float> executeReferenceGraph(LogicalId rootId, Graph &graph,
         }
 
         TensorNode outNodeNC = node;
+        bool ignore_in_ms = (node.opType != OpType::COPY_TO);
         auto refs_nc = KernelRegistry::get().findMatchingKernels(
             node.opType, node.opName, inputNodes, outNodeNC, true, MemSpace{1, HandleType::CPP}, {},
-            {Engine{0, EngineType::CPU}}, false, true, false, true);
+            {Engine{0, EngineType::CPU}}, false, ignore_in_ms, false, true);
         TensorView chosenOutView;
         KernelId chosenKernelUid = KernelId{0};
         if (forceNonContiguous && !refs_nc.empty())
@@ -427,7 +428,7 @@ std::vector<float> executeReferenceGraph(LogicalId rootId, Graph &graph,
             TensorNode outNodeC = node;
             auto refs_c = KernelRegistry::get().findMatchingKernels(
                 node.opType, node.opName, inputNodes, outNodeC, true, MemSpace{1, HandleType::CPP}, {},
-                {Engine{0, EngineType::CPU}}, false, true, false, true);
+                {Engine{0, EngineType::CPU}}, false, ignore_in_ms, false, true);
             if (refs_c.empty())
             {
                 Error::throw_err("No reference kernel found for node " + std::to_string(nodeId.value) +
@@ -1045,9 +1046,10 @@ void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
         outNode.strides = outStrides;
 
         std::cout << "Testing Python Ref " << testDir << " [" << toString(opType) << "] ... " << std::flush;
+        bool ignore_in_ms = (opType != OpType::COPY_TO);
         std::vector<KernelId> matches = KernelRegistry::get().findMatchingKernels(
             opType, "", dummyInputNodes, outNode, true, MemSpace{1, HandleType::CPP}, {}, {Engine{0, EngineType::CPU}},
-            false, true, false, true);
+            false, ignore_in_ms, false, true);
         if (matches.empty())
         {
             Error::throw_err("[runPythonTests] FAILED (No reference kernel found)");

@@ -552,7 +552,6 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
                               BufferId &overflow // if failed due to mem, which buffer pushed mem over the edge
 )
 {
-    ProgressTimer t(0, "check_peak_memory", false, true);
     if (mem_cap == std::numeric_limits<uint64_t>::max())
         return true;
 
@@ -715,19 +714,13 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
     return true;
 }
 
+// File: tensor_graphs_cpp/core/plan/validators/mem.hpp
 struct MemValidator : public ISelectionValidator
 {
     const EGraph &egraph;
     const std::vector<ENodeInfo> &enodeInfos;
     const std::unordered_map<MemSpace, uint64_t> &mem_caps;
-    // Map from canonical eclass id -> logical id (used to detect INPUT/CACHE
-    // enodes that correspond to a logical node whose buffer was pre-allocated
-    // outside of the Planner).
     const std::unordered_map<EClassId, LogicalId> &eclassToLogical;
-    // Pre-allocated stable ParallelBuffers for INPUT/CACHE logical nodes,
-    // keyed by LogicalId. These buffers are placed in a contiguous region
-    // starting at offset 0 in their MemSpace, and the malloc solver is given
-    // a reduced mem_cap so it places all other buffers *above* this region.
     const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers;
 
     MemValidator(const EGraph &_egraph, const std::vector<ENodeInfo> &_enodeInfos,
@@ -740,27 +733,18 @@ struct MemValidator : public ISelectionValidator
     }
 
     bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
+                  const std::vector<EClassId> &path,
                   std::vector<ParallelBuffer> &buffers, std::unordered_map<EClassId, BufferId> &eclass_to_buf,
                   float &cost, std::vector<EClassId> &conflict_nodes) override
     {
         ProgressTimer t(0, "validate", false, true);
         cost = get_cost(order, egraph, selection_map, enodeInfos);
-        // bufferize: parallel schedule + per-node lifetimes
+
         std::vector<ParallelBuffer> unallocated_buffers =
             bufferize(order, egraph, selection_map, enodeInfos, eclass_to_buf);
 
-        // ------------------------------------------------------------------
-        // Identify pre-allocated buffers (INPUT/CACHE enodes whose eclass has
-        // a logical mapping AND for which a pre-allocated ParallelBuffer was
-        // supplied by the Session). These buffers must NOT be re-allocated by
-        // the malloc solver; their offset is fixed by the Session so that the
-        // same logical node lands at the same byte offset across runs.
-        // ------------------------------------------------------------------
         std::unordered_set<BufferId> preallocated_buf_ids;
         std::unordered_map<BufferId, ParallelBuffer> preallocated_overrides;
-        // Per-MemSpace "high water mark" of the pre-allocated region.
-        // Buffers are placed contiguously from offset 0 upward by the Session,
-        // so max(offset+size) == total bytes reserved in that MemSpace.
         std::unordered_map<MemSpace, uint64_t> reserved_per_ms;
         for (EClassId eclass : order)
         {
@@ -778,9 +762,6 @@ struct MemValidator : public ISelectionValidator
             if (preIt == preallocatedBuffers.end())
                 continue;
 
-            // The eclass' buffer id was assigned by bufferize() above. We use
-            // that same id in the final `buffers` vector, but override the
-            // offset with the pre-allocated value.
             BufferId buf_id = eclass_to_buf.at(eclass);
             preallocated_buf_ids.insert(buf_id);
             preallocated_overrides[buf_id] = preIt->second;
@@ -791,11 +772,6 @@ struct MemValidator : public ISelectionValidator
             cur = std::max(cur, extent);
         }
 
-        // group buffers by mem_space instead of mem_space.idx.
-        // Pre-allocated buffers are excluded from the malloc input (the user's
-        // "ignore any INPUT or CACHE where eclassToLogical.count(eclass_id) != 0"
-        // rule). They will be added back to the final `buffers` vector below
-        // with their pre-allocated offsets.
         std::unordered_map<MemSpace, std::vector<ParallelBuffer>> buf_by_mem_space;
         for (auto &buf : unallocated_buffers)
         {
@@ -806,33 +782,23 @@ struct MemValidator : public ISelectionValidator
             buf_by_mem_space[buf.mem_space].push_back(buf);
         }
 
-        // malloc: try to assign offsets within (reduced) mem_cap for each
-        // mem_space. The malloc solver places buffers starting from offset 0,
-        // so after it returns we shift every malloc'd buffer UP by
-        // `reserved_per_ms[ms]` to leave the low-offset region for the
-        // pre-allocated INPUT/CACHE buffers.
         buffers.clear();
         buffers.reserve(unallocated_buffers.size());
 
-        // 1. STORAGE buffers: dynamic offset resolved at runtime, no malloc.
         for (auto &buf : unallocated_buffers)
         {
             if (buf.mem_space.type == HandleType::STORAGE)
             {
-                buf.offset = 0; // Actual file offset is resolved dynamically in
-                                // StorageBuffer::setupInput
+                buf.offset = 0;
                 buffers.push_back(buf);
             }
         }
 
-        // 2. Pre-allocated INPUT/CACHE buffers: use the Session-assigned offset.
         for (auto &buf : unallocated_buffers)
         {
             if (preallocated_buf_ids.count(buf.id))
             {
                 ParallelBuffer pre = preallocated_overrides.at(buf.id);
-                // Preserve bufferize()'s assigned id / lifetime / size; only
-                // the offset comes from the pre-allocated buffer.
                 buf.offset = pre.offset;
                 buffers.push_back(buf);
             }
@@ -840,14 +806,14 @@ struct MemValidator : public ISelectionValidator
 
         bool alloc_ok = true;
         BufferId overflow;
+        MemSpace failed_ms;
+        uint64_t failed_reduced_cap = std::numeric_limits<uint64_t>::max();
 
         for (auto &kv : buf_by_mem_space)
         {
             MemSpace ms = kv.first;
             auto &bufs = kv.second;
             uint64_t cap = mem_caps.count(ms) ? mem_caps.at(ms) : std::numeric_limits<uint64_t>::max();
-            // Reduce mem_caps by the max(offset+size) of the pre-allocated
-            // logical-node buffers in this MemSpace.
             uint64_t reserved = reserved_per_ms.count(ms) ? reserved_per_ms.at(ms) : 0;
             uint64_t reduced_cap =
                 (cap == std::numeric_limits<uint64_t>::max()) ? cap : (cap > reserved ? cap - reserved : 0);
@@ -861,12 +827,12 @@ struct MemValidator : public ISelectionValidator
             if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow))
             {
                 alloc_ok = false;
+                failed_ms = ms;
+                failed_reduced_cap = reduced_cap;
                 LOG(L_INFO) << "[MemValidator] OOM error in mem_space (" << ms.idx << ", " << (int)ms.type << ")" << std::endl;
                 break;
             }
 
-            // Shift malloc'd buffers above the pre-allocated region so they
-            // do not collide with the INPUT/CACHE buffers placed at low offsets.
             for (auto &buf : allocated)
             {
                 buf.offset += static_cast<int64_t>(reserved);
@@ -916,33 +882,57 @@ struct MemValidator : public ISelectionValidator
             return true;
         }
 
-        // Isolate the conflicting buffers that caused OOM
-        int buf_idx = -1;
-        for (int i = 0; i < unallocated_buffers.size(); i++)
+        // Find the overflowing buffer details
+        const ParallelBuffer *overflow_buf_ptr = nullptr;
+        for (const auto &b : unallocated_buffers)
         {
-            if (unallocated_buffers[i].id == overflow)
+            if (b.id == overflow)
             {
-                buf_idx = i;
+                overflow_buf_ptr = &b;
                 break;
             }
         }
+
+        std::unordered_map<BufferId, uint64_t> overlapping_buf_sizes;
         std::unordered_set<BufferId> overflows;
-        if (buf_idx != -1)
+
+        if (overflow_buf_ptr)
         {
-            for (int i = 0; i < unallocated_buffers.size(); i++)
+            for (const auto &b : unallocated_buffers)
             {
-                if (overlapsBuf(unallocated_buffers[buf_idx], unallocated_buffers[i]))
+                if (b.mem_space == failed_ms && overlapsBuf(*overflow_buf_ptr, b))
                 {
-                    overflows.insert(unallocated_buffers[i].id);
+                    overflows.insert(b.id);
+                    overlapping_buf_sizes[b.id] = b.size;
                 }
             }
         }
 
-        for (const auto &kv : eclass_to_buf)
+        // Find the earliest path index where unique overlapping buffers sum to > failed_reduced_cap
+        std::unordered_set<BufferId> seen_bufs;
+        uint64_t running_sum = 0;
+
+        for (EClassId node_in_path : path)
         {
-            if (overflows.count(kv.second))
+            auto it = eclass_to_buf.find(node_in_path);
+            if (it == eclass_to_buf.end())
+                continue;
+
+            BufferId buf_id = it->second;
+            auto size_it = overlapping_buf_sizes.find(buf_id);
+            if (size_it != overlapping_buf_sizes.end())
             {
-                conflict_nodes.push_back(kv.first);
+                if (seen_bufs.insert(buf_id).second)
+                {
+                    running_sum += size_it->second;
+                    conflict_nodes.push_back(node_in_path);
+
+                    if (failed_reduced_cap != std::numeric_limits<uint64_t>::max() &&
+                        running_sum > failed_reduced_cap)
+                    {
+                        break;
+                    }
+                }
             }
         }
 
