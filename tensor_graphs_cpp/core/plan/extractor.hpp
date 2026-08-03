@@ -32,7 +32,7 @@ struct ENodeInfo
 
 struct DispatchIterator
 {
-  public:
+public:
     DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map)
         : egraph(_egraph)
     {
@@ -117,7 +117,7 @@ struct DispatchIterator
         return iter;
     }
 
-  private:
+private:
     const EGraph &egraph;
     std::unordered_set<EClassId> remaining;
     std::vector<EClassId> ordered;
@@ -180,18 +180,18 @@ struct DispatchIterator
 
 struct Extractor
 {
-  private:
+private:
     std::vector<std::unique_ptr<ISelectionValidator>> validators;
 
-  public:
+public:
     std::unordered_map<EClassId, uint32_t> selection_map; // EClass -> ENode (idx into EClass.enodes)
     const EGraph &egraph;
-    std::vector<EClassId> path;                      // List of EClasses in selection_map, in order root -> leaves
-    std::vector<EClassId> to_process;                // EClass ids to process
-    std::vector<EClassId> to_process_enode;          // what does this do??? is it just used to know when we
-                                                     // have extracted all graphs???
+    std::vector<EClassId> path; // List of EClasses in selection_map, in order root -> leaves
+    std::vector<bool> in_path;
+    std::vector<EClassId> to_process; // EClass ids to process
+    std::vector<bool> has_options;
+    uint32_t active_options = 0;
     std::unordered_map<EClassId, uint32_t> next_sel; // EClass -> ENode idx, what enode should we move to next time
-                                                     // we encounter this eclass
     EClassId target_backtrack_eclass;
     uint64_t numClasses;
 
@@ -199,7 +199,8 @@ struct Extractor
     bool updated_cost = false;
 
     Extractor(const EGraph &_egraph, EClassId root_eclass_id)
-        : egraph(_egraph), numClasses(_egraph.classes.size()), to_process({root_eclass_id})
+        : egraph(_egraph), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
+          in_path(_egraph.classes.size(), false), has_options(_egraph.classes.size(), false)
     {
     }
 
@@ -239,8 +240,8 @@ struct Extractor
         ProgressTimer t(0, "getNextSelection", false, true);
         while (!to_process.empty())
         {
-            EClassId current = to_process.front();
-            to_process.erase(to_process.begin());
+            EClassId current = to_process.back();
+            to_process.pop_back();
 
             if (selection_map.find(current) != selection_map.end())
             {
@@ -248,6 +249,7 @@ struct Extractor
             }
 
             path.push_back(current);
+            in_path[current.value] = true;
 
             uint32_t sel = 0;
             auto nextIt = next_sel.find(current);
@@ -270,23 +272,22 @@ struct Extractor
 
             if (enodes.size() > sel + 1)
             {
-                if (std::find(to_process_enode.begin(), to_process_enode.end(), current) == to_process_enode.end())
+                if (!has_options[current.value])
                 {
-                    to_process_enode.push_back(current);
+                    has_options[current.value] = true;
+                    active_options++;
                 }
             }
 
-            std::vector<EClassId> new_to_process;
-            new_to_process.reserve(node.getChildren().size());
-            for (EClassId child : node.getChildren())
+            const auto &children = node.getChildren();
+            for (auto it = children.rbegin(); it != children.rend(); ++it)
             {
-                EClassId childEClass = egraph.findConst(child);
+                EClassId childEClass = egraph.findConst(*it);
                 if (selection_map.find(childEClass) == selection_map.end())
                 {
-                    new_to_process.push_back(childEClass);
+                    to_process.push_back(childEClass);
                 }
             }
-            to_process.insert(to_process.begin(), new_to_process.begin(), new_to_process.end());
         }
         return selection_map;
     }
@@ -317,7 +318,8 @@ struct Extractor
             std::vector<EClassId> st;
             int time_counter = 0;
 
-            std::function<void(EClassId)> tarjan = [&](EClassId u) {
+            std::function<void(EClassId)> tarjan = [&](EClassId u)
+            {
                 disc[u.value] = low[u.value] = time_counter++;
                 st.push_back(u);
                 onStack[u.value] = true;
@@ -494,6 +496,7 @@ struct Extractor
         {
             EClassId current = path.back();
             path.pop_back();
+            in_path[current.value] = false;
 
             if (selection_map.find(current) == selection_map.end())
                 continue;
@@ -513,27 +516,23 @@ struct Extractor
             {
                 next_sel[current] = sel + 1;
 
-                std::vector<EClassId> keys_to_delete;
-                keys_to_delete.reserve(selection_map.size());
-                for (const auto &kv : selection_map)
-                {
-                    if (std::find(path.begin(), path.end(), kv.first) == path.end() && kv.first != current)
-                    {
-                        keys_to_delete.push_back(kv.first);
-                    }
-                }
-                for (EClassId k : keys_to_delete)
-                    selection_map.erase(k);
-
                 selection_map.erase(current);
 
-                auto it = std::remove(to_process_enode.begin(), to_process_enode.end(), current);
-                if (it != to_process_enode.end())
-                    to_process_enode.erase(it, to_process_enode.end());
-
-                if (enodes.size() > sel + 2)
+                if (enodes.size() <= sel + 2)
                 {
-                    to_process_enode.push_back(current);
+                    if (has_options[current.value])
+                    {
+                        has_options[current.value] = false;
+                        active_options--;
+                    }
+                }
+                else
+                {
+                    if (!has_options[current.value])
+                    {
+                        has_options[current.value] = true;
+                        active_options++;
+                    }
                 }
 
                 to_process.clear();
@@ -541,27 +540,27 @@ struct Extractor
                 {
                     ENodeId n_id = egraph.getEClass(eclass).enodes[selection_map[eclass]];
                     const ENode &n = egraph.getENode(n_id);
-                    std::vector<EClassId> new_to_process;
-                    new_to_process.reserve(n.getChildren().size());
-                    for (EClassId child : n.getChildren())
+                    const auto &children = n.getChildren();
+                    for (auto c_it = children.rbegin(); c_it != children.rend(); ++c_it)
                     {
-                        EClassId childEClass = egraph.findConst(child);
+                        EClassId childEClass = egraph.findConst(*c_it);
                         if (selection_map.find(childEClass) == selection_map.end())
                         {
-                            new_to_process.push_back(childEClass);
+                            to_process.push_back(childEClass);
                         }
                     }
-                    to_process.insert(to_process.begin(), new_to_process.begin(), new_to_process.end());
                 }
-                to_process.insert(to_process.begin(), current);
+                to_process.push_back(current);
                 break;
             }
             else
             {
                 selection_map.erase(current);
-                auto it = std::remove(to_process_enode.begin(), to_process_enode.end(), current);
-                if (it != to_process_enode.end())
-                    to_process_enode.erase(it, to_process_enode.end());
+                if (has_options[current.value])
+                {
+                    has_options[current.value] = false;
+                    active_options--;
+                }
             }
         }
     }

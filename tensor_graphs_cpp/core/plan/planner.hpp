@@ -627,7 +627,7 @@ struct Planner
                 }
             }
 
-            if (extractor.to_process_enode.empty())
+            if (extractor.active_options == 0)
             {
                 std::cout << "finished extracting: no more graphs" << std::endl;
                 break;
