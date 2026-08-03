@@ -32,7 +32,7 @@ struct ENodeInfo
 
 struct DispatchIterator
 {
-public:
+  public:
     DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map)
         : egraph(_egraph)
     {
@@ -122,7 +122,7 @@ public:
         return iter;
     }
 
-private:
+  private:
     const EGraph &egraph;
     size_t num_nodes_in_selection = 0;
     std::vector<EClassId> ordered;
@@ -227,10 +227,10 @@ private:
 
 struct Extractor
 {
-private:
+  private:
     std::vector<std::unique_ptr<ISelectionValidator>> validators;
 
-public:
+  public:
     std::unordered_map<EClassId, uint32_t> selection_map; // EClass -> ENode (idx into EClass.enodes)
     const EGraph &egraph;
     std::vector<EClassId> path; // List of EClasses in selection_map, in order root -> leaves
@@ -245,7 +245,8 @@ public:
 
     Extractor(const EGraph &_egraph, EClassId root_eclass_id)
         : egraph(_egraph), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
-          in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1), has_options(_egraph.classes.size(), false)
+          in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
+          has_options(_egraph.classes.size(), false)
     {
     }
 

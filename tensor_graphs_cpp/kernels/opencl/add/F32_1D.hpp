@@ -32,8 +32,6 @@ inline void runAddF32_OpenCL_1D(const KernelContext &ctx)
                                         nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Add_F32_1D");
-
-    clFinish(OpenCLState::get().queue);
 }
 
 inline LogicalId refFactoryAddF32_1D_OpenCL(const std::vector<LogicalId> &inputs, Graph &graph)

@@ -27,8 +27,6 @@ inline void runSoftmaxF32_4D_OpenCL(const KernelContext &ctx)
                                         nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Softmax_4D_OpenCL");
-
-    clFinish(OpenCLState::get().queue);
 }
 
 inline LogicalId refFactorySoftmax4D_OpenCL(const std::vector<LogicalId> &inputs, Graph &g)

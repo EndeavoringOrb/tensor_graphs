@@ -28,8 +28,6 @@ inline void runJinaGeluExact_F32_3D_OpenCL(const KernelContext &ctx)
                                         nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Gelu_OpenCL");
-
-    clFinish(OpenCLState::get().queue);
 }
 
 inline LogicalId refFactoryJinaGeluExact_F32_3D_OpenCL(const std::vector<LogicalId> &inputs, Graph &g)

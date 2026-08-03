@@ -1,7 +1,7 @@
 // File: tensor_graphs_cpp/core/plan/validators/cycle.hpp
 #pragma once
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
 #include "core/egraph.hpp"
 #include "core/plan/validators/validator.hpp"
@@ -16,44 +16,50 @@ struct CycleValidator : public ISelectionValidator
     {
     }
 
-    bool reaches(EClassId start, EClassId target, const std::unordered_map<EClassId, uint32_t> &selection_map, std::vector<EClassId> &out_cycle)
+    bool reaches(EClassId start, EClassId target, const std::unordered_map<EClassId, uint32_t> &selection_map,
+                 std::vector<EClassId> &out_cycle)
     {
-        if (start == target) {
+        if (start == target)
+        {
             out_cycle.push_back(start);
             return true;
         }
-        
+
         std::vector<EClassId> q;
         q.push_back(start);
         visited_gen++;
         visited[start.value] = visited_gen;
-        
+
         std::unordered_map<EClassId, EClassId> came_from;
-        
+
         int head = 0;
         while (head < q.size())
         {
             EClassId curr = q[head++];
-            
+
             auto it = selection_map.find(curr);
-            if (it == selection_map.end()) continue;
-            
+            if (it == selection_map.end())
+                continue;
+
             uint32_t sel = it->second;
             ENodeId enode_id = egraph.getEClass(curr).enodes[sel];
             for (EClassId child : egraph.getENode(enode_id).getChildren())
             {
                 EClassId canon_child = egraph.findConst(child);
-                if (canon_child == target) {
+                if (canon_child == target)
+                {
                     out_cycle.push_back(target);
                     EClassId p = curr;
-                    while (true) {
+                    while (true)
+                    {
                         out_cycle.push_back(p);
-                        if (p == start) break;
+                        if (p == start)
+                            break;
                         p = came_from[p];
                     }
                     return true;
                 }
-                
+
                 if (visited[canon_child.value] != visited_gen)
                 {
                     visited[canon_child.value] = visited_gen;
@@ -65,9 +71,8 @@ struct CycleValidator : public ISelectionValidator
         return false;
     }
 
-    bool validateStep(EClassId current, ENodeId enode_id, 
-                      const std::unordered_map<EClassId, uint32_t> &selection_map,
-                      std::vector<EClassId>& conflict_nodes) override
+    bool validateStep(EClassId current, ENodeId enode_id, const std::unordered_map<EClassId, uint32_t> &selection_map,
+                      std::vector<EClassId> &conflict_nodes) override
     {
         const ENode &enode = egraph.getENode(enode_id);
         for (EClassId child : enode.getChildren())
@@ -84,11 +89,10 @@ struct CycleValidator : public ISelectionValidator
         return true;
     }
 
-    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map,
-                  const std::vector<EClassId> &order,
-                  const std::vector<EClassId> &path,
-                  std::vector<ParallelBuffer> &buffers, std::unordered_map<EClassId, BufferId> &eclass_to_buf,
-                  float &cost, std::vector<EClassId> &conflict_nodes) override
+    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
+                  const std::vector<EClassId> &path, std::vector<ParallelBuffer> &buffers,
+                  std::unordered_map<EClassId, BufferId> &eclass_to_buf, float &cost,
+                  std::vector<EClassId> &conflict_nodes) override
     {
         return true;
     }

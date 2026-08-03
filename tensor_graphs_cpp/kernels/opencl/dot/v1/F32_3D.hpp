@@ -47,8 +47,6 @@ inline void runDotF32_3D_OpenCL_v1(const KernelContext &ctx)
                                         nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue Dot_F32_3D_v1");
-
-    clFinish(OpenCLState::get().queue);
 }
 
 inline LogicalId refFactoryDotF32_3D_OpenCL_v1(const std::vector<LogicalId> &inputs, Graph &graph)

@@ -34,8 +34,7 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     std::vector<MemSpace> current_path = {src};
     std::unordered_set<MemSpace> visited = {src};
 
-    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
-    {
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr) {
         if (curr == dst)
         {
             all_paths.push_back(current_path);
@@ -1434,8 +1433,7 @@ struct SlicePushDownDot : public Rule
                 EClassId stepsIdB = egraph.addIntConst(stepsB);
 
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en,
-                                       EClassId stId, EClassId enId, EClassId stepId)
-                {
+                                       EClassId stId, EClassId enId, EClassId stepId) {
                     EClassId canonId = egraph.findConst(classId);
                     const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;
@@ -1987,8 +1985,7 @@ struct RemoveContiguous : public Rule
         std::vector<std::vector<EClassId>> childCombinations;
         std::vector<EClassId> currentCombination(children.size());
 
-        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped)
-        {
+        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped) {
             if (pos == children.size())
             {
                 if (hasUnwrapped)

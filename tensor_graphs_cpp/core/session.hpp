@@ -616,7 +616,8 @@ struct Session
                     if (graph.hasNode(nodeId))
                     {
                         const TensorNode &node = graph.getNode(nodeId);
-                        uint64_t dataHash = tg_hash::computeConstantHash(node.getShape(), node.dtype, buf->data(), buf->size());
+                        uint64_t dataHash =
+                            tg_hash::computeConstantHash(node.getShape(), node.dtype, buf->data(), buf->size());
                         graph.constantHashIndex[dataHash].push_back(nodeId);
                     }
                 }

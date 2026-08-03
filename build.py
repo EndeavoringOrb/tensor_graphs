@@ -755,7 +755,11 @@ class Toolchain:
         return "nvcc"
 
     def get_cxx_flags(self) -> list[str]:
-        flags = [f"-I{ROOT_DIR}", "-std=c++20",f"-DTG_LOG_LEVEL={self.config.log_level_val}"]
+        flags = [
+            f"-I{ROOT_DIR}",
+            "-std=c++20",
+            f"-DTG_LOG_LEVEL={self.config.log_level_val}",
+        ]
 
         if self.config.use_opencl:
             flags.append("-DTG_USE_OPENCL")

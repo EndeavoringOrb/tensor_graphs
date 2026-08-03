@@ -66,8 +66,6 @@ inline void runContiguous_OpenCL_ND(const KernelContext &ctx)
     {
         Error::throw_err("OpenCL: Failed to enqueue Contiguous_OpenCL_ND");
     }
-
-    clFinish(OpenCLState::get().queue);
 }
 
 inline LogicalId refFactoryContiguous_OpenCL_ND(const std::vector<LogicalId> &inputs, Graph &graph)

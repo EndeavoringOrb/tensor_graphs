@@ -36,8 +36,6 @@ inline void runJinaRMSNorm_F32_3D_OpenCL(const KernelContext &ctx)
                                         nullptr, nullptr);
     if (err != CL_SUCCESS)
         Error::throw_err("OpenCL: Failed to enqueue RMSNorm_OpenCL");
-
-    clFinish(OpenCLState::get().queue);
 }
 
 inline LogicalId refFactoryJinaRMSNorm_F32_3D_OpenCL(const std::vector<LogicalId> &inputs, Graph &g)

@@ -237,8 +237,7 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     }
 
     std::unordered_map<EClassId, EClassId> inplace_alias;
-    auto get_inplace_alias = [&](EClassId id)
-    {
+    auto get_inplace_alias = [&](EClassId id) {
         while (inplace_alias.count(id))
             id = inplace_alias.at(id);
         return id;
@@ -572,11 +571,11 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
     }
 
     // Process Ends before Starts to correctly simulate memory release
-    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b)
-              {
+    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b) {
         if (a.time != b.time)
             return a.time < b.time;
-        return a.type < b.type; });
+        return a.type < b.type;
+    });
 
     int64_t current_mem = 0;
     for (const auto &ev : events)
@@ -610,12 +609,11 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
     std::vector<ParallelBuffer> bufs = unallocated;
 
     // Heuristic: Place largest buffers first to minimize fragmentation
-    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
-                  if (a.size != b.size)
-                      return a.size > b.size;
-                  return a.id < b.id; // Deterministic tie-breaker
-              });
+    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
+        if (a.size != b.size)
+            return a.size > b.size;
+        return a.id < b.id; // Deterministic tie-breaker
+    });
 
     allocated.clear();
     allocated.reserve(bufs.size());
@@ -636,8 +634,7 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 
         // Sort overlapping buffers by their memory offset ascending
         std::sort(time_overlaps.begin(), time_overlaps.end(),
-                  [](const ParallelBuffer *a, const ParallelBuffer *b)
-                  { return a->offset < b->offset; });
+                  [](const ParallelBuffer *a, const ParallelBuffer *b) { return a->offset < b->offset; });
 
         // First-fit algorithm: push best_offset upwards if there's a memory
         // collision
@@ -672,11 +669,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
 
     // 1. Sort buffers by start time (and then end time to be deterministic)
     std::vector<ParallelBuffer> sorted_bufs = unallocated;
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
         if (a.start != b.start)
             return a.start < b.start;
-        return a.end < b.end; });
+        return a.end < b.end;
+    });
 
     if (sorted_bufs.empty())
         return true;
@@ -699,11 +696,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
     // OPTIMIZATION 3: Exact solver fallback with aggressive pruning ordering
     // Sorting by size descending forces the tree to hit conflict limits much
     // faster.
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
         if (a.size != b.size)
             return a.size > b.size;
-        return a.id < b.id; });
+        return a.id < b.id;
+    });
 
     if (!malloc(mem_cap, sorted_bufs, comp_allocated))
     {
@@ -733,9 +730,9 @@ struct MemValidator : public ISelectionValidator
     }
 
     bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
-                  const std::vector<EClassId> &path,
-                  std::vector<ParallelBuffer> &buffers, std::unordered_map<EClassId, BufferId> &eclass_to_buf,
-                  float &cost, std::vector<EClassId> &conflict_nodes) override
+                  const std::vector<EClassId> &path, std::vector<ParallelBuffer> &buffers,
+                  std::unordered_map<EClassId, BufferId> &eclass_to_buf, float &cost,
+                  std::vector<EClassId> &conflict_nodes) override
     {
         ProgressTimer t(0, "validate", false, true);
         cost = get_cost(order, egraph, selection_map, enodeInfos);
@@ -829,7 +826,8 @@ struct MemValidator : public ISelectionValidator
                 alloc_ok = false;
                 failed_ms = ms;
                 failed_reduced_cap = reduced_cap;
-                LOG(L_INFO) << "[MemValidator] OOM error in mem_space (" << ms.idx << ", " << (int)ms.type << ")" << std::endl;
+                LOG(L_INFO) << "[MemValidator] OOM error in mem_space (" << ms.idx << ", " << (int)ms.type << ")"
+                            << std::endl;
                 break;
             }
 

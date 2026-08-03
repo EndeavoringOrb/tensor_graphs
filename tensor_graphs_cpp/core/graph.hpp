@@ -642,7 +642,7 @@ struct Graph
     }
 
     LogicalId reshape(LogicalId id, const std::vector<int32_t> &shape,
-                   std::source_location loc = std::source_location::current())
+                      std::source_location loc = std::source_location::current())
     {
         LogicalId shape_node = constant({(uint32_t)shape.size()}, shape.data(), DType::INT32);
         return reshape(id, shape_node, loc);

@@ -26,7 +26,7 @@ inline void runCopy_CPU_OpenCL(const KernelContext &ctx)
         return;
 
     cl_int err = clEnqueueWriteBuffer(OpenCLState::get().queue, dst_device_buf,
-                                      CL_TRUE, // Blocking write
+                                      CL_FALSE, // Non-blocking write
                                       0, size_bytes, src_host_ptr, 0, nullptr, nullptr);
 
     if (err != CL_SUCCESS)

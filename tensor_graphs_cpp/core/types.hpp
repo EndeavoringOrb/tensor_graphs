@@ -350,6 +350,7 @@ template <> struct hash<MemSpace>
         return std::hash<uint32_t>()(ms.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(ms.type)) << 1);
     }
 };
+
 } // namespace std
 
 struct Engine
@@ -371,6 +372,17 @@ struct Engine
         return idx == other.idx && type == other.type;
     }
 };
+
+namespace std
+{
+template <> struct hash<Engine>
+{
+    uint64_t operator()(const Engine &eng) const noexcept
+    {
+        return std::hash<uint32_t>()(eng.idx) ^ (std::hash<uint32_t>()(static_cast<uint32_t>(eng.type)) << 1);
+    }
+};
+} // namespace std
 
 inline uint32_t getDTypeNBits(DType dtype)
 {

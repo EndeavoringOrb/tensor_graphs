@@ -165,9 +165,33 @@ struct KernelEntry
         // 5. Check engines
         if (!ignore_engines && !this->engines.empty())
         {
-            if (this->engines != engines)
+            if (this->engines.size() != engines.size())
             {
                 return false;
+            }
+
+            std::unordered_map<Engine, Engine> localToActualEngine;
+            std::unordered_map<Engine, Engine> actualToLocalEngine;
+
+            auto reconcileEngine = [&](const Engine &local, const Engine &actual) {
+                if (local.type != actual.type)
+                    return false;
+
+                auto [fwdIt, fwdInserted] = localToActualEngine.try_emplace(local, actual);
+                if (!fwdInserted && !(fwdIt->second == actual))
+                    return false; // same local idx resolved two different ways
+
+                auto [bwdIt, bwdInserted] = actualToLocalEngine.try_emplace(actual, local);
+                if (!bwdInserted && !(bwdIt->second == local))
+                    return false; // two different local idxs collapsed onto one actual engine
+
+                return true;
+            };
+
+            for (uint64_t i = 0; i < this->engines.size(); ++i)
+            {
+                if (!reconcileEngine(this->engines[i], engines[i]))
+                    return false;
             }
         }
 
