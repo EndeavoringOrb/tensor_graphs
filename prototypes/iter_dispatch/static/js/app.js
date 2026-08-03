@@ -3,10 +3,15 @@ let orderAIndex = 0;
 let orderBIndex = 0;
 let currentZoomPercent = 100;
 
+// Track renderers registered for viewport canvas rendering
+let activeTrackRenderers = [];
+let renderScheduled = false;
+
 const graphSelect = document.getElementById('graphSelect');
 const vizContainer = document.getElementById('vizContainer');
 const nav = document.getElementById('navigation');
 const graphStatsPanel = document.getElementById('graphStatsPanel');
+const scrollContainer = document.querySelector('.timeline-container-scroll');
 
 // Inspector DOM Panel Elements
 const detailsPanel = document.getElementById('detailsPanel');
@@ -31,14 +36,14 @@ const zoomRange = document.getElementById('zoomRange');
 const zoomVal = document.getElementById('zoomVal');
 const zoomResetBtn = document.getElementById('zoomResetBtn');
 
-// Known OP colors palette
+// Known OP colors palette (Hex format for high performance Canvas fills)
 const KNOWN_OP_COLORS = {
-    'INPUT': { bg: 'var(--color-input-bg)', text: 'var(--color-input-text)', border: 'var(--color-input-border)' },
-    'ADD': { bg: 'var(--color-add-bg)', text: 'var(--color-add-text)', border: 'var(--color-add-border)' },
-    'MUL': { bg: 'var(--color-mul-bg)', text: 'var(--color-mul-text)', border: 'var(--color-mul-border)' },
-    'COPYTO': { bg: 'var(--color-copyto-bg)', text: 'var(--color-copyto-text)', border: 'var(--color-copyto-border)' },
-    'COPY_TO': { bg: 'var(--color-copyto-bg)', text: 'var(--color-copyto-text)', border: 'var(--color-copyto-border)' },
-    'SQRT': { bg: 'var(--color-sqrt-bg)', text: 'var(--color-sqrt-text)', border: 'var(--color-sqrt-border)' },
+    'INPUT': { bg: '#f1f5f9', text: '#475569', border: '#cbd5e1' },
+    'ADD': { bg: '#eff6ff', text: '#1d4ed8', border: '#bfdbfe' },
+    'MUL': { bg: '#faf5ff', text: '#6d28d9', border: '#e9d5ff' },
+    'COPYTO': { bg: '#fffbeb', text: '#b45309', border: '#fde047' },
+    'COPY_TO': { bg: '#fffbeb', text: '#b45309', border: '#fde047' },
+    'SQRT': { bg: '#fdf2f8', text: '#be185d', border: '#fbcfe8' },
     'DOT': { bg: '#f0fdf4', text: '#15803d', border: '#bbf7d0' },
     'CONCAT': { bg: '#fff7ed', text: '#c2410c', border: '#fed7aa' },
     'RESHAPE': { bg: '#f0f9ff', text: '#0369a1', border: '#bae6fd' },
@@ -100,7 +105,67 @@ function renderLegend(orders) {
 }
 
 /**
- * Handles fetching graph payload and setting up application states.
+ * Binary search to find starting index in items sorted by start time.
+ */
+function findStartIndex(items, targetTime) {
+    let low = 0;
+    let high = items.length - 1;
+    let ans = 0;
+    while (low <= high) {
+        const mid = (low + high) >> 1;
+        if (items[mid].end >= targetTime) {
+            ans = mid;
+            high = mid - 1;
+        } else {
+            low = mid + 1;
+        }
+    }
+    return ans;
+}
+
+/**
+ * Dynamic Tick interval calculation for high-performance scale markers.
+ */
+function getNiceTickInterval(rawInterval) {
+    if (rawInterval <= 0) return 1;
+    const exponent = Math.floor(Math.log10(rawInterval));
+    const fraction = rawInterval / Math.pow(10, exponent);
+    let niceFraction;
+    if (fraction <= 1.5) niceFraction = 1;
+    else if (fraction <= 3) niceFraction = 2;
+    else if (fraction <= 7) niceFraction = 5;
+    else niceFraction = 10;
+    return niceFraction * Math.pow(10, exponent);
+}
+
+/**
+ * Canvas drawing helpers.
+ */
+function drawRoundedRect(ctx, x, y, width, height, radius) {
+    if (width < 2 * radius) radius = width / 2;
+    if (height < 2 * radius) radius = height / 2;
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.arcTo(x + width, y, x + width, y + height, radius);
+    ctx.arcTo(x + width, y + height, x, y + height, radius);
+    ctx.arcTo(x, y + height, x, y, radius);
+    ctx.arcTo(x, y, x + width, y, radius);
+    ctx.closePath();
+}
+
+function getTruncatedText(ctx, text, maxWidth) {
+    if (maxWidth <= 10) return '';
+    if (ctx.measureText(text).width <= maxWidth) return text;
+    let ellipsis = '…';
+    let truncated = text;
+    while (truncated.length > 0 && ctx.measureText(truncated + ellipsis).width > maxWidth) {
+        truncated = truncated.substring(0, truncated.length - 1);
+    }
+    return truncated ? truncated + ellipsis : '';
+}
+
+/**
+ * Fetches graph payload and parses ordered nodes into pre-sorted arrays.
  */
 async function loadGraphData(name) {
     if (!name) return;
@@ -144,7 +209,7 @@ async function loadGraphData(name) {
                     engine: engineKey,
                     size: node.size
                 };
-            });
+            }).sort((a, b) => a.start - b.start);
 
             // Map parsed buffers
             const buffers = parsedBuffers.map(buf => {
@@ -165,7 +230,7 @@ async function loadGraphData(name) {
                     mem_space_idx: memSpaceIdx,
                     mem_space_handle: memSpaceHandle
                 };
-            });
+            }).sort((a, b) => a.start - b.start);
 
             // Map parsed allocated buffers
             const allocated = parsedAllocated.map(buf => {
@@ -186,7 +251,7 @@ async function loadGraphData(name) {
                     mem_space_idx: memSpaceIdx,
                     mem_space_handle: memSpaceHandle
                 };
-            });
+            }).sort((a, b) => a.start - b.start);
 
             return {
                 schedule: schedule,
@@ -273,6 +338,26 @@ if (zoomResetBtn) {
         if (zoomVal) zoomVal.textContent = '100%';
         renderComparison();
     });
+}
+
+if (scrollContainer) {
+    scrollContainer.addEventListener('scroll', () => {
+        requestViewportRender();
+    }, { passive: true });
+}
+
+window.addEventListener('resize', () => {
+    requestViewportRender();
+});
+
+function requestViewportRender() {
+    if (!renderScheduled) {
+        renderScheduled = true;
+        window.requestAnimationFrame(() => {
+            renderVisibleTrackViewports();
+            renderScheduled = false;
+        });
+    }
 }
 
 function formatEngineName(rawName) {
@@ -376,6 +461,7 @@ function updateButtonStates() {
 
 function renderComparison() {
     vizContainer.innerHTML = '';
+    activeTrackRenderers = [];
 
     const orderAObj = currentGraphOrders[orderAIndex];
     const orderBObj = currentGraphOrders[orderBIndex];
@@ -412,10 +498,13 @@ function renderComparison() {
     blockB.className = 'schedule-block schedule-block-b';
     renderScheduleInto(blockB, scheduleB, buffersB, allocatedB, orderBIndex, commonMaxTime, scale, 'B');
     vizContainer.appendChild(blockB);
+
+    requestViewportRender();
 }
 
 function renderScheduleInto(container, order, buffers, allocated, orderIndex, maxTime, scale, blockLabel) {
-    const timelineWidthStr = (maxTime * scale) + 'px';
+    const timelineWidthPx = Math.ceil(maxTime * scale);
+    const timelineWidthStr = timelineWidthPx + 'px';
 
     const headerRow = document.createElement('div');
     headerRow.className = 'schedule-block-header';
@@ -464,36 +553,17 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
     rulerTicks.style.width = timelineWidthStr;
     rulerTicks.style.flexShrink = '0';
 
-    const tickInterval = maxTime > 100 ? Math.ceil(maxTime / 20) : (maxTime > 30 ? 5 : (maxTime > 15 ? 2 : 1));
-
-    for (let t = 0; t <= maxTime; t += tickInterval) {
-        const tick = document.createElement('div');
-        tick.className = 'ruler-tick';
-        tick.style.left = (t * scale) + 'px';
-        tick.textContent = Number.isInteger(t) ? t : t.toFixed(1);
-        rulerTicks.appendChild(tick);
-    }
     rulerRow.appendChild(rulerTicks);
     blockBody.appendChild(rulerRow);
 
-    // 2. Grid Overlay
-    const gridOverlay = document.createElement('div');
-    gridOverlay.className = 'time-grid-overlay';
+    registerTrackRenderer({
+        type: 'ruler',
+        container: rulerTicks,
+        maxTime: maxTime,
+        scale: scale
+    });
 
-    for (let t = 0; t <= maxTime; t += tickInterval) {
-        const gridLine = document.createElement('div');
-        gridLine.style.position = 'absolute';
-        gridLine.style.left = (t * scale) + 'px';
-        gridLine.style.top = '0';
-        gridLine.style.bottom = '0';
-        gridLine.style.width = '1px';
-        gridLine.style.backgroundColor = '#e2e8f0';
-        gridLine.style.zIndex = '1';
-        gridOverlay.appendChild(gridLine);
-    }
-    blockBody.appendChild(gridOverlay);
-
-    // 3. Hardware Track Rows
+    // 2. Hardware Track Rows
     engines.forEach(engName => {
         const row = document.createElement('div');
         row.className = 'engine-row';
@@ -516,40 +586,33 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
         timeline.style.width = timelineWidthStr;
         timeline.style.flexShrink = '0';
 
+        const canvas = document.createElement('canvas');
+        canvas.className = 'track-canvas';
+        timeline.appendChild(canvas);
+
         const engineTasks = order.filter(t => t.engine === engName);
-        engineTasks.forEach(task => {
-            const bar = document.createElement('div');
 
-            const isZero = task.duration === 0;
-            const barWidth = isZero ? 24 : (task.duration * scale);
-            const offsetLeft = task.start * scale;
+        const renderer = {
+            type: 'engine',
+            container: timeline,
+            canvas: canvas,
+            ctx: canvas.getContext('2d'),
+            data: engineTasks,
+            scale: scale,
+            rowHeight: 72,
+            extra: { formatted: formatted },
+            hoveredItem: null
+        };
 
-            const color = getOpColor(task.op);
-
-            bar.className = 'task-bar';
-            if (isZero) bar.classList.add('task-zero-duration');
-
-            bar.style.left = offsetLeft + 'px';
-            bar.style.width = barWidth + 'px';
-            bar.style.backgroundColor = color.bg;
-            bar.style.color = color.text;
-            bar.style.borderColor = color.border;
-
-            bar.textContent = task.name;
-            bar.title = `${task.name} (${task.op}): Time ${task.start}-${task.end} (duration: ${task.duration})`;
-
-            bar.addEventListener('mouseenter', () => showInspector(task, formatted));
-            bar.addEventListener('mouseleave', () => hideInspector());
-
-            timeline.appendChild(bar);
-        });
+        setupHoverInteractivity(renderer);
+        registerTrackRenderer(renderer);
 
         row.appendChild(label);
         row.appendChild(timeline);
         blockBody.appendChild(row);
     });
 
-    // 4. Logical Memory Tracks
+    // 3. Logical Memory Tracks
     if (buffers && buffers.length > 0) {
         const memSectionHeader = document.createElement('div');
         memSectionHeader.className = 'mem-section-header';
@@ -584,35 +647,24 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
             memTimeline.style.width = timelineWidthStr;
             memTimeline.style.flexShrink = '0';
 
-            const numBufs = spaceBuffers.length;
-            spaceBuffers.forEach((buf, bIdx) => {
-                const bar = document.createElement('div');
-                const color = getOpColor(buf.op);
-                bar.className = 'mem-buffer-bar';
+            const canvas = document.createElement('canvas');
+            canvas.className = 'track-canvas';
+            memTimeline.appendChild(canvas);
 
-                const barWidth = (buf.end - buf.start) * scale;
-                const offsetLeft = buf.start * scale;
+            const renderer = {
+                type: 'logical',
+                container: memTimeline,
+                canvas: canvas,
+                ctx: canvas.getContext('2d'),
+                data: spaceBuffers,
+                scale: scale,
+                rowHeight: 110,
+                extra: { spaceName, handleName, numBufs: spaceBuffers.length },
+                hoveredItem: null
+            };
 
-                bar.style.left = offsetLeft + 'px';
-                bar.style.width = barWidth + 'px';
-                bar.style.backgroundColor = color.bg;
-                bar.style.color = color.text;
-                bar.style.borderColor = color.border;
-
-                const pctHeight = 100 / numBufs;
-                const pctBottom = bIdx * pctHeight;
-
-                bar.style.height = `calc(${pctHeight}% - 4px)`;
-                bar.style.bottom = `calc(${pctBottom}% + 2px)`;
-
-                bar.innerHTML = `<span class="mem-buffer-label">${buf.node_name}</span>`;
-                bar.title = `Buffer ${buf.idx} (${buf.node_name}): Active ${buf.start}-${buf.end}, Size: ${formatBytes(buf.size)}`;
-
-                bar.addEventListener('mouseenter', () => showMemInspector(buf, spaceName, handleName));
-                bar.addEventListener('mouseleave', () => hideInspector());
-
-                memTimeline.appendChild(bar);
-            });
+            setupHoverInteractivity(renderer);
+            registerTrackRenderer(renderer);
 
             row.appendChild(label);
             row.appendChild(memTimeline);
@@ -620,7 +672,7 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
         });
     }
 
-    // 5. Physical Memory Layout (Allocated Offsets)
+    // 4. Physical Memory Layout (Allocated Offsets)
     const physSectionHeader = document.createElement('div');
     physSectionHeader.className = 'mem-section-header';
     physSectionHeader.innerHTML = '<span>Physical Memory Allocation Layout (malloc offsets)</span>';
@@ -655,56 +707,26 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
             memTimeline.style.width = timelineWidthStr;
             memTimeline.style.flexShrink = '0';
 
+            const canvas = document.createElement('canvas');
+            canvas.className = 'track-canvas';
+            memTimeline.appendChild(canvas);
+
             const maxOffsetAndSize = Math.max(...spaceBuffers.map(b => (b.offset >= 0 ? b.offset : 0) + b.size), 1);
 
-            // Bounded Y-axis guideline gridlines
-            const numYGridlines = 4;
-            const yStep = maxOffsetAndSize / numYGridlines;
-            for (let i = 0; i <= numYGridlines; i++) {
-                const y = Math.round(i * yStep);
-                const line = document.createElement('div');
-                line.className = 'mem-offset-gridline';
-                line.style.bottom = `${(y / maxOffsetAndSize) * 100}%`;
-                memTimeline.appendChild(line);
+            const renderer = {
+                type: 'physical',
+                container: memTimeline,
+                canvas: canvas,
+                ctx: canvas.getContext('2d'),
+                data: spaceBuffers,
+                scale: scale,
+                rowHeight: 110,
+                extra: { spaceName, handleName, maxOffsetAndSize },
+                hoveredItem: null
+            };
 
-                if (i < numYGridlines) {
-                    const tickText = document.createElement('span');
-                    tickText.className = 'mem-offset-tick-text';
-                    tickText.textContent = `O: ${formatBytes(y)}`;
-                    tickText.style.bottom = `${(y / maxOffsetAndSize) * 100 + 1}%`;
-                    memTimeline.appendChild(tickText);
-                }
-            }
-
-            spaceBuffers.forEach(buf => {
-                const bar = document.createElement('div');
-                const color = getOpColor(buf.op);
-                bar.className = 'mem-buffer-bar';
-
-                const barWidth = (buf.end - buf.start) * scale;
-                const offsetLeft = buf.start * scale;
-
-                bar.style.left = offsetLeft + 'px';
-                bar.style.width = barWidth + 'px';
-                bar.style.backgroundColor = color.bg;
-                bar.style.color = color.text;
-                bar.style.borderColor = color.border;
-
-                const bufOffset = buf.offset >= 0 ? buf.offset : 0;
-                const pctHeight = (buf.size / maxOffsetAndSize) * 100;
-                const pctBottom = (bufOffset / maxOffsetAndSize) * 100;
-
-                bar.style.height = `calc(${pctHeight}% - 4px)`;
-                bar.style.bottom = `calc(${pctBottom}% + 2px)`;
-
-                bar.innerHTML = `<span class="mem-buffer-label">${buf.node_name}</span>`;
-                bar.title = `Buffer ${buf.idx} (${buf.node_name}): Active ${buf.start}-${buf.end}, Offset: ${formatBytes(bufOffset)}, Size: ${formatBytes(buf.size)}`;
-
-                bar.addEventListener('mouseenter', () => showMemInspector(buf, spaceName, handleName));
-                bar.addEventListener('mouseleave', () => hideInspector());
-
-                memTimeline.appendChild(bar);
-            });
+            setupHoverInteractivity(renderer);
+            registerTrackRenderer(renderer);
 
             row.appendChild(label);
             row.appendChild(memTimeline);
@@ -718,6 +740,346 @@ function renderScheduleInto(container, order, buffers, allocated, orderIndex, ma
     }
 
     container.appendChild(blockBody);
+}
+
+function registerTrackRenderer(renderer) {
+    activeTrackRenderers.push(renderer);
+}
+
+/**
+ * Main viewport view update pass. Executes fast binary range rendering on canvas.
+ */
+function renderVisibleTrackViewports() {
+    if (!scrollContainer) return;
+
+    const scrollLeft = scrollContainer.scrollLeft;
+    const viewportWidth = scrollContainer.clientWidth || 1200;
+    const dpr = window.devicePixelRatio || 1;
+
+    activeTrackRenderers.forEach(track => {
+        if (track.type === 'ruler') {
+            renderRulerTicks(track, scrollLeft, viewportWidth);
+            return;
+        }
+
+        const canvas = track.canvas;
+        const ctx = track.ctx;
+        const scale = track.scale;
+        const rowHeight = track.rowHeight;
+
+        canvas.style.left = scrollLeft + 'px';
+        canvas.style.width = viewportWidth + 'px';
+        canvas.style.height = rowHeight + 'px';
+
+        canvas.width = Math.floor(viewportWidth * dpr);
+        canvas.height = Math.floor(rowHeight * dpr);
+
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, viewportWidth, rowHeight);
+
+        const tMin = Math.max(0, scrollLeft / scale);
+        const tMax = (scrollLeft + viewportWidth) / scale;
+
+        // Draw track vertical gridlines
+        const tickInterval = getNiceTickInterval((viewportWidth / 10) / scale);
+        const firstTick = Math.floor(tMin / tickInterval) * tickInterval;
+
+        ctx.strokeStyle = '#f1f5f9';
+        ctx.lineWidth = 1;
+
+        for (let t = firstTick; t <= tMax; t += tickInterval) {
+            const gx = t * scale - scrollLeft;
+            ctx.beginPath();
+            ctx.moveTo(gx, 0);
+            ctx.lineTo(gx, rowHeight);
+            ctx.stroke();
+        }
+
+        // Draw track items using binary search filtering
+        const startIdx = findStartIndex(track.data, tMin);
+        let lastPixelX = -1;
+
+        if (track.type === 'engine') {
+            for (let i = startIdx; i < track.data.length; i++) {
+                const task = track.data[i];
+                if (task.start > tMax) break;
+
+                const isZero = task.duration === 0;
+                const barW = isZero ? 24 : Math.max(task.duration * scale, 2);
+                const drawX = isZero ? (task.start * scale - scrollLeft - 12) : (task.start * scale - scrollLeft);
+                const drawY = 16;
+                const drawH = 40;
+
+                // Canvas pixel binning optimization
+                if (!isZero && barW < 1.5) {
+                    const currentPixelX = Math.floor(drawX);
+                    if (currentPixelX === lastPixelX) continue;
+                    lastPixelX = currentPixelX;
+                }
+
+                const color = getOpColor(task.op);
+                const isHovered = (task === track.hoveredItem);
+
+                if (isZero) {
+                    ctx.fillStyle = '#f8fafc';
+                    ctx.fillRect(drawX, drawY, barW, drawH);
+                    ctx.save();
+                    ctx.setLineDash([3, 3]);
+                    ctx.strokeStyle = isHovered ? '#0f172a' : '#94a3b8';
+                    ctx.lineWidth = isHovered ? 2 : 1;
+                    ctx.strokeRect(drawX, drawY, barW, drawH);
+                    ctx.restore();
+                } else {
+                    ctx.fillStyle = color.bg;
+                    drawRoundedRect(ctx, drawX, drawY, barW, drawH, 4);
+                    ctx.fill();
+
+                    ctx.strokeStyle = isHovered ? '#0f172a' : color.border;
+                    ctx.lineWidth = isHovered ? 2.5 : 1;
+                    ctx.stroke();
+
+                    if (barW > 25) {
+                        ctx.fillStyle = color.text;
+                        ctx.font = '700 11px Inter, -apple-system, sans-serif';
+                        const text = getTruncatedText(ctx, task.name, barW - 10);
+                        if (text) {
+                            ctx.fillText(text, drawX + 6, drawY + 24);
+                        }
+                    }
+                }
+            }
+        } else if (track.type === 'logical') {
+            const numBufs = track.extra.numBufs;
+            const pctHeight = 1 / numBufs;
+
+            for (let i = startIdx; i < track.data.length; i++) {
+                const buf = track.data[i];
+                if (buf.start > tMax) break;
+
+                const bIdx = i % numBufs;
+                const drawX = buf.start * scale - scrollLeft;
+                const drawW = Math.max((buf.end - buf.start) * scale, 2);
+
+                const boxH = Math.max((rowHeight * pctHeight) - 4, 4);
+                const boxY = rowHeight - ((bIdx + 1) * rowHeight * pctHeight) + 2;
+
+                if (drawW < 1.5) {
+                    const currentPixelX = Math.floor(drawX);
+                    if (currentPixelX === lastPixelX) continue;
+                    lastPixelX = currentPixelX;
+                }
+
+                const color = getOpColor(buf.op);
+                const isHovered = (buf === track.hoveredItem);
+
+                ctx.fillStyle = color.bg;
+                drawRoundedRect(ctx, drawX, boxY, drawW, boxH, 3);
+                ctx.fill();
+
+                ctx.strokeStyle = isHovered ? '#0f172a' : color.border;
+                ctx.lineWidth = isHovered ? 2.5 : 1;
+                ctx.stroke();
+
+                if (drawW > 25 && boxH > 14) {
+                    ctx.fillStyle = color.text;
+                    ctx.font = '700 10px Inter, -apple-system, sans-serif';
+                    const text = getTruncatedText(ctx, buf.node_name, drawW - 8);
+                    if (text) {
+                        ctx.fillText(text, drawX + 4, boxY + boxH / 2 + 3);
+                    }
+                }
+            }
+        } else if (track.type === 'physical') {
+            const maxOffsetAndSize = track.extra.maxOffsetAndSize;
+
+            // Draw Y-axis guideline gridlines
+            const numYGridlines = 4;
+            const yStep = maxOffsetAndSize / numYGridlines;
+
+            ctx.save();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = 'rgba(203, 213, 225, 0.7)';
+            ctx.font = '600 9px Inter, -apple-system, sans-serif';
+            ctx.fillStyle = '#94a3b8';
+
+            for (let k = 0; k <= numYGridlines; k++) {
+                const yVal = Math.round(k * yStep);
+                const canvasY = rowHeight - (yVal / maxOffsetAndSize) * rowHeight;
+                ctx.beginPath();
+                ctx.moveTo(0, canvasY);
+                ctx.lineTo(viewportWidth, canvasY);
+                ctx.stroke();
+
+                if (k < numYGridlines) {
+                    ctx.fillText(`O: ${formatBytes(yVal)}`, 6, canvasY - 2);
+                }
+            }
+            ctx.restore();
+
+            for (let i = startIdx; i < track.data.length; i++) {
+                const buf = track.data[i];
+                if (buf.start > tMax) break;
+
+                const bufOffset = buf.offset >= 0 ? buf.offset : 0;
+                const pctHeight = buf.size / maxOffsetAndSize;
+                const pctBottom = bufOffset / maxOffsetAndSize;
+
+                const boxH = Math.max(pctHeight * rowHeight - 4, 4);
+                const boxY = rowHeight - (pctBottom + pctHeight) * rowHeight + 2;
+                const drawX = buf.start * scale - scrollLeft;
+                const drawW = Math.max((buf.end - buf.start) * scale, 2);
+
+                if (drawW < 1.5) {
+                    const currentPixelX = Math.floor(drawX);
+                    if (currentPixelX === lastPixelX) continue;
+                    lastPixelX = currentPixelX;
+                }
+
+                const color = getOpColor(buf.op);
+                const isHovered = (buf === track.hoveredItem);
+
+                ctx.fillStyle = color.bg;
+                drawRoundedRect(ctx, drawX, boxY, drawW, boxH, 3);
+                ctx.fill();
+
+                ctx.strokeStyle = isHovered ? '#0f172a' : color.border;
+                ctx.lineWidth = isHovered ? 2.5 : 1;
+                ctx.stroke();
+
+                if (drawW > 25 && boxH > 14) {
+                    ctx.fillStyle = color.text;
+                    ctx.font = '700 10px Inter, -apple-system, sans-serif';
+                    const text = getTruncatedText(ctx, buf.node_name, drawW - 8);
+                    if (text) {
+                        ctx.fillText(text, drawX + 4, boxY + boxH / 2 + 3);
+                    }
+                }
+            }
+        }
+
+        ctx.restore();
+    });
+}
+
+function renderRulerTicks(track, scrollLeft, viewportWidth) {
+    const scale = track.scale;
+    const tMin = Math.max(0, scrollLeft / scale);
+    const tMax = (scrollLeft + viewportWidth) / scale;
+
+    const tickInterval = getNiceTickInterval((viewportWidth / 10) / scale);
+    const firstTick = Math.floor(tMin / tickInterval) * tickInterval;
+
+    track.container.innerHTML = '';
+
+    for (let t = firstTick; t <= tMax && t <= track.maxTime; t += tickInterval) {
+        const tick = document.createElement('div');
+        tick.className = 'ruler-tick';
+        tick.style.left = (t * scale) + 'px';
+        tick.textContent = Number.isInteger(t) ? t : t.toFixed(1);
+        track.container.appendChild(tick);
+    }
+}
+
+/**
+ * Pointer event tracking for canvas item hover and Inspector updates.
+ */
+function setupHoverInteractivity(track) {
+    const container = track.container;
+
+    container.addEventListener('mousemove', (e) => {
+        const rect = container.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        const scale = track.scale;
+        const hoverTime = mouseX / scale;
+
+        let foundItem = null;
+
+        if (track.type === 'engine') {
+            const startIdx = findStartIndex(track.data, hoverTime - 10);
+            for (let i = startIdx; i < track.data.length; i++) {
+                const task = track.data[i];
+                if (task.start > hoverTime + 10) break;
+
+                const isZero = task.duration === 0;
+                const startX = isZero ? (task.start * scale - 12) : (task.start * scale);
+                const endX = isZero ? (task.start * scale + 12) : (task.end * scale);
+
+                if (mouseX >= startX && mouseX <= endX && mouseY >= 16 && mouseY <= 56) {
+                    foundItem = task;
+                    break;
+                }
+            }
+        } else if (track.type === 'logical') {
+            const numBufs = track.extra.numBufs;
+            const pctHeight = 1 / numBufs;
+            const rowHeight = track.rowHeight;
+
+            const startIdx = findStartIndex(track.data, hoverTime - 10);
+            for (let i = startIdx; i < track.data.length; i++) {
+                const buf = track.data[i];
+                if (buf.start > hoverTime + 10) break;
+
+                const bIdx = i % numBufs;
+                const startX = buf.start * scale;
+                const endX = buf.end * scale;
+                const boxH = Math.max((rowHeight * pctHeight) - 4, 4);
+                const boxY = rowHeight - ((bIdx + 1) * rowHeight * pctHeight) + 2;
+
+                if (mouseX >= startX && mouseX <= endX && mouseY >= boxY && mouseY <= boxY + boxH) {
+                    foundItem = buf;
+                    break;
+                }
+            }
+        } else if (track.type === 'physical') {
+            const maxOffsetAndSize = track.extra.maxOffsetAndSize;
+            const rowHeight = track.rowHeight;
+
+            const startIdx = findStartIndex(track.data, hoverTime - 10);
+            for (let i = startIdx; i < track.data.length; i++) {
+                const buf = track.data[i];
+                if (buf.start > hoverTime + 10) break;
+
+                const bufOffset = buf.offset >= 0 ? buf.offset : 0;
+                const pctHeight = buf.size / maxOffsetAndSize;
+                const pctBottom = bufOffset / maxOffsetAndSize;
+
+                const boxH = Math.max(pctHeight * rowHeight - 4, 4);
+                const boxY = rowHeight - (pctBottom + pctHeight) * rowHeight + 2;
+                const startX = buf.start * scale;
+                const endX = buf.end * scale;
+
+                if (mouseX >= startX && mouseX <= endX && mouseY >= boxY && mouseY <= boxY + boxH) {
+                    foundItem = buf;
+                    break;
+                }
+            }
+        }
+
+        if (foundItem !== track.hoveredItem) {
+            track.hoveredItem = foundItem;
+            container.style.cursor = foundItem ? 'pointer' : 'default';
+
+            if (foundItem) {
+                if (track.type === 'engine') {
+                    showInspector(foundItem, track.extra.formatted);
+                } else {
+                    showMemInspector(foundItem, track.extra.spaceName, track.extra.handleName);
+                }
+            }
+
+            requestViewportRender();
+        }
+    });
+
+    container.addEventListener('mouseleave', () => {
+        if (track.hoveredItem) {
+            track.hoveredItem = null;
+            container.style.cursor = 'default';
+            requestViewportRender();
+        }
+    });
 }
 
 function showInspector(task, engineDetails) {
@@ -750,10 +1112,6 @@ function showMemInspector(buf, spaceName, handleName) {
     inspectEngine.textContent = `${spaceName} (${handleName})`;
     inspectInterval.textContent = `Active: ${buf.start} → ${buf.end}`;
     inspectDuration.textContent = `Offset: ${formatBytes(buf.offset >= 0 ? buf.offset : 0)} | Size: ${formatBytes(buf.size)}`;
-}
-
-function hideInspector() {
-    // Keep last hovered item details displayed
 }
 
 if (graphSelect && graphSelect.value) {

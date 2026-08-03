@@ -44,6 +44,7 @@ def discover_compiled_graphs() -> dict[str, str]:
 
     return compiled_files
 
+
 def load_compiled_graph_orders(filepath: str) -> list[dict]:
     """Converts a compiled graph binary cache file into the visualization schedule format."""
     if not os.path.exists(filepath):
@@ -176,6 +177,7 @@ def load_compiled_graph_orders(filepath: str) -> list[dict]:
 
     return all_orders
 
+
 @app.route("/")
 def index():
     prototype_names = list(graphs.keys())
@@ -216,15 +218,10 @@ def get_graph_data(name):
 
             all_orders.append(
                 {
-                    "ordered": [
-                        node_adapter.dump_json(node).decode() for node in ordered
-                    ],
-                    "buffers": [
-                        buffer_adapter.dump_json(buf).decode() for buf in buffers
-                    ],
+                    "ordered": [node_adapter.dump_python(node) for node in ordered],
+                    "buffers": [buffer_adapter.dump_python(buf) for buf in buffers],
                     "allocated": [
-                        buffer_adapter.dump_json(buf).decode()
-                        for buf in allocated_buffers
+                        buffer_adapter.dump_python(buf) for buf in allocated_buffers
                     ],
                 }
             )
