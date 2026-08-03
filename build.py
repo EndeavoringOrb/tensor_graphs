@@ -25,7 +25,6 @@ KERNELS_DIR = ROOT_DIR / "kernels"
 CORE_DEPENDENCIES = [
     ROOT_DIR / "core" / "types.hpp",
     ROOT_DIR / "core" / "kernels.hpp",
-    ROOT_DIR / "core" / "graph.hpp",
 ]
 
 ALL_TARGETS = [
