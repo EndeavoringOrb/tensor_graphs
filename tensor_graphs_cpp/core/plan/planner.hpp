@@ -61,7 +61,7 @@ struct Planner
         rules.emplace_back(std::make_unique<FlattenBatchDot>());
         rules.emplace_back(std::make_unique<FlattenElementwise>());
         rules.emplace_back(std::make_unique<DotSplitRule>());
-        rules.emplace_back(std::make_unique<RemoveContiguous>());
+        // rules.emplace_back(std::make_unique<RemoveContiguous>());
         if (injected)
         {
             rules.emplace_back(std::make_unique<InfinityDomination>());
