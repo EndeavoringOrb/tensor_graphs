@@ -605,7 +605,7 @@ struct Planner
                     break;
             }
 
-            DispatchIterator dispatch_iterator(egraph, selection_map);
+            DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos);
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
                 valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);

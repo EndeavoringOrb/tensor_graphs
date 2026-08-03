@@ -32,11 +32,14 @@ struct ENodeInfo
 
 struct DispatchIterator
 {
-  public:
-    DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map)
+public:
+    // Now accepts enode_infos to compute true remaining latency paths
+    DispatchIterator(const EGraph &_egraph, 
+                     const std::unordered_map<EClassId, uint32_t> &selection_map,
+                     const std::vector<ENodeInfo> &enode_infos)
         : egraph(_egraph)
     {
-        initOrderState(selection_map);
+        initOrderState(selection_map, enode_infos);
     }
 
     bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
@@ -61,6 +64,17 @@ struct DispatchIterator
             is_done = true;
             return false;
         }
+
+        auto compare_nodes = [&](EClassId a, EClassId b) {
+            // Compare using floating-point remaining critical path latency
+            float h_a = heights[a.value];
+            float h_b = heights[b.value];
+            if (std::abs(h_a - h_b) > 1e-5f) {
+                return h_a > h_b; 
+            }
+
+            return a.value < b.value;
+        };
 
         while (true)
         {
@@ -104,6 +118,8 @@ struct DispatchIterator
                         ready_stack[pos + 1].push_back(dep);
                     }
                 }
+
+                std::sort(ready_stack[pos + 1].begin(), ready_stack[pos + 1].end(), compare_nodes);
             }
             else
             {
@@ -122,7 +138,7 @@ struct DispatchIterator
         return iter;
     }
 
-  private:
+private:
     const EGraph &egraph;
     size_t num_nodes_in_selection = 0;
     std::vector<EClassId> ordered;
@@ -133,8 +149,10 @@ struct DispatchIterator
     bool is_done = false;
     bool first_yield = true;
     uint32_t iter = 0;
+    std::vector<float> heights;
 
-    void initOrderState(const std::unordered_map<EClassId, uint32_t> &selection_map)
+    void initOrderState(const std::unordered_map<EClassId, uint32_t> &selection_map,
+                        const std::vector<ENodeInfo> &enode_infos)
     {
         num_nodes_in_selection = selection_map.size();
         ordered.clear();
@@ -203,6 +221,46 @@ struct DispatchIterator
             }
         }
 
+        // Calculate remaining execution time along the critical path for each node.
+        heights.assign(max_class_id, 0.0f);
+        std::vector<bool> height_computed(max_class_id, false);
+
+        std::function<float(EClassId)> get_height = [&](EClassId u) -> float {
+            if (height_computed[u.value]) return heights[u.value];
+
+            uint32_t sel = selection_map.at(u);
+            ENodeId enode_id = egraph.getEClass(u).enodes[sel];
+            float self_cost = enode_infos[enode_id.value].cost;
+
+            float max_dep_height = 0.0f;
+            for (EClassId v : dependents[u.value]) {
+                max_dep_height = std::max(max_dep_height, get_height(v));
+            }
+
+            float h = self_cost + max_dep_height;
+            heights[u.value] = h;
+            height_computed[u.value] = true;
+            return h;
+        };
+
+        for (const auto &kv : selection_map) {
+            EClassId u = egraph.findConst(kv.first);
+            if (u.value < max_class_id) {
+                get_height(u);
+            }
+        }
+
+        auto compare_nodes = [&](EClassId a, EClassId b) {
+            float h_a = heights[a.value];
+            float h_b = heights[b.value];
+            if (std::abs(h_a - h_b) > 1e-5f) {
+                return h_a > h_b;
+            }
+
+            return a.value < b.value;
+        };
+
+        std::sort(initial_ready.begin(), initial_ready.end(), compare_nodes);
         ready_stack[0] = std::move(initial_ready);
     }
 
@@ -227,10 +285,10 @@ struct DispatchIterator
 
 struct Extractor
 {
-  private:
+private:
     std::vector<std::unique_ptr<ISelectionValidator>> validators;
 
-  public:
+public:
     std::unordered_map<EClassId, uint32_t> selection_map; // EClass -> ENode (idx into EClass.enodes)
     const EGraph &egraph;
     std::vector<EClassId> path; // List of EClasses in selection_map, in order root -> leaves
