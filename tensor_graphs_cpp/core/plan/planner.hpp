@@ -230,7 +230,8 @@ struct Planner
     {
         constexpr float EPS = 1e-6f;
 
-        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool {
+        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool
+        {
             if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
                 return true;
             if (op == OpType::RESHAPE && inputIdx == 1)
@@ -343,7 +344,8 @@ struct Planner
                     {
                         if (refEntry && pGraph)
                         {
-                            auto traceToInputIdx = [&](LogicalId pid) -> int {
+                            auto traceToInputIdx = [&](LogicalId pid) -> int
+                            {
                                 LogicalId curr = pid;
                                 while (pGraph->hasNode(curr) && (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
                                                                  pGraph->getNode(curr).opType == OpType::CAST ||
@@ -519,7 +521,8 @@ struct Planner
             if (e_class_id != EClassId{i})
                 continue;
             EClass &cls = egraph.getEClass(e_class_id);
-            std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b) {
+            std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b)
+                      {
                 float costA = enodeInfos[a.value].cost;
                 float costB = enodeInfos[b.value].cost;
 
@@ -527,8 +530,7 @@ struct Planner
                     return true;
                 if (costA > costB)
                     return false;
-                return a < b;
-            });
+                return a < b; });
         }
 
         LOG(L_INFO) << "finished sorting enodes";
@@ -565,65 +567,63 @@ struct Planner
             loopTimer.reset();
 #endif
 
-            const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.getNextSelection();
+            if (!extractor.getNextSelection())
+            {
+                extractor.ascend();
+                timer.tick();
+                continue;
+            }
 
-            reason.clear();
+            const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.selection_map;
+
             bool valid = true;
             std::vector<EClassId> order;
             std::vector<ParallelBuffer> buffers;
             std::unordered_map<EClassId, BufferId> eclass_to_buf;
-            BufferId overflow;
             float cost = TGConstants::INF;
+            std::vector<EClassId> conflict_nodes;
 
-            // 1. Validate for cycles FIRST before building DispatchIterator
-            if (cycleValidator.detectCycles(selection_map, reason))
+            // 2. Compute dispatch order
+            uint32_t first_engine = UINT32_MAX;
+            bool single_engine = true;
+            for (const auto &kv : selection_map)
             {
-                valid = false; // reason is set to "cycle" by detectCycles
-            }
-            else
-            {
-                // 2. Compute dispatch order if graph is a valid DAG
-                uint32_t first_engine = UINT32_MAX;
-                bool single_engine = true;
-                for (const auto &kv : selection_map)
+                uint32_t sel = kv.second;
+                ENodeId enode_id = egraph.getEClass(kv.first).enodes[sel];
+                const ENode &enode = egraph.getENode(enode_id);
+                for (const auto &eng : enode.getEngines())
                 {
-                    uint32_t sel = kv.second;
-                    ENodeId enode_id = egraph.getEClass(kv.first).enodes[sel];
-                    const ENode &enode = egraph.getENode(enode_id);
-                    for (const auto &eng : enode.getEngines())
+                    if (first_engine == UINT32_MAX)
                     {
-                        if (first_engine == UINT32_MAX)
-                        {
-                            first_engine = eng.idx;
-                        }
-                        else if (first_engine != eng.idx)
-                        {
-                            single_engine = false;
-                            break;
-                        }
+                        first_engine = eng.idx;
                     }
-                    if (!single_engine)
+                    else if (first_engine != eng.idx)
+                    {
+                        single_engine = false;
                         break;
+                    }
                 }
+                if (!single_engine)
+                    break;
+            }
 
-                DispatchIterator dispatch_iterator = DispatchIterator(egraph, selection_map);
-                while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
+            DispatchIterator dispatch_iterator = DispatchIterator(egraph, selection_map);
+            while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
+            {
+                valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);
+                if (!valid)
+                    break;
+                if (cost < best_cost)
                 {
-                    valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, overflow, cost, reason);
-                    if (!valid)
-                        break;
-                    if (cost < best_cost)
-                    {
-                        best_cost = cost;
-                        best_selection_map = selection_map;
-                        best_order = order;
-                        best_buffers = buffers;
-                        best_eclass_to_buf = eclass_to_buf;
-                    }
-                    if (stopOnFirstValid || single_engine)
-                    {
-                        break;
-                    }
+                    best_cost = cost;
+                    best_selection_map = selection_map;
+                    best_order = order;
+                    best_buffers = buffers;
+                    best_eclass_to_buf = eclass_to_buf;
+                }
+                if (stopOnFirstValid || single_engine)
+                {
+                    break;
                 }
             }
 
@@ -651,13 +651,24 @@ struct Planner
 
             if (!valid)
             {
-                std::cout << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
-                          << "] invalid reason: " << reason << std::endl;
-            }
-
-            if (!valid)
-            {
-                extractor.backtrack(reason, eclass_to_buf, buffers, overflow);
+                int max_conflict_path_pos = -1;
+                for (EClassId c_node : conflict_nodes)
+                {
+                    if (extractor.path_pos[c_node.value] != -1)
+                    {
+                        if (extractor.path_pos[c_node.value] > max_conflict_path_pos)
+                        {
+                            max_conflict_path_pos = extractor.path_pos[c_node.value];
+                        }
+                    }
+                }
+                if (max_conflict_path_pos != -1)
+                {
+                    extractor.target_backtrack_eclass = extractor.path[max_conflict_path_pos];
+                    std::cout << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                              << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
+                              << " (path index " << max_conflict_path_pos << ")" << std::endl;
+                }
             }
 
             extractor.ascend();
@@ -677,7 +688,7 @@ struct Planner
                 enodeInfos[egraph.getEClass(pair.first).enodes[best_selection_map.at(pair.first)].value].cost;
         }
         ExtractionResult result = {best_selection_map, best_order, best_buffers,
-                                   best_eclass_to_buf, best_cost,  best_eclass_to_cost};
+                                   best_eclass_to_buf, best_cost, best_eclass_to_cost};
         std::cout << "best_cost=" << std::to_string(best_cost) << std::endl;
 
         return result;
@@ -1003,7 +1014,7 @@ struct Planner
 
         if (isFullRegion)
         {
-            return injected;
+            return false;
         }
 
         MemSpace ram = MemSpace{1, HandleType::CPP};
@@ -1017,7 +1028,7 @@ struct Planner
         }
         else if (strictCache)
         {
-            return injected;
+            return false;
         }
 
         const EClass lClass = egraph.getEClass(E_L);
@@ -1030,7 +1041,8 @@ struct Planner
         eclassToLogical[E_Cache] = logicalId;
         EClassId current_E = E_Cache;
 
-        auto addConst = [&](const std::vector<int32_t> &vals) {
+        auto addConst = [&](const std::vector<int32_t> &vals)
+        {
             return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
         };
 

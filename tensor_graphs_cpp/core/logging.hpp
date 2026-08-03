@@ -20,6 +20,7 @@
 #define TG_LOG_LEVEL LOG_LEVEL_L_INFO
 #endif
 
+// TODO rename DEBUG -> TG_DEBUG so we don't have to have the L_ prefix for these
 enum class LogLevel : int
 {
     L_DEBUG = LOG_LEVEL_L_DEBUG,

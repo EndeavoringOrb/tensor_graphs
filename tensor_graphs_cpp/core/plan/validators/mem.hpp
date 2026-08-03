@@ -237,7 +237,8 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     }
 
     std::unordered_map<EClassId, EClassId> inplace_alias;
-    auto get_inplace_alias = [&](EClassId id) {
+    auto get_inplace_alias = [&](EClassId id)
+    {
         while (inplace_alias.count(id))
             id = inplace_alias.at(id);
         return id;
@@ -355,6 +356,7 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
 static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
                    std::vector<ParallelBuffer> &allocated)
 {
+    ProgressTimer t(0, "malloc", false, true);
     if (unallocated.empty())
         return true;
     int N = static_cast<int>(unallocated.size());
@@ -549,6 +551,7 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
                               BufferId &overflow // if failed due to mem, which buffer pushed mem over the edge
 )
 {
+    ProgressTimer t(0, "check_peak_memory", false, true);
     if (mem_cap == std::numeric_limits<uint64_t>::max())
         return true;
 
@@ -569,11 +572,11 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
     }
 
     // Process Ends before Starts to correctly simulate memory release
-    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b) {
+    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b)
+              {
         if (a.time != b.time)
             return a.time < b.time;
-        return a.type < b.type;
-    });
+        return a.type < b.type; });
 
     int64_t current_mem = 0;
     for (const auto &ev : events)
@@ -602,14 +605,16 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
                                             // buffer pushed mem over the edge
 )
 {
+    ProgressTimer t(0, "greedy_alloc", false, true);
     std::vector<ParallelBuffer> bufs = unallocated;
 
     // Heuristic: Place largest buffers first to minimize fragmentation
-    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
-        if (a.size != b.size)
-            return a.size > b.size;
-        return a.id < b.id; // Deterministic tie-breaker
-    });
+    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
+              {
+                  if (a.size != b.size)
+                      return a.size > b.size;
+                  return a.id < b.id; // Deterministic tie-breaker
+              });
 
     allocated.clear();
     allocated.reserve(bufs.size());
@@ -630,7 +635,8 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 
         // Sort overlapping buffers by their memory offset ascending
         std::sort(time_overlaps.begin(), time_overlaps.end(),
-                  [](const ParallelBuffer *a, const ParallelBuffer *b) { return a->offset < b->offset; });
+                  [](const ParallelBuffer *a, const ParallelBuffer *b)
+                  { return a->offset < b->offset; });
 
         // First-fit algorithm: push best_offset upwards if there's a memory
         // collision
@@ -665,11 +671,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
 
     // 1. Sort buffers by start time (and then end time to be deterministic)
     std::vector<ParallelBuffer> sorted_bufs = unallocated;
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
+              {
         if (a.start != b.start)
             return a.start < b.start;
-        return a.end < b.end;
-    });
+        return a.end < b.end; });
 
     if (sorted_bufs.empty())
         return true;
@@ -692,11 +698,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
     // OPTIMIZATION 3: Exact solver fallback with aggressive pruning ordering
     // Sorting by size descending forces the tree to hit conflict limits much
     // faster.
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
+              {
         if (a.size != b.size)
             return a.size > b.size;
-        return a.id < b.id;
-    });
+        return a.id < b.id; });
 
     if (!malloc(mem_cap, sorted_bufs, comp_allocated))
     {
@@ -733,14 +739,10 @@ struct MemValidator : public ISelectionValidator
 
     bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
                   std::vector<ParallelBuffer> &buffers, std::unordered_map<EClassId, BufferId> &eclass_to_buf,
-                  BufferId &overflow, float &cost, std::string &reason, bool &updated_buffers,
-                  bool &updated_cost) override
+                  float &cost, std::vector<EClassId> &conflict_nodes) override
     {
-#ifdef DEBUG
-        ProgressTimer t = ProgressTimer(0, "validate");
-#endif
+        ProgressTimer t(0, "validate", false, true);
         cost = get_cost(order, egraph, selection_map, enodeInfos);
-        updated_cost = true;
         // bufferize: parallel schedule + per-node lifetimes
         std::vector<ParallelBuffer> unallocated_buffers =
             bufferize(order, egraph, selection_map, enodeInfos, eclass_to_buf);
@@ -835,7 +837,7 @@ struct MemValidator : public ISelectionValidator
         }
 
         bool alloc_ok = true;
-        std::string oom_reason = "OOM";
+        BufferId overflow;
 
         for (auto &kv : buf_by_mem_space)
         {
@@ -857,7 +859,7 @@ struct MemValidator : public ISelectionValidator
             if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow))
             {
                 alloc_ok = false;
-                oom_reason = "OOM:" + std::to_string(ms.idx) + ":" + std::to_string(static_cast<int>(ms.type));
+                LOG(L_INFO) << "[MemValidator] OOM error in mem_space (" << ms.idx << ", " << (int)ms.type << ")" << std::endl;
                 break;
             }
 
@@ -871,7 +873,6 @@ struct MemValidator : public ISelectionValidator
             buffers.insert(buffers.end(), std::make_move_iterator(allocated.begin()),
                            std::make_move_iterator(allocated.end()));
         }
-        updated_buffers = true;
 
         if (alloc_ok)
         {
@@ -912,8 +913,38 @@ struct MemValidator : public ISelectionValidator
 #endif
             return true;
         }
+
+        // Isolate the conflicting buffers that caused OOM
+        int buf_idx = -1;
+        for (int i = 0; i < unallocated_buffers.size(); i++)
+        {
+            if (unallocated_buffers[i].id == overflow)
+            {
+                buf_idx = i;
+                break;
+            }
+        }
+        std::unordered_set<BufferId> overflows;
+        if (buf_idx != -1)
+        {
+            for (int i = 0; i < unallocated_buffers.size(); i++)
+            {
+                if (overlapsBuf(unallocated_buffers[buf_idx], unallocated_buffers[i]))
+                {
+                    overflows.insert(unallocated_buffers[i].id);
+                }
+            }
+        }
+
+        for (const auto &kv : eclass_to_buf)
+        {
+            if (overflows.count(kv.second))
+            {
+                conflict_nodes.push_back(kv.first);
+            }
+        }
+
         buffers.insert(buffers.end(), unallocated_buffers.begin(), unallocated_buffers.end());
-        reason = oom_reason;
         return false;
     }
 };

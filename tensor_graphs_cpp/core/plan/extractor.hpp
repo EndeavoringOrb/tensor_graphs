@@ -42,6 +42,7 @@ public:
     bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
                               std::vector<EClassId> &out_order)
     {
+        ProgressTimer t(0, "getNextDispatchOrder", false, true);
         if (is_done)
             return false;
 
@@ -188,6 +189,7 @@ public:
     const EGraph &egraph;
     std::vector<EClassId> path; // List of EClasses in selection_map, in order root -> leaves
     std::vector<bool> in_path;
+    std::vector<int> path_pos;
     std::vector<EClassId> to_process; // EClass ids to process
     std::vector<bool> has_options;
     uint32_t active_options = 0;
@@ -195,12 +197,9 @@ public:
     EClassId target_backtrack_eclass;
     uint64_t numClasses;
 
-    bool updated_buffers = false;
-    bool updated_cost = false;
-
     Extractor(const EGraph &_egraph, EClassId root_eclass_id)
         : egraph(_egraph), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
-          in_path(_egraph.classes.size(), false), has_options(_egraph.classes.size(), false)
+          in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1), has_options(_egraph.classes.size(), false)
     {
     }
 
@@ -211,31 +210,20 @@ public:
 
     bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
                   std::vector<ParallelBuffer> &buffers, std::unordered_map<EClassId, BufferId> &eclass_to_buf,
-                  BufferId &overflow, float &cost, std::string &reason)
+                  float &cost, std::vector<EClassId> &conflict_nodes)
     {
-        updated_buffers = false;
-        updated_cost = false;
         for (const auto &validator : validators)
         {
-            if (!validator->validate(selection_map, order, buffers, eclass_to_buf, overflow, cost, reason,
-                                     updated_buffers, updated_cost))
+            if (!validator->validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes))
             {
                 return false;
             }
         }
-        if (!updated_buffers)
-        {
-            Error::throw_err("buffers not updated during validate");
-        }
-        if (!updated_cost)
-        {
-            Error::throw_err("cost not updated during validate");
-        }
         return true;
     }
 
-    // Returns the next graph contained in the egraph
-    const std::unordered_map<EClassId, uint32_t> &getNextSelection()
+    // Returns true if successfully formed a selection map, false if it needs to backtrack
+    bool getNextSelection()
     {
         ProgressTimer t(0, "getNextSelection", false, true);
         while (!to_process.empty())
@@ -250,6 +238,7 @@ public:
 
             path.push_back(current);
             in_path[current.value] = true;
+            path_pos[current.value] = path.size() - 1;
 
             uint32_t sel = 0;
             auto nextIt = next_sel.find(current);
@@ -260,15 +249,56 @@ public:
             }
 
             const auto &enodes = egraph.getEClass(current).enodes;
-            if (sel >= enodes.size())
+            
+            bool found_valid = false;
+            int max_conflict_path_pos = -1;
+
+            for (; sel < enodes.size(); ++sel)
             {
-                Error::throw_err("Invalid selection index in EGraph");
+                ENodeId enode_id = enodes[sel];
+                selection_map[current] = sel;
+                
+                bool step_valid = true;
+                std::vector<EClassId> conflict_nodes;
+                
+                for (const auto &validator : validators)
+                {
+                    if (!validator->validateStep(current, enode_id, selection_map, conflict_nodes))
+                    {
+                        step_valid = false;
+                        break;
+                    }
+                }
+                
+                if (step_valid)
+                {
+                    found_valid = true;
+                    break;
+                }
+                else
+                {
+                    for (EClassId c_node : conflict_nodes)
+                    {
+                        if (c_node != current && path_pos[c_node.value] != -1)
+                        {
+                            if (path_pos[c_node.value] > max_conflict_path_pos)
+                            {
+                                max_conflict_path_pos = path_pos[c_node.value];
+                            }
+                        }
+                    }
+                    selection_map.erase(current);
+                }
             }
 
-            ENodeId enode_id = enodes[sel];
-            const ENode &node = egraph.getENode(enode_id);
-
-            selection_map[current] = sel;
+            if (!found_valid)
+            {
+                if (max_conflict_path_pos != -1)
+                {
+                    target_backtrack_eclass = path[max_conflict_path_pos];
+                }
+                return false;
+            }
 
             if (enodes.size() > sel + 1)
             {
@@ -279,6 +309,8 @@ public:
                 }
             }
 
+            ENodeId enode_id = enodes[sel];
+            const ENode &node = egraph.getENode(enode_id);
             const auto &children = node.getChildren();
             for (auto it = children.rbegin(); it != children.rend(); ++it)
             {
@@ -289,202 +321,7 @@ public:
                 }
             }
         }
-        return selection_map;
-    }
-
-    void backtrack(const std::string reason, const std::unordered_map<EClassId, BufferId> &eclass_to_buf,
-                   const std::vector<ParallelBuffer> &buffers, const BufferId overflow)
-    {
-        ProgressTimer t(0, "backtrack", false, true);
-        target_backtrack_eclass = EClassId{UINT32_MAX};
-
-        if (reason == "cycle")
-        {
-            int best_backtrack_idx = std::numeric_limits<int>::max();
-            // Compute SCCs of the graph using Tarjan's algorithm.
-            // For each SCC of size > 1 (or size == 1 with a self-loop,
-            // i.e. a true cycle) choose a representative (max path idx)
-            // Backtrack target is min of all representatives
-
-            std::vector<int> path_idx(numClasses, -1);
-            for (int i = 0; i < (int)path.size(); ++i)
-            {
-                path_idx[egraph.findConst(path[i]).value] = i;
-            }
-
-            std::vector<int> disc(numClasses, -1);
-            std::vector<int> low(numClasses, -1);
-            std::vector<bool> onStack(numClasses, false);
-            std::vector<EClassId> st;
-            int time_counter = 0;
-
-            std::function<void(EClassId)> tarjan = [&](EClassId u)
-            {
-                disc[u.value] = low[u.value] = time_counter++;
-                st.push_back(u);
-                onStack[u.value] = true;
-
-                auto it = selection_map.find(u);
-                if (it != selection_map.end())
-                {
-                    uint32_t sel = it->second;
-                    ENodeId enode_id = egraph.getEClass(u).enodes[sel];
-                    for (EClassId v : egraph.getENode(enode_id).getChildren())
-                    {
-                        v = egraph.findConst(v);
-                        if (selection_map.find(v) != selection_map.end())
-                        {
-                            if (disc[v.value] == -1)
-                            {
-                                tarjan(v);
-                                low[u.value] = std::min(low[u.value], low[v.value]);
-                            }
-                            else if (onStack[v.value])
-                            {
-                                low[u.value] = std::min(low[u.value], disc[v.value]);
-                            }
-                        }
-                    }
-                }
-
-                if (low[u.value] == disc[u.value])
-                {
-                    std::vector<EClassId> scc;
-                    while (true)
-                    {
-                        EClassId v = st.back();
-                        st.pop_back();
-                        onStack[v.value] = false;
-                        scc.push_back(v);
-                        if (u == v)
-                            break;
-                    }
-
-                    bool is_cycle = false;
-                    if (scc.size() > 1)
-                    {
-                        is_cycle = true;
-                    }
-                    else if (scc.size() == 1)
-                    {
-                        EClassId v = scc[0];
-                        auto itv = selection_map.find(v);
-                        if (itv != selection_map.end())
-                        {
-                            uint32_t sel = itv->second;
-                            ENodeId enode_id = egraph.getEClass(v).enodes[sel];
-                            for (EClassId child : egraph.getENode(enode_id).getChildren())
-                            {
-                                child = egraph.findConst(child);
-                                if (child == v)
-                                {
-                                    is_cycle = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if (is_cycle)
-                    {
-                        int32_t scc_highest = -1;
-                        for (EClassId v : scc)
-                        {
-                            if (path_idx[v.value] != -1)
-                            {
-                                auto choiceIt = selection_map.find(v);
-                                if (choiceIt != selection_map.end())
-                                {
-                                    uint32_t sel = choiceIt->second;
-                                    const auto &enodes = egraph.getEClass(v).enodes;
-                                    if (sel + 1 < enodes.size())
-                                    {
-                                        if (path_idx[v.value] > scc_highest)
-                                        {
-                                            scc_highest = path_idx[v.value];
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (scc_highest != -1)
-                        {
-                            best_backtrack_idx = std::min(scc_highest, best_backtrack_idx);
-                        }
-                    }
-                }
-            };
-
-            for (const auto &kv : selection_map)
-            {
-                if (disc[kv.first.value] == -1)
-                {
-                    tarjan(kv.first);
-                }
-            }
-
-            if (best_backtrack_idx != std::numeric_limits<int>::max())
-            {
-                target_backtrack_eclass = path[best_backtrack_idx];
-                std::cout << "[Planner.extractBest] cycle: backtracking to eclass " << toString(target_backtrack_eclass)
-                          << " (path index " << best_backtrack_idx << " of " << path.size() << ")" << std::endl;
-            }
-        }
-        else if (reason.rfind("OOM", 0) == 0)
-        {
-            int best_backtrack_idx = -1;
-
-            // Find all buffers overlapping with the overflow buffer
-            int buf_idx = -1;
-            for (int i = 0; i < buffers.size(); i++)
-            {
-                if (buffers[i].id == overflow)
-                {
-                    buf_idx = i;
-                }
-            }
-            std::unordered_set<BufferId> overflows;
-            if (buf_idx != -1)
-            {
-                for (int i = 0; i < buffers.size(); i++)
-                {
-                    if (overlapsBuf(buffers[buf_idx], buffers[i]))
-                    {
-                        overflows.insert(buffers[i].id);
-                    }
-                }
-            }
-            std::cout << "got " << std::to_string(overflows.size()) << " buffers at overflow" << std::endl;
-
-            // Search path from deepest to highest for an eclass that was in the overflow buffer
-            if (overflows.size() > 0)
-            {
-                for (int i = path.size() - 1; i >= 0; --i)
-                {
-                    EClassId ec = path[i];
-                    auto selIt = selection_map.find(ec);
-                    if (selIt == selection_map.end())
-                        continue;
-
-                    auto bufIt = eclass_to_buf.find(ec);
-                    if (bufIt == eclass_to_buf.end())
-                        Error::throw_err("eclass has no buffer");
-
-                    if (!overflows.count(bufIt->second))
-                        continue;
-
-                    best_backtrack_idx = i;
-                    break;
-                }
-            }
-
-            if (best_backtrack_idx != -1)
-            {
-                target_backtrack_eclass = path[best_backtrack_idx];
-                std::cout << "[Planner.extractBest] OOM: backtracking to eclass " << toString(target_backtrack_eclass)
-                          << " (path index " << best_backtrack_idx << " of " << path.size() << ")" << std::endl;
-            }
-        }
+        return true;
     }
 
     void ascend()
