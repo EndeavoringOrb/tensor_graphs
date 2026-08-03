@@ -11,7 +11,7 @@
     --primary-hover: #2563eb;
     --primary-light: #eff6ff;
 
-    /* Operations Theme Colors (Pill designs with matching crisp borders) */
+    /* Operations Theme Colors */
     --color-input-bg: #f1f5f9;
     --color-input-text: #475569;
     --color-input-border: #cbd5e1;
@@ -382,6 +382,7 @@ body {
     padding: 2px 6px;
     border-radius: 4px;
     text-transform: uppercase;
+    border: 1px solid transparent;
 }
 
 #inspectName {
@@ -416,7 +417,7 @@ body {
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    gap: 12px;
+    gap: 16px;
     border-bottom: 1px solid var(--border-color);
     padding-bottom: 16px;
     margin-bottom: 20px;
@@ -427,6 +428,38 @@ body {
         flex-direction: row;
         align-items: center;
     }
+}
+
+.main-header-left {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.zoom-control-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #475569;
+    background-color: #f8fafc;
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-color);
+}
+
+.zoom-control-group label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+.zoom-control-group input[type="range"] {
+    width: 140px;
+    cursor: pointer;
+    accent-color: var(--primary);
 }
 
 .legend {
@@ -576,64 +609,13 @@ body {
     cursor: pointer;
     transition: transform 0.1s ease, box-shadow 0.1s ease;
     z-index: 2;
+    border: 1px solid transparent;
 }
 
 .task-bar:hover {
     transform: translateY(-2px);
     box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
     z-index: 5;
-}
-
-/* Pill Colors based on Operational Type */
-.op-INPUT {
-    background: var(--color-input-bg);
-    color: var(--color-input-text);
-    border: 1px solid var(--color-input-border);
-}
-
-.op-ADD {
-    background: var(--color-add-bg);
-    color: var(--color-add-text);
-    border: 1px solid var(--color-add-border);
-}
-
-.op-MUL {
-    background: var(--color-mul-bg);
-    color: var(--color-mul-text);
-    border: 1px solid var(--color-mul-border);
-}
-
-.op-COPYTO {
-    background: var(--color-copyto-bg);
-    color: var(--color-copyto-text);
-    border: 1px solid var(--color-copyto-border);
-}
-
-.op-SQRT {
-    background: var(--color-sqrt-bg);
-    color: var(--color-sqrt-text);
-    border: 1px solid var(--color-sqrt-border);
-}
-
-/* Legend dot matching */
-.legend-dot.op-INPUT {
-    background: var(--color-input-text);
-}
-
-.legend-dot.op-ADD {
-    background: var(--color-add-text);
-}
-
-.legend-dot.op-MUL {
-    background: var(--color-mul-text);
-}
-
-.legend-dot.op-COPYTO {
-    background: var(--color-copyto-text);
-}
-
-.legend-dot.op-SQRT {
-    background: var(--color-sqrt-text);
 }
 
 /* Styling for Instant/Zero Duration Event Bars */
@@ -734,8 +716,6 @@ body {
     }
 }
 
-/* (Add these rules towards the bottom of your static/css/style.css file) */
-
 /* Memory Allocation Canvas Layout Styling */
 .mem-section-header {
     font-size: 0.7rem;
@@ -831,6 +811,7 @@ body {
     cursor: pointer;
     transition: transform 0.1s ease, box-shadow 0.1s ease, filter 0.1s;
     z-index: 2;
+    border: 1px solid transparent;
 }
 
 .mem-buffer-bar:hover {

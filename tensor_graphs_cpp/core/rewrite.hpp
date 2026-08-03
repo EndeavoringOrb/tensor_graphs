@@ -34,7 +34,8 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     std::vector<MemSpace> current_path = {src};
     std::unordered_set<MemSpace> visited = {src};
 
-    std::function<void(MemSpace)> dfs = [&](MemSpace curr) {
+    std::function<void(MemSpace)> dfs = [&](MemSpace curr)
+    {
         if (curr == dst)
         {
             all_paths.push_back(current_path);
@@ -1433,7 +1434,8 @@ struct SlicePushDownDot : public Rule
                 EClassId stepsIdB = egraph.addIntConst(stepsB);
 
                 auto createSlice = [&](EClassId classId, const std::vector<int32_t> &st, const std::vector<int32_t> &en,
-                                       EClassId stId, EClassId enId, EClassId stepId) {
+                                       EClassId stId, EClassId enId, EClassId stepId)
+                {
                     EClassId canonId = egraph.findConst(classId);
                     const EClass cls = egraph.getEClass(canonId);
                     std::vector<uint64_t> sStrides = cls.strides;
@@ -1985,7 +1987,8 @@ struct RemoveContiguous : public Rule
         std::vector<std::vector<EClassId>> childCombinations;
         std::vector<EClassId> currentCombination(children.size());
 
-        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped) {
+        std::function<void(uint64_t, bool)> generateCombos = [&](uint64_t pos, bool hasUnwrapped)
+        {
             if (pos == children.size())
             {
                 if (hasUnwrapped)
@@ -2033,6 +2036,123 @@ struct RemoveContiguous : public Rule
                                enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines());
                 egraph.addENode(e_class_id, newENode);
             }
+        }
+    }
+};
+
+// Remove chains of COPY_TO operations where the start and end MemSpaces match.
+// Matches the consumer node and rewrites its children to point directly to the
+// earlier EClass in the same MemSpace, bypassing intermediate COPY_TO nodes.
+struct RemoveCopyChains : public Rule
+{
+    std::unordered_set<uint32_t> visited;
+
+    std::string name() const override
+    {
+        return "RemoveCopyChains";
+    }
+
+    static EClassId findCopyChainOrigin(EClassId startClassId, const EGraph &egraph)
+    {
+        EClassId startCanon = egraph.findConst(startClassId);
+        MemSpace targetMemSpace = egraph.getEClass(startCanon).mem_space;
+
+        EClassId currClass = startCanon;
+        EClassId bestOrigin = startCanon;
+        std::unordered_set<EClassId> visitedClasses = {currClass};
+
+        while (true)
+        {
+            const EClass &cls = egraph.getEClass(currClass);
+            EClassId nextClass = EClassId{UINT32_MAX};
+
+            for (ENodeId enodeId : cls.enodes)
+            {
+                const ENode &enode = egraph.getENode(enodeId);
+                if (enode.getOpType() == OpType::COPY_TO && !enode.getChildren().empty())
+                {
+                    nextClass = egraph.findConst(enode.getChildren()[0]);
+                    break;
+                }
+            }
+
+            if (nextClass == EClassId{UINT32_MAX} || visitedClasses.count(nextClass))
+            {
+                break;
+            }
+
+            visitedClasses.insert(nextClass);
+            if (egraph.getEClass(nextClass).mem_space == targetMemSpace)
+            {
+                bestOrigin = nextClass;
+            }
+            currClass = nextClass;
+        }
+
+        return bestOrigin;
+    }
+
+    bool match(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        if (visited.count(eNodeIdx))
+            return false;
+
+        const EGraph &egraph = ctx.egraph;
+        if (eNodeIdx >= egraph.getENodes().size())
+            return false;
+
+        const ENode &enode = egraph.getENode(ENodeId{eNodeIdx});
+
+        if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
+            return false;
+
+        const auto &children = enode.getChildren();
+        for (uint64_t i = 0; i < children.size(); ++i)
+        {
+            EClassId childCanon = egraph.findConst(children[i]);
+            EClassId origin = findCopyChainOrigin(childCanon, egraph);
+            if (origin != childCanon)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    void apply(uint32_t eNodeIdx, RuleCtx &ctx) override
+    {
+        EGraph &egraph = ctx.egraph;
+        visited.insert(eNodeIdx);
+
+        const ENode enode = egraph.getENode(ENodeId{eNodeIdx});
+        EClassId eClassId = egraph.getENodeEClass(ENodeId{eNodeIdx});
+
+        std::vector<EClassId> newChildren;
+        newChildren.reserve(enode.getChildren().size());
+        bool changed = false;
+
+        for (uint64_t i = 0; i < enode.getChildren().size(); ++i)
+        {
+            EClassId childCanon = egraph.findConst(enode.getChildren()[i]);
+            EClassId origin = findCopyChainOrigin(childCanon, egraph);
+            if (origin != childCanon)
+            {
+                newChildren.push_back(origin);
+                changed = true;
+            }
+            else
+            {
+                newChildren.push_back(childCanon);
+            }
+        }
+
+        if (changed)
+        {
+            ENode newENode(enode.getKernelId(), enode.getOpType(), enode.getOpName(), newChildren, enode.getShape(),
+                           enode.getStrides(), enode.getDType(), enode.getMemSpace(), enode.getEngines(),
+                           enode.getContentHash());
+            egraph.addENode(eClassId, newENode);
         }
     }
 };

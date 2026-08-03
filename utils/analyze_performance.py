@@ -5,7 +5,7 @@ import os
 import re
 from collections import defaultdict
 
-from binary import load_cache_file
+from utils.binary import load_cache_file
 
 
 def load_uids_from_cpp():

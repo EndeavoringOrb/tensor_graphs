@@ -62,6 +62,7 @@ struct Planner
         rules.emplace_back(std::make_unique<FlattenElementwise>());
         rules.emplace_back(std::make_unique<DotSplitRule>());
         rules.emplace_back(std::make_unique<RemoveContiguous>());
+        rules.emplace_back(std::make_unique<RemoveCopyChains>());
         if (injected)
         {
             rules.emplace_back(std::make_unique<InfinityDomination>());
