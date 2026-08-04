@@ -619,120 +619,185 @@ std::unordered_map<KernelId, std::vector<Record>> loadCallRecords(const std::str
     return records;
 }
 
-// TODO: this is sort of redundant with Session::loadCache
-std::unordered_map<KernelId, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
+struct CacheFile
 {
-    std::unordered_map<KernelId, std::vector<Record>> recordsByUid;
-    std::unordered_set<std::string> seen;
+    uint32_t version = 0;
+    LogicalId rootId;
+    std::unordered_map<LogicalId, MemSpace> selectedCachedNodes;
+    std::vector<CompiledGraph> compiledGraphs;
+    std::unordered_map<LogicalId, std::shared_ptr<std::vector<uint8_t>>> constants;
+    bool isValid = true;
+    std::string invalidReason;
+};
+
+inline CacheFile loadCacheFile(const std::string &cachePath, bool validateKernels = false)
+{
+    CacheFile cache;
+    if (cachePath.empty())
+    {
+        cache.isValid = false;
+        cache.invalidReason = "Cache path is empty";
+        return cache;
+    }
 
     std::ifstream file(cachePath, std::ios::binary);
     if (!file.is_open())
     {
-        std::cerr << "Warning: Could not open cache file: " << cachePath << std::endl;
-        return recordsByUid;
+        cache.isValid = false;
+        cache.invalidReason = "Could not open cache file: " + cachePath;
+        return cache;
     }
 
     BinaryReader br(file);
     while (file.peek() != EOF)
     {
-        uint8_t type;
+        uint8_t type = 0;
         br.read(type);
 
         if (type == 0) // Metadata
         {
-            uint32_t version;
-            LogicalId cachedRootId;
-            std::unordered_map<LogicalId, MemSpace> tempSelected;
-            br.read(version);
-            br.read(cachedRootId);
-            br.read(tempSelected);
+            br.read(cache.version);
+            br.read(cache.rootId);
+            br.read(cache.selectedCachedNodes);
         }
         else if (type == 1) // Compiled Bucket
         {
             CompiledGraph cg;
             br.read(cg);
 
-            for (const auto &inst : cg.instructions)
+            if (validateKernels)
             {
-                if (inst.kernel_id.value == 0)
+                for (const auto &inst : cg.instructions)
+                {
+                    if (inst.kernel_id == KernelId{0} || !KernelRegistry::get().hasKernel(inst.kernel_id))
+                    {
+                        cache.isValid = false;
+                        cache.invalidReason = "Invalid Kernel ID: " + toString(inst.kernel_id);
+                        break;
+                    }
+                }
+                if (!cache.isValid)
+                    break;
+            }
+            cache.compiledGraphs.push_back(std::move(cg));
+        }
+        else if (type == 2) // Constants
+        {
+            uint32_t count = 0;
+            br.read(count);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                LogicalId nodeId;
+                std::vector<uint8_t> data;
+                br.read(nodeId);
+                br.read(data);
+                cache.constants[nodeId] = std::make_shared<std::vector<uint8_t>>(std::move(data));
+            }
+        }
+        else
+        {
+            cache.isValid = false;
+            cache.invalidReason = "Unknown block type";
+            break;
+        }
+    }
+
+    return cache;
+}
+
+inline std::unordered_map<KernelId, std::vector<Record>> getRecordsFromCache(const std::string &cachePath)
+{
+    std::unordered_map<KernelId, std::vector<Record>> recordsByUid;
+    std::unordered_set<std::string> seen;
+
+    CacheFile cache = loadCacheFile(cachePath, /*validateKernels=*/false);
+    if (!cache.isValid)
+    {
+        std::cerr << "Warning: " << cache.invalidReason << std::endl;
+        return recordsByUid;
+    }
+
+    for (const auto &cg : cache.compiledGraphs)
+    {
+        for (const auto &inst : cg.instructions)
+        {
+            if (inst.kernel_id.value == 0 || !KernelRegistry::get().hasKernel(inst.kernel_id))
+                continue;
+
+            Record r;
+            r.kernelId = inst.kernel_id;
+            r.buildContextId = BUILD_CONTEXT_ID;
+            r.hwTag = HW_TAG;
+            r.runTime = 0.0f;
+
+            const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
+            r.output_mem_space = kernel.output_mem_space;
+            r.engines = kernel.engines;
+
+            if (cg.nodeViews.count(inst.eclass_id))
+            {
+                const TensorView &outView = cg.nodeViews.at(inst.eclass_id);
+                r.outputShape = outView.getShape();
+                r.outputStrides = outView.strides;
+                r.outputDType = outView.dtype;
+            }
+
+            for (uint32_t i = 0; i < inst.children.size(); i++)
+            {
+                EClassId inId = inst.children[i];
+                if (!cg.nodeViews.count(inId))
                     continue;
 
-                Record r;
-                r.kernelId = inst.kernel_id;
-                r.buildContextId = BUILD_CONTEXT_ID;
-                r.hwTag = HW_TAG;
-                r.runTime = 0.0f;
+                const TensorView &inView = cg.nodeViews.at(inId);
+                r.inputShapes.push_back(inView.getShape());
+                r.inputStrides.push_back(inView.strides);
+                r.inputDTypes.push_back(inView.dtype);
 
-                const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
-                r.output_mem_space = kernel.output_mem_space;
-                r.engines = kernel.engines;
-
-                for (uint32_t i = 0; i < inst.children.size(); i++)
+                uint64_t ruleIdx = std::min(
+                    (uint64_t)i,
+                    static_cast<uint64_t>(kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1));
+                MemSpace ms = {1, HandleType::CPP};
+                if (!kernel.input_mem_spaces.empty() && ruleIdx < kernel.input_mem_spaces.size())
                 {
-                    EClassId inId = inst.children[i];
-                    const TensorView &inView = cg.nodeViews.at(inId);
-                    r.inputShapes.push_back(inView.getShape());
-                    r.inputStrides.push_back(inView.strides);
-                    r.inputDTypes.push_back(inView.dtype);
+                    ms = kernel.input_mem_spaces[ruleIdx];
+                }
+                r.input_mem_spaces.push_back(ms);
 
-                    uint64_t ruleIdx = std::min(
-                        (uint64_t)i, static_cast<uint64_t>(
-                                         kernel.input_mem_spaces.empty() ? 0 : kernel.input_mem_spaces.size() - 1));
-                    MemSpace ms = {1, HandleType::CPP};
-                    if (!kernel.input_mem_spaces.empty() && ruleIdx < kernel.input_mem_spaces.size())
+                if (cg.has_logical_id(inId))
+                {
+                    LogicalId logicalId = cg.get_logical_id(inId);
+                    if (cg.constantStaging.count(EClassId{logicalId.value}))
                     {
-                        ms = kernel.input_mem_spaces[ruleIdx];
-                    }
-                    r.input_mem_spaces.push_back(ms);
-
-                    if (cg.has_logical_id(inId))
-                    {
-                        LogicalId logicalId = cg.get_logical_id(inId);
-                        if (cg.constantStaging.count(EClassId{logicalId.value}))
-                        {
-                            r.inputConstants.push_back(*cg.constantStaging.at(EClassId{logicalId.value}));
-                        }
-                        else if (cg.constantStaging.count(inId))
-                        {
-                            r.inputConstants.push_back(*cg.constantStaging.at(inId));
-                        }
-                        else
-                        {
-                            r.inputConstants.push_back({});
-                        }
+                        r.inputConstants.push_back(*cg.constantStaging.at(EClassId{logicalId.value}));
                     }
                     else if (cg.constantStaging.count(inId))
                     {
                         r.inputConstants.push_back(*cg.constantStaging.at(inId));
+                    }
+                    else if (cache.constants.count(logicalId))
+                    {
+                        r.inputConstants.push_back(*cache.constants.at(logicalId));
                     }
                     else
                     {
                         r.inputConstants.push_back({});
                     }
                 }
-
-                std::string sig = serializeToString(r);
-                if (seen.insert(sig).second)
+                else if (cg.constantStaging.count(inId))
                 {
-                    recordsByUid[r.kernelId].push_back(r);
+                    r.inputConstants.push_back(*cg.constantStaging.at(inId));
+                }
+                else
+                {
+                    r.inputConstants.push_back({});
                 }
             }
-        }
-        else if (type == 2) // Constants
-        {
-            uint32_t count;
-            br.read(count);
-            for (uint32_t i = 0; i < count; ++i)
+
+            std::string sig = serializeToString(r);
+            if (seen.insert(sig).second)
             {
-                uint32_t n;
-                std::vector<uint8_t> d;
-                br.read(n);
-                br.read(d);
+                recordsByUid[r.kernelId].push_back(r);
             }
-        }
-        else
-        {
-            break;
         }
     }
     return recordsByUid;

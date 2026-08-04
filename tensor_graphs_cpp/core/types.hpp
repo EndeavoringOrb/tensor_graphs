@@ -575,8 +575,9 @@ inline uint64_t countElements(const TensorView &view)
 
 struct GraphPatternCacheKey
 {
-    OpType pOpType;
-    std::string pOpName;
+    OpType pRootOpType;
+    std::string pRootOpName;
+    std::string patternHash;
     bool reference_only;
     bool ignore_output_mem_space;
     bool ignore_input_mem_spaces;
@@ -590,8 +591,8 @@ struct GraphPatternCacheKey
 
     bool operator==(const GraphPatternCacheKey &o) const
     {
-        if (pOpType != o.pOpType || pOpName != o.pOpName || reference_only != o.reference_only ||
-            ignore_output_mem_space != o.ignore_output_mem_space ||
+        if (pRootOpType != o.pRootOpType || pRootOpName != o.pRootOpName || patternHash != o.patternHash ||
+            reference_only != o.reference_only || ignore_output_mem_space != o.ignore_output_mem_space ||
             ignore_input_mem_spaces != o.ignore_input_mem_spaces || ignore_engines != o.ignore_engines)
             return false;
         if (inputs.size() != o.inputs.size())
@@ -624,9 +625,11 @@ template <> struct hash<GraphPatternCacheKey>
         uint64_t h = 0;
         auto combine = [&](uint64_t val) { tg_hash::hashCombine(h, val); };
 
-        combine(static_cast<uint64_t>(k.pOpType));
-        if (!k.pOpName.empty())
-            combine(std::hash<std::string>()(k.pOpName));
+        combine(static_cast<uint64_t>(k.pRootOpType));
+        if (!k.pRootOpName.empty())
+            combine(std::hash<std::string>()(k.pRootOpName));
+        if (!k.patternHash.empty())
+            combine(std::hash<std::string>()(k.patternHash));
         combine(static_cast<uint64_t>(k.reference_only));
         combine(static_cast<uint64_t>(k.ignore_output_mem_space));
         combine(static_cast<uint64_t>(k.ignore_input_mem_spaces));

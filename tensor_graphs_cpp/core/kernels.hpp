@@ -337,16 +337,17 @@ class KernelRegistry
         return matches;
     }
 
-    std::vector<KernelId> findMatchingKernelsByPattern(
-        const Graph &patternGraph, LogicalId patternRootId, const std::vector<TensorNode> &inputs,
-        const TensorNode &output, bool reference_only = false, MemSpace output_mem_space = {},
-        const std::vector<MemSpace> &input_mem_spaces = {}, const std::vector<Engine> &engines = {},
-        bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false, bool ignore_engines = false,
-        bool ignore_input_contig = false) const
+    std::vector<KernelId> findMatchingKernelsByPatternHash(
+        const Graph &patternGraph, LogicalId patternRootId, const std::string &patternHash,
+        const std::vector<TensorNode> &inputs, const TensorNode &output, bool reference_only = false,
+        MemSpace output_mem_space = {}, const std::vector<MemSpace> &input_mem_spaces = {},
+        const std::vector<Engine> &engines = {}, bool ignore_output_mem_space = false,
+        bool ignore_input_mem_spaces = false, bool ignore_engines = false, bool ignore_input_contig = false) const
     {
         const TensorNode &rootNode = patternGraph.getNode(patternRootId);
         GraphPatternCacheKey key{rootNode.opType,
                                  rootNode.opName,
+                                 patternHash,
                                  reference_only,
                                  ignore_output_mem_space,
                                  ignore_input_mem_spaces,
@@ -369,6 +370,20 @@ class KernelRegistry
 
         patternCache[key] = matches;
         return matches;
+    }
+
+    std::vector<KernelId> findMatchingKernelsByPattern(
+        const Graph &patternGraph, LogicalId patternRootId, const std::vector<TensorNode> &inputs,
+        const TensorNode &output, bool reference_only = false, MemSpace output_mem_space = {},
+        const std::vector<MemSpace> &input_mem_spaces = {}, const std::vector<Engine> &engines = {},
+        bool ignore_output_mem_space = false, bool ignore_input_mem_spaces = false, bool ignore_engines = false,
+        bool ignore_input_contig = false) const
+    {
+        std::string patternHash = computeGraphHash(patternGraph, {patternRootId});
+        return findMatchingKernelsByPatternHash(patternGraph, patternRootId, patternHash, inputs, output,
+                                                reference_only, output_mem_space, input_mem_spaces, engines,
+                                                ignore_output_mem_space, ignore_input_mem_spaces, ignore_engines,
+                                                ignore_input_contig);
     }
 
     void registerKernel(KernelId uid, OpType op, const std::string &opName, uint32_t min_num_inputs,

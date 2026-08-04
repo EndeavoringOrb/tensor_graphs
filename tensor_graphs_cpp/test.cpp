@@ -941,7 +941,6 @@ bool testKernelWithRecord(const KernelEntry &kernel, const Record &rec)
     }
 }
 
-
 void runPythonTests(std::string testDir = "tensor_graphs_cpp/tests")
 {
     std::cout << "\n========================================" << std::endl;

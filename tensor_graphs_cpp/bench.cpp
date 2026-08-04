@@ -29,7 +29,8 @@ int main(int argc, char *argv[])
     ArgParser parser("bench", "Benchmark registered kernels.");
     parser.add_option({"--skip", "-s"}, "Number of kernels to skip.", "0");
     parser.add_flag({"--list", "-l"}, "Only list the configurations, do not benchmark.");
-    parser.add_option({"--cache"}, "Path to cache file. If provided, benchmark only configurations from this cache.", "");
+    parser.add_option({"--cache"}, "Path to cache file. If provided, benchmark only configurations from this cache.",
+                      "");
     parser.add_positional("targetKernel", "Bench only kernels whose name contain this string.", "");
 
     if (!parser.parse(argc, argv))
@@ -88,7 +89,8 @@ int main(int argc, char *argv[])
         std::ifstream callsFile(callsPath, std::ios::binary);
         if (!callsFile.is_open())
         {
-            std::cerr << "No calls file found at " << callsPath << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference pass first." << std::endl;
+            std::cerr << "No calls file found at " << callsPath
+                      << ". Enable TENSOR_GRAPHS_LOG_COST_CALLS and run an inference pass first." << std::endl;
             return 0;
         }
 

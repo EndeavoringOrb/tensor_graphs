@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "core/common/bench_utils.hpp"
 #include "core/cost_model.hpp"
 #include "core/executor.hpp"
 #include "core/graph.hpp"
@@ -547,100 +548,33 @@ struct Session
     {
         if (cachePath.empty())
             return;
-        std::ifstream file(cachePath, std::ios::binary);
-        if (!file.is_open())
-            return;
 
-        BinaryReader br(file);
-        bool hasInvalidCache = false;
-        std::string invalidCacheReason = "";
-        std::vector<CompiledGraph> tempGraphs;
-        std::unordered_map<LogicalId, MemSpace> tempSelectedCachedNodes;
+        CacheFile cache = loadCacheFile(cachePath, /*validateKernels=*/true);
 
-        while (file.peek() != EOF)
+        if (!cache.isValid || cache.version != kCacheFileVersion || cache.rootId != rootId)
         {
-            uint8_t type;
-            br.read(type);
-
-            if (type == 0)
-            {
-                uint32_t version;
-                LogicalId cachedRootId;
-                br.read(version);
-                br.read(cachedRootId);
-                br.read(tempSelectedCachedNodes);
-
-                if (version != kCacheFileVersion || cachedRootId != rootId)
-                {
-                    hasInvalidCache = true;
-                    invalidCacheReason = "Version or RootId mismatch";
-                    break;
-                }
-            }
-            else if (type == 1)
-            {
-                CompiledGraph cg;
-                br.read(cg);
-
-                bool valid = true;
-                for (const auto &inst : cg.instructions)
-                {
-                    if (inst.kernel_id == KernelId{0} || !KernelRegistry::get().hasKernel(inst.kernel_id))
-                    {
-                        valid = false;
-                        break;
-                    }
-                    if (!valid)
-                        break;
-                }
-                if (!valid)
-                {
-                    hasInvalidCache = true;
-                    invalidCacheReason = "Invalid Kernel ID";
-                    break;
-                }
-                tempGraphs.push_back(cg);
-            }
-            else if (type == 2)
-            {
-                uint32_t count;
-                br.read(count);
-                for (uint32_t i = 0; i < count; ++i)
-                {
-                    LogicalId nodeId;
-                    std::vector<uint8_t> data;
-                    br.read(nodeId);
-                    br.read(data);
-                    auto buf = std::make_shared<std::vector<uint8_t>>(std::move(data));
-                    graph.constantStaging[nodeId] = buf;
-                    if (graph.hasNode(nodeId))
-                    {
-                        const TensorNode &node = graph.getNode(nodeId);
-                        uint64_t dataHash =
-                            tg_hash::computeConstantHash(node.getShape(), node.dtype, buf->data(), buf->size());
-                        graph.constantHashIndex[dataHash].push_back(nodeId);
-                    }
-                }
-            }
-            else
-            {
-                hasInvalidCache = true;
-                invalidCacheReason = "Unknown block type";
-                break;
-            }
-        }
-
-        if (hasInvalidCache)
-        {
-            std::cout << "[Session.loadCache] invalid cache: " << invalidCacheReason << std::endl;
+            std::string reason = cache.isValid ? "Version or RootId mismatch" : cache.invalidReason;
+            std::cout << "[Session.loadCache] invalid cache: " << reason << std::endl;
             std::ofstream clearFile(cachePath, std::ios::trunc | std::ios::binary);
             return;
         }
 
-        if (!tempGraphs.empty())
+        for (const auto &pair : cache.constants)
         {
-            cachedGraphs = std::move(tempGraphs);
-            selectedCachedNodes = std::move(tempSelectedCachedNodes);
+            graph.constantStaging[pair.first] = pair.second;
+            if (graph.hasNode(pair.first))
+            {
+                const TensorNode &node = graph.getNode(pair.first);
+                uint64_t dataHash =
+                    tg_hash::computeConstantHash(node.getShape(), node.dtype, pair.second->data(), pair.second->size());
+                graph.constantHashIndex[dataHash].push_back(pair.first);
+            }
+        }
+
+        if (!cache.compiledGraphs.empty())
+        {
+            cachedGraphs = std::move(cache.compiledGraphs);
+            selectedCachedNodes = std::move(cache.selectedCachedNodes);
             isPlanned = true;
         }
     }

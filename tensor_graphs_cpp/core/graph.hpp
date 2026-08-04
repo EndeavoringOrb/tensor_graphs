@@ -678,6 +678,87 @@ struct Graph
     }
 };
 
+inline std::string computeGraphHash(const Graph &graph, const std::vector<LogicalId> &rootIds)
+{
+    // Pass 1: Perform an iterative post-order DFS to establish evaluation order.
+    std::vector<LogicalId> postOrder;
+    std::unordered_set<LogicalId> visited;
+
+    struct StackFrame
+    {
+        LogicalId id;
+        size_t childIdx;
+    };
+
+    std::vector<StackFrame> stack;
+
+    for (LogicalId r : rootIds)
+    {
+        if (visited.count(r))
+            continue;
+
+        visited.insert(r);
+        stack.push_back({r, 0});
+
+        while (!stack.empty())
+        {
+            LogicalId currId = stack.back().id;
+            size_t &childIdx = stack.back().childIdx;
+            const TensorNode &n = graph.getNode(currId);
+
+            if (childIdx < n.child_ids.size())
+            {
+                LogicalId childId = n.child_ids[childIdx++];
+                if (visited.insert(childId).second)
+                {
+                    stack.push_back({childId, 0});
+                }
+            }
+            else
+            {
+                postOrder.push_back(currId);
+                stack.pop_back();
+            }
+        }
+    }
+
+    // Pass 2: Iteratively compute hashes in post-order (leaves -> roots).
+    std::unordered_map<LogicalId, std::string> memo;
+
+    for (LogicalId id : postOrder)
+    {
+        const TensorNode &n = graph.getNode(id);
+        SHA256 sha;
+        sha.update(toString(n.opType));
+        sha.update(":");
+        for (auto s : n.getShape())
+        {
+            sha.update(std::to_string(s) + ",");
+        }
+        sha.update(":");
+        sha.update(toString(n.dtype));
+        if (graph.constantStaging.count(id))
+        {
+            sha.update(":");
+            sha.update(n.contentHash);
+        }
+        for (LogicalId pid : n.child_ids)
+        {
+            sha.update(":");
+            sha.update(memo.at(pid)); // Guaranteed to be computed already
+        }
+        memo[id] = sha.digest();
+    }
+
+    // Final Hash across all root nodes
+    SHA256 finalSha;
+    for (LogicalId r : rootIds)
+    {
+        finalSha.update(memo.at(r));
+    }
+    return finalSha.digest();
+}
+
 inline bool isIsomorphic(const Graph &g1, LogicalId root1, const Graph &g2, LogicalId root2)
 {
     const TensorNode &n1 = g1.getNode(root1);

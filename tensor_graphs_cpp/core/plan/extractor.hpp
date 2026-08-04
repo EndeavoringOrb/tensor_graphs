@@ -32,10 +32,9 @@ struct ENodeInfo
 
 struct DispatchIterator
 {
-public:
+  public:
     // Now accepts enode_infos to compute true remaining latency paths
-    DispatchIterator(const EGraph &_egraph, 
-                     const std::unordered_map<EClassId, uint32_t> &selection_map,
+    DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
                      const std::vector<ENodeInfo> &enode_infos)
         : egraph(_egraph)
     {
@@ -69,8 +68,9 @@ public:
             // Compare using floating-point remaining critical path latency
             float h_a = heights[a.value];
             float h_b = heights[b.value];
-            if (std::abs(h_a - h_b) > 1e-5f) {
-                return h_a > h_b; 
+            if (std::abs(h_a - h_b) > 1e-5f)
+            {
+                return h_a > h_b;
             }
 
             return a.value < b.value;
@@ -138,7 +138,7 @@ public:
         return iter;
     }
 
-private:
+  private:
     const EGraph &egraph;
     size_t num_nodes_in_selection = 0;
     std::vector<EClassId> ordered;
@@ -226,14 +226,16 @@ private:
         std::vector<bool> height_computed(max_class_id, false);
 
         std::function<float(EClassId)> get_height = [&](EClassId u) -> float {
-            if (height_computed[u.value]) return heights[u.value];
+            if (height_computed[u.value])
+                return heights[u.value];
 
             uint32_t sel = selection_map.at(u);
             ENodeId enode_id = egraph.getEClass(u).enodes[sel];
             float self_cost = enode_infos[enode_id.value].cost;
 
             float max_dep_height = 0.0f;
-            for (EClassId v : dependents[u.value]) {
+            for (EClassId v : dependents[u.value])
+            {
                 max_dep_height = std::max(max_dep_height, get_height(v));
             }
 
@@ -243,9 +245,11 @@ private:
             return h;
         };
 
-        for (const auto &kv : selection_map) {
+        for (const auto &kv : selection_map)
+        {
             EClassId u = egraph.findConst(kv.first);
-            if (u.value < max_class_id) {
+            if (u.value < max_class_id)
+            {
                 get_height(u);
             }
         }
@@ -253,7 +257,8 @@ private:
         auto compare_nodes = [&](EClassId a, EClassId b) {
             float h_a = heights[a.value];
             float h_b = heights[b.value];
-            if (std::abs(h_a - h_b) > 1e-5f) {
+            if (std::abs(h_a - h_b) > 1e-5f)
+            {
                 return h_a > h_b;
             }
 
@@ -285,10 +290,10 @@ private:
 
 struct Extractor
 {
-private:
+  private:
     std::vector<std::unique_ptr<ISelectionValidator>> validators;
 
-public:
+  public:
     std::unordered_map<EClassId, uint32_t> selection_map; // EClass -> ENode (idx into EClass.enodes)
     const EGraph &egraph;
     std::vector<EClassId> path; // List of EClasses in selection_map, in order root -> leaves
