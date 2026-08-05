@@ -38,12 +38,14 @@ struct DispatchIterator
                      const std::vector<ENodeInfo> &enode_infos)
         : egraph(_egraph)
     {
+        LOG(L_INFO) << "initializing dispatch iterator";
         initOrderState(selection_map, enode_infos);
     }
 
     bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
                               std::vector<EClassId> &out_order)
     {
+        LOG(L_INFO) << "getNextDispatchOrder";
         if (is_done)
             return false;
 
@@ -335,6 +337,7 @@ struct Extractor
     // Returns true if successfully formed a selection map, false if it needs to backtrack
     bool getNextSelection()
     {
+        LOG(L_INFO) << "getNextSelection";
         while (!to_process.empty())
         {
             EClassId current = to_process.back();
@@ -463,6 +466,7 @@ struct Extractor
 
     void ascend()
     {
+        LOG(L_INFO) << "ascend";
         bool skip_increment = (target_backtrack_eclass != EClassId{UINT32_MAX});
 
         while (!path.empty())

@@ -552,6 +552,7 @@ struct Planner
         ProgressTimer timer(max_iters, "extracting graphs");
         ProgressTimer loopTimer(0, "", true);
         auto start_time = std::chrono::high_resolution_clock::now();
+        LOG(L_INFO) << "entering loop";
 
         while (remaining_iters-- > 0)
         {
@@ -572,6 +573,7 @@ struct Planner
                 timer.tick();
                 continue;
             }
+            LOG(L_INFO) << "got selection";
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.selection_map;
 

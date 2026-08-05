@@ -448,12 +448,10 @@ struct CostModel
 
         BinaryReader br(file);
         uint32_t total = 0, valid = 0;
-        ProgressTimer timer(0, "loading records");
         std::unordered_map<ModelKey, std::vector<Record>, ModelKeyHash> recordsByKey;
 
         while (file.peek() != EOF)
         {
-            timer.tick();
             Record r;
             br.read(r);
             total++;
