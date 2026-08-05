@@ -338,7 +338,7 @@ inline StorageFiles createStorageInputs(const Record &r, const KernelEntry &kern
     return sf;
 }
 
-inline void synchronizeHandle(HandleType handle)
+inline void synchronizeHandle(HandleType handle) // TODO: merge with Synchronizer
 {
     if (handle == HandleType::CUDA)
     {
