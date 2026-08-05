@@ -67,14 +67,12 @@ struct DispatchIterator
         }
 
         auto compare_nodes = [&](EClassId a, EClassId b) {
-            // Compare using floating-point remaining critical path latency
             float h_a = heights[a.value];
             float h_b = heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
             {
                 return h_a > h_b;
             }
-
             return a.value < b.value;
         };
 
@@ -89,39 +87,31 @@ struct DispatchIterator
                 return true;
             }
 
-            const auto &ready = ready_stack[pos];
             uint32_t choice = selection_at_pos[pos];
 
-            if (choice < ready.size())
+            if (choice < current_ready.size())
             {
                 selection_at_pos[pos] = choice + 1;
-                EClassId node = ready[choice];
+                EClassId node = current_ready[choice];
                 ordered.push_back(node);
+                chosen_at_pos[pos] = node;
 
-                if (pos + 1 >= ready_stack.size())
-                {
-                    ready_stack.resize(pos + 2);
-                }
-                ready_stack[pos + 1].clear();
+                // Mask/Erase from the shared list instead of full level copies
+                current_ready.erase(current_ready.begin() + choice);
 
-                for (uint32_t i = 0; i < ready.size(); ++i)
-                {
-                    if (i != choice)
-                    {
-                        ready_stack[pos + 1].push_back(ready[i]);
-                    }
-                }
-
+                uint32_t added_count = 0;
                 for (EClassId dep : dependents[node.value])
                 {
                     current_in_degree[dep.value]--;
                     if (current_in_degree[dep.value] == 0)
                     {
-                        ready_stack[pos + 1].push_back(dep);
+                        current_ready.push_back(dep);
+                        added_count++;
                     }
                 }
+                added_at_pos[pos] = added_count;
 
-                std::sort(ready_stack[pos + 1].begin(), ready_stack[pos + 1].end(), compare_nodes);
+                std::sort(current_ready.begin(), current_ready.end(), compare_nodes);
             }
             else
             {
@@ -146,7 +136,11 @@ struct DispatchIterator
     std::vector<EClassId> ordered;
     std::vector<int32_t> current_in_degree;
     std::vector<std::vector<EClassId>> dependents;
-    std::vector<std::vector<EClassId>> ready_stack;
+    
+    std::vector<EClassId> current_ready;
+    std::vector<uint32_t> added_at_pos;
+    std::vector<EClassId> chosen_at_pos;
+    
     std::vector<uint32_t> selection_at_pos;
     bool is_done = false;
     bool first_yield = true;
@@ -169,13 +163,12 @@ struct DispatchIterator
         dependents.clear();
         dependents.resize(max_class_id);
 
-        ready_stack.clear();
-        ready_stack.resize(num_nodes_in_selection + 1);
+        current_ready.clear();
+        current_ready.reserve(1024);
 
         selection_at_pos.assign(num_nodes_in_selection + 1, 0);
-
-        std::vector<EClassId> initial_ready;
-        initial_ready.reserve(1024);
+        added_at_pos.assign(num_nodes_in_selection + 1, 0);
+        chosen_at_pos.assign(num_nodes_in_selection + 1, EClassId{UINT32_MAX});
 
         std::vector<uint8_t> in_selection(max_class_id, 0);
         for (const auto &kv : selection_map)
@@ -214,7 +207,7 @@ struct DispatchIterator
             current_in_degree[node.value] = static_cast<int32_t>(unique_children.size());
             if (current_in_degree[node.value] == 0)
             {
-                initial_ready.push_back(node);
+                current_ready.push_back(node);
             }
 
             for (EClassId canon_child : unique_children)
@@ -223,7 +216,6 @@ struct DispatchIterator
             }
         }
 
-        // Calculate remaining execution time along the critical path for each node.
         heights.assign(max_class_id, 0.0f);
         std::vector<bool> height_computed(max_class_id, false);
 
@@ -263,12 +255,10 @@ struct DispatchIterator
             {
                 return h_a > h_b;
             }
-
             return a.value < b.value;
         };
 
-        std::sort(initial_ready.begin(), initial_ready.end(), compare_nodes);
-        ready_stack[0] = std::move(initial_ready);
+        std::sort(current_ready.begin(), current_ready.end(), compare_nodes);
     }
 
     bool ascend()
@@ -281,10 +271,34 @@ struct DispatchIterator
         EClassId last = ordered.back();
         ordered.pop_back();
 
+        uint32_t parent_pos = pos - 1;
+
+        // Efficiently undo dependencies without copying huge vectors.
         for (EClassId dep : dependents[last.value])
         {
+            if (current_in_degree[dep.value] == 0)
+            {
+                auto it = std::find(current_ready.begin(), current_ready.end(), dep);
+                if (it != current_ready.end())
+                {
+                    current_ready.erase(it);
+                }
+            }
             current_in_degree[dep.value]++;
         }
+
+        current_ready.push_back(last);
+        
+        auto compare_nodes = [&](EClassId a, EClassId b) {
+            float h_a = heights[a.value];
+            float h_b = heights[b.value];
+            if (std::abs(h_a - h_b) > 1e-5f)
+            {
+                return h_a > h_b;
+            }
+            return a.value < b.value;
+        };
+        std::sort(current_ready.begin(), current_ready.end(), compare_nodes);
 
         return true;
     }
