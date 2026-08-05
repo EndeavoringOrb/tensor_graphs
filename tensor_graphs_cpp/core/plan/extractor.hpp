@@ -32,8 +32,7 @@ struct ENodeInfo
 
 struct DispatchIterator
 {
-  public:
-    // Now accepts enode_infos to compute true remaining latency paths
+public:
     DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
                      const std::vector<ENodeInfo> &enode_infos)
         : egraph(_egraph)
@@ -45,6 +44,7 @@ struct DispatchIterator
     bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
                               std::vector<EClassId> &out_order)
     {
+        ProgressTimer t = ProgressTimer(0, "getNextDispatchOrder", false, true);
         LOG(L_INFO) << "getNextDispatchOrder";
         if (is_done)
             return false;
@@ -66,7 +66,8 @@ struct DispatchIterator
             return false;
         }
 
-        auto compare_nodes = [&](EClassId a, EClassId b) {
+        auto compare_nodes = [&](EClassId a, EClassId b)
+        {
             float h_a = heights[a.value];
             float h_b = heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
@@ -95,23 +96,21 @@ struct DispatchIterator
                 EClassId node = current_ready[choice];
                 ordered.push_back(node);
                 chosen_at_pos[pos] = node;
+                choice_at_pos[pos] = choice;
 
-                // Mask/Erase from the shared list instead of full level copies
                 current_ready.erase(current_ready.begin() + choice);
 
-                uint32_t added_count = 0;
+                added_nodes_at_pos[pos].clear();
                 for (EClassId dep : dependents[node.value])
                 {
                     current_in_degree[dep.value]--;
                     if (current_in_degree[dep.value] == 0)
                     {
-                        current_ready.push_back(dep);
-                        added_count++;
+                        auto it = std::lower_bound(current_ready.begin(), current_ready.end(), dep, compare_nodes);
+                        current_ready.insert(it, dep);
+                        added_nodes_at_pos[pos].push_back(dep);
                     }
                 }
-                added_at_pos[pos] = added_count;
-
-                std::sort(current_ready.begin(), current_ready.end(), compare_nodes);
             }
             else
             {
@@ -130,18 +129,19 @@ struct DispatchIterator
         return iter;
     }
 
-  private:
+private:
     const EGraph &egraph;
     size_t num_nodes_in_selection = 0;
     std::vector<EClassId> ordered;
     std::vector<int32_t> current_in_degree;
     std::vector<std::vector<EClassId>> dependents;
-    
+
     std::vector<EClassId> current_ready;
-    std::vector<uint32_t> added_at_pos;
+    std::vector<std::vector<EClassId>> added_nodes_at_pos;
     std::vector<EClassId> chosen_at_pos;
-    
+    std::vector<uint32_t> choice_at_pos;
     std::vector<uint32_t> selection_at_pos;
+
     bool is_done = false;
     bool first_yield = true;
     uint32_t iter = 0;
@@ -164,11 +164,14 @@ struct DispatchIterator
         dependents.resize(max_class_id);
 
         current_ready.clear();
-        current_ready.reserve(1024);
+        current_ready.reserve(num_nodes_in_selection);
 
-        selection_at_pos.assign(num_nodes_in_selection + 1, 0);
-        added_at_pos.assign(num_nodes_in_selection + 1, 0);
+        added_nodes_at_pos.clear();
+        added_nodes_at_pos.resize(num_nodes_in_selection + 1);
+
         chosen_at_pos.assign(num_nodes_in_selection + 1, EClassId{UINT32_MAX});
+        choice_at_pos.assign(num_nodes_in_selection + 1, 0);
+        selection_at_pos.assign(num_nodes_in_selection + 1, 0);
 
         std::vector<uint8_t> in_selection(max_class_id, 0);
         for (const auto &kv : selection_map)
@@ -219,7 +222,8 @@ struct DispatchIterator
         heights.assign(max_class_id, 0.0f);
         std::vector<bool> height_computed(max_class_id, false);
 
-        std::function<float(EClassId)> get_height = [&](EClassId u) -> float {
+        std::function<float(EClassId)> get_height = [&](EClassId u) -> float
+        {
             if (height_computed[u.value])
                 return heights[u.value];
 
@@ -248,7 +252,8 @@ struct DispatchIterator
             }
         }
 
-        auto compare_nodes = [&](EClassId a, EClassId b) {
+        auto compare_nodes = [&](EClassId a, EClassId b)
+        {
             float h_a = heights[a.value];
             float h_b = heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
@@ -273,23 +278,8 @@ struct DispatchIterator
 
         uint32_t parent_pos = pos - 1;
 
-        // Efficiently undo dependencies without copying huge vectors.
-        for (EClassId dep : dependents[last.value])
+        auto compare_nodes = [&](EClassId a, EClassId b)
         {
-            if (current_in_degree[dep.value] == 0)
-            {
-                auto it = std::find(current_ready.begin(), current_ready.end(), dep);
-                if (it != current_ready.end())
-                {
-                    current_ready.erase(it);
-                }
-            }
-            current_in_degree[dep.value]++;
-        }
-
-        current_ready.push_back(last);
-        
-        auto compare_nodes = [&](EClassId a, EClassId b) {
             float h_a = heights[a.value];
             float h_b = heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
@@ -298,7 +288,23 @@ struct DispatchIterator
             }
             return a.value < b.value;
         };
-        std::sort(current_ready.begin(), current_ready.end(), compare_nodes);
+
+        for (auto it_dep = added_nodes_at_pos[parent_pos].rbegin(); it_dep != added_nodes_at_pos[parent_pos].rend();
+             ++it_dep)
+        {
+            EClassId dep = *it_dep;
+            auto it = std::lower_bound(current_ready.begin(), current_ready.end(), dep, compare_nodes);
+            if (it != current_ready.end() && *it == dep)
+            {
+                current_ready.erase(it);
+            }
+            current_in_degree[dep.value]++;
+        }
+        added_nodes_at_pos[parent_pos].clear();
+
+        EClassId restored_node = chosen_at_pos[parent_pos];
+        uint32_t original_choice = choice_at_pos[parent_pos];
+        current_ready.insert(current_ready.begin() + original_choice, restored_node);
 
         return true;
     }
@@ -306,10 +312,10 @@ struct DispatchIterator
 
 struct Extractor
 {
-  private:
+private:
     std::vector<std::unique_ptr<ISelectionValidator>> validators;
 
-  public:
+public:
     std::unordered_map<EClassId, uint32_t> selection_map; // EClass -> ENode (idx into EClass.enodes)
     const EGraph &egraph;
     std::vector<EClassId> path; // List of EClasses in selection_map, in order root -> leaves
