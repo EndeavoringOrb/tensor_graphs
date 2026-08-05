@@ -355,7 +355,7 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
 static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
                    std::vector<ParallelBuffer> &allocated)
 {
-    LOG(L_INFO) << "malloc";
+    LOG(L_INFO) << "malloc " + std::to_string(unallocated.size());
     ProgressTimer t(0, "malloc", false, true);
     if (unallocated.empty())
         return true;
@@ -419,6 +419,9 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
     int k = 0;
     while (k >= 0)
     {
+        if (k % 100 == 0) {
+            LOG(L_INFO) << "malloc k=" << std::to_string(k);
+        }
         // Base Case: All buffers successfully placed!
         if (k == N)
         {
