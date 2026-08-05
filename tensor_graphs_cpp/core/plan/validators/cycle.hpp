@@ -6,13 +6,13 @@
 #include "core/egraph.hpp"
 #include "core/plan/validators/validator.hpp"
 
-struct CycleValidator : public ISelectionValidator
+struct CycleStepValidator : public ISelectionValidator
 {
     const EGraph &egraph;
     std::vector<uint32_t> visited;
     uint32_t visited_gen = 0;
 
-    CycleValidator(const EGraph &_egraph) : egraph(_egraph), visited(_egraph.getClasses().size(), 0)
+    CycleStepValidator(const EGraph &_egraph) : egraph(_egraph), visited(_egraph.getClasses().size(), 0)
     {
     }
 
@@ -95,5 +95,80 @@ struct CycleValidator : public ISelectionValidator
                   std::vector<EClassId> &conflict_nodes) override
     {
         return true;
+    }
+};
+
+struct CycleValidator : public ISelectionValidator
+{
+    const EGraph &egraph;
+    std::vector<uint32_t> indegree;
+    std::vector<EClassId> zero_indegree;
+
+    CycleValidator(const EGraph &_egraph) : indegree(_egraph.getClasses().size(), 0), egraph(_egraph)
+    {
+        zero_indegree.reserve(egraph.getClasses().size());
+    }
+
+    bool validateStep(EClassId current, ENodeId enode_id, const std::unordered_map<EClassId, uint32_t> &selection_map,
+                      std::vector<EClassId> &conflict_nodes) override
+    {
+        return true;
+    }
+
+    bool detectCycles(const std::unordered_map<EClassId, uint32_t> &selection_map)
+    {
+        std::fill(indegree.begin(), indegree.end(), 0);
+        for (const auto &kv : selection_map)
+        {
+            uint32_t sel = kv.second;
+            ENodeId enode_id = egraph.getEClass(kv.first).enodes[sel];
+            for (EClassId child : egraph.getENode(enode_id).getChildren())
+            {
+                indegree[egraph.findConst(child).value]++;
+            }
+        }
+
+        zero_indegree.clear();
+        for (const auto &kv : selection_map)
+        {
+            if (indegree[kv.first.value] == 0)
+            {
+                zero_indegree.push_back(kv.first);
+            }
+        }
+
+        uint32_t processed = 0;
+        while (!zero_indegree.empty())
+        {
+            EClassId curr = zero_indegree.back();
+            zero_indegree.pop_back();
+            processed++;
+
+            uint32_t sel = selection_map.at(curr);
+            ENodeId enode_id = egraph.getEClass(curr).enodes[sel];
+            for (EClassId child : egraph.getENode(enode_id).getChildren())
+            {
+                child = egraph.findConst(child);
+                indegree[child.value]--;
+                if (indegree[child.value] == 0)
+                {
+                    zero_indegree.push_back(child);
+                }
+            }
+        }
+
+        if (processed < selection_map.size())
+        {
+            return true;
+        }
+        return false;
+    }
+
+    bool validate(const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<EClassId> &order,
+                  const std::vector<EClassId> &path, std::vector<ParallelBuffer> &buffers,
+                  std::unordered_map<EClassId, BufferId> &eclass_to_buf, float &cost,
+                  std::vector<EClassId> &conflict_nodes) override
+    {
+        return !detectCycles(selection_map);
     }
 };

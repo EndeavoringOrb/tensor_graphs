@@ -535,10 +535,10 @@ struct Planner
         LOG(L_INFO) << "finished sorting enodes";
 
         Extractor extractor = Extractor(egraph, rootEClassId);
+        // extractor.registerValidator(std::make_unique<CycleStepValidator>(egraph));
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
         extractor.registerValidator(
             std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical, preallocatedBuffers));
-        CycleValidator cycleValidator(egraph);
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
