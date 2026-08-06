@@ -227,7 +227,8 @@ struct Planner
                                  const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
                                  const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
                                  const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers,
-                                 bool stopOnFirstValid = true, bool strictCache = false, float minCompileSeconds = 0.0f)
+                                 bool stopOnFirstValid = true, bool strictCache = false, float minCompileSeconds = 0.0f,
+                                 const std::string &sort_enodes = "cost")
     {
         constexpr float EPS = 1e-6f;
 
@@ -514,6 +515,72 @@ struct Planner
 
         const uint64_t numClasses = egraph.getClasses().size();
 
+        std::vector<float> eclass_height(numClasses, TGConstants::INF);
+        std::vector<float> enode_height(egraph.getENodes().size(), TGConstants::INF);
+
+        if (sort_enodes == "height")
+        {
+            // Initialize leaf nodes (inputs, caches)
+            for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
+            {
+                const ENode &enode = egraph.getENodes()[i];
+                if (enode.getChildren().empty() || enode.getOpType() == OpType::INPUT ||
+                    enode.getOpType() == OpType::CACHE)
+                {
+                    enode_height[i] = enodeInfos[i].cost;
+                    EClassId cid = egraph.find(egraph.getENodeEClass(ENodeId{i}));
+                    eclass_height[cid.value] = std::min(eclass_height[cid.value], enode_height[i]);
+                }
+            }
+
+            bool changed = true;
+            uint32_t max_iters = numClasses + 1; // Bellman-Ford style relaxation
+            while (changed && max_iters-- > 0)
+            {
+                changed = false;
+                for (uint32_t i = 0; i < numClasses; ++i)
+                {
+                    EClassId cid = egraph.find(EClassId{i});
+                    if (cid.value != i)
+                        continue;
+
+                    const EClass &cls = egraph.getEClass(cid);
+                    for (ENodeId enodeId : cls.enodes)
+                    {
+                        const ENode &enode = egraph.getENode(enodeId);
+                        float max_child_height = 0.0f;
+                        bool all_children_valid = true;
+
+                        for (EClassId child : enode.getChildren())
+                        {
+                            EClassId canon_child = egraph.findConst(child);
+                            float ch = eclass_height[canon_child.value];
+                            if (ch == TGConstants::INF)
+                            {
+                                all_children_valid = false;
+                                break;
+                            }
+                            max_child_height = std::max(max_child_height, ch);
+                        }
+
+                        if (all_children_valid)
+                        {
+                            float new_h = max_child_height + enodeInfos[enodeId.value].cost;
+                            if (new_h < enode_height[enodeId.value])
+                            {
+                                enode_height[enodeId.value] = new_h;
+                                if (new_h < eclass_height[cid.value])
+                                {
+                                    eclass_height[cid.value] = new_h;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for (uint32_t i = 0; i < numClasses; ++i)
         {
             EClassId e_class_id = egraph.find(EClassId{i});
@@ -521,12 +588,12 @@ struct Planner
                 continue;
             EClass &cls = egraph.getEClass(e_class_id);
             std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b) {
-                float costA = enodeInfos[a.value].cost;
-                float costB = enodeInfos[b.value].cost;
+                float valA = (sort_enodes == "height") ? enode_height[a.value] : enodeInfos[a.value].cost;
+                float valB = (sort_enodes == "height") ? enode_height[b.value] : enodeInfos[b.value].cost;
 
-                if (costA < costB)
+                if (valA < valB)
                     return true;
-                if (costA > costB)
+                if (valA > valB)
                     return false;
                 return a < b;
             });
@@ -1400,7 +1467,7 @@ struct Planner
                        const std::unordered_map<LogicalId, MemSpace> &cachedNodes, bool doSaturate = true,
                        bool strictCache = false, Repo *repo = nullptr,
                        const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers = {},
-                       float minCompileSeconds = 0.0f)
+                       float minCompileSeconds = 0.0f, const std::string &sort_enodes = "cost")
     {
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
@@ -1495,8 +1562,9 @@ struct Planner
         }
         eclassToLogical = std::move(updatedEClassToLogical);
 
-        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical,
-                                      preallocatedBuffers, minCompileSeconds == 0.0f, strictCache, minCompileSeconds);
+        auto extraction =
+            extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical,
+                        preallocatedBuffers, minCompileSeconds == 0.0f, strictCache, minCompileSeconds, sort_enodes);
         return buildCompiledGraph(rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes,
                                   eclassToLogical);
     }
