@@ -44,7 +44,8 @@ std::unordered_map<MemSpace, uint64_t> getDefaultBufferSizes()
 {
     std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
 #ifdef TG_USE_CUDA
-    bufferSizes[MemSpace{2, HandleType::CUDA}] = 24ULL * 1024 * 1024 * 1024;
+    LOG(L_INFO) << "ADDING CUDA MEMCAP";
+    bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
 #endif
     if (HardwareCaps::get().has_opencl)
     {

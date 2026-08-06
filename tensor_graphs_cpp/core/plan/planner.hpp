@@ -691,6 +691,7 @@ struct Planner
                     best_order = order;
                     best_buffers = buffers;
                     best_eclass_to_buf = eclass_to_buf;
+                    LOG(L_INFO) << "new best cost " << best_cost;
                 }
                 if (stopOnFirstValid || single_engine)
                 {
