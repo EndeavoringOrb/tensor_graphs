@@ -5,7 +5,6 @@
 #include "core/kernels.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#include <math_functions.h>
 
 // ----------------------------------------------------------------------------
 // CUDA kernel: Fused Sparse Attention
@@ -143,8 +142,6 @@ inline void runFusedSparseAttn_DeepSeek_CUDA(const KernelContext& ctx) {
 
     float scale = 1.0f / sqrtf((float)D); // Query scale
 
-    dim3 grid(T ? T : 1, S, 1); // We'll use x for head, y for S; but we need H as well.
-    // Actually, we have three dimensions: S, H. We'll use grid.x = H, grid.y = S.
     dim3 grid(H, S, 1);
     dim3 block(256, 1, 1); // T may be large; we parallelize over T and V_DIM.
     size_t shared_size = (T + 2) * sizeof(float); // scores + max + sum
