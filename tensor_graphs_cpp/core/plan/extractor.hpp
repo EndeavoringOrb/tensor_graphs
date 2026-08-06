@@ -67,8 +67,8 @@ struct DispatchIterator
         }
 
         auto compare_nodes = [&](EClassId a, EClassId b) {
-            float h_a = heights[a.value];
-            float h_b = heights[b.value];
+            float h_a = -heights[a.value];
+            float h_b = -heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
             {
                 return h_a > h_b;
@@ -251,8 +251,8 @@ struct DispatchIterator
         }
 
         auto compare_nodes = [&](EClassId a, EClassId b) {
-            float h_a = heights[a.value];
-            float h_b = heights[b.value];
+            float h_a = -heights[a.value];
+            float h_b = -heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
             {
                 return h_a > h_b;
@@ -276,8 +276,8 @@ struct DispatchIterator
         uint32_t parent_pos = pos - 1;
 
         auto compare_nodes = [&](EClassId a, EClassId b) {
-            float h_a = heights[a.value];
-            float h_b = heights[b.value];
+            float h_a = -heights[a.value];
+            float h_b = -heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
             {
                 return h_a > h_b;
