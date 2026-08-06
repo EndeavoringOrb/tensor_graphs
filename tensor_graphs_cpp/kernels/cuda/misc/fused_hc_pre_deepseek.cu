@@ -172,7 +172,6 @@ inline bool matchFusedHCPre_DeepSeek_CUDA(const std::vector<TensorNode>& inputs,
     // The kernel is specifically for DeepSeek's HC pre.
     // For matching, we rely on the refFactory to produce the pattern.
     // Here we only do basic shape checks.
-    if (inputs.size() < 6) return false;
     if (inputs[0].getShape().size() != 4) return false;
     return isContiguous(output);
 }

@@ -514,6 +514,7 @@ struct Planner
         }
 
         const uint64_t numClasses = egraph.getClasses().size();
+        LOG(L_INFO) << "numClasses=" << numClasses;
 
         std::vector<float> eclass_height(numClasses, TGConstants::INF);
         std::vector<float> enode_height(egraph.getENodes().size(), TGConstants::INF);
@@ -535,6 +536,7 @@ struct Planner
 
             bool changed = true;
             uint32_t max_iters = numClasses + 1; // Bellman-Ford style relaxation
+            ProgressTimer t(max_iters, "calculating heights");
             while (changed && max_iters-- > 0)
             {
                 changed = false;
@@ -578,6 +580,7 @@ struct Planner
                         }
                     }
                 }
+                t.tick();
             }
         }
 
