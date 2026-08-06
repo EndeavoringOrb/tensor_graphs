@@ -70,7 +70,6 @@ __global__ void fused_mxfp4_dequant_kernel(
 // ---------------------------------------------------------------------------
 inline bool matchFusedMXFP4_CUDA(const std::vector<TensorNode> &inputs, const TensorNode &output) {
     if (output.dtype != DType::FLOAT32) return false;
-    if (inputs.size() != 2) return false;
 
     // inputs[0]: Packed weights [out_d, in_d / 2]
     // inputs[1]: Scales [out_d, in_d / 32]
