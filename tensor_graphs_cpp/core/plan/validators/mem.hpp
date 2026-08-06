@@ -31,93 +31,66 @@ float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
                bool print_utilization = true)
 {
     std::unordered_map<EClassId, float> birth_times;
-    std::unordered_map<uint32_t, float> engine_finish;
+    std::unordered_map<Engine, float> engine_finish;
+    std::unordered_map<Engine, float> engine_active_time;
 
-    // Accumulators to track total active time and types of each engine
-    std::unordered_map<uint32_t, float> engine_active_time;
-    std::unordered_map<uint32_t, EngineType> engine_types;
-
-    for (EClassId eclass : ordered)
-    {
+    for (EClassId eclass : ordered) {
         uint32_t sel = selection_map.at(eclass);
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENode &node = egraph.getENode(enode_id);
 
-        if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE)
-        {
+        if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE) {
             birth_times[eclass] = 0.0f;
             continue;
         }
 
         float cost = enodeInfos[enode_id.value].cost;
 
-        // 1. Calculate max finish time among all child engines
         float children_finish = 0.0f;
-        for (EClassId child : node.getChildren())
-        {
+        for (EClassId child : node.getChildren()) {
             child = egraph.findConst(child);
             uint32_t child_sel = selection_map.at(child);
             ENodeId child_enode_id = egraph.getEClass(child).enodes[child_sel];
             const ENode &child_node = egraph.getENode(child_enode_id);
 
-            for (const auto &engine : child_node.getEngines())
-            {
-                auto it = engine_finish.find(engine.idx);
+            for (const auto &engine : child_node.getEngines()) {
+                auto it = engine_finish.find(engine);
                 float child_finish = (it != engine_finish.end()) ? it->second : 0.0f;
                 children_finish = std::max(children_finish, child_finish);
             }
         }
 
-        // 2. Calculate when all engines required by the current node become free
         float engine_free = 0.0f;
-        for (const auto &engine : node.getEngines())
-        {
-            auto it = engine_finish.find(engine.idx);
-            if (it != engine_finish.end())
-            {
+        for (const auto &engine : node.getEngines()) {
+            auto it = engine_finish.find(engine);
+            if (it != engine_finish.end()) {
                 engine_free = std::max(engine_free, it->second);
             }
         }
 
-        // 3. Compute birth time and update finish times for all node engines
         float birth = std::max(children_finish, engine_free);
         birth_times[eclass] = birth;
 
-        for (const auto &engine : node.getEngines())
-        {
-            engine_finish[engine.idx] = birth + cost;
-
-            // Accumulate active processing time for this device
-            engine_active_time[engine.idx] += cost;
-            engine_types[engine.idx] = engine.type;
+        for (const auto &engine : node.getEngines()) {
+            engine_finish[engine] = birth + cost;
+            engine_active_time[engine] += cost;
         }
     }
 
     float total_cost = 0.0f;
-    for (const auto &kv : engine_finish)
-    {
+    for (const auto &kv : engine_finish) {
         total_cost = std::max(total_cost, kv.second);
     }
 
-    // Print utilization reports if flagged and makespan is valid
-    if (print_utilization && total_cost > 0.0f)
-    {
+    if (print_utilization && total_cost > 0.0f) {
         std::cout << "Total Makespan (Cost): " << total_cost << " ms\n";
-        for (const auto &kv : engine_active_time)
-        {
-            uint32_t eng_idx = kv.first;
+        for (const auto &kv : engine_active_time) {
+            Engine eng = kv.first;
             float active_duration = kv.second;
             float percentage = (active_duration / total_cost) * 100.0f;
 
-            std::string type_str = "UNKNOWN_ENGINE";
-            auto type_it = engine_types.find(eng_idx);
-            if (type_it != engine_types.end())
-            {
-                type_str = toString(type_it->second);
-            }
-
-            std::cout << "  - Engine " << eng_idx << " (" << type_str << "): " << std::fixed << std::setprecision(2)
-                      << percentage << "% "
+            std::cout << "  - Engine " << eng.idx << " (" << toString(eng.type) << "): "
+                      << std::fixed << std::setprecision(2) << percentage << "% "
                       << "(" << active_duration << " ms active)\n";
         }
     }

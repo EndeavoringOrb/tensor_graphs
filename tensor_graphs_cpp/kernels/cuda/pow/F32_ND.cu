@@ -3,7 +3,6 @@
 #include "core/types.hpp"
 #include "core/kernels.hpp"
 #include <cuda_runtime.h>
-#include <math_functions.h>
 
 __global__ void pow_f32_nd_kernel(const float *A, const float *B, float *Out, uint64_t n)
 {
