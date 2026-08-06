@@ -694,7 +694,7 @@ struct Planner
             std::vector<EClassId> conflict_nodes;
 
             // 2. Compute dispatch order
-            uint32_t first_engine = UINT32_MAX;
+            Engine first_engine = Engine{UINT32_MAX, EngineType::CPU};
             bool single_engine = true;
             for (const auto &kv : selection_map)
             {
@@ -703,11 +703,11 @@ struct Planner
                 const ENode &enode = egraph.getENode(enode_id);
                 for (const auto &eng : enode.getEngines())
                 {
-                    if (first_engine == UINT32_MAX)
+                    if (first_engine == Engine{UINT32_MAX, EngineType::CPU})
                     {
-                        first_engine = eng.idx;
+                        first_engine = eng;
                     }
-                    else if (first_engine != eng.idx)
+                    else if (first_engine != eng)
                     {
                         single_engine = false;
                         break;
