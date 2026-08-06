@@ -42,6 +42,6 @@ inline LogicalId refFactoryAndBool_ND_CUDA(const std::vector<LogicalId> &inputs,
     return graph.logical_and(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("And_Bool_ND_CUDA", 2, 2, matchAndBool_CUDA_ND, runAndBool_CUDA_ND, refFactoryAndBool_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::BOOL, DType::BOOL}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("And_Bool_ND_CUDA", 2, 2, matchAndBool_CUDA_ND, runAndBool_CUDA_ND, refFactoryAndBool_ND_CUDA,{0,1}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::BOOL, DType::BOOL}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif

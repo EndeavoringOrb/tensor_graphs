@@ -184,7 +184,7 @@ inline LogicalId refFactoryFluxRMSNorm4D(const std::vector<LogicalId> &inputs, G
     return g.mul(x_norm, w_exp);
 }
 
-REGISTER_KERNEL("FluxRMSNorm_F32_4D", 2, 2, matchFluxRMSNormF32_4D, runFluxRMSNormF32_4D, refFactoryFluxRMSNorm4D,
+REGISTER_KERNEL("FluxRMSNorm_F32_4D", 2, 2, matchFluxRMSNormF32_4D, runFluxRMSNormF32_4D, refFactoryFluxRMSNorm4D, {0},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 24, 512, 128}, {128}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -35,7 +35,7 @@ inline LogicalId refFactoryAdd3D_NEON(const std::vector<LogicalId> &inputs, Grap
     return graph.add(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Add_3D_NEON", 2, 2, matchAddF32_3D_NEON, runAddF32_3D_NEON, refFactoryAdd3D_NEON,
+REGISTER_KERNEL("Add_3D_NEON", 2, 2, matchAddF32_3D_NEON, runAddF32_3D_NEON, refFactoryAdd3D_NEON, {0, 1},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 8, 2048}, {1, 8, 2048}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

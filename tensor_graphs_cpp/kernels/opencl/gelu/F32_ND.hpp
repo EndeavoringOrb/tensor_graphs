@@ -102,6 +102,6 @@ inline LogicalId refFactoryJinaGeluExact_F32_3D_OpenCL(const std::vector<Logical
 }
 
 REGISTER_KERNEL("JinaGeluExact_F32_3D_OpenCL", 1, 1, matchJinaGeluExact_F32_3D_OpenCL, runJinaGeluExact_F32_3D_OpenCL,
-                refFactoryJinaGeluExact_F32_3D_OpenCL, MemSpace(1, HandleType::OPENCL),
+                refFactoryJinaGeluExact_F32_3D_OpenCL, {0}, MemSpace(1, HandleType::OPENCL),
                 {Engine(1, EngineType::QUALCOMM_IGPU)}, {DType::FLOAT32}, {{1, 1024, 3072}}, {true},
                 {{MemSpace(1, HandleType::OPENCL)}});

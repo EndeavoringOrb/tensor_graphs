@@ -122,7 +122,7 @@ inline LogicalId refFactoryDotF32_3D_TransposedB_v2(const std::vector<LogicalId>
 }
 
 REGISTER_KERNEL("Dot_F32_3D_TransposedB_v2", 2, 2, matchDotF32_3D_TransposedB_v2, runDotF32_3D_TransposedB_v2,
-                refFactoryDotF32_3D_TransposedB_v2, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryDotF32_3D_TransposedB_v2, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32}, {{1, 8, 8}, {1, 8, 1}}, {true, false},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

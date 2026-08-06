@@ -138,9 +138,9 @@ inline LogicalId refFactorySwiGLU_3D_NEON_Inplace(const std::vector<LogicalId> &
     return graph.mul(silu_gate, up);
 }
 
-REGISTER_KERNEL_INPLACE("SwiGLU_3D_NEON_F32_Inplace", 2, 2, matchSwiGLU_3D_NEON_Inplace, runSwiGLU_3D_NEON_Inplace,
-                        refFactorySwiGLU_3D_NEON_Inplace, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                        {DType::FLOAT32, DType::FLOAT32}, {{1, 1536, 9216}, {1, 1536, 9216}}, {true, true},
-                        {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("SwiGLU_3D_NEON_F32_Inplace", 2, 2, matchSwiGLU_3D_NEON_Inplace, runSwiGLU_3D_NEON_Inplace,
+                refFactorySwiGLU_3D_NEON_Inplace, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{1, 1536, 9216}, {1, 1536, 9216}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

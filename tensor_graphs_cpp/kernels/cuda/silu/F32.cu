@@ -124,6 +124,7 @@ REGISTER_KERNEL("FusedSilu_CUDA",
                 matchFusedSilu_CUDA,
                 runFusedSilu_CUDA,
                 refFactoryFusedSilu_CUDA,
+                {0},
                 MemSpace(2, HandleType::CUDA),         // output memory space
                 {Engine(0, EngineType::CUDA_GPU)},     // engines
                 {DType::FLOAT32},                      // input dtypes

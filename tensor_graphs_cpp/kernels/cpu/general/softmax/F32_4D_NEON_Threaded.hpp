@@ -97,6 +97,6 @@ inline LogicalId refFactorySoftmax4D(const std::vector<LogicalId> &inputs, Graph
 }
 
 REGISTER_KERNEL("Softmax_4D_Threaded", 1, 1, matchSoftmaxF32_4D_Threaded, runSoftmaxF32_4D_Threaded,
-                refFactorySoftmax4D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32},
+                refFactorySoftmax4D, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32},
                 {{1, 24, 1536, 1536}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 #endif

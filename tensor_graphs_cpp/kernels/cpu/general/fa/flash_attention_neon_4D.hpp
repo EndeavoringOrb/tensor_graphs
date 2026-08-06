@@ -388,7 +388,7 @@ inline LogicalId refFactoryFlashAttention4D(const std::vector<LogicalId> &inputs
 }
 
 REGISTER_KERNEL("Flash_Attention_Neon_Fused_4D", 3, 3, matchFlashAttentionNeon, runFlashAttentionNeon,
-                refFactoryFlashAttention4D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryFlashAttention4D, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32},
                 {{1, 12, 5040, 64}, {1, 12, 5040, 64}, {1, 12, 5040, 64}}, {true, true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

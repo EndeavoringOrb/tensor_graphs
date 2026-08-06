@@ -189,7 +189,7 @@ inline LogicalId refFactoryGatherStreamingStorage(const std::vector<LogicalId> &
 }
 
 REGISTER_KERNEL("Gather_StreamingStorage_NEON", 2, 2, matchGatherStreamingStorage, runGatherStreamingStorage,
-                refFactoryGatherStreamingStorage, MemSpace(1, HandleType::CPP),
+                refFactoryGatherStreamingStorage, {}, MemSpace(1, HandleType::CPP),
                 {Engine(0, EngineType::CPU)}, // output backend
                 {DType::BF16, DType::INT32},  // input types: raw weight (BF16), indices (INT32)
                 {{248320, 2048}, {1, 8}},     // dummy shapes

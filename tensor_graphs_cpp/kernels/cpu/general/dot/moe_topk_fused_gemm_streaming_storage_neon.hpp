@@ -835,7 +835,7 @@ inline LogicalId refFactoryMoETopKFusedGEMM_StreamingStorage(const std::vector<L
 //   [0] Out          — fp32, CPU,     [1, S, H]      — routed MoE output
 // ---------------------------------------------------------------------------
 REGISTER_KERNEL("MoE_TopK_FusedGEMM_StreamingStorage_NEON", 5, 5, matchMoETopKFusedGEMM_StreamingStorage,
-                runMoETopKFusedGEMM_StreamingStorage, refFactoryMoETopKFusedGEMM_StreamingStorage,
+                runMoETopKFusedGEMM_StreamingStorage, refFactoryMoETopKFusedGEMM_StreamingStorage, {},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, // output backend
                 {DType::FLOAT32, DType::BF16, DType::BF16, DType::FLOAT32, DType::INT32},
                 {{1, 8, 2048}, {256, 1024, 2048}, {256, 2048, 512}, {1, 8, 256}, {1, 8, 8}},

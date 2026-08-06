@@ -75,7 +75,7 @@ inline LogicalId refFactoryDivND_Scalar_Threaded(const std::vector<LogicalId> &i
 }
 
 REGISTER_KERNEL("Div_ND_Scalar_Threaded_NEON", 2, 2, matchDivF32_ND_Scalar_Threaded, runDivF32_ND_Scalar_Threaded,
-                refFactoryDivND_Scalar_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryDivND_Scalar_Threaded, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32}, {{1, 32, 512, 128}, {1}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

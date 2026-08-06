@@ -89,6 +89,6 @@ inline LogicalId refFactoryIm2ColF32_ND_CUDA(const std::vector<LogicalId> &input
     return graph.im2col(inputs[0], inputs[1], inputs[2], inputs[3]);
 }
 
-REGISTER_KERNEL("Im2Col_F32_ND_CUDA", 4, 4, matchIm2ColF32_CUDA_ND, runIm2ColF32_CUDA_ND, refFactoryIm2ColF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1, 3, 64, 64}, {1}, {1}, {1}}, {true, false, false, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Im2Col_F32_ND_CUDA", 4, 4, matchIm2ColF32_CUDA_ND, runIm2ColF32_CUDA_ND, refFactoryIm2ColF32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{1, 3, 64, 64}, {1}, {1}, {1}}, {true, false, false, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

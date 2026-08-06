@@ -87,7 +87,7 @@ inline LogicalId refFactoryClamp_F32_ND_CUDA(const std::vector<LogicalId> &input
     return graph.add(graph.mul(clamp_max_res, is_greater_f), graph.mul(min_node, not_greater_f));
 }
 
-REGISTER_KERNEL("Clamp_F32_ND_CUDA", 3, 3, matchClampF32_CUDA_ND, runClampF32_CUDA_ND, refFactoryClamp_F32_ND_CUDA,
+REGISTER_KERNEL("Clamp_F32_ND_CUDA", 3, 3, matchClampF32_CUDA_ND, runClampF32_CUDA_ND, refFactoryClamp_F32_ND_CUDA,{0},
                 MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)},
                 {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32},
                 {{1024}, {1}, {1}}, {true, false, false},

@@ -49,6 +49,6 @@ inline LogicalId refFactoryTriuF32_ND_CUDA(const std::vector<LogicalId> &inputs,
     return graph.triu(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Triu_F32_ND_CUDA", 2, 2, matchTriuF32_CUDA_ND, runTriuF32_CUDA_ND, refFactoryTriuF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {true, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Triu_F32_ND_CUDA", 2, 2, matchTriuF32_CUDA_ND, runTriuF32_CUDA_ND, refFactoryTriuF32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {1}}, {true, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

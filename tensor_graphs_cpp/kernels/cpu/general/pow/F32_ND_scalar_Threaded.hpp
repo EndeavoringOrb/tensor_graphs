@@ -74,6 +74,6 @@ inline LogicalId refFactoryPowND_Scalar_Threaded(const std::vector<LogicalId> &i
 }
 
 REGISTER_KERNEL("Pow_ND_Scalar_Threaded", 2, 2, matchPowF32_ND_Scalar_Threaded, runPowF32_ND_Scalar_Threaded,
-                refFactoryPowND_Scalar_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryPowND_Scalar_Threaded, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32}, {{2, 128}, {1}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

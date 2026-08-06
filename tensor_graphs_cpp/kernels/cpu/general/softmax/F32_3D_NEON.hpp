@@ -124,7 +124,7 @@ inline LogicalId refFactorySoftmax(const std::vector<LogicalId> &inputs, Graph &
     return g.div(exp_scores, sum_exp_expanded);
 }
 
-REGISTER_KERNEL("Softmax_NEON", 1, 1, matchSoftmaxF32_NEON, runSoftmaxF32_NEON, refFactorySoftmax,
+REGISTER_KERNEL("Softmax_NEON", 1, 1, matchSoftmaxF32_NEON, runSoftmaxF32_NEON, refFactorySoftmax, {0},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{4, 8, 8}}, {true},
                 {{MemSpace(1, HandleType::CPP)}});
 

@@ -62,7 +62,7 @@ inline LogicalId refFactoryConcatF32_Fast(const std::vector<LogicalId> &inputs, 
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Concat_F32_Fast", 2, UINT32_MAX, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast,
+REGISTER_KERNEL("Concat_F32_Fast", 2, UINT32_MAX, matchConcatF32_Fast, runConcatF32_Fast, refFactoryConcatF32_Fast, {},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::INT32, DType::FLOAT32},
                 {{1}, {1, 24, 1536, 128}}, {false, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

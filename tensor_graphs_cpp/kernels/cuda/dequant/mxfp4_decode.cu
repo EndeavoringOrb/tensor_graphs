@@ -157,7 +157,7 @@ inline LogicalId refFactoryFusedMXFP4_CUDA(const std::vector<LogicalId> &inputs,
 // Register as a fused CUDA kernel
 REGISTER_KERNEL(
     "Fused_MXFP4_Dequant_CUDA", 2, 2,
-    matchFusedMXFP4_CUDA, runFusedMXFP4_CUDA, refFactoryFusedMXFP4_CUDA,
+    matchFusedMXFP4_CUDA, runFusedMXFP4_CUDA, refFactoryFusedMXFP4_CUDA,{},
     MemSpace(2, HandleType::CUDA),
     {Engine(0, EngineType::CUDA_GPU)},
     {DType::INT8, DType::FLOAT32},

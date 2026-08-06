@@ -41,6 +41,6 @@ inline LogicalId refFactoryNotBool_ND_CUDA(const std::vector<LogicalId> &inputs,
     return graph.logical_not(inputs[0]);
 }
 
-REGISTER_KERNEL("Not_Bool_ND_CUDA", 1, 1, matchNotBool_CUDA_ND, runNotBool_CUDA_ND, refFactoryNotBool_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::BOOL}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Not_Bool_ND_CUDA", 1, 1, matchNotBool_CUDA_ND, runNotBool_CUDA_ND, refFactoryNotBool_ND_CUDA,{0,1}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::BOOL}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
 
 #endif

@@ -60,6 +60,6 @@ inline LogicalId refFactoryGatherF32_I32_ND_CUDA(const std::vector<LogicalId> &i
     return graph.gather(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Gather_F32_I32_ND_CUDA", 2, 2, matchGatherF32_I32_CUDA_ND, runGatherF32_I32_CUDA_ND, refFactoryGatherF32_I32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {8}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Gather_F32_I32_ND_CUDA", 2, 2, matchGatherF32_I32_CUDA_ND, runGatherF32_I32_CUDA_ND, refFactoryGatherF32_I32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{8, 32}, {8}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif

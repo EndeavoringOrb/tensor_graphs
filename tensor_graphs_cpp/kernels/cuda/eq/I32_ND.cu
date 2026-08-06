@@ -42,6 +42,6 @@ inline LogicalId refFactoryEqI32_ND_CUDA(const std::vector<LogicalId> &inputs, G
     return graph.eq(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Eq_I32_ND_CUDA", 2, 2, matchEqI32_CUDA_ND, runEqI32_CUDA_ND, refFactoryEqI32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32, DType::INT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Eq_I32_ND_CUDA", 2, 2, matchEqI32_CUDA_ND, runEqI32_CUDA_ND, refFactoryEqI32_ND_CUDA,{0,1}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32, DType::INT32}, {{1024}, {1024}}, {true, true}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif

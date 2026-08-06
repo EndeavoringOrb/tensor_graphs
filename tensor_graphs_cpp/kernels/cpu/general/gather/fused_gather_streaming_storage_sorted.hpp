@@ -224,9 +224,9 @@ inline LogicalId refFactoryGatherStreamingStorageSorted(const std::vector<Logica
 }
 
 REGISTER_KERNEL("Gather_StreamingStorage_Sorted_NEON", 2, 2, matchGatherStreamingStorageSorted,
-                runGatherStreamingStorageSorted, refFactoryGatherStreamingStorageSorted, MemSpace(1, HandleType::CPP),
-                {Engine(0, EngineType::CPU)}, // output backend
-                {DType::BF16, DType::INT32},  // input types: raw weight (BF16), indices (INT32)
-                {{248320, 2048}, {1, 8}},     // dummy shapes
-                {true, true},                 // requires contiguous inputs
+                runGatherStreamingStorageSorted, refFactoryGatherStreamingStorageSorted, {},
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, // output backend
+                {DType::BF16, DType::INT32}, // input types: raw weight (BF16), indices (INT32)
+                {{248320, 2048}, {1, 8}},    // dummy shapes
+                {true, true},                // requires contiguous inputs
                 {{MemSpace(0, HandleType::STORAGE)}, {MemSpace(1, HandleType::CPP)}}); // input placement

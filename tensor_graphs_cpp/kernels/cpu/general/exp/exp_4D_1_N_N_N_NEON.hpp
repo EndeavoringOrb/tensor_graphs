@@ -97,6 +97,6 @@ inline LogicalId refFactoryExp4D(const std::vector<LogicalId> &inputs, Graph &g)
 }
 
 // Register for typical FLUX Attention score shapes
-REGISTER_KERNEL("Exp_4D_NEON", 1, 1, matchExpF32_4D_NEON, runExpF32_4D_NEON, refFactoryExp4D,
+REGISTER_KERNEL("Exp_4D_NEON", 1, 1, matchExpF32_4D_NEON, runExpF32_4D_NEON, refFactoryExp4D, {0},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 24, 512, 1024}},
                 {true}, {{MemSpace(1, HandleType::CPP)}});

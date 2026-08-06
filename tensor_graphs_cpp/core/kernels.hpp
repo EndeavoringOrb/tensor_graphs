@@ -462,12 +462,14 @@ class KernelRegistry
 
 struct KernelRegistrar
 {
+    // Single unified constructor
     KernelRegistrar(KernelId uid, OpType op, const std::string &opName, uint32_t min_num_inputs,
                     uint32_t max_num_inputs, MatchFunc match, KernelFunc run, ReferenceFactory refFactory,
-                    const std::vector<uint32_t> &safe_inplace_idxs, bool is_view, bool isReference,
-                    InferViewFunc inferView, const MemSpace output_mem_space, const std::vector<Engine> &engines,
-                    const std::vector<DType> &dtypes = {}, const std::vector<std::vector<uint32_t>> &dummyShapes = {},
-                    const std::vector<bool> &contiguous = {}, const std::vector<MemSpace> &input_mem_spaces = {})
+                    const std::vector<uint32_t> &safe_inplace_idxs, const MemSpace output_mem_space,
+                    const std::vector<Engine> &engines, const std::vector<DType> &dtypes = {},
+                    const std::vector<std::vector<uint32_t>> &dummyShapes = {},
+                    const std::vector<bool> &contiguous = {}, const std::vector<MemSpace> &input_mem_spaces = {},
+                    bool is_view = false, bool isReference = false, InferViewFunc inferView = nullptr)
     {
         KernelRegistry::get().registerKernel(uid, op, opName, min_num_inputs, max_num_inputs, match, run, refFactory,
                                              safe_inplace_idxs, is_view, isReference, inferView, output_mem_space,
@@ -484,29 +486,22 @@ struct KernelRegistrar
 #ifndef REGISTER_KERNEL
 #define REGISTER_KERNEL(opName, n_min, n_max, match, run, refFactory, ...)
 #endif
-#ifndef REGISTER_KERNEL_INPLACE
-#define REGISTER_KERNEL_INPLACE(opName, n_min, n_max, match, run, refFactory, ...)
-#endif
 #ifndef REGISTER_KERNEL_VIEW
 #define REGISTER_KERNEL_VIEW(opName, n_min, n_max, match, ref, inferView, ...)
 #endif
 
 #define REGISTER_REF_KERNEL_INTERNAL(uid, op, n_min, n_max, match, run, ...)                                           \
-    static KernelRegistrar _registrar_##run(uid, op, "", n_min, n_max, match, run, nullptr, {}, false, true, nullptr,  \
-                                            __VA_ARGS__)
+    static KernelRegistrar _registrar_##run(uid, op, "", n_min, n_max, match, run, nullptr, {}, __VA_ARGS__, false,    \
+                                            true, nullptr)
 
 #define REGISTER_REF_KERNEL_VIEW_INTERNAL(uid, op, n_min, n_max, match, inferView, ...)                                \
-    static KernelRegistrar _registrar_##inferView(uid, op, "", n_min, n_max, match, nullptr, nullptr, {}, true, true,  \
-                                                  inferView, __VA_ARGS__)
+    static KernelRegistrar _registrar_##inferView(uid, op, "", n_min, n_max, match, nullptr, nullptr, {}, __VA_ARGS__, \
+                                                  true, true, inferView)
 
 #define REGISTER_KERNEL_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...)                               \
     static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory,    \
-                                                  {}, false, false, nullptr, __VA_ARGS__)
-
-#define REGISTER_KERNEL_INPLACE_INTERNAL(uid, opName, n_min, n_max, match, run, refFactory, ...)                       \
-    static KernelRegistrar _registrar_fused_##run(uid, OpType::FUSED, opName, n_min, n_max, match, run, refFactory,    \
-                                                  {0}, false, false, nullptr, __VA_ARGS__)
+                                                  __VA_ARGS__)
 
 #define REGISTER_KERNEL_VIEW_INTERNAL(uid, opName, n_min, n_max, match, refFactory, inferView, ...)                    \
     static KernelRegistrar _registrar_fused_##inferView(uid, OpType::FUSED, opName, n_min, n_max, match, nullptr,      \
-                                                        refFactory, {}, true, false, inferView, __VA_ARGS__)
+                                                        refFactory, {}, __VA_ARGS__, true, false, inferView)

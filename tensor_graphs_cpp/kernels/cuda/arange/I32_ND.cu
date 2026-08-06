@@ -41,6 +41,6 @@ inline LogicalId refFactoryArangeI32_ND_CUDA(const std::vector<LogicalId> &input
     return graph.arange(inputs[0], inputs[1], inputs[2]);
 }
 
-REGISTER_KERNEL("Arange_I32_ND_CUDA", 3, 3, matchArangeI32_CUDA_ND, runArangeI32_CUDA_ND, refFactoryArangeI32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}}, {false, false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Arange_I32_ND_CUDA", 3, 3, matchArangeI32_CUDA_ND, runArangeI32_CUDA_ND, refFactoryArangeI32_ND_CUDA, {},MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32, DType::INT32, DType::INT32}, {{1}, {1}, {1}}, {false, false, false}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

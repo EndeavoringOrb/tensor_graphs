@@ -318,13 +318,12 @@ LogicalId refFactoryScatterF32_ND_Inplace_Fast(const std::vector<LogicalId> &inp
     return graph.scatter(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
 }
 
-REGISTER_KERNEL_INPLACE("SCATTER_inplace_fast", 5, 5, matchScatterF32_ND_Inplace_Fast, runInplaceScatterF32_ND_Fast,
-                        refFactoryScatterF32_ND_Inplace_Fast, MemSpace(1, HandleType::CPP),
-                        {Engine(0, EngineType::CPU)},
-                        {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32},
-                        {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false},
-                        {{MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("SCATTER_inplace_fast", 5, 5, matchScatterF32_ND_Inplace_Fast, runInplaceScatterF32_ND_Fast,
+                refFactoryScatterF32_ND_Inplace_Fast, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32},
+                {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false},
+                {{MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)}});

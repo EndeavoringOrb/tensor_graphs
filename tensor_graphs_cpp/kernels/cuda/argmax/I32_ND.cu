@@ -78,6 +78,6 @@ inline LogicalId refFactoryArgmaxI32_ND_CUDA(const std::vector<LogicalId> &input
     return graph.argmax(inputs[0], inputs[1], inputs[2]);
 }
 
-REGISTER_KERNEL("Argmax_I32_ND_CUDA", 3, 3, matchArgmaxI32_CUDA_ND, runArgmaxI32_CUDA_ND, refFactoryArgmaxI32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32, DType::INT32}, {{8, 32}, {1}, {1}}, {true, false, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Argmax_I32_ND_CUDA", 3, 3, matchArgmaxI32_CUDA_ND, runArgmaxI32_CUDA_ND, refFactoryArgmaxI32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32, DType::INT32}, {{8, 32}, {1}, {1}}, {true, false, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

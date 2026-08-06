@@ -110,6 +110,6 @@ inline LogicalId refFactorySilu_2(const std::vector<LogicalId> &inputs, Graph &g
     return graph.mul(x_id, sig);
 }
 
-REGISTER_KERNEL("Silu_3D_2", 1, 1, matchSiluF32_2, runSiluF32_2, refFactorySilu_2, MemSpace(1, HandleType::CPP),
+REGISTER_KERNEL("Silu_3D_2", 1, 1, matchSiluF32_2, runSiluF32_2, refFactorySilu_2, {0}, MemSpace(1, HandleType::CPP),
                 {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 4, 2048}}, {true},
                 {{MemSpace(1, HandleType::CPP)}});

@@ -101,6 +101,6 @@ inline LogicalId refFactoryGelu(const std::vector<LogicalId> &inputs, Graph &gra
     return graph.mul(term5, term4);
 }
 
-REGISTER_KERNEL("Gelu", 1, 1, matchGeluF32_ND, runGeluF32_ND, refFactoryGelu, MemSpace(1, HandleType::CPP),
+REGISTER_KERNEL("Gelu", 1, 1, matchGeluF32_ND, runGeluF32_ND, refFactoryGelu, {0}, MemSpace(1, HandleType::CPP),
                 {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 2048}}, {true},
                 {{MemSpace(1, HandleType::CPP)}});

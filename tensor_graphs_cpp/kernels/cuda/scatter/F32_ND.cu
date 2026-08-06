@@ -91,6 +91,6 @@ inline LogicalId refFactoryScatterF32_ND_CUDA(const std::vector<LogicalId> &inpu
     return graph.scatter(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]);
 }
 
-REGISTER_KERNEL("Scatter_F32_ND_CUDA", 5, 5, matchScatterF32_CUDA_ND, runScatterF32_CUDA_ND, refFactoryScatterF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Scatter_F32_ND_CUDA", 5, 5, matchScatterF32_CUDA_ND, runScatterF32_CUDA_ND, refFactoryScatterF32_ND_CUDA,{0}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::FLOAT32, DType::INT32, DType::INT32, DType::INT32}, {{8, 32}, {8, 32}, {2}, {2}, {2}}, {false, false, false, false, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

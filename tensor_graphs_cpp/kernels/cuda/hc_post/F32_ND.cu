@@ -163,6 +163,7 @@ REGISTER_KERNEL(
     matchHcPost_CUDA,
     runHcPost_CUDA,
     refFactoryHcPost,
+    {},
     MemSpace(2, HandleType::CUDA),
     {Engine(0, EngineType::CUDA_GPU)},
     {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32, DType::FLOAT32},

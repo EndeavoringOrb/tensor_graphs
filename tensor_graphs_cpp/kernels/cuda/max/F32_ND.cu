@@ -63,6 +63,6 @@ inline LogicalId refFactoryMaxF32_ND_CUDA(const std::vector<LogicalId> &inputs, 
     return graph.max(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Max_F32_ND_CUDA", 2, 2, matchMaxF32_CUDA_ND, runMaxF32_CUDA_ND, refFactoryMaxF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{1024, 1024}, {1}}, {true, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Max_F32_ND_CUDA", 2, 2, matchMaxF32_CUDA_ND, runMaxF32_CUDA_ND, refFactoryMaxF32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32, DType::INT32}, {{1024, 1024}, {1}}, {true, false}, {{MemSpace(2, HandleType::CUDA)}, {MemSpace(1, HandleType::CPP)}});
 
 #endif

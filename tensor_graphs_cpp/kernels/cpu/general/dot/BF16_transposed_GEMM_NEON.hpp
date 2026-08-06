@@ -83,7 +83,7 @@ inline LogicalId refFactoryBF16TransposedGEMM(const std::vector<LogicalId> &inpu
 }
 
 REGISTER_KERNEL("BF16_Transposed_GEMM_NEON", 2, 2, matchBF16TransposedGEMM, runBF16TransposedGEMM,
-                refFactoryBF16TransposedGEMM, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryBF16TransposedGEMM, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::BF16}, {{1, 8, 64}, {1024, 64}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 #endif

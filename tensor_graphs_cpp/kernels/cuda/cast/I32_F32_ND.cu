@@ -41,6 +41,6 @@ inline LogicalId refFactoryCastI32_F32_ND_CUDA(const std::vector<LogicalId> &inp
     return graph.cast(inputs[0], DType::FLOAT32);
 }
 
-REGISTER_KERNEL("Cast_I32_F32_ND_CUDA", 1, 1, matchCastI32_F32_CUDA_ND, runCastI32_F32_CUDA_ND, refFactoryCastI32_F32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Cast_I32_F32_ND_CUDA", 1, 1, matchCastI32_F32_CUDA_ND, runCastI32_F32_CUDA_ND, refFactoryCastI32_F32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
 
 #endif

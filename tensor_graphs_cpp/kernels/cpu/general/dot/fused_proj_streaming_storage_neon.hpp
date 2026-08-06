@@ -670,7 +670,7 @@ inline LogicalId refFactoryFusedProjStreamingStorage(const std::vector<LogicalId
 //   [0] Out — fp32, CPU,   [1, S, N]  — projection output
 // ---------------------------------------------------------------------------
 REGISTER_KERNEL("Fused_Proj_StreamingStorage_NEON", 2, 2, matchFusedProjStreamingStorage, runFusedProjStreamingStorage,
-                refFactoryFusedProjStreamingStorage, MemSpace(1, HandleType::CPP),
+                refFactoryFusedProjStreamingStorage, {}, MemSpace(1, HandleType::CPP),
                 {Engine(0, EngineType::CPU)},  // output backend
                 {DType::FLOAT32, DType::BF16}, // X is fp32, W is bf16
                 {{1, 8, 2048}, {8192, 2048}},  // dummy shapes for the bench harness

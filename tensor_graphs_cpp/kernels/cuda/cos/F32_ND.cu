@@ -41,6 +41,6 @@ inline LogicalId refFactoryCosF32_ND_CUDA(const std::vector<LogicalId> &inputs, 
     return graph.cos(inputs[0]);
 }
 
-REGISTER_KERNEL("Cos_F32_ND_CUDA", 1, 1, matchCosF32_CUDA_ND, runCosF32_CUDA_ND, refFactoryCosF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Cos_F32_ND_CUDA", 1, 1, matchCosF32_CUDA_ND, runCosF32_CUDA_ND, refFactoryCosF32_ND_CUDA,{0}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
 
 #endif

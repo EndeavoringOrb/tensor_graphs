@@ -125,7 +125,7 @@ inline LogicalId refFactoryBatchedTransposedGEMM(const std::vector<LogicalId> &i
 }
 
 REGISTER_KERNEL("Batched_Transposed_GEMM_NEON", 2, 2, matchBatchedTransposedGEMM, runBatchedTransposedGEMM,
-                refFactoryBatchedTransposedGEMM, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryBatchedTransposedGEMM, {}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32}, {{256, 8, 2048}, {256, 1024, 2048}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 

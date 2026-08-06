@@ -69,6 +69,6 @@ inline LogicalId refFactoryConcatF32_ND_CUDA(const std::vector<LogicalId> &input
     return graph.concat(tensors, axis);
 }
 
-REGISTER_KERNEL("Concat_F32_ND_CUDA", 2, UINT32_MAX, matchConcatF32_CUDA_ND, runConcatF32_CUDA_ND, refFactoryConcatF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32, DType::FLOAT32}, {{1}, {1024}}, {false, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Concat_F32_ND_CUDA", 2, UINT32_MAX, matchConcatF32_CUDA_ND, runConcatF32_CUDA_ND, refFactoryConcatF32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::INT32, DType::FLOAT32}, {{1}, {1024}}, {false, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(2, HandleType::CUDA)}});
 
 #endif

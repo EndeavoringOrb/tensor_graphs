@@ -53,6 +53,7 @@ inline LogicalId refFactoryGatherBF16(const std::vector<LogicalId> &inputs, Grap
     return graph.gather(casted, inputs[1]);
 }
 
-REGISTER_KERNEL("Gather_BF16", 2, 2, matchGatherBF16, runGatherBF16, refFactoryGatherBF16, MemSpace(1, HandleType::CPP),
-                {Engine(0, EngineType::CPU)}, {DType::BF16, DType::INT32}, {{262144, 640}, {1, 8}}, {true, true},
+REGISTER_KERNEL("Gather_BF16", 2, 2, matchGatherBF16, runGatherBF16, refFactoryGatherBF16, {},
+                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::BF16, DType::INT32},
+                {{262144, 640}, {1, 8}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -56,6 +56,6 @@ inline LogicalId refFactoryNegF32_ND_CUDA(const std::vector<LogicalId> &inputs, 
     return graph.neg(inputs[0]);
 }
 
-REGISTER_KERNEL("Neg_F32_ND_CUDA", 1, 1, matchNegF32_CUDA_ND, runNegF32_CUDA_ND, refFactoryNegF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Neg_F32_ND_CUDA", 1, 1, matchNegF32_CUDA_ND, runNegF32_CUDA_ND, refFactoryNegF32_ND_CUDA,{0,1}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
 
 #endif

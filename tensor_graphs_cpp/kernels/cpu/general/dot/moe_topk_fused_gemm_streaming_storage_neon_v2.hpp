@@ -807,7 +807,7 @@ inline LogicalId refFactoryMoETopKFusedGEMM_StreamingStorage_v2(const std::vecto
 // generates a unique UID) and the run function (which uses BFDOT).
 // ---------------------------------------------------------------------------
 REGISTER_KERNEL("MoE_TopK_FusedGEMM_StreamingStorage_NEON_v2", 5, 5, matchMoETopKFusedGEMM_StreamingStorage_v2,
-                runMoETopKFusedGEMM_StreamingStorage_v2, refFactoryMoETopKFusedGEMM_StreamingStorage_v2,
+                runMoETopKFusedGEMM_StreamingStorage_v2, refFactoryMoETopKFusedGEMM_StreamingStorage_v2, {},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, // output backend
                 {DType::FLOAT32, DType::BF16, DType::BF16, DType::FLOAT32, DType::INT32},
                 {{1, 8, 2048}, {256, 1024, 2048}, {256, 2048, 512}, {1, 8, 256}, {1, 8, 8}},

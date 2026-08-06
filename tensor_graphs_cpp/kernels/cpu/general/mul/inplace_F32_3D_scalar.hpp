@@ -44,7 +44,7 @@ inline LogicalId refFactoryMul3D_Scalar_Inplace(const std::vector<LogicalId> &in
     return graph.mul(inputs[0], out);
 }
 
-REGISTER_KERNEL_INPLACE("Mul_3D_Scalar_inplace", 2, 2, matchMulFP32_3D_Scalar_Inplace, runMulFP32_3D_Scalar_Inplace,
-                        refFactoryMul3D_Scalar_Inplace, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
-                        {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true},
-                        {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Mul_3D_Scalar_inplace", 2, 2, matchMulFP32_3D_Scalar_Inplace, runMulFP32_3D_Scalar_Inplace,
+                refFactoryMul3D_Scalar_Inplace, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32}, {{1, 1, 1}, {1}}, {true, true},
+                {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -95,7 +95,7 @@ inline LogicalId refDotF32_3D_NC(const std::vector<LogicalId> &inputs, Graph &gr
     return graph.dot(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Dot_F32_3D_NC", 2, 2, matchDotF32_3D_NC, runDotF32_3D_NC, refDotF32_3D_NC,
+REGISTER_KERNEL("Dot_F32_3D_NC", 2, 2, matchDotF32_3D_NC, runDotF32_3D_NC, refDotF32_3D_NC, {},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 8, 8}, {1, 8, 8}}, {false, false},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

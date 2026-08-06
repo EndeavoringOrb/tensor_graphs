@@ -80,7 +80,7 @@ inline LogicalId refFactoryAddNC_F32_3D(const std::vector<LogicalId> &inputs, Gr
     return graph.add(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Add_NC_F32_3D", 2, 2, matchAddNC_F32_3D, runAddNC_F32_3D, refFactoryAddNC_F32_3D,
+REGISTER_KERNEL("Add_NC_F32_3D", 2, 2, matchAddNC_F32_3D, runAddNC_F32_3D, refFactoryAddNC_F32_3D, {0, 1},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 1, 1}, {1, 1, 1}}, {false, false},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

@@ -282,7 +282,7 @@ inline LogicalId refFactoryJinaLayerNormWB_F32_3D(const std::vector<LogicalId> &
 }
 
 REGISTER_KERNEL("JinaLayerNormWB_F32_3D", 3, 3, matchJinaLayerNormWB_F32_3D, runJinaLayerNormWB_F32_3D,
-                refFactoryJinaLayerNormWB_F32_3D, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryJinaLayerNormWB_F32_3D, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32, DType::FLOAT32, DType::FLOAT32}, {{1, 1024, 768}, {768}, {768}}, {true, true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});
 

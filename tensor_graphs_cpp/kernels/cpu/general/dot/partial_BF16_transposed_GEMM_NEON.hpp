@@ -389,24 +389,24 @@ inline LogicalId refFactoryPartialBF16TransposedGEMM(const std::vector<LogicalId
     return graph.scatter(inIds[0], contigDot, inIds[3], inIds[4], inIds[5]);
 }
 
-REGISTER_KERNEL_INPLACE("Scatter_BF16_Transposed_GEMM_NEON", 12, 12, matchPartialBF16TransposedGEMM,
-                        runPartialBF16TransposedGEMM, refFactoryPartialBF16TransposedGEMM, MemSpace(1, HandleType::CPP),
-                        {Engine(0, EngineType::CPU)},
-                        {DType::FLOAT32, DType::FLOAT32, DType::BF16, DType::INT32, DType::INT32, DType::INT32,
-                         DType::INT32, DType::INT32, DType::INT32, DType::INT32, DType::INT32, DType::INT32},
-                        {{1, 8, 2048}, {1, 8, 2048}, {2048, 2048}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}},
-                        {false, false, false, false, false, false, false, false, false, false, false, false},
-                        {{MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)},
-                         {MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Scatter_BF16_Transposed_GEMM_NEON", 12, 12, matchPartialBF16TransposedGEMM,
+                runPartialBF16TransposedGEMM, refFactoryPartialBF16TransposedGEMM, {0}, MemSpace(1, HandleType::CPP),
+                {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32, DType::FLOAT32, DType::BF16, DType::INT32, DType::INT32, DType::INT32, DType::INT32,
+                 DType::INT32, DType::INT32, DType::INT32, DType::INT32, DType::INT32},
+                {{1, 8, 2048}, {1, 8, 2048}, {2048, 2048}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}, {3}},
+                {false, false, false, false, false, false, false, false, false, false, false, false},
+                {{MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)},
+                 {MemSpace(1, HandleType::CPP)}});
 
 #endif

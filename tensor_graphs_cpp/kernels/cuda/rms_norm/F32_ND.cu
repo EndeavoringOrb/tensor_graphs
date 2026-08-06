@@ -245,6 +245,7 @@ REGISTER_KERNEL(
     matchRMSNorm_F32_CUDA_ND,
     runRMSNorm_F32_CUDA_ND,
     refFactoryRMSNorm_F32_CUDA_ND,
+    {0},
     MemSpace(2, HandleType::CUDA),                 // output memory space
     {Engine(0, EngineType::CUDA_GPU)},             // engines
     {DType::FLOAT32, DType::FLOAT32},              // input dtypes

@@ -41,6 +41,6 @@ inline LogicalId refFactoryLogF32_ND_CUDA(const std::vector<LogicalId> &inputs, 
     return graph.log(inputs[0]);
 }
 
-REGISTER_KERNEL("Log_F32_ND_CUDA", 1, 1, matchLogF32_CUDA_ND, runLogF32_CUDA_ND, refFactoryLogF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Log_F32_ND_CUDA", 1, 1, matchLogF32_CUDA_ND, runLogF32_CUDA_ND, refFactoryLogF32_ND_CUDA,{0}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
 
 #endif

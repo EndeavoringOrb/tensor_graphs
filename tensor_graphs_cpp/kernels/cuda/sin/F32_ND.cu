@@ -41,6 +41,6 @@ inline LogicalId refFactorySinF32_ND_CUDA(const std::vector<LogicalId> &inputs, 
     return graph.sin(inputs[0]);
 }
 
-REGISTER_KERNEL("Sin_F32_ND_CUDA", 1, 1, matchSinF32_CUDA_ND, runSinF32_CUDA_ND, refFactorySinF32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Sin_F32_ND_CUDA", 1, 1, matchSinF32_CUDA_ND, runSinF32_CUDA_ND, refFactorySinF32_ND_CUDA,{0}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::FLOAT32}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
 
 #endif

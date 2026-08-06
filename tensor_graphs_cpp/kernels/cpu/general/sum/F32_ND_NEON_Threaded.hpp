@@ -113,7 +113,7 @@ inline LogicalId refFactorySumND(const std::vector<LogicalId> &inputs, Graph &gr
 
 // Updated Registration: Works for any ND shape, assuming float32 data and int32
 // axis
-REGISTER_KERNEL("Sum_F32_ND_Threaded", 2, 2, matchSumF32_ND_Threaded, runSumF32_ND_Threaded, refFactorySumND,
+REGISTER_KERNEL("Sum_F32_ND_Threaded", 2, 2, matchSumF32_ND_Threaded, runSumF32_ND_Threaded, refFactorySumND, {},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::INT32},
                 {{1, 4, 256, 128}, {1}}, {true, false},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

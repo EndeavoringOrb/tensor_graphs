@@ -39,7 +39,6 @@ REGISTER_MACROS = [
     "REGISTER_REF_KERNEL",
     "REGISTER_REF_KERNEL_VIEW",
     "REGISTER_KERNEL",
-    "REGISTER_KERNEL_INPLACE",
     "REGISTER_KERNEL_VIEW",
 ]
 
@@ -641,7 +640,7 @@ class CodeGenerator:
             try:
                 kcontent = path.read_text(encoding="utf-8", errors="ignore")
                 m_name = re.search(
-                    r'REGISTER_KERNEL(?:_INPLACE|_VIEW)?\s*\(\s*"([^"]+)"', kcontent
+                    r'REGISTER_KERNEL(?:_VIEW)?\s*\(\s*"([^"]+)"', kcontent
                 )
                 m_ref = re.search(
                     r"REGISTER_REF_KERNEL(?:_VIEW)?\s*\(\s*OpType::(\w+)", kcontent
@@ -720,9 +719,6 @@ class CodeGenerator:
                 )
                 f.write(
                     f"#define REGISTER_KERNEL(name, n_min, n_max, match, run, ref, ...) REGISTER_KERNEL_INTERNAL({uid_str}, name, n_min, n_max, match, run, ref, __VA_ARGS__)\n"
-                )
-                f.write(
-                    f"#define REGISTER_KERNEL_INPLACE(name, n_min, n_max, match, run, ref, ...) REGISTER_KERNEL_INPLACE_INTERNAL({uid_str}, name, n_min, n_max, match, run, ref, __VA_ARGS__)\n"
                 )
                 f.write(
                     f"#define REGISTER_KERNEL_VIEW(name, n_min, n_max, match, ref, inferView, ...) REGISTER_KERNEL_VIEW_INTERNAL({uid_str}, name, n_min, n_max, match, ref, inferView, __VA_ARGS__)\n"

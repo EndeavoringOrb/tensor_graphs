@@ -72,7 +72,7 @@ inline LogicalId refFactoryMulND_NEON(const std::vector<LogicalId> &inputs, Grap
     return graph.mul(inputs[0], inputs[1]);
 }
 
-REGISTER_KERNEL("Mul_ND_NEON", 2, 2, matchMulF32_ND_NEON, runMulF32_ND_NEON, refFactoryMulND_NEON,
+REGISTER_KERNEL("Mul_ND_NEON", 2, 2, matchMulF32_ND_NEON, runMulF32_ND_NEON, refFactoryMulND_NEON, {0, 1},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::FLOAT32},
                 {{1, 32, 512, 512}, {1, 32, 512, 512}}, // Target typical bottleneck shapes
                 {true, true}, {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

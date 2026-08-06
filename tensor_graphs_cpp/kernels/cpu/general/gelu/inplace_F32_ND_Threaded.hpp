@@ -85,7 +85,6 @@ inline LogicalId refFactoryGelu_Threaded(const std::vector<LogicalId> &inputs, G
     return graph.mul(term5, term4);
 }
 
-REGISTER_KERNEL_INPLACE("Gelu_3D_inplace_Threaded", 1, 1, matchGeluF32_3D_Inplace_Threaded,
-                        runGeluF32_3D_Inplace_Threaded, refFactoryGelu_Threaded, MemSpace(1, HandleType::CPP),
-                        {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 8, 2048}}, {true},
-                        {{MemSpace(1, HandleType::CPP)}});
+REGISTER_KERNEL("Gelu_3D_inplace_Threaded", 1, 1, matchGeluF32_3D_Inplace_Threaded, runGeluF32_3D_Inplace_Threaded,
+                refFactoryGelu_Threaded, {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                {DType::FLOAT32}, {{1, 8, 2048}}, {true}, {{MemSpace(1, HandleType::CPP)}});

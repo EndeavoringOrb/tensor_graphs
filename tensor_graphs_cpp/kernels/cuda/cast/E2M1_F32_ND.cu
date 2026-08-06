@@ -47,6 +47,6 @@ inline LogicalId refFactoryCastE2M1_F32_ND_CUDA(const std::vector<LogicalId> &in
     return graph.cast(inputs[0], DType::FLOAT32);
 }
 
-REGISTER_KERNEL("Cast_E2M1_F32_ND_CUDA", 1, 1, matchCastE2M1_F32_CUDA_ND, runCastE2M1_F32_CUDA_ND, refFactoryCastE2M1_F32_ND_CUDA, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::E2M1}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
+REGISTER_KERNEL("Cast_E2M1_F32_ND_CUDA", 1, 1, matchCastE2M1_F32_CUDA_ND, runCastE2M1_F32_CUDA_ND, refFactoryCastE2M1_F32_ND_CUDA,{}, MemSpace(2, HandleType::CUDA), {Engine(0, EngineType::CUDA_GPU)}, {DType::E2M1}, {{1024}}, {true}, {{MemSpace(2, HandleType::CUDA)}});
 
 #endif

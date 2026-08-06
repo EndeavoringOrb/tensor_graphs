@@ -69,7 +69,7 @@ inline LogicalId refFactoryNegND_NEON_Threaded(const std::vector<LogicalId> &inp
 }
 
 REGISTER_KERNEL("Neg_F32_ND_NEON_Threaded", 1, 1, matchNegF32_ND_NEON_Threaded, runNegF32_ND_NEON_Threaded,
-                refFactoryNegND_NEON_Threaded, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
+                refFactoryNegND_NEON_Threaded, {0, 1}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)},
                 {DType::FLOAT32}, {{1536}}, {true}, {{MemSpace(1, HandleType::CPP)}});
 
 #endif // TG_HAS_NEON

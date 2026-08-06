@@ -221,7 +221,7 @@ inline LogicalId refFactoryBF16GEMM_NEON_v2(const std::vector<LogicalId> &inputs
     return graph.dot(inputs[0], w_f32);
 }
 
-REGISTER_KERNEL("BF16_GEMM_NEON_v2", 2, 2, matchBF16GEMM_NEON_v2, runBF16GEMM_NEON_v2, refFactoryBF16GEMM_NEON_v2,
+REGISTER_KERNEL("BF16_GEMM_NEON_v2", 2, 2, matchBF16GEMM_NEON_v2, runBF16GEMM_NEON_v2, refFactoryBF16GEMM_NEON_v2, {},
                 MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32, DType::BF16},
                 {{1, 8, 64}, {1, 64, 1024}}, {true, true},
                 {{MemSpace(1, HandleType::CPP)}, {MemSpace(1, HandleType::CPP)}});

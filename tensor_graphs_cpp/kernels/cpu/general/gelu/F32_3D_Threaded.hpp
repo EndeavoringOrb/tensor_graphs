@@ -107,5 +107,5 @@ inline LogicalId refFactoryGelu_3D_Threaded(const std::vector<LogicalId> &inputs
 }
 
 REGISTER_KERNEL("Gelu_3D_Threaded", 1, 1, matchGeluF32_3D_Threaded, runGeluF32_3D_Threaded, refFactoryGelu_3D_Threaded,
-                MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 2048}}, {true},
-                {{MemSpace(1, HandleType::CPP)}});
+                {0}, MemSpace(1, HandleType::CPP), {Engine(0, EngineType::CPU)}, {DType::FLOAT32}, {{1, 1, 2048}},
+                {true}, {{MemSpace(1, HandleType::CPP)}});
