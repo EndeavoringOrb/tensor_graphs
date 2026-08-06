@@ -37,7 +37,6 @@ __global__ void fused_silu_f32_nd_kernel(const float* __restrict__ x,
 // ---------------------------------------------------------------------------
 inline bool matchFusedSilu_CUDA(const std::vector<TensorNode> &inputs,
                                 const TensorNode &output) {
-    if (inputs.size() != 1) return false;
     if (inputs[0].getShape() != output.getShape()) return false;
     if (output.dtype != DType::FLOAT32) return false;
     if (!isContiguous(output)) return false;
