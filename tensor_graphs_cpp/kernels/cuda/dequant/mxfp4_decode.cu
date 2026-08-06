@@ -131,6 +131,10 @@ inline LogicalId refFactoryFusedMXFP4_CUDA(const std::vector<LogicalId> &inputs,
 
     LogicalId scale_f32 = graph.cast(inputs[1], DType::FLOAT32);
 
+    // Infer shapes for intermediate nodes before accessing getShape()
+    ShapePropagator propagator;
+    propagator.inferShapeRecursive(unpacked_f32, graph);
+
     auto out_shape = graph.getNode(unpacked_f32).getShape();
     uint32_t out_d = out_shape[0];
     uint32_t in_d  = out_shape[1];
