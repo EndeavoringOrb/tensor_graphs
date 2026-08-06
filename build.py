@@ -1,4 +1,3 @@
-# build.py
 import argparse
 import hashlib
 import json
@@ -62,8 +61,8 @@ def strip_cpp_comments_and_strings(text: str) -> str:
         return "".join("\n" if c == "\n" else " " for c in s)
 
     pattern = re.compile(
-        r'//.*?$|/\*.*?\*/|\'(?:\\.|[^\\\'])*\'|"(?:\\.|[^\\"])*"',
-        re.DOTALL | re.MULTILINE,
+        r'\'(?:\\.|[^\\\'])*\'|"(?:\\.|[^\\"])*"|/\*.*?\*/|//[^\r\n]*',
+        re.DOTALL,
     )
     return pattern.sub(replacer, text)
 
@@ -349,10 +348,10 @@ class KernelLinter:
 
         macro_pattern = re.compile(r"\b(REGISTER_[\w_]+)\s*\(")
         n_matches = 0
-        for match in macro_pattern.finditer(content):
+        for match in macro_pattern.finditer(clean_content):
             macro_name = match.group(1)
             paren_start = match.end() - 1
-            args = extract_macro_call_args(content, paren_start)
+            args = extract_macro_call_args(clean_content, paren_start)
 
             if len(args) < 4:
                 continue

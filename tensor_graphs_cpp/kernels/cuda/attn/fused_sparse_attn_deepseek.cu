@@ -115,8 +115,6 @@ __global__ void fused_sparse_attn_kernel(
 // ----------------------------------------------------------------------------
 inline bool matchFusedSparseAttn_DeepSeek_CUDA(const std::vector<TensorNode>& inputs,
                                                const TensorNode& output) {
-    // Inputs: [q, kv, idx, sink] (4 inputs)
-    if (inputs.size() < 4) return false;
     // Check shapes: q 4D, kv 3D, idx 3D, sink 1D
     if (inputs[0].getShape().size() != 4) return false;
     if (inputs[1].getShape().size() != 3) return false;
