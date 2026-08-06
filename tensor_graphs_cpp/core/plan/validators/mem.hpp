@@ -421,7 +421,7 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
     {
         if (k % 100 == 0)
         {
-            LOG(L_INFO) << "malloc k=" << std::to_string(k);
+            LOG(L_INFO) << "malloc k=" << std::to_string(k) << "/" << std::to_string(N);
         }
         // Base Case: All buffers successfully placed!
         if (k == N)
