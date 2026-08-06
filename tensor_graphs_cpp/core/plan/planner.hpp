@@ -584,6 +584,23 @@ struct Planner
             }
         }
 
+        // for (uint32_t i = 0; i < numClasses; ++i)
+        // {
+        //     EClassId e_class_id = egraph.find(EClassId{i});
+        //     if (e_class_id != EClassId{i})
+        //         continue;
+        //     EClass &cls = egraph.getEClass(e_class_id);
+        //     std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b) {
+        //         float valA = (sort_enodes == "height") ? enode_height[a.value] : enodeInfos[a.value].cost;
+        //         float valB = (sort_enodes == "height") ? enode_height[b.value] : enodeInfos[b.value].cost;
+
+        //         if (valA < valB)
+        //             return true;
+        //         if (valA > valB)
+        //             return false;
+        //         return a < b;
+        //     });
+        // }
         for (uint32_t i = 0; i < numClasses; ++i)
         {
             EClassId e_class_id = egraph.find(EClassId{i});
@@ -591,6 +608,28 @@ struct Planner
                 continue;
             EClass &cls = egraph.getEClass(e_class_id);
             std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b) {
+                // Helper to check if an ENode is a COPY_TO from GPU (CUDA/OpenCL) to CPU (CPP)
+                auto isGpuToCpuCopy = [&](ENodeId id) -> bool {
+                    const ENode &enode = egraph.getENode(id);
+                    if (enode.getOpType() == OpType::COPY_TO && !enode.getChildren().empty())
+                    {
+                        const EClass &srcCls = egraph.getEClass(egraph.findConst(enode.getChildren()[0]));
+                        bool srcIsGpu = (srcCls.mem_space.type == HandleType::CUDA || 
+                                         srcCls.mem_space.type == HandleType::OPENCL);
+                        bool dstIsCpu = (enode.getMemSpace().type == HandleType::CPP);
+                        return srcIsGpu && dstIsCpu;
+                    }
+                    return false;
+                };
+
+                bool aIsGpuCpu = isGpuToCpuCopy(a);
+                bool bIsGpuCpu = isGpuToCpuCopy(b);
+
+                // Prioritize GPU -> CPU COPY_TO nodes
+                if (aIsGpuCpu != bIsGpuCpu)
+                    return aIsGpuCpu;
+
+                // Fallback to cost/height comparison
                 float valA = (sort_enodes == "height") ? enode_height[a.value] : enodeInfos[a.value].cost;
                 float valB = (sort_enodes == "height") ? enode_height[b.value] : enodeInfos[b.value].cost;
 
@@ -643,7 +682,7 @@ struct Planner
                 timer.tick();
                 continue;
             }
-            LOG(L_INFO) << "got selection";
+            LOG(L_DEBUG) << "got selection";
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.selection_map;
 
