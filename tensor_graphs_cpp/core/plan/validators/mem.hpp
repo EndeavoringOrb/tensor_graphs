@@ -28,7 +28,7 @@
 
 float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
                const std::unordered_map<EClassId, uint32_t> &selection_map, const std::vector<ENodeInfo> &enodeInfos,
-               bool print_utilization = true)
+               bool print_utilization = false)
 {
     std::unordered_map<EClassId, float> birth_times;
     std::unordered_map<Engine, float> engine_finish;
@@ -582,7 +582,6 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
                                             // buffer pushed mem over the edge
 )
 {
-    ProgressTimer t(0, "greedy_alloc", false, true);
     std::vector<ParallelBuffer> bufs = unallocated;
 
     // Heuristic: Place largest buffers first to minimize fragmentation
@@ -711,7 +710,6 @@ struct MemValidator : public ISelectionValidator
                   std::unordered_map<EClassId, BufferId> &eclass_to_buf, float &cost,
                   std::vector<EClassId> &conflict_nodes) override
     {
-        ProgressTimer t(0, "validate", false, true);
         cost = get_cost(order, egraph, selection_map, enodeInfos);
 
         std::vector<ParallelBuffer> unallocated_buffers =

@@ -718,6 +718,7 @@ struct Planner
             }
 
             DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos);
+            ProgressTimer dispatchTimer(0, "dispatch orders");
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
                 valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);
@@ -736,6 +737,7 @@ struct Planner
                 {
                     break;
                 }
+                dispatchTimer.tick();
             }
 
             if (extractor.active_options == 0)
