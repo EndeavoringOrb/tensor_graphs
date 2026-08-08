@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -19,6 +20,7 @@
 #include "core/graph.hpp"
 #include "core/kernels.hpp"
 #include "core/misc.hpp"
+#include "core/plan/search_delegate.hpp"
 #include "core/plan/validators/validator.hpp"
 #include "core/rewrite.hpp"
 #include "core/shapes.hpp"
@@ -32,10 +34,11 @@ struct ENodeInfo
 
 struct DispatchIterator
 {
-  public:
+public:
     DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
-                     const std::vector<ENodeInfo> &enode_infos)
-        : egraph(_egraph)
+                     const std::vector<ENodeInfo> &enode_infos,
+                     std::shared_ptr<SearchDelegate> _delegate = nullptr)
+        : egraph(_egraph), delegate(_delegate)
     {
         LOG(L_DEBUG) << "initializing dispatch iterator";
         initOrderState(selection_map, enode_infos);
@@ -44,7 +47,6 @@ struct DispatchIterator
     bool getNextDispatchOrder(const std::unordered_map<EClassId, uint32_t> &selection_map,
                               std::vector<EClassId> &out_order)
     {
-        // ProgressTimer t = ProgressTimer(0, "getNextDispatchOrder", false, true);
         LOG(L_DEBUG) << "getNextDispatchOrder";
         if (is_done)
             return false;
@@ -66,7 +68,8 @@ struct DispatchIterator
             return false;
         }
 
-        auto compare_nodes = [&](EClassId a, EClassId b) {
+        auto compare_nodes = [&](EClassId a, EClassId b)
+        {
             float h_a = heights[a.value];
             float h_b = heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
@@ -87,11 +90,37 @@ struct DispatchIterator
                 return true;
             }
 
-            uint32_t choice = selection_at_pos[pos];
-
-            if (choice < current_ready.size())
+            if (selection_at_pos[pos] == 0)
             {
-                selection_at_pos[pos] = choice + 1;
+                if (delegate)
+                {
+                    delegate->push_state();
+                    std::vector<ActionFeature> features;
+                    features.reserve(current_ready.size());
+                    for (auto id : current_ready)
+                    {
+                        ActionFeature f;
+                        f.id = id.value;
+                        f.cost = (id.value < heights.size()) ? heights[id.value] : 0.0f;
+                        f.size = 0.0f;
+                        f.op_type = 0;
+                        features.push_back(f);
+                    }
+                    chosen_order_at_pos[pos] = delegate->order_dispatch(features);
+                }
+                else
+                {
+                    chosen_order_at_pos[pos].resize(current_ready.size());
+                    std::iota(chosen_order_at_pos[pos].begin(), chosen_order_at_pos[pos].end(), 0);
+                }
+            }
+
+            uint32_t choice_idx = selection_at_pos[pos];
+
+            if (choice_idx < current_ready.size())
+            {
+                selection_at_pos[pos] = choice_idx + 1;
+                uint32_t choice = chosen_order_at_pos[pos][choice_idx];
                 EClassId node = current_ready[choice];
                 ordered.push_back(node);
                 chosen_at_pos[pos] = node;
@@ -128,8 +157,9 @@ struct DispatchIterator
         return iter;
     }
 
-  private:
+private:
     const EGraph &egraph;
+    std::shared_ptr<SearchDelegate> delegate;
     size_t num_nodes_in_selection = 0;
     std::vector<EClassId> ordered;
     std::vector<int32_t> current_in_degree;
@@ -140,6 +170,7 @@ struct DispatchIterator
     std::vector<EClassId> chosen_at_pos;
     std::vector<uint32_t> choice_at_pos;
     std::vector<uint32_t> selection_at_pos;
+    std::vector<std::vector<uint32_t>> chosen_order_at_pos;
 
     bool is_done = false;
     bool first_yield = true;
@@ -171,6 +202,8 @@ struct DispatchIterator
         chosen_at_pos.assign(num_nodes_in_selection + 1, EClassId{UINT32_MAX});
         choice_at_pos.assign(num_nodes_in_selection + 1, 0);
         selection_at_pos.assign(num_nodes_in_selection + 1, 0);
+        chosen_order_at_pos.clear();
+        chosen_order_at_pos.resize(num_nodes_in_selection + 1);
 
         std::vector<uint8_t> in_selection(max_class_id, 0);
         for (const auto &kv : selection_map)
@@ -221,7 +254,8 @@ struct DispatchIterator
         heights.assign(max_class_id, 0.0f);
         std::vector<bool> height_computed(max_class_id, false);
 
-        std::function<float(EClassId)> get_height = [&](EClassId u) -> float {
+        std::function<float(EClassId)> get_height = [&](EClassId u) -> float
+        {
             if (height_computed[u.value])
                 return heights[u.value];
 
@@ -250,7 +284,8 @@ struct DispatchIterator
             }
         }
 
-        auto compare_nodes = [&](EClassId a, EClassId b) {
+        auto compare_nodes = [&](EClassId a, EClassId b)
+        {
             float h_a = heights[a.value];
             float h_b = heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
@@ -265,6 +300,10 @@ struct DispatchIterator
 
     bool ascend()
     {
+        if (delegate)
+        {
+            delegate->pop_state();
+        }
         uint32_t pos = static_cast<uint32_t>(ordered.size());
         selection_at_pos[pos] = 0;
         if (ordered.empty())
@@ -275,7 +314,8 @@ struct DispatchIterator
 
         uint32_t parent_pos = pos - 1;
 
-        auto compare_nodes = [&](EClassId a, EClassId b) {
+        auto compare_nodes = [&](EClassId a, EClassId b)
+        {
             float h_a = heights[a.value];
             float h_b = heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
@@ -308,24 +348,25 @@ struct DispatchIterator
 
 struct Extractor
 {
-  private:
+private:
     std::vector<std::unique_ptr<ISelectionValidator>> validators;
 
-  public:
-    std::unordered_map<EClassId, uint32_t> selection_map; // EClass -> ENode (idx into EClass.enodes)
+public:
+    std::unordered_map<EClassId, uint32_t> selection_map;
     const EGraph &egraph;
-    std::vector<EClassId> path; // List of EClasses in selection_map, in order root -> leaves
+    std::shared_ptr<SearchDelegate> delegate;
+    std::vector<EClassId> path;
     std::vector<bool> in_path;
     std::vector<int> path_pos;
-    std::vector<EClassId> to_process; // EClass ids to process
+    std::vector<EClassId> to_process;
     std::vector<bool> has_options;
     uint32_t active_options = 0;
-    std::unordered_map<EClassId, uint32_t> next_sel; // EClass -> ENode idx, what enode should we move to next time
+    std::unordered_map<EClassId, uint32_t> next_sel;
     EClassId target_backtrack_eclass;
     uint64_t numClasses;
 
-    Extractor(const EGraph &_egraph, EClassId root_eclass_id)
-        : egraph(_egraph), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
+    Extractor(const EGraph &_egraph, EClassId root_eclass_id, std::shared_ptr<SearchDelegate> _delegate = nullptr)
+        : egraph(_egraph), delegate(_delegate), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
           in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
           has_options(_egraph.classes.size(), false)
     {
@@ -350,7 +391,6 @@ struct Extractor
         return true;
     }
 
-    // Returns true if successfully formed a selection map, false if it needs to backtrack
     bool getNextSelection()
     {
         LOG(L_DEBUG) << "getNextSelection";

@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,6 +34,7 @@ ALL_TARGETS = [
     "main.cpp",
     "test.cpp",
     "write_ref_tensors.cpp",
+    "bindings.cpp",
 ]
 
 REGISTER_MACROS = [
@@ -121,18 +123,12 @@ def extract_macro_call_args(content: str, paren_start: int) -> list[str]:
     return args
 
 
-# =============================================================================
-# 1. Configuration & Platform Detection
-# =============================================================================
-
-
 @dataclass
 class PlatformInfo:
-    """Detects host operating system, architecture, toolchain paths, and hardware capabilities."""
-
-    os_name: str  # "nt" or "posix"
-    machine: str  # e.g. "x86_64", "arm64", "aarch64"
+    os_name: str
+    machine: str
     is_arm64: bool
+    is_python_arm64: bool
     is_windows: bool
     vcvars_path: str
     cuda_path: str
@@ -149,6 +145,9 @@ class PlatformInfo:
         machine = platform.machine().lower()
         is_windows = os_name == "nt"
         is_arm64 = machine in ("aarch64", "arm64")
+
+        python_plat = sysconfig.get_platform().lower()
+        is_python_arm64 = "arm64" in python_plat or "aarch64" in python_plat
 
         vcvars_path = os.environ.get(
             "VCVARS_PATH",
@@ -171,7 +170,6 @@ class PlatformInfo:
             r"C:\Program Files\LLVM\bin\clang++.exe" if is_windows else "clang++",
         )
 
-        # 1. Detect CUDA availability on host system
         has_cuda = False
         if (
             shutil.which("nvcc") is not None
@@ -180,7 +178,6 @@ class PlatformInfo:
         ):
             has_cuda = True
 
-        # 2. Detect OpenCL availability on host system
         has_opencl = False
         opencl_inc_dir = None
         opencl_lib_dir = None
@@ -236,6 +233,7 @@ class PlatformInfo:
             os_name=os_name,
             machine=machine,
             is_arm64=is_arm64,
+            is_python_arm64=is_python_arm64,
             is_windows=is_windows,
             vcvars_path=vcvars_path,
             cuda_path=cuda_path,
@@ -250,10 +248,8 @@ class PlatformInfo:
 
 @dataclass
 class BuildConfig:
-    """Holds all compile and build pipeline configuration parameters."""
-
-    cuda_override: int | None = None  # None (auto), 0 (off), 1 (on)
-    opencl_override: int | None = None  # None (auto), 0 (off), 1 (on)
+    cuda_override: int | None = None
+    opencl_override: int | None = None
     use_cuda: bool = False
     use_opencl: bool = False
     debug: bool = False
@@ -289,14 +285,7 @@ class BuildConfig:
             self.targets = list(ALL_TARGETS)
 
 
-# =============================================================================
-# 2. Kernel & Rewrite Linter
-# =============================================================================
-
-
 class KernelLinter:
-    """Validates kernel match logic and rewrite rules for correctness and safety."""
-
     REDUNDANCY_PATTERNS = {
         r"inputs\.size\(\)": (
             "Input Count Check",
@@ -544,14 +533,7 @@ class KernelLinter:
                     func(path)
 
 
-# =============================================================================
-# 3. Code Generation Pipeline
-# =============================================================================
-
-
 class CodeGenerator:
-    """Handles static code and header generation prior to compilation."""
-
     def __init__(self, config: BuildConfig):
         self.config = config
 
@@ -729,14 +711,7 @@ class CodeGenerator:
             f.writelines(f"#undef {macro}\n" for macro in REGISTER_MACROS)
 
 
-# =============================================================================
-# 4. Toolchain & Compiler Driver
-# =============================================================================
-
-
 class Toolchain:
-    """Assembles flags and executes compiler/linker invocations."""
-
     def __init__(self, config: BuildConfig, platform_info: PlatformInfo):
         self.config = config
         self.platform = platform_info
@@ -749,7 +724,7 @@ class Toolchain:
     def get_nvcc_binary(self) -> str:
         return "nvcc"
 
-    def get_cxx_flags(self) -> list[str]:
+    def get_cxx_flags(self, is_python_ext: bool = False) -> list[str]:
         flags = [
             f"-I{ROOT_DIR}",
             "-std=c++20",
@@ -762,8 +737,12 @@ class Toolchain:
             if self.platform.opencl_inc_dir:
                 flags.append(f"-I{self.platform.opencl_inc_dir}")
 
+        target_arm64 = (
+            self.platform.is_python_arm64 if is_python_ext else self.platform.is_arm64
+        )
+
         if self.platform.is_windows:
-            if not self.config.use_cuda:
+            if target_arm64 and not self.config.use_cuda:
                 flags.extend(
                     ["-target", "aarch64-windows", "-march=armv8.6-a+bf16+i8mm"]
                 )
@@ -775,7 +754,7 @@ class Toolchain:
                 if self.config.profile:
                     flags.extend(["-g", "-gcodeview"])
         else:
-            if self.platform.is_arm64:
+            if target_arm64:
                 flags.append("-march=armv8.6-a+bf16+i8mm")
 
             if self.config.debug:
@@ -791,6 +770,36 @@ class Toolchain:
 
         return flags
 
+    def get_pybind11_flags(self) -> tuple[list[str], str]:
+        py_includes = (
+            subprocess.check_output(
+                [sys.executable, "-m", "pybind11", "--includes"], text=True
+            )
+            .strip()
+            .split()
+        )
+
+        ext_suffix = subprocess.check_output(
+            [
+                sys.executable,
+                "-c",
+                "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX') or '.so')",
+            ],
+            text=True,
+        ).strip()
+
+        flags = list(py_includes)
+        flags.append("-shared")
+
+        if self.platform.is_windows:
+            py_lib_dir_base = Path(sys.base_prefix) / "libs"
+            py_lib_dir_prefix = Path(sys.prefix) / "libs"
+            flags.extend([f"-L{py_lib_dir_base}", f"-L{py_lib_dir_prefix}"])
+        else:
+            flags.append("-fPIC")
+
+        return [f for f in flags if f], ext_suffix
+
     def get_ld_flags(self) -> list[str]:
         flags = []
         if self.config.use_opencl:
@@ -802,7 +811,7 @@ class Toolchain:
                 flags.append("-Wl,-debug")
         return flags
 
-    def get_nvcc_flags(self) -> list[str]:
+    def get_nvcc_flags(self, is_python_ext: bool = False) -> list[str]:
         flags = [
             f"-I{ROOT_DIR}",
             "-std=c++20",
@@ -816,20 +825,31 @@ class Toolchain:
         else:
             flags.append("-O3")
 
+        target_arm64 = (
+            self.platform.is_python_arm64 if is_python_ext else self.platform.is_arm64
+        )
+
         if self.config.use_cuda:
             flags.append("-DTG_USE_CUDA")
-            if not self.platform.is_windows and self.platform.is_arm64:
+            if not self.platform.is_windows and target_arm64:
                 flags.extend(["-Xcompiler", "-march=armv8.6-a+bf16+i8mm"])
 
-        if self.config.use_opencl:  # TODO: make opt in
+        if self.config.use_opencl:
             flags.append("-DTG_USE_OPENCL")
 
         return flags
 
-    def run_cmd(self, cmd: list[str]) -> subprocess.CompletedProcess:
+    def run_cmd(
+        self, cmd: list[str], is_python_ext: bool = False
+    ) -> subprocess.CompletedProcess:
         cmd_str = " ".join(cmd)
         if self.platform.is_windows:
-            arch = "amd64" if self.config.use_cuda else "arm64"
+            target_arm64 = (
+                self.platform.is_python_arm64
+                if is_python_ext
+                else self.platform.is_arm64
+            )
+            arch = "arm64" if (target_arm64 and not self.config.use_cuda) else "amd64"
             full_command = f'"{self.platform.vcvars_path}" {arch} && {cmd_str}'
         else:
             full_command = cmd_str
@@ -860,11 +880,6 @@ class Toolchain:
         return result
 
 
-# =============================================================================
-# 5. Build Orchestrator
-# =============================================================================
-
-
 class BuildOrchestrator:
     def __init__(self, config: BuildConfig):
         self.platform = PlatformInfo.detect()
@@ -880,16 +895,13 @@ class BuildOrchestrator:
             f"(Log Level: {self.config.log_level_str}, CUDA: {self.config.use_cuda}, OpenCL: {self.config.use_opencl})...[/bold cyan]\n"
         )
 
-        # 1. Lint Phase
         self.linter.lint(self.config)
 
-        # 2. Code Generation Phase
         core_seed = self.code_gen.generate_core_seed()
         self.code_gen.generate_opencl_strings()
         self.code_gen.generate_kernel_includes(core_seed)
         self.code_gen.generate_build_context()
 
-        # 3. Compilation Phase
         self._compile_project()
 
     def _compile_project(self) -> None:
@@ -898,7 +910,6 @@ class BuildOrchestrator:
 
         cuda_obj = str(GENERATED_DIR / f"cuda_kernels{obj_ext}")
 
-        # Step 3a: Compile CUDA Object if enabled
         if self.config.use_cuda:
             console.print("\n[bold blue]Compiling CUDA Kernels...[/bold blue]")
             cuda_src = str(GENERATED_DIR / "cuda_kernels.gen.cu")
@@ -907,21 +918,32 @@ class BuildOrchestrator:
                 + self.toolchain.get_nvcc_flags()
                 + ["-c", cuda_src, "-o", cuda_obj]
             )
-
             res = self.toolchain.run_cmd(cmd)
             self._render_success_panel(res.stdout)
 
-        # Step 3b: Compile each target
         for main_file in self.config.targets:
             console.print(f"\n[bold blue]Compiling {main_file}...[/bold blue]")
             main_src = str(ROOT_DIR / main_file)
             target_stem = main_file.split(".")[0]
+
+            if main_file == "bindings.cpp":
+                py_flags, ext_suffix = self.toolchain.get_pybind11_flags()
+                out_name = f"tensor_graphs{ext_suffix}"
+                cmd = (
+                    [self.toolchain.get_cxx_binary()]
+                    + self.toolchain.get_cxx_flags(is_python_ext=True)
+                    + py_flags
+                    + [main_src, "-o", out_name]
+                    + self.toolchain.get_ld_flags()
+                )
+                res = self.toolchain.run_cmd(cmd, is_python_ext=True)
+                self._render_success_panel(res.stdout)
+                continue
+
             out_name = f"tensor_graphs_cpp/{target_stem}{out_ext}"
 
             if self.config.use_cuda:
                 main_obj = str(GENERATED_DIR / f"{target_stem}{obj_ext}")
-
-                # Compile C++ source to object
                 cmd = (
                     [self.toolchain.get_cxx_binary()]
                     + self.toolchain.get_cxx_flags()
@@ -929,7 +951,6 @@ class BuildOrchestrator:
                 )
                 self.toolchain.run_cmd(cmd)
 
-                # Link objects via NVCC
                 cmd = [
                     self.toolchain.get_nvcc_binary(),
                     main_obj,
@@ -942,7 +963,6 @@ class BuildOrchestrator:
 
                 res = self.toolchain.run_cmd(cmd)
             else:
-                # Direct compile + link
                 cmd = (
                     [self.toolchain.get_cxx_binary()]
                     + self.toolchain.get_cxx_flags()
@@ -963,11 +983,6 @@ class BuildOrchestrator:
                 border_style="green",
             )
         )
-
-
-# =============================================================================
-# 6. CLI Entry Point
-# =============================================================================
 
 
 def main() -> None:
@@ -1022,7 +1037,7 @@ def main() -> None:
     parser.add_argument(
         "--targets",
         nargs="+",
-        help="Specify which target C++ files to build (e.g. main, bench, test)",
+        help="Specify which target C++ files to build (e.g. main, bench, test, bindings)",
     )
     args = parser.parse_args()
 
