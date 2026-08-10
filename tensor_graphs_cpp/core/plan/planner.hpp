@@ -98,6 +98,17 @@ struct Planner
                     ruleMatchCounts[rule->name()]++;
                     nMatches++;
                 }
+                // if (eNodeIdx % 10000 == 0)
+                // {
+                //     std::stringstream ss;
+                //     ss << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
+                //     for (auto const &[name, count] : ruleMatchCounts)
+                //     {
+                //         ss << "  " << name << ": " << count << " matches\n";
+                //     }
+                //     ss << "Total Matches: " << nMatches;
+                //     LOG(L_INFO) << ss.str();
+                // }
             }
             egraph.rebuild();
             uint32_t postUniqueNodes = egraph.getNumUniqueENodes();
@@ -118,6 +129,7 @@ struct Planner
         }
     }
 
+    // Propagate invalidity from empty EClasses upward to parent ENodes
     uint32_t deathCascade(EGraph &egraph)
     {
         uint32_t numClasses = egraph.getClasses().size();
@@ -125,6 +137,7 @@ struct Planner
         std::vector<uint32_t> valid_enode_count(numClasses, 0);
         std::vector<std::vector<ENodeId>> parents_map(numClasses);
 
+        // construct parents_map
         for (uint32_t i = 0; i < numClasses; ++i)
         {
             EClassId e_class_id = egraph.find(EClassId{i});
@@ -219,6 +232,36 @@ struct Planner
                                  const std::string &sort_enodes = "cost",
                                  std::shared_ptr<SearchDelegate> delegate = nullptr)
     {
+        constexpr float EPS = 1e-6f;
+
+        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool {
+            if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
+                return true;
+            if (op == OpType::RESHAPE && inputIdx == 1)
+                return true;
+            if (op == OpType::PERMUTE && inputIdx == 1)
+                return true;
+            if (op == OpType::SLICE && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
+                return true;
+            if (op == OpType::SCATTER && (inputIdx == 2 || inputIdx == 3 || inputIdx == 4))
+                return true;
+            if ((op == OpType::SUM || op == OpType::MAX) && inputIdx == 1)
+                return true;
+            if (op == OpType::CONCAT && inputIdx == 0)
+                return true;
+            if (op == OpType::TRIU && inputIdx == 1)
+                return true;
+            if (op == OpType::FILL && inputIdx == 1)
+                return true;
+            if (op == OpType::IM2COL && (inputIdx == 1 || inputIdx == 2 || inputIdx == 3))
+                return true;
+            if (op == OpType::ARANGE && (inputIdx == 0 || inputIdx == 1 || inputIdx == 2))
+                return true;
+            if (op == OpType::ARGMAX && (inputIdx == 1 || inputIdx == 2))
+                return true;
+            return false;
+        };
+
         ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info");
         std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
         for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
@@ -300,57 +343,68 @@ struct Planner
                     EClassId canonChild = egraph.find(childEClassId);
                     bool needed = false;
 
-                    if (enode.getOpType() == OpType::FUSED && refEntry && pGraph)
+                    if (enode.getOpType() == OpType::FUSED)
                     {
-                        auto traceToInputIdx = [&](LogicalId pid) -> int
+                        if (refEntry && pGraph)
                         {
-                            LogicalId curr = pid;
-                            while (pGraph->hasNode(curr) && (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
-                                                             pGraph->getNode(curr).opType == OpType::CAST ||
-                                                             pGraph->getNode(curr).opType == OpType::COPY_TO ||
-                                                             pGraph->getNode(curr).opType == OpType::RESHAPE ||
-                                                             pGraph->getNode(curr).opType == OpType::PERMUTE))
-                            {
-                                if (pGraph->getNode(curr).child_ids.empty())
-                                    break;
-                                curr = pGraph->getNode(curr).child_ids[0];
-                            }
-                            for (uint64_t k = 0; k < pInputs.size(); ++k)
-                            {
-                                if (pInputs[k] == curr)
-                                    return (int)k;
-                            }
-                            return -1;
-                        };
+                            auto traceToInputIdx = [&](LogicalId pid) -> int {
+                                LogicalId curr = pid;
+                                while (pGraph->hasNode(curr) && (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
+                                                                 pGraph->getNode(curr).opType == OpType::CAST ||
+                                                                 pGraph->getNode(curr).opType == OpType::COPY_TO ||
+                                                                 pGraph->getNode(curr).opType == OpType::RESHAPE ||
+                                                                 pGraph->getNode(curr).opType == OpType::PERMUTE))
+                                {
+                                    if (pGraph->getNode(curr).child_ids.empty())
+                                        break;
+                                    curr = pGraph->getNode(curr).child_ids[0];
+                                }
+                                for (uint64_t k = 0; k < pInputs.size(); ++k)
+                                {
+                                    if (pInputs[k] == curr)
+                                        return (int)k;
+                                }
+                                return -1;
+                            };
 
-                        for (const auto &pair : pGraph->nodes)
-                        {
-                            const TensorNode &n = pair.second;
-                            for (uint64_t p_idx = 0; p_idx < n.child_ids.size(); ++p_idx)
+                            for (const auto &pair : pGraph->nodes)
                             {
-                                int inputIdx = traceToInputIdx(n.child_ids[p_idx]);
-                                if (kernel.min_num_inputs != kernel.max_num_inputs)
+                                const TensorNode &n = pair.second;
+                                for (uint64_t p_idx = 0; p_idx < n.child_ids.size(); ++p_idx)
                                 {
-                                    if (inputIdx == 0 && j == 0)
+                                    if (isConstantNeeded(n.opType, p_idx, n.child_ids.size()))
                                     {
-                                        needed = true;
-                                        break;
-                                    }
-                                    else if (inputIdx >= 1 && j >= 1)
-                                    {
-                                        needed = true;
-                                        break;
+                                        int inputIdx = traceToInputIdx(n.child_ids[p_idx]);
+                                        if (kernel.min_num_inputs != kernel.max_num_inputs)
+                                        {
+                                            // Assume the first input is the special scalar (e.g. axis for CONCAT)
+                                            // and the rest are the variadic tensors.
+                                            if (inputIdx == 0 && j == 0)
+                                            {
+                                                needed = true;
+                                                break;
+                                            }
+                                            else if (inputIdx >= 1 && j >= 1)
+                                            {
+                                                needed = true;
+                                                break;
+                                            }
+                                        }
+                                        else if (inputIdx == (int)j)
+                                        {
+                                            needed = true;
+                                            break;
+                                        }
                                     }
                                 }
-                                else if (inputIdx == (int)j)
-                                {
-                                    needed = true;
+                                if (needed)
                                     break;
-                                }
                             }
-                            if (needed)
-                                break;
                         }
+                    }
+                    else
+                    {
+                        needed = isConstantNeeded(enode.getOpType(), j, enode.getChildren().size());
                     }
 
                     if (needed && egraph.constantStaging.count(canonChild))
@@ -366,11 +420,17 @@ struct Planner
                 info.cost = costModel.estimateCost(enode.getKernelId(), enode.getShape(), enode.getStrides(),
                                                    enode.getDType(), inShapes, inStrides, inDTypes, inConstants);
             }
+            else
+            {
+                Error::throw_err("[Planner.extractBest] enode.kernelId != 0, but isn't "
+                                 "OpType::INPUT or OpType::CACHE. this shouldn't happen");
+            }
 
             enodeInfos[i] = std::move(info);
             timer3.tick();
         }
 
+        bool droppedInf = false;
         uint32_t totalPruned = 0;
         for (uint32_t i = 0; i < egraph.getClasses().size(); ++i)
         {
@@ -382,14 +442,20 @@ struct Planner
             std::vector<ENodeId> validEnodes;
             validEnodes.reserve(cls.enodes.size());
 
+            // 1. Remove infinite-cost nodes
             for (ENodeId enodeId : cls.enodes)
             {
-                if (enodeInfos[enodeId.value].cost != TGConstants::INF)
+                if (enodeInfos[enodeId.value].cost == TGConstants::INF)
+                {
+                    droppedInf = true;
+                }
+                else
                 {
                     validEnodes.push_back(enodeId);
                 }
             }
 
+            // 2. Prune duplicated nodes to minimize search space bloat
             std::vector<ENodeId> deduped;
             deduped.reserve(validEnodes.size());
             for (uint64_t idxA = 0; idxA < validEnodes.size(); ++idxA)
@@ -399,7 +465,7 @@ struct Planner
                 const ENodeInfo &ia = enodeInfos[idA.value];
 
                 bool dominated = false;
-                for (uint64_t idxB = 0; idxB < validEnodes.size(); ++idxB)
+                for (uint64_t idxB = 0; idxB < validEnodes.size(); ++idxB) // TODO: loop from idxA+1 and check both ways
                 {
                     if (idxA == idxB)
                         continue;
@@ -410,9 +476,11 @@ struct Planner
                     if (a != b)
                         continue;
 
+                    // B dominates A only if strictly cheaper, OR equal-cost with smaller
+                    // ID.
                     if (ib.cost < ia.cost - 1e-9f)
                     {
-                        dominated = true;
+                        dominated = true; // TODO do equal enodes ever have different cost?
                         break;
                     }
                     if (std::abs(ib.cost - ia.cost) <= 1e-9f && idB < idA)
@@ -448,12 +516,14 @@ struct Planner
         }
 
         const uint64_t numClasses = egraph.getClasses().size();
+        LOG(L_INFO) << "numClasses=" << numClasses;
 
         std::vector<float> eclass_height(numClasses, TGConstants::INF);
         std::vector<float> enode_height(egraph.getENodes().size(), TGConstants::INF);
 
         if (sort_enodes == "height")
         {
+            // Initialize leaf nodes (inputs, caches)
             for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
             {
                 const ENode &enode = egraph.getENodes()[i];
@@ -467,7 +537,7 @@ struct Planner
             }
 
             bool changed = true;
-            uint32_t max_iters = numClasses + 1;
+            uint32_t max_iters = numClasses + 1; // Bellman-Ford style relaxation
             ProgressTimer t(max_iters, "calculating heights");
             while (changed && max_iters-- > 0)
             {
@@ -516,58 +586,9 @@ struct Planner
             }
         }
 
-        for (uint32_t i = 0; i < numClasses; ++i)
-        {
-            EClassId e_class_id = egraph.find(EClassId{i});
-            if (e_class_id != EClassId{i})
-                continue;
-            EClass &cls = egraph.getEClass(e_class_id);
-            std::sort(cls.enodes.begin(), cls.enodes.end(), [&](ENodeId a, ENodeId b)
-                      {
-                float valA = (sort_enodes == "height") ? enode_height[a.value] : enodeInfos[a.value].cost;
-                float valB = (sort_enodes == "height") ? enode_height[b.value] : enodeInfos[b.value].cost;
-
-                if (valA < valB)
-                    return true;
-                if (valA > valB)
-                    return false;
-                return a < b; });
-
-            if (delegate)
-            {
-                std::vector<ActionFeature> features;
-                features.reserve(cls.enodes.size());
-                for (ENodeId enodeId : cls.enodes)
-                {
-                    const ENode &enode = egraph.getENode(enodeId);
-                    ActionFeature f;
-                    f.id = enodeId.value;
-                    f.cost = enodeInfos[enodeId.value].cost;
-                    f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
-                    f.op_type = static_cast<uint32_t>(enode.getOpType());
-                    features.push_back(f);
-                }
-                std::vector<uint32_t> custom_order = delegate->order_enodes(e_class_id.value, features);
-                if (custom_order.size() == cls.enodes.size())
-                {
-                    std::vector<ENodeId> reordered;
-                    reordered.reserve(cls.enodes.size());
-                    for (uint32_t idx : custom_order)
-                    {
-                        if (idx < cls.enodes.size())
-                        {
-                            reordered.push_back(cls.enodes[idx]);
-                        }
-                    }
-                    if (reordered.size() == cls.enodes.size())
-                    {
-                        cls.enodes = std::move(reordered);
-                    }
-                }
-            }
-        }
 
         Extractor extractor = Extractor(egraph, rootEClassId, delegate);
+        // extractor.registerValidator(std::make_unique<CycleStepValidator>(egraph));
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
         extractor.registerValidator(
             std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical, preallocatedBuffers, delegate));
@@ -583,15 +604,28 @@ struct Planner
         ProgressTimer timer(max_iters, "extracting graphs");
         ProgressTimer loopTimer(0, "", true);
         auto start_time = std::chrono::high_resolution_clock::now();
+        LOG(L_INFO) << "entering loop";
 
         while (remaining_iters-- > 0)
         {
+#ifdef DEBUG
+            std::cout << "loop " << std::to_string(loopTimer.getElapsed() * 1000) << "ms";
+            if (max_iters - (remaining_iters + 1) > 0)
+            {
+                std::cout << ", avg loop "
+                          << std::to_string(timer.getElapsed() * 1000 / (max_iters - (remaining_iters + 1))) << "ms";
+            }
+            std::cout << std::endl;
+            loopTimer.reset();
+#endif
+
             if (!extractor.getNextSelection())
             {
                 extractor.ascend();
                 timer.tick();
                 continue;
             }
+            LOG(L_DEBUG) << "got selection";
 
             const std::unordered_map<EClassId, uint32_t> &selection_map = extractor.selection_map;
 
@@ -602,6 +636,7 @@ struct Planner
             float cost = TGConstants::INF;
             std::vector<EClassId> conflict_nodes;
 
+            // 2. Compute dispatch order
             Engine first_engine = Engine{UINT32_MAX, EngineType::CPU};
             bool single_engine = true;
             for (const auto &kv : selection_map)
@@ -625,7 +660,7 @@ struct Planner
                     break;
             }
 
-            DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos, delegate);
+            DispatchIterator dispatch_iterator(egraph, selection_map, enodeInfos);
             while (dispatch_iterator.getNextDispatchOrder(selection_map, order))
             {
                 valid = extractor.validate(selection_map, order, buffers, eclass_to_buf, cost, conflict_nodes);
@@ -701,10 +736,16 @@ struct Planner
                 if (best_conflict_pos != -1)
                 {
                     extractor.target_backtrack_eclass = extractor.path[best_conflict_pos];
+                    LOG(L_DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                                 << "] backjumping to eclass " << toString(extractor.target_backtrack_eclass)
+                                 << " (path index " << best_conflict_pos << ") to resolve OOM.";
                 }
                 else if (max_conflict_path_pos != -1)
                 {
                     extractor.target_backtrack_eclass = extractor.path[max_conflict_path_pos];
+                    LOG(L_DEBUG) << "[Planner.extractBest] [iter " << std::to_string(max_iters - remaining_iters)
+                                 << "] backtracking to eclass " << toString(extractor.target_backtrack_eclass)
+                                 << " (path index " << max_conflict_path_pos << ")";
                 }
             }
 
@@ -714,7 +755,8 @@ struct Planner
 
         if (best_cost == TGConstants::INF)
         {
-            Error::throw_err("[Planner.extractBest] no valid extraction found under given constraints.");
+            Error::throw_err("[Planner.extractBest] no valid extraction found under "
+                             "given constraints. try running bench");
         }
 
         std::unordered_map<EClassId, float> best_eclass_to_cost;
@@ -724,7 +766,7 @@ struct Planner
                 enodeInfos[egraph.getEClass(pair.first).enodes[best_selection_map.at(pair.first)].value].cost;
         }
         ExtractionResult result = {best_selection_map, best_order, best_buffers,
-                                   best_eclass_to_buf, best_cost, best_eclass_to_cost};
+                                   best_eclass_to_buf, best_cost,  best_eclass_to_cost};
         std::cout << "best_cost=" << std::to_string(best_cost) << std::endl;
 
         return result;
@@ -844,6 +886,7 @@ struct Planner
     BaseEGraphState baseState;
     bool baseStateInitialized = false;
 
+    // Initialize baseState.egraph from graph
     void initBaseEGraph(LogicalId rootId, Graph &graph, const std::vector<LogicalId> &topo, Repo *repo = nullptr)
     {
         if (baseStateInitialized)
@@ -906,8 +949,10 @@ struct Planner
 
             if (refs.size() == 0)
             {
-                Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels to init EClass " +
-                                 toString(e_class_id));
+                Error::throw_err("[Planner.initBaseEGraph] couldn't find any kernels "
+                                 "to init EClass " +
+                                 toString(e_class_id) + " " + toString(baseState.egraph.getEClass(e_class_id)) +
+                                 "\nNode " + toString(node, graph));
             }
 
             bool any_success = false;
@@ -1005,8 +1050,9 @@ struct Planner
 
             if (!any_success)
             {
-                Error::throw_err("[Planner.initBaseEGraph] found kernels, but could not route memory spaces for node " +
-                                 toString(nodeId));
+                Error::throw_err("[Planner.initBaseEGraph] found kernels, but could not route "
+                                 "memory spaces to satisfy input constraints for node " +
+                                 toString(nodeId) + "\n" + toString(node, graph));
             }
         }
 
@@ -1075,8 +1121,7 @@ struct Planner
         eclassToLogical[E_Cache] = logicalId;
         EClassId current_E = E_Cache;
 
-        auto addConst = [&](const std::vector<int32_t> &vals)
-        {
+        auto addConst = [&](const std::vector<int32_t> &vals) {
             return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
         };
 
@@ -1158,7 +1203,10 @@ struct Planner
                     std::vector<Region> inputSliceRegions = dirtyInputRegions[p_idx];
                     if (inputSliceRegions.size() != 1)
                     {
-                        Error::throw_err("[Planner.injectPartialPath] expected exactly 1 input slice region.");
+                        Error::throw_err("[Planner.injectPartialPath] expected exactly 1 "
+                                         "input slice region for parent " +
+                                         std::to_string(p_idx) + " but got " +
+                                         std::to_string(inputSliceRegions.size()));
                     }
                     Region inputSliceRegion = inputSliceRegions[0];
 
@@ -1266,7 +1314,9 @@ struct Planner
                                                                         target_mem_space, dummyInputMemSpaces, {cpu});
                 if (opRefs.size() == 0)
                 {
-                    Error::throw_err("[Planner.injectPartialPath] couldn't find any slice kernels.");
+                    Error::throw_err("[Planner.injectPartialPath] couldn't find any "
+                                     "slice kernels for op " +
+                                     toString(sourceNode.opType));
                 }
 
                 slicedEClass = egraph.addEClass(partialShape, calcContiguousStrides(partialShape), sourceNode.dtype,
@@ -1329,7 +1379,8 @@ struct Planner
             {
                 const auto &kernel = KernelRegistry::get().getKernel(uid);
                 std::vector<uint64_t> strides =
-                    (kernel.is_view) ? lClass.strides : calcContiguousStrides(lClass.shape);
+                    (kernel.is_view) ? lClass.strides : calcContiguousStrides(lClass.shape); // TODO check inplace based
+                                                                                             // on bufferization stuff
                 ENode sn(uid, OpType::SCATTER, "", {current_E, contigEClass, startsId, endsId, stepsId}, lClass.shape,
                          strides, lClass.dtype, target_mem_space, {cpu});
                 egraph.addENode(scatterEClass, sn);
@@ -1434,6 +1485,7 @@ struct Planner
             }
         }
 
+        // Add cache enodes
         Engine cpu = Engine{0, EngineType::CPU};
         for (const auto &cls : egraph.getClasses())
         {
@@ -1446,6 +1498,13 @@ struct Planner
                     continue;
                 if (cachedNodes.count(eclassToLogical.at(canonId)) == 0)
                     continue;
+            }
+            for (int i = 0; i < cls.enodes.size(); i++)
+            {
+                if (egraph.getENode(cls.enodes[i]).getOpType() == OpType::CACHE)
+                {
+                    continue;
+                }
             }
 
             LogicalId logicalId;
@@ -1480,6 +1539,8 @@ struct Planner
         {
             saturate(egraph, protectedEClasses, eclassToLogical, true, false, repo);
         }
+
+        bool injected = dirtyInjected || neededInjected;
 
         std::unordered_map<EClassId, LogicalId> updatedEClassToLogical;
         for (const auto &kv : eclassToLogical)

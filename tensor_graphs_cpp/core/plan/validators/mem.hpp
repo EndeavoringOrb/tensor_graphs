@@ -142,53 +142,6 @@ inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
     return curr;
 }
 
-static void get_deaths(const std::vector<EClassId> &ordered, const EGraph &egraph,
-                       const std::unordered_map<EClassId, uint32_t> &selection_map,
-                       const std::vector<ENodeInfo> &enodeInfos, const std::unordered_map<EClassId, float> &birth_times,
-                       std::unordered_map<EClassId, float> &death_times)
-{
-    for (uint64_t i = 0; i < ordered.size(); ++i)
-    {
-        EClassId node_eclass = ordered[i];
-        uint32_t sel = selection_map.at(node_eclass);
-        ENodeId enode_id = egraph.getEClass(node_eclass).enodes[sel];
-        const ENode &node = egraph.getENode(enode_id);
-        float cost = enodeInfos[enode_id.value].cost;
-
-        if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE)
-        {
-            death_times[node_eclass] = std::numeric_limits<float>::infinity();
-            continue;
-        }
-
-        float death = birth_times.at(node_eclass) + std::max(0.1f, cost);
-        for (uint64_t j = i + 1; j < ordered.size(); ++j)
-        {
-            EClassId other_eclass = ordered[j];
-            uint32_t other_sel = selection_map.at(other_eclass);
-            ENodeId other_enode_id = egraph.getEClass(other_eclass).enodes[other_sel];
-            const ENode &other_node = egraph.getENode(other_enode_id);
-
-            bool is_consumed = false;
-            for (EClassId child : other_node.getChildren())
-            {
-                if (resolve_view_alias(child, egraph, selection_map, enodeInfos) ==
-                    resolve_view_alias(node_eclass, egraph, selection_map, enodeInfos))
-                {
-                    is_consumed = true;
-                    break;
-                }
-            }
-            if (is_consumed)
-            {
-                float other_cost = enodeInfos[other_enode_id.value].cost;
-                death = std::max(death, birth_times.at(other_eclass) + std::max(0.1f, other_cost));
-            }
-        }
-        death_times[node_eclass] = death;
-    }
-}
-
 static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordered, const EGraph &egraph,
                                              const std::unordered_map<EClassId, uint32_t> &selection_map,
                                              const std::vector<ENodeInfo> &enodeInfos,

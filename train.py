@@ -88,7 +88,7 @@ def train():
     optimizer = optim.Adam(agent.parameters(), lr=1e-3)
 
     model_name = "gemma-3-270m"
-    model_path = "models/gemma-3-270m"
+    model_path = "models/google/gemma-3-270m"
 
     for epoch in range(100):
         delegate = AgentDelegate(agent)

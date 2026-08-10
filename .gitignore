@@ -1,4 +1,5 @@
 .venv
+.*venv
 *__pycache__
 repomix-output*.txt
 .coverage
@@ -63,6 +64,7 @@ kernel_bench/jobs_history.jsonl
 *.o
 *.pyd
 *.ilk
+*.lib
 
 # Generated C++ headers
 tensor_graphs_cpp/generated/
