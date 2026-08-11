@@ -1,20 +1,39 @@
+#!/usr/bin/env python3
 import argparse
 import json
 import os
 import struct
-from collections import defaultdict
 import matplotlib.pyplot as plt
 
+
+def read_binary_metrics(file_path):
+    indices = []
+    values = []
+    record_size = struct.calcsize("<If")
+    if os.path.exists(file_path):
+        with open(file_path, "rb") as f:
+            while chunk := f.read(record_size):
+                if len(chunk) < record_size:
+                    break
+                idx, val = struct.unpack("<If", chunk)
+                indices.append(idx)
+                values.append(val)
+    return indices, values
+
+
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Visualize training metrics (loss and extracted cost) from run directory"
+    )
     parser.add_argument("run_dir", type=str, help="Path to runs/N directory")
     args = parser.parse_args()
 
     config_path = os.path.join(args.run_dir, "config.json")
     losses_path = os.path.join(args.run_dir, "losses.bin")
+    costs_path = os.path.join(args.run_dir, "costs.bin")
 
-    if not os.path.exists(losses_path):
-        print(f"Error: {losses_path} not found.")
+    if not os.path.exists(losses_path) and not os.path.exists(costs_path):
+        print(f"Error: Neither {losses_path} nor {costs_path} found.")
         return
 
     if os.path.exists(config_path):
@@ -22,61 +41,47 @@ def main():
             config = json.load(f)
             print(f"Config: {json.dumps(config, indent=2)}")
 
-    epochs = []
-    costs = []
-    losses = []
-    
-    epoch_costs = defaultdict(list)
-    epoch_losses = defaultdict(list)
-    
-    # Read the binary data (uint32 epoch, uint32 worker, float cost, float loss)
-    with open(losses_path, "rb") as f:
-        while chunk := f.read(16):
-            if len(chunk) < 16:
-                break
-            ep, wid, cost, loss = struct.unpack("<IIff", chunk)
-            epochs.append(ep)
-            costs.append(cost)
-            losses.append(loss)
-            epoch_costs[ep].append(cost)
-            epoch_losses[ep].append(loss)
+    loss_batches, losses = read_binary_metrics(losses_path)
+    cost_indices, costs = read_binary_metrics(costs_path)
 
-    if not epochs:
+    if not loss_batches and not cost_indices:
         print("No data to plot.")
         return
 
-    # Compute worker averages per epoch
-    unique_epochs = sorted(epoch_costs.keys())
-    avg_costs = [sum(epoch_costs[ep]) / len(epoch_costs[ep]) for ep in unique_epochs]
-    avg_losses = [sum(epoch_losses[ep]) / len(epoch_losses[ep]) for ep in unique_epochs]
+    num_plots = (1 if loss_batches else 0) + (1 if cost_indices else 0)
+    fig, axes = plt.subplots(num_plots, 1, figsize=(10, 4 * num_plots), squeeze=False)
+    plot_idx = 0
 
-    plt.figure(figsize=(12, 5))
+    if loss_batches:
+        ax = axes[plot_idx, 0]
+        ax.set_yscale('log')
+        ax.plot(loss_batches, losses, color="red", linewidth=1.5, label="Total Loss")
+        ax.scatter(loss_batches, losses, alpha=0.4, s=10, c="salmon")
+        ax.set_title("Learner Loss over Optimization Batches")
+        ax.set_xlabel("Batch / Step")
+        ax.set_ylabel("Loss")
+        ax.grid(True)
+        ax.legend()
+        plot_idx += 1
 
-    # Plot Cost
-    plt.subplot(1, 2, 1)
-    plt.scatter(epochs, costs, alpha=0.6, s=4, c='lightblue', label='Worker Samples')
-    plt.plot(unique_epochs, avg_costs, color='blue', linewidth=2, label='Worker Average')
-    plt.title("Execution Cost (Makespan) over Epochs")
-    plt.xlabel("Epoch")
-    plt.ylabel("Cost (ms)")
-    plt.grid(True)
-    plt.legend()
-
-    # Plot Loss
-    plt.subplot(1, 2, 2)
-    plt.scatter(epochs, losses, alpha=0.6, s=4, c='salmon', label='Worker Samples')
-    plt.plot(unique_epochs, avg_losses, color='red', linewidth=2, label='Worker Average')
-    plt.title("A2C Loss over Epochs")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.grid(True)
-    plt.legend()
+    if cost_indices:
+        ax = axes[plot_idx, 0]
+        ax.set_yscale('log')
+        ax.plot(cost_indices, costs, color="blue", linewidth=1.5, label="Extracted Cost (ms)")
+        ax.scatter(cost_indices, costs, alpha=0.4, s=10, c="skyblue")
+        ax.set_title("Extracted Cost over Episodes")
+        ax.set_xlabel("Episode / Sample")
+        ax.set_ylabel("Cost (ms)")
+        ax.grid(True)
+        ax.legend()
+        plot_idx += 1
 
     plt.tight_layout()
     out_file = os.path.join(args.run_dir, "training_metrics.png")
     plt.savefig(out_file)
     print(f"Saved visualization to {out_file}")
     plt.show()
+
 
 if __name__ == "__main__":
     main()
