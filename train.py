@@ -1,4 +1,5 @@
 # train.py
+import psutil
 import argparse
 import tensor_graphs
 import torch
@@ -323,7 +324,7 @@ def worker_process(worker_id, shared_agent, optimizer, num_epochs):
 
 def train():
     parser = argparse.ArgumentParser(description="Train GNN/RNN Agent via distributed A2C")
-    parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
+    parser.add_argument("--workers", type=int, default=psutil.cpu_count(logical=False), help="Number of parallel workers")
     parser.add_argument("--epochs", type=int, default=1_000_000, help="Number of epochs per worker")
     args = parser.parse_args()
 
