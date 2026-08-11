@@ -54,6 +54,7 @@ kernel_launches
 tensor_graphs_cpp/tests
 tensor_graphs_cpp/kernels/**/general/generated/*.failed
 kernel_bench/jobs_history.jsonl
+runs
 
 # Compiled binaries
 *.exe

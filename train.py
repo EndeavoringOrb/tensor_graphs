@@ -1,11 +1,35 @@
 # train.py
 import psutil
 import argparse
-import tensor_graphs
+import dataclasses
+import json
+import os
+import struct
+import sys
+import traceback
+from pathlib import Path
+from queue import Empty
 import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
+from safetensors.torch import save_file
 from torch import nn, optim
+
+import tensor_graphs
+
+
+@dataclasses.dataclass
+class TrainConfig:
+    run_name: str = "default"
+    run_dir: str = ""
+    model_name: str = "gemma-3-270m"
+    model_path: str = "models/google/gemma-3-270m"
+    workers: int = 4
+    epochs: int = 10000
+    save_interval: int = 10
+    hidden_dim: int = 64
+    lr: float = 1e-3
+    log_cost_calls: bool = False
 
 
 class GNNModel(nn.Module):
@@ -17,22 +41,18 @@ class GNNModel(nn.Module):
 
     def forward(self, node_features, edge_src, edge_dst):
         x = F.relu(self.lin1(node_features))
-
-        # Message passing 1
         msg = self.lin2(x)
         out = torch.zeros_like(msg)
         if len(edge_dst) > 0:
             out.index_add_(0, edge_dst, msg[edge_src])
         x = F.relu(x + out)
 
-        # Message passing 2
         msg = self.lin3(x)
         out = torch.zeros_like(msg)
         if len(edge_dst) > 0:
             out.index_add_(0, edge_dst, msg[edge_src])
         x = F.relu(x + out)
 
-        # Global pooling
         global_state = x.mean(dim=0)
         return global_state
 
@@ -43,18 +63,21 @@ class RNNModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.rnn = nn.GRUCell(feature_dim, hidden_dim)
         self.policy = nn.Linear(global_dim + hidden_dim + feature_dim, 1)
-        # Value head to predict the expected cost (AlphaDev-esque)
         self.value = nn.Linear(global_dim + hidden_dim, 1)
 
     def forward(self, global_state, hidden_state, options_features):
         step_input = options_features.mean(dim=0).unsqueeze(0)  # (1, input_dim)
-        new_state = self.rnn(step_input, hidden_state.unsqueeze(0)).squeeze(0)  # (hidden_dim,)
+        new_state = self.rnn(step_input, hidden_state.unsqueeze(0)).squeeze(
+            0
+        )  # (hidden_dim,)
 
         N = options_features.size(0)
         global_expanded = global_state.unsqueeze(0).expand(N, -1)
         hidden_expanded = new_state.unsqueeze(0).expand(N, -1)
 
-        policy_in = torch.cat([global_expanded, hidden_expanded, options_features], dim=1)
+        policy_in = torch.cat(
+            [global_expanded, hidden_expanded, options_features], dim=1
+        )
         scores = self.policy(policy_in).squeeze(1)  # (N,)
 
         value_in = torch.cat([global_state, new_state], dim=0)
@@ -67,31 +90,19 @@ class AdvancedAgent(nn.Module):
     def __init__(self, hidden_dim=64):
         super().__init__()
         self.hidden_dim = hidden_dim
-
-        # 1. Extraction GNN
         self.extract_gnn = GNNModel(in_features=4, hidden_dim=hidden_dim)
-        # Extraction RNN (cost, size, type, engines, nodes, edges)
         self.extract_rnn = RNNModel(
             global_dim=hidden_dim, feature_dim=6, hidden_dim=hidden_dim
         )
-
-        # 2. Dispatch GNN
         self.dispatch_gnn = GNNModel(in_features=4, hidden_dim=hidden_dim)
-        # Dispatch RNN
         self.dispatch_rnn = RNNModel(
             global_dim=hidden_dim, feature_dim=6, hidden_dim=hidden_dim
         )
-
-        # 3. Bufferize GNN
         self.bufferize_gnn = GNNModel(in_features=5, hidden_dim=hidden_dim)
-        # Bufferize RNN
         self.bufferize_rnn = RNNModel(
             global_dim=hidden_dim, feature_dim=4, hidden_dim=hidden_dim
         )
-
-        # 4. Malloc GNN
         self.malloc_gnn = GNNModel(in_features=3, hidden_dim=hidden_dim)
-        # Malloc RNN (size, start, end)
         self.malloc_rnn = RNNModel(
             global_dim=hidden_dim, feature_dim=3, hidden_dim=hidden_dim
         )
@@ -101,12 +112,10 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
     def __init__(self, agent):
         super().__init__()
         self.agent = agent
-
         self.hidden_states = []
         self.current_hidden = torch.zeros(agent.hidden_dim)
         self.log_probs = []
         self.values = []
-
         self.extract_global = torch.zeros(agent.hidden_dim)
         self.dispatch_global = torch.zeros(agent.hidden_dim)
         self.bufferize_global = torch.zeros(agent.hidden_dim)
@@ -126,6 +135,7 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
         if not node_features:
             return
         nf = torch.tensor(node_features, dtype=torch.float32).view(-1, 4)
+        nf = torch.nan_to_num(nf, posinf=1e9, neginf=-1e9)
         src = torch.tensor(edge_src, dtype=torch.int64)
         dst = torch.tensor(edge_dst, dtype=torch.int64)
         self.extract_global = self.agent.extract_gnn(nf, src, dst)
@@ -134,6 +144,7 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
         if not node_features:
             return
         nf = torch.tensor(node_features, dtype=torch.float32).view(-1, 4)
+        nf = torch.nan_to_num(nf, posinf=1e9, neginf=-1e9)
         src = torch.tensor(edge_src, dtype=torch.int64)
         dst = torch.tensor(edge_dst, dtype=torch.int64)
         self.dispatch_global = self.agent.dispatch_gnn(nf, src, dst)
@@ -142,6 +153,7 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
         if not node_features:
             return
         nf = torch.tensor(node_features, dtype=torch.float32).view(-1, 5)
+        nf = torch.nan_to_num(nf, posinf=1e9, neginf=-1e9)
         src = torch.tensor(edge_src, dtype=torch.int64)
         dst = torch.tensor(edge_dst, dtype=torch.int64)
         self.bufferize_global = self.agent.bufferize_gnn(nf, src, dst)
@@ -150,6 +162,7 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
         if not node_features:
             return
         nf = torch.tensor(node_features, dtype=torch.float32).view(-1, 3)
+        nf = torch.nan_to_num(nf, posinf=1e9, neginf=-1e9)
         src = torch.tensor(edge_src, dtype=torch.int64)
         dst = torch.tensor(edge_dst, dtype=torch.int64)
         self.malloc_global = self.agent.malloc_gnn(nf, src, dst)
@@ -230,7 +243,6 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
                 else 0.0
             )
             eng_len = float(len(f.engine_idxs)) if hasattr(f, "engine_idxs") else 0.0
-
             feats.append(
                 [
                     float(f.cost),
@@ -241,7 +253,8 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
                     float(num_edges),
                 ]
             )
-        return torch.tensor(feats, dtype=torch.float32)
+        t = torch.tensor(feats, dtype=torch.float32)
+        return torch.nan_to_num(t, posinf=1e9, neginf=-1e9)
 
     def _extract_bufferize_features(self, items):
         feats = [
@@ -253,11 +266,13 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
             ]
             for f in items
         ]
-        return torch.tensor(feats, dtype=torch.float32)
+        t = torch.tensor(feats, dtype=torch.float32)
+        return torch.nan_to_num(t, posinf=1e9, neginf=-1e9)
 
     def _extract_malloc_features(self, items):
         feats = [[float(f.size), float(f.start), float(f.end)] for f in items]
-        return torch.tensor(feats, dtype=torch.float32)
+        t = torch.tensor(feats, dtype=torch.float32)
+        return torch.nan_to_num(t, posinf=1e9, neginf=-1e9)
 
 
 class SharedAdam(optim.Adam):
@@ -271,76 +286,172 @@ class SharedAdam(optim.Adam):
         for group in self.param_groups:
             for p in group["params"]:
                 state = self.state[p]
-                state["step"] = torch.tensor(0, dtype=torch.float32)
-                state["exp_avg"] = torch.zeros_like(p.data)
-                state["exp_avg_sq"] = torch.zeros_like(p.data)
-                
-                # Share in memory natively for async updates across parallel workers
-                state["step"].share_memory_()
-                state["exp_avg"].share_memory_()
-                state["exp_avg_sq"].share_memory_()
+                state["step"] = torch.tensor(0, dtype=torch.float32).share_memory_()
+                state["exp_avg"] = torch.zeros_like(p.data).share_memory_()
+                state["exp_avg_sq"] = torch.zeros_like(p.data).share_memory_()
 
 
-def worker_process(worker_id, shared_agent, optimizer, num_epochs):
-    # Set seed differently for each worker to ensure diverse exploration
+def worker_process(
+    worker_id: int,
+    num_workers: int,
+    config: TrainConfig,
+    shared_agent: nn.Module,
+    optimizer: optim.Optimizer,
+    queue: mp.Queue,
+):
+    id_size = len(str(num_workers))
+    worker_id_str = f"{worker_id:0{id_size}d}/{num_workers:0{id_size}d}"
     torch.manual_seed(42 + worker_id)
+    log_path = os.path.join(config.run_dir, f"train_worker_{worker_id}.log")
 
-    model_name = "gemma-3-270m"
-    model_path = "models/google/gemma-3-270m"
+    f_log = open(log_path, "w", encoding="utf-8")
 
-    for epoch in range(num_epochs):
-        delegate = AgentDelegate(shared_agent)
+    # Save original Python streams and OS file descriptors
+    saved_stdout = sys.stdout
+    saved_stderr = sys.stderr
+    saved_out_fd = os.dup(1)
+    saved_err_fd = os.dup(2)
 
-        try:
-            cost = tensor_graphs.plan_graph(model_name, model_path, delegate)
-        except Exception as e:
-            print(f"Worker {worker_id} | Error during planning: {e}")
-            continue
+    # Redirect Python streams
+    sys.stdout = f_log
+    sys.stderr = f_log
 
-        reward = -cost if cost < float("inf") else -1e6
-        reward_t = torch.tensor([reward], dtype=torch.float32)
+    # Redirect C++ / OS-level file descriptors
+    os.dup2(f_log.fileno(), 1)
+    os.dup2(f_log.fileno(), 2)
 
-        loss = torch.tensor(0.0)
+    try:
+        for epoch in range(config.epochs):
+            delegate = AgentDelegate(shared_agent)
+            try:
+                cost = tensor_graphs.plan_graph(
+                    config.model_name,
+                    config.model_path,
+                    delegate,
+                    config.log_cost_calls,
+                )
+            except Exception as e:
+                print(f"Worker {worker_id_str} | Error during planning: {e}", file=saved_stdout, flush=True)
+                traceback.print_exc(file=saved_stdout)
+                continue
 
-        # Advantage Actor-Critic Loss formulation replacing standard REINFORCE
-        # Advantage A = R - V
-        # Policy Loss = -log_prob * A
-        # Value Loss = (R - V)^2
-        for lp, v in zip(delegate.log_probs, delegate.values):
-            advantage = reward_t - v.detach()
-            policy_loss = -lp * advantage
-            value_loss = F.mse_loss(v, reward_t)
-            loss = loss + policy_loss + value_loss
+            cost_val = float(cost)
+            if cost_val == float("inf") or cost_val != cost_val:
+                cost_val = 1e9
 
-        optimizer.zero_grad()
-        if loss.requires_grad and loss.item() != 0.0:
-            loss.backward()
-            optimizer.step()
+            reward = -cost_val
+            reward_t = torch.tensor([reward], dtype=torch.float32)
 
-        print(
-            f"Worker {worker_id:02d} | Epoch {epoch:03d} | Cost: {cost:8.4f} ms | Loss: {loss.item():.4f}"
-        )
+            loss = torch.tensor(0.0)
+
+            for lp, v in zip(delegate.log_probs, delegate.values):
+                advantage = reward_t - v.detach()
+                policy_loss = -lp * advantage
+                value_loss = F.mse_loss(v, reward_t)
+                loss = loss + policy_loss + value_loss
+
+            optimizer.zero_grad()
+            if loss.requires_grad and loss.item() != 0.0 and loss.item() == loss.item():
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(shared_agent.parameters(), 1.0)
+                optimizer.step()
+
+            queue.put((epoch, worker_id, float(cost_val), float(loss.item())))
+    except Exception as e:
+        print(f"Worker {worker_id_str} ERROR: {e}", file=saved_stdout, flush=True)
+        traceback.print_exc(file=saved_stdout)
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.stdout = saved_stdout
+        sys.stderr = saved_stderr
+        os.dup2(saved_out_fd, 1)
+        os.dup2(saved_err_fd, 2)
+        os.close(saved_out_fd)
+        os.close(saved_err_fd)
+        f_log.close()
+
+
+def setup_run_dir() -> str:
+    runs_dir = Path("runs")
+    runs_dir.mkdir(exist_ok=True)
+    existing = [int(d) for d in os.listdir("runs") if d.isdigit()]
+    run_idx = max(existing) + 1 if existing else 1
+    run_dir = runs_dir / str(run_idx)
+    run_dir.mkdir()
+    return run_dir.as_posix()
 
 
 def train():
-    parser = argparse.ArgumentParser(description="Train GNN/RNN Agent via distributed A2C")
-    parser.add_argument("--workers", type=int, default=psutil.cpu_count(logical=False), help="Number of parallel workers")
-    parser.add_argument("--epochs", type=int, default=1_000_000, help="Number of epochs per worker")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, default="gemma-3-270m")
+    parser.add_argument("--model-path", type=str, default="models/google/gemma-3-270m")
+    parser.add_argument("--workers", type=int, default=psutil.cpu_count(logical=False))
+    parser.add_argument("--epochs", type=int, default=10000)
+    parser.add_argument("--save-interval", type=int, default=1)
+    parser.add_argument(
+        "--log-cost-calls",
+        action="store_true",
+        help="Enable logging unbenchmarked cost calls to benchmarks/calls.bin",
+    )
     args = parser.parse_args()
 
-    agent = AdvancedAgent(hidden_dim=64)
-    # Enable weights sharing to pass across PyTorch mp.Process calls
+    config = TrainConfig(
+        run_dir=setup_run_dir(),
+        model_name=args.model,
+        model_path=args.model_path,
+        workers=args.workers,
+        epochs=args.epochs,
+        save_interval=args.save_interval,
+        log_cost_calls=args.log_cost_calls,
+    )
+
+    with open(os.path.join(config.run_dir, "config.json"), "w") as f:
+        json.dump(dataclasses.asdict(config), f, indent=4)
+
+    agent = AdvancedAgent(hidden_dim=config.hidden_dim)
     agent.share_memory()
+    optimizer = SharedAdam(agent.parameters(), lr=config.lr)
 
-    optimizer = SharedAdam(agent.parameters(), lr=1e-3)
-
+    queue = mp.Queue()
     processes = []
-    for rank in range(args.workers):
+
+    print(f"Starting Training in {config.run_dir} with {config.workers} workers...", flush=True)
+    for rank in range(config.workers):
         p = mp.Process(
-            target=worker_process, args=(rank, agent, optimizer, args.epochs)
+            target=worker_process, args=(rank, config, agent, optimizer, queue)
         )
         p.start()
         processes.append(p)
+
+    active_workers = config.workers
+    total_epochs = 0
+    losses_bin_path = os.path.join(config.run_dir, "losses.bin")
+
+    pack_fmt = "<IIff"
+
+    with open(losses_bin_path, "wb") as f_bin:
+        while active_workers > 0:
+            try:
+                epoch, worker_id, cost, loss = queue.get(timeout=1.0)
+                f_bin.write(struct.pack(pack_fmt, epoch, worker_id, cost, loss))
+                f_bin.flush()
+
+                print(
+                    f"Worker {worker_id:02d} | Epoch {epoch:03d} | Cost: {cost:8.4f} ms | Loss: {loss:.4f}",
+                    flush=True,
+                )
+
+                total_epochs += 1
+                if total_epochs % config.save_interval == 0:
+                    save_file(
+                        agent.state_dict(),
+                        os.path.join(config.run_dir, "model.safetensors"),
+                    )
+                    print(f"Saved model to {config.run_dir}/model.safetensors", flush=True)
+
+            except Empty:
+                active_workers = sum(1 for p in processes if p.is_alive())
 
     for p in processes:
         p.join()

@@ -75,6 +75,8 @@ struct Session
     bool disableCaching = false;
     float minCompileSeconds = 0.0f;
     std::string sort_enodes;
+    std::shared_ptr<SearchDelegate> delegate = nullptr;
+    bool logCostCalls = false;
 
     void ensureOutputDirectories() const
     {
@@ -156,10 +158,12 @@ struct Session
 
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
             Repo *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
-            const std::string &_sort_enodes = "cost")
+            const std::string &_sort_enodes = "cost", std::shared_ptr<SearchDelegate> _delegate = nullptr,
+            bool _logCostCalls = false)
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
           nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
-          minCompileSeconds(_minCompileSeconds), sort_enodes(_sort_enodes)
+          minCompileSeconds(_minCompileSeconds), sort_enodes(_sort_enodes), delegate(_delegate),
+          logCostCalls(_logCostCalls), costModel(_logCostCalls)
     {
         ensureOutputDirectories();
         loadCache();
@@ -194,9 +198,10 @@ struct Session
         }
     }
 
-    void plan(bool doSaturate = true)
+     void plan(bool doSaturate = true)
     {
         ensureOutputDirectories();
+        costModel.setLogging(logCostCalls);
         costModel.load(recordsPath);
 
         ShapePropagator prop;
@@ -328,7 +333,7 @@ struct Session
                 const Bucket &bucket = manualBuckets[i];
 
                 CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, false, repo,
-                                                  {}, minCompileSeconds, sort_enodes);
+                                                  {}, minCompileSeconds, sort_enodes, delegate);
 
                 for (const auto &inst : plan.instructions)
                 {
@@ -345,15 +350,6 @@ struct Session
             }
         }
 
-        // ------------------------------------------------------------------
-        // Pre-allocate ParallelBuffers for INPUT and CACHE logical nodes
-        // *outside* of Planner, before the Final replanning. This guarantees
-        // that the byte offset of every persistent INPUT/CACHE buffer is
-        // identical across all buckets, so Session::writeInput and the
-        // constant-staging writes in Session::compile land at the same
-        // physical offset regardless of which bucket's compiled graph is
-        // selected at run time.
-        // ------------------------------------------------------------------
         std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
         preallocateLogicalBuffers(protectedCachedNodes, preallocatedBuffers);
 
@@ -363,7 +359,7 @@ struct Session
         {
             const Bucket &bucket = manualBuckets[i];
             CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo,
-                                              preallocatedBuffers, minCompileSeconds, sort_enodes);
+                                              preallocatedBuffers, minCompileSeconds, sort_enodes, delegate);
             plan.bucket = bucket;
             cachedGraphs.push_back(plan);
         }
@@ -379,23 +375,12 @@ struct Session
         persistCache();
     }
 
-    // Allocate stable ParallelBuffers for every logical INPUT node and every
-    // node in `cachedNodes` (the protected CACHE set discovered during the
-    // first planning pass). STORAGE-backed INPUTs are skipped because their
-    // offset is resolved dynamically inside StorageBuffer::setupInput.
-    //
-    // Buffers within a MemSpace are placed contiguously starting at offset 0,
-    // sorted by LogicalId for determinism. The MemValidator will reduce the
-    // malloc solver's mem_cap by max(offset+size) of these buffers so the
-    // transient buffers land strictly above the pre-allocated region.
     void preallocateLogicalBuffers(const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
                                    std::unordered_map<LogicalId, ParallelBuffer> &out) const
     {
         // TODO: deduplicate or something, this is adding way too many buffers
         out.clear();
 
-        // Collect (LogicalId, MemSpace, shape, dtype) tuples for every logical
-        // node that needs a stable buffer.
         struct PreAllocEntry
         {
             LogicalId logicalId;
@@ -408,14 +393,12 @@ struct Session
         MemSpace storage = MemSpace{0, HandleType::STORAGE};
         MemSpace ram = MemSpace{1, HandleType::CPP};
 
-        // 1. All logical INPUT nodes (constants + runtime inputs + weights).
         for (const auto &pair : graph.nodes)
         {
             const TensorNode &node = pair.second;
             if (node.opType != OpType::INPUT)
                 continue;
 
-            // STORAGE-backed INPUTs (file weights) bypass the arena entirely.
             auto idtIt = graph.input_data_types.find(node.id);
             if (idtIt != graph.input_data_types.end() && idtIt->second == InputDataType::STORAGE)
                 continue;
@@ -423,9 +406,6 @@ struct Session
             entries.push_back({node.id, ram, node.getShape(), node.dtype});
         }
 
-        // 2. All protected CACHE nodes (computed tensors that survived the
-        // first-pass cache selection). Their MemSpace comes from the first
-        // pass's `inst.outBuffer.mem_space`; if missing, default to RAM.
         for (const auto &kv : cachedNodes)
         {
             LogicalId logicalId = kv.first;
@@ -433,8 +413,6 @@ struct Session
             if (!graph.hasNode(logicalId))
                 continue;
             const TensorNode &node = graph.getNode(logicalId);
-            // Skip if this logical id is also an INPUT we already added above
-            // (an INPUT can also be a cache source). Prefer the INPUT memspace.
             bool alreadyAdded = false;
             for (const auto &e : entries)
             {
@@ -449,13 +427,9 @@ struct Session
             entries.push_back({logicalId, ms, node.getShape(), node.dtype});
         }
 
-        // Stable ordering: sort by LogicalId so the layout is identical across
-        // runs even if iteration order over `graph.nodes` differs.
         std::sort(entries.begin(), entries.end(),
                   [](const PreAllocEntry &a, const PreAllocEntry &b) { return a.logicalId < b.logicalId; });
 
-        // Assign offsets per MemSpace, contiguously from offset 0, with the
-        // same 4096-byte alignment used by bufferize().
         std::unordered_map<MemSpace, uint64_t> cursor;
         BufferId nextId{0};
         for (const auto &e : entries)
@@ -475,7 +449,7 @@ struct Session
             buf.id = nextId++;
             buf.mem_space = e.memSpace;
             buf.size = size_bytes;
-            buf.start = 0; // INPUT/CACHE buffers are alive forever.
+            buf.start = 0;
             buf.end = std::numeric_limits<uint32_t>::max();
             buf.offset = static_cast<int64_t>(offset);
             out[e.logicalId] = std::move(buf);

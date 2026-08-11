@@ -1,56 +1,184 @@
+// tensor_graphs_cpp/bindings.cpp
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <pybind11/numpy.h>
 
-#include "core/graph.hpp"
-#include "core/memory.hpp"
-#include "core/plan/planner.hpp"
 #include "core/plan/search_delegate.hpp"
+#include "core/plan/planner.hpp"
+#include "core/session.hpp"
 #include "models/run_models.hpp"
+#include "models/deepseek-v4-flash.hpp"
 #include "generated/kernels_all.gen.hpp"
 
 namespace py = pybind11;
 
-class PySearchDelegate : public SearchDelegate
-{
-  public:
+class PySearchDelegate : public SearchDelegate {
+public:
     using SearchDelegate::SearchDelegate;
 
-    void init_egraph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                     const std::vector<uint32_t> &edge_dst) override
-    {
+    void push_state() override { PYBIND11_OVERRIDE(void, SearchDelegate, push_state); }
+    void pop_state() override { PYBIND11_OVERRIDE(void, SearchDelegate, pop_state); }
+
+    void init_egraph(const std::vector<float>& node_features, const std::vector<uint32_t>& edge_src, const std::vector<uint32_t>& edge_dst) override {
         PYBIND11_OVERRIDE(void, SearchDelegate, init_egraph, node_features, edge_src, edge_dst);
     }
-
-    void init_dispatch_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                             const std::vector<uint32_t> &edge_dst) override
-    {
+    void init_dispatch_graph(const std::vector<float>& node_features, const std::vector<uint32_t>& edge_src, const std::vector<uint32_t>& edge_dst) override {
         PYBIND11_OVERRIDE(void, SearchDelegate, init_dispatch_graph, node_features, edge_src, edge_dst);
     }
-
-    void init_malloc_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                           const std::vector<uint32_t> &edge_dst) override
-    {
+    void init_bufferize_graph(const std::vector<float>& node_features, const std::vector<uint32_t>& edge_src, const std::vector<uint32_t>& edge_dst) override {
+        PYBIND11_OVERRIDE(void, SearchDelegate, init_bufferize_graph, node_features, edge_src, edge_dst);
+    }
+    void init_malloc_graph(const std::vector<float>& node_features, const std::vector<uint32_t>& edge_src, const std::vector<uint32_t>& edge_dst) override {
         PYBIND11_OVERRIDE(void, SearchDelegate, init_malloc_graph, node_features, edge_src, edge_dst);
     }
 
-    std::vector<uint32_t> order_enodes(const std::vector<ActionFeatureExtractDispatch> &enodes) override
-    {
+    std::vector<uint32_t> order_enodes(const std::vector<ActionFeatureExtractDispatch>& enodes) override {
         PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_enodes, enodes);
     }
-
-    std::vector<uint32_t> order_dispatch(const std::vector<ActionFeatureExtractDispatch> &ready_nodes) override
-    {
+    std::vector<uint32_t> order_dispatch(const std::vector<ActionFeatureExtractDispatch>& ready_nodes) override {
         PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_dispatch, ready_nodes);
     }
-
-    std::vector<uint32_t> order_malloc(const std::vector<ActionFeatureMalloc> &avail_buffers) override
-    {
+    std::vector<uint32_t> order_bufferize(const std::vector<ActionFeatureBufferize>& choices) override {
+        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_bufferize, choices);
+    }
+    std::vector<uint32_t> order_malloc(const std::vector<ActionFeatureMalloc>& avail_buffers) override {
         PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_malloc, avail_buffers);
     }
 };
 
-PYBIND11_MODULE(tensor_graphs, m)
-{
+// C++ API for LLM Generation accessible to Python
+class LLMSession {
+    std::unique_ptr<MemoryManager> mem;
+    std::unique_ptr<Graph> g;
+    std::unique_ptr<Repo> repo;
+    std::unique_ptr<Session> session;
+    LogicalId inputIdsId;
+    LogicalId logitsId;
+    uint32_t vocab_size = 0;
+    uint32_t max_seq_len = 128;
+
+public:
+    LLMSession(const std::string& model_name, const std::string& model_path, std::shared_ptr<SearchDelegate> delegate) {
+        std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 32ULL * 1024 * 1024 * 1024}};
+        
+        // TODO: Enable CUDA conditionally via config if present
+        // #ifdef TG_USE_CUDA
+        // bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
+        // #endif
+
+        mem = std::make_unique<MemoryManager>(bufferSizes);
+        g = std::make_unique<Graph>();
+
+        if (model_name == "gemma-3-270m") {
+            Gemma3ModelConfig cfg;
+            vocab_size = cfg.vocab_size;
+            auto roots = build_gemma_graph(*g, *mem, model_path, max_seq_len);
+            logitsId = roots.roots[0];
+            inputIdsId = roots.inputs[0];
+        } else if (model_name == "qwen-3.6-35b-a3b") {
+            Qwen3_6_35B_A3B_Config cfg;
+            vocab_size = cfg.vocab_size;
+            auto roots = build_qwen_graph(*g, *mem, model_path, max_seq_len);
+            logitsId = roots.roots[0];
+            inputIdsId = roots.inputs[0];
+        } else if (model_name == "deepseek-v4") {
+            DeepSeekV4FlashConfig cfg;
+            vocab_size = cfg.vocab_size;
+            inputIdsId = g->input({1, max_seq_len}, DType::INT32);
+            DeepSeekV4FlashModel model(cfg, max_seq_len, *g, *mem, model_path);
+            logitsId = model.build_graph(inputIdsId);
+        } else {
+            throw std::runtime_error("Unknown model: " + model_name);
+        }
+
+        std::string gHash = computeGraphHash(*g, {logitsId});
+        repo = std::make_unique<Repo>("benchmarks/repo_" + model_name, gHash, true);
+        
+        // Disable caching locally during dynamic python testing
+        session = std::make_unique<Session>(*g, *mem, logitsId, "", 0, repo.get(), true, 0.0f, "cost");
+        
+        // Plan & compile immediately. The SearchDelegate helps guide this compilation if provided.
+        session->delegate = delegate;
+        session->compile(true);
+    }
+
+    int32_t generate_step(const std::vector<uint32_t>& tokens) {
+        if (tokens.size() >= max_seq_len) return -1;
+
+        std::vector<int32_t> input_data(max_seq_len, 0);
+        for(size_t i=0; i<tokens.size(); ++i) {
+            input_data[i] = tokens[i];
+        }
+
+        session->writeInput(inputIdsId, input_data.data(), input_data.size() * sizeof(int32_t));
+
+        Bucket b;
+        uint32_t tokIdx = tokens.size() - 1;
+        Region inR; inR.region = {{0, 1}, {tokIdx, tokIdx + 1}};
+        Region outR; outR.region = {{0, 1}, {tokIdx, tokIdx + 1}, {0, vocab_size}};
+        b.inputDirtyRegions = {{inputIdsId, {inR}}};
+        b.outputNeededRegion = {outR};
+
+        const float* device_output = static_cast<const float*>(session->run(b));
+
+        std::vector<float> host_output;
+#ifdef TG_USE_CUDA
+        cudaPointerAttributes attrs;
+        if (cudaPointerGetAttributes(&attrs, device_output) == cudaSuccess && attrs.type == cudaMemoryTypeDevice) {
+            host_output.resize(vocab_size);
+            cudaMemcpy(host_output.data(), device_output + tokIdx * vocab_size, vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
+        } else
+#endif
+        {
+            host_output.assign(device_output + tokIdx * vocab_size, device_output + tokIdx * vocab_size + vocab_size);
+        }
+
+        float max_val = -1e9f;
+        int32_t argmax_idx = 0;
+        for(uint32_t i=0; i<vocab_size; ++i) {
+            if(host_output[i] > max_val) {
+                max_val = host_output[i];
+                argmax_idx = i;
+            }
+        }
+        return argmax_idx;
+    }
+};
+
+float plan_graph(const std::string& model_name, const std::string& model_path, std::shared_ptr<SearchDelegate> delegate, bool log_cost_calls) {
+    // Helper function exclusively used for evaluating search costs directly inside training loop
+    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 32ULL * 1024 * 1024 * 1024}};
+    MemoryManager mem(bufferSizes);
+    Graph g;
+    uint32_t max_seq_len = 128;
+    LogicalId logitsId;
+
+    if (model_name == "gemma-3-270m") {
+        auto roots = build_gemma_graph(g, mem, model_path, max_seq_len);
+        logitsId = roots.roots[0];
+    } else if (model_name == "qwen-3.6-35b-a3b") {
+        auto roots = build_qwen_graph(g, mem, model_path, max_seq_len);
+        logitsId = roots.roots[0];
+    } else if (model_name == "deepseek-v4") {
+        DeepSeekV4FlashConfig cfg;
+        LogicalId inputIdsId = g.input({1, max_seq_len}, DType::INT32);
+        DeepSeekV4FlashModel model(cfg, max_seq_len, g, mem, model_path);
+        logitsId = model.build_graph(inputIdsId);
+    } else {
+        throw std::runtime_error("Unknown model");
+    }
+
+    // Force plan compilation
+    Session session(g, mem, logitsId, "", 0, nullptr, true, 0.0f, "cost", nullptr, log_cost_calls);
+    session.delegate = delegate;
+    session.plan(true);
+    
+    // Evaluate the cost
+    Bucket b; // Default blank bucket evaluation
+    return session.cachedGraphs[session.getBestGraphIdx(b)].cost();
+}
+
+PYBIND11_MODULE(tensor_graphs, m) {
     // Bind enum HandleType
     py::enum_<HandleType>(m, "HandleType")
         .value("STORAGE", HandleType::STORAGE)
@@ -93,70 +221,36 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readwrite("engine_idxs", &ActionFeatureExtractDispatch::engine_idxs)
         .def_readwrite("graph", &ActionFeatureExtractDispatch::graph);
 
-    // Bind ActionFeatureMalloc
+
+    py::class_<ActionFeatureBufferize>(m, "ActionFeatureBufferize")
+        .def_readwrite("is_new_buffer", &ActionFeatureBufferize::is_new_buffer)
+        .def_readwrite("size", &ActionFeatureBufferize::size)
+        .def_readwrite("parent_size", &ActionFeatureBufferize::parent_size)
+        .def_readwrite("parent_birth_time", &ActionFeatureBufferize::parent_birth_time)
+        ;
+
     py::class_<ActionFeatureMalloc>(m, "ActionFeatureMalloc")
         .def_readwrite("size", &ActionFeatureMalloc::size)
         .def_readwrite("start", &ActionFeatureMalloc::start)
-        .def_readwrite("end", &ActionFeatureMalloc::end);
+        .def_readwrite("end", &ActionFeatureMalloc::end)
+        ;
 
-    // Bind SearchDelegate and PySearchDelegate
     py::class_<SearchDelegate, PySearchDelegate, std::shared_ptr<SearchDelegate>>(m, "SearchDelegate")
         .def(py::init<>())
         .def("push_state", &SearchDelegate::push_state)
         .def("pop_state", &SearchDelegate::pop_state)
         .def("init_egraph", &SearchDelegate::init_egraph)
         .def("init_dispatch_graph", &SearchDelegate::init_dispatch_graph)
+        .def("init_bufferize_graph", &SearchDelegate::init_bufferize_graph)
         .def("init_malloc_graph", &SearchDelegate::init_malloc_graph)
         .def("order_enodes", &SearchDelegate::order_enodes)
         .def("order_dispatch", &SearchDelegate::order_dispatch)
+        .def("order_bufferize", &SearchDelegate::order_bufferize)
         .def("order_malloc", &SearchDelegate::order_malloc);
 
-    // Bind plan_graph function
-    m.def("plan_graph", [](const std::string &model_name, const std::string &model_path,
-                           std::shared_ptr<SearchDelegate> delegate) {
-        std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
-        MemoryManager mem(bufferSizes);
-        Graph g;
+    py::class_<LLMSession>(m, "LLMSession")
+        .def(py::init<const std::string&, const std::string&, std::shared_ptr<SearchDelegate>>())
+        .def("generate_step", &LLMSession::generate_step);
 
-        uint32_t max_seq_len = 8;
-        ModelGraphRoots roots;
-        if (model_name == "gemma-3-270m")
-        {
-            roots = build_gemma_graph(g, mem, model_path, max_seq_len);
-        }
-        else if (model_name == "qwen-3.6-35b-a3b")
-        {
-            roots = build_qwen_graph(g, mem, model_path, max_seq_len);
-        }
-        else
-        {
-            throw std::runtime_error("Unknown model: " + model_name);
-        }
-
-        CostModel costModel;
-        costModel.load("benchmarks/records.bin");
-
-        Planner planner(costModel, mem.getMemCaps());
-
-        Bucket bucket;
-        bucket.outputNeededRegion = {makeFull(g.getNode(roots.roots[0]).getShape())};
-        for (LogicalId inp : roots.inputs)
-        {
-            bucket.inputDirtyRegions[inp] = {makeFull(g.getNode(inp).getShape())};
-        }
-
-        std::unordered_map<LogicalId, MemSpace> cachedNodes;
-        std::unordered_map<LogicalId, ParallelBuffer> prealloc;
-
-        try
-        {
-            CompiledGraph compiled = planner.plan(roots.roots[0], g, bucket, cachedNodes, true, false, nullptr,
-                                                  prealloc, 0.0f, "cost", delegate);
-            return compiled.cost();
-        }
-        catch (const std::exception &e)
-        {
-            Error::throw_err(e.what());
-        }
-    });
+    m.def("plan_graph", &plan_graph, "Plan graph execution cost");
 }
