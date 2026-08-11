@@ -107,8 +107,8 @@ float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
             float active_duration = kv.second;
             float percentage = (active_duration / total_cost) * 100.0f;
 
-            std::cout << "  - Engine " << eng.idx << " (" << toString(eng.type) << "): "
-                      << std::fixed << std::setprecision(2) << percentage << "% "
+            std::cout << "  - Engine " << eng.idx << " (" << toString(eng.type) << "): " << std::fixed
+                      << std::setprecision(2) << percentage << "% "
                       << "(" << active_duration << " ms active)\n";
         }
     }
@@ -178,8 +178,7 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     }
 
     std::unordered_map<EClassId, EClassId> inplace_alias;
-    auto get_inplace_alias = [&](EClassId id)
-    {
+    auto get_inplace_alias = [&](EClassId id) {
         while (inplace_alias.count(id))
             id = inplace_alias.at(id);
         return id;
@@ -300,9 +299,7 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
             uint32_t b_time = (b_it != birth_times.end()) ? b_it->second : 0;
             uint32_t d_time = (d_it != death_times.end()) ? d_it->second : 0;
 
-            ParallelBuffer buf = {
-                buf_id, base_node.getMemSpace(), size_bytes, b_time, d_time,
-                -1};
+            ParallelBuffer buf = {buf_id, base_node.getMemSpace(), size_bytes, b_time, d_time, -1};
             buffers.push_back(std::move(buf));
         }
 
@@ -312,8 +309,7 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
 }
 
 static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unallocated,
-                   std::vector<ParallelBuffer> &allocated,
-                   std::shared_ptr<SearchDelegate> delegate = nullptr)
+                   std::vector<ParallelBuffer> &allocated, std::shared_ptr<SearchDelegate> delegate = nullptr)
 {
     LOG(L_INFO) << "malloc " + std::to_string(unallocated.size());
     ProgressTimer t(0, "malloc", false, true);
@@ -335,6 +331,27 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
                 adj[i].push_back(j);
             }
         }
+    }
+
+    if (delegate)
+    {
+        std::vector<float> node_features;
+        std::vector<uint32_t> edge_src;
+        std::vector<uint32_t> edge_dst;
+
+        for (int i = 0; i < N; ++i)
+        {
+            node_features.push_back((float)unallocated[i].size);
+            node_features.push_back((float)unallocated[i].start);
+            node_features.push_back((float)unallocated[i].end);
+
+            for (int j : adj[i])
+            {
+                edge_src.push_back(i);
+                edge_dst.push_back(j);
+            }
+        }
+        delegate->init_malloc_graph(node_features, edge_src, edge_dst);
     }
 
     std::vector<int> avail(N);
@@ -403,14 +420,13 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
 
             if (delegate)
             {
-                std::vector<ActionFeature> features;
+                std::vector<ActionFeatureMalloc> features;
                 for (int idx = k; idx < N; ++idx)
                 {
-                    ActionFeature f;
-                    f.id = unallocated[avail[idx]].id.value;
-                    f.cost = 0.0f;
-                    f.size = (float)unallocated[avail[idx]].size;
-                    f.op_type = 0;
+                    ActionFeatureMalloc f;
+                    f.size = unallocated[avail[idx]].size;
+                    f.start = unallocated[avail[idx]].start;
+                    f.end = unallocated[avail[idx]].end;
                     features.push_back(f);
                 }
                 std::vector<uint32_t> custom_order = delegate->order_malloc(features);
@@ -500,8 +516,7 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
     return false;
 }
 
-static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t mem_cap,
-                              BufferId &overflow)
+static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t mem_cap, BufferId &overflow)
 {
     if (mem_cap == std::numeric_limits<uint64_t>::max())
         return true;
@@ -522,11 +537,11 @@ static bool check_peak_memory(const std::vector<ParallelBuffer> &bufs, uint64_t 
         events.push_back({b.end, 0, static_cast<int64_t>(b.size), b.id});
     }
 
-    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b)
-              {
+    std::sort(events.begin(), events.end(), [](const Event &a, const Event &b) {
         if (a.time != b.time)
             return a.time < b.time;
-        return a.type < b.type; });
+        return a.type < b.type;
+    });
 
     int64_t current_mem = 0;
     for (const auto &ev : events)
@@ -554,11 +569,11 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
 {
     std::vector<ParallelBuffer> bufs = unallocated;
 
-    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
+    std::sort(bufs.begin(), bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
         if (a.size != b.size)
             return a.size > b.size;
-        return a.id < b.id; });
+        return a.id < b.id;
+    });
 
     allocated.clear();
     allocated.reserve(bufs.size());
@@ -577,8 +592,7 @@ static bool greedy_alloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &un
         }
 
         std::sort(time_overlaps.begin(), time_overlaps.end(),
-                  [](const ParallelBuffer *a, const ParallelBuffer *b)
-                  { return a->offset < b->offset; });
+                  [](const ParallelBuffer *a, const ParallelBuffer *b) { return a->offset < b->offset; });
 
         for (const auto *alloc : time_overlaps)
         {
@@ -610,11 +624,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
         return true;
 
     std::vector<ParallelBuffer> sorted_bufs = unallocated;
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
         if (a.start != b.start)
             return a.start < b.start;
-        return a.end < b.end; });
+        return a.end < b.end;
+    });
 
     if (sorted_bufs.empty())
         return true;
@@ -631,11 +645,11 @@ static bool malloc_by_time_components(uint64_t mem_cap, const std::vector<Parall
         return true;
     }
 
-    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b)
-              {
+    std::sort(sorted_bufs.begin(), sorted_bufs.end(), [](const ParallelBuffer &a, const ParallelBuffer &b) {
         if (a.size != b.size)
             return a.size > b.size;
-        return a.id < b.id; });
+        return a.id < b.id;
+    });
 
     if (!malloc(mem_cap, sorted_bufs, comp_allocated, delegate))
     {

@@ -34,10 +34,9 @@ struct ENodeInfo
 
 struct DispatchIterator
 {
-public:
+  public:
     DispatchIterator(const EGraph &_egraph, const std::unordered_map<EClassId, uint32_t> &selection_map,
-                     const std::vector<ENodeInfo> &enode_infos,
-                     std::shared_ptr<SearchDelegate> _delegate = nullptr)
+                     const std::vector<ENodeInfo> &enode_infos, std::shared_ptr<SearchDelegate> _delegate = nullptr)
         : egraph(_egraph), delegate(_delegate)
     {
         LOG(L_DEBUG) << "initializing dispatch iterator";
@@ -68,8 +67,7 @@ public:
             return false;
         }
 
-        auto compare_nodes = [&](EClassId a, EClassId b)
-        {
+        auto compare_nodes = [&](EClassId a, EClassId b) {
             float h_a = heights[a.value];
             float h_b = heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
@@ -106,19 +104,52 @@ public:
                 uint32_t choice = choice_idx;
                 if (delegate)
                 {
-                    std::vector<ActionFeature> features;
+                    std::vector<ActionFeatureExtractDispatch> features;
                     features.reserve(current_ready.size());
                     for (auto id : current_ready)
                     {
-                        ActionFeature f;
-                        f.id = id.value;
+                        ActionFeatureExtractDispatch f;
+                        uint32_t sel = selection_map.at(id);
+                        ENodeId enodeId = egraph.getEClass(id).enodes[sel];
+                        const ENode &enode = egraph.getENode(enodeId);
+
                         f.cost = (id.value < heights.size()) ? heights[id.value] : 0.0f;
-                        f.size = 0.0f;
-                        f.op_type = 0;
+                        f.size = countElements(enode.getShape()) * getDTypeSize(enode.getDType());
+                        f.mem_space = enode.getMemSpace();
+                        for (const auto &eng : enode.getEngines())
+                        {
+                            f.engine_idxs.push_back(eng.idx);
+                        }
+
+                        Graph g;
+                        std::vector<LogicalId> inIds;
+                        for (EClassId child : enode.getChildren())
+                        {
+                            const EClass &cCls = egraph.getEClass(egraph.findConst(child));
+                            inIds.push_back(g.input(cCls.shape, cCls.dtype, cCls.strides));
+                        }
+
+                        if (enode.getOpType() == OpType::FUSED)
+                        {
+                            if (KernelRegistry::get().hasKernel(enode.getKernelId()))
+                            {
+                                auto refFact = KernelRegistry::get().getKernel(enode.getKernelId()).refFactory;
+                                if (refFact)
+                                    refFact(inIds, g);
+                            }
+                        }
+                        else
+                        {
+                            g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
+                                           enode.getShape(), enode.getStrides(), "");
+                        }
+                        f.graph = g;
+
                         features.push_back(f);
                     }
                     std::vector<uint32_t> custom_order = delegate->order_dispatch(features);
-                    if (choice_idx < custom_order.size()) {
+                    if (choice_idx < custom_order.size())
+                    {
                         choice = custom_order[choice_idx];
                     }
                 }
@@ -159,7 +190,7 @@ public:
         return iter;
     }
 
-private:
+  private:
     const EGraph &egraph;
     std::shared_ptr<SearchDelegate> delegate;
     size_t num_nodes_in_selection = 0;
@@ -253,8 +284,7 @@ private:
         heights.assign(max_class_id, 0.0f);
         std::vector<bool> height_computed(max_class_id, false);
 
-        std::function<float(EClassId)> get_height = [&](EClassId u) -> float
-        {
+        std::function<float(EClassId)> get_height = [&](EClassId u) -> float {
             if (height_computed[u.value])
                 return heights[u.value];
 
@@ -283,8 +313,7 @@ private:
             }
         }
 
-        auto compare_nodes = [&](EClassId a, EClassId b)
-        {
+        auto compare_nodes = [&](EClassId a, EClassId b) {
             float h_a = heights[a.value];
             float h_b = heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
@@ -295,6 +324,54 @@ private:
         };
 
         std::sort(current_ready.begin(), current_ready.end(), compare_nodes);
+
+        if (delegate)
+        {
+            std::vector<float> node_features;
+            std::vector<uint32_t> edge_src;
+            std::vector<uint32_t> edge_dst;
+
+            std::unordered_map<EClassId, uint32_t> class_to_node_idx;
+            uint32_t node_idx = 0;
+
+            for (const auto &kv : selection_map)
+            {
+                EClassId u = egraph.findConst(kv.first);
+                if (u.value < max_class_id)
+                {
+                    class_to_node_idx[u] = node_idx++;
+                }
+            }
+
+            for (const auto &kv : selection_map)
+            {
+                EClassId u = egraph.findConst(kv.first);
+                if (u.value >= max_class_id)
+                    continue;
+
+                uint32_t sel = kv.second;
+                ENodeId enode_id = egraph.getEClass(u).enodes[sel];
+                const ENode &enode = egraph.getENode(enode_id);
+
+                node_features.push_back((float)countElements(enode.getShape()) * getDTypeSize(enode.getDType()));
+                node_features.push_back((float)enode.getOpType());
+                node_features.push_back((enode_id.value < enode_infos.size()) ? enode_infos[enode_id.value].cost
+                                                                              : 0.0f);
+                node_features.push_back((float)enode.getMemSpace().type);
+
+                uint32_t src_idx = class_to_node_idx[u];
+                for (EClassId child : enode.getChildren())
+                {
+                    EClassId canon_child = egraph.findConst(child);
+                    if (class_to_node_idx.count(canon_child))
+                    {
+                        edge_src.push_back(src_idx);
+                        edge_dst.push_back(class_to_node_idx[canon_child]);
+                    }
+                }
+            }
+            delegate->init_dispatch_graph(node_features, edge_src, edge_dst);
+        }
     }
 
     bool ascend()
@@ -313,8 +390,7 @@ private:
 
         uint32_t parent_pos = pos - 1;
 
-        auto compare_nodes = [&](EClassId a, EClassId b)
-        {
+        auto compare_nodes = [&](EClassId a, EClassId b) {
             float h_a = heights[a.value];
             float h_b = heights[b.value];
             if (std::abs(h_a - h_b) > 1e-5f)
@@ -347,10 +423,10 @@ private:
 
 struct Extractor
 {
-private:
+  private:
     std::vector<std::unique_ptr<ISelectionValidator>> validators;
 
-public:
+  public:
     std::unordered_map<EClassId, uint32_t> selection_map;
     const EGraph &egraph;
     const std::vector<ENodeInfo> &enodeInfos;
@@ -365,9 +441,10 @@ public:
     EClassId target_backtrack_eclass;
     uint64_t numClasses;
 
-    Extractor(const EGraph &_egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &_enodeInfos, std::shared_ptr<SearchDelegate> _delegate = nullptr)
-        : egraph(_egraph), enodeInfos(_enodeInfos), delegate(_delegate), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
-          in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
+    Extractor(const EGraph &_egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &_enodeInfos,
+              std::shared_ptr<SearchDelegate> _delegate = nullptr)
+        : egraph(_egraph), enodeInfos(_enodeInfos), delegate(_delegate), numClasses(_egraph.classes.size()),
+          to_process({root_eclass_id}), in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
           has_options(_egraph.classes.size(), false)
     {
     }
@@ -432,20 +509,49 @@ public:
                 uint32_t chosen_sel = sel;
                 if (delegate)
                 {
-                    std::vector<ActionFeature> features;
+                    std::vector<ActionFeatureExtractDispatch> features;
                     features.reserve(enodes.size());
                     for (ENodeId enodeId : enodes)
                     {
                         const ENode &enode = egraph.getENode(enodeId);
-                        ActionFeature f;
-                        f.id = enodeId.value;
+                        ActionFeatureExtractDispatch f;
                         f.cost = enodeInfos[enodeId.value].cost;
                         f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
-                        f.op_type = static_cast<uint32_t>(enode.getOpType());
+                        f.mem_space = enode.getMemSpace();
+                        for (const auto &eng : enode.getEngines())
+                        {
+                            f.engine_idxs.push_back(eng.idx);
+                        }
+
+                        Graph g;
+                        std::vector<LogicalId> inIds;
+                        for (EClassId child : enode.getChildren())
+                        {
+                            const EClass &cCls = egraph.getEClass(egraph.findConst(child));
+                            inIds.push_back(g.input(cCls.shape, cCls.dtype, cCls.strides));
+                        }
+
+                        if (enode.getOpType() == OpType::FUSED)
+                        {
+                            if (KernelRegistry::get().hasKernel(enode.getKernelId()))
+                            {
+                                auto refFact = KernelRegistry::get().getKernel(enode.getKernelId()).refFactory;
+                                if (refFact)
+                                    refFact(inIds, g);
+                            }
+                        }
+                        else
+                        {
+                            g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds,
+                                           enode.getShape(), enode.getStrides(), "");
+                        }
+                        f.graph = g;
+
                         features.push_back(f);
                     }
-                    std::vector<uint32_t> custom_order = delegate->order_enodes(current.value, features);
-                    if (sel < custom_order.size()) {
+                    std::vector<uint32_t> custom_order = delegate->order_enodes(features);
+                    if (sel < custom_order.size())
+                    {
                         chosen_sel = custom_order[sel];
                     }
                 }
@@ -489,7 +595,8 @@ public:
 
             if (!found_valid)
             {
-                if (delegate) delegate->pop_state();
+                if (delegate)
+                    delegate->pop_state();
 
                 int best_conflict_pos = -1;
                 for (EClassId c_node : aggregate_conflicts)
@@ -575,21 +682,50 @@ public:
             uint32_t iteration_index = chosen_sel;
             if (delegate)
             {
-                std::vector<ActionFeature> features;
+                std::vector<ActionFeatureExtractDispatch> features;
                 features.reserve(enodes.size());
                 for (ENodeId enodeId : enodes)
                 {
                     const ENode &enode = egraph.getENode(enodeId);
-                    ActionFeature f;
-                    f.id = enodeId.value;
+                    ActionFeatureExtractDispatch f;
                     f.cost = enodeInfos[enodeId.value].cost;
                     f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
-                    f.op_type = static_cast<uint32_t>(enode.getOpType());
+                    f.mem_space = enode.getMemSpace();
+                    for (const auto &eng : enode.getEngines())
+                    {
+                        f.engine_idxs.push_back(eng.idx);
+                    }
+
+                    Graph g;
+                    std::vector<LogicalId> inIds;
+                    for (EClassId child : enode.getChildren())
+                    {
+                        const EClass &cCls = egraph.getEClass(egraph.findConst(child));
+                        inIds.push_back(g.input(cCls.shape, cCls.dtype, cCls.strides));
+                    }
+
+                    if (enode.getOpType() == OpType::FUSED)
+                    {
+                        if (KernelRegistry::get().hasKernel(enode.getKernelId()))
+                        {
+                            auto refFact = KernelRegistry::get().getKernel(enode.getKernelId()).refFactory;
+                            if (refFact)
+                                refFact(inIds, g);
+                        }
+                    }
+                    else
+                    {
+                        g.allocateNode(enode.getOpType(), enode.getOpName(), enode.getDType(), inIds, enode.getShape(),
+                                       enode.getStrides(), "");
+                    }
+                    f.graph = g;
+
                     features.push_back(f);
                 }
-                std::vector<uint32_t> custom_order = delegate->order_enodes(current.value, features);
+                std::vector<uint32_t> custom_order = delegate->order_enodes(features);
                 auto it = std::find(custom_order.begin(), custom_order.end(), chosen_sel);
-                if (it != custom_order.end()) {
+                if (it != custom_order.end())
+                {
                     iteration_index = static_cast<uint32_t>(std::distance(custom_order.begin(), it));
                 }
             }
@@ -641,7 +777,8 @@ public:
             else
             {
                 selection_map.erase(current);
-                if (delegate) delegate->pop_state();
+                if (delegate)
+                    delegate->pop_state();
                 if (has_options[current.value])
                 {
                     has_options[current.value] = false;

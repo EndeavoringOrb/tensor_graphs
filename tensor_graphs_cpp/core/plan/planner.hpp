@@ -234,8 +234,7 @@ struct Planner
     {
         constexpr float EPS = 1e-6f;
 
-        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool
-        {
+        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool {
             if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
                 return true;
             if (op == OpType::RESHAPE && inputIdx == 1)
@@ -348,8 +347,7 @@ struct Planner
                     {
                         if (refEntry && pGraph)
                         {
-                            auto traceToInputIdx = [&](LogicalId pid) -> int
-                            {
+                            auto traceToInputIdx = [&](LogicalId pid) -> int {
                                 LogicalId curr = pid;
                                 while (pGraph->hasNode(curr) && (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
                                                                  pGraph->getNode(curr).opType == OpType::CAST ||
@@ -520,11 +518,51 @@ struct Planner
         const uint64_t numClasses = egraph.getClasses().size();
         LOG(L_INFO) << "numClasses=" << numClasses;
 
+        if (delegate)
+        {
+            std::vector<float> node_features;
+            std::vector<uint32_t> edge_src;
+            std::vector<uint32_t> edge_dst;
+
+            uint32_t num_classes = egraph.getClasses().size();
+            uint32_t num_enodes = egraph.getENodes().size();
+
+            for (uint32_t i = 0; i < num_classes; ++i)
+            {
+                const EClass &cls = egraph.getClasses()[i];
+                node_features.push_back(1.0f); // is_eclass
+                node_features.push_back(0.0f); // is_enode
+                node_features.push_back((float)countElements(cls.shape) * getDTypeSize(cls.dtype));
+                node_features.push_back((float)cls.dtype);
+
+                for (ENodeId enode_id : cls.enodes)
+                {
+                    edge_src.push_back(i);
+                    edge_dst.push_back(num_classes + enode_id.value);
+                }
+            }
+            for (uint32_t i = 0; i < num_enodes; ++i)
+            {
+                const ENode &enode = egraph.getENodes()[i];
+                node_features.push_back(0.0f); // is_eclass
+                node_features.push_back(1.0f); // is_enode
+                node_features.push_back(enodeInfos[i].cost);
+                node_features.push_back((float)enode.getOpType());
+
+                for (EClassId child : enode.getChildren())
+                {
+                    edge_src.push_back(num_classes + i);
+                    edge_dst.push_back(egraph.findConst(child).value);
+                }
+            }
+            delegate->init_egraph(node_features, edge_src, edge_dst);
+        }
+
         Extractor extractor = Extractor(egraph, rootEClassId, enodeInfos, delegate);
         // extractor.registerValidator(std::make_unique<CycleStepValidator>(egraph));
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
-        extractor.registerValidator(
-            std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical, preallocatedBuffers, delegate));
+        extractor.registerValidator(std::make_unique<MemValidator>(egraph, enodeInfos, mem_caps, eclassToLogical,
+                                                                   preallocatedBuffers, delegate));
 
         float best_cost = TGConstants::INF;
         std::unordered_map<EClassId, uint32_t> best_selection_map;
@@ -699,7 +737,7 @@ struct Planner
                 enodeInfos[egraph.getEClass(pair.first).enodes[best_selection_map.at(pair.first)].value].cost;
         }
         ExtractionResult result = {best_selection_map, best_order, best_buffers,
-                                   best_eclass_to_buf, best_cost, best_eclass_to_cost};
+                                   best_eclass_to_buf, best_cost,  best_eclass_to_cost};
         std::cout << "best_cost=" << std::to_string(best_cost) << std::endl;
 
         return result;
@@ -824,10 +862,9 @@ struct Planner
     {
         if (KernelRegistry::get().nKernels() == 0)
         {
-            Error::throw_err(
-                "KernelRegistry has 0 registered kernels! "
-                "Did you forget to `#include \"generated/kernels_all.gen.hpp\"` "
-                "in your entry point (e.g. bindings.cpp or main.cpp)?");
+            Error::throw_err("KernelRegistry has 0 registered kernels! "
+                             "Did you forget to `#include \"generated/kernels_all.gen.hpp\"` "
+                             "in your entry point (e.g. bindings.cpp or main.cpp)?");
         }
         if (baseStateInitialized)
             return;
@@ -1061,8 +1098,7 @@ struct Planner
         eclassToLogical[E_Cache] = logicalId;
         EClassId current_E = E_Cache;
 
-        auto addConst = [&](const std::vector<int32_t> &vals)
-        {
+        auto addConst = [&](const std::vector<int32_t> &vals) {
             return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
         };
 
@@ -1490,10 +1526,9 @@ struct Planner
         }
         eclassToLogical = std::move(updatedEClassToLogical);
 
-        auto extraction =
-            extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical,
-                        preallocatedBuffers, minCompileSeconds == 0.0f, strictCache, minCompileSeconds, sort_enodes,
-                        delegate);
+        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical,
+                                      preallocatedBuffers, minCompileSeconds == 0.0f, strictCache, minCompileSeconds,
+                                      sort_enodes, delegate);
         return buildCompiledGraph(rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes,
                                   eclassToLogical);
     }

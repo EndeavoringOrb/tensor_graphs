@@ -4,7 +4,6 @@ from typing import Tuple, cast
 import numpy as np
 import pytest
 import torch
-
 from tensor_graphs.backend.registry import KernelRegistry
 from tensor_graphs.benchmark.data_gen import DataGenerator
 from tensor_graphs.compiler.propagation import GraphPropagator

@@ -15,13 +15,12 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 from PIL import Image
-from tqdm import tqdm
-
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ir.graph import GraphBuilder
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.session import GraphSession
 from tensor_graphs.weights import SafetensorsSource
+from tqdm import tqdm
 
 warnings.simplefilter("error", RuntimeWarning)
 
