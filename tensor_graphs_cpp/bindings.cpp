@@ -7,6 +7,7 @@
 #include "core/plan/planner.hpp"
 #include "core/plan/search_delegate.hpp"
 #include "models/run_models.hpp"
+#include "generated/kernels_all.gen.hpp"
 
 namespace py = pybind11;
 
@@ -98,7 +99,7 @@ PYBIND11_MODULE(tensor_graphs, m)
         }
         catch (const std::exception &e)
         {
-            return static_cast<float>(TGConstants::INF);
+            Error::throw_err(e.what());
         }
     });
 }

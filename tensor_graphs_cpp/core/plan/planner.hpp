@@ -234,7 +234,8 @@ struct Planner
     {
         constexpr float EPS = 1e-6f;
 
-        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool {
+        auto isConstantNeeded = [](OpType op, uint64_t inputIdx, uint64_t numInputs) -> bool
+        {
             if (op == OpType::REPEAT && (inputIdx == 1 || inputIdx == 2))
                 return true;
             if (op == OpType::RESHAPE && inputIdx == 1)
@@ -347,7 +348,8 @@ struct Planner
                     {
                         if (refEntry && pGraph)
                         {
-                            auto traceToInputIdx = [&](LogicalId pid) -> int {
+                            auto traceToInputIdx = [&](LogicalId pid) -> int
+                            {
                                 LogicalId curr = pid;
                                 while (pGraph->hasNode(curr) && (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
                                                                  pGraph->getNode(curr).opType == OpType::CAST ||
@@ -518,76 +520,7 @@ struct Planner
         const uint64_t numClasses = egraph.getClasses().size();
         LOG(L_INFO) << "numClasses=" << numClasses;
 
-        std::vector<float> eclass_height(numClasses, TGConstants::INF);
-        std::vector<float> enode_height(egraph.getENodes().size(), TGConstants::INF);
-
-        if (sort_enodes == "height")
-        {
-            // Initialize leaf nodes (inputs, caches)
-            for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
-            {
-                const ENode &enode = egraph.getENodes()[i];
-                if (enode.getChildren().empty() || enode.getOpType() == OpType::INPUT ||
-                    enode.getOpType() == OpType::CACHE)
-                {
-                    enode_height[i] = enodeInfos[i].cost;
-                    EClassId cid = egraph.find(egraph.getENodeEClass(ENodeId{i}));
-                    eclass_height[cid.value] = std::min(eclass_height[cid.value], enode_height[i]);
-                }
-            }
-
-            bool changed = true;
-            uint32_t max_iters = numClasses + 1; // Bellman-Ford style relaxation
-            ProgressTimer t(max_iters, "calculating heights");
-            while (changed && max_iters-- > 0)
-            {
-                changed = false;
-                for (uint32_t i = 0; i < numClasses; ++i)
-                {
-                    EClassId cid = egraph.find(EClassId{i});
-                    if (cid.value != i)
-                        continue;
-
-                    const EClass &cls = egraph.getEClass(cid);
-                    for (ENodeId enodeId : cls.enodes)
-                    {
-                        const ENode &enode = egraph.getENode(enodeId);
-                        float max_child_height = 0.0f;
-                        bool all_children_valid = true;
-
-                        for (EClassId child : enode.getChildren())
-                        {
-                            EClassId canon_child = egraph.findConst(child);
-                            float ch = eclass_height[canon_child.value];
-                            if (ch == TGConstants::INF)
-                            {
-                                all_children_valid = false;
-                                break;
-                            }
-                            max_child_height = std::max(max_child_height, ch);
-                        }
-
-                        if (all_children_valid)
-                        {
-                            float new_h = max_child_height + enodeInfos[enodeId.value].cost;
-                            if (new_h < enode_height[enodeId.value])
-                            {
-                                enode_height[enodeId.value] = new_h;
-                                if (new_h < eclass_height[cid.value])
-                                {
-                                    eclass_height[cid.value] = new_h;
-                                    changed = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                t.tick();
-            }
-        }
-
-
-        Extractor extractor = Extractor(egraph, rootEClassId, delegate);
+        Extractor extractor = Extractor(egraph, rootEClassId, enodeInfos, delegate);
         // extractor.registerValidator(std::make_unique<CycleStepValidator>(egraph));
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
         extractor.registerValidator(
@@ -766,7 +699,7 @@ struct Planner
                 enodeInfos[egraph.getEClass(pair.first).enodes[best_selection_map.at(pair.first)].value].cost;
         }
         ExtractionResult result = {best_selection_map, best_order, best_buffers,
-                                   best_eclass_to_buf, best_cost,  best_eclass_to_cost};
+                                   best_eclass_to_buf, best_cost, best_eclass_to_cost};
         std::cout << "best_cost=" << std::to_string(best_cost) << std::endl;
 
         return result;
@@ -889,6 +822,13 @@ struct Planner
     // Initialize baseState.egraph from graph
     void initBaseEGraph(LogicalId rootId, Graph &graph, const std::vector<LogicalId> &topo, Repo *repo = nullptr)
     {
+        if (KernelRegistry::get().nKernels() == 0)
+        {
+            Error::throw_err(
+                "KernelRegistry has 0 registered kernels! "
+                "Did you forget to `#include \"generated/kernels_all.gen.hpp\"` "
+                "in your entry point (e.g. bindings.cpp or main.cpp)?");
+        }
         if (baseStateInitialized)
             return;
 
@@ -1121,7 +1061,8 @@ struct Planner
         eclassToLogical[E_Cache] = logicalId;
         EClassId current_E = E_Cache;
 
-        auto addConst = [&](const std::vector<int32_t> &vals) {
+        auto addConst = [&](const std::vector<int32_t> &vals)
+        {
             return egraph.getOrAddConstantData<int32_t>({(uint32_t)vals.size()}, DType::INT32, vals);
         };
 

@@ -90,7 +90,7 @@ def train():
     model_name = "gemma-3-270m"
     model_path = "models/google/gemma-3-270m"
 
-    for epoch in range(100):
+    for epoch in range(1000000):
         delegate = AgentDelegate(agent)
 
         cost = tensor_graphs.plan_graph(model_name, model_path, delegate)

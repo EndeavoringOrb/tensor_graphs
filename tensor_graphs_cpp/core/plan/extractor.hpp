@@ -95,6 +95,17 @@ public:
                 if (delegate)
                 {
                     delegate->push_state();
+                }
+            }
+
+            uint32_t choice_idx = selection_at_pos[pos];
+
+            if (choice_idx < current_ready.size())
+            {
+                selection_at_pos[pos] = choice_idx + 1;
+                uint32_t choice = choice_idx;
+                if (delegate)
+                {
                     std::vector<ActionFeature> features;
                     features.reserve(current_ready.size());
                     for (auto id : current_ready)
@@ -106,21 +117,12 @@ public:
                         f.op_type = 0;
                         features.push_back(f);
                     }
-                    chosen_order_at_pos[pos] = delegate->order_dispatch(features);
+                    std::vector<uint32_t> custom_order = delegate->order_dispatch(features);
+                    if (choice_idx < custom_order.size()) {
+                        choice = custom_order[choice_idx];
+                    }
                 }
-                else
-                {
-                    chosen_order_at_pos[pos].resize(current_ready.size());
-                    std::iota(chosen_order_at_pos[pos].begin(), chosen_order_at_pos[pos].end(), 0);
-                }
-            }
 
-            uint32_t choice_idx = selection_at_pos[pos];
-
-            if (choice_idx < current_ready.size())
-            {
-                selection_at_pos[pos] = choice_idx + 1;
-                uint32_t choice = chosen_order_at_pos[pos][choice_idx];
                 EClassId node = current_ready[choice];
                 ordered.push_back(node);
                 chosen_at_pos[pos] = node;
@@ -170,7 +172,6 @@ private:
     std::vector<EClassId> chosen_at_pos;
     std::vector<uint32_t> choice_at_pos;
     std::vector<uint32_t> selection_at_pos;
-    std::vector<std::vector<uint32_t>> chosen_order_at_pos;
 
     bool is_done = false;
     bool first_yield = true;
@@ -202,8 +203,6 @@ private:
         chosen_at_pos.assign(num_nodes_in_selection + 1, EClassId{UINT32_MAX});
         choice_at_pos.assign(num_nodes_in_selection + 1, 0);
         selection_at_pos.assign(num_nodes_in_selection + 1, 0);
-        chosen_order_at_pos.clear();
-        chosen_order_at_pos.resize(num_nodes_in_selection + 1);
 
         std::vector<uint8_t> in_selection(max_class_id, 0);
         for (const auto &kv : selection_map)
@@ -354,6 +353,7 @@ private:
 public:
     std::unordered_map<EClassId, uint32_t> selection_map;
     const EGraph &egraph;
+    const std::vector<ENodeInfo> &enodeInfos;
     std::shared_ptr<SearchDelegate> delegate;
     std::vector<EClassId> path;
     std::vector<bool> in_path;
@@ -365,8 +365,8 @@ public:
     EClassId target_backtrack_eclass;
     uint64_t numClasses;
 
-    Extractor(const EGraph &_egraph, EClassId root_eclass_id, std::shared_ptr<SearchDelegate> _delegate = nullptr)
-        : egraph(_egraph), delegate(_delegate), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
+    Extractor(const EGraph &_egraph, EClassId root_eclass_id, const std::vector<ENodeInfo> &_enodeInfos, std::shared_ptr<SearchDelegate> _delegate = nullptr)
+        : egraph(_egraph), enodeInfos(_enodeInfos), delegate(_delegate), numClasses(_egraph.classes.size()), to_process({root_eclass_id}),
           in_path(_egraph.classes.size(), false), path_pos(_egraph.classes.size(), -1),
           has_options(_egraph.classes.size(), false)
     {
@@ -416,6 +416,11 @@ public:
                 next_sel.erase(nextIt);
             }
 
+            if (sel == 0 && delegate)
+            {
+                delegate->push_state();
+            }
+
             const auto &enodes = egraph.getEClass(current).enodes;
 
             bool found_valid = false;
@@ -424,8 +429,29 @@ public:
 
             for (; sel < enodes.size(); ++sel)
             {
-                ENodeId enode_id = enodes[sel];
-                selection_map[current] = sel;
+                uint32_t chosen_sel = sel;
+                if (delegate)
+                {
+                    std::vector<ActionFeature> features;
+                    features.reserve(enodes.size());
+                    for (ENodeId enodeId : enodes)
+                    {
+                        const ENode &enode = egraph.getENode(enodeId);
+                        ActionFeature f;
+                        f.id = enodeId.value;
+                        f.cost = enodeInfos[enodeId.value].cost;
+                        f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
+                        f.op_type = static_cast<uint32_t>(enode.getOpType());
+                        features.push_back(f);
+                    }
+                    std::vector<uint32_t> custom_order = delegate->order_enodes(current.value, features);
+                    if (sel < custom_order.size()) {
+                        chosen_sel = custom_order[sel];
+                    }
+                }
+
+                ENodeId enode_id = enodes[chosen_sel];
+                selection_map[current] = chosen_sel;
 
                 bool step_valid = true;
                 std::vector<EClassId> conflict_nodes;
@@ -463,6 +489,8 @@ public:
 
             if (!found_valid)
             {
+                if (delegate) delegate->pop_state();
+
                 int best_conflict_pos = -1;
                 for (EClassId c_node : aggregate_conflicts)
                 {
@@ -505,7 +533,8 @@ public:
                 }
             }
 
-            ENodeId enode_id = enodes[sel];
+            uint32_t chosen_sel = selection_map[current];
+            ENodeId enode_id = enodes[chosen_sel];
             const ENode &node = egraph.getENode(enode_id);
             const auto &children = node.getChildren();
             for (auto it = children.rbegin(); it != children.rend(); ++it)
@@ -540,18 +569,41 @@ public:
                 skip_increment = false;
             }
 
-            uint32_t sel = selection_map[current];
+            uint32_t chosen_sel = selection_map[current];
             const auto &enodes = egraph.getEClass(current).enodes;
-            ENodeId enode_id = enodes[sel];
+
+            uint32_t iteration_index = chosen_sel;
+            if (delegate)
+            {
+                std::vector<ActionFeature> features;
+                features.reserve(enodes.size());
+                for (ENodeId enodeId : enodes)
+                {
+                    const ENode &enode = egraph.getENode(enodeId);
+                    ActionFeature f;
+                    f.id = enodeId.value;
+                    f.cost = enodeInfos[enodeId.value].cost;
+                    f.size = (float)countElements(enode.getShape()) * getDTypeSize(enode.getDType());
+                    f.op_type = static_cast<uint32_t>(enode.getOpType());
+                    features.push_back(f);
+                }
+                std::vector<uint32_t> custom_order = delegate->order_enodes(current.value, features);
+                auto it = std::find(custom_order.begin(), custom_order.end(), chosen_sel);
+                if (it != custom_order.end()) {
+                    iteration_index = static_cast<uint32_t>(std::distance(custom_order.begin(), it));
+                }
+            }
+
+            ENodeId enode_id = enodes[chosen_sel];
             const ENode &node = egraph.getENode(enode_id);
 
-            if (!skip_increment && sel + 1 < enodes.size())
+            if (!skip_increment && iteration_index + 1 < enodes.size())
             {
-                next_sel[current] = sel + 1;
+                next_sel[current] = iteration_index + 1;
 
                 selection_map.erase(current);
 
-                if (enodes.size() <= sel + 2)
+                if (enodes.size() <= iteration_index + 2)
                 {
                     if (has_options[current.value])
                     {
@@ -589,6 +641,7 @@ public:
             else
             {
                 selection_map.erase(current);
+                if (delegate) delegate->pop_state();
                 if (has_options[current.value])
                 {
                     has_options[current.value] = false;

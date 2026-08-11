@@ -38,7 +38,10 @@ float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
 
     for (EClassId eclass : ordered)
     {
-        uint32_t sel = selection_map.at(eclass);
+        auto sel_it = selection_map.find(eclass);
+        if (sel_it == selection_map.end())
+            continue;
+        uint32_t sel = sel_it->second;
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENode &node = egraph.getENode(enode_id);
 
@@ -54,7 +57,10 @@ float get_cost(const std::vector<EClassId> &ordered, const EGraph &egraph,
         for (EClassId child : node.getChildren())
         {
             child = egraph.findConst(child);
-            uint32_t child_sel = selection_map.at(child);
+            auto c_sel_it = selection_map.find(child);
+            if (c_sel_it == selection_map.end())
+                continue;
+            uint32_t child_sel = c_sel_it->second;
             ENodeId child_enode_id = egraph.getEClass(child).enodes[child_sel];
             const ENode &child_node = egraph.getENode(child_enode_id);
 
@@ -158,7 +164,10 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
         EClassId eclass = ordered[i];
         birth_times[eclass] = i;
         death_times[eclass] = i + 1;
-        uint32_t sel = selection_map.at(eclass);
+        auto sel_it = selection_map.find(eclass);
+        if (sel_it == selection_map.end())
+            Error::throw_err("eclass from ordered not in selection_map");
+        uint32_t sel = sel_it->second;
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENode &node = egraph.getENode(enode_id);
         for (EClassId child : node.getChildren())
@@ -179,7 +188,10 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     for (uint32_t i = 0; i < ordered.size(); ++i)
     {
         EClassId eclass = ordered[i];
-        uint32_t sel = selection_map.at(eclass);
+        auto sel_it = selection_map.find(eclass);
+        if (sel_it == selection_map.end())
+            Error::throw_err("eclass from ordered not in selection_map");
+        uint32_t sel = sel_it->second;
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENode &node = egraph.getENode(enode_id);
 
@@ -197,7 +209,10 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
 
                         if (death_times[child_base] == i)
                         {
-                            uint32_t c_sel = selection_map.at(child_base);
+                            auto c_sel_it = selection_map.find(child_base);
+                            if (c_sel_it == selection_map.end())
+                                continue;
+                            uint32_t c_sel = c_sel_it->second;
                             const ENode &c_node = egraph.getENode(egraph.getEClass(child_base).enodes[c_sel]);
                             if (c_node.getOpType() != OpType::INPUT && c_node.getOpType() != OpType::CACHE)
                             {
@@ -221,7 +236,10 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     for (uint32_t i = 0; i < ordered.size(); ++i)
     {
         EClassId eclass = ordered[i];
-        uint32_t sel = selection_map.at(eclass);
+        auto sel_it = selection_map.find(eclass);
+        if (sel_it == selection_map.end())
+            continue;
+        uint32_t sel = sel_it->second;
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         const ENodeInfo &info = enodeInfos[enode_id.value];
 
@@ -246,7 +264,10 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
     for (EClassId eclass : ordered)
     {
         EClassId base = eclass;
-        uint32_t sel = selection_map.at(eclass);
+        auto sel_it = selection_map.find(eclass);
+        if (sel_it == selection_map.end())
+            continue;
+        uint32_t sel = sel_it->second;
         ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
         if (enodeInfos[enode_id.value].is_view)
         {
@@ -260,7 +281,10 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
             BufferId buf_id = BufferId{(uint32_t)buffers.size()};
             base_to_buf[target_base] = buf_id;
 
-            uint32_t base_sel = selection_map.at(target_base);
+            auto base_sel_it = selection_map.find(target_base);
+            if (base_sel_it == selection_map.end())
+                continue;
+            uint32_t base_sel = base_sel_it->second;
             ENodeId base_enode_id = egraph.getEClass(target_base).enodes[base_sel];
             const ENode &base_node = egraph.getENode(base_enode_id);
 
@@ -271,8 +295,13 @@ static std::vector<ParallelBuffer> bufferize(const std::vector<EClassId> &ordere
             }
             size_bytes = (size_bytes + 4095) & ~4095ULL;
 
+            auto b_it = birth_times.find(target_base);
+            auto d_it = death_times.find(target_base);
+            uint32_t b_time = (b_it != birth_times.end()) ? b_it->second : 0;
+            uint32_t d_time = (d_it != death_times.end()) ? d_it->second : 0;
+
             ParallelBuffer buf = {
-                buf_id, base_node.getMemSpace(), size_bytes, birth_times.at(target_base), death_times.at(target_base),
+                buf_id, base_node.getMemSpace(), size_bytes, b_time, d_time,
                 -1};
             buffers.push_back(std::move(buf));
         }
@@ -329,8 +358,6 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
     trail.reserve(N * 50);
     std::vector<size_t> trail_starts(N + 1, 0);
 
-    std::vector<std::vector<uint32_t>> chosen_order_at_k(N + 1);
-
     int k = 0;
     while (k >= 0)
     {
@@ -355,22 +382,6 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
             if (delegate)
             {
                 delegate->push_state();
-                std::vector<ActionFeature> features;
-                for (int idx = k; idx < N; ++idx)
-                {
-                    ActionFeature f;
-                    f.id = unallocated[avail[idx]].id.value;
-                    f.cost = 0.0f;
-                    f.size = (float)unallocated[avail[idx]].size;
-                    f.op_type = 0;
-                    features.push_back(f);
-                }
-                chosen_order_at_k[k] = delegate->order_malloc(features);
-            }
-            else
-            {
-                chosen_order_at_k[k].resize(N - k);
-                std::iota(chosen_order_at_k[k].begin(), chosen_order_at_k[k].end(), 0);
             }
         }
 
@@ -388,7 +399,27 @@ static bool malloc(uint64_t mem_cap, const std::vector<ParallelBuffer> &unalloca
         while (state[k] < N)
         {
             uint32_t sel_idx = state[k] - k;
-            int mapped_idx = k + chosen_order_at_k[k][sel_idx];
+            int mapped_idx = k + sel_idx;
+
+            if (delegate)
+            {
+                std::vector<ActionFeature> features;
+                for (int idx = k; idx < N; ++idx)
+                {
+                    ActionFeature f;
+                    f.id = unallocated[avail[idx]].id.value;
+                    f.cost = 0.0f;
+                    f.size = (float)unallocated[avail[idx]].size;
+                    f.op_type = 0;
+                    features.push_back(f);
+                }
+                std::vector<uint32_t> custom_order = delegate->order_malloc(features);
+                if (sel_idx < custom_order.size())
+                {
+                    mapped_idx = k + custom_order[sel_idx];
+                }
+            }
+
             int idx = mapped_idx;
             state[k]++;
             int i = avail[idx];

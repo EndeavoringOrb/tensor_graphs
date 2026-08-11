@@ -124,7 +124,11 @@ struct CycleValidator : public ISelectionValidator
             ENodeId enode_id = egraph.getEClass(kv.first).enodes[sel];
             for (EClassId child : egraph.getENode(enode_id).getChildren())
             {
-                indegree[egraph.findConst(child).value]++;
+                EClassId canon_child = egraph.findConst(child);
+                if (selection_map.find(canon_child) != selection_map.end())
+                {
+                    indegree[canon_child.value]++;
+                }
             }
         }
 
@@ -144,15 +148,22 @@ struct CycleValidator : public ISelectionValidator
             zero_indegree.pop_back();
             processed++;
 
-            uint32_t sel = selection_map.at(curr);
+            auto sel_it = selection_map.find(curr);
+            if (sel_it == selection_map.end())
+                continue;
+
+            uint32_t sel = sel_it->second;
             ENodeId enode_id = egraph.getEClass(curr).enodes[sel];
             for (EClassId child : egraph.getENode(enode_id).getChildren())
             {
                 child = egraph.findConst(child);
-                indegree[child.value]--;
-                if (indegree[child.value] == 0)
+                if (selection_map.find(child) != selection_map.end())
                 {
-                    zero_indegree.push_back(child);
+                    indegree[child.value]--;
+                    if (indegree[child.value] == 0)
+                    {
+                        zero_indegree.push_back(child);
+                    }
                 }
             }
         }

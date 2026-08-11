@@ -455,6 +455,11 @@ class KernelRegistry
         return entries.find(uid) != entries.end();
     }
 
+    uint64_t nKernels() const
+    {
+        return entries.size();
+    }
+
   private:
     std::unordered_map<KernelId, KernelEntry> entries;
     bool reference_only_mode = false;
