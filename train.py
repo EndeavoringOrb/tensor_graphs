@@ -1,3 +1,4 @@
+# train.py
 import tensor_graphs
 import torch
 import torch.nn.functional as F
@@ -65,27 +66,36 @@ class AdvancedAgent(nn.Module):
 
         # 1. Extraction GNN
         self.extract_gnn = GNNModel(in_features=4, hidden_dim=hidden_dim)
-        # 2. Extraction RNN (cost, size, type, engines, nodes, edges)
+        # Extraction RNN (cost, size, type, engines, nodes, edges)
         self.extract_rnn = RNNModel(
             global_dim=hidden_dim, feature_dim=6, hidden_dim=hidden_dim
         )
 
-        # 3. Dispatch GNN
+        # 2. Dispatch GNN
         self.dispatch_gnn = GNNModel(in_features=4, hidden_dim=hidden_dim)
-        # 4. Dispatch RNN
+        # Dispatch RNN
         self.dispatch_rnn = RNNModel(
             global_dim=hidden_dim, feature_dim=6, hidden_dim=hidden_dim
         )
 
-        # 5. Malloc GNN
+        # 3. Bufferize GNN
+        # Features: (size, birth_time, death_time, is_view, is_input) -> 5 features
+        self.bufferize_gnn = GNNModel(in_features=5, hidden_dim=hidden_dim)
+        # Bufferize RNN
+        # Features: (is_new_buffer, size, parent_size, parent_birth_time) -> 4 features
+        self.bufferize_rnn = RNNModel(
+            global_dim=hidden_dim, feature_dim=4, hidden_dim=hidden_dim
+        )
+
+        # 4. Malloc GNN
         self.malloc_gnn = GNNModel(in_features=3, hidden_dim=hidden_dim)
-        # 6. Malloc RNN (size, start, end)
+        # Malloc RNN (size, start, end)
         self.malloc_rnn = RNNModel(
             global_dim=hidden_dim, feature_dim=3, hidden_dim=hidden_dim
         )
 
 
-class AgentDelegate(tensor_graphs.SearchDelegate):
+class AgentDelegate(tensor_graphs.SearchDelegate): # // TODO ensure tensor_graphs_cpp/bindings.cpp receives the ActionFeatureBufferize interface.
     def __init__(self, agent):
         super().__init__()
         self.agent = agent
@@ -96,6 +106,7 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
 
         self.extract_global = torch.zeros(agent.hidden_dim)
         self.dispatch_global = torch.zeros(agent.hidden_dim)
+        self.bufferize_global = torch.zeros(agent.hidden_dim)
         self.malloc_global = torch.zeros(agent.hidden_dim)
 
     def push_state(self):
@@ -122,6 +133,14 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
         src = torch.tensor(edge_src, dtype=torch.int64)
         dst = torch.tensor(edge_dst, dtype=torch.int64)
         self.dispatch_global = self.agent.dispatch_gnn(nf, src, dst)
+
+    def init_bufferize_graph(self, node_features, edge_src, edge_dst):
+        if not node_features:
+            return
+        nf = torch.tensor(node_features, dtype=torch.float32).view(-1, 5)
+        src = torch.tensor(edge_src, dtype=torch.int64)
+        dst = torch.tensor(edge_dst, dtype=torch.int64)
+        self.bufferize_global = self.agent.bufferize_gnn(nf, src, dst)
 
     def init_malloc_graph(self, node_features, edge_src, edge_dst):
         if not node_features:
@@ -172,6 +191,14 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
             self._extract_dispatch_features,
         )
 
+    def order_bufferize(self, choices):
+        return self._order_items(
+            choices,
+            self.agent.bufferize_rnn,
+            self.bufferize_global,
+            self._extract_bufferize_features,
+        )
+
     def order_malloc(self, avail_buffers):
         return self._order_items(
             avail_buffers,
@@ -210,6 +237,13 @@ class AgentDelegate(tensor_graphs.SearchDelegate):
             )
         return torch.tensor(feats, dtype=torch.float32)
 
+    def _extract_bufferize_features(self, items):
+        feats = [
+            [float(f.is_new_buffer), float(f.size), float(f.parent_size), float(f.parent_birth_time)] 
+            for f in items
+        ]
+        return torch.tensor(feats, dtype=torch.float32)
+
     def _extract_malloc_features(self, items):
         feats = [[float(f.size), float(f.start), float(f.end)] for f in items]
         return torch.tensor(feats, dtype=torch.float32)
@@ -244,4 +278,5 @@ def train():
 
 
 if __name__ == "__main__":
+    torch.manual_seed(42)
     train()

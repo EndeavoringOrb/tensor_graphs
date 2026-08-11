@@ -1,3 +1,4 @@
+// tensor_graphs_cpp/core/plan/search_delegate.hpp
 #pragma once
 #include "core/graph.hpp"
 #include "core/types.hpp"
@@ -20,30 +21,33 @@ struct ActionFeatureMalloc
     uint32_t end = 0;   // death time (idx into dispatch order of last eclass that uses this)
 };
 
+struct ActionFeatureBufferize
+{
+    float is_new_buffer;
+    uint64_t size;
+    uint64_t parent_size;
+    float parent_birth_time;
+};
+
 class SearchDelegate
 {
   public:
     virtual ~SearchDelegate() = default;
 
-    virtual void push_state()
-    {
-    }
-    virtual void pop_state()
-    {
-    }
+    virtual void push_state() {}
+    virtual void pop_state() {}
 
     virtual void init_egraph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                             const std::vector<uint32_t> &edge_dst)
-    {
-    }
+                             const std::vector<uint32_t> &edge_dst) {}
+    
     virtual void init_dispatch_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                                     const std::vector<uint32_t> &edge_dst)
-    {
-    }
+                                     const std::vector<uint32_t> &edge_dst) {}
+    
+    virtual void init_bufferize_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
+                                      const std::vector<uint32_t> &edge_dst) {}
+
     virtual void init_malloc_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                                   const std::vector<uint32_t> &edge_dst)
-    {
-    }
+                                   const std::vector<uint32_t> &edge_dst) {}
 
     virtual std::vector<uint32_t> order_enodes(const std::vector<ActionFeatureExtractDispatch> &enodes)
     {
@@ -57,6 +61,14 @@ class SearchDelegate
     {
         std::vector<uint32_t> res(ready_nodes.size());
         for (uint32_t i = 0; i < ready_nodes.size(); ++i)
+            res[i] = i;
+        return res;
+    }
+
+    virtual std::vector<uint32_t> order_bufferize(const std::vector<ActionFeatureBufferize> &choices)
+    {
+        std::vector<uint32_t> res(choices.size());
+        for (uint32_t i = 0; i < choices.size(); ++i)
             res[i] = i;
         return res;
     }
