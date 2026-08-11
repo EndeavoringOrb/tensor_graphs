@@ -1,6 +1,8 @@
 # train.py
+import argparse
 import tensor_graphs
 import torch
+import torch.multiprocessing as mp
 import torch.nn.functional as F
 from torch import nn, optim
 
@@ -40,23 +42,24 @@ class RNNModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.rnn = nn.GRUCell(feature_dim, hidden_dim)
         self.policy = nn.Linear(global_dim + hidden_dim + feature_dim, 1)
+        # Value head to predict the expected cost (AlphaDev-esque)
+        self.value = nn.Linear(global_dim + hidden_dim, 1)
 
     def forward(self, global_state, hidden_state, options_features):
         step_input = options_features.mean(dim=0).unsqueeze(0)  # (1, input_dim)
-        new_state = self.rnn(step_input, hidden_state.unsqueeze(0)).squeeze(
-            0
-        )  # (hidden_dim,)
+        new_state = self.rnn(step_input, hidden_state.unsqueeze(0)).squeeze(0)  # (hidden_dim,)
 
         N = options_features.size(0)
         global_expanded = global_state.unsqueeze(0).expand(N, -1)
         hidden_expanded = new_state.unsqueeze(0).expand(N, -1)
 
-        policy_in = torch.cat(
-            [global_expanded, hidden_expanded, options_features], dim=1
-        )
+        policy_in = torch.cat([global_expanded, hidden_expanded, options_features], dim=1)
         scores = self.policy(policy_in).squeeze(1)  # (N,)
 
-        return new_state, scores
+        value_in = torch.cat([global_state, new_state], dim=0)
+        val = self.value(value_in)  # (1,)
+
+        return new_state, scores, val
 
 
 class AdvancedAgent(nn.Module):
@@ -79,10 +82,8 @@ class AdvancedAgent(nn.Module):
         )
 
         # 3. Bufferize GNN
-        # Features: (size, birth_time, death_time, is_view, is_input) -> 5 features
         self.bufferize_gnn = GNNModel(in_features=5, hidden_dim=hidden_dim)
         # Bufferize RNN
-        # Features: (is_new_buffer, size, parent_size, parent_birth_time) -> 4 features
         self.bufferize_rnn = RNNModel(
             global_dim=hidden_dim, feature_dim=4, hidden_dim=hidden_dim
         )
@@ -95,7 +96,7 @@ class AdvancedAgent(nn.Module):
         )
 
 
-class AgentDelegate(tensor_graphs.SearchDelegate): # // TODO ensure tensor_graphs_cpp/bindings.cpp receives the ActionFeatureBufferize interface.
+class AgentDelegate(tensor_graphs.SearchDelegate):
     def __init__(self, agent):
         super().__init__()
         self.agent = agent
@@ -103,6 +104,7 @@ class AgentDelegate(tensor_graphs.SearchDelegate): # // TODO ensure tensor_graph
         self.hidden_states = []
         self.current_hidden = torch.zeros(agent.hidden_dim)
         self.log_probs = []
+        self.values = []
 
         self.extract_global = torch.zeros(agent.hidden_dim)
         self.dispatch_global = torch.zeros(agent.hidden_dim)
@@ -117,6 +119,7 @@ class AgentDelegate(tensor_graphs.SearchDelegate): # // TODO ensure tensor_graph
             self.current_hidden = self.hidden_states.pop()
         if len(self.log_probs) > len(self.hidden_states):
             self.log_probs.pop()
+            self.values.pop()
 
     def init_egraph(self, node_features, edge_src, edge_dst):
         if not node_features:
@@ -154,24 +157,26 @@ class AgentDelegate(tensor_graphs.SearchDelegate): # // TODO ensure tensor_graph
         if len(items) <= 1:
             if len(items) == 1:
                 self.log_probs.append(torch.tensor(0.0, requires_grad=True))
+                self.values.append(torch.tensor([0.0], requires_grad=True))
             return list(range(len(items)))
 
         features = extract_fn(items)
-        new_state, scores = rnn_model(global_state, self.current_hidden, features)
+        new_state, scores, val = rnn_model(global_state, self.current_hidden, features)
         self.current_hidden = new_state
 
         probs = torch.softmax(scores, dim=0)
         dist = torch.distributions.Categorical(probs)
 
-        # Gumbel-Max trick for sampling permutations without replacement
+        # Gumbel-Max trick for sampling permutations without replacement during exploration
         gumbel_noise = -torch.log(-torch.log(torch.rand_like(scores) + 1e-10) + 1e-10)
         noisy_scores = scores + gumbel_noise
 
         sorted_indices = torch.argsort(noisy_scores, descending=True).tolist()
 
-        # Log prob of top choice (DFS searches this first)
+        # Log prob and predicted value of the top choice (DFS searches this first)
         top_choice = sorted_indices[0]
         self.log_probs.append(dist.log_prob(torch.tensor(top_choice)))
+        self.values.append(val)
 
         return sorted_indices
 
@@ -239,7 +244,12 @@ class AgentDelegate(tensor_graphs.SearchDelegate): # // TODO ensure tensor_graph
 
     def _extract_bufferize_features(self, items):
         feats = [
-            [float(f.is_new_buffer), float(f.size), float(f.parent_size), float(f.parent_birth_time)] 
+            [
+                float(f.is_new_buffer),
+                float(f.size),
+                float(f.parent_size),
+                float(f.parent_birth_time),
+            ]
             for f in items
         ]
         return torch.tensor(feats, dtype=torch.float32)
@@ -249,23 +259,57 @@ class AgentDelegate(tensor_graphs.SearchDelegate): # // TODO ensure tensor_graph
         return torch.tensor(feats, dtype=torch.float32)
 
 
-def train():
-    agent = AdvancedAgent(hidden_dim=64)
-    optimizer = optim.Adam(agent.parameters(), lr=1e-3)
+class SharedAdam(optim.Adam):
+    """
+    A Shared Optimizer ensuring internal states are preserved across multi-processing environments.
+    """
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0):
+        super(SharedAdam, self).__init__(
+            params, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay
+        )
+        for group in self.param_groups:
+            for p in group["params"]:
+                state = self.state[p]
+                state["step"] = torch.tensor(0, dtype=torch.float32)
+                state["exp_avg"] = torch.zeros_like(p.data)
+                state["exp_avg_sq"] = torch.zeros_like(p.data)
+                
+                # Share in memory natively for async updates across parallel workers
+                state["step"].share_memory_()
+                state["exp_avg"].share_memory_()
+                state["exp_avg_sq"].share_memory_()
+
+
+def worker_process(worker_id, shared_agent, optimizer, num_epochs):
+    # Set seed differently for each worker to ensure diverse exploration
+    torch.manual_seed(42 + worker_id)
 
     model_name = "gemma-3-270m"
     model_path = "models/google/gemma-3-270m"
 
-    for epoch in range(1000000):
-        delegate = AgentDelegate(agent)
+    for epoch in range(num_epochs):
+        delegate = AgentDelegate(shared_agent)
 
-        cost = tensor_graphs.plan_graph(model_name, model_path, delegate)
+        try:
+            cost = tensor_graphs.plan_graph(model_name, model_path, delegate)
+        except Exception as e:
+            print(f"Worker {worker_id} | Error during planning: {e}")
+            continue
 
         reward = -cost if cost < float("inf") else -1e6
+        reward_t = torch.tensor([reward], dtype=torch.float32)
 
-        loss = torch.tensor(0.0, requires_grad=True)
-        for lp in delegate.log_probs:
-            loss = loss - lp * reward
+        loss = torch.tensor(0.0)
+
+        # Advantage Actor-Critic Loss formulation replacing standard REINFORCE
+        # Advantage A = R - V
+        # Policy Loss = -log_prob * A
+        # Value Loss = (R - V)^2
+        for lp, v in zip(delegate.log_probs, delegate.values):
+            advantage = reward_t - v.detach()
+            policy_loss = -lp * advantage
+            value_loss = F.mse_loss(v, reward_t)
+            loss = loss + policy_loss + value_loss
 
         optimizer.zero_grad()
         if loss.requires_grad and loss.item() != 0.0:
@@ -273,10 +317,34 @@ def train():
             optimizer.step()
 
         print(
-            f"Epoch {epoch:03d} | Execution Cost: {cost:.4f} ms | REINFORCE Loss: {loss.item():.4f}"
+            f"Worker {worker_id:02d} | Epoch {epoch:03d} | Cost: {cost:8.4f} ms | Loss: {loss.item():.4f}"
         )
 
 
+def train():
+    parser = argparse.ArgumentParser(description="Train GNN/RNN Agent via distributed A2C")
+    parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
+    parser.add_argument("--epochs", type=int, default=1_000_000, help="Number of epochs per worker")
+    args = parser.parse_args()
+
+    agent = AdvancedAgent(hidden_dim=64)
+    # Enable weights sharing to pass across PyTorch mp.Process calls
+    agent.share_memory()
+
+    optimizer = SharedAdam(agent.parameters(), lr=1e-3)
+
+    processes = []
+    for rank in range(args.workers):
+        p = mp.Process(
+            target=worker_process, args=(rank, agent, optimizer, args.epochs)
+        )
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
+
 if __name__ == "__main__":
-    torch.manual_seed(42)
+    mp.set_start_method("spawn", force=True)
     train()
