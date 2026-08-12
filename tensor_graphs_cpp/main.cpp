@@ -88,7 +88,7 @@ template <typename ConfigClass>
 void run_autoregressive_llm(const std::string &model_path, const std::string &model_name, const std::string &cache_file,
                             const std::vector<uint32_t> &initial_tokens, uint32_t vocab_size, uint32_t max_seq_len,
                             uint32_t num_tokens_to_generate, bool only_plan, bool disable_caching,
-                            float min_compile_time, const std::string &sort_enodes,
+                            float min_compile_time,
                             ModelGraphRoots (*builder)(Graph &, MemoryManager &, const std::string &model_path,
                                                        uint32_t max_seq_len),
                             bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
@@ -112,7 +112,7 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
     std::string gHash = computeGraphHash(g, roots.roots);
     Repo repo("benchmarks/repo_" + model_name, gHash, true);
 
-    Session session(g, mem, logits_id, cache_file, 0, &repo, disable_caching, min_compile_time, sort_enodes);
+    Session session(g, mem, logits_id, cache_file, 0, &repo, disable_caching, min_compile_time);
 
     for (uint32_t i = tokens.size(); i < max_seq_len; ++i)
     {
@@ -177,23 +177,23 @@ void run_autoregressive_llm(const std::string &model_path, const std::string &mo
 }
 
 void run_gemma(const std::string &model_path, bool only_plan, bool disable_caching, float min_compile_time,
-               const std::string &sort_enodes, bool refOnly = false, bool doSaturate = true,
-               const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+               bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
+               Graph **activeGraphOut = nullptr)
 {
     run_autoregressive_llm<Gemma3ModelConfig>(model_path, "gemma-3-270m", "dirty_region_caches/gemma-3-270m-cpp.bin",
                                               {2, 9259}, Gemma3ModelConfig().vocab_size, 8, 6, only_plan,
-                                              disable_caching, min_compile_time, sort_enodes, build_gemma_graph,
-                                              refOnly, doSaturate, debugCb, activeGraphOut);
+                                              disable_caching, min_compile_time, build_gemma_graph, refOnly, doSaturate,
+                                              debugCb, activeGraphOut);
 }
 
 void run_qwen_35b(const std::string &model_path, bool only_plan, bool disable_caching, float min_compile_time,
-                  const std::string &sort_enodes, bool refOnly = false, bool doSaturate = true,
-                  const Debug::Callback &debugCb = nullptr, Graph **activeGraphOut = nullptr)
+                  bool refOnly = false, bool doSaturate = true, const Debug::Callback &debugCb = nullptr,
+                  Graph **activeGraphOut = nullptr)
 {
     run_autoregressive_llm<Qwen3_6_35B_A3B_Config>(
         model_path, "qwen-3.6-35b-a3b", "dirty_region_caches/qwen-3.6-35b-a3b-cpp.bin", {24227},
-        Qwen3_6_35B_A3B_Config().vocab_size, 32, 31, only_plan, disable_caching, min_compile_time, sort_enodes,
-        build_qwen_graph, refOnly, doSaturate, debugCb, activeGraphOut);
+        Qwen3_6_35B_A3B_Config().vocab_size, 32, 31, only_plan, disable_caching, min_compile_time, build_qwen_graph,
+        refOnly, doSaturate, debugCb, activeGraphOut);
 }
 
 int main(int argc, char *argv[])
@@ -232,7 +232,6 @@ int main(int argc, char *argv[])
     std::string write_refs = parser.get_option("--write-refs");
     std::string compare_refs = parser.get_option("--compare-refs");
     float min_compile_time = std::stof(parser.get_option("--min-compile-time"));
-    std::string sort_enodes = parser.get_option("--sort-enodes");
 
     Debug::ReferenceVerifier verifier;
     if (!verifier.init(write_refs, compare_refs))
@@ -250,11 +249,11 @@ int main(int argc, char *argv[])
     };
 
     if (model == "gemma-3-270m")
-        run_gemma(model_path, only_plan, disable_caching, min_compile_time, sort_enodes, refOnly, doSaturate, debugCb,
+        run_gemma(model_path, only_plan, disable_caching, min_compile_time, refOnly, doSaturate, debugCb,
                   &activeGraphPtr);
     else if (model == "qwen-3.6-35b-a3b")
-        run_qwen_35b(model_path, only_plan, disable_caching, min_compile_time, sort_enodes, refOnly, doSaturate,
-                     debugCb, &activeGraphPtr);
+        run_qwen_35b(model_path, only_plan, disable_caching, min_compile_time, refOnly, doSaturate, debugCb,
+                     &activeGraphPtr);
     else
         std::cout << "Model not implemented yet: " << model << std::endl;
 

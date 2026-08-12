@@ -43,6 +43,7 @@ clean.txt
 OpenCL-SDK
 analysis*.txt
 reference_tensors
+*.log
 
 # Profiling artifacts
 profile_output*

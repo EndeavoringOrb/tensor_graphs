@@ -1,5 +1,4 @@
 import numpy as np
-
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ir.node import TensorNode
 from tensor_graphs.ops.atomic_types import OpType

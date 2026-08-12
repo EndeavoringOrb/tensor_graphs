@@ -74,7 +74,6 @@ struct Session
     Repo *repo;
     bool disableCaching = false;
     float minCompileSeconds = 0.0f;
-    std::string sort_enodes;
     std::shared_ptr<SearchDelegate> delegate = nullptr;
     bool logCostCalls = false;
 
@@ -158,12 +157,11 @@ struct Session
 
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
             Repo *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
-            const std::string &_sort_enodes = "cost", std::shared_ptr<SearchDelegate> _delegate = nullptr,
-            bool _logCostCalls = false)
+            std::shared_ptr<SearchDelegate> _delegate = nullptr, bool _logCostCalls = false)
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
           nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
-          minCompileSeconds(_minCompileSeconds), sort_enodes(_sort_enodes), delegate(_delegate),
-          logCostCalls(_logCostCalls), costModel(_logCostCalls)
+          minCompileSeconds(_minCompileSeconds), delegate(_delegate), logCostCalls(_logCostCalls),
+          costModel(_logCostCalls)
     {
         ensureOutputDirectories();
         loadCache();
@@ -198,7 +196,7 @@ struct Session
         }
     }
 
-     void plan(bool doSaturate = true)
+    void plan(bool doSaturate = true)
     {
         ensureOutputDirectories();
         costModel.setLogging(logCostCalls);
@@ -333,7 +331,7 @@ struct Session
                 const Bucket &bucket = manualBuckets[i];
 
                 CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, false, repo,
-                                                  {}, minCompileSeconds, sort_enodes, delegate);
+                                                  {}, minCompileSeconds, delegate);
 
                 for (const auto &inst : plan.instructions)
                 {
@@ -359,7 +357,7 @@ struct Session
         {
             const Bucket &bucket = manualBuckets[i];
             CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo,
-                                              preallocatedBuffers, minCompileSeconds, sort_enodes, delegate);
+                                              preallocatedBuffers, minCompileSeconds, delegate);
             plan.bucket = bucket;
             cachedGraphs.push_back(plan);
         }

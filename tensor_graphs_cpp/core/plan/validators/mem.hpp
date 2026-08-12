@@ -150,11 +150,12 @@ inline EClassId resolve_view_alias(EClassId id, const EGraph &egraph,
 
 // tensor_graphs_cpp/core/plan/validators/mem.hpp
 
-struct BufferizeIterator {
-    const std::vector<EClassId>& ordered;
-    const EGraph& egraph;
-    const std::unordered_map<EClassId, uint32_t>& selection_map;
-    const std::vector<ENodeInfo>& enodeInfos;
+struct BufferizeIterator
+{
+    const std::vector<EClassId> &ordered;
+    const EGraph &egraph;
+    const std::unordered_map<EClassId, uint32_t> &selection_map;
+    const std::vector<ENodeInfo> &enodeInfos;
     std::shared_ptr<SearchDelegate> delegate;
 
     std::unordered_map<EClassId, uint32_t> birth_times;
@@ -168,77 +169,92 @@ struct BufferizeIterator {
     std::vector<std::vector<uint32_t>> choice_orders; // Changed to uint32_t to match SearchDelegate::order_bufferize
     std::unordered_map<EClassId, EClassId> inplace_alias;
 
-    BufferizeIterator(const std::vector<EClassId> &_ordered,
-                      const EGraph &_egraph,
+    BufferizeIterator(const std::vector<EClassId> &_ordered, const EGraph &_egraph,
                       const std::unordered_map<EClassId, uint32_t> &_selection_map,
-                      const std::vector<ENodeInfo> &_enodeInfos,
-                      std::shared_ptr<SearchDelegate> _delegate)
-        : ordered(_ordered), egraph(_egraph), selection_map(_selection_map),
-          enodeInfos(_enodeInfos), delegate(_delegate)
+                      const std::vector<ENodeInfo> &_enodeInfos, std::shared_ptr<SearchDelegate> _delegate)
+        : ordered(_ordered), egraph(_egraph), selection_map(_selection_map), enodeInfos(_enodeInfos),
+          delegate(_delegate)
     {
         init();
     }
 
-    void init() {
+    void init()
+    {
         uint32_t N = ordered.size();
         state.assign(N, 0);
         choice_orders.resize(N);
         valid_choices.resize(N);
 
-        for (uint32_t i = 0; i < N; ++i) {
+        for (uint32_t i = 0; i < N; ++i)
+        {
             EClassId eclass = ordered[i];
             birth_times[eclass] = i;
             death_times[eclass] = i + 1;
         }
-        for (uint32_t i = 0; i < N; ++i) {
+        for (uint32_t i = 0; i < N; ++i)
+        {
             EClassId eclass = ordered[i];
             auto sel_it = selection_map.find(eclass);
-            if (sel_it == selection_map.end()) continue;
+            if (sel_it == selection_map.end())
+                continue;
             uint32_t sel = sel_it->second;
             ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
             const ENode &node = egraph.getENode(enode_id);
-            for (EClassId child : node.getChildren()) {
+            for (EClassId child : node.getChildren())
+            {
                 EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
                 death_times[child_base] = std::max(death_times[child_base], i);
             }
         }
 
-        for (uint32_t i = 0; i < N; ++i) {
+        for (uint32_t i = 0; i < N; ++i)
+        {
             EClassId eclass = ordered[i];
             auto sel_it = selection_map.find(eclass);
-            if (sel_it == selection_map.end()) continue;
+            if (sel_it == selection_map.end())
+                continue;
             uint32_t sel = sel_it->second;
             ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
             const ENode &node = egraph.getENode(enode_id);
             const ENodeInfo &info = enodeInfos[enode_id.value];
 
-            if (info.is_view) {
+            if (info.is_view)
+            {
                 continue;
             }
-            if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE) {
+            if (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE)
+            {
                 valid_choices[i].push_back(-1);
                 continue;
             }
 
             valid_choices[i].push_back(-1); // Always allow allocating a new buffer
 
-            if (node.getKernelId().value != 0) {
+            if (node.getKernelId().value != 0)
+            {
                 const KernelEntry &kernel = KernelRegistry::get().getKernel(node.getKernelId());
-                if (!kernel.safe_inplace_idxs.empty()) {
-                    for (uint32_t idx : kernel.safe_inplace_idxs) {
-                        if (idx < node.getChildren().size()) {
+                if (!kernel.safe_inplace_idxs.empty())
+                {
+                    for (uint32_t idx : kernel.safe_inplace_idxs)
+                    {
+                        if (idx < node.getChildren().size())
+                        {
                             EClassId child = egraph.findConst(node.getChildren()[idx]);
                             EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
 
-                            if (death_times[child_base] == i) {
+                            if (death_times[child_base] == i)
+                            {
                                 auto c_sel_it = selection_map.find(child_base);
-                                if (c_sel_it == selection_map.end()) continue;
+                                if (c_sel_it == selection_map.end())
+                                    continue;
                                 uint32_t c_sel = c_sel_it->second;
                                 const ENode &c_node = egraph.getENode(egraph.getEClass(child_base).enodes[c_sel]);
-                                if (c_node.getOpType() != OpType::INPUT && c_node.getOpType() != OpType::CACHE) {
+                                if (c_node.getOpType() != OpType::INPUT && c_node.getOpType() != OpType::CACHE)
+                                {
                                     uint64_t out_size = getSizeBytes(node.getShape(), node.getDType());
                                     uint64_t in_size = getSizeBytes(c_node.getShape(), c_node.getDType());
-                                    if (out_size <= in_size) {
+                                    if (out_size <= in_size)
+                                    {
                                         valid_choices[i].push_back((int)idx);
                                     }
                                 }
@@ -249,20 +265,24 @@ struct BufferizeIterator {
             }
         }
 
-        if (delegate) {
+        if (delegate)
+        {
             std::vector<float> node_features;
             std::vector<uint32_t> edge_src;
             std::vector<uint32_t> edge_dst;
 
             std::unordered_map<EClassId, uint32_t> eclass_to_idx;
-            for (uint32_t i = 0; i < N; ++i) {
+            for (uint32_t i = 0; i < N; ++i)
+            {
                 eclass_to_idx[ordered[i]] = i;
             }
 
-            for (uint32_t i = 0; i < N; ++i) {
+            for (uint32_t i = 0; i < N; ++i)
+            {
                 EClassId eclass = ordered[i];
                 auto sel_it = selection_map.find(eclass);
-                if (sel_it == selection_map.end()) {
+                if (sel_it == selection_map.end())
+                {
                     node_features.push_back(0.0f);
                     node_features.push_back(0.0f);
                     node_features.push_back(0.0f);
@@ -279,11 +299,14 @@ struct BufferizeIterator {
                 node_features.push_back((float)birth_times[eclass]);
                 node_features.push_back((float)death_times[eclass]);
                 node_features.push_back(info.is_view ? 1.0f : 0.0f);
-                node_features.push_back((node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE) ? 1.0f : 0.0f);
+                node_features.push_back(
+                    (node.getOpType() == OpType::INPUT || node.getOpType() == OpType::CACHE) ? 1.0f : 0.0f);
 
-                for (EClassId child : node.getChildren()) {
+                for (EClassId child : node.getChildren())
+                {
                     EClassId child_canon = egraph.findConst(child);
-                    if (eclass_to_idx.count(child_canon)) {
+                    if (eclass_to_idx.count(child_canon))
+                    {
                         edge_src.push_back(eclass_to_idx[child_canon]);
                         edge_dst.push_back(i);
                     }
@@ -293,30 +316,37 @@ struct BufferizeIterator {
         }
     }
 
-    EClassId get_inplace_alias(EClassId id) const {
+    EClassId get_inplace_alias(EClassId id) const
+    {
         auto it = inplace_alias.find(id);
-        while (it != inplace_alias.end()) {
+        while (it != inplace_alias.end())
+        {
             id = it->second;
             it = inplace_alias.find(id);
         }
         return id;
     }
 
-    bool ascend() {
+    bool ascend()
+    {
         k--;
-        while (k >= 0) {
-            if (valid_choices[k].empty()) {
+        while (k >= 0)
+        {
+            if (valid_choices[k].empty())
+            {
                 k--;
                 continue;
             }
-            if (delegate && valid_choices[k].size() > 1) {
+            if (delegate && valid_choices[k].size() > 1)
+            {
                 delegate->pop_state();
             }
 
             EClassId eclass = ordered[k];
             inplace_alias.erase(eclass);
 
-            if (state[k] < valid_choices[k].size()) {
+            if (state[k] < valid_choices[k].size())
+            {
                 return true;
             }
             state[k] = 0;
@@ -325,10 +355,15 @@ struct BufferizeIterator {
         return false;
     }
 
-    bool getNextBufferization(std::vector<ParallelBuffer> &out_buffers, std::unordered_map<EClassId, BufferId> &out_eclass_to_buf) {
-        if (is_done) return false;
-        if (!first_yield) {
-            if (!ascend()) {
+    bool getNextBufferization(std::vector<ParallelBuffer> &out_buffers,
+                              std::unordered_map<EClassId, BufferId> &out_eclass_to_buf)
+    {
+        if (is_done)
+            return false;
+        if (!first_yield)
+        {
+            if (!ascend())
+            {
                 is_done = true;
                 return false;
             }
@@ -336,13 +371,16 @@ struct BufferizeIterator {
         first_yield = false;
 
         uint32_t N = ordered.size();
-        while (k >= 0) {
-            if (k == N) {
+        while (k >= 0)
+        {
+            if (k == N)
+            {
                 build_buffers(out_buffers, out_eclass_to_buf);
                 return true;
             }
 
-            if (valid_choices[k].empty()) {
+            if (valid_choices[k].empty())
+            {
                 k++;
                 continue;
             }
@@ -352,33 +390,42 @@ struct BufferizeIterator {
             ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
             const ENode &node = egraph.getENode(enode_id);
 
-            if (state[k] == 0) {
-                if (delegate && valid_choices[k].size() > 1) {
+            if (state[k] == 0)
+            {
+                if (delegate && valid_choices[k].size() > 1)
+                {
                     delegate->push_state();
-                    
+
                     std::vector<ActionFeatureBufferize> features;
                     uint64_t out_size = getSizeBytes(node.getShape(), node.getDType());
 
-                    for (int choice : valid_choices[k]) {
+                    for (int choice : valid_choices[k])
+                    {
                         ActionFeatureBufferize f;
-                        if (choice == -1) {
+                        if (choice == -1)
+                        {
                             f.is_new_buffer = 1.0f;
                             f.size = out_size;
                             f.parent_size = 0;
                             f.parent_birth_time = 0.0f;
-                        } else {
+                        }
+                        else
+                        {
                             f.is_new_buffer = 0.0f;
                             f.size = out_size;
                             EClassId child = egraph.findConst(node.getChildren()[choice]);
                             EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
                             EClassId parent_actual_base = get_inplace_alias(child_base);
-                            
+
                             auto c_sel_it = selection_map.find(child_base);
-                            if (c_sel_it != selection_map.end()) {
+                            if (c_sel_it != selection_map.end())
+                            {
                                 uint32_t c_sel = c_sel_it->second;
                                 const ENode &c_node = egraph.getENode(egraph.getEClass(child_base).enodes[c_sel]);
                                 f.parent_size = getSizeBytes(c_node.getShape(), c_node.getDType());
-                            } else {
+                            }
+                            else
+                            {
                                 f.parent_size = 0;
                             }
                             f.parent_birth_time = (float)birth_times[parent_actual_base];
@@ -386,27 +433,34 @@ struct BufferizeIterator {
                         features.push_back(f);
                     }
                     choice_orders[k] = delegate->order_bufferize(features);
-                } else {
+                }
+                else
+                {
                     choice_orders[k].resize(valid_choices[k].size());
                     std::iota(choice_orders[k].begin(), choice_orders[k].end(), 0u);
                 }
             }
 
-            if (state[k] < valid_choices[k].size()) {
+            if (state[k] < valid_choices[k].size())
+            {
                 uint32_t choice_idx = choice_orders[k][state[k]];
                 int choice = valid_choices[k][choice_idx];
                 state[k]++;
 
-                if (choice != -1) {
+                if (choice != -1)
+                {
                     EClassId child = egraph.findConst(node.getChildren()[choice]);
                     EClassId child_base = resolve_view_alias(child, egraph, selection_map, enodeInfos);
                     inplace_alias[eclass] = get_inplace_alias(child_base);
                 }
 
                 k++;
-            } else {
+            }
+            else
+            {
                 state[k] = 0;
-                if (!ascend()) {
+                if (!ascend())
+                {
                     is_done = true;
                     return false;
                 }
@@ -416,28 +470,34 @@ struct BufferizeIterator {
         return false;
     }
 
-    void build_buffers(std::vector<ParallelBuffer> &out_buffers, std::unordered_map<EClassId, BufferId> &out_eclass_to_buf) {
+    void build_buffers(std::vector<ParallelBuffer> &out_buffers,
+                       std::unordered_map<EClassId, BufferId> &out_eclass_to_buf)
+    {
         out_buffers.clear();
         out_eclass_to_buf.clear();
 
         std::unordered_map<EClassId, uint32_t> act_birth_times = birth_times;
         std::unordered_map<EClassId, uint32_t> act_death_times = death_times;
 
-        for (uint32_t i = 0; i < ordered.size(); ++i) {
+        for (uint32_t i = 0; i < ordered.size(); ++i)
+        {
             EClassId eclass = ordered[i];
             auto sel_it = selection_map.find(eclass);
-            if (sel_it == selection_map.end()) continue;
+            if (sel_it == selection_map.end())
+                continue;
             uint32_t sel = sel_it->second;
             ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
             const ENodeInfo &info = enodeInfos[enode_id.value];
 
             EClassId base = eclass;
-            if (info.is_view) {
+            if (info.is_view)
+            {
                 base = resolve_view_alias(eclass, egraph, selection_map, enodeInfos);
             }
             EClassId target_base = get_inplace_alias(base);
 
-            if (target_base != eclass) {
+            if (target_base != eclass)
+            {
                 if (act_birth_times.count(target_base))
                     act_birth_times[target_base] = std::min(act_birth_times[target_base], act_birth_times[eclass]);
                 if (act_death_times.count(target_base))
@@ -446,30 +506,36 @@ struct BufferizeIterator {
         }
 
         std::unordered_map<EClassId, BufferId> base_to_buf;
-        for (EClassId eclass : ordered) {
+        for (EClassId eclass : ordered)
+        {
             auto sel_it = selection_map.find(eclass);
-            if (sel_it == selection_map.end()) continue;
+            if (sel_it == selection_map.end())
+                continue;
 
             EClassId base = eclass;
             uint32_t sel = sel_it->second;
             ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
-            if (enodeInfos[enode_id.value].is_view) {
+            if (enodeInfos[enode_id.value].is_view)
+            {
                 base = resolve_view_alias(eclass, egraph, selection_map, enodeInfos);
             }
             EClassId target_base = get_inplace_alias(base);
 
-            if (base_to_buf.find(target_base) == base_to_buf.end()) {
+            if (base_to_buf.find(target_base) == base_to_buf.end())
+            {
                 BufferId buf_id = BufferId{(uint32_t)out_buffers.size()};
                 base_to_buf[target_base] = buf_id;
 
                 auto base_sel_it = selection_map.find(target_base);
-                if (base_sel_it == selection_map.end()) continue;
+                if (base_sel_it == selection_map.end())
+                    continue;
                 uint32_t base_sel = base_sel_it->second;
                 ENodeId base_enode_id = egraph.getEClass(target_base).enodes[base_sel];
                 const ENode &base_node = egraph.getENode(base_enode_id);
 
                 uint64_t size_bytes = getSizeBytes(base_node.getShape(), base_node.getDType());
-                if (size_bytes == 0) {
+                if (size_bytes == 0)
+                {
                     Error::throw_err("empty node");
                 }
                 size_bytes = (size_bytes + 4095) & ~4095ULL;
@@ -868,7 +934,7 @@ struct MemValidator : public ISelectionValidator
         std::vector<ParallelBuffer> unallocated_buffers;
         std::unordered_map<EClassId, BufferId> eclass_to_buf_local;
 
-        std::unordered_set<EClassId> all_conflict_nodes; 
+        std::unordered_set<EClassId> all_conflict_nodes;
         bool any_alloc_ok = false;
 
         while (buf_iter.getNextBufferization(unallocated_buffers, eclass_to_buf_local))
@@ -883,7 +949,8 @@ struct MemValidator : public ISelectionValidator
                     continue;
 
                 auto sel_it = selection_map.find(eclass);
-                if (sel_it == selection_map.end()) continue;
+                if (sel_it == selection_map.end())
+                    continue;
                 uint32_t sel = sel_it->second;
                 ENodeId enode_id = egraph.getEClass(eclass).enodes[sel];
                 const ENode &node = egraph.getENode(enode_id);
@@ -1028,7 +1095,8 @@ struct MemValidator : public ISelectionValidator
                 if (!added)
                 {
                     auto sel_it = selection_map.find(node_in_path);
-                    if (sel_it != selection_map.end()) {
+                    if (sel_it != selection_map.end())
+                    {
                         uint32_t sel = sel_it->second;
                         ENodeId enode_id = egraph.getEClass(node_in_path).enodes[sel];
                         const ENode &node = egraph.getENode(enode_id);
@@ -1052,7 +1120,8 @@ struct MemValidator : public ISelectionValidator
             }
         }
 
-        if (any_alloc_ok) {
+        if (any_alloc_ok)
+        {
             return true;
         }
 

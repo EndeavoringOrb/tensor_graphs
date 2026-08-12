@@ -9,7 +9,6 @@ import argparse
 import collections
 import dataclasses
 import json
-import math
 import random
 import struct
 import sys
@@ -18,25 +17,23 @@ from pathlib import Path
 from queue import Empty
 
 import psutil
+import tensor_graphs
 import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 from torch import nn, optim
 
-import tensor_graphs
-
 
 @dataclasses.dataclass
 class TrainConfig:
-    run_name: str = "alphazero_run"
     run_dir: str = ""
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
     workers: int = 4
-    num_simulations: int = 4  # Search Method: MCTS-style simulations per episode
-    replay_buffer_size: int = 5000  # Architecture: Central Replay Buffer
-    batch_size: int = 64
+    num_simulations: int = 30  # Search Method: MCTS-style simulations per episode
+    replay_buffer_size: int = 50000  # Architecture: Central Replay Buffer
+    batch_size: int = 1024
     save_interval: int = 20  # Save / Sync weights every N batches
     hidden_dim: int = 64
     lr: float = 1e-3
@@ -345,8 +342,10 @@ def actor_worker(worker_id: int, config: TrainConfig, replay_queue: mp.Queue):
                     replay_queue.put({"type": "log", "msg": err_msg})
                     cost = float("inf")
 
-                if cost < best_cost:
-                    best_cost = cost
+                if cost < float("inf"):
+                    replay_queue.put({"type": "cost_metric", "cost": float(cost)})
+
+                best_cost = min(best_cost, cost)
 
                 # Aggregate visit counts (MCTS analogue)
                 for step in delegate.trajectory:
@@ -361,7 +360,6 @@ def actor_worker(worker_id: int, config: TrainConfig, replay_queue: mp.Queue):
             # Determine final episode return (Z)
             if best_cost < float("inf"):
                 Z = 1000.0 / (best_cost + 1.0)
-                replay_queue.put({"type": "cost_metric", "cost": float(best_cost)})
             else:
                 Z = -1.0
 
@@ -496,9 +494,7 @@ def learner_process(config: TrainConfig, replay_queue: mp.Queue):
 
             with open(losses_bin_path, "ab") as f_bin:
                 f_bin.write(
-                    struct.pack(
-                        pack_fmt, batches_processed, float(total_loss.detach())
-                    )
+                    struct.pack(pack_fmt, batches_processed, float(total_loss.detach()))
                 )
                 f_bin.flush()
 

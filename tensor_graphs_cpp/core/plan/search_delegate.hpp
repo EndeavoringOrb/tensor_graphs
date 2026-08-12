@@ -34,20 +34,32 @@ class SearchDelegate
   public:
     virtual ~SearchDelegate() = default;
 
-    virtual void push_state() {}
-    virtual void pop_state() {}
+    virtual void push_state()
+    {
+    }
+    virtual void pop_state()
+    {
+    }
 
     virtual void init_egraph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                             const std::vector<uint32_t> &edge_dst) {}
-    
+                             const std::vector<uint32_t> &edge_dst)
+    {
+    }
+
     virtual void init_dispatch_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                                     const std::vector<uint32_t> &edge_dst) {}
-    
+                                     const std::vector<uint32_t> &edge_dst)
+    {
+    }
+
     virtual void init_bufferize_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                                      const std::vector<uint32_t> &edge_dst) {}
+                                      const std::vector<uint32_t> &edge_dst)
+    {
+    }
 
     virtual void init_malloc_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
-                                   const std::vector<uint32_t> &edge_dst) {}
+                                   const std::vector<uint32_t> &edge_dst)
+    {
+    }
 
     virtual std::vector<uint32_t> order_enodes(const std::vector<ActionFeatureExtractDispatch> &enodes)
     {

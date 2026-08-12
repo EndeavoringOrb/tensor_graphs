@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import struct
+
 import matplotlib.pyplot as plt
 
 
@@ -54,7 +55,7 @@ def main():
 
     if loss_batches:
         ax = axes[plot_idx, 0]
-        ax.set_yscale('log')
+        ax.set_yscale("log")
         ax.plot(loss_batches, losses, color="red", linewidth=1.5, label="Total Loss")
         ax.scatter(loss_batches, losses, alpha=0.4, s=10, c="salmon")
         ax.set_title("Learner Loss over Optimization Batches")
@@ -66,8 +67,14 @@ def main():
 
     if cost_indices:
         ax = axes[plot_idx, 0]
-        ax.set_yscale('log')
-        ax.plot(cost_indices, costs, color="blue", linewidth=1.5, label="Extracted Cost (ms)")
+        ax.set_yscale("log")
+        ax.plot(
+            cost_indices,
+            costs,
+            color="blue",
+            linewidth=1.5,
+            label="Extracted Cost (ms)",
+        )
         ax.scatter(cost_indices, costs, alpha=0.4, s=10, c="skyblue")
         ax.set_title("Extracted Cost over Episodes")
         ax.set_xlabel("Episode / Sample")

@@ -55,7 +55,6 @@ int main(int argc, char *argv[])
     parser.add_positional("model_path", "Model directory.");
     parser.add_flag({"--disable-caching"}, "Disable dirty region session caching.");
     parser.add_option({"--min-compile-time"}, "Minimum required compile time per bucket in seconds.", "0.0");
-    parser.add_option({"--sort-enodes"}, "Sort order for enodes in extraction (cost or height).", "height");
 
     if (!parser.parse(argc, argv))
         return 1;
@@ -63,7 +62,6 @@ int main(int argc, char *argv[])
     std::string model_path = parser.get_positional("model_path");
     bool disable_caching = parser.get_flag("--disable-caching");
     float min_compile_time = std::stof(parser.get_option("--min-compile-time"));
-    std::string sort_enodes = parser.get_option("--sort-enodes");
 
     SharedMemoryPayload *shm_payload = nullptr;
 #ifdef TG_OS_WINDOWS
@@ -94,7 +92,7 @@ int main(int argc, char *argv[])
     std::string gHash = computeGraphHash(g, {logits_id});
     Repo repo("benchmarks/repo_deepseek-v4", gHash, true);
     Session session(g, mem, logits_id, "dirty_region_caches/deepseek-v4-flash.bin", 0, &repo, disable_caching,
-                    min_compile_time, sort_enodes);
+                    min_compile_time);
 
     // for (uint32_t i = 1; i <= max_seq_len; ++i)
     // {

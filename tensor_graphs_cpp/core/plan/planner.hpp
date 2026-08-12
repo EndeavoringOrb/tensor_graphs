@@ -98,17 +98,6 @@ struct Planner
                     ruleMatchCounts[rule->name()]++;
                     nMatches++;
                 }
-                // if (eNodeIdx % 10000 == 0)
-                // {
-                //     std::stringstream ss;
-                //     ss << "\n--- Saturation Summary (" << iterations << " iterations) ---" << std::endl;
-                //     for (auto const &[name, count] : ruleMatchCounts)
-                //     {
-                //         ss << "  " << name << ": " << count << " matches\n";
-                //     }
-                //     ss << "Total Matches: " << nMatches;
-                //     LOG(L_INFO) << ss.str();
-                // }
             }
             egraph.rebuild();
             uint32_t postUniqueNodes = egraph.getNumUniqueENodes();
@@ -229,8 +218,8 @@ struct Planner
                                  const std::unordered_map<EClassId, LogicalId> &eclassToLogical,
                                  const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers,
                                  bool stopOnFirstValid = true, bool strictCache = false, float minCompileSeconds = 0.0f,
-                                 const std::string &sort_enodes = "cost",
-                                 std::shared_ptr<SearchDelegate> delegate = nullptr)
+                                 std::shared_ptr<SearchDelegate> delegate = nullptr,
+                                 const std::vector<ENodeInfo> &providedEnodeInfos = {})
     {
         constexpr float EPS = 1e-6f;
 
@@ -262,172 +251,181 @@ struct Planner
             return false;
         };
 
-        ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info");
-        std::vector<ENodeInfo> enodeInfos(egraph.getENodes().size());
-        for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
+        std::vector<ENodeInfo> enodeInfos;
+        if (!providedEnodeInfos.empty())
         {
-            const ENode &enode = egraph.getENodes()[i];
-            ENodeInfo info;
-            info.is_view = false;
-
-            if (enode.getKernelId() != KernelId{0})
+            enodeInfos = providedEnodeInfos;
+        }
+        else
+        {
+            ProgressTimer timer3(egraph.getENodes().size(), "calculating enode info");
+            enodeInfos.resize(egraph.getENodes().size());
+            for (uint32_t i = 0; i < egraph.getENodes().size(); ++i)
             {
-                const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
-                info.is_view = kernel.is_view;
-            }
+                const ENode &enode = egraph.getENodes()[i];
+                ENodeInfo info;
+                info.is_view = false;
 
-            if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
-            {
-                info.cost = 0.0f;
-                if (strictCache && enode.getOpType() == OpType::CACHE)
+                if (enode.getKernelId() != KernelId{0})
                 {
-                    EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
-                    EClassId canonId = egraph.findConst(e_class_id);
-                    LogicalId logicalId =
-                        eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : LogicalId{UINT32_MAX};
-                    if (logicalId == LogicalId{UINT32_MAX} || cachedNodes.find(logicalId) == cachedNodes.end())
-                    {
-                        info.cost = TGConstants::INF;
-                    }
-                    else if (enode.getMemSpace() != cachedNodes.at(logicalId))
-                    {
-                        info.cost = TGConstants::INF;
-                    }
+                    const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
+                    info.is_view = kernel.is_view;
                 }
-            }
-            else if (enode.getKernelId() != KernelId{0})
-            {
-                std::vector<std::vector<uint32_t>> inShapes;
-                std::vector<std::vector<uint64_t>> inStrides;
-                std::vector<DType> inDTypes;
-                std::vector<std::vector<uint8_t>> inConstants;
 
-                inShapes.reserve(enode.getChildren().size());
-                inStrides.reserve(enode.getChildren().size());
-                inDTypes.reserve(enode.getChildren().size());
-                inConstants.reserve(enode.getChildren().size());
-
-                const ReferenceGraphEntry *refEntry = nullptr;
-                std::unique_ptr<Graph> pGraph;
-                std::vector<LogicalId> pInputs;
-
-                const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
-                if (enode.getOpType() == OpType::FUSED)
+                if (enode.getOpType() == OpType::INPUT || enode.getOpType() == OpType::CACHE)
                 {
-                    refEntry = ReferenceGraphRegistry::get().getFactory(kernel.opName);
-                    if (refEntry)
+                    info.cost = 0.0f;
+                    if (strictCache && enode.getOpType() == OpType::CACHE)
                     {
-                        pGraph = std::make_unique<Graph>();
-                        for (uint64_t k = 0; k < kernel.min_num_inputs; ++k)
+                        EClassId e_class_id = egraph.getENodeEClass(ENodeId{i});
+                        EClassId canonId = egraph.findConst(e_class_id);
+                        LogicalId logicalId =
+                            eclassToLogical.count(canonId) ? eclassToLogical.at(canonId) : LogicalId{UINT32_MAX};
+                        if (logicalId == LogicalId{UINT32_MAX} || cachedNodes.find(logicalId) == cachedNodes.end())
                         {
-                            pInputs.push_back(pGraph->input(kernel.dummyShapes[k], kernel.dtypes[k]));
+                            info.cost = TGConstants::INF;
                         }
-                        refEntry->factory(pInputs, *pGraph);
+                        else if (enode.getMemSpace() != cachedNodes.at(logicalId))
+                        {
+                            info.cost = TGConstants::INF;
+                        }
                     }
                 }
-
-                for (uint64_t j = 0; j < enode.getChildren().size(); j++)
+                else if (enode.getKernelId() != KernelId{0})
                 {
-                    EClassId childEClassId = enode.getChildren()[j];
-                    const EClass &childCls = egraph.getEClass(egraph.find(childEClassId));
-                    inShapes.push_back(childCls.shape);
+                    std::vector<std::vector<uint32_t>> inShapes;
+                    std::vector<std::vector<uint64_t>> inStrides;
+                    std::vector<DType> inDTypes;
+                    std::vector<std::vector<uint8_t>> inConstants;
 
-                    std::vector<uint64_t> strides_cast;
-                    strides_cast.reserve(childCls.strides.size());
-                    for (uint64_t s : childCls.strides)
-                        strides_cast.push_back(s);
-                    inStrides.push_back(std::move(strides_cast));
+                    inShapes.reserve(enode.getChildren().size());
+                    inStrides.reserve(enode.getChildren().size());
+                    inDTypes.reserve(enode.getChildren().size());
+                    inConstants.reserve(enode.getChildren().size());
 
-                    inDTypes.push_back(childCls.dtype);
+                    const ReferenceGraphEntry *refEntry = nullptr;
+                    std::unique_ptr<Graph> pGraph;
+                    std::vector<LogicalId> pInputs;
 
-                    EClassId canonChild = egraph.find(childEClassId);
-                    bool needed = false;
-
+                    const auto &kernel = KernelRegistry::get().getKernel(enode.getKernelId());
                     if (enode.getOpType() == OpType::FUSED)
                     {
-                        if (refEntry && pGraph)
+                        refEntry = ReferenceGraphRegistry::get().getFactory(kernel.opName);
+                        if (refEntry)
                         {
-                            auto traceToInputIdx = [&](LogicalId pid) -> int {
-                                LogicalId curr = pid;
-                                while (pGraph->hasNode(curr) && (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
-                                                                 pGraph->getNode(curr).opType == OpType::CAST ||
-                                                                 pGraph->getNode(curr).opType == OpType::COPY_TO ||
-                                                                 pGraph->getNode(curr).opType == OpType::RESHAPE ||
-                                                                 pGraph->getNode(curr).opType == OpType::PERMUTE))
-                                {
-                                    if (pGraph->getNode(curr).child_ids.empty())
-                                        break;
-                                    curr = pGraph->getNode(curr).child_ids[0];
-                                }
-                                for (uint64_t k = 0; k < pInputs.size(); ++k)
-                                {
-                                    if (pInputs[k] == curr)
-                                        return (int)k;
-                                }
-                                return -1;
-                            };
-
-                            for (const auto &pair : pGraph->nodes)
+                            pGraph = std::make_unique<Graph>();
+                            for (uint64_t k = 0; k < kernel.min_num_inputs; ++k)
                             {
-                                const TensorNode &n = pair.second;
-                                for (uint64_t p_idx = 0; p_idx < n.child_ids.size(); ++p_idx)
-                                {
-                                    if (isConstantNeeded(n.opType, p_idx, n.child_ids.size()))
-                                    {
-                                        int inputIdx = traceToInputIdx(n.child_ids[p_idx]);
-                                        if (kernel.min_num_inputs != kernel.max_num_inputs)
-                                        {
-                                            // Assume the first input is the special scalar (e.g. axis for CONCAT)
-                                            // and the rest are the variadic tensors.
-                                            if (inputIdx == 0 && j == 0)
-                                            {
-                                                needed = true;
-                                                break;
-                                            }
-                                            else if (inputIdx >= 1 && j >= 1)
-                                            {
-                                                needed = true;
-                                                break;
-                                            }
-                                        }
-                                        else if (inputIdx == (int)j)
-                                        {
-                                            needed = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if (needed)
-                                    break;
+                                pInputs.push_back(pGraph->input(kernel.dummyShapes[k], kernel.dtypes[k]));
                             }
+                            refEntry->factory(pInputs, *pGraph);
                         }
                     }
-                    else
+
+                    for (uint64_t j = 0; j < enode.getChildren().size(); j++)
                     {
-                        needed = isConstantNeeded(enode.getOpType(), j, enode.getChildren().size());
+                        EClassId childEClassId = enode.getChildren()[j];
+                        const EClass &childCls = egraph.getEClass(egraph.find(childEClassId));
+                        inShapes.push_back(childCls.shape);
+
+                        std::vector<uint64_t> strides_cast;
+                        strides_cast.reserve(childCls.strides.size());
+                        for (uint64_t s : childCls.strides)
+                            strides_cast.push_back(s);
+                        inStrides.push_back(std::move(strides_cast));
+
+                        inDTypes.push_back(childCls.dtype);
+
+                        EClassId canonChild = egraph.find(childEClassId);
+                        bool needed = false;
+
+                        if (enode.getOpType() == OpType::FUSED)
+                        {
+                            if (refEntry && pGraph)
+                            {
+                                auto traceToInputIdx = [&](LogicalId pid) -> int {
+                                    LogicalId curr = pid;
+                                    while (pGraph->hasNode(curr) &&
+                                           (pGraph->getNode(curr).opType == OpType::CONTIGUOUS ||
+                                            pGraph->getNode(curr).opType == OpType::CAST ||
+                                            pGraph->getNode(curr).opType == OpType::COPY_TO ||
+                                            pGraph->getNode(curr).opType == OpType::RESHAPE ||
+                                            pGraph->getNode(curr).opType == OpType::PERMUTE))
+                                    {
+                                        if (pGraph->getNode(curr).child_ids.empty())
+                                            break;
+                                        curr = pGraph->getNode(curr).child_ids[0];
+                                    }
+                                    for (uint64_t k = 0; k < pInputs.size(); ++k)
+                                    {
+                                        if (pInputs[k] == curr)
+                                            return (int)k;
+                                    }
+                                    return -1;
+                                };
+
+                                for (const auto &pair : pGraph->nodes)
+                                {
+                                    const TensorNode &n = pair.second;
+                                    for (uint64_t p_idx = 0; p_idx < n.child_ids.size(); ++p_idx)
+                                    {
+                                        if (isConstantNeeded(n.opType, p_idx, n.child_ids.size()))
+                                        {
+                                            int inputIdx = traceToInputIdx(n.child_ids[p_idx]);
+                                            if (kernel.min_num_inputs != kernel.max_num_inputs)
+                                            {
+                                                // Assume the first input is the special scalar (e.g. axis for CONCAT)
+                                                // and the rest are the variadic tensors.
+                                                if (inputIdx == 0 && j == 0)
+                                                {
+                                                    needed = true;
+                                                    break;
+                                                }
+                                                else if (inputIdx >= 1 && j >= 1)
+                                                {
+                                                    needed = true;
+                                                    break;
+                                                }
+                                            }
+                                            else if (inputIdx == (int)j)
+                                            {
+                                                needed = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (needed)
+                                        break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            needed = isConstantNeeded(enode.getOpType(), j, enode.getChildren().size());
+                        }
+
+                        if (needed && egraph.constantStaging.count(canonChild))
+                        {
+                            inConstants.push_back(*egraph.constantStaging.at(canonChild));
+                        }
+                        else
+                        {
+                            inConstants.push_back({});
+                        }
                     }
 
-                    if (needed && egraph.constantStaging.count(canonChild))
-                    {
-                        inConstants.push_back(*egraph.constantStaging.at(canonChild));
-                    }
-                    else
-                    {
-                        inConstants.push_back({});
-                    }
+                    info.cost = costModel.estimateCost(enode.getKernelId(), enode.getShape(), enode.getStrides(),
+                                                       enode.getDType(), inShapes, inStrides, inDTypes, inConstants);
+                }
+                else
+                {
+                    Error::throw_err("[Planner.extractBest] enode.kernelId != 0, but isn't "
+                                     "OpType::INPUT or OpType::CACHE. this shouldn't happen");
                 }
 
-                info.cost = costModel.estimateCost(enode.getKernelId(), enode.getShape(), enode.getStrides(),
-                                                   enode.getDType(), inShapes, inStrides, inDTypes, inConstants);
+                enodeInfos[i] = std::move(info);
+                timer3.tick();
             }
-            else
-            {
-                Error::throw_err("[Planner.extractBest] enode.kernelId != 0, but isn't "
-                                 "OpType::INPUT or OpType::CACHE. this shouldn't happen");
-            }
-
-            enodeInfos[i] = std::move(info);
-            timer3.tick();
         }
 
         bool droppedInf = false;
@@ -1430,8 +1428,7 @@ struct Planner
                        const std::unordered_map<LogicalId, MemSpace> &cachedNodes, bool doSaturate = true,
                        bool strictCache = false, Repo *repo = nullptr,
                        const std::unordered_map<LogicalId, ParallelBuffer> &preallocatedBuffers = {},
-                       float minCompileSeconds = 0.0f, const std::string &sort_enodes = "cost",
-                       std::shared_ptr<SearchDelegate> delegate = nullptr)
+                       float minCompileSeconds = 0.0f, std::shared_ptr<SearchDelegate> delegate = nullptr)
     {
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
@@ -1526,9 +1523,9 @@ struct Planner
         }
         eclassToLogical = std::move(updatedEClassToLogical);
 
-        auto extraction = extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical,
-                                      preallocatedBuffers, minCompileSeconds == 0.0f, strictCache, minCompileSeconds,
-                                      sort_enodes, delegate);
+        auto extraction =
+            extractBest(rootId, graph, egraph, baseState.nodeToEClass, cachedNodes, eclassToLogical,
+                        preallocatedBuffers, minCompileSeconds == 0.0f, strictCache, minCompileSeconds, delegate);
         return buildCompiledGraph(rootId, graph, egraph, baseState.nodeToEClass, extraction, cachedNodes,
                                   eclassToLogical);
     }

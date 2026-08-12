@@ -2,13 +2,12 @@ import os
 import time
 
 import numpy as np
-from tokenizers import Tokenizer
-
 from tensor_graphs.config import DEBUG_EXECUTION
 from tensor_graphs.ir.dtypes import DType
 from tensor_graphs.ir.graph import GraphBuilder
 from tensor_graphs.session import GraphSession
 from tensor_graphs.tools.timer import Timer
+from tokenizers import Tokenizer
 
 
 class Gemma3Model:
