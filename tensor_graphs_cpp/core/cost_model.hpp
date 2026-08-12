@@ -246,7 +246,7 @@ struct CostModel
     bool doneWarning = false;
     bool enableLogging = false;
 
-    CostModel(bool logCalls = false) : enableLogging(logCalls)
+    CostModel(bool logCalls = true) : enableLogging(logCalls)
     {
         if (enableLogging)
         {
