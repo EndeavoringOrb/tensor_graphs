@@ -248,7 +248,7 @@ def main():
     parser.add_argument(
         "--simulations",
         type=int,
-        default=30,
+        default=800,
         help="Number of MCTS simulations per episode",
     )
     parser.add_argument("--model", type=str, default="gemma-3-270m", help="Model name")
