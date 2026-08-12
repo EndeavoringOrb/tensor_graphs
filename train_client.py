@@ -206,21 +206,20 @@ def client_worker(rank: int, config: TrainConfig):
 
         episode += 1
 
-        # 6. Check for updated weights periodically
-        if episode % 5 == 0:
-            try:
-                send_msg(client_sock, {"type": "req_weights"})
-                weight_resp = recv_msg(client_sock)
-                if weight_resp and weight_resp.get("type") == "weights":
-                    agent.load_state_dict(weight_resp["data"])
-                    logger.info(
-                        f"{LOG_PREFIX} [Worker {rank}] Synced updated weights from server."
-                    )
-            except Exception as e:
+        # 6. Check for updated weights
+        try:
+            send_msg(client_sock, {"type": "req_weights"})
+            weight_resp = recv_msg(client_sock)
+            if weight_resp and weight_resp.get("type") == "weights":
+                agent.load_state_dict(weight_resp["data"])
                 logger.info(
-                    f"{LOG_PREFIX} [Worker {rank}] Error syncing weights from server: {e}"
+                    f"{LOG_PREFIX} [Worker {rank}] Synced updated weights from server."
                 )
-                break
+        except Exception as e:
+            logger.info(
+                f"{LOG_PREFIX} [Worker {rank}] Error syncing weights from server: {e}"
+            )
+            break
 
     client_sock.close()
 

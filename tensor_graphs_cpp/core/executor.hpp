@@ -46,7 +46,6 @@ class Executor
                 }
             }
         }
-        std::cout << "restored " << std::to_string(restored_constants.size()) << " generated constants" << std::endl;
 
         Synchronizer sync;
 

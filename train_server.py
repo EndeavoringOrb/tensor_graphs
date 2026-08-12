@@ -11,7 +11,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 from torch import optim
 
 from train_shared import (
@@ -27,14 +27,26 @@ global_weights = {}
 weights_lock = threading.Lock()
 
 
-def setup_run_dir(base_dir="runs") -> str:
+def setup_run_dir(base_dir="runs", run_dir=None, resume_latest=False) -> str:
     runs_dir = Path(base_dir)
     runs_dir.mkdir(parents=True, exist_ok=True)
+
+    if run_dir:
+        target_dir = Path(run_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return target_dir.as_posix()
+
+    if resume_latest:
+        existing = [int(d) for d in os.listdir(runs_dir) if d.isdigit()]
+        if existing:
+            target_dir = runs_dir / str(max(existing))
+            return target_dir.as_posix()
+
     existing = [int(d) for d in os.listdir(runs_dir) if d.isdigit()]
     run_idx = max(existing) + 1 if existing else 1
-    run_dir = runs_dir / str(run_idx)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir.as_posix()
+    target_dir = runs_dir / str(run_idx)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir.as_posix()
 
 
 def client_handler(client_sock, client_info, replay_queue):
@@ -106,14 +118,47 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     costs_bin_path = os.path.join(config.run_dir, "costs.bin")
     model_filepath = Path(config.run_dir) / "model.safetensors"
     pack_fmt = "<If"
-    cost_count = 0
 
-    # Store initial weights safely in memory and save initial model checkpoint to disk
+    # Restore existing model weights if resuming
+    if model_filepath.exists():
+        try:
+            state_dict = load_file(model_filepath)
+            agent.load_state_dict(state_dict)
+            print(f"[Learner] Loaded existing model weights from {model_filepath}")
+        except Exception as e:
+            print(f"[Learner] Warning: Failed to load {model_filepath}: {e}")
+
+    # Restore metric counters if log files exist
+    batches_processed = 0
+    if os.path.exists(losses_bin_path) and os.path.getsize(losses_bin_path) >= 8:
+        try:
+            with open(losses_bin_path, "rb") as f_bin:
+                f_bin.seek(-8, os.SEEK_END)
+                last_idx, _ = struct.unpack(pack_fmt, f_bin.read(8))
+                batches_processed = int(last_idx)
+            print(f"[Learner] Resuming loss logging at batch {batches_processed}")
+        except Exception as e:
+            print(
+                f"[Learner] Warning: Could not read last entry of {losses_bin_path}: {e}"
+            )
+
+    cost_count = 0
+    if os.path.exists(costs_bin_path) and os.path.getsize(costs_bin_path) >= 8:
+        try:
+            with open(costs_bin_path, "rb") as f_bin:
+                f_bin.seek(-8, os.SEEK_END)
+                last_idx, _ = struct.unpack(pack_fmt, f_bin.read(8))
+                cost_count = int(last_idx)
+            print(f"[Learner] Resuming cost logging at count {cost_count}")
+        except Exception as e:
+            print(
+                f"[Learner] Warning: Could not read last entry of {costs_bin_path}: {e}"
+            )
+
+    # Store initial weights safely in memory and save model checkpoint to disk
     with weights_lock:
         global_weights.update({k: v.cpu() for k, v in agent.state_dict().items()})
     save_file(agent.state_dict(), model_filepath)
-
-    batches_processed = 0
 
     while True:
         # Drain incoming queue from all workers into Replay Buffer and metrics files
@@ -229,17 +274,44 @@ def main():
         "--batch-size", type=int, default=1024, help="Replay buffer batch size"
     )
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Path to specific run directory to resume or save to (e.g., runs/8)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from the latest existing run directory if --run-dir is not specified",
+    )
 
     args = parser.parse_args()
 
-    config = TrainConfig()
-    config.run_dir = setup_run_dir()
+    run_dir = setup_run_dir(run_dir=args.run_dir, resume_latest=args.resume)
+
+    config_file = Path(run_dir) / "config.json"
+    if config_file.exists():
+        try:
+            with open(config_file, "r") as f:
+                saved_config = json.load(f)
+            config = TrainConfig(**saved_config)
+            print(f"[Server] Loaded existing run configuration from {config_file}")
+        except Exception as e:
+            print(
+                f"[Server] Could not load existing config ({e}), creating default config."
+            )
+            config = TrainConfig()
+    else:
+        config = TrainConfig()
+
+    config.run_dir = run_dir
     config.batch_size = args.batch_size
     config.lr = args.lr
     config.host = args.host
     config.port = args.port
 
-    # Save run config
+    # Save/update run config
     with open(os.path.join(config.run_dir, "config.json"), "w") as f:
         json.dump(dataclasses.asdict(config), f, indent=4)
 

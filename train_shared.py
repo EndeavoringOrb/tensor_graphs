@@ -16,9 +16,9 @@ class TrainConfig:
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
     num_simulations: int = 30
-    replay_buffer_size: int = 50000
+    replay_buffer_size: int = 1_000_000
     batch_size: int = 1024
-    save_interval: int = 20
+    save_interval: int = 1
     hidden_dim: int = 64
     lr: float = 1e-3
     log_cost_calls: bool = False

@@ -38,7 +38,7 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
     auto ctx = std::make_shared<SaturatedEGraphContext>();
 
     // TODO: Load memory sizes dynamically from hardware probing configuration
-    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 24ULL * 1024 * 1024 * 1024}};
+    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
 #ifdef TG_USE_CUDA
     bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
 #endif
