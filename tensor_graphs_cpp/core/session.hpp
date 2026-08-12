@@ -157,7 +157,7 @@ struct Session
 
     Session(Graph &g, MemoryManager &mem, LogicalId root, const std::string &cacheFile = "", uint32_t _nBucketSizes = 0,
             Repo *_repo = nullptr, bool _disableCaching = false, float _minCompileSeconds = 0.0f,
-            std::shared_ptr<SearchDelegate> _delegate = nullptr, bool _logCostCalls = false)
+            std::shared_ptr<SearchDelegate> _delegate = nullptr, bool _logCostCalls = true)
         : graph(g), memManager(mem), rootId(root), isPlanned(false), isCompiled(false), cachePath(cacheFile),
           nBucketSizes(_nBucketSizes), repo(_repo), disableCaching(_disableCaching),
           minCompileSeconds(_minCompileSeconds), delegate(_delegate), logCostCalls(_logCostCalls),
