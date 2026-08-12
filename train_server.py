@@ -11,6 +11,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from safetensors.torch import save_file
 from torch import optim
 
 from train_shared import (
@@ -103,12 +104,14 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     os.makedirs(config.run_dir, exist_ok=True)
     losses_bin_path = os.path.join(config.run_dir, "losses.bin")
     costs_bin_path = os.path.join(config.run_dir, "costs.bin")
+    model_filepath = Path(config.run_dir) / "model.safetensors"
     pack_fmt = "<If"
     cost_count = 0
 
-    # Store initial weights safely
+    # Store initial weights safely in memory and save initial model checkpoint to disk
     with weights_lock:
         global_weights.update({k: v.cpu() for k, v in agent.state_dict().items()})
+    save_file(agent.state_dict(), model_filepath)
 
     batches_processed = 0
 
@@ -182,13 +185,14 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 f_bin.write(struct.pack(pack_fmt, batches_processed, loss_val))
                 f_bin.flush()
 
-            # Sync updated weights for worker threads
+            # Sync updated weights for worker threads and write to model.safetensors
             if batches_processed % config.save_interval == 0:
                 with weights_lock:
                     global_weights.clear()
                     global_weights.update(
                         {k: v.cpu() for k, v in agent.state_dict().items()}
                     )
+                save_file(agent.state_dict(), model_filepath)
         else:
             time.sleep(1)
 

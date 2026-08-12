@@ -243,6 +243,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         if nf is not None:
             self.globals["malloc_dec"] = self.agent.malloc_gnn(nf, src, dst)
 
+    @torch.inference_mode()
     def _order_items(self, items, dec_type, extract_fn):
         if len(items) <= 1:
             return list(range(len(items)))

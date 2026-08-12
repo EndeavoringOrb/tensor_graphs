@@ -5,7 +5,7 @@ import os
 import tensor_graphs
 from safetensors.torch import load_file
 
-from train import AdvancedAgent, AgentDelegate
+from train_shared import ActorDelegate, AlphaZeroAgent
 
 
 def main():
@@ -28,7 +28,7 @@ def main():
     )
     args = parser.parse_args()
 
-    agent = AdvancedAgent(hidden_dim=64)
+    agent = AlphaZeroAgent(hidden_dim=64)
     if args.run_dir:
         model_file = os.path.join(args.run_dir, "model.safetensors")
         if os.path.exists(model_file):
@@ -36,7 +36,7 @@ def main():
             print(f"Loaded trained delegate agent from {model_file}")
 
     agent.eval()
-    delegate = AgentDelegate(agent)
+    delegate = ActorDelegate(agent, exploration_noise=0.0)
 
     print(f"Loading {args.model} via LLMSession...")
     session = tensor_graphs.LLMSession(args.model, args.model_path, delegate)
