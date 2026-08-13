@@ -297,8 +297,13 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
             try:
                 subprocess.run(
                     [
-                        "winget", "install", "--id", "LLVM.LLVM", "-e",
-                        "--accept-source-agreements", "--accept-package-agreements"
+                        "winget",
+                        "install",
+                        "--id",
+                        "LLVM.LLVM",
+                        "-e",
+                        "--accept-source-agreements",
+                        "--accept-package-agreements",
                     ],
                     check=True,
                 )
@@ -306,7 +311,9 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
                 if llvm_bin.exists():
                     os.environ["PATH"] = f"{llvm_bin};" + os.environ.get("PATH", "")
                     platform_info.clang_cpp_path = str(llvm_bin / "clang++.exe")
-                    console.print("[bold green]LLVM/clang++ installed successfully![/bold green]")
+                    console.print(
+                        "[bold green]LLVM/clang++ installed successfully![/bold green]"
+                    )
             except Exception as e:
                 console.print(
                     f"[bold red]Auto-installation of LLVM via winget failed: {e}[/bold red]\n"
@@ -316,21 +323,33 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
         # 2. Check Visual Studio C++ Build Tools (headers & libraries)
         vcvars = find_vcvarsall()
         if not vcvars:
-            console.print("[yellow]Visual Studio C++ Build Tools (vcvarsall.bat) not detected.[/yellow]")
-            console.print("[yellow]Attempting to install VS C++ Build Tools via winget...[/yellow]")
+            console.print(
+                "[yellow]Visual Studio C++ Build Tools (vcvarsall.bat) not detected.[/yellow]"
+            )
+            console.print(
+                "[yellow]Attempting to install VS C++ Build Tools via winget...[/yellow]"
+            )
             try:
                 subprocess.run(
                     [
-                        "winget", "install", "--id", "Microsoft.VisualStudio.2022.BuildTools", "-e",
-                        "--accept-source-agreements", "--accept-package-agreements",
-                        "--override", "--passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+                        "winget",
+                        "install",
+                        "--id",
+                        "Microsoft.VisualStudio.2022.BuildTools",
+                        "-e",
+                        "--accept-source-agreements",
+                        "--accept-package-agreements",
+                        "--override",
+                        "--passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
                     ],
                     check=True,
                 )
                 vcvars = find_vcvarsall()
                 if vcvars:
                     platform_info.vcvars_path = vcvars
-                    console.print("[bold green]Visual Studio C++ Build Tools installed successfully![/bold green]")
+                    console.print(
+                        "[bold green]Visual Studio C++ Build Tools installed successfully![/bold green]"
+                    )
             except Exception as e:
                 console.print(
                     f"[bold red]Auto-installation of VS Build Tools failed: {e}[/bold red]\n"
@@ -350,13 +369,25 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
             or shutil.which("g++") is not None
         )
         if not has_compiler:
-            console.print("[yellow]No C++ compiler found. Attempting automatic installation...[/yellow]")
+            console.print(
+                "[yellow]No C++ compiler found. Attempting automatic installation...[/yellow]"
+            )
             if shutil.which("apt-get"):
-                subprocess.run("sudo apt-get update && sudo apt-get install -y clang build-essential", shell=True, check=False)
+                subprocess.run(
+                    "sudo apt-get update && sudo apt-get install -y clang build-essential",
+                    shell=True,
+                    check=False,
+                )
             elif shutil.which("dnf"):
-                subprocess.run(["sudo", "dnf", "install", "-y", "clang", "gcc-c++", "make"], check=False)
+                subprocess.run(
+                    ["sudo", "dnf", "install", "-y", "clang", "gcc-c++", "make"],
+                    check=False,
+                )
             elif shutil.which("pacman"):
-                subprocess.run(["sudo", "pacman", "-S", "--noconfirm", "clang", "base-devel"], check=False)
+                subprocess.run(
+                    ["sudo", "pacman", "-S", "--noconfirm", "clang", "base-devel"],
+                    check=False,
+                )
 
             if shutil.which("clang++"):
                 platform_info.clang_cpp_path = shutil.which("clang++")

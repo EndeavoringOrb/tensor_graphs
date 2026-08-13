@@ -14,7 +14,7 @@ namespace py = pybind11;
 // Pybind11 Trampoline Class for C++ SearchDelegate virtual method overrides
 class PySearchDelegate : public SearchDelegate
 {
-public:
+  public:
     using SearchDelegate::SearchDelegate;
 
     void push_state() override
@@ -83,7 +83,7 @@ class LLMSession
     uint32_t vocab_size = 0;
     uint32_t max_seq_len = 128;
 
-public:
+  public:
     LLMSession(const std::string &model_name, const std::string &model_path, std::shared_ptr<SearchDelegate> delegate)
     {
         std::unordered_map<MemSpace, uint64_t> bufferSizes = {
@@ -216,12 +216,9 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<LogicalId>(m, "LogicalId")
         .def(py::init<>())
         .def_readwrite("value", &LogicalId::value)
-        .def("__hash__", [](const LogicalId &self)
-             { return std::hash<LogicalId>()(self); })
-        .def("__eq__", [](const LogicalId &self, const LogicalId &other)
-             { return self == other; })
-        .def("__repr__", [](const LogicalId &self)
-             { return "LogicalId(" + std::to_string(self.value) + ")"; });
+        .def("__hash__", [](const LogicalId &self) { return std::hash<LogicalId>()(self); })
+        .def("__eq__", [](const LogicalId &self, const LogicalId &other) { return self == other; })
+        .def("__repr__", [](const LogicalId &self) { return "LogicalId(" + std::to_string(self.value) + ")"; });
 
     // Bind TensorNode
     py::class_<TensorNode>(m, "TensorNode")
