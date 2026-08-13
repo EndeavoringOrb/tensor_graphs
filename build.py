@@ -978,8 +978,7 @@ class Toolchain:
 
             if self.platform.is_windows and self.config.profile:
                 flags.append("-Wl,-debug")
-        flags.append("-static-libgcc")
-        flags.append("-static-libstdc++")
+        flags.extend(["-static"])
         return flags
 
     def get_nvcc_flags(self, is_python_ext: bool = False) -> list[str]:
