@@ -5,6 +5,7 @@ import socket
 import struct
 import zlib
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -23,6 +24,12 @@ class TrainConfig:
     lr: float = 1e-3
     log_cost_calls: bool = False
     workers: int = 4
+    # PUCT & Noise Annealing Config
+    c_puct: float = 1.25
+    base_noise: float = 0.25
+    min_noise: float = 0.01
+    decay_episodes: int = 500
+    depth_gamma: float = 0.7
     # Networking Config
     host: str = "127.0.0.1"
     port: int = 5000
@@ -79,7 +86,6 @@ def create_server_socket(host: str, port: int, use_bluetooth: bool = False):
 def send_msg(sock, msg):
     """Compresses and frames the message to handle slow/fragmented streams."""
     data = zlib.compress(pickle.dumps(msg))
-    # Prefix each message with a 4-byte length (network byte order)
     sock.sendall(struct.pack(">I", len(data)) + data)
 
 
@@ -107,7 +113,7 @@ def recv_msg(sock):
 
 
 # ==============================================================================
-# MODELS (With RMSNorm for scaling raw features)
+# MODELS
 # ==============================================================================
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6):
@@ -118,6 +124,22 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         norm = x.norm(2, dim=-1, keepdim=True) * (x.size(-1) ** -0.5)
         return (x / (norm + self.eps)) * self.weight
+
+
+class Net(nn.Module):
+    def __init__(self, inputSize=42, outSize=7, weightLayers=2, weightSize=10):
+        super().__init__()
+        layers = []
+        for i in range(weightLayers):
+            in_feat = inputSize if i == 0 else weightSize
+            out_feat = outSize if i == (weightLayers - 1) else weightSize
+            layers.append(nn.Linear(in_feat, out_feat, bias=False))
+            if i != (weightLayers - 1):
+                layers.append(nn.Tanh())
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.layers(x)
 
 
 class GNNModel(nn.Module):
@@ -201,16 +223,48 @@ class AlphaZeroAgent(nn.Module):
 
 
 # ==============================================================================
-# ACTOR DELEGATE
+# ACTOR DELEGATE WITH PUCT SELECTION & NOISE ANNEALING
 # ==============================================================================
 import tensor_graphs
 
 
 class ActorDelegate(tensor_graphs.SearchDelegate):
-    def __init__(self, agent, exploration_noise=0.25):
+    def __init__(
+        self,
+        agent,
+        mcts_tree: dict = None,
+        c_puct: float = 1.25,
+        exploration_noise=None,
+        episode: int = 0,
+        decay_episodes: int = 500,
+        base_noise: float = 0.25,
+        min_noise: float = 0.01,
+        depth_gamma: float = 0.7,
+    ):
         super().__init__()
         self.agent = agent
-        self.exploration_noise = exploration_noise
+        self.mcts_tree = mcts_tree if mcts_tree is not None else {}
+        self.c_puct = c_puct
+        self.episode = episode
+        self.decay_episodes = decay_episodes
+        self.base_noise = base_noise if exploration_noise is None else exploration_noise
+        self.min_noise = min_noise
+        self.depth_gamma = depth_gamma
+
+        if exploration_noise is not None:
+            if exploration_noise == 0.0:
+                self.episode_noise = 0.0
+            else:
+                self.episode_noise = max(
+                    min_noise,
+                    exploration_noise * (1.0 - episode / max(1, decay_episodes)),
+                )
+        else:
+            self.episode_noise = max(
+                min_noise,
+                base_noise * (1.0 - episode / max(1, decay_episodes)),
+            )
+
         self.trajectory = []
         self.globals = {}
 
@@ -251,29 +305,66 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         features = extract_fn(items)
         global_state = self.globals.get(dec_type, torch.zeros(self.agent.hidden_dim))
 
-        with torch.no_grad():
-            dec_model = getattr(self.agent, dec_type)
-            scores, _ = dec_model(global_state, features)
+        # Composite key for state node
+        state_key = hash(
+            (global_state.cpu().numpy().tobytes(), features.cpu().numpy().tobytes())
+        )
+        num_actions = len(items)
 
-        P = torch.softmax(scores, dim=0).cpu().numpy()
+        # 1. Expand MCTS State Node if unvisited
+        if state_key not in self.mcts_tree:
+            with torch.no_grad():
+                dec_model = getattr(self.agent, dec_type)
+                scores, val = dec_model(global_state, features)
 
-        if self.exploration_noise > 0:
-            noise = (
-                torch.distributions.Dirichlet(torch.full_like(scores, 0.3))
-                .sample()
-                .numpy()
-            )
-            P = (1 - self.exploration_noise) * P + self.exploration_noise * noise
+            P = torch.softmax(scores, dim=0).cpu().numpy()
+            v = val.item() if hasattr(val, "item") else float(val)
 
-        order = torch.argsort(torch.tensor(P), descending=True).tolist()
+            current_depth = len(self.trajectory)
+            effective_noise = self.episode_noise * (self.depth_gamma**current_depth)
 
-        self.trajectory.append(
-            {
+            if effective_noise > 0.001:
+                noise = (
+                    torch.distributions.Dirichlet(torch.full_like(scores, 0.3))
+                    .sample()
+                    .numpy()
+                )
+                P_perturbed = (1.0 - effective_noise) * P + effective_noise * noise
+            else:
+                P_perturbed = P.copy()
+
+            self.mcts_tree[state_key] = {
+                "N": np.zeros(num_actions, dtype=np.float32),
+                "W": np.zeros(num_actions, dtype=np.float32),
+                "P": P_perturbed,
+                "v": v,
                 "type": dec_type,
                 "global_state": global_state.cpu().numpy(),
                 "features": features.cpu().numpy(),
-                "P": P,
+            }
+
+        # 2. Retrieve State Stats for PUCT Evaluation
+        node_data = self.mcts_tree[state_key]
+        N_sa = node_data["N"]
+        W_sa = node_data["W"]
+        P_sa = node_data["P"]
+        v_s = node_data["v"]
+
+        N_s = N_sa.sum()
+
+        # PUCT Formula: Q(s,a) + U(s,a)
+        Q_sa = np.where(N_sa > 0, W_sa / np.maximum(N_sa, 1.0), v_s)
+        U_sa = self.c_puct * P_sa * (math.sqrt(max(1.0, float(N_s))) / (1.0 + N_sa))
+
+        puct_scores = Q_sa + U_sa
+        order = np.argsort(-puct_scores).tolist()
+
+        current_depth = len(self.trajectory)
+        self.trajectory.append(
+            {
+                "state_hash": state_key,
                 "top_action": order[0],
+                "depth": current_depth,
             }
         )
 
@@ -309,7 +400,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             mem_type = float(f.mem_space.type) if hasattr(f, "mem_space") else 0.0
             eng_len = float(len(f.engine_idxs)) if hasattr(f, "engine_idxs") else 0.0
 
-            # Log-transform large numerical scales
             log_cost = math.log1p(max(0.0, float(f.cost)))
             log_size = math.log1p(max(0.0, float(f.size)))
 

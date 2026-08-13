@@ -123,6 +123,48 @@ def extract_macro_call_args(content: str, paren_start: int) -> list[str]:
     return args
 
 
+def find_vcvarsall() -> str:
+    """Locates Visual Studio vcvarsall.bat across standard installation directories."""
+    if "VCVARS_PATH" in os.environ and Path(os.environ["VCVARS_PATH"]).exists():
+        return os.environ["VCVARS_PATH"]
+
+    candidates = [
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat",
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return ""
+
+
+def find_clang() -> str:
+    """Locates the clang++ compiler binary."""
+    if "CLANG_CXX" in os.environ and (
+        shutil.which(os.environ["CLANG_CXX"]) or Path(os.environ["CLANG_CXX"]).exists()
+    ):
+        return os.environ["CLANG_CXX"]
+
+    which_clang = shutil.which("clang++")
+    if which_clang:
+        return which_clang
+
+    default_llvm = Path(r"C:\Program Files\LLVM\bin\clang++.exe")
+    if default_llvm.exists():
+        return str(default_llvm)
+
+    which_gxx = shutil.which("g++")
+    if which_gxx:
+        return which_gxx
+
+    return "clang++"
+
+
 @dataclass
 class PlatformInfo:
     os_name: str
@@ -149,10 +191,9 @@ class PlatformInfo:
         python_plat = sysconfig.get_platform().lower()
         is_python_arm64 = "arm64" in python_plat or "aarch64" in python_plat
 
-        vcvars_path = os.environ.get(
-            "VCVARS_PATH",
-            r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat",
-        )
+        vcvars_path = find_vcvarsall()
+        clang_cpp_path = find_clang()
+
         cuda_path = os.environ.get(
             "CUDA_PATH",
             os.environ.get(
@@ -165,10 +206,6 @@ class PlatformInfo:
             ),
         )
         opencl_sdk_path = os.environ.get("OPENCL_SDK_ROOT", "./OpenCL-SDK/install")
-        clang_cpp_path = os.environ.get(
-            "CLANG_CXX",
-            r"C:\Program Files\LLVM\bin\clang++.exe" if is_windows else "clang++",
-        )
 
         has_cuda = False
         if (
@@ -244,6 +281,87 @@ class PlatformInfo:
             opencl_inc_dir=opencl_inc_dir,
             opencl_lib_dir=opencl_lib_dir,
         )
+
+
+def ensure_toolchain(platform_info: PlatformInfo) -> None:
+    """Idempotently ensures compiler and headers/tools are installed for the host OS."""
+    if platform_info.is_windows:
+        # 1. Ensure clang++ or a C++ compiler is present
+        clang_path = find_clang()
+        has_compiler = shutil.which(clang_path) is not None or Path(clang_path).exists()
+
+        if not has_compiler:
+            console.print(
+                "[yellow]No C++ compiler (clang++/g++) found. Installing LLVM via winget...[/yellow]"
+            )
+            try:
+                subprocess.run(
+                    [
+                        "winget", "install", "--id", "LLVM.LLVM", "-e",
+                        "--accept-source-agreements", "--accept-package-agreements"
+                    ],
+                    check=True,
+                )
+                llvm_bin = Path(r"C:\Program Files\LLVM\bin")
+                if llvm_bin.exists():
+                    os.environ["PATH"] = f"{llvm_bin};" + os.environ.get("PATH", "")
+                    platform_info.clang_cpp_path = str(llvm_bin / "clang++.exe")
+                    console.print("[bold green]LLVM/clang++ installed successfully![/bold green]")
+            except Exception as e:
+                console.print(
+                    f"[bold red]Auto-installation of LLVM via winget failed: {e}[/bold red]\n"
+                    "[white]Please install LLVM or MinGW manually and add it to your PATH.[/white]"
+                )
+
+        # 2. Check Visual Studio C++ Build Tools (headers & libraries)
+        vcvars = find_vcvarsall()
+        if not vcvars:
+            console.print("[yellow]Visual Studio C++ Build Tools (vcvarsall.bat) not detected.[/yellow]")
+            console.print("[yellow]Attempting to install VS C++ Build Tools via winget...[/yellow]")
+            try:
+                subprocess.run(
+                    [
+                        "winget", "install", "--id", "Microsoft.VisualStudio.2022.BuildTools", "-e",
+                        "--accept-source-agreements", "--accept-package-agreements",
+                        "--override", "--passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+                    ],
+                    check=True,
+                )
+                vcvars = find_vcvarsall()
+                if vcvars:
+                    platform_info.vcvars_path = vcvars
+                    console.print("[bold green]Visual Studio C++ Build Tools installed successfully![/bold green]")
+            except Exception as e:
+                console.print(
+                    f"[bold red]Auto-installation of VS Build Tools failed: {e}[/bold red]\n"
+                    "[white]If using Clang on Windows, ensure MSVC Build Tools or a MinGW environment is available.[/white]"
+                )
+        else:
+            platform_info.vcvars_path = vcvars
+
+        # Refresh platform_info compiler path
+        platform_info.clang_cpp_path = find_clang()
+
+    else:
+        # Linux / macOS
+        has_compiler = (
+            shutil.which(platform_info.clang_cpp_path) is not None
+            or shutil.which("clang++") is not None
+            or shutil.which("g++") is not None
+        )
+        if not has_compiler:
+            console.print("[yellow]No C++ compiler found. Attempting automatic installation...[/yellow]")
+            if shutil.which("apt-get"):
+                subprocess.run("sudo apt-get update && sudo apt-get install -y clang build-essential", shell=True, check=False)
+            elif shutil.which("dnf"):
+                subprocess.run(["sudo", "dnf", "install", "-y", "clang", "gcc-c++", "make"], check=False)
+            elif shutil.which("pacman"):
+                subprocess.run(["sudo", "pacman", "-S", "--noconfirm", "clang", "base-devel"], check=False)
+
+            if shutil.which("clang++"):
+                platform_info.clang_cpp_path = shutil.which("clang++")
+            elif shutil.which("g++"):
+                platform_info.clang_cpp_path = shutil.which("g++")
 
 
 @dataclass
@@ -717,9 +835,12 @@ class Toolchain:
         self.platform = platform_info
 
     def get_cxx_binary(self) -> str:
+        clang_path = self.platform.clang_cpp_path
         if self.platform.is_windows:
-            return f'"{self.platform.clang_cpp_path}"'
-        return "g++"
+            if " " in clang_path and not clang_path.startswith('"'):
+                return f'"{clang_path}"'
+            return clang_path
+        return clang_path if shutil.which(clang_path) else "g++"
 
     def get_nvcc_binary(self) -> str:
         return "nvcc"
@@ -843,7 +964,13 @@ class Toolchain:
         self, cmd: list[str], is_python_ext: bool = False
     ) -> subprocess.CompletedProcess:
         cmd_str = " ".join(cmd)
-        if self.platform.is_windows:
+
+        # Only invoke vcvarsall.bat on Windows if it actually exists on disk
+        if (
+            self.platform.is_windows
+            and self.platform.vcvars_path
+            and Path(self.platform.vcvars_path).exists()
+        ):
             target_arm64 = (
                 self.platform.is_python_arm64
                 if is_python_ext
@@ -890,6 +1017,9 @@ class BuildOrchestrator:
         self.code_gen = CodeGenerator(config)
 
     def run(self) -> None:
+        # Guarantee toolchain & headers exist before proceeding
+        ensure_toolchain(self.platform)
+
         console.print(
             f"\n[bold cyan]Starting Build [{'DEBUG' if self.config.debug else 'RELEASE'}] "
             f"(Log Level: {self.config.log_level_str}, CUDA: {self.config.use_cuda}, OpenCL: {self.config.use_opencl})...[/bold cyan]\n"

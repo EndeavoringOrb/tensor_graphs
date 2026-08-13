@@ -87,7 +87,6 @@ def main():
     out_file = os.path.join(args.run_dir, "training_metrics.png")
     plt.savefig(out_file)
     print(f"Saved visualization to {out_file}")
-    plt.show()
 
 
 if __name__ == "__main__":

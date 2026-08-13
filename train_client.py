@@ -34,7 +34,6 @@ def client_worker(rank: int, config: TrainConfig):
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
 
-    # Save original stdout fd before dup2 redirection so we can print filtered logger output to terminal
     real_stdout_fd = os.dup(1)
     real_stdout = os.fdopen(real_stdout_fd, "w", buffering=1)
 
@@ -52,8 +51,8 @@ def client_worker(rank: int, config: TrainConfig):
         import msvcrt
 
         os_handle = msvcrt.get_osfhandle(f_log.fileno())
-        ctypes.windll.kernel32.SetStdHandle(-11, os_handle)  # STD_OUTPUT_HANDLE
-        ctypes.windll.kernel32.SetStdHandle(-12, os_handle)  # STD_ERROR_HANDLE
+        ctypes.windll.kernel32.SetStdHandle(-11, os_handle)
+        ctypes.windll.kernel32.SetStdHandle(-12, os_handle)
 
     sys.stdout = f_log
     sys.stderr = f_log
@@ -125,14 +124,22 @@ def client_worker(rank: int, config: TrainConfig):
     while True:
         agent.eval()
         best_cost = float("inf")
-        state_visits = {}
         extraction_costs = []
+        mcts_tree = {}
 
-        # MCTS Simulations using the already saturated e-graph
+        # MCTS Simulations using PUCT selection & episode + depth noise annealing
         for sim in range(config.num_simulations):
-            delegate = ActorDelegate(agent, exploration_noise=0.25)
+            delegate = ActorDelegate(
+                agent,
+                mcts_tree=mcts_tree,
+                c_puct=config.c_puct,
+                episode=episode,
+                decay_episodes=config.decay_episodes,
+                base_noise=config.base_noise,
+                min_noise=config.min_noise,
+                depth_gamma=config.depth_gamma,
+            )
             try:
-                # Fast extraction only
                 cost = tensor_graphs.extract_best_from_egraph(
                     egraph_context, delegate, config.log_cost_calls
                 )
@@ -145,45 +152,49 @@ def client_worker(rank: int, config: TrainConfig):
             if cost < float("inf"):
                 extraction_costs.append(float(cost))
                 best_cost = min(best_cost, cost)
+                Z_sim = 1000.0 / (cost + 1.0)
+            else:
+                Z_sim = -1.0
 
-            # Build trajectory MCTS target distribution
+            # Backup simulation return (Z_sim) into MCTS Tree
             for step in delegate.trajectory:
-                h = hash(step["features"].tobytes())
-                if h not in state_visits:
-                    state_visits[h] = {
-                        "counts": torch.zeros_like(torch.tensor(step["P"])),
-                        "data": step,
-                    }
-                state_visits[h]["counts"][step["top_action"]] += 1
+                h = step["state_hash"]
+                act = step["top_action"]
+                if h in mcts_tree:
+                    mcts_tree[h]["N"][act] += 1.0
+                    mcts_tree[h]["W"][act] += Z_sim
 
-        # Calculate Z and normalize targets
+        # Episode Best Z Target
         if best_cost < float("inf"):
-            Z = 1000.0 / (best_cost + 1.0)
+            best_Z = 1000.0 / (best_cost + 1.0)
         else:
-            Z = -1.0
+            best_Z = -1.0
 
         trajectory_payload = []
-        for h, state_info in state_visits.items():
-            data = state_info["data"]
-            counts = state_info["counts"]
-
-            if counts.sum() > 0:
-                pi = (counts / counts.sum()).numpy()
+        for h, node_data in mcts_tree.items():
+            counts = node_data["N"]
+            total_counts = counts.sum()
+            if total_counts > 0:
+                pi = counts / total_counts
             else:
-                pi = data["P"]
+                pi = node_data["P"]
 
             trajectory_payload.append(
                 {
-                    "type": data["type"],
-                    "global_state": data["global_state"],
-                    "features": data["features"],
+                    "type": node_data["type"],
+                    "global_state": node_data["global_state"],
+                    "features": node_data["features"],
                     "pi": pi,
-                    "Z": Z,
+                    "Z": best_Z,
                 }
             )
 
+        ep_noise = max(
+            config.min_noise,
+            config.base_noise * (1.0 - episode / max(1, config.decay_episodes)),
+        )
         logger.info(
-            f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} | Best Cost: {best_cost:8.4f} ms | "
+            f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} | Ep Noise: {ep_noise:.4f} | Best Cost: {best_cost:8.4f} ms | "
             f"Extractions: {len(extraction_costs)} | Sending {len(trajectory_payload)} transitions..."
         )
 
@@ -258,6 +269,37 @@ def main():
         help="Model weights path",
     )
     parser.add_argument("--log-cost-calls", action="store_true", help="Log cost calls")
+    # PUCT & Noise Annealing Options
+    parser.add_argument(
+        "--c-puct",
+        type=float,
+        default=1.25,
+        help="PUCT exploration constant",
+    )
+    parser.add_argument(
+        "--base-noise",
+        type=float,
+        default=0.25,
+        help="Initial exploration noise at episode 0 and depth 0",
+    )
+    parser.add_argument(
+        "--min-noise",
+        type=float,
+        default=0.01,
+        help="Minimum exploration noise floor",
+    )
+    parser.add_argument(
+        "--decay-episodes",
+        type=int,
+        default=500,
+        help="Number of episodes over which to decay episode-level noise",
+    )
+    parser.add_argument(
+        "--depth-gamma",
+        type=float,
+        default=0.7,
+        help="Per-depth noise decay factor",
+    )
 
     args = parser.parse_args()
 
@@ -270,11 +312,15 @@ def main():
     config.model_name = args.model
     config.model_path = args.model_path
     config.log_cost_calls = args.log_cost_calls
+    config.c_puct = args.c_puct
+    config.base_noise = args.base_noise
+    config.min_noise = args.min_noise
+    config.decay_episodes = args.decay_episodes
+    config.depth_gamma = args.depth_gamma
 
     if config.host and ":" in config.host and len(config.host.split(":")) == 6:
         config.use_bluetooth = True
 
-    # Auto-download model safetensors / metadata before launching workers
     try:
         from utils.download_hf_meta import download_model_meta
 
@@ -297,6 +343,11 @@ def main():
     print("=========================================================")
     print(f" Starting {config.workers} Client Worker Process(es)")
     print(f" Target Server: {config.host}:{config.port} ({conn_type})")
+    print(
+        f" MCTS Settings: c_puct={config.c_puct}, base_noise={config.base_noise}, "
+        f"min_noise={config.min_noise}, decay_episodes={config.decay_episodes}, "
+        f"depth_gamma={config.depth_gamma}"
+    )
     print("=========================================================")
 
     processes = []
@@ -305,7 +356,6 @@ def main():
         p.start()
         processes.append(p)
 
-    # Wait for completion (Manual exit via Ctrl+C)
     for p in processes:
         p.join()
 

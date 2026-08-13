@@ -22,7 +22,6 @@ from train_shared import (
     send_msg,
 )
 
-# Thread-safe global weights storage for the server
 global_weights = {}
 weights_lock = threading.Lock()
 
@@ -50,7 +49,6 @@ def setup_run_dir(base_dir="runs", run_dir=None, resume_latest=False) -> str:
 
 
 def client_handler(client_sock, client_info, replay_queue):
-    """Dedicated thread for handling a worker client."""
     print(f"[Server] Worker connected from {client_info}")
     try:
         while True:
@@ -69,7 +67,6 @@ def client_handler(client_sock, client_info, replay_queue):
                 if not costs and cost < float("inf"):
                     costs = [cost]
 
-                # Queue extraction costs to be logged to costs.bin
                 for c in costs:
                     replay_queue.put({"type": "cost_metric", "cost": float(c)})
 
@@ -92,7 +89,6 @@ def client_handler(client_sock, client_info, replay_queue):
 
 
 def accept_loop(server_sock, conn_type_label, replay_queue):
-    """Accepts incoming connections on a specific server socket."""
     try:
         while True:
             client_sock, client_info = server_sock.accept()
@@ -107,19 +103,16 @@ def accept_loop(server_sock, conn_type_label, replay_queue):
 
 
 def learner_process(config: TrainConfig, replay_queue: queue.Queue):
-    """Central gradient update and metrics logging loop running locally on the Server."""
     agent = AlphaZeroAgent(hidden_dim=config.hidden_dim)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
     buffer = []
 
-    # Ensure run directory exists
     os.makedirs(config.run_dir, exist_ok=True)
     losses_bin_path = os.path.join(config.run_dir, "losses.bin")
     costs_bin_path = os.path.join(config.run_dir, "costs.bin")
     model_filepath = Path(config.run_dir) / "model.safetensors"
     pack_fmt = "<If"
 
-    # Restore existing model weights if resuming
     if model_filepath.exists():
         try:
             state_dict = load_file(model_filepath)
@@ -128,7 +121,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
         except Exception as e:
             print(f"[Learner] Warning: Failed to load {model_filepath}: {e}")
 
-    # Restore metric counters if log files exist
     batches_processed = 0
     if os.path.exists(losses_bin_path) and os.path.getsize(losses_bin_path) >= 8:
         try:
@@ -155,13 +147,11 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 f"[Learner] Warning: Could not read last entry of {costs_bin_path}: {e}"
             )
 
-    # Store initial weights safely in memory and save model checkpoint to disk
     with weights_lock:
         global_weights.update({k: v.cpu() for k, v in agent.state_dict().items()})
     save_file(agent.state_dict(), model_filepath)
 
     while True:
-        # Drain incoming queue from all workers into Replay Buffer and metrics files
         while not replay_queue.empty():
             try:
                 item = replay_queue.get_nowait()
@@ -178,7 +168,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             except queue.Empty:
                 break
 
-        # Gradient Updates
         if len(buffer) >= config.batch_size:
             agent.train()
             batch = random.sample(buffer, config.batch_size)
@@ -225,12 +214,10 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 f"[Learner] Batch {batches_processed:04d} | BufSize: {len(buffer)} | Loss: {loss_val:.4f}"
             )
 
-            # Log loss metric to binary file
             with open(losses_bin_path, "ab") as f_bin:
                 f_bin.write(struct.pack(pack_fmt, batches_processed, loss_val))
                 f_bin.flush()
 
-            # Sync updated weights for worker threads and write to model.safetensors
             if batches_processed % config.save_interval == 0:
                 with weights_lock:
                     global_weights.clear()
@@ -285,6 +272,25 @@ def main():
         action="store_true",
         help="Resume from the latest existing run directory if --run-dir is not specified",
     )
+    # PUCT & Noise Annealing Options
+    parser.add_argument(
+        "--c-puct", type=float, default=1.25, help="PUCT exploration constant"
+    )
+    parser.add_argument(
+        "--base-noise", type=float, default=0.25, help="Initial exploration noise"
+    )
+    parser.add_argument(
+        "--min-noise", type=float, default=0.01, help="Minimum exploration noise floor"
+    )
+    parser.add_argument(
+        "--decay-episodes",
+        type=int,
+        default=500,
+        help="Number of episodes over which to decay noise",
+    )
+    parser.add_argument(
+        "--depth-gamma", type=float, default=0.7, help="Per-depth noise decay factor"
+    )
 
     args = parser.parse_args()
 
@@ -310,14 +316,17 @@ def main():
     config.lr = args.lr
     config.host = args.host
     config.port = args.port
+    config.c_puct = args.c_puct
+    config.base_noise = args.base_noise
+    config.min_noise = args.min_noise
+    config.decay_episodes = args.decay_episodes
+    config.depth_gamma = args.depth_gamma
 
-    # Save/update run config
     with open(os.path.join(config.run_dir, "config.json"), "w") as f:
         json.dump(dataclasses.asdict(config), f, indent=4)
 
     replay_queue = queue.Queue()
 
-    # 1. Start Learner Thread
     learner_thread = threading.Thread(
         target=learner_process, args=(config, replay_queue), daemon=True
     )
@@ -325,7 +334,6 @@ def main():
 
     server_sockets = []
 
-    # 2. Setup TCP Server Socket
     tcp_sock = create_server_socket(config.host, config.port, use_bluetooth=False)
     server_sockets.append(tcp_sock)
     tcp_thread = threading.Thread(
@@ -336,7 +344,6 @@ def main():
     print("=========================================================")
     print(f" Server Listening on TCP: {config.host}:{config.port}")
 
-    # 3. Optionally Setup Bluetooth Server Socket in Parallel
     if args.enable_bluetooth:
         try:
             bt_sock = create_server_socket(
