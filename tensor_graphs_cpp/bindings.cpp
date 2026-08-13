@@ -82,17 +82,15 @@ class LLMSession
     LogicalId logitsId;
     uint32_t vocab_size = 0;
     uint32_t max_seq_len = 128;
+    std::vector<uint32_t> prev_tokens;
 
   public:
-    LLMSession(const std::string &model_name, const std::string &model_path, std::shared_ptr<SearchDelegate> delegate)
+    LLMSession(const std::string &model_name, const std::string &model_path,
+               std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f)
     {
         std::unordered_map<MemSpace, uint64_t> bufferSizes = {
             {MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
 
-        // TODO: Enable CUDA conditionally via config if present
-        // #ifdef TG_USE_CUDA
-        // bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
-        // #endif
         if (HardwareCaps::get().has_opencl)
         {
             bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
@@ -134,32 +132,60 @@ class LLMSession
         repo = std::make_unique<Repo>("benchmarks/repo_" + model_name, gHash, true);
 
         // Disable caching locally during dynamic python testing
-        session = std::make_unique<Session>(*g, *mem, logitsId, "", 0, repo.get(), true, 0.0f, delegate);
+        session = std::make_unique<Session>(*g, *mem, logitsId, "", 0, repo.get(), true, min_compile_time, delegate);
 
-        // Plan & compile immediately. The SearchDelegate helps guide this compilation if provided.
+        // Plan & compile immediately
         session->compile(true);
     }
 
     int32_t generate_step(const std::vector<uint32_t> &tokens)
     {
-        if (tokens.size() >= max_seq_len)
+        if (tokens.empty() || tokens.size() >= max_seq_len)
             return -1;
 
-        std::vector<int32_t> input_data(max_seq_len, 0);
-        for (size_t i = 0; i < tokens.size(); ++i)
+        std::vector<Region> dirty_regions;
+        uint32_t i = 0;
+        while (i < tokens.size())
         {
-            input_data[i] = tokens[i];
+            if (i >= prev_tokens.size() || tokens[i] != prev_tokens[i])
+            {
+                uint32_t start = i;
+                while (i < tokens.size() && (i >= prev_tokens.size() || tokens[i] != prev_tokens[i]))
+                {
+                    i++;
+                }
+                uint32_t end = i;
+                Region inR;
+                inR.region = {{0, 1}, {start, end}};
+                dirty_regions.push_back(inR);
+            }
+            else
+            {
+                i++;
+            }
+        }
+
+        if (dirty_regions.empty())
+        {
+            uint32_t tokIdx = tokens.size() - 1;
+            Region inR;
+            inR.region = {{0, 1}, {tokIdx, tokIdx + 1}};
+            dirty_regions.push_back(inR);
+        }
+
+        std::vector<int32_t> input_data(max_seq_len, 0);
+        for (size_t k = 0; k < tokens.size(); ++k)
+        {
+            input_data[k] = tokens[k];
         }
 
         session->writeInput(inputIdsId, input_data.data(), input_data.size() * sizeof(int32_t));
 
         Bucket b;
         uint32_t tokIdx = tokens.size() - 1;
-        Region inR;
-        inR.region = {{0, 1}, {tokIdx, tokIdx + 1}};
         Region outR;
         outR.region = {{0, 1}, {tokIdx, tokIdx + 1}, {0, vocab_size}};
-        b.inputDirtyRegions = {{inputIdsId, {inR}}};
+        b.inputDirtyRegions = {{inputIdsId, dirty_regions}};
         b.outputNeededRegion = {outR};
 
         const float *device_output = static_cast<const float *>(session->run(b));
@@ -181,14 +207,16 @@ class LLMSession
 
         float max_val = -1e9f;
         int32_t argmax_idx = 0;
-        for (uint32_t i = 0; i < vocab_size; ++i)
+        for (uint32_t k = 0; k < vocab_size; ++k)
         {
-            if (host_output[i] > max_val)
+            if (host_output[k] > max_val)
             {
-                max_val = host_output[i];
-                argmax_idx = i;
+                max_val = host_output[k];
+                argmax_idx = k;
             }
         }
+
+        prev_tokens = tokens;
         return argmax_idx;
     }
 };
@@ -274,6 +302,8 @@ PYBIND11_MODULE(tensor_graphs, m)
           "Runs the extraction and validation pass on a pre-saturated E-Graph context.");
 
     py::class_<LLMSession>(m, "LLMSession")
-        .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>>())
+        .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float>(),
+             py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
+             py::arg("min_compile_time") = 0.0f)
         .def("generate_step", &LLMSession::generate_step);
 }

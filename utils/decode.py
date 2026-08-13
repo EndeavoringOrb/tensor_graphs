@@ -13,20 +13,7 @@ def load_tokenizer(model_name_or_path: str):
     tokenizer = None
     tokenizer_type = None
 
-    # Method 1: Try using transformers (recommended for online model IDs)
-    try:
-        from transformers import AutoTokenizer
-
-        print(f"Loading '{model_name_or_path}' via transformers.AutoTokenizer...")
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-        tokenizer_type = "transformers"
-        return tokenizer, tokenizer_type
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"Could not load via transformers: {e}")
-
-    # Method 2: Try using native tokenizers (fast Rust-backed library)
+    # Method 1: Try using native tokenizers (fast Rust-backed library)
     try:
         from tokenizers import Tokenizer
 
@@ -49,6 +36,19 @@ def load_tokenizer(model_name_or_path: str):
             tokenizer = Tokenizer.from_pretrained(model_name_or_path)
 
         tokenizer_type = "tokenizers"
+        return tokenizer, tokenizer_type
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"Could not load via tokenizers: {e}")
+
+    # Method 2: Try using transformers (recommended for online model IDs)
+    try:
+        from transformers import AutoTokenizer
+
+        print(f"Loading '{model_name_or_path}' via transformers.AutoTokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        tokenizer_type = "transformers"
         return tokenizer, tokenizer_type
     except ImportError:
         print(
