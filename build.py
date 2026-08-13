@@ -143,26 +143,39 @@ def find_vcvarsall() -> str:
     return ""
 
 
-def find_clang() -> str:
-    """Locates the clang++ compiler binary."""
-    if "CLANG_CXX" in os.environ and (
-        shutil.which(os.environ["CLANG_CXX"]) or Path(os.environ["CLANG_CXX"]).exists()
-    ):
-        return os.environ["CLANG_CXX"]
+@dataclass
+class CompilerInfo:
+    path: str
+    kind: str  # "clang", "gcc", or "msvc"
 
-    which_clang = shutil.which("clang++")
-    if which_clang:
-        return which_clang
+    @classmethod
+    def detect(cls) -> "CompilerInfo":
+        # 1. Environment variables
+        cxx_env = os.environ.get("CXX") or os.environ.get("CLANG_CXX")
+        if cxx_env and (shutil.which(cxx_env) or Path(cxx_env).exists()):
+            kind = "clang" if "clang" in Path(cxx_env).name.lower() else "gcc"
+            return cls(path=cxx_env, kind=kind)
 
-    default_llvm = Path(r"C:\Program Files\LLVM\bin\clang++.exe")
-    if default_llvm.exists():
-        return str(default_llvm)
+        # 2. Check for clang++ in PATH or standard LLVM locations
+        which_clang = shutil.which("clang++")
+        if which_clang:
+            return cls(path=which_clang, kind="clang")
 
-    which_gxx = shutil.which("g++")
-    if which_gxx:
-        return which_gxx
+        default_llvm = Path(r"C:\Program Files\LLVM\bin\clang++.exe")
+        if default_llvm.exists():
+            return cls(path=str(default_llvm), kind="clang")
 
-    return "clang++"
+        # 3. Fallback to g++
+        which_gxx = shutil.which("g++")
+        if which_gxx:
+            return cls(path=which_gxx, kind="gcc")
+
+        # 4. Fallback to cl.exe if available
+        which_cl = shutil.which("cl")
+        if which_cl:
+            return cls(path=which_cl, kind="msvc")
+
+        return cls(path="clang++", kind="clang")
 
 
 @dataclass
@@ -175,7 +188,7 @@ class PlatformInfo:
     vcvars_path: str
     cuda_path: str
     opencl_sdk_path: str
-    clang_cpp_path: str
+    compiler: CompilerInfo
     has_cuda: bool
     has_opencl: bool
     opencl_inc_dir: str | None = None
@@ -192,7 +205,7 @@ class PlatformInfo:
         is_python_arm64 = "arm64" in python_plat or "aarch64" in python_plat
 
         vcvars_path = find_vcvarsall()
-        clang_cpp_path = find_clang()
+        compiler = CompilerInfo.detect()
 
         cuda_path = os.environ.get(
             "CUDA_PATH",
@@ -275,7 +288,7 @@ class PlatformInfo:
             vcvars_path=vcvars_path,
             cuda_path=cuda_path,
             opencl_sdk_path=opencl_sdk_path,
-            clang_cpp_path=clang_cpp_path,
+            compiler=compiler,
             has_cuda=has_cuda,
             has_opencl=has_opencl,
             opencl_inc_dir=opencl_inc_dir,
@@ -286,9 +299,10 @@ class PlatformInfo:
 def ensure_toolchain(platform_info: PlatformInfo) -> None:
     """Idempotently ensures compiler and headers/tools are installed for the host OS."""
     if platform_info.is_windows:
-        # 1. Ensure clang++ or a C++ compiler is present
-        clang_path = find_clang()
-        has_compiler = shutil.which(clang_path) is not None or Path(clang_path).exists()
+        has_compiler = (
+            shutil.which(platform_info.compiler.path) is not None
+            or Path(platform_info.compiler.path).exists()
+        )
 
         if not has_compiler:
             console.print(
@@ -310,7 +324,9 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
                 llvm_bin = Path(r"C:\Program Files\LLVM\bin")
                 if llvm_bin.exists():
                     os.environ["PATH"] = f"{llvm_bin};" + os.environ.get("PATH", "")
-                    platform_info.clang_cpp_path = str(llvm_bin / "clang++.exe")
+                    platform_info.compiler = CompilerInfo(
+                        path=str(llvm_bin / "clang++.exe"), kind="clang"
+                    )
                     console.print(
                         "[bold green]LLVM/clang++ installed successfully![/bold green]"
                     )
@@ -320,9 +336,8 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
                     "[white]Please install LLVM or MinGW manually and add it to your PATH.[/white]"
                 )
 
-        # 2. Check Visual Studio C++ Build Tools (headers & libraries)
         vcvars = find_vcvarsall()
-        if not vcvars:
+        if not vcvars and platform_info.compiler.kind != "gcc":
             console.print(
                 "[yellow]Visual Studio C++ Build Tools (vcvarsall.bat) not detected.[/yellow]"
             )
@@ -358,13 +373,11 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
         else:
             platform_info.vcvars_path = vcvars
 
-        # Refresh platform_info compiler path
-        platform_info.clang_cpp_path = find_clang()
+        platform_info.compiler = CompilerInfo.detect()
 
     else:
-        # Linux / macOS
         has_compiler = (
-            shutil.which(platform_info.clang_cpp_path) is not None
+            shutil.which(platform_info.compiler.path) is not None
             or shutil.which("clang++") is not None
             or shutil.which("g++") is not None
         )
@@ -389,10 +402,7 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
                     check=False,
                 )
 
-            if shutil.which("clang++"):
-                platform_info.clang_cpp_path = shutil.which("clang++")
-            elif shutil.which("g++"):
-                platform_info.clang_cpp_path = shutil.which("g++")
+            platform_info.compiler = CompilerInfo.detect()
 
 
 @dataclass
@@ -866,12 +876,14 @@ class Toolchain:
         self.platform = platform_info
 
     def get_cxx_binary(self) -> str:
-        clang_path = self.platform.clang_cpp_path
-        if self.platform.is_windows:
-            if " " in clang_path and not clang_path.startswith('"'):
-                return f'"{clang_path}"'
-            return clang_path
-        return clang_path if shutil.which(clang_path) else "g++"
+        compiler_path = self.platform.compiler.path
+        if (
+            self.platform.is_windows
+            and " " in compiler_path
+            and not compiler_path.startswith('"')
+        ):
+            return f'"{compiler_path}"'
+        return compiler_path
 
     def get_nvcc_binary(self) -> str:
         return "nvcc"
@@ -922,7 +934,8 @@ class Toolchain:
 
         return flags
 
-    def get_pybind11_flags(self) -> tuple[list[str], str]:
+    def get_pybind11_flags(self) -> tuple[list[str], list[str], str]:
+        """Returns (include_flags, link_flags, extension_suffix)."""
         py_includes = (
             subprocess.check_output(
                 [sys.executable, "-m", "pybind11", "--includes"], text=True
@@ -940,17 +953,21 @@ class Toolchain:
             text=True,
         ).strip()
 
-        flags = list(py_includes)
-        flags.append("-shared")
+        inc_flags = list(py_includes)
+        link_flags = ["-shared"]
 
         if self.platform.is_windows:
             py_lib_dir_base = Path(sys.base_prefix) / "libs"
             py_lib_dir_prefix = Path(sys.prefix) / "libs"
-            flags.extend([f"-L{py_lib_dir_base}", f"-L{py_lib_dir_prefix}"])
-        else:
-            flags.append("-fPIC")
+            link_flags.extend([f"-L{py_lib_dir_base}", f"-L{py_lib_dir_prefix}"])
 
-        return [f for f in flags if f], ext_suffix
+            # Crucial fix for GCC/MinGW on Windows: explicitly link Python import library
+            py_version_nodot = f"{sys.version_info.major}{sys.version_info.minor}"
+            link_flags.append(f"-lpython{py_version_nodot}")
+        else:
+            inc_flags.append("-fPIC")
+
+        return [f for f in inc_flags if f], [f for f in link_flags if f], ext_suffix
 
     def get_ld_flags(self) -> list[str]:
         flags = []
@@ -996,9 +1013,10 @@ class Toolchain:
     ) -> subprocess.CompletedProcess:
         cmd_str = " ".join(cmd)
 
-        # Only invoke vcvarsall.bat on Windows if it actually exists on disk
+        # Only run vcvarsall.bat if MSVC or MSVC-ABI compiler toolchain is in use
         if (
             self.platform.is_windows
+            and self.platform.compiler.kind in ("clang", "msvc")
             and self.platform.vcvars_path
             and Path(self.platform.vcvars_path).exists()
         ):
@@ -1012,7 +1030,7 @@ class Toolchain:
         else:
             full_command = cmd_str
 
-        print(f"Running {full_command}")
+        console.print(f"[dim]Running:[/dim] [cyan]{full_command}[/cyan]")
         result = subprocess.run(
             full_command, capture_output=True, text=True, shell=True
         )
@@ -1048,12 +1066,11 @@ class BuildOrchestrator:
         self.code_gen = CodeGenerator(config)
 
     def run(self) -> None:
-        # Guarantee toolchain & headers exist before proceeding
         ensure_toolchain(self.platform)
 
         console.print(
             f"\n[bold cyan]Starting Build [{'DEBUG' if self.config.debug else 'RELEASE'}] "
-            f"(Log Level: {self.config.log_level_str}, CUDA: {self.config.use_cuda}, OpenCL: {self.config.use_opencl})...[/bold cyan]\n"
+            f"(Compiler: {self.platform.compiler.path} [{self.platform.compiler.kind}], Log Level: {self.config.log_level_str}, CUDA: {self.config.use_cuda}, OpenCL: {self.config.use_opencl})...[/bold cyan]\n"
         )
 
         self.linter.lint(self.config)
@@ -1088,13 +1105,16 @@ class BuildOrchestrator:
             target_stem = main_file.split(".")[0]
 
             if main_file == "bindings.cpp":
-                py_flags, ext_suffix = self.toolchain.get_pybind11_flags()
+                py_inc_flags, py_link_flags, ext_suffix = (
+                    self.toolchain.get_pybind11_flags()
+                )
                 out_name = f"tensor_graphs{ext_suffix}"
                 cmd = (
                     [self.toolchain.get_cxx_binary()]
                     + self.toolchain.get_cxx_flags(is_python_ext=True)
-                    + py_flags
+                    + py_inc_flags
                     + [main_src, "-o", out_name]
+                    + py_link_flags
                     + self.toolchain.get_ld_flags()
                 )
                 res = self.toolchain.run_cmd(cmd, is_python_ext=True)
