@@ -107,7 +107,10 @@ def client_worker(rank: int, config: TrainConfig):
     )
     try:
         egraph_context = tensor_graphs.build_and_saturate_egraph(
-            config.model_name, config.model_path
+            config.model_name,
+            config.model_path,
+            config.log_cost_calls,
+            config.compile_decode_buckets,
         )
     except Exception as e:
         logger.info(
@@ -117,13 +120,35 @@ def client_worker(rank: int, config: TrainConfig):
         client_sock.close()
         return
 
+    num_buckets = getattr(egraph_context, "num_buckets", 1)
+    bucket_idx = (
+        config.bucket_idx if config.bucket_idx >= 0 else (rank % max(1, num_buckets))
+    )
+    logger.info(
+        f"{LOG_PREFIX} [Worker {rank}] Assigned to bucket {bucket_idx}/{num_buckets}"
+    )
+
     # 4. Generate Trajectories
     episode = 0
+    import random
+
     while True:
         agent.eval()
         best_cost = float("inf")
         extraction_costs = []
         mcts_tree = {}
+
+        is_replanning_phase = random.random() < 0.5
+
+        if is_replanning_phase:
+            delegate_zero = ActorDelegate(agent, exploration_noise=0.0)
+            egraph_context.setup_for_bucket(bucket_idx, {}, False)
+            cached_nodes = tensor_graphs.get_cached_nodes(
+                egraph_context, delegate_zero, config.log_cost_calls
+            )
+            egraph_context.setup_for_bucket(bucket_idx, cached_nodes, True)
+        else:
+            egraph_context.setup_for_bucket(bucket_idx, {}, False)
 
         # MCTS Simulations using PUCT selection & episode + depth noise annealing
         for sim in range(config.num_simulations):
@@ -256,7 +281,7 @@ def main():
     parser.add_argument(
         "--simulations",
         type=int,
-        default=800,
+        default=10,
         help="Number of MCTS simulations per episode",
     )
     parser.add_argument("--model", type=str, default="gemma-3-270m", help="Model name")
@@ -266,7 +291,17 @@ def main():
         default="models/google/gemma-3-270m",
         help="Model weights path",
     )
-    parser.add_argument("--log-cost-calls", action="store_true", help="Log cost calls")
+    parser.add_argument(
+        "--compile-decode-buckets",
+        action="store_true",
+        help="Compile decode buckets in addition to the single full bucket",
+    )
+    parser.add_argument(
+        "--log-lost-calls",
+        action="store_true",
+        dest="log_cost_calls",
+        help="Log cost calls (forces workers=1 when enabled)",
+    )
     # PUCT & Noise Annealing Options
     parser.add_argument(
         "--c-puct",
@@ -305,10 +340,11 @@ def main():
     config.host = args.host
     config.port = args.port
     config.use_bluetooth = args.use_bluetooth
-    config.workers = args.workers
+    config.workers = 1 if args.log_cost_calls else args.workers
     config.num_simulations = args.simulations
     config.model_name = args.model
     config.model_path = args.model_path
+    config.compile_decode_buckets = args.compile_decode_buckets
     config.log_cost_calls = args.log_cost_calls
     config.c_puct = args.c_puct
     config.base_noise = args.base_noise

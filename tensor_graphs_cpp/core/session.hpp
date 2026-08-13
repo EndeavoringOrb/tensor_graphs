@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include "core/common/bench_utils.hpp"
+#include "core/common/thread_pool.hpp"
 #include "core/cost_model.hpp"
 #include "core/executor.hpp"
 #include "core/graph.hpp"
@@ -315,9 +316,7 @@ struct Session
         cachedGraphs.clear();
         selectedCachedNodes.clear();
 
-        std::cout << "[Session.ensureCacheCoverage] Starting iterative cache "
-                     "optimization..."
-                  << std::endl;
+        std::cout << "[Session.ensureCacheCoverage] Starting iterative cache optimization..." << std::endl;
         Planner planner(costModel, memManager.getMemCaps());
 
         std::unordered_map<LogicalId, MemSpace> protectedCachedNodes;
@@ -352,15 +351,25 @@ struct Session
         preallocateLogicalBuffers(protectedCachedNodes, preallocatedBuffers);
 
         std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size()
-                  << " protected eclasses..." << std::endl;
-        for (uint64_t i = 0; i < manualBuckets.size(); ++i)
-        {
+                  << " protected eclasses across physical cores..." << std::endl;
+
+        std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
+        Graph tempGraph = graph;
+        planner.initBaseEGraph(rootId, tempGraph, topo, repo);
+
+        cachedGraphs.resize(manualBuckets.size());
+
+        ThreadPool::get().parallel_for(static_cast<uint32_t>(manualBuckets.size()), [&](uint32_t i) {
+            Planner threadPlanner(costModel, memManager.getMemCaps());
+            threadPlanner.baseState = planner.baseState;
+            threadPlanner.baseStateInitialized = true;
+
             const Bucket &bucket = manualBuckets[i];
-            CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo,
-                                              preallocatedBuffers, minCompileSeconds, delegate);
+            CompiledGraph plan = threadPlanner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo,
+                                                    preallocatedBuffers, minCompileSeconds, delegate);
             plan.bucket = bucket;
-            cachedGraphs.push_back(plan);
-        }
+            cachedGraphs[i] = std::move(plan);
+        });
 
         selectedCachedNodes = std::move(protectedCachedNodes);
 

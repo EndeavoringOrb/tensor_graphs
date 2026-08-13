@@ -1,4 +1,3 @@
-# main.py
 import argparse
 import os
 
@@ -6,52 +5,22 @@ import tensor_graphs
 from safetensors.torch import load_file
 
 from train_shared import ActorDelegate, AlphaZeroAgent
+from utils.decode import load_tokenizer
 
 
-def load_tokenizer(model_path: str, model_name: str):
-    tokenizer = None
-    try:
-        from tokenizers import Tokenizer
-
-        for path in [model_path, model_name]:
-            try:
-                if os.path.isdir(path):
-                    json_path = os.path.join(path, "tokenizer.json")
-                    if os.path.exists(json_path):
-                        tokenizer = Tokenizer.from_file(json_path)
-                        break
-                else:
-                    tokenizer = Tokenizer.from_pretrained(path)
-                    break
-            except Exception:
-                pass
-    except ImportError:
-        pass
-
-    if tokenizer is None:
-        try:
-            from transformers import AutoTokenizer
-
-            for path in [model_path, model_name]:
-                try:
-                    tokenizer = AutoTokenizer.from_pretrained(path)
-                    break
-                except Exception:
-                    pass
-        except ImportError:
-            pass
-
-    if tokenizer is None:
-        raise RuntimeError(
-            f"Could not load tokenizer for '{model_path}' or '{model_name}'. "
-            "Please install 'transformers' or 'tokenizers'."
-        )
-    return tokenizer
+def decode_tokens(tokenizer_obj, token_ids: list[int]) -> str:
+    if isinstance(tokenizer_obj, tuple):
+        tokenizer_obj = tokenizer_obj[0]
+    if hasattr(tokenizer_obj, "decode"):
+        return tokenizer_obj.decode(token_ids)
+    raise ValueError("Unsupported tokenizer type")
 
 
-def encode_text(tokenizer, text: str, is_first: bool = False):
-    if hasattr(tokenizer, "encode"):
-        res = tokenizer.encode(text)
+def encode_text(tokenizer_obj, text: str, is_first: bool = False):
+    if isinstance(tokenizer_obj, tuple):
+        tokenizer_obj = tokenizer_obj[0]
+    if hasattr(tokenizer_obj, "encode"):
+        res = tokenizer_obj.encode(text)
         if hasattr(res, "ids"):
             tokens = list(res.ids)
         elif isinstance(res, list):
@@ -63,24 +32,18 @@ def encode_text(tokenizer, text: str, is_first: bool = False):
 
         if (
             is_first
-            and hasattr(tokenizer, "bos_token_id")
-            and tokenizer.bos_token_id is not None
+            and hasattr(tokenizer_obj, "bos_token_id")
+            and tokenizer_obj.bos_token_id is not None
         ):
-            if not tokens or tokens[0] != tokenizer.bos_token_id:
-                tokens = [tokenizer.bos_token_id] + tokens
+            if not tokens or tokens[0] != tokenizer_obj.bos_token_id:
+                tokens = [tokenizer_obj.bos_token_id] + tokens
         return tokens
-    raise ValueError("Unsupported tokenizer type")
-
-
-def decode_tokens(tokenizer, token_ids: list[int]) -> str:
-    if hasattr(tokenizer, "decode"):
-        return tokenizer.decode(token_ids)
     raise ValueError("Unsupported tokenizer type")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run AutoRegressive LLM Interactive Chat"
+        description="Run AutoRegressive LLM Interactive Chat / Completion"
     )
     parser.add_argument(
         "--model",
@@ -107,6 +70,16 @@ def main():
         default=0.0,
         help="Minimum required compile time per bucket in seconds",
     )
+    parser.add_argument(
+        "--compile-decode-buckets",
+        action="store_true",
+        help="Compile decode buckets in addition to the single full bucket",
+    )
+    parser.add_argument(
+        "--disable-caching",
+        action="store_true",
+        help="Disable dirty region session caching",
+    )
     args = parser.parse_args()
 
     agent = AlphaZeroAgent(hidden_dim=64)
@@ -121,35 +94,64 @@ def main():
 
     print(f"Loading {args.model} via LLMSession...")
     session = tensor_graphs.LLMSession(
-        args.model, args.model_path, delegate, min_compile_time=args.min_compile_time
+        args.model,
+        args.model_path,
+        delegate,
+        min_compile_time=args.min_compile_time,
+        compile_decode_buckets=args.compile_decode_buckets,
+        disable_caching=args.disable_caching,
     )
 
     print(f"Loading tokenizer for {args.model}...")
-    tokenizer = load_tokenizer(args.model_path, args.model)
+    tokenizer = load_tokenizer([args.model_path, args.model])
+    raw_tokenizer = tokenizer[0] if isinstance(tokenizer, tuple) else tokenizer
 
-    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    eos_token_id = getattr(raw_tokenizer, "eos_token_id", None)
 
-    conversation_tokens = []
-    print("\nChat initialized. Type 'exit' or 'quit' to end.\n")
+    has_chat_template = hasattr(raw_tokenizer, "apply_chat_template")
+
+    if has_chat_template:
+        messages = [{"role": "system", "content": "You are a helpful assistant."}]
+        print("\nChat initialized. Type 'exit' or 'quit' to end.\n")
+    else:
+        messages = []
+        print("\nCompletion mode initialized (chat template not available). Type 'exit' or 'quit' to end.\n")
 
     while True:
         try:
             user_input = input("User: ")
         except (KeyboardInterrupt, EOFError):
-            print("\nExiting chat.")
+            print("\nExiting interaction.")
             break
 
         if user_input.strip().lower() in ["exit", "quit"]:
-            print("Exiting chat.")
+            print("Exiting interaction.")
             break
 
         if not user_input.strip():
             continue
 
-        is_first = len(conversation_tokens) == 0
-        user_tokens = encode_text(tokenizer, user_input, is_first=is_first)
-        conversation_tokens.extend(user_tokens)
-        print(f"Bot: ", end="")
+        if has_chat_template:
+            # Append user input to history and try applying chat template
+            messages.append({"role": "user", "content": user_input})
+            try:
+                conversation_tokens = list(
+                    raw_tokenizer.apply_chat_template(
+                        messages, tokenize=True, add_generation_prompt=True
+                    )
+                )
+            except AttributeError:
+                # Fallback to completion mode if apply_chat_template fails at runtime
+                has_chat_template = False
+                messages.clear()
+
+        if not has_chat_template:
+            # Completion mode encoding
+            conversation_tokens = encode_text(tokenizer, user_input, is_first=True)
+
+        print("Bot: ", end="", flush=True)
+        generated_tokens = []
+        prev_text_len = 0
 
         for _ in range(args.tokens):
             next_token = session.generate_step(conversation_tokens)
@@ -157,9 +159,21 @@ def main():
                 print("\n[Max sequence length reached]")
                 break
             conversation_tokens.append(next_token)
+            generated_tokens.append(next_token)
+
+            full_text = decode_tokens(tokenizer, generated_tokens)
+            new_text = full_text[prev_text_len:]
+            print(new_text, end="", flush=True)
+            prev_text_len = len(full_text)
+
             if eos_token_id is not None and next_token == eos_token_id:
                 break
-            print(decode_tokens(tokenizer, [next_token]), end="")
+        print("\n")
+
+        if has_chat_template:
+            # Save assistant turn content to history only in chat mode
+            assistant_response = decode_tokens(tokenizer, generated_tokens)
+            messages.append({"role": "assistant", "content": assistant_response})
 
 
 if __name__ == "__main__":

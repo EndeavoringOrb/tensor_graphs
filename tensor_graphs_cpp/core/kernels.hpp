@@ -269,6 +269,7 @@ class KernelRegistry
         return instance;
     }
 
+    mutable std::mutex patternCacheMtx;
     mutable std::unordered_map<GraphPatternCacheKey, std::vector<KernelId>> patternCache;
 
     void setReferenceOnly(bool refOnly)
@@ -358,17 +359,23 @@ class KernelRegistry
                                  inputs,
                                  output};
 
-        auto it = patternCache.find(key);
-        if (it != patternCache.end())
         {
-            return it->second;
+            std::lock_guard<std::mutex> lock(patternCacheMtx);
+            auto it = patternCache.find(key);
+            if (it != patternCache.end())
+            {
+                return it->second;
+            }
         }
 
         std::vector<KernelId> matches = _findMatchingKernelsByPattern(
             patternGraph, patternRootId, inputs, output, reference_only, output_mem_space, input_mem_spaces, engines,
             ignore_output_mem_space, ignore_input_mem_spaces, ignore_engines, ignore_input_contig);
 
-        patternCache[key] = matches;
+        {
+            std::lock_guard<std::mutex> lock(patternCacheMtx);
+            patternCache[key] = matches;
+        }
         return matches;
     }
 

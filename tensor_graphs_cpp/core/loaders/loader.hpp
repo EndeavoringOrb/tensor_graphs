@@ -94,6 +94,7 @@ class FileRegistry
 
     void registerPath(const std::string &path)
     {
+        std::lock_guard<std::mutex> lock(mtx);
         if (loaders.find(path) == loaders.end())
         {
             loaders[path] = createLoader(path);
@@ -103,6 +104,7 @@ class FileRegistry
     bool hasTensor(const std::string &path, const std::string &name)
     {
         registerPath(path);
+        std::lock_guard<std::mutex> lock(mtx);
         const auto &it = loaders.find(path);
         if (it == loaders.end())
         {
@@ -114,6 +116,7 @@ class FileRegistry
     TensorMetadata getMetadata(const std::string &path, const std::string &name)
     {
         registerPath(path);
+        std::lock_guard<std::mutex> lock(mtx);
         const auto &it = loaders.find(path);
         if (it == loaders.end())
         {
@@ -128,35 +131,41 @@ class FileRegistry
 
     void registerNode(LogicalId nodeId, const std::string &path, const std::string &name)
     {
+        std::lock_guard<std::mutex> lock(mtx);
         weightSources[nodeId] = {path, name};
     }
 
     TensorMetadata getNodeMeta(LogicalId nodeId)
     {
-        const auto &it = weightSources.find(nodeId);
-        if (it == weightSources.end())
+        std::string path, name;
         {
-            Error::throw_err("[FileRegistry.getNodeMeta] node id " + toString(nodeId) +
-                             " is not registered"); // TODO: make build.py linter check if
-                                                    // Error::throw_err calls inside a function
-                                                    // start with [struct.func]. just use
-                                                    // std::source_location
+            std::lock_guard<std::mutex> lock(mtx);
+            const auto &it = weightSources.find(nodeId);
+            if (it == weightSources.end())
+            {
+                Error::throw_err("[FileRegistry.getNodeMeta] node id " + toString(nodeId) + " is not registered");
+            }
+            path = it->second.first;
+            name = it->second.second;
         }
-        const auto &pair = weightSources.at(nodeId);
-        return getMetadata(pair.first, pair.second);
+        return getMetadata(path, name);
     }
 
     int getNodeFd(LogicalId nodeId)
     {
-        const auto &it = weightSources.find(nodeId);
-        if (it == weightSources.end())
+        std::string path, name;
         {
-            Error::throw_err("[FileRegistry.getNodeFd] node id " + toString(nodeId) + " is not registered");
+            std::lock_guard<std::mutex> lock(mtx);
+            const auto &it = weightSources.find(nodeId);
+            if (it == weightSources.end())
+            {
+                Error::throw_err("[FileRegistry.getNodeFd] node id " + toString(nodeId) + " is not registered");
+            }
+            path = it->second.first;
+            name = it->second.second;
         }
-        const auto &pair = weightSources.at(nodeId);
 
-        // Resolve the actual shard path using metadata
-        TensorMetadata meta = getMetadata(pair.first, pair.second);
+        TensorMetadata meta = getMetadata(path, name);
         return getFd(getFileId(meta.filePath));
     }
 };

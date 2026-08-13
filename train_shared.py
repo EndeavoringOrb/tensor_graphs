@@ -17,12 +17,14 @@ class TrainConfig:
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
     num_simulations: int = 30
-    replay_buffer_size: int = 1_000_000
+    replay_buffer_size: int = 75_000
     batch_size: int = 1024
     save_interval: int = 1
     hidden_dim: int = 64
     lr: float = 1e-3
     log_cost_calls: bool = False
+    bucket_idx: int = -1
+    compile_decode_buckets: bool = False
     workers: int = 4
     # PUCT & Noise Annealing Config
     c_puct: float = 1.25
@@ -34,8 +36,8 @@ class TrainConfig:
     host: str = "127.0.0.1"
     port: int = 5000
     use_bluetooth: bool = False
-    bt_host_address: str = "AC:F2:3C:A7:F7:EC"  # Kept for backward compatibility
-    bt_port: int = 4  # Kept for backward compatibility
+    bt_host_address: str = "AC:F2:3C:A7:F7:EC"
+    bt_port: int = 4
 
 
 # ==============================================================================

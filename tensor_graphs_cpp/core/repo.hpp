@@ -37,6 +37,7 @@ inline void tg_deserialize(BinaryReader &br, RefMetaEntry &val)
     br.read(val.dtype);
     br.read(val.shape);
 }
+
 class Repo
 {
     std::string metaPath;
@@ -46,6 +47,7 @@ class Repo
     std::ofstream dataOut;
     std::ofstream metaOut;
     mutable std::ifstream dataIn;
+    mutable std::mutex repoMtx;
     bool readOnly;
     bool valid = false;
 
@@ -113,6 +115,7 @@ class Repo
 
     std::vector<uint8_t> read(LogicalId logicalId) const
     {
+        std::lock_guard<std::mutex> lock(repoMtx);
         if (!has(logicalId))
             return {};
         const auto &e = entries.at(logicalId);
@@ -124,6 +127,7 @@ class Repo
 
     void write(LogicalId logicalId, const TensorView &view, const void *data, uint64_t sizeBytes)
     {
+        std::lock_guard<std::mutex> lock(repoMtx);
         if (readOnly || !valid)
             return;
         if (has(logicalId))

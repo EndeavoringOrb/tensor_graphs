@@ -86,7 +86,8 @@ class LLMSession
 
   public:
     LLMSession(const std::string &model_name, const std::string &model_path,
-               std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f)
+               std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
+               bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false)
     {
         std::unordered_map<MemSpace, uint64_t> bufferSizes = {
             {MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
@@ -131,10 +132,31 @@ class LLMSession
         std::string gHash = computeGraphHash(*g, {logitsId});
         repo = std::make_unique<Repo>("benchmarks/repo_" + model_name, gHash, true);
 
-        // Disable caching locally during dynamic python testing
-        session = std::make_unique<Session>(*g, *mem, logitsId, "", 0, repo.get(), true, min_compile_time, delegate);
+        std::string actual_cache = cache_file;
+        if (actual_cache.empty())
+        {
+            std::filesystem::create_directories("dirty_region_caches");
+            actual_cache = "dirty_region_caches/" + model_name + "-cpp.bin";
+        }
 
-        // Plan & compile immediately
+        session = std::make_unique<Session>(*g, *mem, logitsId, actual_cache, 0, repo.get(), disable_caching,
+                                            min_compile_time, delegate);
+
+        if (compile_decode_buckets)
+        {
+            for (uint32_t i = 0; i < max_seq_len; ++i)
+            {
+                std::unordered_map<LogicalId, std::vector<Region>> inputDirty;
+                Region inputRegion;
+                inputRegion.region = {{0, 1}, {i, i + 1}};
+                inputDirty[inputIdsId] = {inputRegion};
+
+                Region outputNeeded;
+                outputNeeded.region = {{0, 1}, {i, i + 1}, {0, vocab_size}};
+                session->addBucket(inputDirty, {outputNeeded});
+            }
+        }
+
         session->compile(true);
     }
 
@@ -291,19 +313,25 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("order_malloc", &SearchDelegate::order_malloc);
 
     // Opaque handle for Caching Saturated E-Graphs
-    py::class_<SaturatedEGraphContext, std::shared_ptr<SaturatedEGraphContext>>(m, "SaturatedEGraphContext");
+    py::class_<SaturatedEGraphContext, std::shared_ptr<SaturatedEGraphContext>>(m, "SaturatedEGraphContext")
+        .def_property_readonly("num_buckets", [](const SaturatedEGraphContext &self) { return self.buckets.size(); })
+        .def("setup_for_bucket", &SaturatedEGraphContext::setup_for_bucket, py::arg("bucket_idx"),
+             py::arg("cachedNodes"), py::arg("strictCache"));
 
-    // Modular Functions
     m.def("build_and_saturate_egraph", &build_and_saturate_egraph, py::arg("model_name"), py::arg("model_path"),
-          "Builds the graph, performs base E-Graph initialization, and runs saturation rules once.");
+          py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true);
 
     m.def("extract_best_from_egraph", &extract_best_from_egraph, py::arg("ctx"), py::arg("delegate"),
-          py::arg("log_cost_calls") = false,
-          "Runs the extraction and validation pass on a pre-saturated E-Graph context.");
+          py::arg("log_cost_calls") = false);
+
+    m.def("get_cached_nodes", &get_cached_nodes, py::arg("ctx"), py::arg("delegate"),
+          py::arg("log_cost_calls") = false);
 
     py::class_<LLMSession>(m, "LLMSession")
-        .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float>(),
+        .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
+                      const std::string &, bool>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
-             py::arg("min_compile_time") = 0.0f)
+             py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
+             py::arg("disable_caching") = false)
         .def("generate_step", &LLMSession::generate_step);
 }

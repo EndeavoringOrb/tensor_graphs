@@ -356,10 +356,6 @@ struct FusionRule : public Rule
 
         for (const auto &pattern : it->second)
         {
-            if (pattern.opName == "BF16_Transposed_GEMM_NEON_v5")
-            {
-                int a = 5;
-            }
             std::unordered_map<LogicalId, EClassId> binding;
             if (matchPatternNode(ENodeId{eNodeIdx}, egraph, pattern.rootId, pattern, binding, ctx.protectedEClasses))
             {
