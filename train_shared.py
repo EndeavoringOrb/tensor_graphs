@@ -41,12 +41,9 @@ class TrainConfig:
 # ==============================================================================
 # NETWORK SOCKET UTILITIES
 # ==============================================================================
-def create_client_socket(host: str, port: int, use_bluetooth: bool = False):
+def create_client_socket(config: TrainConfig):
     """Creates and connects a client socket for TCP or Bluetooth RFCOMM."""
-    is_bt = use_bluetooth or (
-        isinstance(host, str) and ":" in host and len(host.split(":")) == 6
-    )
-    if is_bt:
+    if config.use_bluetooth:
         if not hasattr(socket, "AF_BLUETOOTH"):
             raise RuntimeError(
                 "Bluetooth (AF_BLUETOOTH) is not supported on this platform."
@@ -54,10 +51,10 @@ def create_client_socket(host: str, port: int, use_bluetooth: bool = False):
         sock = socket.socket(
             socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM
         )
-        sock.connect((host, port))
+        sock.connect((config.bt_host_address, config.bt_port))
     else:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((host, port))
+        sock.connect((config.host, config.port))
     return sock
 
 
@@ -232,7 +229,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
     def __init__(
         self,
         agent,
-        mcts_tree: dict = None,
+        mcts_tree: dict | None = None,
         c_puct: float = 1.25,
         exploration_noise=None,
         episode: int = 0,

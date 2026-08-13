@@ -81,9 +81,7 @@ def client_worker(rank: int, config: TrainConfig):
         f"{LOG_PREFIX} [Worker {rank}] Connecting to {conn_type} Server at {config.host}:{config.port}..."
     )
     try:
-        client_sock = create_client_socket(
-            config.host, config.port, config.use_bluetooth
-        )
+        client_sock = create_client_socket(config)
         logger.info(f"{LOG_PREFIX} [Worker {rank}] Connected successfully!")
     except Exception as e:
         logger.info(f"{LOG_PREFIX} [Worker {rank}] Connection failed: {e}")
