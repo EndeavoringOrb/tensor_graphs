@@ -103,7 +103,10 @@ def accept_loop(server_sock, conn_type_label, replay_queue):
 
 
 def learner_process(config: TrainConfig, replay_queue: queue.Queue):
-    agent = AlphaZeroAgent(hidden_dim=config.hidden_dim)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[Learner] Using device: {device}")
+
+    agent = AlphaZeroAgent(hidden_dim=config.hidden_dim).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
     buffer = []
 
@@ -117,6 +120,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
         try:
             state_dict = load_file(model_filepath)
             agent.load_state_dict(state_dict)
+            agent.to(device)
             print(f"[Learner] Loaded existing model weights from {model_filepath}")
         except Exception as e:
             print(f"[Learner] Warning: Failed to load {model_filepath}: {e}")
@@ -147,9 +151,10 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 f"[Learner] Warning: Could not read last entry of {costs_bin_path}: {e}"
             )
 
+    cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
     with weights_lock:
-        global_weights.update({k: v.cpu() for k, v in agent.state_dict().items()})
-    save_file(agent.state_dict(), model_filepath)
+        global_weights.update(cpu_state_dict)
+    save_file(cpu_state_dict, model_filepath)
 
     while True:
         while not replay_queue.empty():
@@ -172,7 +177,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             agent.train()
             batch = random.sample(buffer, config.batch_size)
             optimizer.zero_grad()
-            total_loss = torch.tensor(0.0)
+            total_loss = torch.tensor(0.0, device=device)
 
             for dec_type in [
                 "cache_dec",
@@ -185,14 +190,16 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 if not sub_batch:
                     continue
 
-                type_loss = torch.tensor(0.0)
+                type_loss = torch.tensor(0.0, device=device)
                 dec_model = getattr(agent, dec_type)
 
                 for sample in sub_batch:
-                    g_state = torch.from_numpy(sample["global_state"])
-                    feats = torch.from_numpy(sample["features"])
-                    pi_target = torch.from_numpy(sample["pi"])
-                    z_target = torch.tensor([sample["Z"]], dtype=torch.float32)
+                    g_state = torch.from_numpy(sample["global_state"]).to(device)
+                    feats = torch.from_numpy(sample["features"]).to(device)
+                    pi_target = torch.from_numpy(sample["pi"]).to(device)
+                    z_target = torch.tensor(
+                        [sample["Z"]], dtype=torch.float32, device=device
+                    )
 
                     scores, val = dec_model(g_state, feats)
 
@@ -220,12 +227,11 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 f_bin.flush()
 
             if batches_processed % config.save_interval == 0:
+                cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
                 with weights_lock:
                     global_weights.clear()
-                    global_weights.update(
-                        {k: v.cpu() for k, v in agent.state_dict().items()}
-                    )
-                save_file(agent.state_dict(), model_filepath)
+                    global_weights.update(cpu_state_dict)
+                save_file(cpu_state_dict, model_filepath)
         else:
             time.sleep(1)
 
