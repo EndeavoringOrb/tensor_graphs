@@ -897,7 +897,7 @@ class Toolchain:
 
         if self.config.use_opencl:
             flags.append("-DTG_USE_OPENCL")
-            flags.append("-DCL_TARGET_OPENCL_VERSION=310")
+            flags.append("-DCL_TARGET_OPENCL_VERSION=300")
             if self.platform.opencl_inc_dir:
                 flags.append(f"-I{self.platform.opencl_inc_dir}")
 
@@ -978,7 +978,7 @@ class Toolchain:
 
             if self.platform.is_windows and self.config.profile:
                 flags.append("-Wl,-debug")
-        if not is_python_ext:
+        if not is_python_ext and not self.config.use_cuda:
             flags.extend(["-static"])
         return flags
 
