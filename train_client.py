@@ -92,10 +92,18 @@ def client_worker(rank: int, config: TrainConfig):
     try:
         send_msg(client_sock, {"type": "req_weights"})
         initial_resp = recv_msg(client_sock)
-        if initial_resp and initial_resp.get("type") == "weights":
-            agent.load_state_dict(initial_resp["data"])
+        if (
+            initial_resp
+            and initial_resp.get("type") == "weights"
+            and initial_resp.get("data")
+        ):
+            agent.load_state_dict(initial_resp["data"], strict=False)
             logger.info(
                 f"{LOG_PREFIX} [Worker {rank}] Loaded initial network weights from server."
+            )
+        else:
+            logger.info(
+                f"{LOG_PREFIX} [Worker {rank}] Using local randomly initialized weights (server weights pending)."
             )
     except Exception as e:
         logger.info(f"{LOG_PREFIX} [Worker {rank}] Error fetching initial weights: {e}")

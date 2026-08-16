@@ -43,6 +43,7 @@ GNN_FEAT_DIMS = {
 
 global_weights = {}
 weights_lock = threading.Lock()
+weights_ready_event = threading.Event()
 
 
 class ReplayBuffer:
@@ -56,7 +57,6 @@ class ReplayBuffer:
     ):
         self.maxlen = maxlen
 
-        # Scaling limits (graphs generate many nodes & edges per decision!)
         self.max_pool_size = maxlen * pool_multiplier
         self.max_node_pool_size = maxlen * pool_multiplier * 15
         self.max_edge_pool_size = maxlen * pool_multiplier * 30
@@ -65,11 +65,11 @@ class ReplayBuffer:
         self.feat_dim = feat_dim
 
         self.state_ptr = 0
+        self.size = 0
+
         self.pool_ptr = 0
         self.node_ptr = 0
         self.edge_ptr = 0
-
-        self.size = 0
 
         # Structural Metadata
         self.zs = torch.zeros((maxlen, 1), dtype=torch.float32, pin_memory=pin_memory)
@@ -137,7 +137,7 @@ class ReplayBuffer:
             if data_len == 0:
                 return ptr, ptr
             if ptr + data_len > max_size:
-                ptr = 0  # wrap around logic
+                ptr = 0
                 if data_len > max_size:
                     data = data[:max_size]
                     data_len = max_size
@@ -310,6 +310,8 @@ def client_handler(client_sock, client_info, replay_queue):
 
             msg_type = msg.get("type")
             if msg_type == "req_weights":
+                # Wait until initial weights are loaded by learner_process before sending
+                weights_ready_event.wait(timeout=60.0)
                 with weights_lock:
                     send_msg(client_sock, {"type": "weights", "data": global_weights})
 
@@ -377,39 +379,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     print(f"[Learner] Using device: {device}")
 
     agent = AlphaZeroAgent(hidden_dim=config.hidden_dim).to(device)
-    agent_opt = torch.compile(agent)
-    optimizer = optim.Adam(agent.parameters(), lr=config.lr)
-
-    buffer = {
-        dt: ReplayBuffer(
-            maxlen=config.replay_buffer_size,
-            gnn_feat_dim=GNN_FEAT_DIMS[dt],
-            feat_dim=FEAT_DIMS[dt]
-            if dt in globals().get("FEAT_DIMS", {})
-            else 6,  # fallback
-            pool_multiplier=16,
-            pin_memory=True,
-        )
-        for dt in DEC_TYPES
-    }
-
-    for dt in DEC_TYPES:
-        buffer[dt].feat_dim = FEAT_DIMS[dt]
-        buffer[dt].feats_pool = torch.zeros(
-            (buffer[dt].max_pool_size, FEAT_DIMS[dt]),
-            dtype=torch.float32,
-            pin_memory=True,
-        )
-
-    buffer_lock = threading.Lock()
-
-    batch_queue = queue.Queue(maxsize=8)
-    for _ in range(2):
-        threading.Thread(
-            target=batch_generator_worker,
-            args=(buffer, batch_queue, config, buffer_lock),
-            daemon=True,
-        ).start()
 
     os.makedirs(config.run_dir, exist_ok=True)
     losses_bin_path = os.path.join(config.run_dir, "losses.bin")
@@ -420,11 +389,41 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     if model_filepath.exists():
         try:
             state_dict = load_file(model_filepath)
-            agent.load_state_dict(state_dict)
+            agent.load_state_dict(state_dict, strict=False)
             agent.to(device)
             print(f"[Learner] Loaded existing model weights from {model_filepath}")
         except Exception as e:
             print(f"[Learner] Warning: Failed to load {model_filepath}: {e}")
+
+    # Immediately populate global_weights and release client requests
+    cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
+    with weights_lock:
+        global_weights.update(cpu_state_dict)
+    weights_ready_event.set()
+    save_file(cpu_state_dict, model_filepath)
+
+    agent_opt = torch.compile(agent)
+    optimizer = optim.Adam(agent.parameters(), lr=config.lr)
+
+    buffer = {
+        dt: ReplayBuffer(
+            maxlen=config.replay_buffer_size,
+            gnn_feat_dim=GNN_FEAT_DIMS[dt],
+            feat_dim=FEAT_DIMS[dt],
+            pool_multiplier=16,
+            pin_memory=True,
+        )
+        for dt in DEC_TYPES
+    }
+    buffer_lock = threading.Lock()
+
+    batch_queue = queue.Queue(maxsize=8)
+    for _ in range(2):
+        threading.Thread(
+            target=batch_generator_worker,
+            args=(buffer, batch_queue, config, buffer_lock),
+            daemon=True,
+        ).start()
 
     batches_processed = 0
     if os.path.exists(losses_bin_path) and os.path.getsize(losses_bin_path) >= 8:
@@ -451,11 +450,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             print(
                 f"[Learner] Warning: Could not read last entry of {costs_bin_path}: {e}"
             )
-
-    cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
-    with weights_lock:
-        global_weights.update(cpu_state_dict)
-    save_file(cpu_state_dict, model_filepath)
 
     while True:
         while not replay_queue.empty():
@@ -506,7 +500,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             gnn_model = getattr(agent_opt, gnn_model_name)
             dec_model = getattr(agent_opt, dt)
 
-            # Move elements to device with overlapping memory transfers
             nodes_concat = nodes_concat.to(device, non_blocking=True)
             shifted_src = shifted_src.to(device, non_blocking=True)
             shifted_dst = shifted_dst.to(device, non_blocking=True)
@@ -516,7 +509,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             pi_concat = pi_concat.to(device, non_blocking=True)
             z_targets = z_targets.to(device, non_blocking=True)
 
-            # A: GNN Forward
+            # A: GNN Forward Pass
             node_embeddings = gnn_model(nodes_concat, shifted_src, shifted_dst)
 
             B = len(N_list)
@@ -594,7 +587,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             if batches_processed % config.save_interval == 0:
                 cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
                 with weights_lock:
-                    global_weights.clear()
                     global_weights.update(cpu_state_dict)
                 save_file(cpu_state_dict, model_filepath)
 
