@@ -28,6 +28,7 @@ from train_shared import (
 torch.set_float32_matmul_precision("high")
 
 global_weights = {}
+global_version = 0
 weights_lock = threading.Lock()
 weights_ready_event = threading.Event()
 
@@ -81,10 +82,25 @@ def client_handler(client_sock, client_info, replay_queue):
                 break
 
             msg_type = msg.get("type")
-            if msg_type == "req_weights":
+            if msg_type == "req_version":
                 weights_ready_event.wait(timeout=60.0)
                 with weights_lock:
-                    send_msg(client_sock, {"type": "weights", "data": global_weights})
+                    send_msg(
+                        client_sock,
+                        {"type": "version", "version": global_version},
+                    )
+
+            elif msg_type == "req_weights":
+                weights_ready_event.wait(timeout=60.0)
+                with weights_lock:
+                    send_msg(
+                        client_sock,
+                        {
+                            "type": "weights",
+                            "version": global_version,
+                            "data": global_weights,
+                        },
+                    )
 
             elif msg_type == "trajectory":
                 cost = msg.get("cost", float("inf"))
@@ -125,6 +141,7 @@ def accept_loop(server_sock, conn_type_label, replay_queue):
 
 
 def learner_process(config: TrainConfig, replay_queue: queue.Queue):
+    global global_version
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Learner] Using device: {device}")
 
@@ -150,12 +167,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
         except Exception as e:
             print(f"[Learner] Warning: Failed to load {model_filepath}: {e}")
 
-    cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
-    with weights_lock:
-        global_weights.update(cpu_state_dict)
-    weights_ready_event.set()
-    save_file(cpu_state_dict, model_filepath)
-
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
     buffer = UnifiedReplayBuffer(maxlen=config.replay_buffer_size)
 
@@ -169,6 +180,13 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             print(f"[Learner] Resuming loss logging at batch {batches_processed}")
         except Exception:
             pass
+
+    cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
+    with weights_lock:
+        global_weights.update(cpu_state_dict)
+        global_version = batches_processed
+    weights_ready_event.set()
+    save_file(cpu_state_dict, model_filepath)
 
     cost_count = 0
     if os.path.exists(costs_bin_path) and os.path.getsize(costs_bin_path) >= 8:
@@ -306,6 +324,8 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
                 with weights_lock:
                     global_weights.update(cpu_state_dict)
+                    global_version = batches_processed
+                weights_ready_event.set()
                 save_file(cpu_state_dict, model_filepath)
 
 

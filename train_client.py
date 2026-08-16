@@ -7,8 +7,8 @@ import sys
 import threading
 import time
 import traceback
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
 import psutil
 import torch
@@ -411,17 +411,53 @@ def main():
     client_sock = create_client_socket(config)
     sock_lock = threading.Lock()
 
+    # Track weight versions and completed episodes
+    current_version = -1
+    episodes_completed = 0
+    episodes_lock = threading.Lock()
+
     def weight_sync_thread():
+        nonlocal current_version, episodes_completed
         os.makedirs("runs", exist_ok=True)
         weights_path = os.path.join("runs", "client_weights.pt")
         while True:
             try:
+                # 1. Ask server only for current version (lightweight)
                 with sock_lock:
-                    send_msg(client_sock, {"type": "req_weights"})
+                    send_msg(client_sock, {"type": "req_version"})
                     resp = recv_msg(client_sock)
-                if resp and resp.get("type") == "weights" and resp.get("data"):
-                    torch.save(resp["data"], weights_path)
-                    weights_event.set()
+
+                if resp and resp.get("type") == "version":
+                    server_version = resp.get("version", 0)
+
+                    # Only fetch weights on initial boot OR if server has newer weights
+                    # AND at least 1 episode was completed using current weights
+                    with episodes_lock:
+                        ready_to_update = (current_version == -1) or (
+                            server_version > current_version and episodes_completed > 0
+                        )
+
+                    if ready_to_update:
+                        with sock_lock:
+                            send_msg(client_sock, {"type": "req_weights"})
+                            weights_resp = recv_msg(client_sock)
+
+                        if (
+                            weights_resp
+                            and weights_resp.get("type") == "weights"
+                            and weights_resp.get("data")
+                        ):
+                            torch.save(weights_resp["data"], weights_path)
+                            current_version = weights_resp.get(
+                                "version", server_version
+                            )
+                            with episodes_lock:
+                                episodes_completed = 0
+                            weights_event.set()
+                            print(
+                                f"[Client] Synced new weights (version {current_version})."
+                            )
+
                 time.sleep(10)
             except Exception as e:
                 print(f"[Client] Weight sync error: {e}")
@@ -444,6 +480,11 @@ def main():
             buffer_prefixes.update(payload["prefixes"])
             extraction_costs.extend(msg.get("costs", []))
             best_cost_in_window = min(best_cost_in_window, cost)
+
+            # Record that an episode completed with the current weights
+            with episodes_lock:
+                episodes_completed += 1
+
         except queue.Empty:
             pass
 
