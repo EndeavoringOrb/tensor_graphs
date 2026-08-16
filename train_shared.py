@@ -5,6 +5,8 @@ import pickle
 import socket
 import struct
 import zlib
+import contextlib
+import time
 
 import numpy as np
 import torch
@@ -113,12 +115,186 @@ def recv_msg(sock):
 
 
 # ==============================================================================
+# TREE KV CACHE
+# ==============================================================================
+class PreallocatedTreeCache:
+    """Pre-allocated, geometrically growing KV Cache with O(1) pointer-based rollback for tree search / MCTS."""
+
+    def __init__(
+        self,
+        num_layers: int,
+        batch_size: int,
+        num_heads: int,
+        head_dim: int,
+        initial_capacity: int = 1024,
+        dtype: torch.dtype = torch.float32,
+        device: torch.device | str = "cpu",
+    ):
+        self.num_layers = num_layers
+        self.batch_size = batch_size
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.dtype = dtype
+        self.device = device
+
+        self.key_cache: list[torch.Tensor] = []
+        self.value_cache: list[torch.Tensor] = []
+
+        for _ in range(num_layers):
+            k = torch.empty(
+                (batch_size, num_heads, initial_capacity, head_dim),
+                dtype=dtype,
+                device=device,
+            )
+            v = torch.empty(
+                (batch_size, num_heads, initial_capacity, head_dim),
+                dtype=dtype,
+                device=device,
+            )
+            self.key_cache.append(k)
+            self.value_cache.append(v)
+
+        self._seq_len: int = 0
+
+    @property
+    def seq_len(self) -> int:
+        return self._seq_len
+
+    @property
+    def capacity(self) -> int:
+        return self.key_cache[0].shape[2]
+
+    def _grow(self, required_capacity: int):
+        """Grows all layer buffers synchronously so every layer maintains identical capacity."""
+        new_cap = max(self.capacity * 2, required_capacity)
+
+        for layer_idx in range(self.num_layers):
+            old_k = self.key_cache[layer_idx]
+            old_v = self.value_cache[layer_idx]
+
+            new_k = torch.empty(
+                (self.batch_size, self.num_heads, new_cap, self.head_dim),
+                dtype=self.dtype,
+                device=self.device,
+            )
+            new_v = torch.empty_like(new_k)
+
+            if self._seq_len > 0:
+                new_k[:, :, : self._seq_len, :].copy_(
+                    old_k[:, :, : self._seq_len, :], non_blocking=True
+                )
+                new_v[:, :, : self._seq_len, :].copy_(
+                    old_v[:, :, : self._seq_len, :], non_blocking=True
+                )
+
+            self.key_cache[layer_idx] = new_k
+            self.value_cache[layer_idx] = new_v
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        incoming_len = key_states.shape[2]
+        new_total_len = self._seq_len + incoming_len
+
+        # Expand all layer capacities synchronously if needed
+        if new_total_len > self.capacity:
+            self._grow(new_total_len)
+
+        self.key_cache[layer_idx][:, :, self._seq_len : new_total_len, :] = key_states
+        self.value_cache[layer_idx][:, :, self._seq_len : new_total_len, :] = (
+            value_states
+        )
+
+        if layer_idx == self.num_layers - 1:
+            self._seq_len = new_total_len
+
+        k_view = self.key_cache[layer_idx][:, :, :new_total_len, :]
+        v_view = self.value_cache[layer_idx][:, :, :new_total_len, :]
+        return k_view, v_view
+
+    def truncate(self, target_len: int):
+        assert 0 <= target_len <= self._seq_len, (
+            f"Cannot truncate to {target_len} from {self._seq_len}"
+        )
+        self._seq_len = target_len
+
+    @contextlib.contextmanager
+    def checkpoint(self):
+        saved_len = self._seq_len
+        try:
+            yield saved_len
+        finally:
+            self.truncate(saved_len)
+
+
+class CustomSelfAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, layer_idx: int, num_layers: int):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.layer_idx = layer_idx
+        self.num_layers = num_layers
+
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cache: PreallocatedTreeCache | None = None,
+        attn_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        B, L, _ = x.shape
+        q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+
+        if cache is not None:
+            k, v = cache.update(k, v, self.layer_idx)
+
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask
+        )
+        out = out.transpose(1, 2).contiguous().view(B, L, self.d_model)
+        return self.out_proj(out)
+
+
+class CustomTransformerBlock(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, layer_idx: int, num_layers: int):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.attn = CustomSelfAttention(d_model, num_heads, layer_idx, num_layers)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model)
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        cache: PreallocatedTreeCache | None = None,
+        attn_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), cache=cache, attn_mask=attn_mask)
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
+# ==============================================================================
 # UNIFIED TRANSFORMER MODEL
 # ==============================================================================
 class AlphaZeroTransformer(nn.Module):
     def __init__(self, d_model=128, nhead=4, num_layers=3, max_feat_dim=8):
         super().__init__()
         self.d_model = d_model
+        self.nhead = nhead
+        self.num_layers = num_layers
         self.max_feat_dim = max_feat_dim
 
         self.feat_proj = nn.Linear(max_feat_dim, d_model)
@@ -127,14 +303,12 @@ class AlphaZeroTransformer(nn.Module):
             5, d_model
         )  # 0=cache, 1=extract, 2=dispatch, 3=bufferize, 4=malloc
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=d_model * 4,
-            batch_first=True,
-            activation="gelu",
+        self.layers = nn.ModuleList(
+            [
+                CustomTransformerBlock(d_model, nhead, i, num_layers)
+                for i in range(num_layers)
+            ]
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
         self.value_head = nn.Sequential(
             nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1)
@@ -144,23 +318,45 @@ class AlphaZeroTransformer(nn.Module):
             nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1)
         )
 
-    def forward(self, features, token_types, phase_ids, key_padding_mask=None):
-        # features shape: (B, L, max_feat_dim)
+    def forward(
+        self,
+        features,
+        token_types,
+        phase_ids,
+        key_padding_mask=None,
+        cache: PreallocatedTreeCache | None = None,
+    ):
+        start = time.perf_counter()
         x = (
             self.feat_proj(features)
             + self.type_emb(token_types)
             + self.phase_emb(phase_ids)
         )
 
-        # TODO: Consider SDPA / FlashAttention context managers here if sequences get extremely long.
-        x = self.transformer(x, src_key_padding_mask=key_padding_mask)
+        attn_mask = None
+        if cache is None:
+            is_action = token_types == 3
+            is_prefix = ~is_action
 
-        # Global token is always at index 0. It predicts the value (cost).
-        v = self.value_head(x[:, 0]).squeeze(-1)
+            allowed_mask = is_action.unsqueeze(2) | is_prefix.unsqueeze(1)
+            if key_padding_mask is not None:
+                allowed_mask = allowed_mask & (~key_padding_mask).unsqueeze(1)
 
-        # Compute logits for all tokens (we will filter out actions externally)
-        logits = self.policy_head(x).squeeze(-1)  # (B, L)
+            attn_mask = allowed_mask.unsqueeze(1)  # (B, 1, L, L) for SDPA
 
+        for layer in self.layers:
+            x = layer(x, cache=cache, attn_mask=attn_mask)
+
+        v = None
+        if token_types.shape[1] > 0 and (token_types[:, 0] == 0).all():
+            v = self.value_head(x[:, 0]).squeeze(-1)
+
+        logits = self.policy_head(x).squeeze(-1)
+
+        end = time.perf_counter()
+        print(
+            f"Elapsed (cache len={cache.seq_len if cache is not None else 0}): {end - start}"
+        )
         return logits, v
 
 
@@ -209,6 +405,20 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.active_stack = []
         self.raw_graphs = {}
 
+        device = next(self.agent.parameters()).device
+        self.caches = {}
+        for phase in self.PHASE_MAP.keys():
+            self.caches[phase] = PreallocatedTreeCache(
+                num_layers=self.agent.num_layers,
+                batch_size=1,
+                num_heads=self.agent.nhead,
+                head_dim=self.agent.d_model // self.agent.nhead,
+                initial_capacity=1024,
+                dtype=torch.float32,
+                device=device,
+            )
+        self.phase_values = {}
+
     def push_state(self):
         pass
 
@@ -252,6 +462,28 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             "edge_src": src,
             "edge_dst": dst,
         }
+
+        # Embed prefix and populate cache
+        features, token_types, phase_ids = self._build_sequence(
+            phase_name, action_features=np.zeros((0, 8), dtype=np.float32)
+        )
+        cache = self.caches[phase_name]
+        cache.truncate(0)
+
+        f_t = torch.tensor(
+            features, dtype=torch.float32, device=cache.device
+        ).unsqueeze(0)
+        tt_t = torch.tensor(
+            token_types, dtype=torch.int64, device=cache.device
+        ).unsqueeze(0)
+        p_t = torch.tensor(phase_ids, dtype=torch.int64, device=cache.device).unsqueeze(
+            0
+        )
+
+        with torch.inference_mode():
+            _, v = self.agent(f_t, tt_t, p_t, cache=cache)
+
+        self.phase_values[phase_name] = v.item() if v is not None else 0.0
 
     def init_cache_graph(self, node_features, edge_src, edge_dst):
         self._store_raw_graph("cache", node_features, edge_src, edge_dst)
@@ -303,8 +535,8 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         # 1. Node Tokens [ID + Features]
         if N > 0:
             features[1 : N + 1, 0] = np.arange(N)
-            dim = min(7, node_feats.shape[1])
-            features[1 : N + 1, 1 : 1 + dim] = node_feats[:, :dim]
+            dim_feat = min(7, node_feats.shape[1])
+            features[1 : N + 1, 1 : 1 + dim_feat] = node_feats[:, :dim_feat]
         token_types[1 : N + 1] = 1
 
         # 2. Edge Tokens [Src_ID + Dst_ID + padding]
@@ -318,53 +550,74 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             features[N + E + 1 :, 0] = np.arange(A)
             if isinstance(action_features, torch.Tensor):
                 action_features = action_features.cpu().numpy()
-            dim = min(7, action_features.shape[1])
-            features[N + E + 1 :, 1 : 1 + dim] = action_features[:, :dim]
+            dim_feat = min(7, action_features.shape[1])
+            features[N + E + 1 :, 1 : 1 + dim_feat] = action_features[:, :dim_feat]
         token_types[N + E + 1 :] = 3
+
+        return features, token_types, phase_ids
+
+    def _build_action_sequence(self, phase_name, action_features):
+        phase_id = self.PHASE_MAP[phase_name]
+        A = len(action_features)
+
+        features = np.zeros((A, 8), dtype=np.float32)
+        token_types = np.full(A, 3, dtype=np.int64)
+        phase_ids = np.full(A, phase_id, dtype=np.int64)
+
+        features[:, 0] = np.arange(A)
+        if isinstance(action_features, torch.Tensor):
+            action_features = action_features.cpu().numpy()
+        dim_feat = min(7, action_features.shape[1])
+        features[:, 1 : 1 + dim_feat] = action_features[:, :dim_feat]
 
         return features, token_types, phase_ids
 
     @torch.inference_mode()
     def _order_items(self, items, phase_name, extract_fn):
         action_feats = extract_fn(items)
-        features, token_types, phase_ids = self._build_sequence(
-            phase_name, action_feats
-        )
 
-        state_key = hash(
-            features.tobytes() + token_types.tobytes() + phase_ids.tobytes()
-        )
+        full_features, full_tt, full_p = self._build_sequence(phase_name, action_feats)
+        state_key = hash(full_features.tobytes() + full_tt.tobytes() + full_p.tobytes())
+
         num_actions = len(items)
 
         if num_actions <= 1:
             if num_actions == 1 and state_key not in self.mcts_tree:
+                v = self.phase_values.get(phase_name, 0.0)
                 self.mcts_tree[state_key] = {
                     "N": np.zeros(1, dtype=np.float32),
                     "W": np.zeros(1, dtype=np.float32),
                     "P": np.ones(1, dtype=np.float32),
-                    "v": 0.0,
-                    "features": features,
-                    "token_types": token_types,
-                    "phase_ids": phase_ids,
+                    "v": v,
+                    "features": full_features,
+                    "token_types": full_tt,
+                    "phase_ids": full_p,
                 }
                 self.active_stack.append((state_key, 0))
             return list(range(num_actions))
 
         if state_key not in self.mcts_tree:
-            f_t = torch.tensor(features, dtype=torch.float32).unsqueeze(0)
-            tt_t = torch.tensor(token_types, dtype=torch.int64).unsqueeze(0)
-            p_t = torch.tensor(phase_ids, dtype=torch.int64).unsqueeze(0)
+            features, token_types, phase_ids = self._build_action_sequence(
+                phase_name, action_feats
+            )
+            cache = self.caches[phase_name]
 
-            action_mask = tt_t == 3  # shape (1, L)
+            with cache.checkpoint():
+                f_t = torch.tensor(
+                    features, dtype=torch.float32, device=cache.device
+                ).unsqueeze(0)
+                tt_t = torch.tensor(
+                    token_types, dtype=torch.int64, device=cache.device
+                ).unsqueeze(0)
+                p_t = torch.tensor(
+                    phase_ids, dtype=torch.int64, device=cache.device
+                ).unsqueeze(0)
 
-            logits, val = self.agent(f_t, tt_t, p_t)
-
-            # Mask non-actions and slice directly with the 2D boolean mask
-            logits = logits.masked_fill(~action_mask, -float("inf"))
-            scores = logits[action_mask]  # Fixed 1D extraction: shape (num_actions,)
+                logits, _ = self.agent(f_t, tt_t, p_t, cache=cache)
+                scores = logits[0]  # (1, A) -> (A,)
 
             P = torch.softmax(scores, dim=0).cpu().numpy()
-            v = val.item()
+            v = self.phase_values.get(phase_name, 0.0)
 
             current_depth = len(self.active_stack)
             effective_noise = self.episode_noise * (self.depth_gamma**current_depth)
@@ -384,9 +637,9 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 "W": np.zeros(num_actions, dtype=np.float32),
                 "P": P_perturbed,
                 "v": v,
-                "features": features,
-                "token_types": token_types,
-                "phase_ids": phase_ids,
+                "features": full_features,
+                "token_types": full_tt,
+                "phase_ids": full_p,
             }
 
         node_data = self.mcts_tree[state_key]

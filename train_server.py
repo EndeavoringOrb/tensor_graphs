@@ -234,7 +234,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 last_idx, _ = struct.unpack(pack_fmt, f_bin.read(8))
                 batches_processed = int(last_idx)
             print(f"[Learner] Resuming loss logging at batch {batches_processed}")
-        except Exception as e:
+        except Exception:
             pass
 
     cost_count = 0
@@ -245,7 +245,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 last_idx, _ = struct.unpack(pack_fmt, f_bin.read(8))
                 cost_count = int(last_idx)
             print(f"[Learner] Resuming cost logging at count {cost_count}")
-        except Exception as e:
+        except Exception:
             pass
 
     while True:
@@ -284,7 +284,9 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
         padded_pis = batch["padded_pis"].to(device, non_blocking=True)
         zs = batch["zs"].to(device, non_blocking=True)
 
-        logits, v = agent_opt(features, token_types, phase_ids, key_padding_mask)
+        logits, v = agent_opt(
+            features, token_types, phase_ids, key_padding_mask=key_padding_mask
+        )
 
         # 1. Value Loss
         value_loss = F.mse_loss(v, zs, reduction="mean")
