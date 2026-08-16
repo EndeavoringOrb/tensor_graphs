@@ -16,6 +16,7 @@ import torch
 import torch.multiprocessing as mp
 
 DEFAULT_WORKERS = max(1, (psutil.cpu_count(logical=False) or 4) - 1)
+DEC_TYPES = ["cache_dec", "extract_dec", "dispatch_dec", "bufferize_dec", "malloc_dec"]
 
 import tensor_graphs
 
@@ -137,7 +138,7 @@ def client_worker(rank: int, config: TrainConfig):
         extraction_costs = []
         mcts_tree = {}
 
-        # MCTS Simulations exploring Cache -> Extract -> Dispatch -> Bufferize -> Malloc
+        # MCTS Simulations
         for sim in range(config.num_simulations):
             delegate = ActorDelegate(
                 agent,
@@ -168,13 +169,17 @@ def client_worker(rank: int, config: TrainConfig):
                     extraction_costs.append(float(cost))
                     best_cost = min(best_cost, cost)
 
-        # Episode Best Z Target
         if best_cost < float("inf"):
             best_Z = 1000.0 / (best_cost + 1.0)
         else:
             best_Z = -1.0
 
-        trajectory_payload = []
+        # Group trajectory items by dec_type into parallel lists (much more efficient for network serialization)
+        trajectory_payload = {
+            dt: {"global_states": [], "features": [], "pis": [], "Zs": []}
+            for dt in DEC_TYPES
+        }
+
         for h, node_data in mcts_tree.items():
             counts = node_data["N"]
             total_counts = counts.sum()
@@ -183,15 +188,13 @@ def client_worker(rank: int, config: TrainConfig):
             else:
                 pi = node_data["P"]
 
-            trajectory_payload.append(
-                {
-                    "type": node_data["type"],
-                    "global_state": node_data["global_state"],
-                    "features": node_data["features"],
-                    "pi": pi,
-                    "Z": best_Z,
-                }
-            )
+            dt = node_data["type"]
+            trajectory_payload[dt]["global_states"].append(node_data["global_state"])
+            trajectory_payload[dt]["features"].append(node_data["features"])
+            trajectory_payload[dt]["pis"].append(pi)
+            trajectory_payload[dt]["Zs"].append(best_Z)
+
+        total_transitions = sum(len(d["Zs"]) for d in trajectory_payload.values())
 
         ep_noise = max(
             config.min_noise,
@@ -199,10 +202,10 @@ def client_worker(rank: int, config: TrainConfig):
         )
         logger.info(
             f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} | Ep Noise: {ep_noise:.4f} | Best Cost: {best_cost:8.4f} ms | "
-            f"Extractions: {len(extraction_costs)} | Sending {len(trajectory_payload)} transitions..."
+            f"Extractions: {len(extraction_costs)} | Sending {total_transitions} transitions..."
         )
 
-        # 5. Stream Trajectory and ALL extraction costs to Server
+        # 5. Stream Trajectory to Server
         try:
             send_msg(
                 client_sock,

@@ -7,8 +7,10 @@ import random
 import struct
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
@@ -21,6 +23,8 @@ from train_shared import (
     recv_msg,
     send_msg,
 )
+
+DEC_TYPES = ["cache_dec", "extract_dec", "dispatch_dec", "bufferize_dec", "malloc_dec"]
 
 global_weights = {}
 weights_lock = threading.Lock()
@@ -70,11 +74,19 @@ def client_handler(client_sock, client_info, replay_queue):
                 for c in costs:
                     replay_queue.put({"type": "cost_metric", "cost": float(c)})
 
+                trajectory_data = msg.get("data", {})
+                total_transitions = sum(len(d["Zs"]) for d in trajectory_data.values())
+
                 print(
-                    f"[Server] Received trajectory from {client_info} (Best Cost: {cost:.4f} ms, Extractions: {len(costs)})"
+                    f"[Server] Received trajectory from {client_info} "
+                    f"(Best Cost: {cost:.4f} ms, Extractions: {len(costs)}, Transitions: {total_transitions})"
                 )
-                for transition in msg.get("data", []):
-                    replay_queue.put(transition)
+
+                # Forward bulk payload to learner queue
+                if total_transitions > 0:
+                    replay_queue.put(
+                        {"type": "trajectory_data", "data": trajectory_data}
+                    )
 
             elif msg_type == "cost_metric":
                 cost = msg.get("cost")
@@ -108,7 +120,9 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
 
     agent = AlphaZeroAgent(hidden_dim=config.hidden_dim).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
-    buffer = []
+
+    # Maintain separate replay buffers for each decision type
+    buffer = {dt: deque(maxlen=config.replay_buffer_size) for dt in DEC_TYPES}
 
     os.makedirs(config.run_dir, exist_ok=True)
     losses_bin_path = os.path.join(config.run_dir, "losses.bin")
@@ -157,6 +171,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     save_file(cpu_state_dict, model_filepath)
 
     while True:
+        # 1. Drain network queue into separated buffers
         while not replay_queue.empty():
             try:
                 item = replay_queue.get_nowait()
@@ -166,72 +181,101 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                     with open(costs_bin_path, "ab") as f_bin:
                         f_bin.write(struct.pack(pack_fmt, cost_count, cost_val))
                         f_bin.flush()
-                else:
-                    buffer.append(item)
-                    if len(buffer) > config.replay_buffer_size:
-                        buffer.pop(0)
+                elif item["type"] == "trajectory_data":
+                    data_dict = item["data"]
+                    for dt, d in data_dict.items():
+                        for gs, f, p, z in zip(
+                            d["global_states"], d["features"], d["pis"], d["Zs"]
+                        ):
+                            buffer[dt].append((gs, f, p, z))
             except queue.Empty:
                 break
 
-        if len(buffer) >= config.batch_size:
+        # 2. Check if we have enough samples to train ANY decision type network
+        can_train = any(len(buffer[dt]) >= config.batch_size for dt in DEC_TYPES)
+
+        if can_train:
             agent.train()
-            batch = random.sample(buffer, config.batch_size)
             optimizer.zero_grad()
             total_loss = torch.tensor(0.0, device=device)
+            types_trained = 0
 
-            for dec_type in [
-                "cache_dec",
-                "extract_dec",
-                "dispatch_dec",
-                "bufferize_dec",
-                "malloc_dec",
-            ]:
-                sub_batch = [b for b in batch if b["type"] == dec_type]
-                if not sub_batch:
+            for dt in DEC_TYPES:
+                if len(buffer[dt]) < config.batch_size:
                     continue
 
-                type_loss = torch.tensor(0.0, device=device)
-                dec_model = getattr(agent, dec_type)
+                batch = random.sample(buffer[dt], config.batch_size)
+                dec_model = getattr(agent, dt)
 
-                for sample in sub_batch:
-                    g_state = torch.from_numpy(sample["global_state"]).to(device)
-                    feats = torch.from_numpy(sample["features"]).to(device)
-                    pi_target = torch.from_numpy(sample["pi"]).to(device)
-                    z_target = torch.tensor(
-                        [sample["Z"]], dtype=torch.float32, device=device
-                    )
+                # --- VECTORIZATION ---
+                # A: Prepare inputs
+                g_states = torch.from_numpy(np.stack([s[0] for s in batch])).to(
+                    device, non_blocking=True
+                )
+                feats_concat = torch.from_numpy(
+                    np.concatenate([s[1] for s in batch], axis=0)
+                ).to(device, non_blocking=True)
+                pi_concat = torch.from_numpy(
+                    np.concatenate([s[2] for s in batch], axis=0)
+                ).to(device, non_blocking=True)
+                z_targets = torch.tensor(
+                    [s[3] for s in batch], dtype=torch.float32, device=device
+                ).unsqueeze(1)
+                N_list = [s[1].shape[0] for s in batch]
 
-                    scores, val = dec_model(g_state, feats)
+                # B: Value Loss
+                vals = dec_model.value(g_states)
+                value_loss = F.mse_loss(vals, z_targets, reduction="mean")
 
-                    log_p = F.log_softmax(scores, dim=0)
-                    policy_loss = -(pi_target * log_p).sum()
-                    value_loss = F.mse_loss(val, z_target)
+                # C: Policy Loss (Batched Variable-Length Softmax via Padding)
+                g_repeated = torch.repeat_interleave(
+                    g_states, torch.tensor(N_list, device=device), dim=0
+                )
+                policy_in = torch.cat([g_repeated, feats_concat], dim=1)
+                all_scores = dec_model.policy(policy_in).squeeze(1)
 
-                    type_loss = type_loss + policy_loss + value_loss
+                scores_list = list(torch.split(all_scores, N_list))
+                pi_list = list(torch.split(pi_concat, N_list))
 
-                total_loss = total_loss + type_loss
+                # Pad variable length arrays (-1e9 pushes soft-max denominators to roughly 0 for padded sections)
+                scores_padded = torch.nn.utils.rnn.pad_sequence(
+                    scores_list, batch_first=True, padding_value=-1e9
+                )
+                pi_padded = torch.nn.utils.rnn.pad_sequence(
+                    pi_list, batch_first=True, padding_value=0.0
+                )
 
-            total_loss = total_loss / len(batch)
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
-            optimizer.step()
+                log_p_padded = F.log_softmax(scores_padded, dim=1)
+                # Sum across the valid action dimension (dim=1), then average across the batch size (dim=0)
+                policy_loss = -(pi_padded * log_p_padded).sum(dim=1).mean()
 
-            batches_processed += 1
-            loss_val = float(total_loss.detach().item())
-            print(
-                f"[Learner] Batch {batches_processed:04d} | BufSize: {len(buffer)} | Loss: {loss_val:.4f}"
-            )
+                type_loss = policy_loss + value_loss
+                total_loss += type_loss
+                types_trained += 1
 
-            with open(losses_bin_path, "ab") as f_bin:
-                f_bin.write(struct.pack(pack_fmt, batches_processed, loss_val))
-                f_bin.flush()
+            if types_trained > 0:
+                total_loss = total_loss / types_trained
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
+                optimizer.step()
 
-            if batches_processed % config.save_interval == 0:
-                cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
-                with weights_lock:
-                    global_weights.clear()
-                    global_weights.update(cpu_state_dict)
-                save_file(cpu_state_dict, model_filepath)
+                batches_processed += 1
+                loss_val = float(total_loss.detach().item())
+                total_buf_size = sum(len(b) for b in buffer.values())
+                print(
+                    f"[Learner] Batch {batches_processed:04d} | Total BufSize: {total_buf_size} | Loss: {loss_val:.4f}"
+                )
+
+                with open(losses_bin_path, "ab") as f_bin:
+                    f_bin.write(struct.pack(pack_fmt, batches_processed, loss_val))
+                    f_bin.flush()
+
+                if batches_processed % config.save_interval == 0:
+                    cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
+                    with weights_lock:
+                        global_weights.clear()
+                        global_weights.update(cpu_state_dict)
+                    save_file(cpu_state_dict, model_filepath)
         else:
             time.sleep(1)
 
@@ -298,12 +342,6 @@ def main():
     parser.add_argument(
         "--depth-gamma", type=float, default=0.7, help="Per-depth noise decay factor"
     )
-    parser.add_argument(
-        "--replay-buffer-size",
-        type=int,
-        default=1_000_000,
-        help="Max size of replay buffer",
-    )
 
     args = parser.parse_args()
 
@@ -334,7 +372,6 @@ def main():
     config.min_noise = args.min_noise
     config.decay_episodes = args.decay_episodes
     config.depth_gamma = args.depth_gamma
-    config.replay_buffer_size = args.replay_buffer_size
 
     with open(os.path.join(config.run_dir, "config.json"), "w") as f:
         json.dump(dataclasses.asdict(config), f, indent=4)
