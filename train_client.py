@@ -182,33 +182,39 @@ def client_worker(rank: int, config: TrainConfig):
         else:
             best_Z = -1.0
 
-        trajectory_payload = {
-            dt: {
-                "node_features": [],
-                "edge_src": [],
-                "edge_dst": [],
-                "features": [],
-                "pis": [],
-                "Zs": [],
+        # 5. Pack and Pre-concatenate Trajectory for Fast Transfer
+        trajectory_payload = {}
+        for dt in DEC_TYPES:
+            dt_nodes = []
+            dt_src = []
+            dt_dst = []
+            dt_feats = []
+            dt_pis = []
+            dt_zs = []
+
+            for h, node_data in mcts_tree.items():
+                if node_data["type"] != dt:
+                    continue
+
+                counts = node_data["N"]
+                total_counts = counts.sum()
+                pi = counts / total_counts if total_counts > 0 else node_data["P"]
+
+                dt_nodes.append(node_data["node_features"])
+                dt_src.append(node_data["edge_src"])
+                dt_dst.append(node_data["edge_dst"])
+                dt_feats.append(node_data["features"])
+                dt_pis.append(pi)
+                dt_zs.append(best_Z)
+
+            trajectory_payload[dt] = {
+                "node_features": dt_nodes,
+                "edge_src": dt_src,
+                "edge_dst": dt_dst,
+                "features": dt_feats,
+                "pis": dt_pis,
+                "Zs": dt_zs,
             }
-            for dt in DEC_TYPES
-        }
-
-        for h, node_data in mcts_tree.items():
-            counts = node_data["N"]
-            total_counts = counts.sum()
-            if total_counts > 0:
-                pi = counts / total_counts
-            else:
-                pi = node_data["P"]
-
-            dt = node_data["type"]
-            trajectory_payload[dt]["node_features"].append(node_data["node_features"])
-            trajectory_payload[dt]["edge_src"].append(node_data["edge_src"])
-            trajectory_payload[dt]["edge_dst"].append(node_data["edge_dst"])
-            trajectory_payload[dt]["features"].append(node_data["features"])
-            trajectory_payload[dt]["pis"].append(pi)
-            trajectory_payload[dt]["Zs"].append(best_Z)
 
         total_transitions = sum(len(d["Zs"]) for d in trajectory_payload.values())
 

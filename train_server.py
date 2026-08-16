@@ -360,18 +360,22 @@ def accept_loop(server_sock, conn_type_label, replay_queue):
 
 def batch_generator_worker(buffer, batch_queue, config, buffer_lock):
     while True:
+        can_train = False
         with buffer_lock:
             can_train = any(len(buffer[dt]) >= config.batch_size for dt in DEC_TYPES)
-            if not can_train:
-                time.sleep(0.02)
-                continue
 
-            prepared = {}
+        if not can_train:
+            time.sleep(0.02)  # Sleep OUTSIDE the lock
+            continue
+
+        prepared = {}
+        with buffer_lock:
             for dt in DEC_TYPES:
                 if len(buffer[dt]) >= config.batch_size:
                     prepared[dt] = buffer[dt].sample_batch(config.batch_size)
 
-        batch_queue.put(prepared)
+        if prepared:
+            batch_queue.put(prepared)
 
 
 def learner_process(config: TrainConfig, replay_queue: queue.Queue):
@@ -452,6 +456,8 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             )
 
     while True:
+        # Drain network queue in batches
+        incoming_data = []
         while not replay_queue.empty():
             try:
                 item = replay_queue.get_nowait()
@@ -462,19 +468,22 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                         f_bin.write(struct.pack(pack_fmt, cost_count, cost_val))
                         f_bin.flush()
                 elif item["type"] == "trajectory_data":
-                    data_dict = item["data"]
-                    with buffer_lock:
-                        for dt, d in data_dict.items():
-                            buffer[dt].extend(
-                                d["node_features"],
-                                d["edge_src"],
-                                d["edge_dst"],
-                                d["features"],
-                                d["pis"],
-                                d["Zs"],
-                            )
+                    incoming_data.append(item["data"])
             except queue.Empty:
                 break
+
+        if incoming_data:
+            with buffer_lock:
+                for data_dict in incoming_data:
+                    for dt, d in data_dict.items():
+                        buffer[dt].extend(
+                            d["node_features"],
+                            d["edge_src"],
+                            d["edge_dst"],
+                            d["features"],
+                            d["pis"],
+                            d["Zs"],
+                        )
 
         try:
             prepared_batches = batch_queue.get(timeout=0.05)
