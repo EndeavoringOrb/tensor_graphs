@@ -298,6 +298,12 @@ def main():
     parser.add_argument(
         "--depth-gamma", type=float, default=0.7, help="Per-depth noise decay factor"
     )
+    parser.add_argument(
+        "--replay-buffer-size",
+        type=int,
+        default=1_000_000,
+        help="Max size of replay buffer",
+    )
 
     args = parser.parse_args()
 
@@ -328,6 +334,7 @@ def main():
     config.min_noise = args.min_noise
     config.decay_episodes = args.decay_episodes
     config.depth_gamma = args.depth_gamma
+    config.replay_buffer_size = args.replay_buffer_size
 
     with open(os.path.join(config.run_dir, "config.json"), "w") as f:
         json.dump(dataclasses.asdict(config), f, indent=4)
