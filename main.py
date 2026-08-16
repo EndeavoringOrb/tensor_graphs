@@ -4,7 +4,7 @@ import os
 import tensor_graphs
 from safetensors.torch import load_file
 
-from train_shared import ActorDelegate, AlphaZeroAgent
+from train_shared import ActorDelegate, AlphaZeroTransformer
 from utils.decode import load_tokenizer
 
 
@@ -82,7 +82,7 @@ def main():
     )
     args = parser.parse_args()
 
-    agent = AlphaZeroAgent(hidden_dim=64)
+    agent = AlphaZeroTransformer(d_model=128, nhead=4, num_layers=3, max_feat_dim=8)
     if args.run_dir:
         model_file = os.path.join(args.run_dir, "model.safetensors")
         if os.path.exists(model_file):
@@ -90,7 +90,7 @@ def main():
             print(f"Loaded trained delegate agent from {model_file}")
 
     agent.eval()
-    delegate = ActorDelegate(agent, exploration_noise=0.0)
+    delegate = ActorDelegate(agent=agent, exploration_noise=0.0)
 
     print(f"Loading {args.model} via LLMSession...")
     session = tensor_graphs.LLMSession(
@@ -134,7 +134,6 @@ def main():
             continue
 
         if has_chat_template:
-            # Append user input to history and try applying chat template
             messages.append({"role": "user", "content": user_input})
             try:
                 conversation_tokens = list(
@@ -143,12 +142,10 @@ def main():
                     )
                 )
             except AttributeError:
-                # Fallback to completion mode if apply_chat_template fails at runtime
                 has_chat_template = False
                 messages.clear()
 
         if not has_chat_template:
-            # Completion mode encoding
             conversation_tokens = encode_text(tokenizer, user_input, is_first=True)
 
         if has_chat_template:
@@ -174,7 +171,6 @@ def main():
         print("\n")
 
         if has_chat_template:
-            # Save assistant turn content to history only in chat mode
             assistant_response = decode_tokens(tokenizer, generated_tokens)
             messages.append({"role": "assistant", "content": assistant_response})
 

@@ -8,7 +8,10 @@ os.environ["KMP_AFFINITY"] = "none"
 
 import argparse
 import logging
+import queue
 import sys
+import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -19,7 +22,6 @@ import torch.multiprocessing as mp
 DEFAULT_WORKERS = max(1, (psutil.cpu_count(logical=False) or 4) - 1)
 
 import tensor_graphs
-
 from train_shared import (
     ActorDelegate,
     AlphaZeroTransformer,
@@ -32,8 +34,148 @@ from train_shared import (
 )
 
 
+def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
+    torch.set_num_threads(1)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[Inference Server] Started on {device}")
+
+    agent = AlphaZeroTransformer(
+        d_model=config.d_model,
+        nhead=config.nhead,
+        num_layers=config.num_layers,
+        max_feat_dim=config.max_feat_dim,
+    ).to(device)
+    agent.eval()
+
+    prefix_cache_kv = {}
+    prefix_cache_v = {}
+    weights_path = os.path.join(run_dir, "client_weights.pt")
+
+    while True:
+        if weights_event.is_set():
+            if os.path.exists(weights_path):
+                try:
+                    weights_dict = torch.load(
+                        weights_path, map_location="cpu", weights_only=True
+                    )
+                    agent.load_state_dict(weights_dict, strict=False)
+                    prefix_cache_kv.clear()
+                    prefix_cache_v.clear()
+                    print("[Inference Server] Weights updated, KV cache cleared.")
+                except Exception as e:
+                    print(f"[Inference Server] Error loading weights: {e}")
+            weights_event.clear()
+
+        try:
+            reqs = [req_queue.get(timeout=0.05)]
+        except queue.Empty:
+            continue
+
+        while not req_queue.empty():
+            reqs.append(req_queue.get_nowait())
+
+        eval_reqs = []
+        for req in reqs:
+            if req[0] == "register_prefix":
+                _, pkey, pdata = req
+                if pkey not in prefix_cache_kv:
+                    f = torch.tensor(
+                        pdata.features, dtype=torch.float32, device=device
+                    ).unsqueeze(0)
+                    tt = torch.tensor(
+                        pdata.token_types, dtype=torch.int64, device=device
+                    ).unsqueeze(0)
+                    pid = torch.tensor(
+                        pdata.phase_ids, dtype=torch.int64, device=device
+                    ).unsqueeze(0)
+                    with torch.inference_mode():
+                        _, v, kv = agent(f, tt, pid, return_kv=True)
+                    prefix_cache_kv[pkey] = kv
+                    prefix_cache_v[pkey] = v.item()
+            elif req[0] == "evaluate":
+                eval_reqs.append(req)
+
+        if not eval_reqs:
+            continue
+
+        max_P = 0
+        max_A = 0
+        valid_reqs = []
+        for req in eval_reqs:
+            _, pkey, a_feats, phase_id, wid = req
+            if pkey not in prefix_cache_kv:
+                resp_queues[wid].put(("error", "missing_prefix"))
+                continue
+            P_len = prefix_cache_kv[pkey][0][0].shape[2]
+            A_len = a_feats.shape[0]
+            max_P = max(max_P, P_len)
+            max_A = max(max_A, A_len)
+            valid_reqs.append((req, P_len, A_len))
+
+        if not valid_reqs:
+            continue
+
+        B = len(valid_reqs)
+        padded_actions = torch.zeros((B, max_A, 8), dtype=torch.float32, device=device)
+        padded_tt = torch.full((B, max_A), 3, dtype=torch.int64, device=device)
+        padded_pid = torch.zeros((B, max_A), dtype=torch.int64, device=device)
+
+        num_layers = agent.num_layers
+        num_heads = agent.nhead
+        head_dim = agent.d_model // num_heads
+
+        batched_past_kv = []
+        for l in range(num_layers):
+            batched_k = torch.zeros(
+                (B, num_heads, max_P, head_dim), dtype=torch.float32, device=device
+            )
+            batched_v = torch.zeros(
+                (B, num_heads, max_P, head_dim), dtype=torch.float32, device=device
+            )
+            batched_past_kv.append((batched_k, batched_v))
+
+        attn_mask = torch.zeros(
+            (B, 1, max_A, max_P + max_A), dtype=torch.bool, device=device
+        )
+
+        for i, (req_info, P_len, A_len) in enumerate(valid_reqs):
+            _, pkey, a_feats, phase_id, wid = req_info
+
+            dim_feat = min(7, a_feats.shape[1])
+            padded_actions[i, :A_len, 1 : 1 + dim_feat] = torch.tensor(
+                a_feats[:, :dim_feat], dtype=torch.float32, device=device
+            )
+            padded_actions[i, :A_len, 0] = torch.arange(
+                A_len, dtype=torch.float32, device=device
+            )
+            padded_pid[i, :A_len] = phase_id
+
+            kv = prefix_cache_kv[pkey]
+            for l in range(num_layers):
+                batched_past_kv[l][0][i, :, :P_len, :] = kv[l][0][0]
+                batched_past_kv[l][1][i, :, :P_len, :] = kv[l][1][0]
+
+            attn_mask[i, 0, :A_len, :P_len] = True
+            attn_mask[i, 0, :A_len, max_P : max_P + A_len] = True
+
+        with torch.inference_mode():
+            logits, _ = agent(
+                padded_actions,
+                padded_tt,
+                padded_pid,
+                past_kv=batched_past_kv,
+                attention_mask=attn_mask,
+            )
+
+        for i, (req_info, P_len, A_len) in enumerate(valid_reqs):
+            _, pkey, _, _, wid = req_info
+            resp_logits = logits[i, :A_len].cpu().numpy()
+            v = prefix_cache_v[pkey]
+            resp_queues[wid].put(("ok", resp_logits, v))
+
+
 @torch.inference_mode()
-def client_worker(rank: int, config: TrainConfig):
+def client_worker(rank: int, config: TrainConfig, req_queue, resp_queue, traj_queue):
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
 
@@ -74,45 +216,6 @@ def client_worker(rank: int, config: TrainConfig):
     console_handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(console_handler)
 
-    agent = AlphaZeroTransformer(
-        d_model=config.d_model,
-        nhead=config.nhead,
-        num_layers=config.num_layers,
-        max_feat_dim=config.max_feat_dim,
-    )
-
-    conn_type = "Bluetooth" if config.use_bluetooth else "TCP"
-    logger.info(
-        f"{LOG_PREFIX} [Worker {rank}] Connecting to {conn_type} Server at {config.host}:{config.port}..."
-    )
-    try:
-        client_sock = create_client_socket(config)
-        logger.info(f"{LOG_PREFIX} [Worker {rank}] Connected successfully!")
-    except Exception as e:
-        logger.info(f"{LOG_PREFIX} [Worker {rank}] Connection failed: {e}")
-        return
-
-    try:
-        send_msg(client_sock, {"type": "req_weights"})
-        initial_resp = recv_msg(client_sock)
-        if (
-            initial_resp
-            and initial_resp.get("type") == "weights"
-            and initial_resp.get("data")
-        ):
-            agent.load_state_dict(initial_resp["data"], strict=False)
-            logger.info(
-                f"{LOG_PREFIX} [Worker {rank}] Loaded initial network weights from server."
-            )
-        else:
-            logger.info(
-                f"{LOG_PREFIX} [Worker {rank}] Using local randomly initialized weights."
-            )
-    except Exception as e:
-        logger.info(f"{LOG_PREFIX} [Worker {rank}] Error fetching initial weights: {e}")
-        client_sock.close()
-        return
-
     graph_provider = get_graph_provider(config, worker_rank=rank)
     logger.info(
         f"{LOG_PREFIX} [Worker {rank}] Initializing graph provider (source: {config.graph_source})..."
@@ -137,7 +240,6 @@ def client_worker(rank: int, config: TrainConfig):
             else (rank % max(1, num_buckets))
         )
 
-        agent.eval()
         best_cost = float("inf")
         extraction_costs = []
         mcts_tree = {}
@@ -145,7 +247,10 @@ def client_worker(rank: int, config: TrainConfig):
 
         for sim in range(config.num_simulations):
             delegate = ActorDelegate(
-                agent,
+                agent=None,
+                req_queue=req_queue,
+                resp_queue=resp_queue,
+                worker_id=rank,
                 mcts_tree=mcts_tree,
                 c_puct=config.c_puct,
                 episode=episode,
@@ -198,39 +303,15 @@ def client_worker(rank: int, config: TrainConfig):
             f"Extractions: {len(extraction_costs)} | Sending {num_transitions} deduplicated transitions..."
         )
 
-        try:
-            send_msg(
-                client_sock,
-                {
-                    "type": "trajectory",
-                    "cost": best_cost,
-                    "costs": extraction_costs,
-                    "payload": packed_payload,
-                },
-            )
-        except Exception as e:
-            logger.info(
-                f"{LOG_PREFIX} [Worker {rank}] Error sending trajectory to server: {e}"
-            )
-            break
+        traj_queue.put(
+            {
+                "payload": packed_payload,
+                "cost": best_cost,
+                "costs": extraction_costs,
+            }
+        )
 
         episode += 1
-
-        try:
-            send_msg(client_sock, {"type": "req_weights"})
-            weight_resp = recv_msg(client_sock)
-            if weight_resp and weight_resp.get("type") == "weights":
-                agent.load_state_dict(weight_resp["data"])
-                logger.info(
-                    f"{LOG_PREFIX} [Worker {rank}] Synced updated weights from server."
-                )
-        except Exception as e:
-            logger.info(
-                f"{LOG_PREFIX} [Worker {rank}] Error syncing weights from server: {e}"
-            )
-            break
-
-    client_sock.close()
 
 
 def main():
@@ -303,7 +384,7 @@ def main():
     parser.add_argument(
         "--random-seed",
         type=int,
-        default=None,
+        default=42,
         help="Base seed for deterministic random graph generation",
     )
     parser.add_argument(
@@ -414,11 +495,88 @@ def main():
     )
     print("=========================================================")
 
+    req_queue = mp.Queue()
+    resp_queues = [mp.Queue() for _ in range(config.workers)]
+    traj_queue = mp.Queue()
+    weights_event = mp.Event()
+
+    inf_process = mp.Process(
+        target=inference_worker,
+        args=(config, req_queue, resp_queues, weights_event, "runs"),
+    )
+    inf_process.start()
+
     processes = []
     for rank in range(config.workers):
-        p = mp.Process(target=client_worker, args=(rank, config))
+        p = mp.Process(
+            target=client_worker,
+            args=(rank, config, req_queue, resp_queues[rank], traj_queue),
+        )
         p.start()
         processes.append(p)
+
+    client_sock = create_client_socket(config)
+    sock_lock = threading.Lock()
+
+    def weight_sync_thread():
+        os.makedirs("runs", exist_ok=True)
+        weights_path = os.path.join("runs", "client_weights.pt")
+        while True:
+            try:
+                with sock_lock:
+                    send_msg(client_sock, {"type": "req_weights"})
+                    resp = recv_msg(client_sock)
+                if resp and resp.get("type") == "weights" and resp.get("data"):
+                    torch.save(resp["data"], weights_path)
+                    weights_event.set()
+                time.sleep(10)
+            except Exception as e:
+                print(f"[Client] Weight sync error: {e}")
+                time.sleep(5)
+
+    threading.Thread(target=weight_sync_thread, daemon=True).start()
+
+    buffer_transitions = []
+    buffer_prefixes = {}
+    extraction_costs = []
+    best_cost_in_window = float("inf")
+    last_send_time = time.time()
+
+    while True:
+        try:
+            msg = traj_queue.get(timeout=1.0)
+            payload = msg["payload"]
+            cost = msg["cost"]
+            buffer_transitions.extend(payload["transitions"])
+            buffer_prefixes.update(payload["prefixes"])
+            extraction_costs.extend(msg.get("costs", []))
+            best_cost_in_window = min(best_cost_in_window, cost)
+        except queue.Empty:
+            pass
+
+        if time.time() - last_send_time > 2.0 and buffer_transitions:
+            packed_payload = {
+                "prefixes": buffer_prefixes,
+                "transitions": buffer_transitions,
+            }
+            try:
+                with sock_lock:
+                    send_msg(
+                        client_sock,
+                        {
+                            "type": "trajectory",
+                            "cost": best_cost_in_window,
+                            "costs": extraction_costs,
+                            "payload": packed_payload,
+                        },
+                    )
+                buffer_transitions.clear()
+                buffer_prefixes.clear()
+                extraction_costs.clear()
+                best_cost_in_window = float("inf")
+            except Exception as e:
+                print(f"[Client] Error sending trajectory: {e}")
+            last_send_time = time.time()
 
     for p in processes:
         p.join()
