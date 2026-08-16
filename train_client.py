@@ -1,13 +1,7 @@
 # File: train_client.py
-import os
-
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["KMP_AFFINITY"] = "none"
-
 import argparse
 import logging
+import os
 import queue
 import sys
 import threading
@@ -20,8 +14,10 @@ import torch
 import torch.multiprocessing as mp
 
 DEFAULT_WORKERS = max(1, (psutil.cpu_count(logical=False) or 4) - 1)
+torch.set_float32_matmul_precision("high")
 
 import tensor_graphs
+
 from train_shared import (
     ActorDelegate,
     AlphaZeroTransformer,
@@ -88,61 +84,52 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
                     pid = torch.tensor(
                         pdata.phase_ids, dtype=torch.int64, device=device
                     ).unsqueeze(0)
-                    with torch.inference_mode():
-                        _, v, kv = agent(f, tt, pid, return_kv=True)
+
+                    with (
+                        torch.inference_mode(),
+                        torch.autocast(device_type=device.type, dtype=torch.bfloat16),
+                    ):
+                        v, kv = agent.encode_prefix(f, tt, pid)
+
                     prefix_cache_kv[pkey] = kv
-                    prefix_cache_v[pkey] = v.item()
+                    prefix_cache_v[pkey] = v.item() if v is not None else 0.0
             elif req[0] == "evaluate":
                 eval_reqs.append(req)
 
         if not eval_reqs:
             continue
 
-        max_P = 0
-        max_A = 0
         valid_reqs = []
         for req in eval_reqs:
             _, pkey, a_feats, phase_id, wid = req
             if pkey not in prefix_cache_kv:
                 resp_queues[wid].put(("error", "missing_prefix"))
                 continue
-            P_len = prefix_cache_kv[pkey][0][0].shape[2]
-            A_len = a_feats.shape[0]
-            max_P = max(max_P, P_len)
-            max_A = max(max_A, A_len)
-            valid_reqs.append((req, P_len, A_len))
+            valid_reqs.append(req)
 
         if not valid_reqs:
             continue
 
-        start = time.perf_counter()
-
         B = len(valid_reqs)
+        max_A = max(req[2].shape[0] for req in valid_reqs)
         padded_actions = torch.zeros((B, max_A, 8), dtype=torch.float32, device=device)
-        padded_tt = torch.full((B, max_A), 3, dtype=torch.int64, device=device)
         padded_pid = torch.zeros((B, max_A), dtype=torch.int64, device=device)
 
-        num_layers = agent.num_layers
-        num_heads = agent.nhead
-        head_dim = agent.d_model // num_heads
+        # Build batched past_kv per layer
+        first_kv = prefix_cache_kv[valid_reqs[0][1]]
+        num_layers = len(first_kv)
 
         batched_past_kv = []
         for l in range(num_layers):
-            batched_k = torch.zeros(
-                (B, num_heads, max_P, head_dim), dtype=torch.float32, device=device
+            layer_k_list = [prefix_cache_kv[req[1]][l][0] for req in valid_reqs]
+            layer_v_list = [prefix_cache_kv[req[1]][l][1] for req in valid_reqs]
+            batched_past_kv.append(
+                (torch.cat(layer_k_list, dim=0), torch.cat(layer_v_list, dim=0))
             )
-            batched_v = torch.zeros(
-                (B, num_heads, max_P, head_dim), dtype=torch.float32, device=device
-            )
-            batched_past_kv.append((batched_k, batched_v))
 
-        attn_mask = torch.zeros(
-            (B, 1, max_A, max_P + max_A), dtype=torch.bool, device=device
-        )
-
-        for i, (req_info, P_len, A_len) in enumerate(valid_reqs):
-            _, pkey, a_feats, phase_id, wid = req_info
-
+        for i, req in enumerate(valid_reqs):
+            _, pkey, a_feats, phase_id, wid = req
+            A_len = a_feats.shape[0]
             dim_feat = min(7, a_feats.shape[1])
             padded_actions[i, :A_len, 1 : 1 + dim_feat] = torch.tensor(
                 a_feats[:, :dim_feat], dtype=torch.float32, device=device
@@ -152,30 +139,20 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
             )
             padded_pid[i, :A_len] = phase_id
 
-            kv = prefix_cache_kv[pkey]
-            for l in range(num_layers):
-                batched_past_kv[l][0][i, :, :P_len, :] = kv[l][0][0]
-                batched_past_kv[l][1][i, :, :P_len, :] = kv[l][1][0]
-
-            attn_mask[i, 0, :A_len, :P_len] = True
-            attn_mask[i, 0, :A_len, max_P : max_P + A_len] = True
-
-        with torch.inference_mode():
-            logits, _ = agent(
-                padded_actions,
-                padded_tt,
-                padded_pid,
-                past_kv=batched_past_kv,
-                attention_mask=attn_mask,
+        with (
+            torch.inference_mode(),
+            torch.autocast(device_type=device.type, dtype=torch.bfloat16),
+        ):
+            logits = agent.evaluate_actions(
+                padded_actions, padded_pid, past_kv=batched_past_kv
             )
 
-        for i, (req_info, P_len, A_len) in enumerate(valid_reqs):
-            _, pkey, _, _, wid = req_info
-            resp_logits = logits[i, :A_len].cpu().numpy()
+        for i, req in enumerate(valid_reqs):
+            _, pkey, a_feats, _, wid = req
+            A_len = a_feats.shape[0]
+            resp_logits = logits[i, :A_len].cpu().float().numpy()
             v = prefix_cache_v[pkey]
             resp_queues[wid].put(("ok", resp_logits, v))
-        end = time.perf_counter()
-        # print(f"[Inference Server] B={B} took {end-start}")
 
 
 @torch.inference_mode()
@@ -288,7 +265,6 @@ def client_worker(rank: int, config: TrainConfig, req_queue, resp_queue, traj_qu
         else:
             best_Z = -1.0
 
-        # Pack deduplicated episode payload
         packed_payload = (
             TrajectoryCodec.pack_episode(
                 mcts_tree, best_Z, last_delegate.prefix_registry
@@ -314,26 +290,15 @@ def client_worker(rank: int, config: TrainConfig, req_queue, resp_queue, traj_qu
                 "costs": extraction_costs,
             }
         )
-
         episode += 1
 
 
 def main():
     parser = argparse.ArgumentParser(description="AlphaZero TensorGraph Worker Client")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Server address")
+    parser.add_argument("--port", type=int, default=5000, help="Server port")
     parser.add_argument(
-        "--host",
-        type=str,
-        default="127.0.0.1",
-        help="Server address (IP or Bluetooth MAC)",
-    )
-    parser.add_argument(
-        "--port", type=int, default=5000, help="Server port or BT channel"
-    )
-    parser.add_argument(
-        "-bt",
-        "--use-bluetooth",
-        action="store_true",
-        help="Use Bluetooth RFCOMM socket",
+        "-bt", "--use-bluetooth", action="store_true", help="Use Bluetooth RFCOMM"
     )
     parser.add_argument(
         "--workers",
@@ -342,99 +307,32 @@ def main():
         help="Number of worker processes",
     )
     parser.add_argument(
-        "--simulations",
-        type=int,
-        default=10,
-        help="Number of MCTS simulations per episode",
+        "--simulations", type=int, default=10, help="MCTS simulations per episode"
     )
     parser.add_argument(
-        "--graph-source",
-        type=str,
-        default="model",
-        choices=["model", "random"],
-        help="Graph provider source: 'model' (load from file/path) or 'random'",
+        "--graph-source", type=str, default="model", choices=["model", "random"]
     )
     parser.add_argument("--model", type=str, default="gemma-3-270m", help="Model name")
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        default="models/google/gemma-3-270m",
-        help="Model weights path",
-    )
-    parser.add_argument(
-        "--random-min-nodes",
-        type=int,
-        default=10,
-        help="Minimum number of nodes for random graph generation",
-    )
-    parser.add_argument(
-        "--random-max-nodes",
-        type=int,
-        default=30,
-        help="Maximum number of nodes for random graph generation",
-    )
-    parser.add_argument(
-        "--random-dim",
-        type=int,
-        default=128,
-        help="Hidden dimension for random graph nodes",
-    )
-    parser.add_argument(
-        "--random-seq-len",
-        type=int,
-        default=64,
-        help="Sequence length dimension for random graph nodes",
-    )
-    parser.add_argument(
-        "--random-seed",
-        type=int,
-        default=42,
-        help="Base seed for deterministic random graph generation",
-    )
-    parser.add_argument(
-        "--resample-graph-every",
-        type=int,
-        default=0,
-        help="Resample a new random graph every N episodes (0 = fixed per worker)",
-    )
-    parser.add_argument(
-        "--compile-decode-buckets",
-        action="store_true",
-        help="Compile decode buckets in addition to the single full bucket",
-    )
-    parser.add_argument(
-        "--log-lost-calls",
-        action="store_true",
-        dest="log_cost_calls",
-        help="Log cost calls (forces workers=1 when enabled)",
-    )
-    parser.add_argument(
-        "--c-puct", type=float, default=1.25, help="PUCT exploration constant"
-    )
-    parser.add_argument(
-        "--base-noise",
-        type=float,
-        default=0.25,
-        help="Initial exploration noise at episode 0 and depth 0",
-    )
-    parser.add_argument(
-        "--min-noise", type=float, default=0.01, help="Minimum exploration noise floor"
-    )
-    parser.add_argument(
-        "--decay-episodes",
-        type=int,
-        default=500,
-        help="Number of episodes over which to decay episode-level noise",
-    )
-    parser.add_argument(
-        "--depth-gamma", type=float, default=0.7, help="Per-depth noise decay factor"
-    )
+    parser.add_argument("--model-path", type=str, default="models/google/gemma-3-270m")
+    parser.add_argument("--random-min-nodes", type=int, default=10)
+    parser.add_argument("--random-max-nodes", type=int, default=30)
+    parser.add_argument("--random-dim", type=int, default=128)
+    parser.add_argument("--random-seq-len", type=int, default=64)
+    parser.add_argument("--random-seed", type=int, default=None)
+    parser.add_argument("--resample-graph-every", type=int, default=0)
+    parser.add_argument("--compile-decode-buckets", action="store_true")
+    parser.add_argument("--log-lost-calls", action="store_true", dest="log_cost_calls")
+    parser.add_argument("--c-puct", type=float, default=1.25)
+    parser.add_argument("--base-noise", type=float, default=0.25)
+    parser.add_argument("--min-noise", type=float, default=0.01)
+    parser.add_argument("--decay-episodes", type=int, default=500)
+    parser.add_argument("--depth-gamma", type=float, default=0.7)
     parser.add_argument(
         "--level-sims",
         nargs="+",
         type=int,
         default=[1, 1, 1, 1],
-        help="Simulations per level: [num_extract, num_dispatch, num_bufferize, num_malloc] or with num_cache",
+        help="Simulations per level: [num_extract, num_dispatch, num_bufferize, num_malloc]",
     )
 
     args = parser.parse_args()
@@ -481,22 +379,13 @@ def main():
             print(f"[Client] Ensuring model files for '{repo_id}' are downloaded...")
             download_model_meta(repo_id, download_other_files=False)
         except Exception as e:
-            print(
-                f"[Client] Note: Could not auto-download model metadata ({e}). Proceeding assuming local files exist."
-            )
+            print(f"[Client] Note: Proceeding assuming local model files exist ({e}).")
 
     conn_type = "Bluetooth" if config.use_bluetooth else "TCP/IP"
     print("=========================================================")
     print(f" Starting {config.workers} Client Worker Process(es)")
     print(f" Target Server: {config.host}:{config.port} ({conn_type})")
     print(f" Graph Source: {config.graph_source.upper()}")
-    if config.graph_source == "random":
-        print(
-            f" Random Node Range: [{config.random_min_nodes}, {config.random_max_nodes}], Dim: {config.random_hidden_dim}, Seq: {config.random_seq_len}"
-        )
-    print(
-        f" MCTS Settings: c_puct={config.c_puct}, base_noise={config.base_noise}, min_noise={config.min_noise}"
-    )
     print("=========================================================")
 
     req_queue = mp.Queue()
@@ -533,7 +422,7 @@ def main():
                 if resp and resp.get("type") == "weights" and resp.get("data"):
                     torch.save(resp["data"], weights_path)
                     weights_event.set()
-                time.sleep(60)
+                time.sleep(10)
             except Exception as e:
                 print(f"[Client] Weight sync error: {e}")
                 time.sleep(5)

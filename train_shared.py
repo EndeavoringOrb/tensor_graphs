@@ -13,6 +13,8 @@ import tensor_graphs
 import torch
 from torch import nn
 
+torch.set_float32_matmul_precision("high")
+
 
 @dataclasses.dataclass
 class TrainConfig:
@@ -72,7 +74,6 @@ def generate_random_graph(
     seq_len: int = 64,
     seed: int | None = None,
 ) -> tuple[tensor_graphs.Graph, tensor_graphs.LogicalId, list]:
-    """Generates a random compute graph with a controllable number of nodes."""
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
@@ -81,7 +82,6 @@ def generate_random_graph(
     shape_standard = [1, seq_len, hidden_dim]
     shape_proj = [1, hidden_dim, hidden_dim]
 
-    # Create base input tensors
     in0 = g.input(shape_standard, tensor_graphs.DType.FLOAT32)
     in1 = g.input(shape_standard, tensor_graphs.DType.FLOAT32)
     in_w = g.input(shape_proj, tensor_graphs.DType.FLOAT32)
@@ -127,7 +127,6 @@ def generate_random_graph(
             src = random.choice(available_nodes)
             axis_const = g.constant([-1])
             node = g.sum(src, axis_const)
-            # Re-broadcast back to maintain valid standard shape
             node = g.repeat(node, hidden_dim, 2)
             available_nodes.append(node)
 
@@ -141,7 +140,6 @@ def generate_random_graph(
 
     root = available_nodes[-1]
 
-    # Create standard full bucket for inference
     full_bucket = tensor_graphs.Bucket()
     dim_b = tensor_graphs.Dim(0, 1)
     dim_s = tensor_graphs.Dim(0, seq_len)
@@ -153,7 +151,6 @@ def generate_random_graph(
     r_w = tensor_graphs.Region()
     r_w.region = [dim_b, dim_h, dim_h]
 
-    # Collect all reachable input nodes from root
     reachable_nodes = set()
     stack = [root]
     while stack:
@@ -261,11 +258,6 @@ class PrefixData:
 
 
 class TrajectoryCodec:
-    """
-    Dedicated compression and deduplication codec for MCTS decision states.
-    Separates static graph prefix structures (1 + N + E) from decision action features (A).
-    """
-
     @staticmethod
     def compute_prefix(
         phase_id: int,
@@ -281,18 +273,15 @@ class TrajectoryCodec:
         token_types = np.zeros(L, dtype=np.int64)
         phase_ids = np.full(L, phase_id, dtype=np.int64)
 
-        # 0. Global Token
         features[0, 0] = phase_id
         token_types[0] = 0
 
-        # 1. Node Tokens [ID + Features]
         if N > 0:
             features[1 : N + 1, 0] = np.arange(N)
             dim_feat = min(7, node_features.shape[1])
             features[1 : N + 1, 1 : 1 + dim_feat] = node_features[:, :dim_feat]
         token_types[1 : N + 1] = 1
 
-        # 2. Edge Tokens [Src_ID + Dst_ID]
         if E > 0:
             features[N + 1 : N + E + 1, 0] = edge_src
             features[N + 1 : N + E + 1, 1] = edge_dst
@@ -309,40 +298,11 @@ class TrajectoryCodec:
         )
 
     @staticmethod
-    def materialize_full_sequence(
-        prefix: PrefixData,
-        action_features: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Reconstructs the full (1 + N + E + A, 8) tensor sequence on-the-fly."""
-        P_len = len(prefix.features)
-        A = len(action_features)
-        L = P_len + A
-
-        features = np.zeros((L, 8), dtype=np.float32)
-        features[:P_len] = prefix.features
-
-        token_types = np.zeros(L, dtype=np.int64)
-        token_types[:P_len] = prefix.token_types
-
-        phase_ids = np.full(L, prefix.phase_id, dtype=np.int64)
-
-        if A > 0:
-            features[P_len:, 0] = np.arange(A)
-            if isinstance(action_features, torch.Tensor):
-                action_features = action_features.cpu().numpy()
-            dim_feat = min(7, action_features.shape[1])
-            features[P_len:, 1 : 1 + dim_feat] = action_features[:, :dim_feat]
-            token_types[P_len:] = 3
-
-        return features, token_types, phase_ids
-
-    @staticmethod
     def pack_episode(
         mcts_tree: dict,
         best_Z: float,
         prefix_registry: dict[int, PrefixData],
     ) -> dict:
-        """Packs deduplicated trajectory transitions and their referenced prefixes for transfer."""
         referenced_prefixes = {}
         transitions = []
 
@@ -359,6 +319,7 @@ class TrajectoryCodec:
                 {
                     "prefix_key": pkey,
                     "action_features": node_data["action_features"],
+                    "phase_id": node_data.get("phase_id", 0),
                     "pis": pi,
                     "z": best_Z,
                 }
@@ -433,7 +394,7 @@ def recv_msg(sock):
 
 
 # ==============================================================================
-# UNIFIED TRANSFORMER MODEL
+# TRANSFORMER MODEL
 # ==============================================================================
 class CustomSelfAttention(nn.Module):
     def __init__(self, d_model: int, num_heads: int):
@@ -451,23 +412,20 @@ class CustomSelfAttention(nn.Module):
         self,
         x: torch.Tensor,
         past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
-        attn_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         B, L, _ = x.shape
         q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
 
-        new_kv = (k, v)
-
         if past_kv is not None:
             past_k, past_v = past_kv
             k = torch.cat([past_k, k], dim=2)
             v = torch.cat([past_v, v], dim=2)
 
-        out = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask
-        )
+        new_kv = (k, v)
+        # Passing attn_mask=None triggers FlashAttention v2 in bfloat16/float16
+        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None)
         out = out.transpose(1, 2).contiguous().view(B, L, self.d_model)
         return self.out_proj(out), new_kv
 
@@ -486,11 +444,8 @@ class CustomTransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
-        attn_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        attn_out, new_kv = self.attn(
-            self.norm1(x), past_kv=past_kv, attn_mask=attn_mask
-        )
+        attn_out, new_kv = self.attn(self.norm1(x), past_kv=past_kv)
         x = x + attn_out
         x = x + self.mlp(self.norm2(x))
         return x, new_kv
@@ -522,51 +477,37 @@ class AlphaZeroTransformer(nn.Module):
             nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1)
         )
 
-    def forward(
-        self,
-        features,
-        token_types,
-        phase_ids,
-        past_kv=None,
-        attention_mask=None,
-        key_padding_mask=None,
-        return_kv=False,
-    ):
+    def encode_prefix(self, features, token_types, phase_ids):
         x = (
             self.feat_proj(features)
             + self.type_emb(token_types)
             + self.phase_emb(phase_ids)
         )
 
-        # Only build 4D mask if both actions and prefix are in the same forward pass (training)
-        if past_kv is None and attention_mask is None:
-            has_actions = (token_types == 3).any()
-            has_prefix = (token_types != 3).any()
+        prefix_kvs = []
+        for layer in self.layers:
+            x, kv = layer(x, past_kv=None)
+            prefix_kvs.append(kv)
 
-            # If it's purely prefix encoding, no mask is needed -> FlashAttention activates!
-            if has_actions and has_prefix:
-                is_action = token_types == 3
-                is_prefix = ~is_action
-                allowed_mask = is_action.unsqueeze(2) | is_prefix.unsqueeze(1)
-                if key_padding_mask is not None:
-                    allowed_mask = allowed_mask & (~key_padding_mask).unsqueeze(1)
-                attention_mask = allowed_mask.unsqueeze(1)
+        v = self.value_head(x[:, 0]).squeeze(-1)
+        return v, prefix_kvs
 
-        new_kvs = []
+    def evaluate_actions(self, action_features, phase_ids, past_kv):
+        B, A, _ = action_features.shape
+        token_types = torch.full(
+            (B, A), 3, dtype=torch.int64, device=action_features.device
+        )
+        x = (
+            self.feat_proj(action_features)
+            + self.type_emb(token_types)
+            + self.phase_emb(phase_ids)
+        )
+
         for i, layer in enumerate(self.layers):
-            l_past_kv = past_kv[i] if past_kv is not None else None
-            x, l_new_kv = layer(x, past_kv=l_past_kv, attn_mask=attention_mask)
-            if return_kv:
-                new_kvs.append(l_new_kv)
-
-        v = None
-        if token_types.shape[1] > 0 and (token_types[:, 0] == 0).all():
-            v = self.value_head(x[:, 0]).squeeze(-1)
+            x, _ = layer(x, past_kv=past_kv[i])
 
         logits = self.policy_head(x).squeeze(-1)
-        if return_kv:
-            return logits, v, new_kvs
-        return logits, v
+        return logits
 
 
 class ActorDelegate(tensor_graphs.SearchDelegate):
@@ -676,8 +617,11 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 prefix_data.phase_ids, dtype=torch.int64, device=device
             ).unsqueeze(0)
 
-            with torch.inference_mode():
-                _, v, kv = self.agent(f_t, tt_t, p_t, return_kv=True)
+            with (
+                torch.inference_mode(),
+                torch.autocast(device_type=device.type, dtype=torch.bfloat16),
+            ):
+                v, kv = self.agent.encode_prefix(f_t, tt_t, p_t)
 
             self.prefix_cache_kv[prefix_key] = kv
             self.prefix_cache_v[prefix_key] = v.item() if v is not None else 0.0
@@ -717,6 +661,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         state_key = hash((prefix_key, action_feats_np.tobytes()))
 
         if state_key not in self.mcts_tree:
+            phase_id = self.PHASE_MAP[phase_name]
             if self.agent is not None:
                 device = next(self.agent.parameters()).device
                 kv = self.prefix_cache_kv[prefix_key]
@@ -726,12 +671,8 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 padded_actions = torch.zeros(
                     (1, A_len, 8), dtype=torch.float32, device=device
                 )
-                padded_tt = torch.full((1, A_len), 3, dtype=torch.int64, device=device)
                 padded_pid = torch.full(
-                    (1, A_len),
-                    self.PHASE_MAP[phase_name],
-                    dtype=torch.int64,
-                    device=device,
+                    (1, A_len), phase_id, dtype=torch.int64, device=device
                 )
 
                 dim_feat = min(7, action_feats_np.shape[1])
@@ -742,31 +683,17 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                     A_len, dtype=torch.float32, device=device
                 )
 
-                P_len = kv[0][0].shape[2]
-                attn_mask = torch.zeros(
-                    (1, 1, A_len, P_len + A_len), dtype=torch.bool, device=device
-                )
-                attn_mask[0, 0, :A_len, :P_len] = True
-                attn_mask[0, 0, :A_len, P_len : P_len + A_len] = True
-
-                with torch.inference_mode():
-                    logits, _ = self.agent(
-                        padded_actions,
-                        padded_tt,
-                        padded_pid,
-                        past_kv=kv,
-                        attention_mask=attn_mask,
+                with (
+                    torch.inference_mode(),
+                    torch.autocast(device_type=device.type, dtype=torch.bfloat16),
+                ):
+                    logits = self.agent.evaluate_actions(
+                        padded_actions, padded_pid, past_kv=kv
                     )
-                scores = logits[0, :A_len].cpu().numpy()
+                scores = logits[0, :A_len].cpu().float().numpy()
             else:
                 self.req_queue.put(
-                    (
-                        "evaluate",
-                        prefix_key,
-                        action_feats_np,
-                        self.PHASE_MAP[phase_name],
-                        self.worker_id,
-                    )
+                    ("evaluate", prefix_key, action_feats_np, phase_id, self.worker_id)
                 )
                 status, *data = self.resp_queue.get()
 
@@ -778,7 +705,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                             "evaluate",
                             prefix_key,
                             action_feats_np,
-                            self.PHASE_MAP[phase_name],
+                            phase_id,
                             self.worker_id,
                         )
                     )
@@ -787,7 +714,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 scores, v = data
                 self.phase_values[phase_name] = v
 
-            P = torch.softmax(torch.tensor(scores), dim=0).cpu().numpy()
+            P = torch.softmax(torch.tensor(scores, dtype=torch.float32), dim=0).numpy()
             v = self.phase_values.get(phase_name, 0.0)
 
             current_depth = len(self.active_stack)
@@ -803,13 +730,13 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             else:
                 P_perturbed = P.copy()
 
-            # Store only lightweight references (prefix_key + compact action features)
             self.mcts_tree[state_key] = {
                 "N": np.zeros(num_actions, dtype=np.float32),
                 "W": np.zeros(num_actions, dtype=np.float32),
                 "P": P_perturbed,
                 "v": v,
                 "prefix_key": prefix_key,
+                "phase_id": phase_id,
                 "action_features": action_feats_np,
             }
 

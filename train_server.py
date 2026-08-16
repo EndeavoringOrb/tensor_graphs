@@ -8,8 +8,7 @@ import random
 import struct
 import threading
 import time
-import sys
-from collections import deque
+from collections import defaultdict, deque
 from pathlib import Path
 
 import torch
@@ -21,11 +20,12 @@ from train_shared import (
     AlphaZeroTransformer,
     PrefixData,
     TrainConfig,
-    TrajectoryCodec,
     create_server_socket,
     recv_msg,
     send_msg,
 )
+
+torch.set_float32_matmul_precision("high")
 
 global_weights = {}
 weights_lock = threading.Lock()
@@ -33,8 +33,6 @@ weights_ready_event = threading.Event()
 
 
 class UnifiedReplayBuffer:
-    """Stores deduplicated graph prefixes and compact action decision transitions."""
-
     def __init__(self, maxlen: int):
         self.buffer = deque(maxlen=maxlen)
         self.prefix_table: dict[int, PrefixData] = {}
@@ -126,78 +124,6 @@ def accept_loop(server_sock, conn_type_label, replay_queue):
         print(f"[Server] {conn_type_label} accept loop ended: {e}")
 
 
-def batch_generator_worker(
-    buffer: UnifiedReplayBuffer, batch_queue, config, buffer_lock
-):
-    while True:
-        with buffer_lock:
-            can_train = len(buffer) >= config.batch_size
-            if can_train:
-                batch = buffer.sample_batch(config.batch_size)
-                prefix_table_snapshot = dict(buffer.prefix_table)
-
-        if not can_train:
-            time.sleep(0.02)
-            continue
-
-        features_list = []
-        token_types_list = []
-        phase_ids_list = []
-        zs_list = []
-        pis_list = []
-
-        # Materialize full token sequences dynamically on-the-fly from deduplicated prefixes
-        for t in batch:
-            pkey = t["prefix_key"]
-            prefix = prefix_table_snapshot.get(pkey)
-            if prefix is None:
-                continue
-
-            f, tt, p = TrajectoryCodec.materialize_full_sequence(
-                prefix, t["action_features"]
-            )
-            features_list.append(torch.tensor(f, dtype=torch.float32))
-            token_types_list.append(torch.tensor(tt, dtype=torch.int64))
-            phase_ids_list.append(torch.tensor(p, dtype=torch.int64))
-            zs_list.append(t["z"])
-            pis_list.append(t["pis"])
-
-        if not features_list:
-            continue
-
-        zs = torch.tensor(zs_list, dtype=torch.float32)
-
-        features = torch.nn.utils.rnn.pad_sequence(
-            features_list, batch_first=True, padding_value=0.0
-        )
-        token_types = torch.nn.utils.rnn.pad_sequence(
-            token_types_list, batch_first=True, padding_value=0
-        )
-        phase_ids = torch.nn.utils.rnn.pad_sequence(
-            phase_ids_list, batch_first=True, padding_value=0
-        )
-
-        B, L_max = token_types.shape
-        lengths = torch.tensor([len(tt) for tt in token_types_list])
-        key_padding_mask = torch.arange(L_max).expand(B, L_max) >= lengths.unsqueeze(1)
-
-        padded_pis = torch.zeros((B, L_max), dtype=torch.float32)
-        for i, (tt_tensor, pi_arr) in enumerate(zip(token_types_list, pis_list)):
-            action_indices = torch.where(tt_tensor == 3)[0]
-            padded_pis[i, action_indices] = torch.tensor(pi_arr, dtype=torch.float32)
-
-        batch_queue.put(
-            {
-                "features": features,
-                "token_types": token_types,
-                "phase_ids": phase_ids,
-                "key_padding_mask": key_padding_mask,
-                "padded_pis": padded_pis,
-                "zs": zs,
-            }
-        )
-
-
 def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Learner] Using device: {device}")
@@ -230,22 +156,8 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     weights_ready_event.set()
     save_file(cpu_state_dict, model_filepath)
 
-    if os.name == "nt" or sys.platform == "win32":
-        agent_opt = agent
-    else:
-        agent_opt = torch.compile(agent, dynamic=True)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
-
     buffer = UnifiedReplayBuffer(maxlen=config.replay_buffer_size)
-    buffer_lock = threading.Lock()
-
-    batch_queue = queue.Queue(maxsize=4)
-    for _ in range(2):
-        threading.Thread(
-            target=batch_generator_worker,
-            args=(buffer, batch_queue, config, buffer_lock),
-            daemon=True,
-        ).start()
 
     batches_processed = 0
     if os.path.exists(losses_bin_path) and os.path.getsize(losses_bin_path) >= 8:
@@ -270,7 +182,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             pass
 
     while True:
-        incoming_payloads = []
         while not replay_queue.empty():
             try:
                 item = replay_queue.get_nowait()
@@ -281,65 +192,121 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                         f_bin.write(struct.pack(pack_fmt, cost_count, cost_val))
                         f_bin.flush()
                 elif item["type"] == "trajectory_payload":
-                    incoming_payloads.append(item["payload"])
+                    buffer.extend_payload(item["payload"])
             except queue.Empty:
                 break
 
-        if incoming_payloads:
-            with buffer_lock:
-                for payload in incoming_payloads:
-                    buffer.extend_payload(payload)
-
-        try:
-            batch = batch_queue.get(timeout=0.05)
-        except queue.Empty:
+        if len(buffer) < config.batch_size:
+            time.sleep(0.05)
             continue
 
-        agent_opt.train()
+        raw_batch = buffer.sample_batch(config.batch_size)
+
+        # Group transitions by prefix_key to reuse FlashAttention prefix KVs
+        groups = defaultdict(list)
+        for item in raw_batch:
+            groups[item["prefix_key"]].append(item)
+
+        agent.train()
         optimizer.zero_grad()
+        total_loss = 0.0
+        n_transitions = 0
 
-        features = batch["features"].to(device, non_blocking=True)
-        token_types = batch["token_types"].to(device, non_blocking=True)
-        phase_ids = batch["phase_ids"].to(device, non_blocking=True)
-        key_padding_mask = batch["key_padding_mask"].to(device, non_blocking=True)
-        padded_pis = batch["padded_pis"].to(device, non_blocking=True)
-        zs = batch["zs"].to(device, non_blocking=True)
+        for pkey, items in groups.items():
+            prefix = buffer.prefix_table.get(pkey)
+            if prefix is None:
+                continue
 
-        logits, v = agent_opt(
-            features, token_types, phase_ids, key_padding_mask=key_padding_mask
-        )
+            f_t = torch.tensor(
+                prefix.features, dtype=torch.float32, device=device
+            ).unsqueeze(0)
+            tt_t = torch.tensor(
+                prefix.token_types, dtype=torch.int64, device=device
+            ).unsqueeze(0)
+            p_t = torch.tensor(
+                prefix.phase_ids, dtype=torch.int64, device=device
+            ).unsqueeze(0)
 
-        value_loss = F.mse_loss(v, zs, reduction="mean")
+            # FlashAttention prefix encoding pass
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                v_pred, prefix_kvs = agent.encode_prefix(f_t, tt_t, p_t)
 
-        action_mask = token_types == 3
-        logits = logits.masked_fill(~action_mask, -float("inf"))
-        log_probs = F.log_softmax(logits, dim=1)
+            B_g = len(items)
+            max_A = max(len(it["action_features"]) for it in items)
+            padded_actions = torch.zeros(
+                (B_g, max_A, 8), dtype=torch.float32, device=device
+            )
+            padded_pid = torch.zeros((B_g, max_A), dtype=torch.int64, device=device)
+            padded_pis = torch.zeros((B_g, max_A), dtype=torch.float32, device=device)
+            action_mask = torch.zeros((B_g, max_A), dtype=torch.bool, device=device)
 
-        loss_matrix = torch.where(
-            padded_pis > 0, padded_pis * log_probs, torch.zeros_like(log_probs)
-        )
-        policy_loss = -loss_matrix.sum(dim=1).mean()
+            for i, it in enumerate(items):
+                A_len = len(it["action_features"])
+                dim_feat = min(7, it["action_features"].shape[1])
+                padded_actions[i, :A_len, 1 : 1 + dim_feat] = torch.tensor(
+                    it["action_features"][:, :dim_feat],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                padded_actions[i, :A_len, 0] = torch.arange(
+                    A_len, dtype=torch.float32, device=device
+                )
+                padded_pid[i, :A_len] = it.get("phase_id", prefix.phase_id)
+                padded_pis[i, :A_len] = torch.tensor(
+                    it["pis"], dtype=torch.float32, device=device
+                )
+                action_mask[i, :A_len] = True
 
-        total_loss = policy_loss + value_loss
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(agent_opt.parameters(), 1.0)
-        optimizer.step()
+            # Repeat prefix KV across the group batch
+            batched_kvs = [
+                (k.expand(B_g, -1, -1, -1), v.expand(B_g, -1, -1, -1))
+                for (k, v) in prefix_kvs
+            ]
 
-        batches_processed += 1
-        loss_val = float(total_loss.detach().item())
-        print(
-            f"[Learner] Batch {batches_processed:04d} | Total BufSize: {len(buffer)} (Prefixes: {len(buffer.prefix_table)}) | Loss: {loss_val:.4f}"
-        )
+            # FlashAttention action evaluation pass
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                logits = agent.evaluate_actions(
+                    padded_actions, padded_pid, past_kv=batched_kvs
+                )
 
-        with open(losses_bin_path, "ab") as f_bin:
-            f_bin.write(struct.pack(pack_fmt, batches_processed, loss_val))
-            f_bin.flush()
+            logits = logits.masked_fill(~action_mask, -float("inf"))
+            log_probs = F.log_softmax(logits.float(), dim=1)
 
-        if batches_processed % config.save_interval == 0:
-            cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
-            with weights_lock:
-                global_weights.update(cpu_state_dict)
-            save_file(cpu_state_dict, model_filepath)
+            loss_matrix = torch.where(
+                padded_pis > 0, padded_pis * log_probs, torch.zeros_like(log_probs)
+            )
+            p_loss = -loss_matrix.sum(dim=1).mean()
+
+            zs = torch.tensor(
+                [it["z"] for it in items], dtype=torch.float32, device=device
+            )
+            v_loss = F.mse_loss(v_pred.float().expand_as(zs), zs, reduction="mean")
+
+            group_loss = p_loss + v_loss
+            group_loss.backward()
+
+            total_loss += float(group_loss.detach().item()) * B_g
+            n_transitions += B_g
+
+        if n_transitions > 0:
+            torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
+            optimizer.step()
+
+            batches_processed += 1
+            avg_loss = total_loss / n_transitions
+            print(
+                f"[Learner] Batch {batches_processed:04d} | Total BufSize: {len(buffer)} (Prefixes: {len(buffer.prefix_table)}) | Loss: {avg_loss:.4f}"
+            )
+
+            with open(losses_bin_path, "ab") as f_bin:
+                f_bin.write(struct.pack(pack_fmt, batches_processed, avg_loss))
+                f_bin.flush()
+
+            if batches_processed % config.save_interval == 0:
+                cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
+                with weights_lock:
+                    global_weights.update(cpu_state_dict)
+                save_file(cpu_state_dict, model_filepath)
 
 
 def main():
@@ -347,25 +314,17 @@ def main():
         description="AlphaZero TensorGraph Server / Learner"
     )
     parser.add_argument(
-        "--host",
-        type=str,
-        default="0.0.0.0",
-        help="TCP listen address (default: 0.0.0.0)",
+        "--host", type=str, default="0.0.0.0", help="TCP listen address"
     )
-    parser.add_argument(
-        "--port", type=int, default=5000, help="TCP listen port (default: 5000)"
-    )
+    parser.add_argument("--port", type=int, default=5000, help="TCP listen port")
     parser.add_argument(
         "-bt",
         "--enable-bluetooth",
         action="store_true",
-        help="Also listen on Bluetooth RFCOMM simultaneously",
+        help="Listen on Bluetooth RFCOMM",
     )
     parser.add_argument(
-        "--bt-address",
-        type=str,
-        default="AC:F2:3C:A7:F7:EC",
-        help="Bluetooth host MAC address",
+        "--bt-address", type=str, default="AC:F2:3C:A7:F7:EC", help="Bluetooth host MAC"
     )
     parser.add_argument(
         "--bt-port", type=int, default=4, help="Bluetooth RFCOMM channel"
@@ -375,60 +334,24 @@ def main():
     )
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument(
-        "--run-dir", type=str, default=None, help="Path to specific run directory"
+        "--run-dir", type=str, default=None, help="Path to run directory"
     )
+    parser.add_argument("--resume", action="store_true", help="Resume from latest run")
     parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume from the latest existing run directory",
+        "--graph-source", type=str, default="model", choices=["model", "random"]
     )
-    parser.add_argument(
-        "--graph-source",
-        type=str,
-        default="model",
-        choices=["model", "random"],
-        help="Default graph provider source",
-    )
-    parser.add_argument(
-        "--random-min-nodes",
-        type=int,
-        default=10,
-        help="Minimum nodes for random graphs",
-    )
-    parser.add_argument(
-        "--random-max-nodes",
-        type=int,
-        default=30,
-        help="Maximum nodes for random graphs",
-    )
-    parser.add_argument(
-        "--d-model", type=int, default=128, help="Transformer dimension"
-    )
-    parser.add_argument(
-        "--nhead", type=int, default=4, help="Transformer attention heads"
-    )
-    parser.add_argument("--num-layers", type=int, default=3, help="Transformer layers")
-    parser.add_argument(
-        "--c-puct", type=float, default=1.25, help="PUCT exploration constant"
-    )
-    parser.add_argument(
-        "--base-noise", type=float, default=0.25, help="Initial exploration noise"
-    )
-    parser.add_argument(
-        "--min-noise", type=float, default=0.01, help="Minimum exploration noise floor"
-    )
-    parser.add_argument(
-        "--decay-episodes",
-        type=int,
-        default=500,
-        help="Number of episodes over which to decay noise",
-    )
-    parser.add_argument(
-        "--depth-gamma", type=float, default=0.7, help="Per-depth noise decay factor"
-    )
+    parser.add_argument("--random-min-nodes", type=int, default=10)
+    parser.add_argument("--random-max-nodes", type=int, default=30)
+    parser.add_argument("--d-model", type=int, default=128)
+    parser.add_argument("--nhead", type=int, default=4)
+    parser.add_argument("--num-layers", type=int, default=3)
+    parser.add_argument("--c-puct", type=float, default=1.25)
+    parser.add_argument("--base-noise", type=float, default=0.25)
+    parser.add_argument("--min-noise", type=float, default=0.01)
+    parser.add_argument("--decay-episodes", type=int, default=500)
+    parser.add_argument("--depth-gamma", type=float, default=0.7)
 
     args = parser.parse_args()
-
     run_dir = setup_run_dir(run_dir=args.run_dir, resume_latest=args.resume)
 
     config_file = Path(run_dir) / "config.json"
@@ -439,9 +362,7 @@ def main():
             config = TrainConfig(**saved_config)
             print(f"[Server] Loaded existing run configuration from {config_file}")
         except Exception as e:
-            print(
-                f"[Server] Could not load existing config ({e}), creating default config."
-            )
+            print(f"[Server] Could not load existing config ({e}), creating default.")
             config = TrainConfig()
     else:
         config = TrainConfig()
@@ -467,7 +388,6 @@ def main():
         json.dump(dataclasses.asdict(config), f, indent=4)
 
     replay_queue = queue.Queue()
-
     learner_thread = threading.Thread(
         target=learner_process, args=(config, replay_queue), daemon=True
     )
@@ -483,7 +403,6 @@ def main():
 
     print("=========================================================")
     print(f" Server Listening on TCP: {config.host}:{config.port}")
-
     if args.enable_bluetooth:
         try:
             bt_sock = create_server_socket(
