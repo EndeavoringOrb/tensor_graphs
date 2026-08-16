@@ -24,6 +24,7 @@ from train_shared import (
 )
 
 DEC_TYPES = ["cache_dec", "extract_dec", "dispatch_dec", "bufferize_dec", "malloc_dec"]
+
 FEAT_DIMS = {
     "cache_dec": 5,
     "extract_dec": 6,
@@ -32,6 +33,13 @@ FEAT_DIMS = {
     "malloc_dec": 3,
 }
 
+GNN_FEAT_DIMS = {
+    "cache_dec": 5,
+    "extract_dec": 4,
+    "dispatch_dec": 4,
+    "bufferize_dec": 5,
+    "malloc_dec": 3,
+}
 
 global_weights = {}
 weights_lock = threading.Lock()
@@ -41,29 +49,41 @@ class ReplayBuffer:
     def __init__(
         self,
         maxlen: int,
-        global_dim: int,
+        gnn_feat_dim: int,
         feat_dim: int,
         pool_multiplier: int = 16,
         pin_memory: bool = True,
     ):
         self.maxlen = maxlen
+
+        # Scaling limits (graphs generate many nodes & edges per decision!)
         self.max_pool_size = maxlen * pool_multiplier
-        self.global_dim = global_dim
+        self.max_node_pool_size = maxlen * pool_multiplier * 15
+        self.max_edge_pool_size = maxlen * pool_multiplier * 30
+
+        self.gnn_feat_dim = gnn_feat_dim
         self.feat_dim = feat_dim
 
         self.state_ptr = 0
         self.pool_ptr = 0
+        self.node_ptr = 0
+        self.edge_ptr = 0
+
         self.size = 0
 
-        # Pre-allocated fixed-size CPU tensors (pinned for non-blocking GPU transfer)
-        self.global_states = torch.zeros(
-            (maxlen, global_dim), dtype=torch.float32, pin_memory=pin_memory
-        )
+        # Structural Metadata
         self.zs = torch.zeros((maxlen, 1), dtype=torch.float32, pin_memory=pin_memory)
-        self.offsets = torch.zeros(maxlen, dtype=torch.int64)
-        self.lengths = torch.zeros(maxlen, dtype=torch.int64)
 
-        # Pre-allocated variable-size feature/pi pools
+        self.num_opts = torch.zeros(maxlen, dtype=torch.int64)
+        self.opts_offset = torch.zeros(maxlen, dtype=torch.int64)
+
+        self.num_nodes = torch.zeros(maxlen, dtype=torch.int64)
+        self.nodes_offset = torch.zeros(maxlen, dtype=torch.int64)
+
+        self.num_edges = torch.zeros(maxlen, dtype=torch.int64)
+        self.edges_offset = torch.zeros(maxlen, dtype=torch.int64)
+
+        # Variable-Length Memory Pools
         self.feats_pool = torch.zeros(
             (self.max_pool_size, feat_dim), dtype=torch.float32, pin_memory=pin_memory
         )
@@ -71,89 +91,188 @@ class ReplayBuffer:
             self.max_pool_size, dtype=torch.float32, pin_memory=pin_memory
         )
 
-    def extend(self, gs_list, feats_list, pis_list, zs_list):
-        n = len(gs_list)
+        self.node_feats_pool = torch.zeros(
+            (self.max_node_pool_size, gnn_feat_dim),
+            dtype=torch.float32,
+            pin_memory=pin_memory,
+        )
+        self.edges_src_pool = torch.zeros(
+            self.max_edge_pool_size, dtype=torch.int64, pin_memory=pin_memory
+        )
+        self.edges_dst_pool = torch.zeros(
+            self.max_edge_pool_size, dtype=torch.int64, pin_memory=pin_memory
+        )
+
+    def extend(self, nf_list, esrc_list, edst_list, feats_list, pis_list, zs_list):
+        n = len(feats_list)
         if n == 0:
             return
 
-        # 1. Stack incoming trajectory batch into CPU tensors
-        gs_tensor = torch.from_numpy(np.stack(gs_list)).float()
         zs_tensor = torch.tensor(zs_list, dtype=torch.float32).unsqueeze(1)
 
-        lengths_arr = np.array([f.shape[0] for f in feats_list], dtype=np.int64)
-        lengths_tensor = torch.from_numpy(lengths_arr)
-        total_feats = int(lengths_arr.sum())
+        opts_lengths = np.array([f.shape[0] for f in feats_list], dtype=np.int64)
+        opts_lengths_tensor = torch.from_numpy(opts_lengths)
 
-        feats_tensor = torch.from_numpy(np.concatenate(feats_list, axis=0)).float()
-        pis_tensor = torch.from_numpy(np.concatenate(pis_list, axis=0)).float()
+        nf_lengths = np.array([f.shape[0] for f in nf_list], dtype=np.int64)
+        nf_lengths_tensor = torch.from_numpy(nf_lengths)
 
-        # 2. Write features into flat pool ring
-        if self.pool_ptr + total_feats > self.max_pool_size:
-            self.pool_ptr = 0  # Wrap around
+        edge_lengths = np.array([e.shape[0] for e in esrc_list], dtype=np.int64)
+        edge_lengths_tensor = torch.from_numpy(edge_lengths)
 
-        start_pool = self.pool_ptr
-        self.feats_pool[start_pool : start_pool + total_feats] = feats_tensor
-        self.pis_pool[start_pool : start_pool + total_feats] = pis_tensor
+        def concat_list(lst, dtype):
+            if sum(x.shape[0] for x in lst) == 0:
+                if lst and lst[0].ndim > 1:
+                    return torch.zeros((0, lst[0].shape[1]), dtype=dtype)
+                return torch.zeros(0, dtype=dtype)
+            return torch.from_numpy(np.concatenate(lst, axis=0)).to(dtype)
 
-        # Item-wise offsets in pool
-        item_offsets = torch.zeros(n, dtype=torch.int64)
-        item_offsets[0] = start_pool
-        if n > 1:
-            item_offsets[1:] = start_pool + torch.cumsum(lengths_tensor[:-1], dim=0)
+        feats_tensor = concat_list(feats_list, torch.float32)
+        pis_tensor = concat_list(pis_list, torch.float32)
+        nf_tensor = concat_list(nf_list, torch.float32)
+        esrc_tensor = concat_list(esrc_list, torch.int64)
+        edst_tensor = concat_list(edst_list, torch.int64)
 
-        self.pool_ptr += total_feats
+        def write_to_pool(pool, ptr, max_size, data):
+            data_len = len(data)
+            if data_len == 0:
+                return ptr, ptr
+            if ptr + data_len > max_size:
+                ptr = 0  # wrap around logic
+                if data_len > max_size:
+                    data = data[:max_size]
+                    data_len = max_size
+            start = ptr
+            pool[start : start + data_len] = data
+            return start, ptr + data_len
 
-        # 3. Write states into ring buffer
+        start_opts, self.pool_ptr = write_to_pool(
+            self.feats_pool, self.pool_ptr, self.max_pool_size, feats_tensor
+        )
+        self.pis_pool[start_opts : start_opts + len(pis_tensor)] = pis_tensor
+
+        start_nodes, self.node_ptr = write_to_pool(
+            self.node_feats_pool, self.node_ptr, self.max_node_pool_size, nf_tensor
+        )
+
+        start_edges, self.edge_ptr = write_to_pool(
+            self.edges_src_pool, self.edge_ptr, self.max_edge_pool_size, esrc_tensor
+        )
+        self.edges_dst_pool[start_edges : start_edges + len(edst_tensor)] = edst_tensor
+
+        def get_item_offsets(start, lengths):
+            item_offsets = torch.zeros(n, dtype=torch.int64)
+            item_offsets[0] = start
+            if n > 1:
+                item_offsets[1:] = start + torch.cumsum(lengths[:-1], dim=0)
+            return item_offsets
+
+        opts_offsets = get_item_offsets(start_opts, opts_lengths_tensor)
+        nodes_offsets = get_item_offsets(start_nodes, nf_lengths_tensor)
+        edges_offsets = get_item_offsets(start_edges, edge_lengths_tensor)
+
+        # Write to state tracking arrays
         if self.state_ptr + n <= self.maxlen:
-            self.global_states[self.state_ptr : self.state_ptr + n] = gs_tensor
-            self.zs[self.state_ptr : self.state_ptr + n] = zs_tensor
-            self.offsets[self.state_ptr : self.state_ptr + n] = item_offsets
-            self.lengths[self.state_ptr : self.state_ptr + n] = lengths_tensor
+            slc = slice(self.state_ptr, self.state_ptr + n)
+            self.zs[slc] = zs_tensor
+            self.num_opts[slc] = opts_lengths_tensor
+            self.opts_offset[slc] = opts_offsets
+            self.num_nodes[slc] = nf_lengths_tensor
+            self.nodes_offset[slc] = nodes_offsets
+            self.num_edges[slc] = edge_lengths_tensor
+            self.edges_offset[slc] = edges_offsets
+
             self.state_ptr = (self.state_ptr + n) % self.maxlen
         else:
-            first_part = self.maxlen - self.state_ptr
-            second_part = n - first_part
+            p1 = self.maxlen - self.state_ptr
+            p2 = n - p1
 
-            self.global_states[self.state_ptr : self.maxlen] = gs_tensor[:first_part]
-            self.zs[self.state_ptr : self.maxlen] = zs_tensor[:first_part]
-            self.offsets[self.state_ptr : self.maxlen] = item_offsets[:first_part]
-            self.lengths[self.state_ptr : self.maxlen] = lengths_tensor[:first_part]
+            slc1 = slice(self.state_ptr, self.maxlen)
+            self.zs[slc1] = zs_tensor[:p1]
+            self.num_opts[slc1] = opts_lengths_tensor[:p1]
+            self.opts_offset[slc1] = opts_offsets[:p1]
+            self.num_nodes[slc1] = nf_lengths_tensor[:p1]
+            self.nodes_offset[slc1] = nodes_offsets[:p1]
+            self.num_edges[slc1] = edge_lengths_tensor[:p1]
+            self.edges_offset[slc1] = edges_offsets[:p1]
 
-            self.global_states[:second_part] = gs_tensor[first_part:]
-            self.zs[:second_part] = zs_tensor[first_part:]
-            self.offsets[:second_part] = item_offsets[first_part:]
-            self.lengths[:second_part] = lengths_tensor[first_part:]
-            self.state_ptr = second_part
+            slc2 = slice(0, p2)
+            self.zs[slc2] = zs_tensor[p1:]
+            self.num_opts[slc2] = opts_lengths_tensor[p1:]
+            self.opts_offset[slc2] = opts_offsets[p1:]
+            self.num_nodes[slc2] = nf_lengths_tensor[p1:]
+            self.nodes_offset[slc2] = nodes_offsets[p1:]
+            self.num_edges[slc2] = edge_lengths_tensor[p1:]
+            self.edges_offset[slc2] = edges_offsets[p1:]
+
+            self.state_ptr = p2
 
         self.size = min(self.maxlen, self.size + n)
 
     def sample_batch(self, batch_size: int):
-        """Batched indexing with 0 python loops."""
-        # 1. Random sample batch indices
         batch_idxs = torch.randint(0, self.size, (batch_size,))
 
-        # 2. Native tensor indexing for fixed-size components
-        g_states = self.global_states[batch_idxs]
         z_targets = self.zs[batch_idxs]
-        offsets = self.offsets[batch_idxs]
-        lengths = self.lengths[batch_idxs]
 
-        # 3. Vectorized ragged slice indexing for variable-length features & pis
-        total_N = int(lengths.sum().item())
-        offsets_cum = torch.zeros(batch_size, dtype=torch.int64)
-        if batch_size > 1:
-            offsets_cum[1:] = torch.cumsum(lengths[:-1], dim=0)
+        lengths = self.num_opts[batch_idxs]
+        offsets = self.opts_offset[batch_idxs]
 
-        idx_within_segment = torch.arange(total_N) - torch.repeat_interleave(
-            offsets_cum, lengths
-        )
-        flat_indices = torch.repeat_interleave(offsets, lengths) + idx_within_segment
+        n_lengths = self.num_nodes[batch_idxs]
+        n_offsets = self.nodes_offset[batch_idxs]
 
-        feats_concat = self.feats_pool[flat_indices]
-        pi_concat = self.pis_pool[flat_indices]
+        e_lengths = self.num_edges[batch_idxs]
+        e_offsets = self.edges_offset[batch_idxs]
+
+        def gather_pool(pool, offsets_tensor, lengths_tensor):
+            total_N = int(lengths_tensor.sum().item())
+            if total_N == 0:
+                if pool.dim() > 1:
+                    return torch.zeros((0, pool.size(1)), dtype=pool.dtype)
+                return torch.zeros(0, dtype=pool.dtype)
+
+            offsets_cum = torch.zeros(batch_size, dtype=torch.int64)
+            if batch_size > 1:
+                offsets_cum[1:] = torch.cumsum(lengths_tensor[:-1], dim=0)
+
+            idx_within = torch.arange(total_N) - torch.repeat_interleave(
+                offsets_cum, lengths_tensor
+            )
+            flat_idx = (
+                torch.repeat_interleave(offsets_tensor, lengths_tensor) + idx_within
+            )
+            return pool[flat_idx]
+
+        feats_concat = gather_pool(self.feats_pool, offsets, lengths)
+        pi_concat = gather_pool(self.pis_pool, offsets, lengths)
+
+        nodes_concat = gather_pool(self.node_feats_pool, n_offsets, n_lengths)
+
+        src_concat = gather_pool(self.edges_src_pool, e_offsets, e_lengths)
+        dst_concat = gather_pool(self.edges_dst_pool, e_offsets, e_lengths)
+
+        # Shift graph edges to implement dynamic block-diagonal batching
+        if len(src_concat) > 0:
+            node_offsets_cum = torch.zeros(batch_size, dtype=torch.int64)
+            if batch_size > 1:
+                node_offsets_cum[1:] = torch.cumsum(n_lengths[:-1], dim=0)
+            edge_shifts = torch.repeat_interleave(node_offsets_cum, e_lengths)
+            shifted_src = src_concat + edge_shifts
+            shifted_dst = dst_concat + edge_shifts
+        else:
+            shifted_src = src_concat
+            shifted_dst = dst_concat
+
         N_list = lengths.tolist()
 
-        return g_states, feats_concat, pi_concat, z_targets, N_list
+        return (
+            nodes_concat,
+            shifted_src,
+            shifted_dst,
+            n_lengths,
+            feats_concat,
+            pi_concat,
+            z_targets,
+            N_list,
+        )
 
     def __len__(self):
         return self.size
@@ -238,7 +357,6 @@ def accept_loop(server_sock, conn_type_label, replay_queue):
 
 
 def batch_generator_worker(buffer, batch_queue, config, buffer_lock):
-    """Continuously fetches batches using native tensor indexing."""
     while True:
         with buffer_lock:
             can_train = any(len(buffer[dt]) >= config.batch_size for dt in DEC_TYPES)
@@ -249,7 +367,6 @@ def batch_generator_worker(buffer, batch_queue, config, buffer_lock):
             prepared = {}
             for dt in DEC_TYPES:
                 if len(buffer[dt]) >= config.batch_size:
-                    # Native tensor indexing runs in ~0.3 ms
                     prepared[dt] = buffer[dt].sample_batch(config.batch_size)
 
         batch_queue.put(prepared)
@@ -263,22 +380,31 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     agent_opt = torch.compile(agent)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
 
-    # Pre-allocate pinned CPU tensor replay buffers
     buffer = {
         dt: ReplayBuffer(
             maxlen=config.replay_buffer_size,
-            global_dim=config.hidden_dim,
-            feat_dim=FEAT_DIMS[dt],
+            gnn_feat_dim=GNN_FEAT_DIMS[dt],
+            feat_dim=FEAT_DIMS[dt]
+            if dt in globals().get("FEAT_DIMS", {})
+            else 6,  # fallback
             pool_multiplier=16,
             pin_memory=True,
         )
         for dt in DEC_TYPES
     }
+
+    for dt in DEC_TYPES:
+        buffer[dt].feat_dim = FEAT_DIMS[dt]
+        buffer[dt].feats_pool = torch.zeros(
+            (buffer[dt].max_pool_size, FEAT_DIMS[dt]),
+            dtype=torch.float32,
+            pin_memory=True,
+        )
+
     buffer_lock = threading.Lock()
 
-    # Prefetch queue
     batch_queue = queue.Queue(maxsize=8)
-    for _ in range(2):  # 2 threads are plenty with tensor indexing
+    for _ in range(2):
         threading.Thread(
             target=batch_generator_worker,
             args=(buffer, batch_queue, config, buffer_lock),
@@ -332,7 +458,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     save_file(cpu_state_dict, model_filepath)
 
     while True:
-        # Drain network queue
         while not replay_queue.empty():
             try:
                 item = replay_queue.get_nowait()
@@ -347,7 +472,12 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                     with buffer_lock:
                         for dt, d in data_dict.items():
                             buffer[dt].extend(
-                                d["global_states"], d["features"], d["pis"], d["Zs"]
+                                d["node_features"],
+                                d["edge_src"],
+                                d["edge_dst"],
+                                d["features"],
+                                d["pis"],
+                                d["Zs"],
                             )
             except queue.Empty:
                 break
@@ -363,19 +493,50 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
         types_trained = 0
 
         for dt, (
-            g_states,
+            nodes_concat,
+            shifted_src,
+            shifted_dst,
+            num_nodes_tensor,
             feats_concat,
             pi_concat,
             z_targets,
             N_list,
         ) in prepared_batches.items():
+            gnn_model_name = dt.split("_")[0] + "_gnn"
+            gnn_model = getattr(agent_opt, gnn_model_name)
             dec_model = getattr(agent_opt, dt)
 
-            # non_blocking=True allows the transfer to happen concurrently with GPU execution
-            g_states = g_states.to(device, non_blocking=True)
+            # Move elements to device with overlapping memory transfers
+            nodes_concat = nodes_concat.to(device, non_blocking=True)
+            shifted_src = shifted_src.to(device, non_blocking=True)
+            shifted_dst = shifted_dst.to(device, non_blocking=True)
+            num_nodes_tensor = num_nodes_tensor.to(device, non_blocking=True)
+
             feats_concat = feats_concat.to(device, non_blocking=True)
             pi_concat = pi_concat.to(device, non_blocking=True)
             z_targets = z_targets.to(device, non_blocking=True)
+
+            # A: GNN Forward
+            node_embeddings = gnn_model(nodes_concat, shifted_src, shifted_dst)
+
+            B = len(N_list)
+
+            # Global State Pooling across the variable-length node embeddings
+            node_to_graph_idx = torch.repeat_interleave(
+                torch.arange(B, device=device), num_nodes_tensor
+            )
+
+            counts = torch.zeros(B, 1, device=device)
+            ones = torch.ones(len(node_to_graph_idx), 1, device=device)
+            counts.scatter_add_(0, node_to_graph_idx.unsqueeze(1), ones)
+
+            g_states = torch.zeros(B, config.hidden_dim, device=device)
+            if len(node_embeddings) > 0:
+                idx_expanded = node_to_graph_idx.unsqueeze(1).expand(
+                    -1, config.hidden_dim
+                )
+                g_states.scatter_add_(0, idx_expanded, node_embeddings)
+                g_states = g_states / counts.clamp(min=1.0)
 
             # B: Value Loss
             vals = dec_model.value(g_states)
@@ -388,26 +549,24 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             policy_in = torch.cat([g_repeated, feats_concat], dim=1)
             all_scores = dec_model.policy(policy_in).squeeze(1)
 
-            B = len(N_list)
             N_tensor = torch.tensor(N_list, device=device)
             batch_idx = torch.repeat_interleave(
                 torch.arange(B, device=device), N_tensor
             )
 
-            # 1. Segmented Max for numerical stability
             max_scores = torch.full(
                 (B,), -float("inf"), device=device, dtype=all_scores.dtype
             )
-            max_scores.scatter_reduce_(0, batch_idx, all_scores, reduce="amax")
+            max_scores.scatter_reduce_(
+                0, batch_idx, all_scores, reduce="amax", include_self=False
+            )
 
-            # 2. Segmented Log-Sum-Exp
             shifted = all_scores - max_scores[batch_idx]
             exp_scores = torch.exp(shifted)
             sum_exp = torch.zeros(
                 B, device=device, dtype=all_scores.dtype
             ).scatter_add_(0, batch_idx, exp_scores)
 
-            # 3. Log Softmax & Cross Entropy Loss
             log_p = shifted - torch.log(sum_exp)[batch_idx]
             policy_loss = -(pi_concat * log_p).sum() / B
 

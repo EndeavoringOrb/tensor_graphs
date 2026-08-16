@@ -45,7 +45,6 @@ class TrainConfig:
 # NETWORK SOCKET UTILITIES
 # ==============================================================================
 def create_client_socket(config: TrainConfig):
-    """Creates and connects a client socket for TCP or Bluetooth RFCOMM."""
     if config.use_bluetooth:
         if not hasattr(socket, "AF_BLUETOOTH"):
             raise RuntimeError(
@@ -62,7 +61,6 @@ def create_client_socket(config: TrainConfig):
 
 
 def create_server_socket(host: str, port: int, use_bluetooth: bool = False):
-    """Creates, binds, and listens on a server socket for TCP or Bluetooth RFCOMM."""
     is_bt = use_bluetooth or (
         isinstance(host, str) and ":" in host and len(host.split(":")) == 6
     )
@@ -84,13 +82,11 @@ def create_server_socket(host: str, port: int, use_bluetooth: bool = False):
 
 
 def send_msg(sock, msg):
-    """Compresses and frames the message to handle slow/fragmented streams."""
     data = zlib.compress(pickle.dumps(msg))
     sock.sendall(struct.pack(">I", len(data)) + data)
 
 
 def recvall(sock, n):
-    """Helper to receive exactly n bytes over TCP/RFCOMM."""
     data = bytearray()
     while len(data) < n:
         packet = sock.recv(n - len(data))
@@ -101,7 +97,6 @@ def recvall(sock, n):
 
 
 def recv_msg(sock):
-    """Reads the frame length and decompresses the payload."""
     raw_msglen = recvall(sock, 4)
     if not raw_msglen:
         return None
@@ -154,7 +149,9 @@ class GNNModel(nn.Module):
             aggr_msg.index_add_(0, edge_dst, msg)
             x = x + self.update_net(torch.cat([x, aggr_msg], dim=-1))
 
-        return x.mean(dim=0)
+        # We return the node embeddings directly so they can be grouped across
+        # disconnected subgraphs inside a batched forward pass on the server.
+        return x
 
 
 class DecisionModel(nn.Module):
@@ -254,6 +251,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
         self.active_stack = []
         self.globals = {}
+        self.raw_graphs = {}  # Store the underlying graph components for server syncing
 
     def push_state(self):
         pass
@@ -276,72 +274,104 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
     def _prepare_graphs(self, node_features, edge_src, edge_dst, feat_dim):
         if not node_features:
-            return None, None, None
+            nf = torch.zeros((0, feat_dim), dtype=torch.float32)
+            src = torch.zeros(0, dtype=torch.int64)
+            dst = torch.zeros(0, dtype=torch.int64)
+            return nf, src, dst
+
         nf = torch.tensor(node_features, dtype=torch.float32).view(-1, feat_dim)
         nf = torch.nan_to_num(nf, posinf=1e9, neginf=-1e9)
         src = torch.tensor(edge_src, dtype=torch.int64)
         dst = torch.tensor(edge_dst, dtype=torch.int64)
         return nf, src, dst
 
+    def _process_gnn(
+        self, dec_type, gnn_model, node_features, edge_src, edge_dst, feat_dim
+    ):
+        nf, src, dst = self._prepare_graphs(node_features, edge_src, edge_dst, feat_dim)
+
+        self.raw_graphs[dec_type] = {
+            "node_features": nf.cpu().numpy(),
+            "edge_src": src.cpu().numpy(),
+            "edge_dst": dst.cpu().numpy(),
+        }
+
+        if len(nf) > 0:
+            node_embs = gnn_model(nf, src, dst)
+            self.globals[dec_type] = node_embs.mean(dim=0)
+        else:
+            self.globals[dec_type] = torch.zeros(self.agent.hidden_dim)
+
     def init_cache_graph(self, node_features, edge_src, edge_dst):
-        nf, src, dst = self._prepare_graphs(node_features, edge_src, edge_dst, 5)
-        if nf is not None:
-            self.globals["cache_dec"] = self.agent.cache_gnn(nf, src, dst)
+        self._process_gnn(
+            "cache_dec", self.agent.cache_gnn, node_features, edge_src, edge_dst, 5
+        )
 
     def init_egraph(self, node_features, edge_src, edge_dst):
-        nf, src, dst = self._prepare_graphs(node_features, edge_src, edge_dst, 4)
-        if nf is not None:
-            self.globals["extract_dec"] = self.agent.extract_gnn(nf, src, dst)
+        self._process_gnn(
+            "extract_dec", self.agent.extract_gnn, node_features, edge_src, edge_dst, 4
+        )
 
     def init_dispatch_graph(self, node_features, edge_src, edge_dst):
-        nf, src, dst = self._prepare_graphs(node_features, edge_src, edge_dst, 4)
-        if nf is not None:
-            self.globals["dispatch_dec"] = self.agent.dispatch_gnn(nf, src, dst)
+        self._process_gnn(
+            "dispatch_dec",
+            self.agent.dispatch_gnn,
+            node_features,
+            edge_src,
+            edge_dst,
+            4,
+        )
 
     def init_bufferize_graph(self, node_features, edge_src, edge_dst):
-        nf, src, dst = self._prepare_graphs(node_features, edge_src, edge_dst, 5)
-        if nf is not None:
-            self.globals["bufferize_dec"] = self.agent.bufferize_gnn(nf, src, dst)
+        self._process_gnn(
+            "bufferize_dec",
+            self.agent.bufferize_gnn,
+            node_features,
+            edge_src,
+            edge_dst,
+            5,
+        )
 
     def init_malloc_graph(self, node_features, edge_src, edge_dst):
-        nf, src, dst = self._prepare_graphs(node_features, edge_src, edge_dst, 3)
-        if nf is not None:
-            self.globals["malloc_dec"] = self.agent.malloc_gnn(nf, src, dst)
+        self._process_gnn(
+            "malloc_dec", self.agent.malloc_gnn, node_features, edge_src, edge_dst, 3
+        )
 
     @torch.inference_mode()
     def _order_items(self, items, dec_type, extract_fn):
-        if len(items) <= 1:
-            if len(items) == 1:
-                features = extract_fn(items)
-                global_state = self.globals.get(
-                    dec_type, torch.zeros(self.agent.hidden_dim)
-                )
-                state_key = hash(
-                    (
-                        global_state.cpu().numpy().tobytes(),
-                        features.cpu().numpy().tobytes(),
-                    )
-                )
-                if state_key not in self.mcts_tree:
-                    self.mcts_tree[state_key] = {
-                        "N": np.zeros(1, dtype=np.float32),
-                        "W": np.zeros(1, dtype=np.float32),
-                        "P": np.ones(1, dtype=np.float32),
-                        "v": 0.0,
-                        "type": dec_type,
-                        "global_state": global_state.cpu().numpy(),
-                        "features": features.cpu().numpy(),
-                    }
-                self.active_stack.append((state_key, 0))
-            return list(range(len(items)))
-
         features = extract_fn(items)
         global_state = self.globals.get(dec_type, torch.zeros(self.agent.hidden_dim))
+
+        # Save the graph state right now in case it changes later
+        raw_graph = self.raw_graphs.get(
+            dec_type,
+            {
+                "node_features": np.zeros((0, features.shape[1]), dtype=np.float32),
+                "edge_src": np.zeros(0, dtype=np.int64),
+                "edge_dst": np.zeros(0, dtype=np.int64),
+            },
+        )
 
         state_key = hash(
             (global_state.cpu().numpy().tobytes(), features.cpu().numpy().tobytes())
         )
         num_actions = len(items)
+
+        if len(items) <= 1:
+            if len(items) == 1 and state_key not in self.mcts_tree:
+                self.mcts_tree[state_key] = {
+                    "N": np.zeros(1, dtype=np.float32),
+                    "W": np.zeros(1, dtype=np.float32),
+                    "P": np.ones(1, dtype=np.float32),
+                    "v": 0.0,
+                    "type": dec_type,
+                    "features": features.cpu().numpy(),
+                    "node_features": raw_graph["node_features"],
+                    "edge_src": raw_graph["edge_src"],
+                    "edge_dst": raw_graph["edge_dst"],
+                }
+                self.active_stack.append((state_key, 0))
+            return list(range(len(items)))
 
         if state_key not in self.mcts_tree:
             with torch.no_grad():
@@ -370,8 +400,10 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 "P": P_perturbed,
                 "v": v,
                 "type": dec_type,
-                "global_state": global_state.cpu().numpy(),
                 "features": features.cpu().numpy(),
+                "node_features": raw_graph["node_features"],
+                "edge_src": raw_graph["edge_src"],
+                "edge_dst": raw_graph["edge_dst"],
             }
 
         node_data = self.mcts_tree[state_key]
