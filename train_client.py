@@ -1,3 +1,4 @@
+# File: train_client.py
 import os
 
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -14,7 +15,6 @@ from pathlib import Path
 import psutil
 import torch
 import torch.multiprocessing as mp
-import numpy as np
 
 DEFAULT_WORKERS = max(1, (psutil.cpu_count(logical=False) or 4) - 1)
 
@@ -22,30 +22,12 @@ import tensor_graphs
 
 from train_shared import (
     ActorDelegate,
-    AlphaZeroAgent,
+    AlphaZeroTransformer,
     TrainConfig,
     create_client_socket,
     recv_msg,
     send_msg,
-    PHASE_MAP,
-    MAX_GNN_DIM,
-    MAX_OPT_DIM,
 )
-
-
-# Pad helper: ensure arrays are padded to MAX dims for unified buffer
-def pad_gnn(arr, target_dim=MAX_GNN_DIM):
-    if arr.shape[1] >= target_dim:
-        return arr[:, :target_dim]
-    pad = np.zeros((arr.shape[0], target_dim - arr.shape[1]), dtype=np.float32)
-    return np.concatenate([arr, pad], axis=1)
-
-
-def pad_opt(arr, target_dim=MAX_OPT_DIM):
-    if arr.shape[1] >= target_dim:
-        return arr[:, :target_dim]
-    pad = np.zeros((arr.shape[0], target_dim - arr.shape[1]), dtype=np.float32)
-    return np.concatenate([arr, pad], axis=1)
 
 
 @torch.inference_mode()
@@ -58,10 +40,8 @@ def client_worker(rank: int, config: TrainConfig):
 
     log_path = f"client_worker_{rank}.log"
     f_log = open(log_path, "w", encoding="utf-8")
-
     sys.stdout.flush()
     sys.stderr.flush()
-
     os.dup2(f_log.fileno(), 1)
     os.dup2(f_log.fileno(), 2)
 
@@ -92,11 +72,11 @@ def client_worker(rank: int, config: TrainConfig):
     console_handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(console_handler)
 
-    agent = AlphaZeroAgent(
-        hidden_dim=config.hidden_dim,
-        transformer_layers=config.transformer_layers,
-        transformer_heads=config.transformer_heads,
-        dropout=config.transformer_dropout,
+    agent = AlphaZeroTransformer(
+        d_model=config.d_model,
+        nhead=config.nhead,
+        num_layers=config.num_layers,
+        max_feat_dim=config.max_feat_dim,
     )
 
     # 1. Connect to Server
@@ -111,7 +91,7 @@ def client_worker(rank: int, config: TrainConfig):
         logger.info(f"{LOG_PREFIX} [Worker {rank}] Connection failed: {e}")
         return
 
-    # 2. Fetch Initial Weights
+    # 2. Fetch Initial Weights from Server
     try:
         send_msg(client_sock, {"type": "req_weights"})
         initial_resp = recv_msg(client_sock)
@@ -126,7 +106,7 @@ def client_worker(rank: int, config: TrainConfig):
             )
         else:
             logger.info(
-                f"{LOG_PREFIX} [Worker {rank}] Using local randomly initialized weights (server weights pending)."
+                f"{LOG_PREFIX} [Worker {rank}] Using local randomly initialized weights."
             )
     except Exception as e:
         logger.info(f"{LOG_PREFIX} [Worker {rank}] Error fetching initial weights: {e}")
@@ -160,7 +140,7 @@ def client_worker(rank: int, config: TrainConfig):
         f"{LOG_PREFIX} [Worker {rank}] Assigned to bucket {bucket_idx}/{num_buckets}"
     )
 
-    # 4. Generate Trajectories - optimized for thousands of transitions per episode
+    # 4. Generate Trajectories
     episode = 0
 
     while True:
@@ -169,6 +149,7 @@ def client_worker(rank: int, config: TrainConfig):
         extraction_costs = []
         mcts_tree = {}
 
+        # MCTS Simulations
         for sim in range(config.num_simulations):
             delegate = ActorDelegate(
                 agent,
@@ -204,51 +185,22 @@ def client_worker(rank: int, config: TrainConfig):
         else:
             best_Z = -1.0
 
-        # 5. Pack unified trajectory - optimized for thousands
-        # Pre-allocate lists with expected size
-        num_transitions = len(mcts_tree)
-        phase_list = []
-        nf_list = []
-        esrc_list = []
-        edst_list = []
-        feats_list = []
-        pis_list = []
-        zs_list = []
-
-        # Reserve capacity hint (Python list doesn't have reserve, but we can extend efficiently)
-        # Use local variables for speed
-        for node_data in mcts_tree.values():
+        # 5. Pack Trajectory (Unified Format)
+        trajectory_transitions = []
+        for h, node_data in mcts_tree.items():
             counts = node_data["N"]
             total_counts = counts.sum()
             pi = counts / total_counts if total_counts > 0 else node_data["P"]
 
-            # node_data["node_features"] is already padded to MAX_GNN_DIM in new ActorDelegate
-            # but ensure padding for safety
-            nf = node_data["node_features"]
-            if nf.shape[1] < MAX_GNN_DIM:
-                nf = pad_gnn(nf, MAX_GNN_DIM)
-            else:
-                nf = nf[:, :MAX_GNN_DIM]
-
-            feat = node_data["features"]
-            if feat.shape[1] < MAX_OPT_DIM:
-                feat = pad_opt(feat, MAX_OPT_DIM)
-
-            phase_list.append(
-                int(
-                    node_data.get(
-                        "phase", PHASE_MAP.get(node_data.get("type", "cache_dec"), 0)
-                    )
-                )
+            trajectory_transitions.append(
+                {
+                    "features": node_data["features"],
+                    "token_types": node_data["token_types"],
+                    "phase_ids": node_data["phase_ids"],
+                    "pis": pi,
+                    "z": best_Z,
+                }
             )
-            nf_list.append(nf.astype(np.float32, copy=False))
-            esrc_list.append(node_data["edge_src"].astype(np.int64, copy=False))
-            edst_list.append(node_data["edge_dst"].astype(np.int64, copy=False))
-            feats_list.append(feat.astype(np.float32, copy=False))
-            pis_list.append(pi.astype(np.float32, copy=False))
-            zs_list.append(best_Z)
-
-        total_transitions = len(zs_list)
 
         ep_noise = max(
             config.min_noise,
@@ -256,19 +208,10 @@ def client_worker(rank: int, config: TrainConfig):
         )
         logger.info(
             f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} | Ep Noise: {ep_noise:.4f} | Best Cost: {best_cost:8.4f} ms | "
-            f"Extractions: {len(extraction_costs)} | Sending {total_transitions} transitions (unified)..."
+            f"Extractions: {len(extraction_costs)} | Sending {len(trajectory_transitions)} transitions..."
         )
 
-        trajectory_payload = {
-            "phase": phase_list,
-            "node_features": nf_list,
-            "edge_src": esrc_list,
-            "edge_dst": edst_list,
-            "features": feats_list,
-            "pis": pis_list,
-            "Zs": zs_list,
-        }
-
+        # 6. Stream Trajectory to Server
         try:
             send_msg(
                 client_sock,
@@ -276,7 +219,7 @@ def client_worker(rank: int, config: TrainConfig):
                     "type": "trajectory",
                     "cost": best_cost,
                     "costs": extraction_costs,
-                    "data": trajectory_payload,
+                    "data": trajectory_transitions,
                 },
             )
         except Exception as e:
@@ -287,62 +230,160 @@ def client_worker(rank: int, config: TrainConfig):
 
         episode += 1
 
-        # 6. Check for updated weights
+        # 7. Check for updated weights
         try:
             send_msg(client_sock, {"type": "req_weights"})
             weight_resp = recv_msg(client_sock)
             if weight_resp and weight_resp.get("type") == "weights":
-                agent.load_state_dict(weight_resp["data"], strict=False)
+                agent.load_state_dict(weight_resp["data"])
+                logger.info(
+                    f"{LOG_PREFIX} [Worker {rank}] Synced updated weights from server."
+                )
         except Exception as e:
-            logger.info(f"{LOG_PREFIX} [Worker {rank}] Error fetching weights: {e}")
+            logger.info(
+                f"{LOG_PREFIX} [Worker {rank}] Error syncing weights from server: {e}"
+            )
             break
 
     client_sock.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="AlphaZero TensorGraph Client - Unified MDP"
+    parser = argparse.ArgumentParser(description="AlphaZero TensorGraph Worker Client")
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Server address (IP or Bluetooth MAC)",
     )
-    parser.add_argument("--host", type=str, default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--model", type=str, default="gemma-3-270m")
-    parser.add_argument("--model-path", type=str, default="models/google/gemma-3-270m")
-    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
-    parser.add_argument("--num-simulations", type=int, default=10)
-    parser.add_argument("--hidden-dim", type=int, default=128)
-    parser.add_argument("--transformer-layers", type=int, default=2)
-    parser.add_argument("--transformer-heads", type=int, default=4)
+    parser.add_argument(
+        "--port", type=int, default=5000, help="Server port or BT channel"
+    )
+    parser.add_argument(
+        "-bt",
+        "--use-bluetooth",
+        action="store_true",
+        help="Use Bluetooth RFCOMM socket",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help="Number of worker processes",
+    )
+    parser.add_argument(
+        "--simulations",
+        type=int,
+        default=10,
+        help="Number of MCTS simulations per episode",
+    )
+    parser.add_argument("--model", type=str, default="gemma-3-270m", help="Model name")
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default="models/google/gemma-3-270m",
+        help="Model weights path",
+    )
+    parser.add_argument(
+        "--compile-decode-buckets",
+        action="store_true",
+        help="Compile decode buckets in addition to the single full bucket",
+    )
+    parser.add_argument(
+        "--log-lost-calls",
+        action="store_true",
+        dest="log_cost_calls",
+        help="Log cost calls (forces workers=1 when enabled)",
+    )
+    # PUCT & Noise Annealing Options
+    parser.add_argument(
+        "--c-puct", type=float, default=1.25, help="PUCT exploration constant"
+    )
+    parser.add_argument(
+        "--base-noise",
+        type=float,
+        default=0.25,
+        help="Initial exploration noise at episode 0 and depth 0",
+    )
+    parser.add_argument(
+        "--min-noise", type=float, default=0.01, help="Minimum exploration noise floor"
+    )
+    parser.add_argument(
+        "--decay-episodes",
+        type=int,
+        default=500,
+        help="Number of episodes over which to decay episode-level noise",
+    )
+    parser.add_argument(
+        "--depth-gamma", type=float, default=0.7, help="Per-depth noise decay factor"
+    )
+    parser.add_argument(
+        "--level-sims",
+        nargs="+",
+        type=int,
+        default=[1, 1, 1, 1],
+        help="Simulations per level: [num_extract, num_dispatch, num_bufferize, num_malloc] or with num_cache",
+    )
 
     args = parser.parse_args()
 
     config = TrainConfig()
     config.host = args.host
     config.port = args.port
+    config.use_bluetooth = args.use_bluetooth
+    config.workers = 1 if args.log_cost_calls else args.workers
+    config.num_simulations = args.simulations
     config.model_name = args.model
     config.model_path = args.model_path
-    config.num_simulations = args.num_simulations
-    config.hidden_dim = args.hidden_dim
-    config.transformer_layers = args.transformer_layers
-    config.transformer_heads = args.transformer_heads
+    config.compile_decode_buckets = args.compile_decode_buckets
+    config.log_cost_calls = args.log_cost_calls
+    config.c_puct = args.c_puct
+    config.base_noise = args.base_noise
+    config.min_noise = args.min_noise
+    config.decay_episodes = args.decay_episodes
+    config.depth_gamma = args.depth_gamma
+    config.level_simulations = args.level_sims
 
-    # Use spawn for multiprocessing
-    mp.set_start_method("spawn", force=True)
+    if config.host and ":" in config.host and len(config.host.split(":")) == 6:
+        config.use_bluetooth = True
+
+    try:
+        from utils.download_hf_meta import download_model_meta
+
+        p = Path(config.model_path)
+        if p.is_file() or p.suffix == ".safetensors":
+            p = p.parent
+        parts = p.parts
+        if parts and parts[0] == "models":
+            parts = parts[1:]
+        repo_id = "/".join(parts) if parts else config.model_name
+
+        print(f"[Client] Ensuring model files for '{repo_id}' are downloaded...")
+        download_model_meta(repo_id, download_other_files=False)
+    except Exception as e:
+        print(
+            f"[Client] Note: Could not auto-download model metadata ({e}). Proceeding assuming local files exist."
+        )
+
+    conn_type = "Bluetooth" if config.use_bluetooth else "TCP/IP"
+    print("=========================================================")
+    print(f" Starting {config.workers} Client Worker Process(es)")
+    print(f" Target Server: {config.host}:{config.port} ({conn_type})")
+    print(
+        f" MCTS Settings: c_puct={config.c_puct}, base_noise={config.base_noise}, min_noise={config.min_noise}"
+    )
+    print("=========================================================")
 
     processes = []
-    for rank in range(args.workers):
+    for rank in range(config.workers):
         p = mp.Process(target=client_worker, args=(rank, config))
         p.start()
         processes.append(p)
 
-    try:
-        for p in processes:
-            p.join()
-    except KeyboardInterrupt:
-        print("Shutting down client workers...")
-        for p in processes:
-            p.terminate()
+    for p in processes:
+        p.join()
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
     main()
