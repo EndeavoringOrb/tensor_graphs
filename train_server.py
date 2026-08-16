@@ -30,6 +30,26 @@ global_weights = {}
 weights_lock = threading.Lock()
 
 
+class ReplayBuffer:
+    def __init__(self, maxlen):
+        self.buffer = []
+        self.maxlen = maxlen
+        self.ptr = 0
+
+    def append(self, item):
+        if len(self.buffer) < self.maxlen:
+            self.buffer.append(item)
+        else:
+            self.buffer[self.ptr] = item
+            self.ptr = (self.ptr + 1) % self.maxlen
+
+    def sample(self, batch_size):
+        return random.sample(self.buffer, batch_size)
+
+    def __len__(self):
+        return len(self.buffer)
+
+
 def setup_run_dir(base_dir="runs", run_dir=None, resume_latest=False) -> str:
     runs_dir = Path(base_dir)
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +134,52 @@ def accept_loop(server_sock, conn_type_label, replay_queue):
         print(f"[Server] {conn_type_label} accept loop ended: {e}")
 
 
+def batch_generator_thread(buffer, batch_queue, config, buffer_lock):
+    """Background thread to prepare batches on the CPU and pin memory."""
+    while True:
+        with buffer_lock:
+            # 1. Wait until we have enough samples
+            can_train = any(len(buffer[dt]) >= config.batch_size for dt in DEC_TYPES)
+            if not can_train:
+                time.sleep(0.1)
+                continue
+
+            # 2. Fast sampling inside the lock
+            batches = {}
+            for dt in DEC_TYPES:
+                if len(buffer[dt]) >= config.batch_size:
+                    batches[dt] = buffer[dt].sample(config.batch_size)
+
+        # 3. Heavy lifting (np.stack, np.concatenate) OUTSIDE the lock!
+        prepared_batches = {}
+        for dt, batch in batches.items():
+            # pin_memory() speeds up CPU -> GPU transfers and enables non_blocking=True
+            g_states = torch.from_numpy(np.stack([s[0] for s in batch])).pin_memory()
+            feats_concat = torch.from_numpy(
+                np.concatenate([s[1] for s in batch], axis=0)
+            ).pin_memory()
+            pi_concat = torch.from_numpy(
+                np.concatenate([s[2] for s in batch], axis=0)
+            ).pin_memory()
+            z_targets = (
+                torch.tensor([s[3] for s in batch], dtype=torch.float32)
+                .unsqueeze(1)
+                .pin_memory()
+            )
+            N_list = [s[1].shape[0] for s in batch]
+
+            prepared_batches[dt] = (
+                g_states,
+                feats_concat,
+                pi_concat,
+                z_targets,
+                N_list,
+            )
+
+        # Put into queue (blocks if queue is full, naturally preventing CPU from running away)
+        batch_queue.put(prepared_batches)
+
+
 def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Learner] Using device: {device}")
@@ -121,8 +187,20 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     agent = AlphaZeroAgent(hidden_dim=config.hidden_dim).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
 
-    # Maintain separate replay buffers for each decision type
-    buffer = {dt: deque(maxlen=config.replay_buffer_size) for dt in DEC_TYPES}
+    # Use our new fast ReplayBuffer
+    buffer = {dt: ReplayBuffer(config.replay_buffer_size) for dt in DEC_TYPES}
+    buffer_lock = threading.Lock()
+
+    # Keep up to 4 fully collated batches ready for the GPU
+    batch_queue = queue.Queue(maxsize=4)
+
+    # Start the background batch generator thread
+    bg_thread = threading.Thread(
+        target=batch_generator_thread,
+        args=(buffer, batch_queue, config, buffer_lock),
+        daemon=True,
+    )
+    bg_thread.start()
 
     os.makedirs(config.run_dir, exist_ok=True)
     losses_bin_path = os.path.join(config.run_dir, "losses.bin")
@@ -171,7 +249,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     save_file(cpu_state_dict, model_filepath)
 
     while True:
-        # 1. Drain network queue into separated buffers
+        # 1. Drain incoming network data into the replay buffer quickly
         while not replay_queue.empty():
             try:
                 item = replay_queue.get_nowait()
@@ -183,101 +261,95 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                         f_bin.flush()
                 elif item["type"] == "trajectory_data":
                     data_dict = item["data"]
-                    for dt, d in data_dict.items():
-                        for gs, f, p, z in zip(
-                            d["global_states"], d["features"], d["pis"], d["Zs"]
-                        ):
-                            buffer[dt].append((gs, f, p, z))
+                    with buffer_lock:
+                        for dt, d in data_dict.items():
+                            for gs, f, p, z in zip(
+                                d["global_states"], d["features"], d["pis"], d["Zs"]
+                            ):
+                                buffer[dt].append((gs, f, p, z))
             except queue.Empty:
                 break
 
-        # 2. Check if we have enough samples to train ANY decision type network
-        can_train = any(len(buffer[dt]) >= config.batch_size for dt in DEC_TYPES)
+        # 2. Try to grab a prepared batch (timeout so we can go back to draining the network queue)
+        try:
+            prepared_batches = batch_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
 
-        if can_train:
-            agent.train()
-            optimizer.zero_grad()
-            total_loss = torch.tensor(0.0, device=device)
-            types_trained = 0
+        # 3. GPU Training Block
+        agent.train()
+        optimizer.zero_grad()
+        total_loss = torch.tensor(0.0, device=device)
+        types_trained = 0
 
-            for dt in DEC_TYPES:
-                if len(buffer[dt]) < config.batch_size:
-                    continue
+        for dt, (
+            g_states,
+            feats_concat,
+            pi_concat,
+            z_targets,
+            N_list,
+        ) in prepared_batches.items():
+            dec_model = getattr(agent, dt)
 
-                batch = random.sample(buffer[dt], config.batch_size)
-                dec_model = getattr(agent, dt)
+            # non_blocking=True allows the transfer to happen concurrently with GPU execution
+            g_states = g_states.to(device, non_blocking=True)
+            feats_concat = feats_concat.to(device, non_blocking=True)
+            pi_concat = pi_concat.to(device, non_blocking=True)
+            z_targets = z_targets.to(device, non_blocking=True)
 
-                # --- VECTORIZATION ---
-                # A: Prepare inputs
-                g_states = torch.from_numpy(np.stack([s[0] for s in batch])).to(
-                    device, non_blocking=True
-                )
-                feats_concat = torch.from_numpy(
-                    np.concatenate([s[1] for s in batch], axis=0)
-                ).to(device, non_blocking=True)
-                pi_concat = torch.from_numpy(
-                    np.concatenate([s[2] for s in batch], axis=0)
-                ).to(device, non_blocking=True)
-                z_targets = torch.tensor(
-                    [s[3] for s in batch], dtype=torch.float32, device=device
-                ).unsqueeze(1)
-                N_list = [s[1].shape[0] for s in batch]
+            # B: Value Loss
+            vals = dec_model.value(g_states)
+            value_loss = F.mse_loss(vals, z_targets, reduction="mean")
 
-                # B: Value Loss
-                vals = dec_model.value(g_states)
-                value_loss = F.mse_loss(vals, z_targets, reduction="mean")
+            # C: Policy Loss
+            g_repeated = torch.repeat_interleave(
+                g_states, torch.tensor(N_list, device=device), dim=0
+            )
+            policy_in = torch.cat([g_repeated, feats_concat], dim=1)
+            all_scores = dec_model.policy(policy_in).squeeze(1)
 
-                # C: Policy Loss (Batched Variable-Length Softmax via Padding)
-                g_repeated = torch.repeat_interleave(
-                    g_states, torch.tensor(N_list, device=device), dim=0
-                )
-                policy_in = torch.cat([g_repeated, feats_concat], dim=1)
-                all_scores = dec_model.policy(policy_in).squeeze(1)
+            scores_list = list(torch.split(all_scores, N_list))
+            pi_list = list(torch.split(pi_concat, N_list))
 
-                scores_list = list(torch.split(all_scores, N_list))
-                pi_list = list(torch.split(pi_concat, N_list))
+            scores_padded = torch.nn.utils.rnn.pad_sequence(
+                scores_list, batch_first=True, padding_value=-1e9
+            )
+            pi_padded = torch.nn.utils.rnn.pad_sequence(
+                pi_list, batch_first=True, padding_value=0.0
+            )
 
-                # Pad variable length arrays (-1e9 pushes soft-max denominators to roughly 0 for padded sections)
-                scores_padded = torch.nn.utils.rnn.pad_sequence(
-                    scores_list, batch_first=True, padding_value=-1e9
-                )
-                pi_padded = torch.nn.utils.rnn.pad_sequence(
-                    pi_list, batch_first=True, padding_value=0.0
-                )
+            log_p_padded = F.log_softmax(scores_padded, dim=1)
+            policy_loss = -(pi_padded * log_p_padded).sum(dim=1).mean()
 
-                log_p_padded = F.log_softmax(scores_padded, dim=1)
-                # Sum across the valid action dimension (dim=1), then average across the batch size (dim=0)
-                policy_loss = -(pi_padded * log_p_padded).sum(dim=1).mean()
+            type_loss = policy_loss + value_loss
+            total_loss += type_loss
+            types_trained += 1
 
-                type_loss = policy_loss + value_loss
-                total_loss += type_loss
-                types_trained += 1
+        if types_trained > 0:
+            total_loss = total_loss / types_trained
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
+            optimizer.step()
 
-            if types_trained > 0:
-                total_loss = total_loss / types_trained
-                total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(agent.parameters(), 1.0)
-                optimizer.step()
+            batches_processed += 1
+            loss_val = float(total_loss.detach().item())
+            total_buf_size = sum(len(b) for b in buffer.values())
+            print(
+                f"[Learner] Batch {batches_processed:04d} | Total BufSize: {total_buf_size} | Loss: {loss_val:.4f}"
+            )
 
-                batches_processed += 1
-                loss_val = float(total_loss.detach().item())
-                total_buf_size = sum(len(b) for b in buffer.values())
-                print(
-                    f"[Learner] Batch {batches_processed:04d} | Total BufSize: {total_buf_size} | Loss: {loss_val:.4f}"
-                )
+            with open(losses_bin_path, "ab") as f_bin:
+                f_bin.write(struct.pack(pack_fmt, batches_processed, loss_val))
+                f_bin.flush()
 
-                with open(losses_bin_path, "ab") as f_bin:
-                    f_bin.write(struct.pack(pack_fmt, batches_processed, loss_val))
-                    f_bin.flush()
-
-                if batches_processed % config.save_interval == 0:
-                    cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
-                    with weights_lock:
-                        global_weights.clear()
-                        global_weights.update(cpu_state_dict)
-                    save_file(cpu_state_dict, model_filepath)
-        else:
-            time.sleep(1)
+            if batches_processed % config.save_interval == 0:
+                cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
+                with weights_lock:
+                    global_weights.clear()
+                    global_weights.update(cpu_state_dict)
+                save_file(cpu_state_dict, model_filepath)
+    else:
+        time.sleep(1)
 
 
 def main():
