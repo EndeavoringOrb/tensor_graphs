@@ -110,8 +110,8 @@ struct CacheIterator
                 node_features.push_back(static_cast<float>(node.getSizeBytes()));
                 node_features.push_back(static_cast<float>(node.opType));
                 node_features.push_back(static_cast<float>(node.dtype));
-                bool is_storage = (graph.input_data_types.count(id) &&
-                                   graph.input_data_types.at(id) == InputDataType::STORAGE);
+                bool is_storage =
+                    (graph.input_data_types.count(id) && graph.input_data_types.at(id) == InputDataType::STORAGE);
                 node_features.push_back(is_storage ? 1.0f : 0.0f);
                 node_features.push_back(static_cast<float>(num_users[i]));
             }
@@ -367,9 +367,10 @@ struct Planner
         }
     }
 
-    std::unordered_map<LogicalId, MemSpace> searchBestCacheNodes(
-        LogicalId rootId, const Graph &graph, const std::vector<Bucket> &buckets,
-        std::shared_ptr<SearchDelegate> delegate = nullptr, float minCompileSeconds = 0.0f)
+    std::unordered_map<LogicalId, MemSpace> searchBestCacheNodes(LogicalId rootId, const Graph &graph,
+                                                                 const std::vector<Bucket> &buckets,
+                                                                 std::shared_ptr<SearchDelegate> delegate = nullptr,
+                                                                 float minCompileSeconds = 0.0f)
     {
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
 
@@ -442,8 +443,8 @@ struct Planner
                 std::unordered_map<LogicalId, ParallelBuffer> preallocated;
                 preallocateLogicalBuffers(graph, current_cache, preallocated);
 
-                CompiledGraph plan_res = plan(rootId, graph, rep_bucket, current_cache, true, true, nullptr,
-                                              preallocated, 0.0f, delegate);
+                CompiledGraph plan_res =
+                    plan(rootId, graph, rep_bucket, current_cache, true, true, nullptr, preallocated, 0.0f, delegate);
                 float cost = plan_res.cost();
                 if (cost < best_cost)
                 {

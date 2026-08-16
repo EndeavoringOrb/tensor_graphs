@@ -251,7 +251,10 @@ def main():
         "--port", type=int, default=5000, help="Server port or BT channel"
     )
     parser.add_argument(
-        "-bt", "--use-bluetooth", action="store_true", help="Use Bluetooth RFCOMM socket"
+        "-bt",
+        "--use-bluetooth",
+        action="store_true",
+        help="Use Bluetooth RFCOMM socket",
     )
     parser.add_argument(
         "--workers",

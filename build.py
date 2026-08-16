@@ -969,7 +969,7 @@ class Toolchain:
 
         return [f for f in inc_flags if f], [f for f in link_flags if f], ext_suffix
 
-    def get_ld_flags(self) -> list[str]:
+    def get_ld_flags(self, is_python_ext: bool = False) -> list[str]:
         flags = []
         if self.config.use_opencl:
             if self.platform.opencl_lib_dir:
@@ -978,7 +978,8 @@ class Toolchain:
 
             if self.platform.is_windows and self.config.profile:
                 flags.append("-Wl,-debug")
-        flags.extend(["-static"])
+        if not is_python_ext:
+            flags.extend(["-static"])
         return flags
 
     def get_nvcc_flags(self, is_python_ext: bool = False) -> list[str]:
@@ -1116,7 +1117,7 @@ class BuildOrchestrator:
                     + py_inc_flags
                     + [main_src, "-o", out_name]
                     + py_link_flags
-                    + self.toolchain.get_ld_flags()
+                    + self.toolchain.get_ld_flags(is_python_ext=True)
                 )
                 res = self.toolchain.run_cmd(cmd, is_python_ext=True)
                 self._render_success_panel(res.stdout)

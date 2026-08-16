@@ -123,9 +123,10 @@ inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const s
     return ctx;
 }
 
-inline std::vector<float> run_hierarchical_simulations(
-    std::shared_ptr<SaturatedEGraphContext> ctx, int bucket_idx, std::shared_ptr<SearchDelegate> delegate,
-    const std::vector<uint32_t> &level_simulations, bool log_cost_calls = false)
+inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<SaturatedEGraphContext> ctx, int bucket_idx,
+                                                       std::shared_ptr<SearchDelegate> delegate,
+                                                       const std::vector<uint32_t> &level_simulations,
+                                                       bool log_cost_calls = false)
 {
     ctx->costModel.setLogging(log_cost_calls);
 
@@ -371,9 +372,8 @@ inline std::vector<float> run_hierarchical_simulations(
                         uint64_t cap = ctx->mem->getMemCaps().count(ms) ? ctx->mem->getMemCaps().at(ms)
                                                                         : std::numeric_limits<uint64_t>::max();
                         uint64_t reserved = reserved_per_ms.count(ms) ? reserved_per_ms.at(ms) : 0;
-                        uint64_t reduced_cap = (cap == std::numeric_limits<uint64_t>::max())
-                                                   ? cap
-                                                   : (cap > reserved ? cap - reserved : 0);
+                        uint64_t reduced_cap =
+                            (cap == std::numeric_limits<uint64_t>::max()) ? cap : (cap > reserved ? cap - reserved : 0);
 
                         std::vector<ParallelBuffer> allocated;
                         if (!malloc_by_time_components(reduced_cap, bufs, allocated, overflow, delegate))
