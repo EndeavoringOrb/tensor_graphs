@@ -7,7 +7,6 @@ import random
 import struct
 import threading
 import time
-from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -25,29 +24,139 @@ from train_shared import (
 )
 
 DEC_TYPES = ["cache_dec", "extract_dec", "dispatch_dec", "bufferize_dec", "malloc_dec"]
+FEAT_DIMS = {
+    "cache_dec": 5,
+    "extract_dec": 6,
+    "dispatch_dec": 6,
+    "bufferize_dec": 4,
+    "malloc_dec": 3,
+}
+
 
 global_weights = {}
 weights_lock = threading.Lock()
 
 
 class ReplayBuffer:
-    def __init__(self, maxlen):
-        self.buffer = []
+    def __init__(
+        self,
+        maxlen: int,
+        global_dim: int,
+        feat_dim: int,
+        pool_multiplier: int = 16,
+        pin_memory: bool = True,
+    ):
         self.maxlen = maxlen
-        self.ptr = 0
+        self.max_pool_size = maxlen * pool_multiplier
+        self.global_dim = global_dim
+        self.feat_dim = feat_dim
 
-    def append(self, item):
-        if len(self.buffer) < self.maxlen:
-            self.buffer.append(item)
+        self.state_ptr = 0
+        self.pool_ptr = 0
+        self.size = 0
+
+        # Pre-allocated fixed-size CPU tensors (pinned for non-blocking GPU transfer)
+        self.global_states = torch.zeros(
+            (maxlen, global_dim), dtype=torch.float32, pin_memory=pin_memory
+        )
+        self.zs = torch.zeros((maxlen, 1), dtype=torch.float32, pin_memory=pin_memory)
+        self.offsets = torch.zeros(maxlen, dtype=torch.int64)
+        self.lengths = torch.zeros(maxlen, dtype=torch.int64)
+
+        # Pre-allocated variable-size feature/pi pools
+        self.feats_pool = torch.zeros(
+            (self.max_pool_size, feat_dim), dtype=torch.float32, pin_memory=pin_memory
+        )
+        self.pis_pool = torch.zeros(
+            self.max_pool_size, dtype=torch.float32, pin_memory=pin_memory
+        )
+
+    def extend(self, gs_list, feats_list, pis_list, zs_list):
+        n = len(gs_list)
+        if n == 0:
+            return
+
+        # 1. Stack incoming trajectory batch into CPU tensors
+        gs_tensor = torch.from_numpy(np.stack(gs_list)).float()
+        zs_tensor = torch.tensor(zs_list, dtype=torch.float32).unsqueeze(1)
+
+        lengths_arr = np.array([f.shape[0] for f in feats_list], dtype=np.int64)
+        lengths_tensor = torch.from_numpy(lengths_arr)
+        total_feats = int(lengths_arr.sum())
+
+        feats_tensor = torch.from_numpy(np.concatenate(feats_list, axis=0)).float()
+        pis_tensor = torch.from_numpy(np.concatenate(pis_list, axis=0)).float()
+
+        # 2. Write features into flat pool ring
+        if self.pool_ptr + total_feats > self.max_pool_size:
+            self.pool_ptr = 0  # Wrap around
+
+        start_pool = self.pool_ptr
+        self.feats_pool[start_pool : start_pool + total_feats] = feats_tensor
+        self.pis_pool[start_pool : start_pool + total_feats] = pis_tensor
+
+        # Item-wise offsets in pool
+        item_offsets = torch.zeros(n, dtype=torch.int64)
+        item_offsets[0] = start_pool
+        if n > 1:
+            item_offsets[1:] = start_pool + torch.cumsum(lengths_tensor[:-1], dim=0)
+
+        self.pool_ptr += total_feats
+
+        # 3. Write states into ring buffer
+        if self.state_ptr + n <= self.maxlen:
+            self.global_states[self.state_ptr : self.state_ptr + n] = gs_tensor
+            self.zs[self.state_ptr : self.state_ptr + n] = zs_tensor
+            self.offsets[self.state_ptr : self.state_ptr + n] = item_offsets
+            self.lengths[self.state_ptr : self.state_ptr + n] = lengths_tensor
+            self.state_ptr = (self.state_ptr + n) % self.maxlen
         else:
-            self.buffer[self.ptr] = item
-            self.ptr = (self.ptr + 1) % self.maxlen
+            first_part = self.maxlen - self.state_ptr
+            second_part = n - first_part
 
-    def sample(self, batch_size):
-        return random.sample(self.buffer, batch_size)
+            self.global_states[self.state_ptr : self.maxlen] = gs_tensor[:first_part]
+            self.zs[self.state_ptr : self.maxlen] = zs_tensor[:first_part]
+            self.offsets[self.state_ptr : self.maxlen] = item_offsets[:first_part]
+            self.lengths[self.state_ptr : self.maxlen] = lengths_tensor[:first_part]
+
+            self.global_states[:second_part] = gs_tensor[first_part:]
+            self.zs[:second_part] = zs_tensor[first_part:]
+            self.offsets[:second_part] = item_offsets[first_part:]
+            self.lengths[:second_part] = lengths_tensor[first_part:]
+            self.state_ptr = second_part
+
+        self.size = min(self.maxlen, self.size + n)
+
+    def sample_batch(self, batch_size: int):
+        """Batched indexing with 0 python loops."""
+        # 1. Random sample batch indices
+        batch_idxs = torch.randint(0, self.size, (batch_size,))
+
+        # 2. Native tensor indexing for fixed-size components
+        g_states = self.global_states[batch_idxs]
+        z_targets = self.zs[batch_idxs]
+        offsets = self.offsets[batch_idxs]
+        lengths = self.lengths[batch_idxs]
+
+        # 3. Vectorized ragged slice indexing for variable-length features & pis
+        total_N = int(lengths.sum().item())
+        offsets_cum = torch.zeros(batch_size, dtype=torch.int64)
+        if batch_size > 1:
+            offsets_cum[1:] = torch.cumsum(lengths[:-1], dim=0)
+
+        idx_within_segment = torch.arange(total_N) - torch.repeat_interleave(
+            offsets_cum, lengths
+        )
+        flat_indices = torch.repeat_interleave(offsets, lengths) + idx_within_segment
+
+        feats_concat = self.feats_pool[flat_indices]
+        pi_concat = self.pis_pool[flat_indices]
+        N_list = lengths.tolist()
+
+        return g_states, feats_concat, pi_concat, z_targets, N_list
 
     def __len__(self):
-        return len(self.buffer)
+        return self.size
 
 
 def setup_run_dir(base_dir="runs", run_dir=None, resume_latest=False) -> str:
@@ -97,12 +206,6 @@ def client_handler(client_sock, client_info, replay_queue):
                 trajectory_data = msg.get("data", {})
                 total_transitions = sum(len(d["Zs"]) for d in trajectory_data.values())
 
-                print(
-                    f"[Server] Received trajectory from {client_info} "
-                    f"(Best Cost: {cost:.4f} ms, Extractions: {len(costs)}, Transitions: {total_transitions})"
-                )
-
-                # Forward bulk payload to learner queue
                 if total_transitions > 0:
                     replay_queue.put(
                         {"type": "trajectory_data", "data": trajectory_data}
@@ -134,50 +237,22 @@ def accept_loop(server_sock, conn_type_label, replay_queue):
         print(f"[Server] {conn_type_label} accept loop ended: {e}")
 
 
-def batch_generator_thread(buffer, batch_queue, config, buffer_lock):
-    """Background thread to prepare batches on the CPU and pin memory."""
+def batch_generator_worker(buffer, batch_queue, config, buffer_lock):
+    """Continuously fetches batches using native tensor indexing."""
     while True:
         with buffer_lock:
-            # 1. Wait until we have enough samples
             can_train = any(len(buffer[dt]) >= config.batch_size for dt in DEC_TYPES)
             if not can_train:
-                time.sleep(0.1)
+                time.sleep(0.02)
                 continue
 
-            # 2. Fast sampling inside the lock
-            batches = {}
+            prepared = {}
             for dt in DEC_TYPES:
                 if len(buffer[dt]) >= config.batch_size:
-                    batches[dt] = buffer[dt].sample(config.batch_size)
+                    # Native tensor indexing runs in ~0.3 ms
+                    prepared[dt] = buffer[dt].sample_batch(config.batch_size)
 
-        # 3. Heavy lifting (np.stack, np.concatenate) OUTSIDE the lock!
-        prepared_batches = {}
-        for dt, batch in batches.items():
-            # pin_memory() speeds up CPU -> GPU transfers and enables non_blocking=True
-            g_states = torch.from_numpy(np.stack([s[0] for s in batch])).pin_memory()
-            feats_concat = torch.from_numpy(
-                np.concatenate([s[1] for s in batch], axis=0)
-            ).pin_memory()
-            pi_concat = torch.from_numpy(
-                np.concatenate([s[2] for s in batch], axis=0)
-            ).pin_memory()
-            z_targets = (
-                torch.tensor([s[3] for s in batch], dtype=torch.float32)
-                .unsqueeze(1)
-                .pin_memory()
-            )
-            N_list = [s[1].shape[0] for s in batch]
-
-            prepared_batches[dt] = (
-                g_states,
-                feats_concat,
-                pi_concat,
-                z_targets,
-                N_list,
-            )
-
-        # Put into queue (blocks if queue is full, naturally preventing CPU from running away)
-        batch_queue.put(prepared_batches)
+        batch_queue.put(prepared)
 
 
 def learner_process(config: TrainConfig, replay_queue: queue.Queue):
@@ -188,20 +263,27 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     agent_opt = torch.compile(agent)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
 
-    # Use our new fast ReplayBuffer
-    buffer = {dt: ReplayBuffer(config.replay_buffer_size) for dt in DEC_TYPES}
+    # Pre-allocate pinned CPU tensor replay buffers
+    buffer = {
+        dt: ReplayBuffer(
+            maxlen=config.replay_buffer_size,
+            global_dim=config.hidden_dim,
+            feat_dim=FEAT_DIMS[dt],
+            pool_multiplier=16,
+            pin_memory=True,
+        )
+        for dt in DEC_TYPES
+    }
     buffer_lock = threading.Lock()
 
-    # Keep up to 4 fully collated batches ready for the GPU
-    batch_queue = queue.Queue(maxsize=4)
-
-    # Start the background batch generator thread
-    bg_thread = threading.Thread(
-        target=batch_generator_thread,
-        args=(buffer, batch_queue, config, buffer_lock),
-        daemon=True,
-    )
-    bg_thread.start()
+    # Prefetch queue
+    batch_queue = queue.Queue(maxsize=8)
+    for _ in range(2):  # 2 threads are plenty with tensor indexing
+        threading.Thread(
+            target=batch_generator_worker,
+            args=(buffer, batch_queue, config, buffer_lock),
+            daemon=True,
+        ).start()
 
     os.makedirs(config.run_dir, exist_ok=True)
     losses_bin_path = os.path.join(config.run_dir, "losses.bin")
@@ -250,7 +332,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     save_file(cpu_state_dict, model_filepath)
 
     while True:
-        # 1. Drain incoming network data into the replay buffer quickly
+        # Drain network queue
         while not replay_queue.empty():
             try:
                 item = replay_queue.get_nowait()
@@ -264,20 +346,17 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                     data_dict = item["data"]
                     with buffer_lock:
                         for dt, d in data_dict.items():
-                            for gs, f, p, z in zip(
+                            buffer[dt].extend(
                                 d["global_states"], d["features"], d["pis"], d["Zs"]
-                            ):
-                                buffer[dt].append((gs, f, p, z))
+                            )
             except queue.Empty:
                 break
 
-        # 2. Try to grab a prepared batch (timeout so we can go back to draining the network queue)
         try:
-            prepared_batches = batch_queue.get(timeout=0.1)
+            prepared_batches = batch_queue.get(timeout=0.05)
         except queue.Empty:
             continue
 
-        # 3. GPU Training Block
         agent.train()
         optimizer.zero_grad()
         total_loss = torch.tensor(0.0, device=device)
@@ -311,16 +390,22 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
 
             B = len(N_list)
             N_tensor = torch.tensor(N_list, device=device)
-            batch_idx = torch.repeat_interleave(torch.arange(B, device=device), N_tensor)
+            batch_idx = torch.repeat_interleave(
+                torch.arange(B, device=device), N_tensor
+            )
 
             # 1. Segmented Max for numerical stability
-            max_scores = torch.full((B,), -float("inf"), device=device, dtype=all_scores.dtype)
+            max_scores = torch.full(
+                (B,), -float("inf"), device=device, dtype=all_scores.dtype
+            )
             max_scores.scatter_reduce_(0, batch_idx, all_scores, reduce="amax")
 
             # 2. Segmented Log-Sum-Exp
             shifted = all_scores - max_scores[batch_idx]
             exp_scores = torch.exp(shifted)
-            sum_exp = torch.zeros(B, device=device, dtype=all_scores.dtype).scatter_add_(0, batch_idx, exp_scores)
+            sum_exp = torch.zeros(
+                B, device=device, dtype=all_scores.dtype
+            ).scatter_add_(0, batch_idx, exp_scores)
 
             # 3. Log Softmax & Cross Entropy Loss
             log_p = shifted - torch.log(sum_exp)[batch_idx]
@@ -353,8 +438,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                     global_weights.clear()
                     global_weights.update(cpu_state_dict)
                 save_file(cpu_state_dict, model_filepath)
-    else:
-        time.sleep(1)
 
 
 def main():
@@ -461,7 +544,6 @@ def main():
     learner_thread.start()
 
     server_sockets = []
-
     tcp_sock = create_server_socket(config.host, config.port, use_bluetooth=False)
     server_sockets.append(tcp_sock)
     tcp_thread = threading.Thread(
