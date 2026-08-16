@@ -538,13 +538,19 @@ class AlphaZeroTransformer(nn.Module):
             + self.phase_emb(phase_ids)
         )
 
+        # Only build 4D mask if both actions and prefix are in the same forward pass (training)
         if past_kv is None and attention_mask is None:
-            is_action = token_types == 3
-            is_prefix = ~is_action
-            allowed_mask = is_action.unsqueeze(2) | is_prefix.unsqueeze(1)
-            if key_padding_mask is not None:
-                allowed_mask = allowed_mask & (~key_padding_mask).unsqueeze(1)
-            attention_mask = allowed_mask.unsqueeze(1)
+            has_actions = (token_types == 3).any()
+            has_prefix = (token_types != 3).any()
+
+            # If it's purely prefix encoding, no mask is needed -> FlashAttention activates!
+            if has_actions and has_prefix:
+                is_action = token_types == 3
+                is_prefix = ~is_action
+                allowed_mask = is_action.unsqueeze(2) | is_prefix.unsqueeze(1)
+                if key_padding_mask is not None:
+                    allowed_mask = allowed_mask & (~key_padding_mask).unsqueeze(1)
+                attention_mask = allowed_mask.unsqueeze(1)
 
         new_kvs = []
         for i, layer in enumerate(self.layers):

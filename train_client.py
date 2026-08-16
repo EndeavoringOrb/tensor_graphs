@@ -115,6 +115,8 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
         if not valid_reqs:
             continue
 
+        start = time.perf_counter()
+
         B = len(valid_reqs)
         padded_actions = torch.zeros((B, max_A, 8), dtype=torch.float32, device=device)
         padded_tt = torch.full((B, max_A), 3, dtype=torch.int64, device=device)
@@ -172,6 +174,8 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
             resp_logits = logits[i, :A_len].cpu().numpy()
             v = prefix_cache_v[pkey]
             resp_queues[wid].put(("ok", resp_logits, v))
+        end = time.perf_counter()
+        # print(f"[Inference Server] B={B} took {end-start}")
 
 
 @torch.inference_mode()
@@ -529,7 +533,7 @@ def main():
                 if resp and resp.get("type") == "weights" and resp.get("data"):
                     torch.save(resp["data"], weights_path)
                     weights_event.set()
-                time.sleep(10)
+                time.sleep(60)
             except Exception as e:
                 print(f"[Client] Weight sync error: {e}")
                 time.sleep(5)
