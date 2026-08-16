@@ -185,7 +185,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     print(f"[Learner] Using device: {device}")
 
     agent = AlphaZeroAgent(hidden_dim=config.hidden_dim).to(device)
-    original_state_names = set(agent.state_dict().keys())
+    agent_opt = torch.compile(agent)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
 
     # Use our new fast ReplayBuffer
@@ -244,12 +244,10 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 f"[Learner] Warning: Could not read last entry of {costs_bin_path}: {e}"
             )
 
-    cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items() if k in original_state_names}
+    cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
     with weights_lock:
         global_weights.update(cpu_state_dict)
     save_file(cpu_state_dict, model_filepath)
-
-    agent = torch.compile(agent)
 
     while True:
         # 1. Drain incoming network data into the replay buffer quickly
@@ -292,7 +290,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             z_targets,
             N_list,
         ) in prepared_batches.items():
-            dec_model = getattr(agent, dt)
+            dec_model = getattr(agent_opt, dt)
 
             # non_blocking=True allows the transfer to happen concurrently with GPU execution
             g_states = g_states.to(device, non_blocking=True)
@@ -350,7 +348,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 f_bin.flush()
 
             if batches_processed % config.save_interval == 0:
-                cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items() if k in original_state_names}
+                cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
                 with weights_lock:
                     global_weights.clear()
                     global_weights.update(cpu_state_dict)
