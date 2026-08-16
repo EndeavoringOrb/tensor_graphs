@@ -131,7 +131,6 @@ def batch_generator_worker(buffer, batch_queue, config, buffer_lock):
             time.sleep(0.02)
             continue
 
-        # Convert to Tensors and Collate (Padding)
         features_list = [
             torch.tensor(t["features"], dtype=torch.float32) for t in batch
         ]
@@ -143,7 +142,6 @@ def batch_generator_worker(buffer, batch_queue, config, buffer_lock):
         ]
         zs = torch.tensor([t["z"] for t in batch], dtype=torch.float32)
 
-        # Pad to max length in the batch
         features = torch.nn.utils.rnn.pad_sequence(
             features_list, batch_first=True, padding_value=0.0
         )
@@ -154,16 +152,13 @@ def batch_generator_worker(buffer, batch_queue, config, buffer_lock):
             phase_ids_list, batch_first=True, padding_value=0
         )
 
-        # Generate Attention Padding Mask (True = Ignore)
         B, L_max = token_types.shape
         lengths = torch.tensor([len(t["token_types"]) for t in batch])
         key_padding_mask = torch.arange(L_max).expand(B, L_max) >= lengths.unsqueeze(1)
 
-        # Align policy targets with the dynamically padded sequence
         padded_pis = torch.zeros((B, L_max), dtype=torch.float32)
         for i, t in enumerate(batch):
             tt = t["token_types"]
-            # Action tokens have token_type == 3
             action_indices = np.where(tt == 3)[0]
             padded_pis[i, action_indices] = torch.tensor(t["pis"], dtype=torch.float32)
 
@@ -205,7 +200,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
         except Exception as e:
             print(f"[Learner] Warning: Failed to load {model_filepath}: {e}")
 
-    # Immediately populate global_weights and release client requests
     cpu_state_dict = {k: v.cpu() for k, v in agent.state_dict().items()}
     with weights_lock:
         global_weights.update(cpu_state_dict)
@@ -249,7 +243,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             pass
 
     while True:
-        # Drain network queue
         incoming_data = []
         while not replay_queue.empty():
             try:
@@ -288,15 +281,12 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             features, token_types, phase_ids, key_padding_mask=key_padding_mask
         )
 
-        # 1. Value Loss
         value_loss = F.mse_loss(v, zs, reduction="mean")
 
-        # 2. Policy Loss
         action_mask = token_types == 3
         logits = logits.masked_fill(~action_mask, -float("inf"))
         log_probs = F.log_softmax(logits, dim=1)
 
-        # Prevent 0.0 * -inf from generating NaN values
         loss_matrix = torch.where(
             padded_pis > 0, padded_pis * log_probs, torch.zeros_like(log_probs)
         )
@@ -364,7 +354,25 @@ def main():
         action="store_true",
         help="Resume from the latest existing run directory",
     )
-    # Transformer Architecture Config
+    parser.add_argument(
+        "--graph-source",
+        type=str,
+        default="model",
+        choices=["model", "random"],
+        help="Default graph provider source",
+    )
+    parser.add_argument(
+        "--random-min-nodes",
+        type=int,
+        default=10,
+        help="Minimum nodes for random graphs",
+    )
+    parser.add_argument(
+        "--random-max-nodes",
+        type=int,
+        default=30,
+        help="Maximum nodes for random graphs",
+    )
     parser.add_argument(
         "--d-model", type=int, default=128, help="Transformer dimension"
     )
@@ -372,7 +380,6 @@ def main():
         "--nhead", type=int, default=4, help="Transformer attention heads"
     )
     parser.add_argument("--num-layers", type=int, default=3, help="Transformer layers")
-    # PUCT & Noise Annealing Options
     parser.add_argument(
         "--c-puct", type=float, default=1.25, help="PUCT exploration constant"
     )
@@ -416,6 +423,9 @@ def main():
     config.lr = args.lr
     config.host = args.host
     config.port = args.port
+    config.graph_source = args.graph_source
+    config.random_min_nodes = args.random_min_nodes
+    config.random_max_nodes = args.random_max_nodes
     config.c_puct = args.c_puct
     config.base_noise = args.base_noise
     config.min_noise = args.min_noise

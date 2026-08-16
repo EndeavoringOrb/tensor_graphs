@@ -1,16 +1,17 @@
 # File: train_shared.py
+import contextlib
 import dataclasses
 import math
 import pickle
+import random
 import socket
 import struct
 import zlib
-import contextlib
-import time
+from typing import Optional, Protocol, Tuple
 
 import numpy as np
+import tensor_graphs
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 
@@ -24,6 +25,17 @@ class TrainConfig:
     replay_buffer_size: int = 1_000_000
     batch_size: int = 1024
     save_interval: int = 100
+
+    # Graph Source & Generation Config
+    graph_source: str = "model"  # "model" or "random"
+    random_min_nodes: int = 10
+    random_max_nodes: int = 30
+    random_hidden_dim: int = 128
+    random_seq_len: int = 64
+    random_seed: Optional[int] = None
+    resample_graph_every: int = (
+        0  # 0 = fixed per worker, >0 = resample every N episodes
+    )
 
     # Transformer Architecture Config
     d_model: int = 128
@@ -50,6 +62,192 @@ class TrainConfig:
     use_bluetooth: bool = False
     bt_host_address: str = "AC:F2:3C:A7:F7:EC"
     bt_port: int = 4
+
+
+# ==============================================================================
+# GRAPH PROVIDER INTERFACE & RANDOM GENERATOR
+# ==============================================================================
+def generate_random_graph(
+    num_nodes: int = 20,
+    hidden_dim: int = 128,
+    seq_len: int = 64,
+    seed: Optional[int] = None,
+) -> Tuple[tensor_graphs.Graph, tensor_graphs.LogicalId, list]:
+    """Generates a random compute graph with a controllable number of nodes."""
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
+    g = tensor_graphs.Graph()
+    shape_standard = [1, seq_len, hidden_dim]
+    shape_proj = [1, hidden_dim, hidden_dim]
+
+    # Create base input tensors
+    in0 = g.input(shape_standard, tensor_graphs.DType.FLOAT32)
+    in1 = g.input(shape_standard, tensor_graphs.DType.FLOAT32)
+    in_w = g.input(shape_proj, tensor_graphs.DType.FLOAT32)
+
+    available_nodes = [in0, in1]
+    weights = [in_w]
+
+    for _ in range(num_nodes):
+        op_choice = random.choice(
+            ["elementwise", "unary", "dot", "reduce", "reshape_cycle"]
+        )
+
+        if op_choice == "unary":
+            src = random.choice(available_nodes)
+            u_op = random.choice(["sin", "cos", "neg", "relu"])
+            if u_op == "sin":
+                node = g.sin(src)
+            elif u_op == "cos":
+                node = g.cos(src)
+            elif u_op == "neg":
+                node = g.neg(src)
+            else:
+                node = g.relu(src, shape_standard)
+            available_nodes.append(node)
+
+        elif op_choice == "elementwise":
+            src1 = random.choice(available_nodes)
+            src2 = random.choice(available_nodes)
+            b_op = random.choice(["add", "mul"])
+            if b_op == "add":
+                node = g.add(src1, src2)
+            else:
+                node = g.mul(src1, src2)
+            available_nodes.append(node)
+
+        elif op_choice == "dot":
+            src = random.choice(available_nodes)
+            w = random.choice(weights)
+            node = g.dot(src, w)
+            available_nodes.append(node)
+
+        elif op_choice == "reduce":
+            src = random.choice(available_nodes)
+            axis_const = g.constant([-1])
+            node = g.sum(src, axis_const)
+            # Re-broadcast back to maintain valid standard shape
+            node = g.repeat(node, hidden_dim, 2)
+            available_nodes.append(node)
+
+        elif op_choice == "reshape_cycle":
+            src = random.choice(available_nodes)
+            sh_flat = [1, seq_len * hidden_dim]
+            sh_rec = [1, seq_len, hidden_dim]
+            node = g.reshape(src, sh_flat)
+            node = g.reshape(node, sh_rec)
+            available_nodes.append(node)
+
+    root = available_nodes[-1]
+
+    # Create standard full bucket for inference
+    full_bucket = tensor_graphs.Bucket()
+    dim_b = tensor_graphs.Dim(0, 1)
+    dim_s = tensor_graphs.Dim(0, seq_len)
+    dim_h = tensor_graphs.Dim(0, hidden_dim)
+
+    r_in = tensor_graphs.Region()
+    r_in.region = [dim_b, dim_s, dim_h]
+
+    r_w = tensor_graphs.Region()
+    r_w.region = [dim_b, dim_h, dim_h]
+
+    # Collect all reachable input nodes from root
+    reachable_nodes = set()
+    stack = [root]
+    while stack:
+        curr = stack.pop()
+        if curr in reachable_nodes:
+            continue
+        reachable_nodes.add(curr)
+        node = g.getNode(curr)
+        for child in node.child_ids:
+            stack.append(child)
+
+    dirty_map = {}
+    if in0 in reachable_nodes:
+        dirty_map[in0] = [r_in]
+    if in1 in reachable_nodes:
+        dirty_map[in1] = [r_in]
+    if in_w in reachable_nodes:
+        dirty_map[in_w] = [r_w]
+
+    full_bucket.inputDirtyRegions = dirty_map
+    full_bucket.outputNeededRegion = [r_in]
+
+    return g, root, [full_bucket]
+
+
+class BaseGraphProvider(Protocol):
+    def get_context(
+        self, config: TrainConfig, episode: int = 0
+    ) -> tensor_graphs.SaturatedEGraphContext: ...
+
+
+class ModelGraphProvider:
+    def __init__(self, model_name: str, model_path: str):
+        self.model_name = model_name
+        self.model_path = model_path
+        self._cached_context = None
+
+    def get_context(
+        self, config: TrainConfig, episode: int = 0
+    ) -> tensor_graphs.SaturatedEGraphContext:
+        if self._cached_context is None:
+            self._cached_context = tensor_graphs.build_and_saturate_egraph(
+                self.model_name,
+                self.model_path,
+                config.log_cost_calls,
+                config.compile_decode_buckets,
+            )
+        return self._cached_context
+
+
+class RandomGraphProvider:
+    def __init__(self, worker_rank: int = 0):
+        self.worker_rank = worker_rank
+        self._cached_context = None
+        self._last_sampled_episode = -1
+
+    def get_context(
+        self, config: TrainConfig, episode: int = 0
+    ) -> tensor_graphs.SaturatedEGraphContext:
+        need_resample = False
+        if self._cached_context is None or (
+            config.resample_graph_every > 0
+            and (episode - self._last_sampled_episode) >= config.resample_graph_every
+        ):
+            need_resample = True
+
+        if need_resample:
+            seed = (
+                (config.random_seed or 42) + self.worker_rank * 10007 + episode
+            ) & 0x7FFFFFFF
+            num_nodes = random.Random(seed).randint(
+                config.random_min_nodes, config.random_max_nodes
+            )
+
+            graph, root, buckets = generate_random_graph(
+                num_nodes=num_nodes,
+                hidden_dim=config.random_hidden_dim,
+                seq_len=config.random_seq_len,
+                seed=seed,
+            )
+
+            self._cached_context = tensor_graphs.build_and_saturate_egraph_from_graph(
+                graph, root, buckets, config.log_cost_calls
+            )
+            self._last_sampled_episode = episode
+
+        return self._cached_context
+
+
+def get_graph_provider(config: TrainConfig, worker_rank: int = 0) -> BaseGraphProvider:
+    if config.graph_source.lower() == "random":
+        return RandomGraphProvider(worker_rank=worker_rank)
+    return ModelGraphProvider(config.model_name, config.model_path)
 
 
 # ==============================================================================
@@ -165,7 +363,6 @@ class PreallocatedTreeCache:
         return self.key_cache[0].shape[2]
 
     def _grow(self, required_capacity: int):
-        """Grows all layer buffers synchronously so every layer maintains identical capacity."""
         new_cap = max(self.capacity * 2, required_capacity)
 
         for layer_idx in range(self.num_layers):
@@ -199,7 +396,6 @@ class PreallocatedTreeCache:
         incoming_len = key_states.shape[2]
         new_total_len = self._seq_len + incoming_len
 
-        # Expand all layer capacities synchronously if needed
         if new_total_len > self.capacity:
             self._grow(new_total_len)
 
@@ -326,7 +522,6 @@ class AlphaZeroTransformer(nn.Module):
         key_padding_mask=None,
         cache: PreallocatedTreeCache | None = None,
     ):
-        start = time.perf_counter()
         x = (
             self.feat_proj(features)
             + self.type_emb(token_types)
@@ -342,7 +537,7 @@ class AlphaZeroTransformer(nn.Module):
             if key_padding_mask is not None:
                 allowed_mask = allowed_mask & (~key_padding_mask).unsqueeze(1)
 
-            attn_mask = allowed_mask.unsqueeze(1)  # (B, 1, L, L) for SDPA
+            attn_mask = allowed_mask.unsqueeze(1)
 
         for layer in self.layers:
             x = layer(x, cache=cache, attn_mask=attn_mask)
@@ -352,15 +547,7 @@ class AlphaZeroTransformer(nn.Module):
             v = self.value_head(x[:, 0]).squeeze(-1)
 
         logits = self.policy_head(x).squeeze(-1)
-
-        end = time.perf_counter()
-        print(
-            f"Elapsed (cache len={cache.seq_len if cache is not None else 0}): {end - start}"
-        )
         return logits, v
-
-
-import tensor_graphs
 
 
 class ActorDelegate(tensor_graphs.SearchDelegate):
@@ -463,7 +650,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             "edge_dst": dst,
         }
 
-        # Embed prefix and populate cache
         features, token_types, phase_ids = self._build_sequence(
             phase_name, action_features=np.zeros((0, 8), dtype=np.float32)
         )
@@ -528,24 +714,20 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         token_types = np.zeros(L, dtype=np.int64)
         phase_ids = np.full(L, phase_id, dtype=np.int64)
 
-        # 0. Global Token
         features[0, 0] = phase_id
         token_types[0] = 0
 
-        # 1. Node Tokens [ID + Features]
         if N > 0:
             features[1 : N + 1, 0] = np.arange(N)
             dim_feat = min(7, node_feats.shape[1])
             features[1 : N + 1, 1 : 1 + dim_feat] = node_feats[:, :dim_feat]
         token_types[1 : N + 1] = 1
 
-        # 2. Edge Tokens [Src_ID + Dst_ID + padding]
         if E > 0:
             features[N + 1 : N + E + 1, 0] = edge_src
             features[N + 1 : N + E + 1, 1] = edge_dst
         token_types[N + 1 : N + E + 1] = 2
 
-        # 3. Action Tokens [Action_ID + Features]
         if A > 0:
             features[N + E + 1 :, 0] = np.arange(A)
             if isinstance(action_features, torch.Tensor):
@@ -614,7 +796,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 ).unsqueeze(0)
 
                 logits, _ = self.agent(f_t, tt_t, p_t, cache=cache)
-                scores = logits[0]  # (1, A) -> (A,)
+                scores = logits[0]
 
             P = torch.softmax(scores, dim=0).cpu().numpy()
             v = self.phase_values.get(phase_name, 0.0)

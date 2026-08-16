@@ -1809,6 +1809,8 @@ struct Planner
             LogicalId nodeId = kv.first;
             if (!graph.hasNode(nodeId))
                 continue;
+            if (nodeToEClass.find(nodeId) == nodeToEClass.end())
+                continue;
 
             const TensorNode &node = graph.getNode(nodeId);
             if (node.opType == OpType::INPUT && graph.constantStaging.count(nodeId) == 0)
@@ -1834,7 +1836,7 @@ struct Planner
                                   std::unordered_map<EClassId, LogicalId> &eclassToLogical)
     {
         bool injected = false;
-        if (!outputNeeded.empty())
+        if (!outputNeeded.empty() && nodeToEClass.find(rootId) != nodeToEClass.end())
         {
             injected =
                 injectPartialPath(egraph, graph, rootId, outputNeeded, cachedNodes, nodeToEClass, eclassToLogical);
@@ -1927,7 +1929,10 @@ struct Planner
         for (const auto &kv : cachedNodes)
         {
             LogicalId logicalId = kv.first;
-            protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
+            if (baseState.nodeToEClass.count(logicalId))
+            {
+                protectedEClasses.insert(egraph.find(baseState.nodeToEClass.at(logicalId)));
+            }
         }
 
         bool dirtyInjected = injectInputPartialPaths(egraph, graph, bucket.inputDirtyRegions, cachedNodes,

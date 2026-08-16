@@ -25,6 +25,7 @@ from train_shared import (
     AlphaZeroTransformer,
     TrainConfig,
     create_client_socket,
+    get_graph_provider,
     recv_msg,
     send_msg,
 )
@@ -113,43 +114,37 @@ def client_worker(rank: int, config: TrainConfig):
         client_sock.close()
         return
 
-    # 3. Setup and Cache the Saturated E-Graph
+    # 3. Setup Graph Provider
+    graph_provider = get_graph_provider(config, worker_rank=rank)
     logger.info(
-        f"{LOG_PREFIX} [Worker {rank}] Building and caching saturated E-Graph for {config.model_name}..."
-    )
-    try:
-        egraph_context = tensor_graphs.build_and_saturate_egraph(
-            config.model_name,
-            config.model_path,
-            config.log_cost_calls,
-            config.compile_decode_buckets,
-        )
-    except Exception as e:
-        logger.info(
-            f"{LOG_PREFIX} [Worker {rank}] Error building saturated E-Graph: {e}"
-        )
-        traceback.print_exc()
-        client_sock.close()
-        return
-
-    num_buckets = getattr(egraph_context, "num_buckets", 1)
-    bucket_idx = (
-        config.bucket_idx if config.bucket_idx >= 0 else (rank % max(1, num_buckets))
-    )
-    logger.info(
-        f"{LOG_PREFIX} [Worker {rank}] Assigned to bucket {bucket_idx}/{num_buckets}"
+        f"{LOG_PREFIX} [Worker {rank}] Initializing graph provider (source: {config.graph_source})..."
     )
 
-    # 4. Generate Trajectories
     episode = 0
 
     while True:
+        try:
+            egraph_context = graph_provider.get_context(config, episode=episode)
+        except Exception as e:
+            logger.info(
+                f"{LOG_PREFIX} [Worker {rank}] Error obtaining E-Graph context at episode {episode}: {e}"
+            )
+            traceback.print_exc()
+            break
+
+        num_buckets = getattr(egraph_context, "num_buckets", 1)
+        bucket_idx = (
+            config.bucket_idx
+            if config.bucket_idx >= 0
+            else (rank % max(1, num_buckets))
+        )
+
         agent.eval()
         best_cost = float("inf")
         extraction_costs = []
         mcts_tree = {}
 
-        # MCTS Simulations
+        # 4. Run MCTS Simulations
         for sim in range(config.num_simulations):
             delegate = ActorDelegate(
                 agent,
@@ -185,7 +180,7 @@ def client_worker(rank: int, config: TrainConfig):
         else:
             best_Z = -1.0
 
-        # 5. Pack Trajectory (Unified Format)
+        # 5. Pack Trajectory
         trajectory_transitions = []
         for h, node_data in mcts_tree.items():
             counts = node_data["N"]
@@ -277,12 +272,55 @@ def main():
         default=10,
         help="Number of MCTS simulations per episode",
     )
+    parser.add_argument(
+        "--graph-source",
+        type=str,
+        default="model",
+        choices=["model", "random"],
+        help="Graph provider source: 'model' (load from file/path) or 'random'",
+    )
     parser.add_argument("--model", type=str, default="gemma-3-270m", help="Model name")
     parser.add_argument(
         "--model-path",
         type=str,
         default="models/google/gemma-3-270m",
         help="Model weights path",
+    )
+    parser.add_argument(
+        "--random-min-nodes",
+        type=int,
+        default=10,
+        help="Minimum number of nodes for random graph generation",
+    )
+    parser.add_argument(
+        "--random-max-nodes",
+        type=int,
+        default=30,
+        help="Maximum number of nodes for random graph generation",
+    )
+    parser.add_argument(
+        "--random-dim",
+        type=int,
+        default=128,
+        help="Hidden dimension for random graph nodes",
+    )
+    parser.add_argument(
+        "--random-seq-len",
+        type=int,
+        default=64,
+        help="Sequence length dimension for random graph nodes",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=None,
+        help="Base seed for deterministic random graph generation",
+    )
+    parser.add_argument(
+        "--resample-graph-every",
+        type=int,
+        default=0,
+        help="Resample a new random graph every N episodes (0 = fixed per worker)",
     )
     parser.add_argument(
         "--compile-decode-buckets",
@@ -295,7 +333,6 @@ def main():
         dest="log_cost_calls",
         help="Log cost calls (forces workers=1 when enabled)",
     )
-    # PUCT & Noise Annealing Options
     parser.add_argument(
         "--c-puct", type=float, default=1.25, help="PUCT exploration constant"
     )
@@ -333,8 +370,15 @@ def main():
     config.use_bluetooth = args.use_bluetooth
     config.workers = 1 if args.log_cost_calls else args.workers
     config.num_simulations = args.simulations
+    config.graph_source = args.graph_source
     config.model_name = args.model
     config.model_path = args.model_path
+    config.random_min_nodes = args.random_min_nodes
+    config.random_max_nodes = args.random_max_nodes
+    config.random_hidden_dim = args.random_dim
+    config.random_seq_len = args.random_seq_len
+    config.random_seed = args.random_seed
+    config.resample_graph_every = args.resample_graph_every
     config.compile_decode_buckets = args.compile_decode_buckets
     config.log_cost_calls = args.log_cost_calls
     config.c_puct = args.c_puct
@@ -347,28 +391,34 @@ def main():
     if config.host and ":" in config.host and len(config.host.split(":")) == 6:
         config.use_bluetooth = True
 
-    try:
-        from utils.download_hf_meta import download_model_meta
+    if config.graph_source == "model":
+        try:
+            from utils.download_hf_meta import download_model_meta
 
-        p = Path(config.model_path)
-        if p.is_file() or p.suffix == ".safetensors":
-            p = p.parent
-        parts = p.parts
-        if parts and parts[0] == "models":
-            parts = parts[1:]
-        repo_id = "/".join(parts) if parts else config.model_name
+            p = Path(config.model_path)
+            if p.is_file() or p.suffix == ".safetensors":
+                p = p.parent
+            parts = p.parts
+            if parts and parts[0] == "models":
+                parts = parts[1:]
+            repo_id = "/".join(parts) if parts else config.model_name
 
-        print(f"[Client] Ensuring model files for '{repo_id}' are downloaded...")
-        download_model_meta(repo_id, download_other_files=False)
-    except Exception as e:
-        print(
-            f"[Client] Note: Could not auto-download model metadata ({e}). Proceeding assuming local files exist."
-        )
+            print(f"[Client] Ensuring model files for '{repo_id}' are downloaded...")
+            download_model_meta(repo_id, download_other_files=False)
+        except Exception as e:
+            print(
+                f"[Client] Note: Could not auto-download model metadata ({e}). Proceeding assuming local files exist."
+            )
 
     conn_type = "Bluetooth" if config.use_bluetooth else "TCP/IP"
     print("=========================================================")
     print(f" Starting {config.workers} Client Worker Process(es)")
     print(f" Target Server: {config.host}:{config.port} ({conn_type})")
+    print(f" Graph Source: {config.graph_source.upper()}")
+    if config.graph_source == "random":
+        print(
+            f" Random Node Range: [{config.random_min_nodes}, {config.random_max_nodes}], Dim: {config.random_hidden_dim}, Seq: {config.random_seq_len}"
+        )
     print(
         f" MCTS Settings: c_puct={config.c_puct}, base_noise={config.base_noise}, min_noise={config.min_noise}"
     )

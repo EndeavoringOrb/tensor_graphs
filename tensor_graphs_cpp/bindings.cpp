@@ -1,3 +1,4 @@
+// File: tensor_graphs_cpp/bindings.cpp
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -270,7 +271,77 @@ PYBIND11_MODULE(tensor_graphs, m)
         .value("CUDA", HandleType::CUDA)
         .export_values();
 
+    py::enum_<DType>(m, "DType")
+        .value("FLOAT32", DType::FLOAT32)
+        .value("INT32", DType::INT32)
+        .value("INT64", DType::INT64)
+        .value("BF16", DType::BF16)
+        .value("BOOL", DType::BOOL)
+        .value("ANY", DType::ANY)
+        .value("INT8", DType::INT8)
+        .value("E2M1_PACKED_INT8", DType::E2M1_PACKED_INT8)
+        .value("E2M1", DType::E2M1)
+        .value("F8_E8M0", DType::F8_E8M0)
+        .value("F8_E4M3", DType::F8_E4M3)
+        .export_values();
+
+    py::enum_<OpType>(m, "OpType")
+        .value("INPUT", OpType::INPUT)
+        .value("CACHE", OpType::CACHE)
+        .value("ADD", OpType::ADD)
+        .value("MUL", OpType::MUL)
+        .value("DIVIDE", OpType::DIVIDE)
+        .value("DOT", OpType::DOT)
+        .value("SIN", OpType::SIN)
+        .value("COS", OpType::COS)
+        .value("NEGATE", OpType::NEGATE)
+        .value("POWER", OpType::POWER)
+        .value("SUM", OpType::SUM)
+        .value("MAX", OpType::MAX)
+        .value("RESHAPE", OpType::RESHAPE)
+        .value("PERMUTE", OpType::PERMUTE)
+        .value("SLICE", OpType::SLICE)
+        .value("CONCAT", OpType::CONCAT)
+        .value("CAST", OpType::CAST)
+        .value("UNPACK", OpType::UNPACK)
+        .value("REPEAT", OpType::REPEAT)
+        .value("ARANGE", OpType::ARANGE)
+        .value("TRIU", OpType::TRIU)
+        .value("GATHER", OpType::GATHER)
+        .value("FILL", OpType::FILL)
+        .value("COPY_TO", OpType::COPY_TO)
+        .value("IM2COL", OpType::IM2COL)
+        .value("CONTIGUOUS", OpType::CONTIGUOUS)
+        .value("SCATTER", OpType::SCATTER)
+        .value("LOG", OpType::LOG)
+        .value("ARGMAX", OpType::ARGMAX)
+        .value("LT", OpType::LT)
+        .value("EQ", OpType::EQ)
+        .value("AND", OpType::AND)
+        .value("OR", OpType::OR)
+        .value("NOT", OpType::NOT)
+        .value("FUSED", OpType::FUSED)
+        .export_values();
+
     // Value Objects
+    py::class_<Dim>(m, "Dim")
+        .def(py::init<>())
+        .def(py::init<uint32_t, uint32_t>())
+        .def_readwrite("start", &Dim::start)
+        .def_readwrite("stop", &Dim::stop)
+        .def("__repr__",
+             [](const Dim &d) { return "Dim(" + std::to_string(d.start) + ", " + std::to_string(d.stop) + ")"; });
+
+    py::class_<Region>(m, "Region")
+        .def(py::init<>())
+        .def_readwrite("region", &Region::region)
+        .def("__repr__", [](const Region &r) { return encodeRegion(r); });
+
+    py::class_<Bucket>(m, "Bucket")
+        .def(py::init<>())
+        .def_readwrite("inputDirtyRegions", &Bucket::inputDirtyRegions)
+        .def_readwrite("outputNeededRegion", &Bucket::outputNeededRegion);
+
     py::class_<MemSpace>(m, "MemSpace")
         .def(py::init<>())
         .def(py::init<uint32_t, HandleType>())
@@ -287,10 +358,56 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<TensorNode>(m, "TensorNode")
         .def_readonly("id", &TensorNode::id)
         .def_readonly("op_type", &TensorNode::opType)
+        .def_readonly("dtype", &TensorNode::dtype)
         .def_readonly("child_ids", &TensorNode::child_ids)
         .def_property_readonly("shape", &TensorNode::getShape);
 
-    py::class_<Graph>(m, "Graph").def_readonly("nodes", &Graph::nodes);
+    py::class_<Graph>(m, "Graph")
+        .def(py::init<>())
+        .def_readonly("nodes", &Graph::nodes)
+        .def("hasNode", &Graph::hasNode)
+        .def("getNode", [](const Graph &self, LogicalId id) { return self.getNode(id); })
+        .def(
+            "input",
+            [](Graph &self, const std::vector<uint32_t> &shape, DType dtype) { return self.input(shape, dtype); },
+            py::arg("shape"), py::arg("dtype") = DType::FLOAT32)
+        .def("add", [](Graph &self, LogicalId a, LogicalId b) { return self.add(a, b); })
+        .def("mul", [](Graph &self, LogicalId a, LogicalId b) { return self.mul(a, b); })
+        .def("div", [](Graph &self, LogicalId a, LogicalId b) { return self.div(a, b); })
+        .def("dot", [](Graph &self, LogicalId a, LogicalId b) { return self.dot(a, b); })
+        .def("sin", [](Graph &self, LogicalId a) { return self.sin(a); })
+        .def("cos", [](Graph &self, LogicalId a) { return self.cos(a); })
+        .def("neg", [](Graph &self, LogicalId a) { return self.neg(a); })
+        .def("pow", [](Graph &self, LogicalId a, LogicalId b) { return self.pow(a, b); })
+        .def("sum", [](Graph &self, LogicalId a, LogicalId b) { return self.sum(a, b); })
+        .def("max", [](Graph &self, LogicalId a, LogicalId b) { return self.max(a, b); })
+        .def("reshape",
+             [](Graph &self, LogicalId a, const std::vector<int32_t> &shape) { return self.reshape(a, shape); })
+        .def("permute", [](Graph &self, LogicalId a, LogicalId dims) { return self.permute(a, dims); })
+        .def("slice", [](Graph &self, LogicalId a, LogicalId st, LogicalId en,
+                         LogicalId step) { return self.slice(a, st, en, step); })
+        .def("scatter", [](Graph &self, LogicalId t, LogicalId u, LogicalId st, LogicalId en,
+                           LogicalId step) { return self.scatter(t, u, st, en, step); })
+        .def("concat",
+             [](Graph &self, const std::vector<LogicalId> &ids, uint32_t axis) { return self.concat(ids, axis); })
+        .def("cast", [](Graph &self, LogicalId a, DType dtype) { return self.cast(a, dtype); })
+        .def("repeat",
+             [](Graph &self, LogicalId a, uint32_t repeats, uint32_t axis) { return self.repeat(a, repeats, axis); })
+        .def("arange",
+             [](Graph &self, LogicalId st, LogicalId sp, LogicalId step) { return self.arange(st, sp, step); })
+        .def("triu", [](Graph &self, LogicalId a, LogicalId k) { return self.triu(a, k); })
+        .def("gather", [](Graph &self, LogicalId a, LogicalId idx) { return self.gather(a, idx); })
+        .def("fill",
+             [](Graph &self, float value, const std::vector<uint32_t> &shape) { return self.fill(value, shape); })
+        .def("constant", [](Graph &self, const std::vector<int32_t> &vals) { return self.constant(vals); })
+        .def("relu", [](Graph &self, LogicalId a, const std::vector<uint32_t> &shape) { return self.relu(a, shape); })
+        .def("log", [](Graph &self, LogicalId a) { return self.log(a); })
+        .def("argmax", [](Graph &self, LogicalId a, LogicalId dim, LogicalId k) { return self.argmax(a, dim, k); })
+        .def("lt", [](Graph &self, LogicalId a, LogicalId b) { return self.lt(a, b); })
+        .def("eq", [](Graph &self, LogicalId a, LogicalId b) { return self.eq(a, b); })
+        .def("logical_and", [](Graph &self, LogicalId a, LogicalId b) { return self.logical_and(a, b); })
+        .def("logical_or", [](Graph &self, LogicalId a, LogicalId b) { return self.logical_or(a, b); })
+        .def("logical_not", [](Graph &self, LogicalId a) { return self.logical_not(a); });
 
     // Action Feature Structs
     py::class_<ActionFeatureCache>(m, "ActionFeatureCache")
@@ -342,6 +459,9 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     m.def("build_and_saturate_egraph", &build_and_saturate_egraph, py::arg("model_name"), py::arg("model_path"),
           py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true);
+
+    m.def("build_and_saturate_egraph_from_graph", &build_and_saturate_egraph_from_graph, py::arg("graph"),
+          py::arg("root_id"), py::arg("buckets") = std::vector<Bucket>{}, py::arg("log_cost_calls") = false);
 
     m.def("run_hierarchical_simulations", &run_hierarchical_simulations, py::arg("ctx"), py::arg("bucket_idx"),
           py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false);

@@ -45,6 +45,56 @@ struct SaturatedEGraphContext
     }
 };
 
+inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph_from_graph(const Graph &input_graph,
+                                                                                    LogicalId rootId,
+                                                                                    const std::vector<Bucket> &buckets,
+                                                                                    bool log_cost_calls = false)
+{
+    auto ctx = std::make_shared<SaturatedEGraphContext>();
+    ctx->costModel.setLogging(log_cost_calls);
+
+    std::unordered_map<MemSpace, uint64_t> bufferSizes = {{MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
+#ifdef TG_USE_CUDA
+    bufferSizes[MemSpace{2, HandleType::CUDA}] = 90ULL * 1024 * 1024 * 1024;
+#endif
+    if (HardwareCaps::get().has_opencl)
+    {
+        bufferSizes[MemSpace{1, HandleType::OPENCL}] = 1ULL * 1024 * 1024 * 1024;
+    }
+
+    ctx->mem = std::make_unique<MemoryManager>(bufferSizes);
+    ctx->graph = input_graph;
+    ctx->rootId = rootId;
+    ctx->buckets = buckets;
+
+    if (ctx->buckets.empty())
+    {
+        Bucket fullB;
+        for (const auto &pair : ctx->graph.nodes)
+        {
+            if (pair.second.opType == OpType::INPUT)
+            {
+                fullB.inputDirtyRegions[pair.first] = {makeFull(pair.second.getShape())};
+            }
+        }
+        fullB.outputNeededRegion = {makeFull(ctx->graph.getNode(rootId).getShape())};
+        ctx->buckets.push_back(fullB);
+    }
+
+    std::vector<LogicalId> topo = topologicalSort({rootId}, ctx->graph);
+
+    Planner planner(ctx->costModel, ctx->mem->getMemCaps());
+    planner.initBaseEGraph(ctx->rootId, ctx->graph, topo, nullptr);
+
+    ctx->baseEGraph = planner.baseState.egraph;
+    ctx->baseNodeToEClass = planner.baseState.nodeToEClass;
+    ctx->baseEclassToLogical = planner.baseState.eclassToLogical;
+
+    ctx->costModel.load("benchmarks/records.bin");
+
+    return ctx;
+}
+
 inline std::shared_ptr<SaturatedEGraphContext> build_and_saturate_egraph(const std::string &model_name,
                                                                          const std::string &model_path,
                                                                          bool log_cost_calls = false,
@@ -259,7 +309,10 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
         for (const auto &kv : cachedNodes)
         {
             LogicalId logicalId = kv.first;
-            protectedEClasses.insert(egraph.findConst(ctx->baseNodeToEClass.at(logicalId)));
+            if (ctx->baseNodeToEClass.count(logicalId))
+            {
+                protectedEClasses.insert(egraph.findConst(ctx->baseNodeToEClass.at(logicalId)));
+            }
         }
 
         planner.injectInputPartialPaths(egraph, ctx->graph, bucket.inputDirtyRegions, cachedNodes,
