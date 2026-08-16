@@ -163,9 +163,9 @@ def client_worker(rank: int, config: TrainConfig):
                     config.level_simulations,
                     config.log_cost_calls,
                 )
-            except Exception as e:
+            except Exception:
                 logger.info(
-                    f"{LOG_PREFIX} [Worker {rank}] Error during simulation: {e}"
+                    f"{LOG_PREFIX} [Worker {rank}] Error during simulation: {traceback.format_exc()}"
                 )
                 costs = []
 

@@ -1,4 +1,5 @@
 # File: train_shared.py
+import contextlib
 import dataclasses
 import math
 import pickle
@@ -6,14 +7,13 @@ import random
 import socket
 import struct
 import zlib
-import contextlib
 from typing import Protocol
 
 import numpy as np
 import tensor_graphs
 import torch
-import torch.nn.functional as F
 from torch import nn
+
 
 @dataclasses.dataclass
 class TrainConfig:
@@ -62,6 +62,7 @@ class TrainConfig:
     use_bluetooth: bool = False
     bt_host_address: str = "AC:F2:3C:A7:F7:EC"
     bt_port: int = 4
+
 
 # ==============================================================================
 # GRAPH PROVIDER INTERFACE & RANDOM GENERATOR
@@ -248,14 +249,15 @@ def get_graph_provider(config: TrainConfig, worker_rank: int = 0):
         return RandomGraphProvider(worker_rank=worker_rank)
     return ModelGraphProvider(config.model_name, config.model_path)
 
+
 # ==============================================================================
 # PREFIX DEDUPLICATION & TRAJECTORY CODEC
 # ==============================================================================
 @dataclasses.dataclass
 class PrefixData:
-    features: np.ndarray       # (1 + N + E, 8) float32
-    token_types: np.ndarray    # (1 + N + E,) int64
-    phase_ids: np.ndarray      # (1 + N + E,) int64
+    features: np.ndarray  # (1 + N + E, 8) float32
+    token_types: np.ndarray  # (1 + N + E,) int64
+    phase_ids: np.ndarray  # (1 + N + E,) int64
     phase_id: int
 
 
@@ -297,7 +299,9 @@ class TrajectoryCodec:
             features[N + 1 : N + E + 1, 1] = edge_dst
         token_types[N + 1 : N + E + 1] = 2
 
-        prefix_key = hash(features.tobytes() + token_types.tobytes() + phase_ids.tobytes())
+        prefix_key = hash(
+            features.tobytes() + token_types.tobytes() + phase_ids.tobytes()
+        )
         return prefix_key, PrefixData(
             features=features,
             token_types=token_types,
@@ -761,9 +765,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             src = np.array(edge_src, dtype=np.int64)
             dst = np.array(edge_dst, dtype=np.int64)
 
-        prefix_key, prefix_data = TrajectoryCodec.compute_prefix(
-            phase_id, nf, src, dst
-        )
+        prefix_key, prefix_data = TrajectoryCodec.compute_prefix(phase_id, nf, src, dst)
         self.prefix_registry[prefix_key] = prefix_data
         self.current_prefix_keys[phase_name] = prefix_key
 

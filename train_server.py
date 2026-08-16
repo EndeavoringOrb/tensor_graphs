@@ -11,7 +11,6 @@ import time
 from collections import deque
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
@@ -126,7 +125,9 @@ def accept_loop(server_sock, conn_type_label, replay_queue):
         print(f"[Server] {conn_type_label} accept loop ended: {e}")
 
 
-def batch_generator_worker(buffer: UnifiedReplayBuffer, batch_queue, config, buffer_lock):
+def batch_generator_worker(
+    buffer: UnifiedReplayBuffer, batch_queue, config, buffer_lock
+):
     while True:
         with buffer_lock:
             can_train = len(buffer) >= config.batch_size

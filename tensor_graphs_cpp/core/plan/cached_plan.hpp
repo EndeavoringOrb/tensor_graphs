@@ -342,6 +342,47 @@ inline std::vector<float> run_hierarchical_simulations(std::shared_ptr<Saturated
             continue;
         }
 
+        // tensor_graphs_cpp/core/plan/cached_plan.hpp
+        if (delegate)
+        {
+            std::vector<float> node_features;
+            std::vector<uint32_t> edge_src;
+            std::vector<uint32_t> edge_dst;
+
+            uint32_t num_classes = egraph.getClasses().size();
+            uint32_t num_enodes = egraph.getENodes().size();
+
+            for (uint32_t i = 0; i < num_classes; ++i)
+            {
+                const EClass &cls = egraph.getClasses()[i];
+                node_features.push_back(1.0f); // is_eclass
+                node_features.push_back(0.0f); // is_enode
+                node_features.push_back((float)countElements(cls.shape) * getDTypeSize(cls.dtype));
+                node_features.push_back((float)cls.dtype);
+
+                for (ENodeId enode_id : cls.enodes)
+                {
+                    edge_src.push_back(i);
+                    edge_dst.push_back(num_classes + enode_id.value);
+                }
+            }
+            for (uint32_t i = 0; i < num_enodes; ++i)
+            {
+                const ENode &enode = egraph.getENodes()[i];
+                node_features.push_back(0.0f); // is_eclass
+                node_features.push_back(1.0f); // is_enode
+                node_features.push_back(enodeInfos[i].cost);
+                node_features.push_back((float)enode.getOpType());
+
+                for (EClassId child : enode.getChildren())
+                {
+                    edge_src.push_back(num_classes + i);
+                    edge_dst.push_back(egraph.findConst(child).value);
+                }
+            }
+            delegate->init_egraph(node_features, edge_src, edge_dst);
+        }
+
         // Extractor (Level 1)
         Extractor extractor(egraph, rootEClassId, enodeInfos, delegate);
         extractor.registerValidator(std::make_unique<CycleValidator>(egraph));
