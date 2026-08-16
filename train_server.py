@@ -291,10 +291,14 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
 
         # 2. Policy Loss
         action_mask = token_types == 3
-        # Block non-action tokens from softmax distribution by setting them to -inf
         logits = logits.masked_fill(~action_mask, -float("inf"))
         log_probs = F.log_softmax(logits, dim=1)
-        policy_loss = -(padded_pis * log_probs).sum(dim=1).mean()
+
+        # Prevent 0.0 * -inf from generating NaN values
+        loss_matrix = torch.where(
+            padded_pis > 0, padded_pis * log_probs, torch.zeros_like(log_probs)
+        )
+        policy_loss = -loss_matrix.sum(dim=1).mean()
 
         total_loss = policy_loss + value_loss
         total_loss.backward()

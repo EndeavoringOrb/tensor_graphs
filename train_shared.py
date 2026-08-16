@@ -121,14 +121,11 @@ class AlphaZeroTransformer(nn.Module):
         self.d_model = d_model
         self.max_feat_dim = max_feat_dim
 
-        # Project heterogeneous float features to common dimension
         self.feat_proj = nn.Linear(max_feat_dim, d_model)
-
-        # Token Type: 0=Global, 1=Node, 2=Edge, 3=Action
-        self.type_emb = nn.Embedding(4, d_model)
-
-        # Phase Type: 0=cache, 1=extract, 2=dispatch, 3=bufferize, 4=malloc
-        self.phase_emb = nn.Embedding(5, d_model)
+        self.type_emb = nn.Embedding(4, d_model)  # 0=Global, 1=Node, 2=Edge, 3=Action
+        self.phase_emb = nn.Embedding(
+            5, d_model
+        )  # 0=cache, 1=extract, 2=dispatch, 3=bufferize, 4=malloc
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -229,40 +226,24 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 self.mcts_tree[state_key]["W"][act] += z
 
     def _store_raw_graph(self, phase_name, node_features, edge_src, edge_dst):
-        # We store these temporarily; they get consumed by _order_items
+        dim = (
+            5
+            if phase_name in ["cache", "bufferize"]
+            else (4 if phase_name in ["extract", "dispatch"] else 3)
+        )
         if not node_features:
-            nf = np.zeros((0, 0), dtype=np.float32)
+            nf = np.zeros((0, dim), dtype=np.float32)
             src = np.zeros(0, dtype=np.int64)
             dst = np.zeros(0, dtype=np.int64)
         else:
             nf = np.nan_to_num(
                 np.array(node_features, dtype=np.float32), posinf=1e9, neginf=-1e9
             )
-            # The dimension depends on the phase. C++ provides a flattened 1D array.
-            # We reshape it dynamically based on the length
-            if len(nf) > 0 and len(edge_src) >= 0:
-                dim = len(nf) // (
-                    len(edge_src) + len(node_features)
-                    if len(edge_src) == 0
-                    else len(nf)
-                )
-                # Fallback safeguard against division anomalies
-                dim = (
-                    len(node_features)
-                    if dim == 0
-                    else max(1, len(nf) // max(1, len(nf)))
-                )  # Temporary fallback, better handled below
-
-            # Since C++ provides flattened arrays, we rely on the number of actual nodes
-            num_nodes = len(node_features) if isinstance(node_features, list) else 0
-            # To avoid complexity, we just let C++ pass the raw list, we calculate dim here
-            # Actually C++ passes a flat list. We need to know the dim.
-            dim = (
-                5
-                if phase_name in ["cache", "bufferize"]
-                else (4 if phase_name in ["extract", "dispatch"] else 3)
+            nf = (
+                nf.reshape(-1, dim)
+                if len(nf) > 0
+                else np.zeros((0, dim), dtype=np.float32)
             )
-            nf = nf.reshape(-1, dim)
             src = np.array(edge_src, dtype=np.int64)
             dst = np.array(edge_dst, dtype=np.int64)
 
@@ -289,9 +270,18 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
     def _build_sequence(self, phase_name, action_features):
         phase_id = self.PHASE_MAP[phase_name]
+        dim = (
+            5
+            if phase_name in ["cache", "bufferize"]
+            else (4 if phase_name in ["extract", "dispatch"] else 3)
+        )
         raw_graph = self.raw_graphs.get(
             phase_name,
-            {"node_features": np.zeros((0, 0)), "edge_src": [], "edge_dst": []},
+            {
+                "node_features": np.zeros((0, dim), dtype=np.float32),
+                "edge_src": [],
+                "edge_dst": [],
+            },
         )
         node_feats = raw_graph["node_features"]
         edge_src = raw_graph["edge_src"]
@@ -302,7 +292,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         A = len(action_features)
         L = 1 + N + E + A
 
-        # Universal fixed dimension expected by the Transformer Projection layer
         features = np.zeros((L, 8), dtype=np.float32)
         token_types = np.zeros(L, dtype=np.int64)
         phase_ids = np.full(L, phase_id, dtype=np.int64)
@@ -366,13 +355,13 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             tt_t = torch.tensor(token_types, dtype=torch.int64).unsqueeze(0)
             p_t = torch.tensor(phase_ids, dtype=torch.int64).unsqueeze(0)
 
-            action_mask = tt_t == 3
+            action_mask = tt_t == 3  # shape (1, L)
 
             logits, val = self.agent(f_t, tt_t, p_t)
 
-            # Mask out non-action tokens
+            # Mask non-actions and slice directly with the 2D boolean mask
             logits = logits.masked_fill(~action_mask, -float("inf"))
-            scores = logits[0, action_mask]
+            scores = logits[action_mask]  # Fixed 1D extraction: shape (num_actions,)
 
             P = torch.softmax(scores, dim=0).cpu().numpy()
             v = val.item()
@@ -433,7 +422,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
     def order_malloc(self, avail_buffers):
         return self._order_items(avail_buffers, "malloc", self._extract_malloc_features)
 
-    # --- Feature Extraction Helpers (Same logic as before, converted to padded 1D lists) ---
     def _extract_cache_features(self, items):
         feats = []
         for f in items:
