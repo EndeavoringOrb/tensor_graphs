@@ -229,7 +229,10 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     weights_ready_event.set()
     save_file(cpu_state_dict, model_filepath)
 
-    agent_opt = torch.compile(agent, dynamic=True)
+    if os.name == "nt" or sys.platform == "win32":
+        agent_opt = agent
+    else:
+        agent_opt = torch.compile(agent, dynamic=True)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
 
     buffer = UnifiedReplayBuffer(maxlen=config.replay_buffer_size)
