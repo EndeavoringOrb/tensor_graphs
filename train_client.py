@@ -24,6 +24,7 @@ from train_shared import (
     ActorDelegate,
     AlphaZeroTransformer,
     TrainConfig,
+    TrajectoryCodec,
     create_client_socket,
     get_graph_provider,
     recv_msg,
@@ -80,7 +81,6 @@ def client_worker(rank: int, config: TrainConfig):
         max_feat_dim=config.max_feat_dim,
     )
 
-    # 1. Connect to Server
     conn_type = "Bluetooth" if config.use_bluetooth else "TCP"
     logger.info(
         f"{LOG_PREFIX} [Worker {rank}] Connecting to {conn_type} Server at {config.host}:{config.port}..."
@@ -92,7 +92,6 @@ def client_worker(rank: int, config: TrainConfig):
         logger.info(f"{LOG_PREFIX} [Worker {rank}] Connection failed: {e}")
         return
 
-    # 2. Fetch Initial Weights from Server
     try:
         send_msg(client_sock, {"type": "req_weights"})
         initial_resp = recv_msg(client_sock)
@@ -114,7 +113,6 @@ def client_worker(rank: int, config: TrainConfig):
         client_sock.close()
         return
 
-    # 3. Setup Graph Provider
     graph_provider = get_graph_provider(config, worker_rank=rank)
     logger.info(
         f"{LOG_PREFIX} [Worker {rank}] Initializing graph provider (source: {config.graph_source})..."
@@ -143,8 +141,8 @@ def client_worker(rank: int, config: TrainConfig):
         best_cost = float("inf")
         extraction_costs = []
         mcts_tree = {}
+        last_delegate = None
 
-        # 4. Run MCTS Simulations
         for sim in range(config.num_simulations):
             delegate = ActorDelegate(
                 agent,
@@ -156,6 +154,7 @@ def client_worker(rank: int, config: TrainConfig):
                 min_noise=config.min_noise,
                 depth_gamma=config.depth_gamma,
             )
+            last_delegate = delegate
             try:
                 costs = tensor_graphs.run_hierarchical_simulations(
                     egraph_context,
@@ -180,33 +179,25 @@ def client_worker(rank: int, config: TrainConfig):
         else:
             best_Z = -1.0
 
-        # 5. Pack Trajectory
-        trajectory_transitions = []
-        for h, node_data in mcts_tree.items():
-            counts = node_data["N"]
-            total_counts = counts.sum()
-            pi = counts / total_counts if total_counts > 0 else node_data["P"]
-
-            trajectory_transitions.append(
-                {
-                    "features": node_data["features"],
-                    "token_types": node_data["token_types"],
-                    "phase_ids": node_data["phase_ids"],
-                    "pis": pi,
-                    "z": best_Z,
-                }
+        # Pack deduplicated episode payload
+        packed_payload = (
+            TrajectoryCodec.pack_episode(
+                mcts_tree, best_Z, last_delegate.prefix_registry
             )
+            if last_delegate
+            else {"prefixes": {}, "transitions": []}
+        )
 
+        num_transitions = len(packed_payload["transitions"])
         ep_noise = max(
             config.min_noise,
             config.base_noise * (1.0 - episode / max(1, config.decay_episodes)),
         )
         logger.info(
             f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} | Ep Noise: {ep_noise:.4f} | Best Cost: {best_cost:8.4f} ms | "
-            f"Extractions: {len(extraction_costs)} | Sending {len(trajectory_transitions)} transitions..."
+            f"Extractions: {len(extraction_costs)} | Sending {num_transitions} deduplicated transitions..."
         )
 
-        # 6. Stream Trajectory to Server
         try:
             send_msg(
                 client_sock,
@@ -214,7 +205,7 @@ def client_worker(rank: int, config: TrainConfig):
                     "type": "trajectory",
                     "cost": best_cost,
                     "costs": extraction_costs,
-                    "data": trajectory_transitions,
+                    "payload": packed_payload,
                 },
             )
         except Exception as e:
@@ -225,7 +216,6 @@ def client_worker(rank: int, config: TrainConfig):
 
         episode += 1
 
-        # 7. Check for updated weights
         try:
             send_msg(client_sock, {"type": "req_weights"})
             weight_resp = recv_msg(client_sock)

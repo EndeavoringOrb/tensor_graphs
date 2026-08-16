@@ -19,7 +19,9 @@ from torch import optim
 
 from train_shared import (
     AlphaZeroTransformer,
+    PrefixData,
     TrainConfig,
+    TrajectoryCodec,
     create_server_socket,
     recv_msg,
     send_msg,
@@ -31,11 +33,17 @@ weights_ready_event = threading.Event()
 
 
 class UnifiedReplayBuffer:
+    """Stores deduplicated graph prefixes and compact action decision transitions."""
+
     def __init__(self, maxlen: int):
         self.buffer = deque(maxlen=maxlen)
+        self.prefix_table: dict[int, PrefixData] = {}
 
-    def extend(self, transitions):
-        self.buffer.extend(transitions)
+    def extend_payload(self, payload: dict):
+        if "prefixes" in payload:
+            self.prefix_table.update(payload["prefixes"])
+        if "transitions" in payload:
+            self.buffer.extend(payload["transitions"])
 
     def sample_batch(self, batch_size: int):
         return random.sample(self.buffer, batch_size)
@@ -89,11 +97,9 @@ def client_handler(client_sock, client_info, replay_queue):
                 for c in costs:
                     replay_queue.put({"type": "cost_metric", "cost": float(c)})
 
-                trajectory_data = msg.get("data", [])
-                if trajectory_data:
-                    replay_queue.put(
-                        {"type": "trajectory_data", "data": trajectory_data}
-                    )
+                payload = msg.get("payload", {})
+                if payload:
+                    replay_queue.put({"type": "trajectory_payload", "payload": payload})
 
             elif msg_type == "cost_metric":
                 cost = msg.get("cost")
@@ -120,27 +126,44 @@ def accept_loop(server_sock, conn_type_label, replay_queue):
         print(f"[Server] {conn_type_label} accept loop ended: {e}")
 
 
-def batch_generator_worker(buffer, batch_queue, config, buffer_lock):
+def batch_generator_worker(buffer: UnifiedReplayBuffer, batch_queue, config, buffer_lock):
     while True:
         with buffer_lock:
             can_train = len(buffer) >= config.batch_size
             if can_train:
                 batch = buffer.sample_batch(config.batch_size)
+                prefix_table_snapshot = dict(buffer.prefix_table)
 
         if not can_train:
             time.sleep(0.02)
             continue
 
-        features_list = [
-            torch.tensor(t["features"], dtype=torch.float32) for t in batch
-        ]
-        token_types_list = [
-            torch.tensor(t["token_types"], dtype=torch.int64) for t in batch
-        ]
-        phase_ids_list = [
-            torch.tensor(t["phase_ids"], dtype=torch.int64) for t in batch
-        ]
-        zs = torch.tensor([t["z"] for t in batch], dtype=torch.float32)
+        features_list = []
+        token_types_list = []
+        phase_ids_list = []
+        zs_list = []
+        pis_list = []
+
+        # Materialize full token sequences dynamically on-the-fly from deduplicated prefixes
+        for t in batch:
+            pkey = t["prefix_key"]
+            prefix = prefix_table_snapshot.get(pkey)
+            if prefix is None:
+                continue
+
+            f, tt, p = TrajectoryCodec.materialize_full_sequence(
+                prefix, t["action_features"]
+            )
+            features_list.append(torch.tensor(f, dtype=torch.float32))
+            token_types_list.append(torch.tensor(tt, dtype=torch.int64))
+            phase_ids_list.append(torch.tensor(p, dtype=torch.int64))
+            zs_list.append(t["z"])
+            pis_list.append(t["pis"])
+
+        if not features_list:
+            continue
+
+        zs = torch.tensor(zs_list, dtype=torch.float32)
 
         features = torch.nn.utils.rnn.pad_sequence(
             features_list, batch_first=True, padding_value=0.0
@@ -153,14 +176,13 @@ def batch_generator_worker(buffer, batch_queue, config, buffer_lock):
         )
 
         B, L_max = token_types.shape
-        lengths = torch.tensor([len(t["token_types"]) for t in batch])
+        lengths = torch.tensor([len(tt) for tt in token_types_list])
         key_padding_mask = torch.arange(L_max).expand(B, L_max) >= lengths.unsqueeze(1)
 
         padded_pis = torch.zeros((B, L_max), dtype=torch.float32)
-        for i, t in enumerate(batch):
-            tt = t["token_types"]
-            action_indices = np.where(tt == 3)[0]
-            padded_pis[i, action_indices] = torch.tensor(t["pis"], dtype=torch.float32)
+        for i, (tt_tensor, pi_arr) in enumerate(zip(token_types_list, pis_list)):
+            action_indices = torch.where(tt_tensor == 3)[0]
+            padded_pis[i, action_indices] = torch.tensor(pi_arr, dtype=torch.float32)
 
         batch_queue.put(
             {
@@ -212,7 +234,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     buffer = UnifiedReplayBuffer(maxlen=config.replay_buffer_size)
     buffer_lock = threading.Lock()
 
-    batch_queue = queue.Queue(maxsize=8)
+    batch_queue = queue.Queue(maxsize=4)
     for _ in range(2):
         threading.Thread(
             target=batch_generator_worker,
@@ -243,7 +265,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             pass
 
     while True:
-        incoming_data = []
+        incoming_payloads = []
         while not replay_queue.empty():
             try:
                 item = replay_queue.get_nowait()
@@ -253,14 +275,15 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                     with open(costs_bin_path, "ab") as f_bin:
                         f_bin.write(struct.pack(pack_fmt, cost_count, cost_val))
                         f_bin.flush()
-                elif item["type"] == "trajectory_data":
-                    incoming_data.extend(item["data"])
+                elif item["type"] == "trajectory_payload":
+                    incoming_payloads.append(item["payload"])
             except queue.Empty:
                 break
 
-        if incoming_data:
+        if incoming_payloads:
             with buffer_lock:
-                buffer.extend(incoming_data)
+                for payload in incoming_payloads:
+                    buffer.extend_payload(payload)
 
         try:
             batch = batch_queue.get(timeout=0.05)
@@ -300,7 +323,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
         batches_processed += 1
         loss_val = float(total_loss.detach().item())
         print(
-            f"[Learner] Batch {batches_processed:04d} | Total BufSize: {len(buffer)} | Loss: {loss_val:.4f}"
+            f"[Learner] Batch {batches_processed:04d} | Total BufSize: {len(buffer)} (Prefixes: {len(buffer.prefix_table)}) | Loss: {loss_val:.4f}"
         )
 
         with open(losses_bin_path, "ab") as f_bin:
@@ -343,7 +366,7 @@ def main():
         "--bt-port", type=int, default=4, help="Bluetooth RFCOMM channel"
     )
     parser.add_argument(
-        "--batch-size", type=int, default=1024, help="Replay buffer batch size"
+        "--batch-size", type=int, default=64, help="Replay buffer batch size"
     )
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument(

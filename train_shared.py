@@ -1,5 +1,4 @@
 # File: train_shared.py
-import contextlib
 import dataclasses
 import math
 import pickle
@@ -7,13 +6,14 @@ import random
 import socket
 import struct
 import zlib
-from typing import Optional, Protocol, Tuple
+import contextlib
+
 
 import numpy as np
 import tensor_graphs
 import torch
+import torch.nn.functional as F
 from torch import nn
-
 
 @dataclasses.dataclass
 class TrainConfig:
@@ -22,8 +22,8 @@ class TrainConfig:
     model_path: str = "models/google/gemma-3-270m"
     num_simulations: int = 10
     level_simulations: list = dataclasses.field(default_factory=lambda: [2, 7, 10, 3])
-    replay_buffer_size: int = 1_000_000
-    batch_size: int = 1024
+    replay_buffer_size: int = 100_000
+    batch_size: int = 64
     save_interval: int = 100
 
     # Graph Source & Generation Config
@@ -32,7 +32,7 @@ class TrainConfig:
     random_max_nodes: int = 30
     random_hidden_dim: int = 128
     random_seq_len: int = 64
-    random_seed: Optional[int] = None
+    random_seed: int | None = None
     resample_graph_every: int = (
         0  # 0 = fixed per worker, >0 = resample every N episodes
     )
@@ -63,7 +63,6 @@ class TrainConfig:
     bt_host_address: str = "AC:F2:3C:A7:F7:EC"
     bt_port: int = 4
 
-
 # ==============================================================================
 # GRAPH PROVIDER INTERFACE & RANDOM GENERATOR
 # ==============================================================================
@@ -71,8 +70,8 @@ def generate_random_graph(
     num_nodes: int = 20,
     hidden_dim: int = 128,
     seq_len: int = 64,
-    seed: Optional[int] = None,
-) -> Tuple[tensor_graphs.Graph, tensor_graphs.LogicalId, list]:
+    seed: int | None = None,
+) -> tuple[tensor_graphs.Graph, tensor_graphs.LogicalId, list]:
     """Generates a random compute graph with a controllable number of nodes."""
     if seed is not None:
         random.seed(seed)
@@ -244,10 +243,128 @@ class RandomGraphProvider:
         return self._cached_context
 
 
-def get_graph_provider(config: TrainConfig, worker_rank: int = 0) -> BaseGraphProvider:
+def get_graph_provider(config: TrainConfig, worker_rank: int = 0):
     if config.graph_source.lower() == "random":
         return RandomGraphProvider(worker_rank=worker_rank)
     return ModelGraphProvider(config.model_name, config.model_path)
+
+# ==============================================================================
+# PREFIX DEDUPLICATION & TRAJECTORY CODEC
+# ==============================================================================
+@dataclasses.dataclass
+class PrefixData:
+    features: np.ndarray       # (1 + N + E, 8) float32
+    token_types: np.ndarray    # (1 + N + E,) int64
+    phase_ids: np.ndarray      # (1 + N + E,) int64
+    phase_id: int
+
+
+class TrajectoryCodec:
+    """
+    Dedicated compression and deduplication codec for MCTS decision states.
+    Separates static graph prefix structures (1 + N + E) from decision action features (A).
+    """
+
+    @staticmethod
+    def compute_prefix(
+        phase_id: int,
+        node_features: np.ndarray,
+        edge_src: np.ndarray,
+        edge_dst: np.ndarray,
+    ) -> tuple[int, PrefixData]:
+        N = len(node_features)
+        E = len(edge_src)
+        L = 1 + N + E
+
+        features = np.zeros((L, 8), dtype=np.float32)
+        token_types = np.zeros(L, dtype=np.int64)
+        phase_ids = np.full(L, phase_id, dtype=np.int64)
+
+        # 0. Global Token
+        features[0, 0] = phase_id
+        token_types[0] = 0
+
+        # 1. Node Tokens [ID + Features]
+        if N > 0:
+            features[1 : N + 1, 0] = np.arange(N)
+            dim_feat = min(7, node_features.shape[1])
+            features[1 : N + 1, 1 : 1 + dim_feat] = node_features[:, :dim_feat]
+        token_types[1 : N + 1] = 1
+
+        # 2. Edge Tokens [Src_ID + Dst_ID]
+        if E > 0:
+            features[N + 1 : N + E + 1, 0] = edge_src
+            features[N + 1 : N + E + 1, 1] = edge_dst
+        token_types[N + 1 : N + E + 1] = 2
+
+        prefix_key = hash(features.tobytes() + token_types.tobytes() + phase_ids.tobytes())
+        return prefix_key, PrefixData(
+            features=features,
+            token_types=token_types,
+            phase_ids=phase_ids,
+            phase_id=phase_id,
+        )
+
+    @staticmethod
+    def materialize_full_sequence(
+        prefix: PrefixData,
+        action_features: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Reconstructs the full (1 + N + E + A, 8) tensor sequence on-the-fly."""
+        P_len = len(prefix.features)
+        A = len(action_features)
+        L = P_len + A
+
+        features = np.zeros((L, 8), dtype=np.float32)
+        features[:P_len] = prefix.features
+
+        token_types = np.zeros(L, dtype=np.int64)
+        token_types[:P_len] = prefix.token_types
+
+        phase_ids = np.full(L, prefix.phase_id, dtype=np.int64)
+
+        if A > 0:
+            features[P_len:, 0] = np.arange(A)
+            if isinstance(action_features, torch.Tensor):
+                action_features = action_features.cpu().numpy()
+            dim_feat = min(7, action_features.shape[1])
+            features[P_len:, 1 : 1 + dim_feat] = action_features[:, :dim_feat]
+            token_types[P_len:] = 3
+
+        return features, token_types, phase_ids
+
+    @staticmethod
+    def pack_episode(
+        mcts_tree: dict,
+        best_Z: float,
+        prefix_registry: dict[int, PrefixData],
+    ) -> dict:
+        """Packs deduplicated trajectory transitions and their referenced prefixes for transfer."""
+        referenced_prefixes = {}
+        transitions = []
+
+        for _, node_data in mcts_tree.items():
+            pkey = node_data["prefix_key"]
+            if pkey in prefix_registry and pkey not in referenced_prefixes:
+                referenced_prefixes[pkey] = prefix_registry[pkey]
+
+            counts = node_data["N"]
+            total_counts = counts.sum()
+            pi = counts / total_counts if total_counts > 0 else node_data["P"]
+
+            transitions.append(
+                {
+                    "prefix_key": pkey,
+                    "action_features": node_data["action_features"],
+                    "pis": pi,
+                    "z": best_Z,
+                }
+            )
+
+        return {
+            "prefixes": referenced_prefixes,
+            "transitions": transitions,
+        }
 
 
 # ==============================================================================
@@ -316,7 +433,7 @@ def recv_msg(sock):
 # TREE KV CACHE
 # ==============================================================================
 class PreallocatedTreeCache:
-    """Pre-allocated, geometrically growing KV Cache with O(1) pointer-based rollback for tree search / MCTS."""
+    """Pre-allocated, geometrically growing KV Cache with O(1) pointer-based rollback."""
 
     def __init__(
         self,
@@ -532,11 +649,9 @@ class AlphaZeroTransformer(nn.Module):
         if cache is None:
             is_action = token_types == 3
             is_prefix = ~is_action
-
             allowed_mask = is_action.unsqueeze(2) | is_prefix.unsqueeze(1)
             if key_padding_mask is not None:
                 allowed_mask = allowed_mask & (~key_padding_mask).unsqueeze(1)
-
             attn_mask = allowed_mask.unsqueeze(1)
 
         for layer in self.layers:
@@ -590,7 +705,8 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             )
 
         self.active_stack = []
-        self.raw_graphs = {}
+        self.prefix_registry: dict[int, PrefixData] = {}
+        self.current_prefix_keys: dict[str, int] = {}
 
         device = next(self.agent.parameters()).device
         self.caches = {}
@@ -623,6 +739,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 self.mcts_tree[state_key]["W"][act] += z
 
     def _store_raw_graph(self, phase_name, node_features, edge_src, edge_dst):
+        phase_id = self.PHASE_MAP[phase_name]
         dim = (
             5
             if phase_name in ["cache", "bufferize"]
@@ -644,27 +761,25 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             src = np.array(edge_src, dtype=np.int64)
             dst = np.array(edge_dst, dtype=np.int64)
 
-        self.raw_graphs[phase_name] = {
-            "node_features": nf,
-            "edge_src": src,
-            "edge_dst": dst,
-        }
-
-        features, token_types, phase_ids = self._build_sequence(
-            phase_name, action_features=np.zeros((0, 8), dtype=np.float32)
+        prefix_key, prefix_data = TrajectoryCodec.compute_prefix(
+            phase_id, nf, src, dst
         )
+        self.prefix_registry[prefix_key] = prefix_data
+        self.current_prefix_keys[phase_name] = prefix_key
+
+        # Populate inference KV cache for this phase
         cache = self.caches[phase_name]
         cache.truncate(0)
 
         f_t = torch.tensor(
-            features, dtype=torch.float32, device=cache.device
+            prefix_data.features, dtype=torch.float32, device=cache.device
         ).unsqueeze(0)
         tt_t = torch.tensor(
-            token_types, dtype=torch.int64, device=cache.device
+            prefix_data.token_types, dtype=torch.int64, device=cache.device
         ).unsqueeze(0)
-        p_t = torch.tensor(phase_ids, dtype=torch.int64, device=cache.device).unsqueeze(
-            0
-        )
+        p_t = torch.tensor(
+            prefix_data.phase_ids, dtype=torch.int64, device=cache.device
+        ).unsqueeze(0)
 
         with torch.inference_mode():
             _, v = self.agent(f_t, tt_t, p_t, cache=cache)
@@ -686,58 +801,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
     def init_malloc_graph(self, node_features, edge_src, edge_dst):
         self._store_raw_graph("malloc", node_features, edge_src, edge_dst)
 
-    def _build_sequence(self, phase_name, action_features):
-        phase_id = self.PHASE_MAP[phase_name]
-        dim = (
-            5
-            if phase_name in ["cache", "bufferize"]
-            else (4 if phase_name in ["extract", "dispatch"] else 3)
-        )
-        raw_graph = self.raw_graphs.get(
-            phase_name,
-            {
-                "node_features": np.zeros((0, dim), dtype=np.float32),
-                "edge_src": [],
-                "edge_dst": [],
-            },
-        )
-        node_feats = raw_graph["node_features"]
-        edge_src = raw_graph["edge_src"]
-        edge_dst = raw_graph["edge_dst"]
-
-        N = len(node_feats)
-        E = len(edge_src)
-        A = len(action_features)
-        L = 1 + N + E + A
-
-        features = np.zeros((L, 8), dtype=np.float32)
-        token_types = np.zeros(L, dtype=np.int64)
-        phase_ids = np.full(L, phase_id, dtype=np.int64)
-
-        features[0, 0] = phase_id
-        token_types[0] = 0
-
-        if N > 0:
-            features[1 : N + 1, 0] = np.arange(N)
-            dim_feat = min(7, node_feats.shape[1])
-            features[1 : N + 1, 1 : 1 + dim_feat] = node_feats[:, :dim_feat]
-        token_types[1 : N + 1] = 1
-
-        if E > 0:
-            features[N + 1 : N + E + 1, 0] = edge_src
-            features[N + 1 : N + E + 1, 1] = edge_dst
-        token_types[N + 1 : N + E + 1] = 2
-
-        if A > 0:
-            features[N + E + 1 :, 0] = np.arange(A)
-            if isinstance(action_features, torch.Tensor):
-                action_features = action_features.cpu().numpy()
-            dim_feat = min(7, action_features.shape[1])
-            features[N + E + 1 :, 1 : 1 + dim_feat] = action_features[:, :dim_feat]
-        token_types[N + E + 1 :] = 3
-
-        return features, token_types, phase_ids
-
     def _build_action_sequence(self, phase_name, action_features):
         phase_id = self.PHASE_MAP[phase_name]
         A = len(action_features)
@@ -756,31 +819,22 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
     @torch.inference_mode()
     def _order_items(self, items, phase_name, extract_fn):
-        action_feats = extract_fn(items)
-
-        full_features, full_tt, full_p = self._build_sequence(phase_name, action_feats)
-        state_key = hash(full_features.tobytes() + full_tt.tobytes() + full_p.tobytes())
-
         num_actions = len(items)
-
         if num_actions <= 1:
-            if num_actions == 1 and state_key not in self.mcts_tree:
-                v = self.phase_values.get(phase_name, 0.0)
-                self.mcts_tree[state_key] = {
-                    "N": np.zeros(1, dtype=np.float32),
-                    "W": np.zeros(1, dtype=np.float32),
-                    "P": np.ones(1, dtype=np.float32),
-                    "v": v,
-                    "features": full_features,
-                    "token_types": full_tt,
-                    "phase_ids": full_p,
-                }
-                self.active_stack.append((state_key, 0))
             return list(range(num_actions))
+
+        action_feats = extract_fn(items)
+        if isinstance(action_feats, torch.Tensor):
+            action_feats_np = action_feats.cpu().numpy()
+        else:
+            action_feats_np = np.array(action_feats, dtype=np.float32)
+
+        prefix_key = self.current_prefix_keys[phase_name]
+        state_key = hash((prefix_key, action_feats_np.tobytes()))
 
         if state_key not in self.mcts_tree:
             features, token_types, phase_ids = self._build_action_sequence(
-                phase_name, action_feats
+                phase_name, action_feats_np
             )
             cache = self.caches[phase_name]
 
@@ -814,14 +868,14 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             else:
                 P_perturbed = P.copy()
 
+            # Store only lightweight references (prefix_key + compact action features)
             self.mcts_tree[state_key] = {
                 "N": np.zeros(num_actions, dtype=np.float32),
                 "W": np.zeros(num_actions, dtype=np.float32),
                 "P": P_perturbed,
                 "v": v,
-                "features": full_features,
-                "token_types": full_tt,
-                "phase_ids": full_p,
+                "prefix_key": prefix_key,
+                "action_features": action_feats_np,
             }
 
         node_data = self.mcts_tree[state_key]
