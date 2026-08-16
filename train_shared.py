@@ -121,36 +121,22 @@ class RMSNorm(nn.Module):
         return (x / (norm + self.eps)) * self.weight
 
 
-class GNNModel(nn.Module):
+class StateEncoder(nn.Module):
     def __init__(self, in_features, hidden_dim=64):
         super().__init__()
         self.in_norm = RMSNorm(in_features)
-        self.node_emb = nn.Linear(in_features, hidden_dim)
-        self.msg_net = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+        # DeepSets approach: dropping message passing to maximize GPU utilization
+        self.net = nn.Sequential(
+            nn.Linear(in_features, hidden_dim * 2),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-        self.update_net = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(hidden_dim * 2, hidden_dim * 2),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim * 2, hidden_dim),
         )
 
     def forward(self, node_features, edge_src, edge_dst):
         x = self.in_norm(node_features)
-        x = F.gelu(self.node_emb(x))
-
-        if len(edge_dst) > 0:
-            src_x = x[edge_src]
-            dst_x = x[edge_dst]
-            msg = self.msg_net(torch.cat([src_x, dst_x], dim=-1))
-            aggr_msg = torch.zeros_like(x)
-            aggr_msg.index_add_(0, edge_dst, msg)
-            x = x + self.update_net(torch.cat([x, aggr_msg], dim=-1))
-
-        # We return the node embeddings directly so they can be grouped across
-        # disconnected subgraphs inside a batched forward pass on the server.
+        x = self.net(x)
         return x
 
 
@@ -158,14 +144,18 @@ class DecisionModel(nn.Module):
     def __init__(self, global_dim, feature_dim, hidden_dim=64):
         super().__init__()
         self.policy = nn.Sequential(
-            nn.Linear(global_dim + feature_dim, hidden_dim),
+            nn.Linear(global_dim + feature_dim, hidden_dim * 2),
             nn.GELU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim * 2, hidden_dim * 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim * 2, 1),
         )
         self.value = nn.Sequential(
-            nn.Linear(global_dim, hidden_dim),
+            nn.Linear(global_dim, hidden_dim * 2),
             nn.GELU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim * 2, hidden_dim * 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim * 2, 1),
         )
 
     def forward(self, global_state, options_features):
@@ -183,27 +173,27 @@ class AlphaZeroAgent(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
 
-        self.cache_gnn = GNNModel(in_features=5, hidden_dim=hidden_dim)
+        self.cache_gnn = StateEncoder(in_features=5, hidden_dim=hidden_dim)
         self.cache_dec = DecisionModel(
             global_dim=hidden_dim, feature_dim=5, hidden_dim=hidden_dim
         )
 
-        self.extract_gnn = GNNModel(in_features=4, hidden_dim=hidden_dim)
+        self.extract_gnn = StateEncoder(in_features=4, hidden_dim=hidden_dim)
         self.extract_dec = DecisionModel(
             global_dim=hidden_dim, feature_dim=6, hidden_dim=hidden_dim
         )
 
-        self.dispatch_gnn = GNNModel(in_features=4, hidden_dim=hidden_dim)
+        self.dispatch_gnn = StateEncoder(in_features=4, hidden_dim=hidden_dim)
         self.dispatch_dec = DecisionModel(
             global_dim=hidden_dim, feature_dim=6, hidden_dim=hidden_dim
         )
 
-        self.bufferize_gnn = GNNModel(in_features=5, hidden_dim=hidden_dim)
+        self.bufferize_gnn = StateEncoder(in_features=5, hidden_dim=hidden_dim)
         self.bufferize_dec = DecisionModel(
             global_dim=hidden_dim, feature_dim=4, hidden_dim=hidden_dim
         )
 
-        self.malloc_gnn = GNNModel(in_features=3, hidden_dim=hidden_dim)
+        self.malloc_gnn = StateEncoder(in_features=3, hidden_dim=hidden_dim)
         self.malloc_dec = DecisionModel(
             global_dim=hidden_dim, feature_dim=3, hidden_dim=hidden_dim
         )

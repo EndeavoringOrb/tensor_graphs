@@ -406,7 +406,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     weights_ready_event.set()
     save_file(cpu_state_dict, model_filepath)
 
-    agent_opt = torch.compile(agent)
+    agent_opt = torch.compile(agent, dynamic=True)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
 
     buffer = {
