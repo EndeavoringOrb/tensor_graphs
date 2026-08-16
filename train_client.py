@@ -8,6 +8,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from collections import defaultdict
 
 import psutil
 import torch
@@ -107,52 +108,51 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
                 continue
             valid_reqs.append(req)
 
-        if not valid_reqs:
-            continue
+        # Group evaluation requests by prefix_key
+        groups = defaultdict(list)
+        for req in valid_reqs:
+            groups[req[1]].append(req)
 
-        B = len(valid_reqs)
-        max_A = max(req[2].shape[0] for req in valid_reqs)
-        padded_actions = torch.zeros((B, max_A, 8), dtype=torch.float32, device=device)
-        padded_pid = torch.zeros((B, max_A), dtype=torch.int64, device=device)
-
-        # Build batched past_kv per layer
-        first_kv = prefix_cache_kv[valid_reqs[0][1]]
-        num_layers = len(first_kv)
-
-        batched_past_kv = []
-        for l in range(num_layers):
-            layer_k_list = [prefix_cache_kv[req[1]][l][0] for req in valid_reqs]
-            layer_v_list = [prefix_cache_kv[req[1]][l][1] for req in valid_reqs]
-            batched_past_kv.append(
-                (torch.cat(layer_k_list, dim=0), torch.cat(layer_v_list, dim=0))
+        for pkey, group_reqs in groups.items():
+            B = len(group_reqs)
+            max_A = max(req[2].shape[0] for req in group_reqs)
+            padded_actions = torch.zeros(
+                (B, max_A, 8), dtype=torch.float32, device=device
             )
+            padded_pid = torch.zeros((B, max_A), dtype=torch.int64, device=device)
 
-        for i, req in enumerate(valid_reqs):
-            _, pkey, a_feats, phase_id, wid = req
-            A_len = a_feats.shape[0]
-            dim_feat = min(7, a_feats.shape[1])
-            padded_actions[i, :A_len, 1 : 1 + dim_feat] = torch.tensor(
-                a_feats[:, :dim_feat], dtype=torch.float32, device=device
-            )
-            padded_actions[i, :A_len, 0] = torch.arange(
-                A_len, dtype=torch.float32, device=device
-            )
-            padded_pid[i, :A_len] = phase_id
+            # For the same pkey, past_kv length L is identical; expand across the group batch
+            kv = prefix_cache_kv[pkey]
+            batched_past_kv = [
+                (k.expand(B, -1, -1, -1), v.expand(B, -1, -1, -1)) for (k, v) in kv
+            ]
 
-        with (
-            torch.inference_mode(),
-            torch.autocast(device_type=device.type, dtype=torch.bfloat16),
-        ):
-            logits = agent.evaluate_actions(
-                padded_actions, padded_pid, past_kv=batched_past_kv
-            )
+            for i, req in enumerate(group_reqs):
+                _, _, a_feats, phase_id, wid = req
+                A_len = a_feats.shape[0]
+                dim_feat = min(7, a_feats.shape[1])
+                padded_actions[i, :A_len, 1 : 1 + dim_feat] = torch.tensor(
+                    a_feats[:, :dim_feat], dtype=torch.float32, device=device
+                )
+                padded_actions[i, :A_len, 0] = torch.arange(
+                    A_len, dtype=torch.float32, device=device
+                )
+                padded_pid[i, :A_len] = phase_id
 
-        for i, req in enumerate(valid_reqs):
-            _, pkey, a_feats, _, wid = req
-            A_len = a_feats.shape[0]
-            resp_logits = logits[i, :A_len].cpu().float().numpy()
-            v = prefix_cache_v[pkey]
-            resp_queues[wid].put(("ok", resp_logits, v))
+            with (
+                torch.inference_mode(),
+                torch.autocast(device_type=device.type, dtype=torch.bfloat16),
+            ):
+                logits = agent.evaluate_actions(
+                    padded_actions, padded_pid, past_kv=batched_past_kv
+                )
+
+            for i, req in enumerate(group_reqs):
+                _, _, a_feats, _, wid = req
+                A_len = a_feats.shape[0]
+                resp_logits = logits[i, :A_len].cpu().float().numpy()
+                v = prefix_cache_v[pkey]
+                resp_queues[wid].put(("ok", resp_logits, v))
 
 
 @torch.inference_mode()
