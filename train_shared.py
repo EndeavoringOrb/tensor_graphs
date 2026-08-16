@@ -20,7 +20,7 @@ class TrainConfig:
     level_simulations: list = dataclasses.field(default_factory=lambda: [2, 7, 10, 3])
     replay_buffer_size: int = 1_000_000
     batch_size: int = 1024
-    save_interval: int = 1
+    save_interval: int = 100
     hidden_dim: int = 64
     lr: float = 1e-3
     log_cost_calls: bool = False

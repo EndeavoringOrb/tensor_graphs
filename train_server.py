@@ -185,6 +185,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     print(f"[Learner] Using device: {device}")
 
     agent = AlphaZeroAgent(hidden_dim=config.hidden_dim).to(device)
+    agent = torch.compile(agent)
     optimizer = optim.Adam(agent.parameters(), lr=config.lr)
 
     # Use our new fast ReplayBuffer
@@ -308,18 +309,22 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             policy_in = torch.cat([g_repeated, feats_concat], dim=1)
             all_scores = dec_model.policy(policy_in).squeeze(1)
 
-            scores_list = list(torch.split(all_scores, N_list))
-            pi_list = list(torch.split(pi_concat, N_list))
+            B = len(N_list)
+            N_tensor = torch.tensor(N_list, device=device)
+            batch_idx = torch.repeat_interleave(torch.arange(B, device=device), N_tensor)
 
-            scores_padded = torch.nn.utils.rnn.pad_sequence(
-                scores_list, batch_first=True, padding_value=-1e9
-            )
-            pi_padded = torch.nn.utils.rnn.pad_sequence(
-                pi_list, batch_first=True, padding_value=0.0
-            )
+            # 1. Segmented Max for numerical stability
+            max_scores = torch.full((B,), -float("inf"), device=device, dtype=all_scores.dtype)
+            max_scores.scatter_reduce_(0, batch_idx, all_scores, reduce="amax")
 
-            log_p_padded = F.log_softmax(scores_padded, dim=1)
-            policy_loss = -(pi_padded * log_p_padded).sum(dim=1).mean()
+            # 2. Segmented Log-Sum-Exp
+            shifted = all_scores - max_scores[batch_idx]
+            exp_scores = torch.exp(shifted)
+            sum_exp = torch.zeros(B, device=device, dtype=all_scores.dtype).scatter_add_(0, batch_idx, exp_scores)
+
+            # 3. Log Softmax & Cross Entropy Loss
+            log_p = shifted - torch.log(sum_exp)[batch_idx]
+            policy_loss = -(pi_concat * log_p).sum() / B
 
             type_loss = policy_loss + value_loss
             total_loss += type_loss
