@@ -316,42 +316,20 @@ struct Session
         cachedGraphs.clear();
         selectedCachedNodes.clear();
 
-        std::cout << "[Session.ensureCacheCoverage] Starting iterative cache optimization..." << std::endl;
+        std::cout << "[Session.ensureCacheCoverage] Selecting cache nodes via SearchDelegate..." << std::endl;
         Planner planner(costModel, memManager.getMemCaps());
 
-        std::unordered_map<LogicalId, MemSpace> protectedCachedNodes;
-
+        std::unordered_map<LogicalId, MemSpace> bestCachedNodes;
         if (!disableCaching)
         {
-            for (uint64_t i = 0; i < manualBuckets.size(); ++i)
-            {
-                if (i == fullBucketIdx)
-                    continue;
-                const Bucket &bucket = manualBuckets[i];
-
-                CompiledGraph plan = planner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, false, repo,
-                                                  {}, minCompileSeconds, delegate);
-
-                for (const auto &inst : plan.instructions)
-                {
-                    if (plan.has_logical_id(inst.eclass_id))
-                    {
-                        LogicalId logical_id = plan.get_logical_id(inst.eclass_id);
-                        OpType op_type = graph.getNode(logical_id).opType;
-                        if (op_type == OpType::CACHE)
-                        {
-                            protectedCachedNodes[logical_id] = inst.outBuffer.mem_space;
-                        }
-                    }
-                }
-            }
+            bestCachedNodes = planner.searchBestCacheNodes(rootId, graph, manualBuckets, delegate, minCompileSeconds);
         }
 
         std::unordered_map<LogicalId, ParallelBuffer> preallocatedBuffers;
-        preallocateLogicalBuffers(protectedCachedNodes, preallocatedBuffers);
+        preallocateLogicalBuffers(bestCachedNodes, preallocatedBuffers);
 
-        std::cout << "[Session.ensureCacheCoverage] Final replanning with " << protectedCachedNodes.size()
-                  << " protected eclasses across physical cores..." << std::endl;
+        std::cout << "[Session.ensureCacheCoverage] Planning buckets with " << bestCachedNodes.size()
+                  << " cached nodes across physical cores..." << std::endl;
 
         std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
         Graph tempGraph = graph;
@@ -365,13 +343,13 @@ struct Session
             threadPlanner.baseStateInitialized = true;
 
             const Bucket &bucket = manualBuckets[i];
-            CompiledGraph plan = threadPlanner.plan(rootId, graph, bucket, protectedCachedNodes, doSaturate, true, repo,
+            CompiledGraph plan = threadPlanner.plan(rootId, graph, bucket, bestCachedNodes, doSaturate, true, repo,
                                                     preallocatedBuffers, minCompileSeconds, delegate);
             plan.bucket = bucket;
             cachedGraphs[i] = std::move(plan);
         });
 
-        selectedCachedNodes = std::move(protectedCachedNodes);
+        selectedCachedNodes = std::move(bestCachedNodes);
 
         if (cachedGraphs.size() != manualBuckets.size())
         {

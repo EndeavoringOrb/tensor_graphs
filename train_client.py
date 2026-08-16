@@ -130,7 +130,6 @@ def client_worker(rank: int, config: TrainConfig):
 
     # 4. Generate Trajectories
     episode = 0
-    import random
 
     while True:
         agent.eval()
@@ -138,19 +137,7 @@ def client_worker(rank: int, config: TrainConfig):
         extraction_costs = []
         mcts_tree = {}
 
-        is_replanning_phase = random.random() < 0.5
-
-        if is_replanning_phase:
-            delegate_zero = ActorDelegate(agent, exploration_noise=0.0)
-            egraph_context.setup_for_bucket(bucket_idx, {}, False)
-            cached_nodes = tensor_graphs.get_cached_nodes(
-                egraph_context, delegate_zero, config.log_cost_calls
-            )
-            egraph_context.setup_for_bucket(bucket_idx, cached_nodes, True)
-        else:
-            egraph_context.setup_for_bucket(bucket_idx, {}, False)
-
-        # MCTS Simulations using PUCT selection & episode + depth noise annealing
+        # MCTS Simulations exploring Cache -> Extract -> Dispatch -> Bufferize -> Malloc
         for sim in range(config.num_simulations):
             delegate = ActorDelegate(
                 agent,
@@ -163,29 +150,23 @@ def client_worker(rank: int, config: TrainConfig):
                 depth_gamma=config.depth_gamma,
             )
             try:
-                cost = tensor_graphs.extract_best_from_egraph(
-                    egraph_context, delegate, config.log_cost_calls
+                costs = tensor_graphs.run_hierarchical_simulations(
+                    egraph_context,
+                    bucket_idx,
+                    delegate,
+                    config.level_simulations,
+                    config.log_cost_calls,
                 )
             except Exception as e:
                 logger.info(
-                    f"{LOG_PREFIX} [Worker {rank}] Error during extraction: {e}"
+                    f"{LOG_PREFIX} [Worker {rank}] Error during simulation: {e}"
                 )
-                cost = float("inf")
+                costs = []
 
-            if cost < float("inf"):
-                extraction_costs.append(float(cost))
-                best_cost = min(best_cost, cost)
-                Z_sim = 1000.0 / (cost + 1.0)
-            else:
-                Z_sim = -1.0
-
-            # Backup simulation return (Z_sim) into MCTS Tree
-            for step in delegate.trajectory:
-                h = step["state_hash"]
-                act = step["top_action"]
-                if h in mcts_tree:
-                    mcts_tree[h]["N"][act] += 1.0
-                    mcts_tree[h]["W"][act] += Z_sim
+            for cost in costs:
+                if cost < float("inf"):
+                    extraction_costs.append(float(cost))
+                    best_cost = min(best_cost, cost)
 
         # Episode Best Z Target
         if best_cost < float("inf"):
@@ -270,7 +251,7 @@ def main():
         "--port", type=int, default=5000, help="Server port or BT channel"
     )
     parser.add_argument(
-        "--use-bluetooth", action="store_true", help="Use Bluetooth RFCOMM socket"
+        "-bt", "--use-bluetooth", action="store_true", help="Use Bluetooth RFCOMM socket"
     )
     parser.add_argument(
         "--workers",
@@ -333,6 +314,13 @@ def main():
         default=0.7,
         help="Per-depth noise decay factor",
     )
+    parser.add_argument(
+        "--level-sims",
+        nargs="+",
+        type=int,
+        default=[1, 1, 1, 1],
+        help="Simulations per level: [num_extract, num_dispatch, num_bufferize, num_malloc] or with num_cache",
+    )
 
     args = parser.parse_args()
 
@@ -351,6 +339,7 @@ def main():
     config.min_noise = args.min_noise
     config.decay_episodes = args.decay_episodes
     config.depth_gamma = args.depth_gamma
+    config.level_simulations = args.level_sims
 
     if config.host and ":" in config.host and len(config.host.split(":")) == 6:
         config.use_bluetooth = True

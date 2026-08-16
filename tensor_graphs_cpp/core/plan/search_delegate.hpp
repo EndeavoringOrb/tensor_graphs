@@ -5,6 +5,16 @@
 #include <cstdint>
 #include <vector>
 
+struct ActionFeatureCache
+{
+    float is_cached = 0.0f; // 1.0f if cached, 0.0f if not cached
+    uint64_t size = 0;      // bytes
+    MemSpace mem_space;
+    uint32_t op_type = 0;
+    float num_users = 0.0f;
+    uint32_t logical_id = 0;
+};
+
 struct ActionFeatureExtractDispatch
 {
     float cost;
@@ -40,6 +50,14 @@ class SearchDelegate
     virtual void pop_state()
     {
     }
+    virtual void on_leaf_evaluated(float cost)
+    {
+    }
+
+    virtual void init_cache_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
+                                  const std::vector<uint32_t> &edge_dst)
+    {
+    }
 
     virtual void init_egraph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
                              const std::vector<uint32_t> &edge_dst)
@@ -59,6 +77,14 @@ class SearchDelegate
     virtual void init_malloc_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
                                    const std::vector<uint32_t> &edge_dst)
     {
+    }
+
+    virtual std::vector<uint32_t> order_cache(const std::vector<ActionFeatureCache> &choices)
+    {
+        std::vector<uint32_t> res(choices.size());
+        for (uint32_t i = 0; i < choices.size(); ++i)
+            res[i] = i;
+        return res;
     }
 
     virtual std::vector<uint32_t> order_enodes(const std::vector<ActionFeatureExtractDispatch> &enodes)

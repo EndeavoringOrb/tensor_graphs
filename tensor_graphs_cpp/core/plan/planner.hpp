@@ -38,10 +38,441 @@ struct ExtractionResult
     std::unordered_map<EClassId, float> eclass_to_cost;
 };
 
+struct CacheIterator
+{
+    const Graph &graph;
+    std::vector<LogicalId> candidate_nodes;
+    std::vector<MemSpace> avail_mem_spaces;
+    std::shared_ptr<SearchDelegate> delegate;
+
+    std::vector<uint32_t> num_users;
+    std::vector<std::vector<int>> valid_choices;
+
+    int k = 0;
+    bool is_done = false;
+    bool first_yield = true;
+    std::vector<int> state;
+    std::vector<std::vector<uint32_t>> choice_orders;
+    std::unordered_map<LogicalId, MemSpace> current_cache_selection;
+
+    CacheIterator(const Graph &_graph, const std::vector<LogicalId> &_candidates,
+                  const std::vector<MemSpace> &_avail_mem_spaces, std::shared_ptr<SearchDelegate> _delegate = nullptr)
+        : graph(_graph), candidate_nodes(_candidates), avail_mem_spaces(_avail_mem_spaces), delegate(_delegate)
+    {
+        init();
+    }
+
+    void init()
+    {
+        uint32_t N = static_cast<uint32_t>(candidate_nodes.size());
+        state.assign(N, 0);
+        choice_orders.resize(N);
+        valid_choices.resize(N);
+        num_users.assign(N, 0);
+
+        std::unordered_map<LogicalId, uint32_t> user_counts;
+        for (const auto &pair : graph.nodes)
+        {
+            for (LogicalId child_id : pair.second.child_ids)
+            {
+                user_counts[child_id]++;
+            }
+        }
+
+        for (uint32_t i = 0; i < N; ++i)
+        {
+            LogicalId id = candidate_nodes[i];
+            num_users[i] = user_counts[id];
+
+            // Choice 0: Not cached
+            valid_choices[i].push_back(0);
+
+            // Choice 1..M: Cached in avail_mem_spaces[choice - 1]
+            for (size_t m = 0; m < avail_mem_spaces.size(); ++m)
+            {
+                valid_choices[i].push_back(static_cast<int>(m + 1));
+            }
+        }
+
+        if (delegate && N > 0)
+        {
+            std::vector<float> node_features;
+            std::vector<uint32_t> edge_src;
+            std::vector<uint32_t> edge_dst;
+            std::unordered_map<LogicalId, uint32_t> id_to_idx;
+
+            for (uint32_t i = 0; i < N; ++i)
+            {
+                LogicalId id = candidate_nodes[i];
+                id_to_idx[id] = i;
+                const TensorNode &node = graph.getNode(id);
+
+                node_features.push_back(static_cast<float>(node.getSizeBytes()));
+                node_features.push_back(static_cast<float>(node.opType));
+                node_features.push_back(static_cast<float>(node.dtype));
+                bool is_storage = (graph.input_data_types.count(id) &&
+                                   graph.input_data_types.at(id) == InputDataType::STORAGE);
+                node_features.push_back(is_storage ? 1.0f : 0.0f);
+                node_features.push_back(static_cast<float>(num_users[i]));
+            }
+
+            for (uint32_t i = 0; i < N; ++i)
+            {
+                LogicalId id = candidate_nodes[i];
+                const TensorNode &node = graph.getNode(id);
+                for (LogicalId pid : node.child_ids)
+                {
+                    auto p_it = id_to_idx.find(pid);
+                    if (p_it != id_to_idx.end())
+                    {
+                        edge_src.push_back(p_it->second);
+                        edge_dst.push_back(i);
+                    }
+                }
+            }
+
+            delegate->init_cache_graph(node_features, edge_src, edge_dst);
+        }
+    }
+
+    bool ascend()
+    {
+        k--;
+        while (k >= 0)
+        {
+            if (valid_choices[k].empty())
+            {
+                k--;
+                continue;
+            }
+            if (delegate && valid_choices[k].size() > 1)
+            {
+                delegate->pop_state();
+            }
+
+            LogicalId id = candidate_nodes[k];
+            current_cache_selection.erase(id);
+
+            if (state[k] < valid_choices[k].size())
+            {
+                return true;
+            }
+            state[k] = 0;
+            k--;
+        }
+        return false;
+    }
+
+    bool getNextCacheSelection(std::unordered_map<LogicalId, MemSpace> &out_cached_nodes)
+    {
+        if (is_done)
+            return false;
+
+        uint32_t N = static_cast<uint32_t>(candidate_nodes.size());
+        if (N == 0)
+        {
+            if (first_yield)
+            {
+                first_yield = false;
+                out_cached_nodes.clear();
+                return true;
+            }
+            is_done = true;
+            return false;
+        }
+
+        if (!first_yield)
+        {
+            if (!ascend())
+            {
+                is_done = true;
+                return false;
+            }
+        }
+        first_yield = false;
+
+        while (k >= 0)
+        {
+            if (k == static_cast<int>(N))
+            {
+                out_cached_nodes = current_cache_selection;
+                return true;
+            }
+
+            if (valid_choices[k].empty())
+            {
+                k++;
+                continue;
+            }
+
+            LogicalId id = candidate_nodes[k];
+            const TensorNode &node = graph.getNode(id);
+
+            if (state[k] == 0)
+            {
+                if (delegate && valid_choices[k].size() > 1)
+                {
+                    delegate->push_state();
+
+                    std::vector<ActionFeatureCache> features;
+                    features.reserve(valid_choices[k].size());
+
+                    uint64_t node_size = node.getSizeBytes();
+
+                    for (int choice : valid_choices[k])
+                    {
+                        ActionFeatureCache f;
+                        f.size = node_size;
+                        f.op_type = static_cast<uint32_t>(node.opType);
+                        f.num_users = static_cast<float>(num_users[k]);
+                        f.logical_id = id.value;
+
+                        if (choice == 0)
+                        {
+                            f.is_cached = 0.0f;
+                            f.mem_space = MemSpace{0, HandleType::STORAGE};
+                        }
+                        else
+                        {
+                            f.is_cached = 1.0f;
+                            f.mem_space = avail_mem_spaces[choice - 1];
+                        }
+                        features.push_back(f);
+                    }
+
+                    choice_orders[k] = delegate->order_cache(features);
+                }
+                else
+                {
+                    choice_orders[k].resize(valid_choices[k].size());
+                    std::iota(choice_orders[k].begin(), choice_orders[k].end(), 0u);
+                }
+            }
+
+            if (state[k] < valid_choices[k].size())
+            {
+                uint32_t choice_idx = choice_orders[k][state[k]];
+                int choice = valid_choices[k][choice_idx];
+                state[k]++;
+
+                if (choice > 0)
+                {
+                    current_cache_selection[id] = avail_mem_spaces[choice - 1];
+                }
+                else
+                {
+                    current_cache_selection.erase(id);
+                }
+
+                k++;
+            }
+            else
+            {
+                state[k] = 0;
+                if (!ascend())
+                {
+                    is_done = true;
+                    return false;
+                }
+            }
+        }
+
+        is_done = true;
+        return false;
+    }
+};
+
 struct Planner
 {
     CostModel &costModel;
     std::unordered_map<MemSpace, uint64_t> mem_caps;
+
+    void preallocateLogicalBuffers(const Graph &graph, const std::unordered_map<LogicalId, MemSpace> &cachedNodes,
+                                   std::unordered_map<LogicalId, ParallelBuffer> &out) const
+    {
+        out.clear();
+
+        struct PreAllocEntry
+        {
+            LogicalId logicalId;
+            MemSpace memSpace;
+            std::vector<uint32_t> shape;
+            DType dtype;
+        };
+        std::vector<PreAllocEntry> entries;
+
+        MemSpace storage = MemSpace{0, HandleType::STORAGE};
+        MemSpace ram = MemSpace{1, HandleType::CPP};
+
+        for (const auto &pair : graph.nodes)
+        {
+            const TensorNode &node = pair.second;
+            if (node.opType != OpType::INPUT)
+                continue;
+
+            auto idtIt = graph.input_data_types.find(node.id);
+            if (idtIt != graph.input_data_types.end() && idtIt->second == InputDataType::STORAGE)
+                continue;
+
+            entries.push_back({node.id, ram, node.getShape(), node.dtype});
+        }
+
+        for (const auto &kv : cachedNodes)
+        {
+            LogicalId logicalId = kv.first;
+            MemSpace ms = kv.second;
+            if (!graph.hasNode(logicalId))
+                continue;
+            const TensorNode &node = graph.getNode(logicalId);
+            bool alreadyAdded = false;
+            for (const auto &e : entries)
+            {
+                if (e.logicalId == logicalId)
+                {
+                    alreadyAdded = true;
+                    break;
+                }
+            }
+            if (alreadyAdded)
+                continue;
+            entries.push_back({logicalId, ms, node.getShape(), node.dtype});
+        }
+
+        std::sort(entries.begin(), entries.end(),
+                  [](const PreAllocEntry &a, const PreAllocEntry &b) { return a.logicalId < b.logicalId; });
+
+        std::unordered_map<MemSpace, uint64_t> cursor;
+        BufferId nextId{0};
+        for (const auto &e : entries)
+        {
+            if (e.memSpace == storage)
+                continue;
+
+            uint64_t size_bytes = getSizeBytes(e.shape, e.dtype);
+            if (size_bytes == 0)
+                continue;
+            size_bytes = (size_bytes + 4095) & ~4095ULL;
+
+            uint64_t offset = cursor[e.memSpace];
+            cursor[e.memSpace] = offset + size_bytes;
+
+            ParallelBuffer buf;
+            buf.id = nextId++;
+            buf.mem_space = e.memSpace;
+            buf.size = size_bytes;
+            buf.start = 0;
+            buf.end = std::numeric_limits<uint32_t>::max();
+            buf.offset = static_cast<int64_t>(offset);
+            out[e.logicalId] = std::move(buf);
+        }
+    }
+
+    std::unordered_map<LogicalId, MemSpace> searchBestCacheNodes(
+        LogicalId rootId, const Graph &graph, const std::vector<Bucket> &buckets,
+        std::shared_ptr<SearchDelegate> delegate = nullptr, float minCompileSeconds = 0.0f)
+    {
+        std::vector<LogicalId> topo = topologicalSort({rootId}, graph);
+
+        std::unordered_map<LogicalId, bool> logicalDirty;
+        for (const auto &bucket : buckets)
+        {
+            for (LogicalId nodeId : topo)
+            {
+                if (bucket.inputDirtyRegions.count(nodeId) && !bucket.inputDirtyRegions.at(nodeId).empty())
+                {
+                    logicalDirty[nodeId] = true;
+                }
+                else
+                {
+                    bool isDirty = false;
+                    for (LogicalId pid : graph.getNode(nodeId).child_ids)
+                    {
+                        if (logicalDirty[pid])
+                        {
+                            isDirty = true;
+                            break;
+                        }
+                    }
+                    if (isDirty)
+                        logicalDirty[nodeId] = true;
+                }
+            }
+        }
+
+        std::vector<LogicalId> candidates;
+        for (LogicalId nodeId : topo)
+        {
+            if (!logicalDirty[nodeId] && graph.getNode(nodeId).getSizeBytes() > 0)
+            {
+                candidates.push_back(nodeId);
+            }
+        }
+
+        std::vector<MemSpace> avail_mem_spaces;
+        for (const auto &kv : mem_caps)
+        {
+            if (kv.first.type != HandleType::STORAGE)
+            {
+                avail_mem_spaces.push_back(kv.first);
+            }
+        }
+        std::sort(avail_mem_spaces.begin(), avail_mem_spaces.end(), [](const MemSpace &a, const MemSpace &b) {
+            if (a.type != b.type)
+                return a.type < b.type;
+            return a.idx < b.idx;
+        });
+
+        CacheIterator cache_iter(graph, candidates, avail_mem_spaces, delegate);
+        std::unordered_map<LogicalId, MemSpace> current_cache;
+        std::unordered_map<LogicalId, MemSpace> best_cache;
+        float best_cost = TGConstants::INF;
+
+        uint32_t rep_bucket_idx = buckets.size() > 1 ? 1 : 0;
+        const Bucket &rep_bucket = buckets[rep_bucket_idx];
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+        uint32_t max_cache_evals = 100;
+        uint32_t eval_count = 0;
+
+        while (cache_iter.getNextCacheSelection(current_cache))
+        {
+            eval_count++;
+            try
+            {
+                std::unordered_map<LogicalId, ParallelBuffer> preallocated;
+                preallocateLogicalBuffers(graph, current_cache, preallocated);
+
+                CompiledGraph plan_res = plan(rootId, graph, rep_bucket, current_cache, true, true, nullptr,
+                                              preallocated, 0.0f, delegate);
+                float cost = plan_res.cost();
+                if (cost < best_cost)
+                {
+                    best_cost = cost;
+                    best_cache = current_cache;
+                }
+            }
+            catch (...)
+            {
+            }
+
+            if (best_cost < TGConstants::INF && minCompileSeconds == 0.0f && delegate == nullptr)
+            {
+                break;
+            }
+
+            if (minCompileSeconds > 0.0f)
+            {
+                auto now = std::chrono::high_resolution_clock::now();
+                float elapsed = std::chrono::duration<float>(now - start_time).count();
+                if (elapsed >= minCompileSeconds)
+                    break;
+            }
+            if (eval_count >= max_cache_evals)
+                break;
+        }
+
+        return best_cache;
+    }
 
     void inferShapes(const std::vector<LogicalId> &topo, Graph &graph)
     {

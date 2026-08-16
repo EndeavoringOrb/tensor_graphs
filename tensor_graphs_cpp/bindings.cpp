@@ -25,6 +25,16 @@ class PySearchDelegate : public SearchDelegate
     {
         PYBIND11_OVERRIDE(void, SearchDelegate, pop_state);
     }
+    void on_leaf_evaluated(float cost) override
+    {
+        PYBIND11_OVERRIDE(void, SearchDelegate, on_leaf_evaluated, cost);
+    }
+
+    void init_cache_graph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
+                          const std::vector<uint32_t> &edge_dst) override
+    {
+        PYBIND11_OVERRIDE(void, SearchDelegate, init_cache_graph, node_features, edge_src, edge_dst);
+    }
 
     void init_egraph(const std::vector<float> &node_features, const std::vector<uint32_t> &edge_src,
                      const std::vector<uint32_t> &edge_dst) override
@@ -48,6 +58,11 @@ class PySearchDelegate : public SearchDelegate
                            const std::vector<uint32_t> &edge_dst) override
     {
         PYBIND11_OVERRIDE(void, SearchDelegate, init_malloc_graph, node_features, edge_src, edge_dst);
+    }
+
+    std::vector<uint32_t> order_cache(const std::vector<ActionFeatureCache> &choices) override
+    {
+        PYBIND11_OVERRIDE(std::vector<uint32_t>, SearchDelegate, order_cache, choices);
     }
 
     std::vector<uint32_t> order_enodes(const std::vector<ActionFeatureExtractDispatch> &enodes) override
@@ -262,7 +277,6 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def_readwrite("idx", &MemSpace::idx)
         .def_readwrite("type", &MemSpace::type);
 
-    // Bind struct LogicalId with __hash__ and __eq__ so pybind11 can use it as a dict key
     py::class_<LogicalId>(m, "LogicalId")
         .def(py::init<>())
         .def_readwrite("value", &LogicalId::value)
@@ -270,7 +284,6 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def("__eq__", [](const LogicalId &self, const LogicalId &other) { return self == other; })
         .def("__repr__", [](const LogicalId &self) { return "LogicalId(" + std::to_string(self.value) + ")"; });
 
-    // Bind TensorNode
     py::class_<TensorNode>(m, "TensorNode")
         .def_readonly("id", &TensorNode::id)
         .def_readonly("op_type", &TensorNode::opType)
@@ -280,6 +293,14 @@ PYBIND11_MODULE(tensor_graphs, m)
     py::class_<Graph>(m, "Graph").def_readonly("nodes", &Graph::nodes);
 
     // Action Feature Structs
+    py::class_<ActionFeatureCache>(m, "ActionFeatureCache")
+        .def_readwrite("is_cached", &ActionFeatureCache::is_cached)
+        .def_readwrite("size", &ActionFeatureCache::size)
+        .def_readwrite("mem_space", &ActionFeatureCache::mem_space)
+        .def_readwrite("op_type", &ActionFeatureCache::op_type)
+        .def_readwrite("num_users", &ActionFeatureCache::num_users)
+        .def_readwrite("logical_id", &ActionFeatureCache::logical_id);
+
     py::class_<ActionFeatureExtractDispatch>(m, "ActionFeatureExtractDispatch")
         .def_readwrite("cost", &ActionFeatureExtractDispatch::cost)
         .def_readwrite("size", &ActionFeatureExtractDispatch::size)
@@ -303,28 +324,29 @@ PYBIND11_MODULE(tensor_graphs, m)
         .def(py::init<>())
         .def("push_state", &SearchDelegate::push_state)
         .def("pop_state", &SearchDelegate::pop_state)
+        .def("on_leaf_evaluated", &SearchDelegate::on_leaf_evaluated)
+        .def("init_cache_graph", &SearchDelegate::init_cache_graph)
         .def("init_egraph", &SearchDelegate::init_egraph)
         .def("init_dispatch_graph", &SearchDelegate::init_dispatch_graph)
         .def("init_bufferize_graph", &SearchDelegate::init_bufferize_graph)
         .def("init_malloc_graph", &SearchDelegate::init_malloc_graph)
+        .def("order_cache", &SearchDelegate::order_cache)
         .def("order_enodes", &SearchDelegate::order_enodes)
         .def("order_dispatch", &SearchDelegate::order_dispatch)
         .def("order_bufferize", &SearchDelegate::order_bufferize)
         .def("order_malloc", &SearchDelegate::order_malloc);
 
-    // Opaque handle for Caching Saturated E-Graphs
+    // Saturated E-Graph Context & Simulations
     py::class_<SaturatedEGraphContext, std::shared_ptr<SaturatedEGraphContext>>(m, "SaturatedEGraphContext")
-        .def_property_readonly("num_buckets", [](const SaturatedEGraphContext &self) { return self.buckets.size(); })
-        .def("setup_for_bucket", &SaturatedEGraphContext::setup_for_bucket, py::arg("bucket_idx"),
-             py::arg("cachedNodes"), py::arg("strictCache"));
+        .def_property_readonly("num_buckets", [](const SaturatedEGraphContext &self) { return self.buckets.size(); });
 
     m.def("build_and_saturate_egraph", &build_and_saturate_egraph, py::arg("model_name"), py::arg("model_path"),
           py::arg("log_cost_calls") = false, py::arg("compile_decode_buckets") = true);
 
-    m.def("extract_best_from_egraph", &extract_best_from_egraph, py::arg("ctx"), py::arg("delegate"),
-          py::arg("log_cost_calls") = false);
+    m.def("run_hierarchical_simulations", &run_hierarchical_simulations, py::arg("ctx"), py::arg("bucket_idx"),
+          py::arg("delegate"), py::arg("level_simulations"), py::arg("log_cost_calls") = false);
 
-    m.def("get_cached_nodes", &get_cached_nodes, py::arg("ctx"), py::arg("delegate"),
+    m.def("extract_best_from_egraph", &extract_best_from_egraph, py::arg("ctx"), py::arg("delegate"),
           py::arg("log_cost_calls") = false);
 
     py::class_<LLMSession>(m, "LLMSession")

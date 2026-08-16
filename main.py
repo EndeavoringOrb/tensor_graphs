@@ -115,11 +115,13 @@ def main():
         print("\nChat initialized. Type 'exit' or 'quit' to end.\n")
     else:
         messages = []
-        print("\nCompletion mode initialized (chat template not available). Type 'exit' or 'quit' to end.\n")
+        print(
+            "\nCompletion mode initialized (chat template not available). Type 'exit' or 'quit' to end.\n"
+        )
 
     while True:
         try:
-            user_input = input("User: ")
+            user_input = input("User: " if has_chat_template else "Enter text: ")
         except (KeyboardInterrupt, EOFError):
             print("\nExiting interaction.")
             break
@@ -149,7 +151,8 @@ def main():
             # Completion mode encoding
             conversation_tokens = encode_text(tokenizer, user_input, is_first=True)
 
-        print("Bot: ", end="", flush=True)
+        if has_chat_template:
+            print("Bot: ", end="", flush=True)
         generated_tokens = []
         prev_text_len = 0
 

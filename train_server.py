@@ -175,6 +175,7 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             total_loss = torch.tensor(0.0)
 
             for dec_type in [
+                "cache_dec",
                 "extract_dec",
                 "dispatch_dec",
                 "bufferize_dec",

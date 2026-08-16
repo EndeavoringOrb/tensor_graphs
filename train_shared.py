@@ -16,7 +16,8 @@ class TrainConfig:
     run_dir: str = "runs/server_train"
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
-    num_simulations: int = 30
+    num_simulations: int = 10
+    level_simulations: list = dataclasses.field(default_factory=lambda: [2, 7, 10, 3])
     replay_buffer_size: int = 75_000
     batch_size: int = 1024
     save_interval: int = 1
@@ -125,22 +126,6 @@ class RMSNorm(nn.Module):
         return (x / (norm + self.eps)) * self.weight
 
 
-class Net(nn.Module):
-    def __init__(self, inputSize=42, outSize=7, weightLayers=2, weightSize=10):
-        super().__init__()
-        layers = []
-        for i in range(weightLayers):
-            in_feat = inputSize if i == 0 else weightSize
-            out_feat = outSize if i == (weightLayers - 1) else weightSize
-            layers.append(nn.Linear(in_feat, out_feat, bias=False))
-            if i != (weightLayers - 1):
-                layers.append(nn.Tanh())
-        self.layers = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.layers(x)
-
-
 class GNNModel(nn.Module):
     def __init__(self, in_features, hidden_dim=64):
         super().__init__()
@@ -200,6 +185,12 @@ class AlphaZeroAgent(nn.Module):
     def __init__(self, hidden_dim=64):
         super().__init__()
         self.hidden_dim = hidden_dim
+
+        self.cache_gnn = GNNModel(in_features=5, hidden_dim=hidden_dim)
+        self.cache_dec = DecisionModel(
+            global_dim=hidden_dim, feature_dim=5, hidden_dim=hidden_dim
+        )
+
         self.extract_gnn = GNNModel(in_features=4, hidden_dim=hidden_dim)
         self.extract_dec = DecisionModel(
             global_dim=hidden_dim, feature_dim=6, hidden_dim=hidden_dim
@@ -221,9 +212,6 @@ class AlphaZeroAgent(nn.Module):
         )
 
 
-# ==============================================================================
-# ACTOR DELEGATE WITH PUCT SELECTION & NOISE ANNEALING
-# ==============================================================================
 import tensor_graphs
 
 
@@ -264,8 +252,27 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 base_noise * (1.0 - episode / max(1, decay_episodes)),
             )
 
-        self.trajectory = []
+        self.active_stack = []
         self.globals = {}
+
+    def push_state(self):
+        pass
+
+    def pop_state(self):
+        if self.active_stack:
+            self.active_stack.pop()
+
+    def on_leaf_evaluated(self, cost: float):
+        cost_val = float(cost)
+        if cost_val < float("inf"):
+            z = 1000.0 / (cost_val + 1.0)
+        else:
+            z = -1.0
+
+        for state_key, act in self.active_stack:
+            if state_key in self.mcts_tree:
+                self.mcts_tree[state_key]["N"][act] += 1.0
+                self.mcts_tree[state_key]["W"][act] += z
 
     def _prepare_graphs(self, node_features, edge_src, edge_dst, feat_dim):
         if not node_features:
@@ -275,6 +282,11 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         src = torch.tensor(edge_src, dtype=torch.int64)
         dst = torch.tensor(edge_dst, dtype=torch.int64)
         return nf, src, dst
+
+    def init_cache_graph(self, node_features, edge_src, edge_dst):
+        nf, src, dst = self._prepare_graphs(node_features, edge_src, edge_dst, 5)
+        if nf is not None:
+            self.globals["cache_dec"] = self.agent.cache_gnn(nf, src, dst)
 
     def init_egraph(self, node_features, edge_src, edge_dst):
         nf, src, dst = self._prepare_graphs(node_features, edge_src, edge_dst, 4)
@@ -299,18 +311,38 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
     @torch.inference_mode()
     def _order_items(self, items, dec_type, extract_fn):
         if len(items) <= 1:
+            if len(items) == 1:
+                features = extract_fn(items)
+                global_state = self.globals.get(
+                    dec_type, torch.zeros(self.agent.hidden_dim)
+                )
+                state_key = hash(
+                    (
+                        global_state.cpu().numpy().tobytes(),
+                        features.cpu().numpy().tobytes(),
+                    )
+                )
+                if state_key not in self.mcts_tree:
+                    self.mcts_tree[state_key] = {
+                        "N": np.zeros(1, dtype=np.float32),
+                        "W": np.zeros(1, dtype=np.float32),
+                        "P": np.ones(1, dtype=np.float32),
+                        "v": 0.0,
+                        "type": dec_type,
+                        "global_state": global_state.cpu().numpy(),
+                        "features": features.cpu().numpy(),
+                    }
+                self.active_stack.append((state_key, 0))
             return list(range(len(items)))
 
         features = extract_fn(items)
         global_state = self.globals.get(dec_type, torch.zeros(self.agent.hidden_dim))
 
-        # Composite key for state node
         state_key = hash(
             (global_state.cpu().numpy().tobytes(), features.cpu().numpy().tobytes())
         )
         num_actions = len(items)
 
-        # 1. Expand MCTS State Node if unvisited
         if state_key not in self.mcts_tree:
             with torch.no_grad():
                 dec_model = getattr(self.agent, dec_type)
@@ -319,7 +351,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             P = torch.softmax(scores, dim=0).cpu().numpy()
             v = val.item() if hasattr(val, "item") else float(val)
 
-            current_depth = len(self.trajectory)
+            current_depth = len(self.active_stack)
             effective_noise = self.episode_noise * (self.depth_gamma**current_depth)
 
             if effective_noise > 0.001:
@@ -342,7 +374,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 "features": features.cpu().numpy(),
             }
 
-        # 2. Retrieve State Stats for PUCT Evaluation
         node_data = self.mcts_tree[state_key]
         N_sa = node_data["N"]
         W_sa = node_data["W"]
@@ -351,23 +382,17 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
         N_s = N_sa.sum()
 
-        # PUCT Formula: Q(s,a) + U(s,a)
         Q_sa = np.where(N_sa > 0, W_sa / np.maximum(N_sa, 1.0), v_s)
         U_sa = self.c_puct * P_sa * (math.sqrt(max(1.0, float(N_s))) / (1.0 + N_sa))
 
         puct_scores = Q_sa + U_sa
         order = np.argsort(-puct_scores).tolist()
 
-        current_depth = len(self.trajectory)
-        self.trajectory.append(
-            {
-                "state_hash": state_key,
-                "top_action": order[0],
-                "depth": current_depth,
-            }
-        )
-
+        self.active_stack.append((state_key, order[0]))
         return order
+
+    def order_cache(self, choices):
+        return self._order_items(choices, "cache_dec", self._extract_cache_features)
 
     def order_enodes(self, enodes):
         return self._order_items(enodes, "extract_dec", self._extract_dispatch_features)
@@ -385,6 +410,23 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
     def order_malloc(self, avail_buffers):
         return self._order_items(
             avail_buffers, "malloc_dec", self._extract_malloc_features
+        )
+
+    def _extract_cache_features(self, items):
+        feats = []
+        for f in items:
+            mem_type = float(f.mem_space.type) if hasattr(f, "mem_space") else 0.0
+            feats.append(
+                [
+                    float(f.is_cached),
+                    math.log1p(max(0.0, float(f.size))),
+                    mem_type,
+                    float(f.op_type),
+                    float(f.num_users),
+                ]
+            )
+        return torch.nan_to_num(
+            torch.tensor(feats, dtype=torch.float32), posinf=1e9, neginf=-1e9
         )
 
     def _extract_dispatch_features(self, items):
