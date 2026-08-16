@@ -7,7 +7,7 @@ import socket
 import struct
 import zlib
 import contextlib
-
+from typing import Protocol
 
 import numpy as np
 import tensor_graphs
