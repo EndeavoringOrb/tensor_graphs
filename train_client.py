@@ -64,19 +64,8 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
 
                     agent.load_state_dict(weights_dict, strict=False)
                     current_version = new_version
-
-                    active_versions = {
-                        current_version,
-                        current_version - 1,
-                        current_version - 2,
-                    }
-                    for k in list(prefix_cache_kv.keys()):
-                        if k[0] not in active_versions:
-                            prefix_cache_kv.pop(k, None)
-                            prefix_cache_v.pop(k, None)
-
                     print(
-                        f"[Inference Server] Weights updated to version {current_version}. Retaining active versions {active_versions}."
+                        f"[Inference Server] Weights updated to version {current_version}."
                     )
                 except Exception as e:
                     print(f"[Inference Server] Error loading weights: {e}")
