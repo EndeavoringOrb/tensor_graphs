@@ -315,10 +315,29 @@ class FlashInferSelfAttention(nn.Module):
         ),  # (max_pages, 2, page_size, num_heads, head_dim)
         prefill_wrapper: (flashinfer.BatchPrefillWithPagedKVCacheWrapper | None) = None,
     ) -> torch.Tensor:
-        """Runs SGLang-style FlashInfer paged prefill attention."""
+        """Runs SGLang-style FlashInfer paged prefill attention during inference."""
         out = prefill_wrapper.run(q_ragged, paged_kv_data_layer)
         out = self.out_proj(out.view(-1, self.d_model))
         return out
+
+    def forward_train_layer(
+        self,
+        norm_x: torch.Tensor,  # (B_g, max_A, d_model)
+        k_past: torch.Tensor,  # (B_g, nhead, L, head_dim)
+        v_past: torch.Tensor,  # (B_g, nhead, L, head_dim)
+    ) -> torch.Tensor:
+        """Runs PyTorch SDPA without dense mask for full autograd support during training."""
+        B_g, max_A, _ = norm_x.shape
+        q = (
+            self.q_proj(norm_x)
+            .view(B_g, max_A, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
+        attn_out = torch.nn.functional.scaled_dot_product_attention(
+            q, k_past, v_past, is_causal=False
+        )
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B_g, max_A, self.d_model)
+        return self.out_proj(attn_out)
 
 
 class FlashInferTransformerBlock(nn.Module):
@@ -361,6 +380,18 @@ class FlashInferTransformerBlock(nn.Module):
         x_ragged = x_ragged + attn_out
         x_ragged = x_ragged + self.mlp(self.norm2(x_ragged))
         return x_ragged
+
+    def forward_train(
+        self,
+        x: torch.Tensor,
+        k_past: torch.Tensor,
+        v_past: torch.Tensor,
+    ) -> torch.Tensor:
+        norm_x = self.norm1(x)
+        attn_out = self.attn.forward_train_layer(norm_x, k_past, v_past)
+        x = x + attn_out
+        x = x + self.mlp(self.norm2(x))
+        return x
 
 
 class AlphaZeroTransformer(nn.Module):
@@ -431,6 +462,7 @@ class AlphaZeroTransformer(nn.Module):
         paged_kv_last_page_len: torch.Tensor,
         q_indptr: torch.Tensor,
     ) -> torch.Tensor:
+        """Evaluates actions during client inference using SGLang-style FlashInfer kernels."""
         total_A = ragged_action_features.shape[0]
         token_types = torch.full(
             (total_A,), 3, dtype=torch.int64, device=ragged_action_features.device
@@ -444,7 +476,6 @@ class AlphaZeroTransformer(nn.Module):
 
         self._init_flashinfer_wrapper(ragged_action_features.device)
 
-        # Plan the fused batched FlashInfer kernel across all heterogeneous requests
         self.wrapper.plan(
             qo_indptr=q_indptr,
             paged_kv_indptr=paged_kv_indptr,
@@ -461,6 +492,33 @@ class AlphaZeroTransformer(nn.Module):
             x = layer.forward_paged_actions(
                 x, paged_kv_data[l], prefill_wrapper=self.wrapper
             )
+
+        logits = self.policy_head(x).squeeze(-1)
+        return logits
+
+    def evaluate_actions_train(
+        self,
+        padded_actions: torch.Tensor,  # (B_g, max_A, 8)
+        padded_pid: torch.Tensor,  # (B_g, max_A)
+        k_layers: list[torch.Tensor],  # list of (L, nhead, head_dim)
+        v_layers: list[torch.Tensor],  # list of (L, nhead, head_dim)
+    ) -> torch.Tensor:
+        """Evaluates actions during training with full backward autograd support."""
+        B_g, max_A, _ = padded_actions.shape
+        token_types = torch.full(
+            (B_g, max_A), 3, dtype=torch.int64, device=padded_actions.device
+        )
+
+        x = (
+            self.feat_proj(padded_actions)
+            + self.type_emb(token_types)
+            + self.phase_emb(padded_pid)
+        )
+
+        for l, layer in enumerate(self.layers):
+            k_past = k_layers[l].transpose(0, 1).unsqueeze(0).expand(B_g, -1, -1, -1)
+            v_past = v_layers[l].transpose(0, 1).unsqueeze(0).expand(B_g, -1, -1, -1)
+            x = layer.forward_train(x, k_past, v_past)
 
         logits = self.policy_head(x).squeeze(-1)
         return logits
@@ -932,7 +990,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             phase_id = self.PHASE_MAP[phase_name]
 
             if self.agent is not None:
-                # Direct local evaluation
                 device = next(self.agent.parameters()).device
                 pdata = self.prefix_registry[prefix_key]
                 f_t = torch.tensor(pdata.features, dtype=torch.float32, device=device)
@@ -947,57 +1004,25 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 A_len = action_feats_np.shape[0]
                 dim_feat = min(MAX_FEATS - 1, action_feats_np.shape[1])
                 actions_t = torch.zeros(
-                    (A_len, MAX_FEATS), dtype=torch.float32, device=device
+                    (1, A_len, MAX_FEATS), dtype=torch.float32, device=device
                 )
-                actions_t[:, 0] = torch.arange(
+                actions_t[0, :, 0] = torch.arange(
                     A_len, dtype=torch.float32, device=device
                 )
-                actions_t[:, 1 : 1 + dim_feat] = torch.tensor(
+                actions_t[0, :, 1 : 1 + dim_feat] = torch.tensor(
                     action_feats_np[:, :dim_feat], dtype=torch.float32, device=device
                 )
                 pids_t = torch.full(
-                    (A_len,), phase_id, dtype=torch.int64, device=device
+                    (1, A_len), phase_id, dtype=torch.int64, device=device
                 )
-
-                # Execute local evaluation
-                L = pdata.features.shape[0]
-                q_indptr = torch.tensor([0, A_len], dtype=torch.int32, device=device)
-                paged_kv_indptr = torch.tensor([0, L], dtype=torch.int32, device=device)
-                paged_kv_indices = torch.arange(L, dtype=torch.int32, device=device)
-                paged_kv_last_page_len = torch.tensor(
-                    [1], dtype=torch.int32, device=device
-                )
-
-                paged_kv_data = torch.zeros(
-                    (
-                        len(k_layers),
-                        L,
-                        2,
-                        1,
-                        self.agent.nhead,
-                        self.agent.d_model // self.agent.nhead,
-                    ),
-                    dtype=torch.bfloat16,
-                    device=device,
-                )
-                for l in range(len(k_layers)):
-                    paged_kv_data[l, :, 0, 0, :, :] = k_layers[l]
-                    paged_kv_data[l, :, 1, 0, :, :] = v_layers[l]
 
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                    logits = self.agent.evaluate_actions_paged(
-                        actions_t,
-                        pids_t,
-                        paged_kv_data,
-                        paged_kv_indices,
-                        paged_kv_indptr,
-                        paged_kv_last_page_len,
-                        q_indptr,
+                    logits = self.agent.evaluate_actions_train(
+                        actions_t, pids_t, k_layers, v_layers
                     )
-                scores = logits[:A_len].cpu().float().numpy()
+                scores = logits[0, :A_len].cpu().float().numpy()
                 v = float(v_pred.item())
             else:
-                # Lock-free Shared-Memory IPC to centralized inference worker
                 A_len = min(MAX_ACTIONS, action_feats_np.shape[0])
                 dim_feat = min(MAX_FEATS - 1, action_feats_np.shape[1])
 

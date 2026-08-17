@@ -235,22 +235,15 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             if prefix is None:
                 continue
 
-            f_t = torch.tensor(
-                prefix.features, dtype=torch.float32, device=device
-            ).unsqueeze(0)
-            tt_t = torch.tensor(
-                prefix.token_types, dtype=torch.int64, device=device
-            ).unsqueeze(0)
-            p_t = torch.tensor(
-                prefix.phase_ids, dtype=torch.int64, device=device
-            ).unsqueeze(0)
+            f_t = torch.tensor(prefix.features, dtype=torch.float32, device=device)
+            tt_t = torch.tensor(prefix.token_types, dtype=torch.int64, device=device)
+            p_t = torch.tensor(prefix.phase_ids, dtype=torch.int64, device=device)
 
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                v_pred, prefix_kvs = agent.encode_prefix(f_t, tt_t, p_t)
+                v_pred, k_layers, v_layers = agent.encode_prefix(f_t, tt_t, p_t)
 
             B_g = len(items)
             max_A = max(len(it["action_features"]) for it in items)
-            L = prefix.features.shape[0]
 
             padded_actions = torch.zeros(
                 (B_g, max_A, MAX_FEATS), dtype=torch.float32, device=device
@@ -258,9 +251,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             padded_pid = torch.zeros((B_g, max_A), dtype=torch.int64, device=device)
             padded_pis = torch.zeros((B_g, max_A), dtype=torch.float32, device=device)
             action_mask = torch.zeros((B_g, max_A), dtype=torch.bool, device=device)
-            attn_mask = torch.full(
-                (B_g, 1, max_A, L + max_A), -float("inf"), device=device
-            )
 
             for i, it in enumerate(items):
                 A_len = len(it["action_features"])
@@ -279,18 +269,9 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 )
                 action_mask[i, :A_len] = True
 
-                for a_idx in range(A_len):
-                    attn_mask[i, 0, a_idx, :L] = 0.0
-                    attn_mask[i, 0, a_idx, L : L + a_idx + 1] = 0.0
-
-            batched_kvs = [
-                (k.expand(B_g, -1, -1, -1), v.expand(B_g, -1, -1, -1))
-                for (k, v) in prefix_kvs
-            ]
-
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                logits = agent.evaluate_actions_batched(
-                    padded_actions, padded_pid, batched_kvs, attn_mask
+                logits = agent.evaluate_actions_train(
+                    padded_actions, padded_pid, k_layers, v_layers
                 )
 
             logits = logits.masked_fill(~action_mask, -float("inf"))

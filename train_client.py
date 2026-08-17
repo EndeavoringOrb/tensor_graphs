@@ -8,6 +8,7 @@ import time
 import traceback
 from pathlib import Path
 
+import numpy as np
 import psutil
 import torch
 import torch.multiprocessing as mp
