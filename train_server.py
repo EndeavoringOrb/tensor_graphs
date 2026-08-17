@@ -17,6 +17,7 @@ from safetensors.torch import load_file, save_file
 from torch import optim
 
 from train_shared import (
+    MAX_FEATS,
     AlphaZeroTransformer,
     PrefixData,
     TrainConfig,
@@ -249,16 +250,21 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
 
             B_g = len(items)
             max_A = max(len(it["action_features"]) for it in items)
+            L = prefix.features.shape[0]
+
             padded_actions = torch.zeros(
-                (B_g, max_A, 8), dtype=torch.float32, device=device
+                (B_g, max_A, MAX_FEATS), dtype=torch.float32, device=device
             )
             padded_pid = torch.zeros((B_g, max_A), dtype=torch.int64, device=device)
             padded_pis = torch.zeros((B_g, max_A), dtype=torch.float32, device=device)
             action_mask = torch.zeros((B_g, max_A), dtype=torch.bool, device=device)
+            attn_mask = torch.full(
+                (B_g, 1, max_A, L + max_A), -float("inf"), device=device
+            )
 
             for i, it in enumerate(items):
                 A_len = len(it["action_features"])
-                dim_feat = min(7, it["action_features"].shape[1])
+                dim_feat = min(MAX_FEATS - 1, it["action_features"].shape[1])
                 padded_actions[i, :A_len, 1 : 1 + dim_feat] = torch.tensor(
                     it["action_features"][:, :dim_feat],
                     dtype=torch.float32,
@@ -273,14 +279,18 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 )
                 action_mask[i, :A_len] = True
 
+                for a_idx in range(A_len):
+                    attn_mask[i, 0, a_idx, :L] = 0.0
+                    attn_mask[i, 0, a_idx, L : L + a_idx + 1] = 0.0
+
             batched_kvs = [
                 (k.expand(B_g, -1, -1, -1), v.expand(B_g, -1, -1, -1))
                 for (k, v) in prefix_kvs
             ]
 
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                logits = agent.evaluate_actions(
-                    padded_actions, padded_pid, past_kv=batched_kvs
+                logits = agent.evaluate_actions_batched(
+                    padded_actions, padded_pid, batched_kvs, attn_mask
                 )
 
             logits = logits.masked_fill(~action_mask, -float("inf"))

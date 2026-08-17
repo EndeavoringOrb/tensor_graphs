@@ -1,3 +1,4 @@
+import ctypes
 import dataclasses
 import math
 import pickle
@@ -5,14 +6,27 @@ import random
 import socket
 import struct
 import zlib
-from typing import Protocol
+from multiprocessing import shared_memory
+from typing import Protocol, Any
 
 import numpy as np
 import tensor_graphs
 import torch
 from torch import nn
 
+try:
+    import flashinfer
+
+    HAS_FLASHINFER = True
+except ImportError:
+    HAS_FLASHINFER = False
+
 torch.set_float32_matmul_precision("high")
+
+# Maximum parameters for shared memory pre-allocated slots
+MAX_ACTIONS = 1024
+MAX_FEATS = 8
+MAX_GRAPH_TOKENS = 65536
 
 
 @dataclasses.dataclass
@@ -46,9 +60,7 @@ class TrainConfig:
     bucket_idx: int = -1
     compile_decode_buckets: bool = False
     workers: int = 4
-    cpp_threads: int = (
-        1  # Prevents C++ thread oversubscription in multi-process workers
-    )
+    cpp_threads: int = 1
 
     # PUCT & Noise Annealing Config
     c_puct: float = 1.25
@@ -63,6 +75,395 @@ class TrainConfig:
     use_bluetooth: bool = False
     bt_host_address: str = "AC:F2:3C:A7:F7:EC"
     bt_port: int = 4
+
+
+# ==============================================================================
+# LOCK-FREE SHARED MEMORY SPSC RING BUFFER
+# ==============================================================================
+class ShmRequestSlot(ctypes.Structure):
+    _fields_ = [
+        ("msg_type", ctypes.c_uint32),
+        ("version", ctypes.c_int64),
+        ("prefix_key", ctypes.c_int64),
+        ("phase_id", ctypes.c_int32),
+        ("num_actions", ctypes.c_int32),
+        ("action_features", ctypes.c_float * (MAX_ACTIONS * MAX_FEATS)),
+    ]
+
+
+class ShmResponseSlot(ctypes.Structure):
+    _fields_ = [
+        ("ready", ctypes.c_uint32),
+        ("num_actions", ctypes.c_int32),
+        ("value", ctypes.c_float),
+        ("logits", ctypes.c_float * MAX_ACTIONS),
+    ]
+
+
+class ShmSPSCQueue:
+    """Zero-copy single-producer single-consumer lock-free shared-memory circular queue."""
+
+    def __init__(
+        self,
+        name: str,
+        slot_cls,
+        capacity: int = 32,
+        create: bool = False,
+    ):
+        self.capacity = capacity
+        self.slot_size = ctypes.sizeof(slot_cls)
+        self.header_size = 16  # head (uint32), tail (uint32)
+        self.total_size = self.header_size + self.capacity * self.slot_size
+        self.slot_cls = slot_cls
+
+        if create:
+            try:
+                self.shm = shared_memory.SharedMemory(
+                    name=name, create=True, size=self.total_size
+                )
+            except FileExistsError:
+                temp = shared_memory.SharedMemory(name=name)
+                temp.close()
+                temp.unlink()
+                self.shm = shared_memory.SharedMemory(
+                    name=name, create=True, size=self.total_size
+                )
+            self.shm.buf[: self.header_size] = b"\x00" * self.header_size
+        else:
+            self.shm = shared_memory.SharedMemory(name=name, create=False)
+
+        self._head_ptr = (ctypes.c_uint32).from_buffer(self.shm.buf, 0)
+        self._tail_ptr = (ctypes.c_uint32).from_buffer(self.shm.buf, 4)
+
+    def write_slot(self) -> tuple[int, Any]:
+        head = self._head_ptr.value
+        tail = self._tail_ptr.value
+        if head - tail >= self.capacity:
+            return -1, None
+
+        slot_idx = head % self.capacity
+        offset = self.header_size + slot_idx * self.slot_size
+        slot = self.slot_cls.from_buffer(self.shm.buf, offset)
+        return slot_idx, slot
+
+    def commit_write(self):
+        self._head_ptr.value += 1
+
+    def read_slot(self) -> tuple[int, Any]:
+        head = self._head_ptr.value
+        tail = self._tail_ptr.value
+        if tail >= head:
+            return -1, None
+
+        slot_idx = tail % self.capacity
+        offset = self.header_size + slot_idx * self.slot_size
+        slot = self.slot_cls.from_buffer(self.shm.buf, offset)
+        return slot_idx, slot
+
+    def commit_read(self):
+        self._tail_ptr.value += 1
+
+    def is_empty(self) -> bool:
+        return self._tail_ptr.value >= self._head_ptr.value
+
+    def close(self):
+        self.shm.close()
+
+    def unlink(self):
+        try:
+            self.shm.unlink()
+        except FileNotFoundError:
+            pass
+
+
+# ==============================================================================
+# RADIX KV CACHE (SGLANG-STYLE PAGED KV TREE)
+# ==============================================================================
+class RadixNode:
+    def __init__(
+        self,
+        prefix_key: int,
+        page_indices: torch.Tensor,
+        num_tokens: int,
+        value: float = 0.0,
+    ):
+        self.prefix_key = prefix_key
+        self.page_indices = page_indices
+        self.num_tokens = num_tokens
+        self.value = value
+
+
+class RadixTreeKVCache:
+    """Manages physical paged KV cache allocation and Radix tree structure."""
+
+    def __init__(
+        self,
+        num_layers: int,
+        num_heads: int,
+        head_dim: int,
+        max_pages: int = 250000,
+        device="cuda",
+    ):
+        self.device = device
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.page_size = 1  # Page size 1 for granular token-level radix reuse
+
+        # Layout: (num_layers, max_pages, 2, page_size, num_heads, head_dim)
+        self.paged_kv_data = torch.zeros(
+            (num_layers, max_pages, 2, self.page_size, num_heads, head_dim),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        self.nodes: dict[int, RadixNode] = {}
+        self.free_page_ptr = 0
+
+    def insert(
+        self,
+        prefix_key: int,
+        num_tokens: int,
+        layer_k: list[torch.Tensor],  # list of (L, num_heads, head_dim)
+        layer_v: list[torch.Tensor],  # list of (L, num_heads, head_dim)
+        value: float,
+    ) -> RadixNode:
+        if prefix_key in self.nodes:
+            return self.nodes[prefix_key]
+
+        start_page = self.free_page_ptr
+        end_page = start_page + num_tokens
+        self.free_page_ptr = end_page
+
+        for l in range(self.num_layers):
+            self.paged_kv_data[l, start_page:end_page, 0, 0, :, :] = layer_k[l]
+            self.paged_kv_data[l, start_page:end_page, 1, 0, :, :] = layer_v[l]
+
+        page_indices = torch.arange(
+            start_page, end_page, dtype=torch.int32, device=self.device
+        )
+        node = RadixNode(
+            prefix_key=prefix_key,
+            page_indices=page_indices,
+            num_tokens=num_tokens,
+            value=value,
+        )
+        self.nodes[prefix_key] = node
+        return node
+
+    def get(self, prefix_key: int) -> RadixNode | None:
+        return self.nodes.get(prefix_key, None)
+
+    def contains(self, prefix_key: int) -> bool:
+        return prefix_key in self.nodes
+
+
+# ==============================================================================
+# TRANSFORMER ARCHITECTURE WITH FLASHINFER PAGED RADIX ATTENTION
+# ==============================================================================
+class FlashInferSelfAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+
+    def forward_prefix_layer(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Encodes full prefix and outputs K and V to be cached in the Radix Tree."""
+        L = x.shape[0]
+        q = (
+            self.q_proj(x)
+            .view(L, self.num_heads, self.head_dim)
+            .to(dtype=torch.bfloat16)
+        )
+        k = (
+            self.k_proj(x)
+            .view(L, self.num_heads, self.head_dim)
+            .to(dtype=torch.bfloat16)
+        )
+        v = (
+            self.v_proj(x)
+            .view(L, self.num_heads, self.head_dim)
+            .to(dtype=torch.bfloat16)
+        )
+
+        if HAS_FLASHINFER and x.is_cuda:
+            attn_out = flashinfer.single_prefill_with_kv_cache(q, k, v, causal=False)
+        else:
+            q_t = q.unsqueeze(0).transpose(1, 2)
+            k_t = k.unsqueeze(0).transpose(1, 2)
+            v_t = v.unsqueeze(0).transpose(1, 2)
+            attn_out = torch.nn.functional.scaled_dot_product_attention(
+                q_t, k_t, v_t, is_causal=False
+            )
+            attn_out = attn_out.transpose(1, 2).squeeze(0)
+
+        out = self.out_proj(attn_out.view(L, self.d_model))
+        return out, k, v
+
+    def forward_paged_actions(
+        self,
+        q_ragged: torch.Tensor,  # (total_A, num_heads, head_dim)
+        paged_kv_data_layer: (
+            torch.Tensor
+        ),  # (max_pages, 2, page_size, num_heads, head_dim)
+        prefill_wrapper: (flashinfer.BatchPrefillWithPagedKVCacheWrapper | None) = None,
+    ) -> torch.Tensor:
+        """Runs SGLang-style FlashInfer paged prefill attention."""
+        out = prefill_wrapper.run(q_ragged, paged_kv_data_layer)
+        out = self.out_proj(out.view(-1, self.d_model))
+        return out
+
+
+class FlashInferTransformerBlock(nn.Module):
+    def __init__(self, d_model: int, num_heads: int):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.attn = FlashInferSelfAttention(d_model, num_heads)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, d_model * 4),
+            nn.GELU(),
+            nn.Linear(d_model * 4, d_model),
+        )
+
+    def forward_prefix(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        norm_x = self.norm1(x)
+        attn_out, k, v = self.attn.forward_prefix_layer(norm_x)
+        x = x + attn_out
+        x = x + self.mlp(self.norm2(x))
+        return x, k, v
+
+    def forward_paged_actions(
+        self,
+        x_ragged: torch.Tensor,
+        paged_kv_data_layer: torch.Tensor,
+        prefill_wrapper: flashinfer.BatchPrefillWithPagedKVCacheWrapper,
+    ) -> torch.Tensor:
+        norm_x = self.norm1(x_ragged)
+        total_A = norm_x.shape[0]
+        q = (
+            self.attn.q_proj(norm_x)
+            .view(total_A, self.attn.num_heads, self.attn.head_dim)
+            .to(dtype=torch.bfloat16)
+        )
+        attn_out = self.attn.forward_paged_actions(
+            q, paged_kv_data_layer, prefill_wrapper=prefill_wrapper
+        )
+        x_ragged = x_ragged + attn_out
+        x_ragged = x_ragged + self.mlp(self.norm2(x_ragged))
+        return x_ragged
+
+
+class AlphaZeroTransformer(nn.Module):
+    def __init__(self, d_model=128, nhead=4, num_layers=3, max_feat_dim=8):
+        super().__init__()
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_layers = num_layers
+        self.max_feat_dim = max_feat_dim
+
+        self.feat_proj = nn.Linear(max_feat_dim, d_model)
+        self.type_emb = nn.Embedding(4, d_model)
+        self.phase_emb = nn.Embedding(5, d_model)
+
+        self.layers = nn.ModuleList(
+            [FlashInferTransformerBlock(d_model, nhead) for _ in range(num_layers)]
+        )
+
+        self.value_head = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1)
+        )
+        self.policy_head = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1)
+        )
+
+        self.wrapper = None
+        self.workspace_buffer = None
+
+    def _init_flashinfer_wrapper(self, device):
+        if self.wrapper is None and HAS_FLASHINFER and device.type == "cuda":
+            self.workspace_buffer = torch.empty(
+                128 * 1024 * 1024, dtype=torch.uint8, device=device
+            )
+            self.wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+                self.workspace_buffer, kv_layout="NHD"
+            )
+
+    def encode_prefix(
+        self,
+        features: torch.Tensor,  # (L, 8)
+        token_types: torch.Tensor,  # (L,)
+        phase_ids: torch.Tensor,  # (L,)
+    ) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+        x = (
+            self.feat_proj(features)
+            + self.type_emb(token_types)
+            + self.phase_emb(phase_ids)
+        )
+
+        k_layers, v_layers = [], []
+        for layer in self.layers:
+            x, k, v = layer.forward_prefix(x)
+            k_layers.append(k)
+            v_layers.append(v)
+
+        v_val = self.value_head(x[0]).squeeze(-1)
+        return v_val, k_layers, v_layers
+
+    def evaluate_actions_paged(
+        self,
+        ragged_action_features: torch.Tensor,  # (total_A, 8)
+        ragged_phase_ids: torch.Tensor,  # (total_A,)
+        paged_kv_data: (
+            torch.Tensor
+        ),  # (num_layers, max_pages, 2, 1, num_heads, head_dim)
+        paged_kv_indices: torch.Tensor,
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        q_indptr: torch.Tensor,
+    ) -> torch.Tensor:
+        total_A = ragged_action_features.shape[0]
+        token_types = torch.full(
+            (total_A,), 3, dtype=torch.int64, device=ragged_action_features.device
+        )
+
+        x = (
+            self.feat_proj(ragged_action_features)
+            + self.type_emb(token_types)
+            + self.phase_emb(ragged_phase_ids)
+        )
+
+        self._init_flashinfer_wrapper(ragged_action_features.device)
+
+        # Plan the fused batched FlashInfer kernel across all heterogeneous requests
+        self.wrapper.plan(
+            qo_indptr=q_indptr,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            num_qo_heads=self.nhead,
+            num_kv_heads=self.nhead,
+            head_dim_qk=self.d_model // self.nhead,
+            page_size=1,
+            causal=False,
+        )
+
+        for l, layer in enumerate(self.layers):
+            x = layer.forward_paged_actions(
+                x, paged_kv_data[l], prefill_wrapper=self.wrapper
+            )
+
+        logits = self.policy_head(x).squeeze(-1)
+        return logits
 
 
 # ==============================================================================
@@ -251,9 +652,9 @@ def get_graph_provider(config: TrainConfig, worker_rank: int = 0):
 # ==============================================================================
 @dataclasses.dataclass
 class PrefixData:
-    features: np.ndarray  # (1 + N + E, 8) float32
-    token_types: np.ndarray  # (1 + N + E,) int64
-    phase_ids: np.ndarray  # (1 + N + E,) int64
+    features: np.ndarray
+    token_types: np.ndarray
+    phase_ids: np.ndarray
     phase_id: int
 
 
@@ -394,127 +795,17 @@ def recv_msg(sock):
 
 
 # ==============================================================================
-# TRANSFORMER MODEL
+# ACTOR DELEGATE (SEARCH INTEGRATION)
 # ==============================================================================
-class CustomSelfAttention(nn.Module):
-    def __init__(self, d_model: int, num_heads: int):
-        super().__init__()
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.head_dim = d_model // num_heads
-
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        B, L, _ = x.shape
-        q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
-
-        if past_kv is not None:
-            past_k, past_v = past_kv
-            k = torch.cat([past_k, k], dim=2)
-            v = torch.cat([past_v, v], dim=2)
-
-        new_kv = (k, v)
-        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None)
-        out = out.transpose(1, 2).contiguous().view(B, L, self.d_model)
-        return self.out_proj(out), new_kv
-
-
-class CustomTransformerBlock(nn.Module):
-    def __init__(self, d_model: int, num_heads: int):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(d_model)
-        self.attn = CustomSelfAttention(d_model, num_heads)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model)
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        attn_out, new_kv = self.attn(self.norm1(x), past_kv=past_kv)
-        x = x + attn_out
-        x = x + self.mlp(self.norm2(x))
-        return x, new_kv
-
-
-class AlphaZeroTransformer(nn.Module):
-    def __init__(self, d_model=128, nhead=4, num_layers=3, max_feat_dim=8):
-        super().__init__()
-        self.d_model = d_model
-        self.nhead = nhead
-        self.num_layers = num_layers
-        self.max_feat_dim = max_feat_dim
-
-        self.feat_proj = nn.Linear(max_feat_dim, d_model)
-        self.type_emb = nn.Embedding(4, d_model)
-        self.phase_emb = nn.Embedding(5, d_model)
-
-        self.layers = nn.ModuleList(
-            [CustomTransformerBlock(d_model, nhead) for _ in range(num_layers)]
-        )
-
-        self.value_head = nn.Sequential(
-            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1)
-        )
-
-        self.policy_head = nn.Sequential(
-            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1)
-        )
-
-    def encode_prefix(self, features, token_types, phase_ids):
-        x = (
-            self.feat_proj(features)
-            + self.type_emb(token_types)
-            + self.phase_emb(phase_ids)
-        )
-
-        prefix_kvs = []
-        for layer in self.layers:
-            x, kv = layer(x, past_kv=None)
-            prefix_kvs.append(kv)
-
-        v = self.value_head(x[:, 0]).squeeze(-1)
-        return v, prefix_kvs
-
-    def evaluate_actions(self, action_features, phase_ids, past_kv):
-        B, A, _ = action_features.shape
-        token_types = torch.full(
-            (B, A), 3, dtype=torch.int64, device=action_features.device
-        )
-        x = (
-            self.feat_proj(action_features)
-            + self.type_emb(token_types)
-            + self.phase_emb(phase_ids)
-        )
-
-        for i, layer in enumerate(self.layers):
-            x, _ = layer(x, past_kv=past_kv[i])
-
-        logits = self.policy_head(x).squeeze(-1)
-        return logits
-
-
 class ActorDelegate(tensor_graphs.SearchDelegate):
     PHASE_MAP = {"cache": 0, "extract": 1, "dispatch": 2, "bufferize": 3, "malloc": 4}
 
     def __init__(
         self,
         agent=None,
-        req_queue=None,
-        resp_queue=None,
+        shm_req_queue: ShmSPSCQueue | None = None,
+        shm_resp_queue: ShmSPSCQueue | None = None,
+        prefix_dict: dict | None = None,
         worker_id: int = 0,
         mcts_tree: dict | None = None,
         c_puct: float = 1.25,
@@ -528,8 +819,9 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
     ):
         super().__init__()
         self.agent = agent
-        self.req_queue = req_queue
-        self.resp_queue = resp_queue
+        self.shm_req = shm_req_queue
+        self.shm_resp = shm_resp_queue
+        self.shared_prefix_dict = prefix_dict
         self.worker_id = worker_id
         self.mcts_tree = mcts_tree if mcts_tree is not None else {}
         self.c_puct = c_puct
@@ -558,9 +850,6 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.prefix_registry: dict[int, PrefixData] = {}
         self.current_prefix_keys: dict[str, int] = {}
         self.phase_values = {}
-        self.prefix_cache_kv = {}
-        self.prefix_cache_v = {}
-        self.worker_registered_prefixes = set()
 
     def push_state(self):
         pass
@@ -605,36 +894,9 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.prefix_registry[prefix_key] = prefix_data
         self.current_prefix_keys[phase_name] = prefix_key
 
-        cache_key = (self.version, prefix_key)
-        if self.agent is not None:
-            if cache_key not in self.prefix_cache_kv:
-                device = next(self.agent.parameters()).device
-                f_t = torch.tensor(
-                    prefix_data.features, dtype=torch.float32, device=device
-                ).unsqueeze(0)
-                tt_t = torch.tensor(
-                    prefix_data.token_types, dtype=torch.int64, device=device
-                ).unsqueeze(0)
-                p_t = torch.tensor(
-                    prefix_data.phase_ids, dtype=torch.int64, device=device
-                ).unsqueeze(0)
-
-                with (
-                    torch.inference_mode(),
-                    torch.autocast(device_type=device.type, dtype=torch.bfloat16),
-                ):
-                    v, kv = self.agent.encode_prefix(f_t, tt_t, p_t)
-
-                self.prefix_cache_kv[cache_key] = kv
-                self.prefix_cache_v[cache_key] = v.item() if v is not None else 0.0
-            self.phase_values[phase_name] = self.prefix_cache_v[cache_key]
-        else:
-            if self.req_queue is not None:
-                if cache_key not in self.worker_registered_prefixes:
-                    self.req_queue.put(
-                        ("register_prefix", self.version, prefix_key, prefix_data)
-                    )
-                    self.worker_registered_prefixes.add(cache_key)
+        if self.shared_prefix_dict is not None:
+            if prefix_key not in self.shared_prefix_dict:
+                self.shared_prefix_dict[prefix_key] = prefix_data
 
     def init_cache_graph(self, node_features, edge_src, edge_dst):
         self._store_raw_graph("cache", node_features, edge_src, edge_dst)
@@ -668,74 +930,127 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
         if state_key not in self.mcts_tree:
             phase_id = self.PHASE_MAP[phase_name]
-            cache_key = (self.version, prefix_key)
 
             if self.agent is not None:
+                # Direct local evaluation
                 device = next(self.agent.parameters()).device
-                kv = self.prefix_cache_kv[cache_key]
-                v = self.prefix_cache_v[cache_key]
+                pdata = self.prefix_registry[prefix_key]
+                f_t = torch.tensor(pdata.features, dtype=torch.float32, device=device)
+                tt_t = torch.tensor(pdata.token_types, dtype=torch.int64, device=device)
+                p_t = torch.tensor(pdata.phase_ids, dtype=torch.int64, device=device)
+
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                    v_pred, k_layers, v_layers = self.agent.encode_prefix(
+                        f_t, tt_t, p_t
+                    )
 
                 A_len = action_feats_np.shape[0]
-                padded_actions = torch.zeros(
-                    (1, A_len, 8), dtype=torch.float32, device=device
+                dim_feat = min(MAX_FEATS - 1, action_feats_np.shape[1])
+                actions_t = torch.zeros(
+                    (A_len, MAX_FEATS), dtype=torch.float32, device=device
                 )
-                padded_pid = torch.full(
-                    (1, A_len), phase_id, dtype=torch.int64, device=device
-                )
-
-                dim_feat = min(7, action_feats_np.shape[1])
-                padded_actions[0, :A_len, 1 : 1 + dim_feat] = torch.tensor(
-                    action_feats_np[:, :dim_feat], dtype=torch.float32, device=device
-                )
-                padded_actions[0, :A_len, 0] = torch.arange(
+                actions_t[:, 0] = torch.arange(
                     A_len, dtype=torch.float32, device=device
                 )
-
-                with (
-                    torch.inference_mode(),
-                    torch.autocast(device_type=device.type, dtype=torch.bfloat16),
-                ):
-                    logits = self.agent.evaluate_actions(
-                        padded_actions, padded_pid, past_kv=kv
-                    )
-                scores = logits[0, :A_len].cpu().float().numpy()
-            else:
-                self.req_queue.put(
-                    (
-                        "evaluate",
-                        self.version,
-                        prefix_key,
-                        action_feats_np,
-                        phase_id,
-                        self.worker_id,
-                    )
+                actions_t[:, 1 : 1 + dim_feat] = torch.tensor(
+                    action_feats_np[:, :dim_feat], dtype=torch.float32, device=device
                 )
-                status, *data = self.resp_queue.get()
+                pids_t = torch.full(
+                    (A_len,), phase_id, dtype=torch.int64, device=device
+                )
 
-                if status == "error" and data[0] == "missing_prefix":
-                    pdata = self.prefix_registry[prefix_key]
-                    self.req_queue.put(
-                        ("register_prefix", self.version, prefix_key, pdata)
-                    )
-                    self.worker_registered_prefixes.add(cache_key)
-                    self.req_queue.put(
-                        (
-                            "evaluate",
-                            self.version,
-                            prefix_key,
-                            action_feats_np,
-                            phase_id,
-                            self.worker_id,
-                        )
-                    )
-                    status, *data = self.resp_queue.get()
+                # Execute local evaluation
+                L = pdata.features.shape[0]
+                q_indptr = torch.tensor([0, A_len], dtype=torch.int32, device=device)
+                paged_kv_indptr = torch.tensor([0, L], dtype=torch.int32, device=device)
+                paged_kv_indices = torch.arange(L, dtype=torch.int32, device=device)
+                paged_kv_last_page_len = torch.tensor(
+                    [1], dtype=torch.int32, device=device
+                )
 
-                scores, v = data
-                self.phase_values[phase_name] = v
+                paged_kv_data = torch.zeros(
+                    (
+                        len(k_layers),
+                        L,
+                        2,
+                        1,
+                        self.agent.nhead,
+                        self.agent.d_model // self.agent.nhead,
+                    ),
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+                for l in range(len(k_layers)):
+                    paged_kv_data[l, :, 0, 0, :, :] = k_layers[l]
+                    paged_kv_data[l, :, 1, 0, :, :] = v_layers[l]
+
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                    logits = self.agent.evaluate_actions_paged(
+                        actions_t,
+                        pids_t,
+                        paged_kv_data,
+                        paged_kv_indices,
+                        paged_kv_indptr,
+                        paged_kv_last_page_len,
+                        q_indptr,
+                    )
+                scores = logits[:A_len].cpu().float().numpy()
+                v = float(v_pred.item())
+            else:
+                # Lock-free Shared-Memory IPC to centralized inference worker
+                A_len = min(MAX_ACTIONS, action_feats_np.shape[0])
+                dim_feat = min(MAX_FEATS - 1, action_feats_np.shape[1])
+
+                while True:
+                    s_idx, slot = self.shm_req.write_slot()
+                    if slot is not None:
+                        slot.msg_type = 1
+                        slot.version = self.version
+                        slot.prefix_key = prefix_key
+                        slot.phase_id = phase_id
+                        slot.num_actions = A_len
+
+                        flat_view = np.frombuffer(
+                            slot.action_features, dtype=np.float32
+                        ).reshape(MAX_ACTIONS, MAX_FEATS)
+                        flat_view.fill(0.0)
+                        flat_view[:A_len, 0] = np.arange(A_len, dtype=np.float32)
+                        flat_view[:A_len, 1 : 1 + dim_feat] = action_feats_np[
+                            :A_len, :dim_feat
+                        ]
+                        self.shm_req.commit_write()
+                        break
+
+                while True:
+                    r_idx, r_slot = self.shm_resp.read_slot()
+                    if r_slot is not None:
+                        status = r_slot.ready
+                        if status == 1:
+                            v = float(r_slot.value)
+                            logits_view = np.frombuffer(
+                                r_slot.logits, dtype=np.float32
+                            )[:A_len]
+                            scores = logits_view.copy()
+                            self.shm_resp.commit_read()
+                            break
+                        elif status == 2:
+                            self.shm_resp.commit_read()
+                            if self.shared_prefix_dict is not None:
+                                self.shared_prefix_dict[prefix_key] = (
+                                    self.prefix_registry[prefix_key]
+                                )
+                            while True:
+                                _, s2 = self.shm_req.write_slot()
+                                if s2 is not None:
+                                    s2.msg_type = 1
+                                    s2.version = self.version
+                                    s2.prefix_key = prefix_key
+                                    s2.phase_id = phase_id
+                                    s2.num_actions = A_len
+                                    self.shm_req.commit_write()
+                                    break
 
             P = torch.softmax(torch.tensor(scores, dtype=torch.float32), dim=0).numpy()
-            v = self.phase_values.get(phase_name, 0.0)
-
             current_depth = len(self.active_stack)
             effective_noise = self.episode_noise * (self.depth_gamma**current_depth)
 

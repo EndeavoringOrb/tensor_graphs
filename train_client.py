@@ -6,7 +6,6 @@ import sys
 import threading
 import time
 import traceback
-from collections import defaultdict
 from pathlib import Path
 
 import psutil
@@ -19,8 +18,14 @@ torch.set_float32_matmul_precision("high")
 import tensor_graphs
 
 from train_shared import (
+    MAX_ACTIONS,
+    MAX_FEATS,
     ActorDelegate,
     AlphaZeroTransformer,
+    RadixTreeKVCache,
+    ShmRequestSlot,
+    ShmResponseSlot,
+    ShmSPSCQueue,
     TrainConfig,
     TrajectoryCodec,
     create_client_socket,
@@ -30,11 +35,21 @@ from train_shared import (
 )
 
 
-def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
+# ==============================================================================
+# INFERENCE WORKER USING FLASHINFER RADIXATTENTION BATCHING
+# ==============================================================================
+def inference_worker(
+    config: TrainConfig,
+    num_workers: int,
+    shared_prefix_dict,
+    weights_event,
+    run_dir,
+):
     torch.set_num_threads(1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Inference Server] Started on {device}")
 
+    head_dim = config.d_model // config.nhead
     agent = AlphaZeroTransformer(
         d_model=config.d_model,
         nhead=config.nhead,
@@ -43,12 +58,35 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
     ).to(device)
     agent.eval()
 
-    prefix_cache_kv = {}
-    prefix_cache_v = {}
+    radix_cache = RadixTreeKVCache(
+        num_layers=config.num_layers,
+        num_heads=config.nhead,
+        head_dim=head_dim,
+        device=device,
+    )
+
     current_version = 0
     weights_path = os.path.join(run_dir, "client_weights.pt")
 
+    # Connect to per-worker lock-free shared memory SPSC queues
+    req_queues = []
+    resp_queues = []
+    for wid in range(num_workers):
+        q_req = ShmSPSCQueue(
+            f"tg_req_w_{wid}", ShmRequestSlot, capacity=32, create=False
+        )
+        q_resp = ShmSPSCQueue(
+            f"tg_resp_w_{wid}", ShmResponseSlot, capacity=32, create=False
+        )
+        req_queues.append(q_req)
+        resp_queues.append(q_resp)
+
+    print(
+        f"[Inference Server] Connected to {num_workers} SPSC Shared-Memory Ring Buffers."
+    )
+
     while True:
+        # 1. Update weights without purging the Radix KV cache
         if weights_event.is_set():
             if os.path.exists(weights_path):
                 try:
@@ -65,111 +103,163 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
                     agent.load_state_dict(weights_dict, strict=False)
                     current_version = new_version
                     print(
-                        f"[Inference Server] Weights updated to version {current_version}."
+                        f"[Inference Server] Weights updated to version {current_version}. Persisting Radix KV Tree."
                     )
                 except Exception as e:
                     print(f"[Inference Server] Error loading weights: {e}")
             weights_event.clear()
 
-        try:
-            reqs = [req_queue.get(timeout=0.05)]
-        except queue.Empty:
+        # 2. Lock-free collection across all worker SPSC queues
+        batched_evals = []
+        for wid in range(num_workers):
+            slot_idx, slot = req_queues[wid].read_slot()
+            if slot is not None:
+                msg_type = slot.msg_type
+                if msg_type == 1:
+                    pkey = int(slot.prefix_key)
+                    ver = int(slot.version)
+                    pid = int(slot.phase_id)
+                    num_act = int(slot.num_actions)
+
+                    action_feats_np = (
+                        np.frombuffer(slot.action_features, dtype=np.float32)
+                        .reshape(MAX_ACTIONS, MAX_FEATS)[:num_act]
+                        .copy()
+                    )
+                    batched_evals.append(
+                        (wid, ver, pkey, pid, num_act, action_feats_np)
+                    )
+                req_queues[wid].commit_read()
+
+        if not batched_evals:
+            time.sleep(0.0001)
             continue
 
-        while not req_queue.empty():
-            reqs.append(req_queue.get_nowait())
-
-        eval_reqs = []
-        for req in reqs:
-            if req[0] == "register_prefix":
-                _, ver, pkey, pdata = req
-                cache_key = (ver, pkey)
-                if cache_key not in prefix_cache_kv:
-                    f = torch.tensor(
+        # 3. Ensure Radix Cache has prefix KV encoded
+        valid_evals = []
+        for wid, ver, pkey, pid, num_act, action_feats_np in batched_evals:
+            if not radix_cache.contains(pkey):
+                if pkey in shared_prefix_dict:
+                    pdata = shared_prefix_dict[pkey]
+                    f_t = torch.tensor(
                         pdata.features, dtype=torch.float32, device=device
-                    ).unsqueeze(0)
-                    tt = torch.tensor(
+                    )
+                    tt_t = torch.tensor(
                         pdata.token_types, dtype=torch.int64, device=device
-                    ).unsqueeze(0)
-                    pid = torch.tensor(
+                    )
+                    p_t = torch.tensor(
                         pdata.phase_ids, dtype=torch.int64, device=device
-                    ).unsqueeze(0)
+                    )
 
                     with (
                         torch.inference_mode(),
                         torch.autocast(device_type=device.type, dtype=torch.bfloat16),
                     ):
-                        v, kv = agent.encode_prefix(f, tt, pid)
+                        v_pred, k_layers, v_layers = agent.encode_prefix(f_t, tt_t, p_t)
 
-                    prefix_cache_kv[cache_key] = kv
-                    prefix_cache_v[cache_key] = v.item() if v is not None else 0.0
-            elif req[0] == "evaluate":
-                eval_reqs.append(req)
+                    radix_cache.insert(
+                        prefix_key=pkey,
+                        num_tokens=pdata.features.shape[0],
+                        layer_k=k_layers,
+                        layer_v=v_layers,
+                        value=float(v_pred.item()),
+                    )
+                else:
+                    while True:
+                        _, r_slot = resp_queues[wid].write_slot()
+                        if r_slot is not None:
+                            r_slot.ready = 2
+                            resp_queues[wid].commit_write()
+                            break
+                    continue
 
-        if not eval_reqs:
+            valid_evals.append((wid, ver, pkey, pid, num_act, action_feats_np))
+
+        if not valid_evals:
             continue
 
-        valid_reqs = []
-        for req in eval_reqs:
-            _, ver, pkey, a_feats, phase_id, wid = req
-            cache_key = (ver, pkey)
-            if cache_key not in prefix_cache_kv:
-                resp_queues[wid].put(("error", "missing_prefix"))
-                continue
-            valid_reqs.append(req)
+        # 4. Batched FlashInfer Execution across heterogeneous requests
+        B = len(valid_evals)
+        nodes = [radix_cache.get(req[2]) for req in valid_evals]
 
-        groups = defaultdict(list)
-        for req in valid_reqs:
-            groups[(req[1], req[2])].append(req)
+        q_lens = [req[4] for req in valid_evals]
+        total_A = sum(q_lens)
 
-        for (ver, pkey), group_reqs in groups.items():
-            cache_key = (ver, pkey)
-            B = len(group_reqs)
-            max_A = max(req[3].shape[0] for req in group_reqs)
-            padded_actions = torch.zeros(
-                (B, max_A, 8), dtype=torch.float32, device=device
+        q_indptr = torch.zeros(B + 1, dtype=torch.int32, device=device)
+        q_indptr[1:] = torch.cumsum(
+            torch.tensor(q_lens, dtype=torch.int32, device=device), dim=0
+        )
+
+        paged_kv_indices_list = [n.page_indices for n in nodes]
+        paged_kv_indices = torch.cat(paged_kv_indices_list)
+
+        kv_lens = [n.num_tokens for n in nodes]
+        paged_kv_indptr = torch.zeros(B + 1, dtype=torch.int32, device=device)
+        paged_kv_indptr[1:] = torch.cumsum(
+            torch.tensor(kv_lens, dtype=torch.int32, device=device), dim=0
+        )
+        paged_kv_last_page_len = torch.ones(B, dtype=torch.int32, device=device)
+
+        ragged_actions = torch.zeros(
+            (total_A, MAX_FEATS), dtype=torch.float32, device=device
+        )
+        ragged_pids = torch.zeros(total_A, dtype=torch.int64, device=device)
+
+        offset = 0
+        for i, (wid, ver, pkey, pid, num_act, a_feats) in enumerate(valid_evals):
+            dim_f = min(MAX_FEATS, a_feats.shape[1])
+            ragged_actions[offset : offset + num_act, :dim_f] = torch.tensor(
+                a_feats[:, :dim_f], dtype=torch.float32, device=device
             )
-            padded_pid = torch.zeros((B, max_A), dtype=torch.int64, device=device)
+            ragged_pids[offset : offset + num_act] = pid
+            offset += num_act
 
-            kv = prefix_cache_kv[cache_key]
-            batched_past_kv = [
-                (k.expand(B, -1, -1, -1), v.expand(B, -1, -1, -1)) for (k, v) in kv
-            ]
+        with (
+            torch.inference_mode(),
+            torch.autocast(device_type=device.type, dtype=torch.bfloat16),
+        ):
+            all_logits = agent.evaluate_actions_paged(
+                ragged_actions,
+                ragged_pids,
+                radix_cache.paged_kv_data,
+                paged_kv_indices,
+                paged_kv_indptr,
+                paged_kv_last_page_len,
+                q_indptr,
+            )
 
-            for i, req in enumerate(group_reqs):
-                _, _, _, a_feats, phase_id, wid = req
-                A_len = a_feats.shape[0]
-                dim_feat = min(7, a_feats.shape[1])
-                padded_actions[i, :A_len, 1 : 1 + dim_feat] = torch.tensor(
-                    a_feats[:, :dim_feat], dtype=torch.float32, device=device
-                )
-                padded_actions[i, :A_len, 0] = torch.arange(
-                    A_len, dtype=torch.float32, device=device
-                )
-                padded_pid[i, :A_len] = phase_id
+        # 5. Write response directly to worker's SPSC shared memory slot
+        offset = 0
+        for i, (wid, ver, pkey, pid, num_act, a_feats) in enumerate(valid_evals):
+            node = nodes[i]
+            resp_logits = all_logits[offset : offset + num_act].cpu().float().numpy()
+            v_val = node.value
+            offset += num_act
 
-            with (
-                torch.inference_mode(),
-                torch.autocast(device_type=device.type, dtype=torch.bfloat16),
-            ):
-                logits = agent.evaluate_actions(
-                    padded_actions, padded_pid, past_kv=batched_past_kv
-                )
+            while True:
+                _, r_slot = resp_queues[wid].write_slot()
+                if r_slot is not None:
+                    r_slot.ready = 1
+                    r_slot.num_actions = num_act
+                    r_slot.value = v_val
 
-            for i, req in enumerate(group_reqs):
-                _, _, _, a_feats, _, wid = req
-                A_len = a_feats.shape[0]
-                resp_logits = logits[i, :A_len].cpu().float().numpy()
-                v = prefix_cache_v[cache_key]
-                resp_queues[wid].put(("ok", resp_logits, v))
+                    logits_dest = np.frombuffer(r_slot.logits, dtype=np.float32)[
+                        :num_act
+                    ]
+                    logits_dest[:] = resp_logits
+
+                    resp_queues[wid].commit_write()
+                    break
 
 
+# ==============================================================================
+# CLIENT SEARCH WORKER
+# ==============================================================================
 @torch.inference_mode()
 def client_worker(
     rank: int,
     config: TrainConfig,
-    req_queue,
-    resp_queue,
+    shared_prefix_dict,
     traj_queue,
     shared_version,
 ):
@@ -214,6 +304,13 @@ def client_worker(
     console_handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(console_handler)
 
+    shm_req = ShmSPSCQueue(
+        f"tg_req_w_{rank}", ShmRequestSlot, capacity=32, create=False
+    )
+    shm_resp = ShmSPSCQueue(
+        f"tg_resp_w_{rank}", ShmResponseSlot, capacity=32, create=False
+    )
+
     graph_provider = get_graph_provider(config, worker_rank=rank)
     logger.info(
         f"{LOG_PREFIX} [Worker {rank}] Initializing graph provider (source: {config.graph_source})..."
@@ -249,8 +346,9 @@ def client_worker(
         for sim in range(config.num_simulations):
             delegate = ActorDelegate(
                 agent=None,
-                req_queue=req_queue,
-                resp_queue=resp_queue,
+                shm_req_queue=shm_req,
+                shm_resp_queue=shm_resp,
+                prefix_dict=shared_prefix_dict,
                 worker_id=rank,
                 mcts_tree=mcts_tree,
                 c_puct=config.c_puct,
@@ -417,15 +515,33 @@ def main():
     print(f" Graph Source: {config.graph_source.upper()}")
     print("=========================================================")
 
-    req_queue = mp.Queue()
-    resp_queues = [mp.Queue() for _ in range(config.workers)]
+    # Pre-create SPSC Shared-Memory Queues
+    created_shm_queues = []
+    for wid in range(config.workers):
+        q_req = ShmSPSCQueue(
+            f"tg_req_w_{wid}", ShmRequestSlot, capacity=32, create=True
+        )
+        q_resp = ShmSPSCQueue(
+            f"tg_resp_w_{wid}", ShmResponseSlot, capacity=32, create=True
+        )
+        created_shm_queues.append((q_req, q_resp))
+
+    manager = mp.Manager()
+    shared_prefix_dict = manager.dict()
+
     traj_queue = mp.Queue()
     weights_event = mp.Event()
     shared_version = mp.Value("i", 0)
 
     inf_process = mp.Process(
         target=inference_worker,
-        args=(config, req_queue, resp_queues, weights_event, "runs"),
+        args=(
+            config,
+            config.workers,
+            shared_prefix_dict,
+            weights_event,
+            "runs",
+        ),
     )
     inf_process.start()
 
@@ -436,8 +552,7 @@ def main():
             args=(
                 rank,
                 config,
-                req_queue,
-                resp_queues[rank],
+                shared_prefix_dict,
                 traj_queue,
                 shared_version,
             ),
@@ -513,55 +628,60 @@ def main():
     last_send_time = time.time()
     server_known_prefixes = set()
 
-    while True:
-        try:
-            msg = traj_queue.get(timeout=1.0)
-            payload = msg["payload"]
-            cost = msg["cost"]
-            buffer_transitions.extend(payload["transitions"])
-            buffer_prefixes.update(payload["prefixes"])
-            extraction_costs.extend(msg.get("costs", []))
-            best_cost_in_window = min(best_cost_in_window, cost)
-
-            with episodes_lock:
-                episodes_completed += 1
-
-        except queue.Empty:
-            pass
-
-        if time.time() - last_send_time > 2.0 and buffer_transitions:
-            new_prefixes = {
-                k: v
-                for k, v in buffer_prefixes.items()
-                if k not in server_known_prefixes
-            }
-            packed_payload = {
-                "prefixes": new_prefixes,
-                "transitions": buffer_transitions,
-            }
+    try:
+        while True:
             try:
-                with sock_lock:
-                    send_msg(
-                        client_sock,
-                        {
-                            "type": "trajectory",
-                            "cost": best_cost_in_window,
-                            "costs": extraction_costs,
-                            "payload": packed_payload,
-                        },
-                    )
-                server_known_prefixes.update(new_prefixes.keys())
-                buffer_transitions.clear()
-                buffer_prefixes.clear()
-                extraction_costs.clear()
-                best_cost_in_window = float("inf")
-            except Exception as e:
-                print(f"[Client] Error sending trajectory: {e}")
-                server_known_prefixes.clear()
-            last_send_time = time.time()
+                msg = traj_queue.get(timeout=1.0)
+                payload = msg["payload"]
+                cost = msg["cost"]
+                buffer_transitions.extend(payload["transitions"])
+                buffer_prefixes.update(payload["prefixes"])
+                extraction_costs.extend(msg.get("costs", []))
+                best_cost_in_window = min(best_cost_in_window, cost)
 
-    for p in processes:
-        p.join()
+                with episodes_lock:
+                    episodes_completed += 1
+
+            except queue.Empty:
+                pass
+
+            if time.time() - last_send_time > 2.0 and buffer_transitions:
+                new_prefixes = {
+                    k: v
+                    for k, v in buffer_prefixes.items()
+                    if k not in server_known_prefixes
+                }
+                packed_payload = {
+                    "prefixes": new_prefixes,
+                    "transitions": buffer_transitions,
+                }
+                try:
+                    with sock_lock:
+                        send_msg(
+                            client_sock,
+                            {
+                                "type": "trajectory",
+                                "cost": best_cost_in_window,
+                                "costs": extraction_costs,
+                                "payload": packed_payload,
+                            },
+                        )
+                    server_known_prefixes.update(new_prefixes.keys())
+                    buffer_transitions.clear()
+                    buffer_prefixes.clear()
+                    extraction_costs.clear()
+                    best_cost_in_window = float("inf")
+                except Exception as e:
+                    print(f"[Client] Error sending trajectory: {e}")
+                    server_known_prefixes.clear()
+                last_send_time = time.time()
+    finally:
+        for p in processes:
+            p.terminate()
+        inf_process.terminate()
+        for q_req, q_resp in created_shm_queues:
+            q_req.unlink()
+            q_resp.unlink()
 
 
 if __name__ == "__main__":
