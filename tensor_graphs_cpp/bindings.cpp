@@ -1,7 +1,8 @@
-// File: tensor_graphs_cpp/bindings.cpp
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "core/common/thread_pool.hpp"
+#include "core/hardware.hpp"
 #include "core/plan/cached_plan.hpp"
 #include "core/plan/planner.hpp"
 #include "core/plan/search_delegate.hpp"
@@ -103,8 +104,14 @@ class LLMSession
   public:
     LLMSession(const std::string &model_name, const std::string &model_path,
                std::shared_ptr<SearchDelegate> delegate = nullptr, float min_compile_time = 0.0f,
-               bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false)
+               bool compile_decode_buckets = false, const std::string &cache_file = "", bool disable_caching = false,
+               uint32_t threads = 0)
     {
+        if (threads > 0)
+        {
+            set_num_threads(threads);
+        }
+
         std::unordered_map<MemSpace, uint64_t> bufferSizes = {
             {MemSpace{1, HandleType::CPP}, 16ULL * 1024 * 1024 * 1024}};
 
@@ -262,6 +269,11 @@ class LLMSession
 PYBIND11_MODULE(tensor_graphs, m)
 {
     m.doc() = "Python bindings for TensorGraph compilation and search optimization";
+
+    m.def("set_num_threads", &set_num_threads, py::arg("num_threads"),
+          "Set the number of threads used by TensorGraph thread pools and parallel execution.");
+    m.def("get_num_threads", &get_num_threads,
+          "Get the current number of threads used by TensorGraph.");
 
     // Enums
     py::enum_<HandleType>(m, "HandleType")
@@ -471,9 +483,9 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     py::class_<LLMSession>(m, "LLMSession")
         .def(py::init<const std::string &, const std::string &, std::shared_ptr<SearchDelegate>, float, bool,
-                      const std::string &, bool>(),
+                      const std::string &, bool, uint32_t>(),
              py::arg("model_name"), py::arg("model_path"), py::arg("delegate") = nullptr,
              py::arg("min_compile_time") = 0.0f, py::arg("compile_decode_buckets") = false, py::arg("cache_file") = "",
-             py::arg("disable_caching") = false)
+             py::arg("disable_caching") = false, py::arg("threads") = 0)
         .def("generate_step", &LLMSession::generate_step);
 }

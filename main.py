@@ -80,7 +80,16 @@ def main():
         action="store_true",
         help="Disable dirty region session caching",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=0,
+        help="Number of C++ threads (0 = auto-detect based on hardware)",
+    )
     args = parser.parse_args()
+
+    if args.threads > 0:
+        tensor_graphs.set_num_threads(args.threads)
 
     agent = AlphaZeroTransformer(d_model=128, nhead=4, num_layers=3, max_feat_dim=8)
     if args.run_dir:
@@ -100,6 +109,7 @@ def main():
         min_compile_time=args.min_compile_time,
         compile_decode_buckets=args.compile_decode_buckets,
         disable_caching=args.disable_caching,
+        threads=args.threads,
     )
 
     print(f"Loading tokenizer for {args.model}...")

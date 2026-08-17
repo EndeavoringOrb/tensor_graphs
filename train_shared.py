@@ -1,4 +1,3 @@
-# File: train_shared.py
 import dataclasses
 import math
 import pickle
@@ -34,9 +33,7 @@ class TrainConfig:
     random_hidden_dim: int = 128
     random_seq_len: int = 64
     random_seed: int | None = None
-    resample_graph_every: int = (
-        0  # 0 = fixed per worker, >0 = resample every N episodes
-    )
+    resample_graph_every: int = 0
 
     # Transformer Architecture Config
     d_model: int = 128
@@ -49,6 +46,7 @@ class TrainConfig:
     bucket_idx: int = -1
     compile_decode_buckets: bool = False
     workers: int = 4
+    cpp_threads: int = 1  # Prevents C++ thread oversubscription in multi-process workers
 
     # PUCT & Noise Annealing Config
     c_puct: float = 1.25
@@ -424,7 +422,6 @@ class CustomSelfAttention(nn.Module):
             v = torch.cat([past_v, v], dim=2)
 
         new_kv = (k, v)
-        # Passing attn_mask=None triggers FlashAttention v2 in bfloat16/float16
         out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None)
         out = out.transpose(1, 2).contiguous().view(B, L, self.d_model)
         return self.out_proj(out), new_kv
@@ -460,10 +457,8 @@ class AlphaZeroTransformer(nn.Module):
         self.max_feat_dim = max_feat_dim
 
         self.feat_proj = nn.Linear(max_feat_dim, d_model)
-        self.type_emb = nn.Embedding(4, d_model)  # 0=Global, 1=Node, 2=Edge, 3=Action
-        self.phase_emb = nn.Embedding(
-            5, d_model
-        )  # 0=cache, 1=extract, 2=dispatch, 3=bufferize, 4=malloc
+        self.type_emb = nn.Embedding(4, d_model)
+        self.phase_emb = nn.Embedding(5, d_model)
 
         self.layers = nn.ModuleList(
             [CustomTransformerBlock(d_model, nhead) for _ in range(num_layers)]
@@ -527,6 +522,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         base_noise: float = 0.25,
         min_noise: float = 0.01,
         depth_gamma: float = 0.7,
+        version: int = 0,
     ):
         super().__init__()
         self.agent = agent
@@ -540,6 +536,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.base_noise = base_noise if exploration_noise is None else exploration_noise
         self.min_noise = min_noise
         self.depth_gamma = depth_gamma
+        self.version = version
 
         if exploration_noise is not None:
             self.episode_noise = (
@@ -561,6 +558,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.phase_values = {}
         self.prefix_cache_kv = {}
         self.prefix_cache_v = {}
+        self.worker_registered_prefixes = set()
 
     def push_state(self):
         pass
@@ -605,30 +603,36 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.prefix_registry[prefix_key] = prefix_data
         self.current_prefix_keys[phase_name] = prefix_key
 
+        cache_key = (self.version, prefix_key)
         if self.agent is not None:
-            device = next(self.agent.parameters()).device
-            f_t = torch.tensor(
-                prefix_data.features, dtype=torch.float32, device=device
-            ).unsqueeze(0)
-            tt_t = torch.tensor(
-                prefix_data.token_types, dtype=torch.int64, device=device
-            ).unsqueeze(0)
-            p_t = torch.tensor(
-                prefix_data.phase_ids, dtype=torch.int64, device=device
-            ).unsqueeze(0)
+            if cache_key not in self.prefix_cache_kv:
+                device = next(self.agent.parameters()).device
+                f_t = torch.tensor(
+                    prefix_data.features, dtype=torch.float32, device=device
+                ).unsqueeze(0)
+                tt_t = torch.tensor(
+                    prefix_data.token_types, dtype=torch.int64, device=device
+                ).unsqueeze(0)
+                p_t = torch.tensor(
+                    prefix_data.phase_ids, dtype=torch.int64, device=device
+                ).unsqueeze(0)
 
-            with (
-                torch.inference_mode(),
-                torch.autocast(device_type=device.type, dtype=torch.bfloat16),
-            ):
-                v, kv = self.agent.encode_prefix(f_t, tt_t, p_t)
+                with (
+                    torch.inference_mode(),
+                    torch.autocast(device_type=device.type, dtype=torch.bfloat16),
+                ):
+                    v, kv = self.agent.encode_prefix(f_t, tt_t, p_t)
 
-            self.prefix_cache_kv[prefix_key] = kv
-            self.prefix_cache_v[prefix_key] = v.item() if v is not None else 0.0
-            self.phase_values[phase_name] = self.prefix_cache_v[prefix_key]
+                self.prefix_cache_kv[cache_key] = kv
+                self.prefix_cache_v[cache_key] = v.item() if v is not None else 0.0
+            self.phase_values[phase_name] = self.prefix_cache_v[cache_key]
         else:
             if self.req_queue is not None:
-                self.req_queue.put(("register_prefix", prefix_key, prefix_data))
+                if cache_key not in self.worker_registered_prefixes:
+                    self.req_queue.put(
+                        ("register_prefix", self.version, prefix_key, prefix_data)
+                    )
+                    self.worker_registered_prefixes.add(cache_key)
 
     def init_cache_graph(self, node_features, edge_src, edge_dst):
         self._store_raw_graph("cache", node_features, edge_src, edge_dst)
@@ -658,14 +662,16 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             action_feats_np = np.array(action_feats, dtype=np.float32)
 
         prefix_key = self.current_prefix_keys[phase_name]
-        state_key = hash((prefix_key, action_feats_np.tobytes()))
+        state_key = hash((self.version, prefix_key, action_feats_np.tobytes()))
 
         if state_key not in self.mcts_tree:
             phase_id = self.PHASE_MAP[phase_name]
+            cache_key = (self.version, prefix_key)
+
             if self.agent is not None:
                 device = next(self.agent.parameters()).device
-                kv = self.prefix_cache_kv[prefix_key]
-                v = self.prefix_cache_v[prefix_key]
+                kv = self.prefix_cache_kv[cache_key]
+                v = self.prefix_cache_v[cache_key]
 
                 A_len = action_feats_np.shape[0]
                 padded_actions = torch.zeros(
@@ -693,16 +699,27 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                 scores = logits[0, :A_len].cpu().float().numpy()
             else:
                 self.req_queue.put(
-                    ("evaluate", prefix_key, action_feats_np, phase_id, self.worker_id)
+                    (
+                        "evaluate",
+                        self.version,
+                        prefix_key,
+                        action_feats_np,
+                        phase_id,
+                        self.worker_id,
+                    )
                 )
                 status, *data = self.resp_queue.get()
 
                 if status == "error" and data[0] == "missing_prefix":
                     pdata = self.prefix_registry[prefix_key]
-                    self.req_queue.put(("register_prefix", prefix_key, pdata))
+                    self.req_queue.put(
+                        ("register_prefix", self.version, prefix_key, pdata)
+                    )
+                    self.worker_registered_prefixes.add(cache_key)
                     self.req_queue.put(
                         (
                             "evaluate",
+                            self.version,
                             prefix_key,
                             action_feats_np,
                             phase_id,

@@ -1,4 +1,3 @@
-# File: train_server.py
 import argparse
 import dataclasses
 import json
@@ -11,6 +10,7 @@ import time
 from collections import defaultdict, deque
 from pathlib import Path
 
+import tensor_graphs
 import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
@@ -113,7 +113,9 @@ def client_handler(client_sock, client_info, replay_queue):
 
                 payload = msg.get("payload", {})
                 if payload:
-                    replay_queue.put({"type": "trajectory_payload", "payload": payload})
+                    replay_queue.put(
+                        {"type": "trajectory_payload", "payload": payload}
+                    )
 
             elif msg_type == "cost_metric":
                 cost = msg.get("cost")
@@ -220,7 +222,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
 
         raw_batch = buffer.sample_batch(config.batch_size)
 
-        # Group transitions by prefix_key to reuse FlashAttention prefix KVs
         groups = defaultdict(list)
         for item in raw_batch:
             groups[item["prefix_key"]].append(item)
@@ -245,7 +246,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 prefix.phase_ids, dtype=torch.int64, device=device
             ).unsqueeze(0)
 
-            # FlashAttention prefix encoding pass
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 v_pred, prefix_kvs = agent.encode_prefix(f_t, tt_t, p_t)
 
@@ -275,13 +275,11 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 )
                 action_mask[i, :A_len] = True
 
-            # Repeat prefix KV across the group batch
             batched_kvs = [
                 (k.expand(B_g, -1, -1, -1), v.expand(B_g, -1, -1, -1))
                 for (k, v) in prefix_kvs
             ]
 
-            # FlashAttention action evaluation pass
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 logits = agent.evaluate_actions(
                     padded_actions, padded_pid, past_kv=batched_kvs
@@ -370,8 +368,17 @@ def main():
     parser.add_argument("--min-noise", type=float, default=0.01)
     parser.add_argument("--decay-episodes", type=int, default=500)
     parser.add_argument("--depth-gamma", type=float, default=0.7)
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=0,
+        help="C++ threads for graph operations (default: auto)",
+    )
 
     args = parser.parse_args()
+    if args.threads > 0:
+        tensor_graphs.set_num_threads(args.threads)
+
     run_dir = setup_run_dir(run_dir=args.run_dir, resume_latest=args.resume)
 
     config_file = Path(run_dir) / "config.json"

@@ -1,4 +1,3 @@
-# File: train_client.py
 import argparse
 import logging
 import os
@@ -46,19 +45,39 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
 
     prefix_cache_kv = {}
     prefix_cache_v = {}
+    current_version = 0
     weights_path = os.path.join(run_dir, "client_weights.pt")
 
     while True:
         if weights_event.is_set():
             if os.path.exists(weights_path):
                 try:
-                    weights_dict = torch.load(
+                    loaded = torch.load(
                         weights_path, map_location="cpu", weights_only=True
                     )
+                    if isinstance(loaded, dict) and "state_dict" in loaded:
+                        new_version = loaded.get("version", current_version + 1)
+                        weights_dict = loaded["state_dict"]
+                    else:
+                        new_version = current_version + 1
+                        weights_dict = loaded
+
                     agent.load_state_dict(weights_dict, strict=False)
-                    prefix_cache_kv.clear()
-                    prefix_cache_v.clear()
-                    print("[Inference Server] Weights updated, KV cache cleared.")
+                    current_version = new_version
+
+                    active_versions = {
+                        current_version,
+                        current_version - 1,
+                        current_version - 2,
+                    }
+                    for k in list(prefix_cache_kv.keys()):
+                        if k[0] not in active_versions:
+                            prefix_cache_kv.pop(k, None)
+                            prefix_cache_v.pop(k, None)
+
+                    print(
+                        f"[Inference Server] Weights updated to version {current_version}. Retaining active versions {active_versions}."
+                    )
                 except Exception as e:
                     print(f"[Inference Server] Error loading weights: {e}")
             weights_event.clear()
@@ -74,8 +93,9 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
         eval_reqs = []
         for req in reqs:
             if req[0] == "register_prefix":
-                _, pkey, pdata = req
-                if pkey not in prefix_cache_kv:
+                _, ver, pkey, pdata = req
+                cache_key = (ver, pkey)
+                if cache_key not in prefix_cache_kv:
                     f = torch.tensor(
                         pdata.features, dtype=torch.float32, device=device
                     ).unsqueeze(0)
@@ -92,8 +112,8 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
                     ):
                         v, kv = agent.encode_prefix(f, tt, pid)
 
-                    prefix_cache_kv[pkey] = kv
-                    prefix_cache_v[pkey] = v.item() if v is not None else 0.0
+                    prefix_cache_kv[cache_key] = kv
+                    prefix_cache_v[cache_key] = v.item() if v is not None else 0.0
             elif req[0] == "evaluate":
                 eval_reqs.append(req)
 
@@ -102,33 +122,33 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
 
         valid_reqs = []
         for req in eval_reqs:
-            _, pkey, a_feats, phase_id, wid = req
-            if pkey not in prefix_cache_kv:
+            _, ver, pkey, a_feats, phase_id, wid = req
+            cache_key = (ver, pkey)
+            if cache_key not in prefix_cache_kv:
                 resp_queues[wid].put(("error", "missing_prefix"))
                 continue
             valid_reqs.append(req)
 
-        # Group evaluation requests by prefix_key
         groups = defaultdict(list)
         for req in valid_reqs:
-            groups[req[1]].append(req)
+            groups[(req[1], req[2])].append(req)
 
-        for pkey, group_reqs in groups.items():
+        for (ver, pkey), group_reqs in groups.items():
+            cache_key = (ver, pkey)
             B = len(group_reqs)
-            max_A = max(req[2].shape[0] for req in group_reqs)
+            max_A = max(req[3].shape[0] for req in group_reqs)
             padded_actions = torch.zeros(
                 (B, max_A, 8), dtype=torch.float32, device=device
             )
             padded_pid = torch.zeros((B, max_A), dtype=torch.int64, device=device)
 
-            # For the same pkey, past_kv length L is identical; expand across the group batch
-            kv = prefix_cache_kv[pkey]
+            kv = prefix_cache_kv[cache_key]
             batched_past_kv = [
                 (k.expand(B, -1, -1, -1), v.expand(B, -1, -1, -1)) for (k, v) in kv
             ]
 
             for i, req in enumerate(group_reqs):
-                _, _, a_feats, phase_id, wid = req
+                _, _, _, a_feats, phase_id, wid = req
                 A_len = a_feats.shape[0]
                 dim_feat = min(7, a_feats.shape[1])
                 padded_actions[i, :A_len, 1 : 1 + dim_feat] = torch.tensor(
@@ -148,17 +168,25 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
                 )
 
             for i, req in enumerate(group_reqs):
-                _, _, a_feats, _, wid = req
+                _, _, _, a_feats, _, wid = req
                 A_len = a_feats.shape[0]
                 resp_logits = logits[i, :A_len].cpu().float().numpy()
-                v = prefix_cache_v[pkey]
+                v = prefix_cache_v[cache_key]
                 resp_queues[wid].put(("ok", resp_logits, v))
 
 
 @torch.inference_mode()
-def client_worker(rank: int, config: TrainConfig, req_queue, resp_queue, traj_queue):
+def client_worker(
+    rank: int,
+    config: TrainConfig,
+    req_queue,
+    resp_queue,
+    traj_queue,
+    shared_version,
+):
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
+    tensor_graphs.set_num_threads(config.cpp_threads)
 
     real_stdout_fd = os.dup(1)
     real_stdout = os.fdopen(real_stdout_fd, "w", buffering=1)
@@ -205,6 +233,9 @@ def client_worker(rank: int, config: TrainConfig, req_queue, resp_queue, traj_qu
     episode = 0
 
     while True:
+        with shared_version.get_lock():
+            episode_version = shared_version.value
+
         try:
             egraph_context = graph_provider.get_context(config, episode=episode)
         except Exception as e:
@@ -239,6 +270,7 @@ def client_worker(rank: int, config: TrainConfig, req_queue, resp_queue, traj_qu
                 base_noise=config.base_noise,
                 min_noise=config.min_noise,
                 depth_gamma=config.depth_gamma,
+                version=episode_version,
             )
             last_delegate = delegate
             try:
@@ -279,7 +311,7 @@ def client_worker(rank: int, config: TrainConfig, req_queue, resp_queue, traj_qu
             config.base_noise * (1.0 - episode / max(1, config.decay_episodes)),
         )
         logger.info(
-            f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} | Ep Noise: {ep_noise:.4f} | Best Cost: {best_cost:8.4f} ms | "
+            f"{LOG_PREFIX} [Worker {rank}] Ep {episode:03d} (v{episode_version}) | Ep Noise: {ep_noise:.4f} | Best Cost: {best_cost:8.4f} ms | "
             f"Extractions: {len(extraction_costs)} | Sending {num_transitions} deduplicated transitions..."
         )
 
@@ -305,6 +337,12 @@ def main():
         type=int,
         default=DEFAULT_WORKERS,
         help="Number of worker processes",
+    )
+    parser.add_argument(
+        "--cpp-threads",
+        type=int,
+        default=1,
+        help="Number of C++ threads per worker process (default: 1)",
     )
     parser.add_argument(
         "--simulations", type=int, default=10, help="MCTS simulations per episode"
@@ -342,6 +380,7 @@ def main():
     config.port = args.port
     config.use_bluetooth = args.use_bluetooth
     config.workers = 1 if args.log_cost_calls else args.workers
+    config.cpp_threads = args.cpp_threads
     config.num_simulations = args.simulations
     config.graph_source = args.graph_source
     config.model_name = args.model
@@ -384,6 +423,7 @@ def main():
     conn_type = "Bluetooth" if config.use_bluetooth else "TCP/IP"
     print("=========================================================")
     print(f" Starting {config.workers} Client Worker Process(es)")
+    print(f" C++ Threads / Worker: {config.cpp_threads}")
     print(f" Target Server: {config.host}:{config.port} ({conn_type})")
     print(f" Graph Source: {config.graph_source.upper()}")
     print("=========================================================")
@@ -392,6 +432,7 @@ def main():
     resp_queues = [mp.Queue() for _ in range(config.workers)]
     traj_queue = mp.Queue()
     weights_event = mp.Event()
+    shared_version = mp.Value("i", 0)
 
     inf_process = mp.Process(
         target=inference_worker,
@@ -403,7 +444,14 @@ def main():
     for rank in range(config.workers):
         p = mp.Process(
             target=client_worker,
-            args=(rank, config, req_queue, resp_queues[rank], traj_queue),
+            args=(
+                rank,
+                config,
+                req_queue,
+                resp_queues[rank],
+                traj_queue,
+                shared_version,
+            ),
         )
         p.start()
         processes.append(p)
@@ -411,7 +459,6 @@ def main():
     client_sock = create_client_socket(config)
     sock_lock = threading.Lock()
 
-    # Track weight versions and completed episodes
     current_version = -1
     episodes_completed = 0
     episodes_lock = threading.Lock()
@@ -422,7 +469,6 @@ def main():
         weights_path = os.path.join("runs", "client_weights.pt")
         while True:
             try:
-                # 1. Ask server only for current version (lightweight)
                 with sock_lock:
                     send_msg(client_sock, {"type": "req_version"})
                     resp = recv_msg(client_sock)
@@ -430,8 +476,6 @@ def main():
                 if resp and resp.get("type") == "version":
                     server_version = resp.get("version", 0)
 
-                    # Only fetch weights on initial boot OR if server has newer weights
-                    # AND at least 1 episode was completed using current weights
                     with episodes_lock:
                         ready_to_update = (current_version == -1) or (
                             server_version > current_version and episodes_completed > 0
@@ -447,10 +491,18 @@ def main():
                             and weights_resp.get("type") == "weights"
                             and weights_resp.get("data")
                         ):
-                            torch.save(weights_resp["data"], weights_path)
+                            torch.save(
+                                {
+                                    "version": server_version,
+                                    "state_dict": weights_resp["data"],
+                                },
+                                weights_path,
+                            )
                             current_version = weights_resp.get(
                                 "version", server_version
                             )
+                            with shared_version.get_lock():
+                                shared_version.value = current_version
                             with episodes_lock:
                                 episodes_completed = 0
                             weights_event.set()
@@ -470,6 +522,7 @@ def main():
     extraction_costs = []
     best_cost_in_window = float("inf")
     last_send_time = time.time()
+    server_known_prefixes = set()
 
     while True:
         try:
@@ -481,7 +534,6 @@ def main():
             extraction_costs.extend(msg.get("costs", []))
             best_cost_in_window = min(best_cost_in_window, cost)
 
-            # Record that an episode completed with the current weights
             with episodes_lock:
                 episodes_completed += 1
 
@@ -489,8 +541,13 @@ def main():
             pass
 
         if time.time() - last_send_time > 2.0 and buffer_transitions:
+            new_prefixes = {
+                k: v
+                for k, v in buffer_prefixes.items()
+                if k not in server_known_prefixes
+            }
             packed_payload = {
-                "prefixes": buffer_prefixes,
+                "prefixes": new_prefixes,
                 "transitions": buffer_transitions,
             }
             try:
@@ -504,12 +561,14 @@ def main():
                             "payload": packed_payload,
                         },
                     )
+                server_known_prefixes.update(new_prefixes.keys())
                 buffer_transitions.clear()
                 buffer_prefixes.clear()
                 extraction_costs.clear()
                 best_cost_in_window = float("inf")
             except Exception as e:
                 print(f"[Client] Error sending trajectory: {e}")
+                server_known_prefixes.clear()
             last_send_time = time.time()
 
     for p in processes:
