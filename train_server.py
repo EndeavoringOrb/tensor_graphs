@@ -113,9 +113,7 @@ def client_handler(client_sock, client_info, replay_queue):
 
                 payload = msg.get("payload", {})
                 if payload:
-                    replay_queue.put(
-                        {"type": "trajectory_payload", "payload": payload}
-                    )
+                    replay_queue.put({"type": "trajectory_payload", "payload": payload})
 
             elif msg_type == "cost_metric":
                 cost = msg.get("cost")

@@ -46,7 +46,9 @@ class TrainConfig:
     bucket_idx: int = -1
     compile_decode_buckets: bool = False
     workers: int = 4
-    cpp_threads: int = 1  # Prevents C++ thread oversubscription in multi-process workers
+    cpp_threads: int = (
+        1  # Prevents C++ thread oversubscription in multi-process workers
+    )
 
     # PUCT & Noise Annealing Config
     c_puct: float = 1.25

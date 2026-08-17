@@ -17,7 +17,6 @@ from tqdm import tqdm
 
 console = Console()
 
-# --- Path Constants ---
 ROOT_DIR = Path("tensor_graphs_cpp")
 GENERATED_DIR = ROOT_DIR / "generated"
 KERNELS_DIR = ROOT_DIR / "kernels"
@@ -150,13 +149,11 @@ class CompilerInfo:
 
     @classmethod
     def detect(cls) -> "CompilerInfo":
-        # 1. Environment variables
         cxx_env = os.environ.get("CXX") or os.environ.get("CLANG_CXX")
         if cxx_env and (shutil.which(cxx_env) or Path(cxx_env).exists()):
             kind = "clang" if "clang" in Path(cxx_env).name.lower() else "gcc"
             return cls(path=cxx_env, kind=kind)
 
-        # 2. Check for clang++ in PATH or standard LLVM locations
         which_clang = shutil.which("clang++")
         if which_clang:
             return cls(path=which_clang, kind="clang")
@@ -165,12 +162,10 @@ class CompilerInfo:
         if default_llvm.exists():
             return cls(path=str(default_llvm), kind="clang")
 
-        # 3. Fallback to g++
         which_gxx = shutil.which("g++")
         if which_gxx:
             return cls(path=which_gxx, kind="gcc")
 
-        # 4. Fallback to cl.exe if available
         which_cl = shutil.which("cl")
         if which_cl:
             return cls(path=which_cl, kind="msvc")
@@ -191,6 +186,8 @@ class PlatformInfo:
     compiler: CompilerInfo
     has_cuda: bool
     has_opencl: bool
+    cuda_inc_dir: str | None = None
+    cuda_lib_dir: str | None = None
     opencl_inc_dir: str | None = None
     opencl_lib_dir: str | None = None
 
@@ -207,26 +204,59 @@ class PlatformInfo:
         vcvars_path = find_vcvarsall()
         compiler = CompilerInfo.detect()
 
+        which_nvcc = shutil.which("nvcc")
+        nvcc_cuda_dir = (
+            str(Path(which_nvcc).resolve().parent.parent) if which_nvcc else None
+        )
+
         cuda_path = os.environ.get(
             "CUDA_PATH",
             os.environ.get(
                 "CUDA_HOME",
                 (
-                    r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0"
-                    if is_windows
-                    else "/usr/local/cuda"
+                    nvcc_cuda_dir
+                    or (
+                        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0"
+                        if is_windows
+                        else "/usr/local/cuda"
+                    )
                 ),
             ),
         )
         opencl_sdk_path = os.environ.get("OPENCL_SDK_ROOT", "./OpenCL-SDK/install")
 
         has_cuda = False
-        if (
-            shutil.which("nvcc") is not None
-            or Path(cuda_path).exists()
-            and (Path(cuda_path) / "include").exists()
-        ):
+        cuda_inc_dir = None
+        cuda_lib_dir = None
+
+        cuda_inc_candidates = [
+            Path(cuda_path) / "include",
+            Path("/usr/local/cuda/include"),
+            Path("/opt/cuda/include"),
+            Path("/usr/include"),
+        ]
+        for inc_dir in cuda_inc_candidates:
+            if (inc_dir / "cuda_runtime.h").exists():
+                has_cuda = True
+                cuda_inc_dir = str(inc_dir)
+                break
+
+        if not has_cuda and (which_nvcc is not None or Path(cuda_path).exists()):
             has_cuda = True
+            cuda_inc_dir = str(Path(cuda_path) / "include")
+
+        if has_cuda:
+            cuda_lib_candidates = [
+                Path(cuda_path) / ("lib/x64" if is_windows else "lib64"),
+                Path(cuda_path) / "lib",
+                Path("/usr/local/cuda/lib64"),
+                Path("/usr/local/cuda/lib"),
+                Path("/usr/lib/x86_64-linux-gnu"),
+            ]
+            for lib_dir in cuda_lib_candidates:
+                if lib_dir.exists():
+                    cuda_lib_dir = str(lib_dir)
+                    break
 
         has_opencl = False
         opencl_inc_dir = None
@@ -291,22 +321,22 @@ class PlatformInfo:
             compiler=compiler,
             has_cuda=has_cuda,
             has_opencl=has_opencl,
+            cuda_inc_dir=cuda_inc_dir,
+            cuda_lib_dir=cuda_lib_dir,
             opencl_inc_dir=opencl_inc_dir,
             opencl_lib_dir=opencl_lib_dir,
         )
 
 
 def ensure_toolchain(platform_info: PlatformInfo) -> None:
-    """Idempotently ensures compiler and headers/tools are installed for the host OS."""
     if platform_info.is_windows:
         has_compiler = (
             shutil.which(platform_info.compiler.path) is not None
             or Path(platform_info.compiler.path).exists()
         )
-
         if not has_compiler:
             console.print(
-                "[yellow]No C++ compiler (clang++/g++) found. Installing LLVM via winget...[/yellow]"
+                "[yellow]No C++ compiler found. Installing LLVM via winget...[/yellow]"
             )
             try:
                 subprocess.run(
@@ -337,44 +367,8 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
                 )
 
         vcvars = find_vcvarsall()
-        if not vcvars and platform_info.compiler.kind != "gcc":
-            console.print(
-                "[yellow]Visual Studio C++ Build Tools (vcvarsall.bat) not detected.[/yellow]"
-            )
-            console.print(
-                "[yellow]Attempting to install VS C++ Build Tools via winget...[/yellow]"
-            )
-            try:
-                subprocess.run(
-                    [
-                        "winget",
-                        "install",
-                        "--id",
-                        "Microsoft.VisualStudio.2022.BuildTools",
-                        "-e",
-                        "--accept-source-agreements",
-                        "--accept-package-agreements",
-                        "--override",
-                        "--passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
-                    ],
-                    check=True,
-                )
-                vcvars = find_vcvarsall()
-                if vcvars:
-                    platform_info.vcvars_path = vcvars
-                    console.print(
-                        "[bold green]Visual Studio C++ Build Tools installed successfully![/bold green]"
-                    )
-            except Exception as e:
-                console.print(
-                    f"[bold red]Auto-installation of VS Build Tools failed: {e}[/bold red]\n"
-                    "[white]If using Clang on Windows, ensure MSVC Build Tools or a MinGW environment is available.[/white]"
-                )
-        else:
-            platform_info.vcvars_path = vcvars
-
+        platform_info.vcvars_path = vcvars
         platform_info.compiler = CompilerInfo.detect()
-
     else:
         has_compiler = (
             shutil.which(platform_info.compiler.path) is not None
@@ -401,7 +395,6 @@ def ensure_toolchain(platform_info: PlatformInfo) -> None:
                     ["sudo", "pacman", "-S", "--noconfirm", "clang", "base-devel"],
                     check=False,
                 )
-
             platform_info.compiler = CompilerInfo.detect()
 
 
@@ -496,7 +489,6 @@ class KernelLinter:
         macro_pattern = re.compile(r"\b(REGISTER_[\w_]+)\s*\(")
         n_matches = 0
         for match in macro_pattern.finditer(clean_content):
-            macro_name = match.group(1)
             paren_start = match.end() - 1
             args = extract_macro_call_args(clean_content, paren_start)
 
@@ -928,14 +920,15 @@ class Toolchain:
 
         if self.config.use_cuda:
             flags.append("-DTG_USE_CUDA")
-            cuda_inc = Path(self.platform.cuda_path) / "include"
-            if cuda_inc.exists():
+            cuda_inc = self.platform.cuda_inc_dir or str(
+                Path(self.platform.cuda_path) / "include"
+            )
+            if Path(cuda_inc).exists():
                 flags.append(f"-I{cuda_inc}")
 
         return flags
 
     def get_pybind11_flags(self) -> tuple[list[str], list[str], str]:
-        """Returns (include_flags, link_flags, extension_suffix)."""
         py_includes = (
             subprocess.check_output(
                 [sys.executable, "-m", "pybind11", "--includes"], text=True
@@ -960,8 +953,6 @@ class Toolchain:
             py_lib_dir_base = Path(sys.base_prefix) / "libs"
             py_lib_dir_prefix = Path(sys.prefix) / "libs"
             link_flags.extend([f"-L{py_lib_dir_base}", f"-L{py_lib_dir_prefix}"])
-
-            # Crucial fix for GCC/MinGW on Windows: explicitly link Python import library
             py_version_nodot = f"{sys.version_info.major}{sys.version_info.minor}"
             link_flags.append(f"-lpython{py_version_nodot}")
         else:
@@ -971,13 +962,23 @@ class Toolchain:
 
     def get_ld_flags(self, is_python_ext: bool = False) -> list[str]:
         flags = []
+        if self.config.use_cuda:
+            if self.platform.cuda_lib_dir:
+                flags.append(f"-L{self.platform.cuda_lib_dir}")
+                if not self.platform.is_windows:
+                    flags.append(f"-Wl,-rpath,{self.platform.cuda_lib_dir}")
+            flags.append("-lcudart")
+
         if self.config.use_opencl:
             if self.platform.opencl_lib_dir:
                 flags.append(f"-L{self.platform.opencl_lib_dir}")
+                if not self.platform.is_windows:
+                    flags.append(f"-Wl,-rpath,{self.platform.opencl_lib_dir}")
             flags.append("-lOpenCL")
 
             if self.platform.is_windows and self.config.profile:
                 flags.append("-Wl,-debug")
+
         if not is_python_ext and not self.config.use_cuda:
             flags.extend(["-static"])
         return flags
@@ -990,6 +991,9 @@ class Toolchain:
             "cu",
             f"-DTG_LOG_LEVEL={self.config.log_level_val}",
         ]
+
+        if not self.platform.is_windows:
+            flags.extend(["-Xcompiler", "-fPIC"])
 
         if self.config.debug:
             flags.extend(["-g", "-G", "-O0", "-DDEBUG"])
@@ -1015,7 +1019,6 @@ class Toolchain:
     ) -> subprocess.CompletedProcess:
         cmd_str = " ".join(cmd)
 
-        # Only run vcvarsall.bat if MSVC or MSVC-ABI compiler toolchain is in use
         if (
             self.platform.is_windows
             and self.platform.compiler.kind in ("clang", "msvc")
@@ -1111,11 +1114,14 @@ class BuildOrchestrator:
                     self.toolchain.get_pybind11_flags()
                 )
                 out_name = f"tensor_graphs{ext_suffix}"
+                extra_objs = [cuda_obj] if self.config.use_cuda else []
                 cmd = (
                     [self.toolchain.get_cxx_binary()]
                     + self.toolchain.get_cxx_flags(is_python_ext=True)
                     + py_inc_flags
-                    + [main_src, "-o", out_name]
+                    + [main_src]
+                    + extra_objs
+                    + ["-o", out_name]
                     + py_link_flags
                     + self.toolchain.get_ld_flags(is_python_ext=True)
                 )
