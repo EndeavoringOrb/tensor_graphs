@@ -510,12 +510,6 @@ struct Planner
         ProgressTimer timer(0, "saturating");
         while (changed)
         {
-            if (InterruptManager::isInterrupted())
-            {
-                std::cerr << "\n[Planner.saturate] Interrupt detected, aborting execution..." << std::endl;
-                InterruptManager::cleanup();
-                std::exit(SIGINT);
-            }
             iterations++;
             uint32_t preUniqueNodes = egraph.getNumUniqueENodes();
             for (uint32_t eNodeIdx = 0; eNodeIdx < egraph.getENodes().size(); eNodeIdx++)

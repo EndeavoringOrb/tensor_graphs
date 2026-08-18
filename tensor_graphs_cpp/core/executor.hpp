@@ -53,13 +53,6 @@ class Executor
         {
             const OpInstruction &inst = compiled.instructions[idx];
 
-            if (InterruptManager::isInterrupted())
-            {
-                std::cerr << "\n[Executor] Interrupt detected, aborting execution..." << std::endl;
-                InterruptManager::cleanup();
-                std::exit(SIGINT);
-            }
-
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
             std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
             EngineType current_engine = kernel.engines.empty() ? EngineType::CPU : kernel.engines[0].type;

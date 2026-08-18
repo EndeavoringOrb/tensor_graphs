@@ -272,8 +272,7 @@ PYBIND11_MODULE(tensor_graphs, m)
 
     m.def("set_num_threads", &set_num_threads, py::arg("num_threads"),
           "Set the number of threads used by TensorGraph thread pools and parallel execution.");
-    m.def("get_num_threads", &get_num_threads,
-          "Get the current number of threads used by TensorGraph.");
+    m.def("get_num_threads", &get_num_threads, "Get the current number of threads used by TensorGraph.");
 
     // Enums
     py::enum_<HandleType>(m, "HandleType")

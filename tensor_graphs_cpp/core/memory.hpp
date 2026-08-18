@@ -66,45 +66,6 @@ struct OpenCLState
 
 struct DeviceBuffer;
 
-struct InterruptManager
-{
-    static inline std::vector<DeviceBuffer *> buffers;
-    static inline std::mutex mtx;
-    static inline volatile sig_atomic_t g_interrupted = 0;
-
-    static void registerBuffer(DeviceBuffer *buf)
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        buffers.push_back(buf);
-    }
-    static void unregisterBuffer(DeviceBuffer *buf)
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        auto it = std::find(buffers.begin(), buffers.end(), buf);
-        if (it != buffers.end())
-            buffers.erase(it);
-    }
-    static void cleanup();
-    static void handleSigInt(int signum)
-    {
-        std::cerr << "\n[TensorGraph] Caught interrupt signal (" << signum << "). Cleaning up..." << std::endl;
-        g_interrupted = 1;
-    }
-    static bool isInterrupted()
-    {
-        return g_interrupted != 0;
-    }
-    static void hook()
-    {
-        static bool hooked = false;
-        if (!hooked)
-        {
-            std::signal(SIGINT, handleSigInt);
-            hooked = true;
-        }
-    }
-};
-
 struct DeviceBuffer
 {
     MemSpace mem_space;
@@ -169,12 +130,9 @@ struct CppBuffer : public DeviceBuffer
 
     CppBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size)
     {
-        InterruptManager::registerBuffer(this);
-        InterruptManager::hook();
     }
     ~CppBuffer() override
     {
-        InterruptManager::unregisterBuffer(this);
         freeArena();
     }
     void init() override
@@ -223,12 +181,9 @@ struct CudaBuffer : public DeviceBuffer
 
     CudaBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size)
     {
-        InterruptManager::registerBuffer(this);
-        InterruptManager::hook();
     }
     ~CudaBuffer() override
     {
-        InterruptManager::unregisterBuffer(this);
         freeArena();
     }
     void init() override
@@ -291,12 +246,9 @@ struct OpenCLBuffer : public DeviceBuffer
 
     OpenCLBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size)
     {
-        InterruptManager::registerBuffer(this);
-        InterruptManager::hook();
     }
     ~OpenCLBuffer() override
     {
-        InterruptManager::unregisterBuffer(this);
         freeArena();
     }
     void init() override
@@ -491,13 +443,3 @@ struct MemoryManager
         return sizes;
     }
 };
-
-inline void InterruptManager::cleanup()
-{
-    std::lock_guard<std::mutex> lock(mtx);
-    for (auto *buf : buffers)
-    {
-        buf->freeArena();
-    }
-    buffers.clear();
-}
