@@ -18,9 +18,9 @@ torch.set_float32_matmul_precision("high")
 
 import tensor_graphs
 
+from train_models import AlphaZeroTransformer
 from train_shared import (
     ActorDelegate,
-    AlphaZeroTransformer,
     TrainConfig,
     TrajectoryCodec,
     create_client_socket,
@@ -33,7 +33,6 @@ from train_shared import (
 def inference_worker(
     config: TrainConfig, req_queue, resp_queues, weights_event, run_dir
 ):
-    torch.set_num_threads(1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Inference Server] Started on {device}")
 
@@ -45,7 +44,7 @@ def inference_worker(
     ).to(device)
     agent.eval()
 
-    prefix_cache_kv = {}
+    prefix_cache_ctx = {}
     prefix_cache_v = {}
     current_version = 0
     weights_path = Path(run_dir) / "client_weights.pt"
@@ -86,24 +85,25 @@ def inference_worker(
             if req[0] == "register_prefix":
                 _, ver, pkey, pdata = req
                 cache_key = (ver, pkey)
-                if cache_key not in prefix_cache_kv:
-                    f = torch.tensor(
-                        pdata.features, dtype=torch.float32, device=device
+                if cache_key not in prefix_cache_ctx:
+                    gf = torch.tensor(
+                        pdata.global_feature, dtype=torch.float32, device=device
                     ).unsqueeze(0)
-                    tt = torch.tensor(
-                        pdata.token_types, dtype=torch.int64, device=device
+                    nf = torch.tensor(
+                        pdata.node_features, dtype=torch.float32, device=device
                     ).unsqueeze(0)
+                    e = torch.tensor(pdata.edge_index, dtype=torch.int64, device=device)
                     pid = torch.tensor(
-                        pdata.phase_ids, dtype=torch.int64, device=device
-                    ).unsqueeze(0)
+                        [pdata.phase_id], dtype=torch.int64, device=device
+                    )
 
                     with (
                         torch.inference_mode(),
                         torch.autocast(device_type=device.type, dtype=torch.bfloat16),
                     ):
-                        v, kv = agent.encode_prefix(f, tt, pid)
+                        v, ctx = agent.encode_prefix(gf, nf, e, pid)
 
-                    prefix_cache_kv[cache_key] = kv
+                    prefix_cache_ctx[cache_key] = ctx
                     prefix_cache_v[cache_key] = v.item() if v is not None else 0.0
             elif req[0] == "evaluate":
                 eval_reqs.append(req)
@@ -115,7 +115,7 @@ def inference_worker(
         for req in eval_reqs:
             _, ver, pkey, a_feats, phase_id, wid = req
             cache_key = (ver, pkey)
-            if cache_key not in prefix_cache_kv:
+            if cache_key not in prefix_cache_ctx:
                 resp_queues[wid].put(("error", "missing_prefix"))
                 continue
             valid_reqs.append(req)
@@ -133,10 +133,8 @@ def inference_worker(
             )
             padded_pid = torch.zeros((B, max_A), dtype=torch.int64, device=device)
 
-            kv = prefix_cache_kv[cache_key]
-            batched_past_kv = [
-                (k.expand(B, -1, -1, -1), v.expand(B, -1, -1, -1)) for (k, v) in kv
-            ]
+            ctx = prefix_cache_ctx[cache_key]
+            batched_ctx = ctx.expand(B, -1, -1)
 
             for i, req in enumerate(group_reqs):
                 _, _, _, a_feats, phase_id, wid = req
@@ -155,7 +153,7 @@ def inference_worker(
                 torch.autocast(device_type=device.type, dtype=torch.bfloat16),
             ):
                 logits = agent.evaluate_actions(
-                    padded_actions, padded_pid, past_kv=batched_past_kv
+                    padded_actions, padded_pid, context=batched_ctx
                 )
 
             for i, req in enumerate(group_reqs):
@@ -318,7 +316,6 @@ def client_worker(
 
 def main():
     parser = argparse.ArgumentParser(description="AlphaZero TensorGraph Worker Client")
-    # Network Args
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Server address")
     parser.add_argument("--port", type=int, default=5000, help="Server port")
     parser.add_argument(
@@ -331,7 +328,6 @@ def main():
         "--bt-port", type=int, default=None, help="Bluetooth RFCOMM channel"
     )
 
-    # Worker Performance Args
     parser.add_argument(
         "--workers",
         type=int,
@@ -344,8 +340,6 @@ def main():
         default=1,
         help="Number of C++ threads per worker process (default: 1)",
     )
-
-    # Simulation & Model Overrides (default=None so server config is used unless explicitly specified)
     parser.add_argument(
         "--simulations", type=int, default=None, help="MCTS simulations per episode"
     )
@@ -376,8 +370,6 @@ def main():
     parser.add_argument("--min-noise", type=float, default=None)
     parser.add_argument("--decay-episodes", type=int, default=None)
     parser.add_argument("--depth-gamma", type=float, default=None)
-
-    # Architecture Overrides
     parser.add_argument("--d-model", type=int, default=None)
     parser.add_argument("--nhead", type=int, default=None)
     parser.add_argument("--num-layers", type=int, default=None)
@@ -407,7 +399,6 @@ def main():
     client_sock = create_client_socket(net_config)
     sock_lock = threading.Lock()
 
-    # Query server for base TrainConfig
     print("[Client] Querying base training configuration from server...")
     with sock_lock:
         send_msg(client_sock, {"type": "req_config"})
@@ -420,7 +411,6 @@ def main():
         print("[Client] Server did not provide config; falling back to local defaults.")
         config = TrainConfig()
 
-    # Overlay network & worker settings
     config.host = net_config.host
     config.port = net_config.port
     config.use_bluetooth = net_config.use_bluetooth
@@ -431,7 +421,6 @@ def main():
     )
     config.cpp_threads = args.cpp_threads
 
-    # Overlay any explicitly supplied CLI overrides on top of the server config
     if args.simulations is not None:
         config.num_simulations = args.simulations
     if args.level_sims is not None:

@@ -12,7 +12,6 @@ from typing import Protocol
 import numpy as np
 import tensor_graphs
 import torch
-from torch import nn
 
 torch.set_float32_matmul_precision("high")
 
@@ -88,7 +87,7 @@ class TrainConfig:
 
 
 # ==============================================================================
-# GRAPH PROVIDER INTERFACE & RANDOM GENERATOR
+# GRAPH PROVIDER & GENERATOR
 # ==============================================================================
 def generate_random_graph(
     num_nodes: int = 20,
@@ -269,13 +268,13 @@ def get_graph_provider(config: TrainConfig, worker_rank: int = 0):
 
 
 # ==============================================================================
-# PREFIX DEDUPLICATION & TRAJECTORY CODEC
+# SPARSE PREFIX DEDUPLICATION & TRAJECTORY CODEC
 # ==============================================================================
 @dataclasses.dataclass
 class PrefixData:
-    features: np.ndarray  # (1 + N + E, 8) float32
-    token_types: np.ndarray  # (1 + N + E,) int64
-    phase_ids: np.ndarray  # (1 + N + E,) int64
+    global_feature: np.ndarray  # (1, 8) float32
+    node_features: np.ndarray  # (N, 8) float32
+    edge_index: np.ndarray  # (2, E) int64
     phase_id: int
 
 
@@ -288,34 +287,31 @@ class TrajectoryCodec:
         edge_dst: np.ndarray,
     ) -> tuple[int, PrefixData]:
         N = len(node_features)
-        E = len(edge_src)
-        L = 1 + N + E
 
-        features = np.zeros((L, 8), dtype=np.float32)
-        token_types = np.zeros(L, dtype=np.int64)
-        phase_ids = np.full(L, phase_id, dtype=np.int64)
+        global_feature = np.zeros((1, 8), dtype=np.float32)
+        global_feature[0, 0] = phase_id
 
-        features[0, 0] = phase_id
-        token_types[0] = 0
-
+        nodes = np.zeros((N, 8), dtype=np.float32)
         if N > 0:
-            features[1 : N + 1, 0] = np.arange(N)
+            nodes[:, 0] = np.arange(N)
             dim_feat = min(7, node_features.shape[1])
-            features[1 : N + 1, 1 : 1 + dim_feat] = node_features[:, :dim_feat]
-        token_types[1 : N + 1] = 1
+            nodes[:, 1 : 1 + dim_feat] = node_features[:, :dim_feat]
 
-        if E > 0:
-            features[N + 1 : N + E + 1, 0] = edge_src
-            features[N + 1 : N + E + 1, 1] = edge_dst
-        token_types[N + 1 : N + E + 1] = 2
+        if len(edge_src) > 0:
+            edge_index = np.stack([edge_src, edge_dst], axis=0).astype(np.int64)
+        else:
+            edge_index = np.zeros((2, 0), dtype=np.int64)
 
         prefix_key = hash(
-            features.tobytes() + token_types.tobytes() + phase_ids.tobytes()
+            global_feature.tobytes()
+            + nodes.tobytes()
+            + edge_index.tobytes()
+            + bytes([phase_id])
         )
         return prefix_key, PrefixData(
-            features=features,
-            token_types=token_types,
-            phase_ids=phase_ids,
+            global_feature=global_feature,
+            node_features=nodes,
+            edge_index=edge_index,
             phase_id=phase_id,
         )
 
@@ -416,121 +412,8 @@ def recv_msg(sock):
 
 
 # ==============================================================================
-# TRANSFORMER MODEL
+# ACTOR DELEGATE
 # ==============================================================================
-class CustomSelfAttention(nn.Module):
-    def __init__(self, d_model: int, num_heads: int):
-        super().__init__()
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.head_dim = d_model // num_heads
-
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        B, L, _ = x.shape
-        q = self.q_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
-
-        if past_kv is not None:
-            past_k, past_v = past_kv
-            k = torch.cat([past_k, k], dim=2)
-            v = torch.cat([past_v, v], dim=2)
-
-        new_kv = (k, v)
-        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None)
-        out = out.transpose(1, 2).contiguous().view(B, L, self.d_model)
-        return self.out_proj(out), new_kv
-
-
-class CustomTransformerBlock(nn.Module):
-    def __init__(self, d_model: int, num_heads: int):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(d_model)
-        self.attn = CustomSelfAttention(d_model, num_heads)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, d_model * 4), nn.GELU(), nn.Linear(d_model * 4, d_model)
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        attn_out, new_kv = self.attn(self.norm1(x), past_kv=past_kv)
-        x = x + attn_out
-        x = x + self.mlp(self.norm2(x))
-        return x, new_kv
-
-
-class AlphaZeroTransformer(nn.Module):
-    def __init__(self, d_model=128, nhead=4, num_layers=3, max_feat_dim=8):
-        super().__init__()
-        self.d_model = d_model
-        self.nhead = nhead
-        self.num_layers = num_layers
-        self.max_feat_dim = max_feat_dim
-
-        self.feat_proj = nn.Linear(max_feat_dim, d_model)
-        self.type_emb = nn.Embedding(4, d_model)
-        self.phase_emb = nn.Embedding(5, d_model)
-
-        self.layers = nn.ModuleList(
-            [CustomTransformerBlock(d_model, nhead) for _ in range(num_layers)]
-        )
-
-        self.value_head = nn.Sequential(
-            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1)
-        )
-
-        self.policy_head = nn.Sequential(
-            nn.Linear(d_model, d_model), nn.GELU(), nn.Linear(d_model, 1)
-        )
-
-    def encode_prefix(self, features, token_types, phase_ids):
-        print(f"[encode_prefix] {features.shape}")
-        x = (
-            self.feat_proj(features)
-            + self.type_emb(token_types)
-            + self.phase_emb(phase_ids)
-        )
-
-        prefix_kvs = []
-        for layer in self.layers:
-            x, kv = layer(x, past_kv=None)
-            prefix_kvs.append(kv)
-
-        v = self.value_head(x[:, 0]).squeeze(-1)
-        return v, prefix_kvs
-
-    def evaluate_actions(self, action_features, phase_ids, past_kv):
-        print(f"[evaluate_actions] {action_features.shape}")
-        B, A, _ = action_features.shape
-        token_types = torch.full(
-            (B, A), 3, dtype=torch.int64, device=action_features.device
-        )
-        x = (
-            self.feat_proj(action_features)
-            + self.type_emb(token_types)
-            + self.phase_emb(phase_ids)
-        )
-
-        for i, layer in enumerate(self.layers):
-            x, _ = layer(x, past_kv=past_kv[i])
-
-        logits = self.policy_head(x).squeeze(-1)
-        return logits
-
-
 class ActorDelegate(tensor_graphs.SearchDelegate):
     PHASE_MAP = {"cache": 0, "extract": 1, "dispatch": 2, "bufferize": 3, "malloc": 4}
 
@@ -582,7 +465,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
         self.prefix_registry: dict[int, PrefixData] = {}
         self.current_prefix_keys: dict[str, int] = {}
         self.phase_values = {}
-        self.prefix_cache_kv = {}
+        self.prefix_cache_ctx = {}
         self.prefix_cache_v = {}
         self.worker_registered_prefixes = set()
 
@@ -631,25 +514,28 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
         cache_key = (self.version, prefix_key)
         if self.agent is not None:
-            if cache_key not in self.prefix_cache_kv:
+            if cache_key not in self.prefix_cache_ctx:
                 device = next(self.agent.parameters()).device
-                f_t = torch.tensor(
-                    prefix_data.features, dtype=torch.float32, device=device
+                gf_t = torch.tensor(
+                    prefix_data.global_feature, dtype=torch.float32, device=device
                 ).unsqueeze(0)
-                tt_t = torch.tensor(
-                    prefix_data.token_types, dtype=torch.int64, device=device
+                nf_t = torch.tensor(
+                    prefix_data.node_features, dtype=torch.float32, device=device
                 ).unsqueeze(0)
-                p_t = torch.tensor(
-                    prefix_data.phase_ids, dtype=torch.int64, device=device
-                ).unsqueeze(0)
+                e_t = torch.tensor(
+                    prefix_data.edge_index, dtype=torch.int64, device=device
+                )
+                pid_t = torch.tensor(
+                    [prefix_data.phase_id], dtype=torch.int64, device=device
+                )
 
                 with (
                     torch.inference_mode(),
                     torch.autocast(device_type=device.type, dtype=torch.bfloat16),
                 ):
-                    v, kv = self.agent.encode_prefix(f_t, tt_t, p_t)
+                    v, ctx = self.agent.encode_prefix(gf_t, nf_t, e_t, pid_t)
 
-                self.prefix_cache_kv[cache_key] = kv
+                self.prefix_cache_ctx[cache_key] = ctx
                 self.prefix_cache_v[cache_key] = v.item() if v is not None else 0.0
             self.phase_values[phase_name] = self.prefix_cache_v[cache_key]
         else:
@@ -696,7 +582,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
             if self.agent is not None:
                 device = next(self.agent.parameters()).device
-                kv = self.prefix_cache_kv[cache_key]
+                ctx = self.prefix_cache_ctx[cache_key]
                 v = self.prefix_cache_v[cache_key]
 
                 A_len = action_feats_np.shape[0]
@@ -720,7 +606,7 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
                     torch.autocast(device_type=device.type, dtype=torch.bfloat16),
                 ):
                     logits = self.agent.evaluate_actions(
-                        padded_actions, padded_pid, past_kv=kv
+                        padded_actions, padded_pid, context=ctx
                     )
                 scores = logits[0, :A_len].cpu().float().numpy()
             else:

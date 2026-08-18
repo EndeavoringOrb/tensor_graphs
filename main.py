@@ -4,7 +4,8 @@ from pathlib import Path
 import tensor_graphs
 from safetensors.torch import load_file
 
-from train_shared import ActorDelegate, AlphaZeroTransformer, TrainConfig
+from train_models import AlphaZeroTransformer
+from train_shared import ActorDelegate, TrainConfig
 from utils.decode import load_tokenizer
 
 

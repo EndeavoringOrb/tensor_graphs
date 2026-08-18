@@ -13,8 +13,8 @@ import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 from torch import optim
 
+from train_models import AlphaZeroTransformer
 from train_shared import (
-    AlphaZeroTransformer,
     PrefixData,
     TrainConfig,
     create_server_socket,
@@ -237,18 +237,17 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             if prefix is None:
                 continue
 
-            f_t = torch.tensor(
-                prefix.features, dtype=torch.float32, device=device
+            gf_t = torch.tensor(
+                prefix.global_feature, dtype=torch.float32, device=device
             ).unsqueeze(0)
-            tt_t = torch.tensor(
-                prefix.token_types, dtype=torch.int64, device=device
+            nf_t = torch.tensor(
+                prefix.node_features, dtype=torch.float32, device=device
             ).unsqueeze(0)
-            p_t = torch.tensor(
-                prefix.phase_ids, dtype=torch.int64, device=device
-            ).unsqueeze(0)
+            e_t = torch.tensor(prefix.edge_index, dtype=torch.int64, device=device)
+            pid_t = torch.tensor([prefix.phase_id], dtype=torch.int64, device=device)
 
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                v_pred, prefix_kvs = agent.encode_prefix(f_t, tt_t, p_t)
+                v_pred, ctx = agent.encode_prefix(gf_t, nf_t, e_t, pid_t)
 
             B_g = len(items)
             max_A = max(len(it["action_features"]) for it in items)
@@ -276,14 +275,11 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 )
                 action_mask[i, :A_len] = True
 
-            batched_kvs = [
-                (k.expand(B_g, -1, -1, -1), v.expand(B_g, -1, -1, -1))
-                for (k, v) in prefix_kvs
-            ]
+            batched_ctx = ctx.expand(B_g, -1, -1)
 
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 logits = agent.evaluate_actions(
-                    padded_actions, padded_pid, past_kv=batched_kvs
+                    padded_actions, padded_pid, context=batched_ctx
                 )
 
             logits = logits.masked_fill(~action_mask, -float("inf"))
@@ -361,9 +357,9 @@ def main():
     )
     parser.add_argument("--random-min-nodes", type=int, default=10)
     parser.add_argument("--random-max-nodes", type=int, default=30)
-    parser.add_argument("--d-model", type=int, default=128)
-    parser.add_argument("--nhead", type=int, default=4)
-    parser.add_argument("--num-layers", type=int, default=3)
+    parser.add_argument("--d-model", type=int, default=32)
+    parser.add_argument("--nhead", type=int, default=2)
+    parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--c-puct", type=float, default=1.25)
     parser.add_argument("--base-noise", type=float, default=0.25)
     parser.add_argument("--min-noise", type=float, default=0.01)
