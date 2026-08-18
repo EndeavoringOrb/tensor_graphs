@@ -3,17 +3,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 import time
 
+
 class GlobalLocalGraphAttention(nn.Module):
     """
     Multi-Head Sparse Graph Attention with Global-Local Factorization.
-    
+
     Complexity:
       - Global tokens (G): Dense attention to [Global + Nodes] -> O(G * (G + N))
       - Node tokens (N): Joint sparse attention to [Global] + [Incoming Graph Neighbors] -> O(N*G + E)
       - Total Time & Memory: O(N + E + G*N) instead of O((G + N + E)^2)
-    
+
     Zero full attention matrices are materialized, making it fast on both CPU and GPU.
     """
+
     def __init__(
         self,
         d_model: int,
@@ -23,12 +25,14 @@ class GlobalLocalGraphAttention(nn.Module):
         bias: bool = True,
     ):
         super().__init__()
-        assert d_model % nhead == 0, f"d_model ({d_model}) must be divisible by nhead ({nhead})"
-        
+        assert d_model % nhead == 0, (
+            f"d_model ({d_model}) must be divisible by nhead ({nhead})"
+        )
+
         self.d_model = d_model
         self.nhead = nhead
         self.head_dim = d_model // nhead
-        self.scale = 1.0 / (self.head_dim ** 0.5)
+        self.scale = 1.0 / (self.head_dim**0.5)
         self.add_self_loops = add_self_loops
         self.dropout_p = dropout
 
@@ -37,10 +41,12 @@ class GlobalLocalGraphAttention(nn.Module):
         self.k_proj = nn.Linear(d_model, d_model, bias=bias)
         self.v_proj = nn.Linear(d_model, d_model, bias=bias)
         self.out_proj = nn.Linear(d_model, d_model, bias=bias)
-        
+
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
-    def _prepare_edges(self, edge_index: torch.Tensor, num_nodes: int, device: torch.device) -> torch.Tensor:
+    def _prepare_edges(
+        self, edge_index: torch.Tensor, num_nodes: int, device: torch.device
+    ) -> torch.Tensor:
         if not self.add_self_loops or num_nodes == 0:
             return edge_index
         loop_index = torch.arange(0, num_nodes, dtype=torch.int64, device=device)
@@ -67,9 +73,21 @@ class GlobalLocalGraphAttention(nn.Module):
 
         # Handle empty node graphs
         if N == 0:
-            q_g = self.q_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
-            k_g = self.k_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
-            v_g = self.v_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
+            q_g = (
+                self.q_proj(x_global)
+                .view(B, G, self.nhead, self.head_dim)
+                .transpose(1, 2)
+            )
+            k_g = (
+                self.k_proj(x_global)
+                .view(B, G, self.nhead, self.head_dim)
+                .transpose(1, 2)
+            )
+            v_g = (
+                self.v_proj(x_global)
+                .view(B, G, self.nhead, self.head_dim)
+                .transpose(1, 2)
+            )
             scores_g = torch.matmul(q_g, k_g.transpose(-2, -1)) * self.scale
             attn_g = F.softmax(scores_g, dim=-1)
             out_g = torch.matmul(attn_g, v_g).transpose(1, 2).contiguous().view(B, G, D)
@@ -82,9 +100,15 @@ class GlobalLocalGraphAttention(nn.Module):
         E = src.size(0)
 
         # Q, K, V Projections
-        q_g = self.q_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
-        k_g = self.k_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
-        v_g = self.v_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
+        q_g = (
+            self.q_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
+        )
+        k_g = (
+            self.k_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
+        )
+        v_g = (
+            self.v_proj(x_global).view(B, G, self.nhead, self.head_dim).transpose(1, 2)
+        )
 
         q_n = self.q_proj(x_nodes).view(B, N, self.nhead, self.head_dim).transpose(1, 2)
         k_n = self.k_proj(x_nodes).view(B, N, self.nhead, self.head_dim).transpose(1, 2)
@@ -103,7 +127,9 @@ class GlobalLocalGraphAttention(nn.Module):
         # ---------------------------------------------------------------------
         # Local Node Attention: Nodes jointly attend to Global and Neighbors
         # ---------------------------------------------------------------------
-        scores_n_to_g = torch.matmul(q_n, k_g.transpose(-2, -1)) * self.scale  # [B, H, N, G]
+        scores_n_to_g = (
+            torch.matmul(q_n, k_g.transpose(-2, -1)) * self.scale
+        )  # [B, H, N, G]
 
         q_dst = q_n[:, :, dst, :]  # [B, H, E, D_h]
         k_src = k_n[:, :, src, :]  # [B, H, E, D_h]
@@ -113,9 +139,18 @@ class GlobalLocalGraphAttention(nn.Module):
         global_max = scores_n_to_g.amax(dim=-1)  # [B, H, N]
         dst_expanded = dst.view(1, 1, E).expand(B, self.nhead, E)
         local_max = torch.full(
-            (B, self.nhead, N), -torch.inf, dtype=scores_local.dtype, device=scores_local.device
+            (B, self.nhead, N),
+            -torch.inf,
+            dtype=scores_local.dtype,
+            device=scores_local.device,
         )
-        local_max.scatter_reduce_(dim=2, index=dst_expanded, src=scores_local, reduce="amax", include_self=False)
+        local_max.scatter_reduce_(
+            dim=2,
+            index=dst_expanded,
+            src=scores_local,
+            reduce="amax",
+            include_self=False,
+        )
         joint_max = torch.maximum(global_max, local_max)
 
         exp_g = torch.exp(scores_n_to_g - joint_max.unsqueeze(-1))
@@ -126,7 +161,9 @@ class GlobalLocalGraphAttention(nn.Module):
         sum_exp_local = torch.zeros(
             (B, self.nhead, N), dtype=exp_local.dtype, device=exp_local.device
         )
-        sum_exp_local.scatter_reduce_(dim=2, index=dst_expanded, src=exp_local, reduce="sum", include_self=False)
+        sum_exp_local.scatter_reduce_(
+            dim=2, index=dst_expanded, src=exp_local, reduce="sum", include_self=False
+        )
         denom = (sum_exp_g + sum_exp_local).clamp(min=1e-8)
 
         attn_n_to_g = self.dropout(exp_g / denom.unsqueeze(-1))
@@ -142,9 +179,13 @@ class GlobalLocalGraphAttention(nn.Module):
         out_n_from_local = torch.zeros(
             (B, self.nhead, N, self.head_dim), dtype=msg.dtype, device=msg.device
         )
-        out_n_from_local.scatter_reduce_(dim=2, index=dst_msg_expanded, src=msg, reduce="sum", include_self=False)
+        out_n_from_local.scatter_reduce_(
+            dim=2, index=dst_msg_expanded, src=msg, reduce="sum", include_self=False
+        )
 
-        out_n = (out_n_from_g + out_n_from_local).transpose(1, 2).contiguous().view(B, N, D)
+        out_n = (
+            (out_n_from_g + out_n_from_local).transpose(1, 2).contiguous().view(B, N, D)
+        )
         out_n = self.out_proj(out_n)
 
         return out_g, out_n
@@ -156,7 +197,7 @@ class GraphTransformerBlock(nn.Module):
         self.norm1_g = nn.LayerNorm(d_model)
         self.norm1_n = nn.LayerNorm(d_model)
         self.attn = GlobalLocalGraphAttention(d_model, nhead)
-        
+
         self.norm2_g = nn.LayerNorm(d_model)
         self.norm2_n = nn.LayerNorm(d_model)
         self.mlp_g = nn.Sequential(
@@ -191,12 +232,13 @@ class ActionCrossAttentionBlock(nn.Module):
     Evaluates candidate action choices by cross-attending to the graph's global summary token
     and applying self-attention across candidate choices.
     """
+
     def __init__(self, d_model: int, nhead: int):
         super().__init__()
         self.d_model = d_model
         self.nhead = nhead
         self.head_dim = d_model // nhead
-        self.scale = 1.0 / (self.head_dim ** 0.5)
+        self.scale = 1.0 / (self.head_dim**0.5)
 
         self.norm_act = nn.LayerNorm(d_model)
         self.norm_ctx = nn.LayerNorm(d_model)
@@ -237,7 +279,14 @@ class AlphaZeroTransformer(nn.Module):
     """
     AlphaZero Graph-Transformer with Sparse Factorized Attention.
     """
-    def __init__(self, d_model: int = 128, nhead: int = 4, num_layers: int = 3, max_feat_dim: int = 8):
+
+    def __init__(
+        self,
+        d_model: int = 128,
+        nhead: int = 4,
+        num_layers: int = 3,
+        max_feat_dim: int = 8,
+    ):
         super().__init__()
         self.d_model = d_model
         self.nhead = nhead
@@ -271,19 +320,17 @@ class AlphaZeroTransformer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Encodes the graph prefix in O(N + E).
-        
+
         Args:
             global_features: [B, 1, 8]
             node_features:   [B, N, 8]
             edge_index:      [2, E]
             phase_ids:       [B]
-        
+
         Returns:
             v_pred: [B] Value prediction
             h_global: [B, 1, D] Latent context for action evaluation
         """
-        print(f"[encode_prefix] {global_features.shape}, {node_features.shape}, {edge_index.shape}")
-        start = time.perf_counter()
         B, N, _ = node_features.shape
         device = node_features.device
 
@@ -308,7 +355,6 @@ class AlphaZeroTransformer(nn.Module):
             x_g, x_n = layer(x_g, x_n, edge_index)
 
         v_pred = self.value_head(x_g[:, 0]).squeeze(-1)
-        print(f"[encode_prefix] {time.perf_counter() - start}")
         return v_pred, x_g
 
     def evaluate_actions(
@@ -319,12 +365,12 @@ class AlphaZeroTransformer(nn.Module):
     ) -> torch.Tensor:
         """
         Evaluates candidate actions against the graph prefix context.
-        
+
         Args:
             action_features: [B, A, 8]
             phase_ids:       [B, A]
             context:         [B, 1, D] (Encoded global prefix token)
-        
+
         Returns:
             logits: [B, A] Action logits
         """

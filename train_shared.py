@@ -22,7 +22,7 @@ class TrainConfig:
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
     num_simulations: int = 10
-    level_simulations: list = dataclasses.field(default_factory=lambda: [2, 7, 10, 3])
+    level_simulations: list = dataclasses.field(default_factory=lambda: [1, 2, 2, 1])
     replay_buffer_size: int = 100_000
     batch_size: int = 64
     save_interval: int = 100
