@@ -1140,13 +1140,12 @@ class BuildOrchestrator:
                 )
                 self.toolchain.run_cmd(cmd)
 
-                cmd = [
-                    self.toolchain.get_nvcc_binary(),
-                    main_obj,
-                    cuda_obj,
-                    "-o",
-                    out_name,
-                ] + self.toolchain.get_ld_flags()
+                cmd = (
+                    [self.toolchain.get_cxx_binary()]
+                    + [main_obj, cuda_obj, "-o", out_name]
+                    + self.toolchain.get_cxx_flags()
+                    + self.toolchain.get_ld_flags()
+                )
                 if self.platform.is_windows and self.config.debug:
                     cmd.append("-g")
 
