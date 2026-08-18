@@ -1,10 +1,10 @@
 import argparse
-import os
+from pathlib import Path
 
 import tensor_graphs
 from safetensors.torch import load_file
 
-from train_shared import ActorDelegate, AlphaZeroTransformer
+from train_shared import ActorDelegate, AlphaZeroTransformer, TrainConfig
 from utils.decode import load_tokenizer
 
 
@@ -91,10 +91,26 @@ def main():
     if args.threads > 0:
         tensor_graphs.set_num_threads(args.threads)
 
-    agent = AlphaZeroTransformer(d_model=128, nhead=4, num_layers=3, max_feat_dim=8)
-    if args.run_dir:
-        model_file = os.path.join(args.run_dir, "model.safetensors")
-        if os.path.exists(model_file):
+    cfg = TrainConfig()
+
+    run_dir_path = Path(args.run_dir) if args.run_dir else None
+    if run_dir_path:
+        config_file = run_dir_path / "config.json"
+        try:
+            cfg = TrainConfig.load(config_file)
+        except FileNotFoundError as e:
+            print(f"Warning: Failed to load config from {config_file}: {e}")
+
+    agent = AlphaZeroTransformer(
+        d_model=cfg.d_model,
+        nhead=cfg.nhead,
+        num_layers=cfg.num_layers,
+        max_feat_dim=cfg.max_feat_dim,
+    )
+
+    if run_dir_path:
+        model_file = run_dir_path / "model.safetensors"
+        if model_file.exists():
             agent.load_state_dict(load_file(model_file))
             print(f"Loaded trained delegate agent from {model_file}")
 
@@ -117,7 +133,6 @@ def main():
     raw_tokenizer = tokenizer[0] if isinstance(tokenizer, tuple) else tokenizer
 
     eos_token_id = getattr(raw_tokenizer, "eos_token_id", None)
-
     has_chat_template = hasattr(raw_tokenizer, "apply_chat_template")
 
     if has_chat_template:

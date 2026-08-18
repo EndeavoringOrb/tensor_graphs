@@ -1,10 +1,12 @@
 import dataclasses
+import json
 import math
 import pickle
 import random
 import socket
 import struct
 import zlib
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -17,7 +19,7 @@ torch.set_float32_matmul_precision("high")
 
 @dataclasses.dataclass
 class TrainConfig:
-    run_dir: str = "runs/server_train"
+    run_dir: str = "runs"
     model_name: str = "gemma-3-270m"
     model_path: str = "models/google/gemma-3-270m"
     num_simulations: int = 10
@@ -36,9 +38,9 @@ class TrainConfig:
     resample_graph_every: int = 0
 
     # Transformer Architecture Config
-    d_model: int = 128
-    nhead: int = 4
-    num_layers: int = 3
+    d_model: int = 32
+    nhead: int = 2
+    num_layers: int = 2
     max_feat_dim: int = 8
 
     lr: float = 1e-3
@@ -46,9 +48,7 @@ class TrainConfig:
     bucket_idx: int = -1
     compile_decode_buckets: bool = False
     workers: int = 4
-    cpp_threads: int = (
-        1  # Prevents C++ thread oversubscription in multi-process workers
-    )
+    cpp_threads: int = 1
 
     # PUCT & Noise Annealing Config
     c_puct: float = 1.25
@@ -63,6 +63,28 @@ class TrainConfig:
     use_bluetooth: bool = False
     bt_host_address: str = "AC:F2:3C:A7:F7:EC"
     bt_port: int = 4
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TrainConfig":
+        valid_fields = {f.name for f in dataclasses.fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_fields}
+        return cls(**filtered)
+
+    def save(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.to_dict(), indent=4), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "TrainConfig":
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"Config file not found: {p}")
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return cls.from_dict(data)
 
 
 # ==============================================================================
@@ -475,6 +497,7 @@ class AlphaZeroTransformer(nn.Module):
         )
 
     def encode_prefix(self, features, token_types, phase_ids):
+        print(f"[encode_prefix] {features.shape}")
         x = (
             self.feat_proj(features)
             + self.type_emb(token_types)
@@ -490,6 +513,7 @@ class AlphaZeroTransformer(nn.Module):
         return v, prefix_kvs
 
     def evaluate_actions(self, action_features, phase_ids, past_kv):
+        print(f"[evaluate_actions] {action_features.shape}")
         B, A, _ = action_features.shape
         token_types = torch.full(
             (B, A), 3, dtype=torch.int64, device=action_features.device

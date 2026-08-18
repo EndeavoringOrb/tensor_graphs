@@ -1,7 +1,4 @@
 import argparse
-import dataclasses
-import json
-import os
 import queue
 import random
 import struct
@@ -60,20 +57,20 @@ def setup_run_dir(base_dir="runs", run_dir=None, resume_latest=False) -> str:
         target_dir.mkdir(parents=True, exist_ok=True)
         return target_dir.as_posix()
 
-    if resume_latest:
-        existing = [int(d) for d in os.listdir(runs_dir) if d.isdigit()]
-        if existing:
-            target_dir = runs_dir / str(max(existing))
-            return target_dir.as_posix()
+    existing = [
+        int(d.name) for d in runs_dir.iterdir() if d.is_dir() and d.name.isdigit()
+    ]
+    if resume_latest and existing:
+        target_dir = runs_dir / str(max(existing))
+        return target_dir.as_posix()
 
-    existing = [int(d) for d in os.listdir(runs_dir) if d.isdigit()]
     run_idx = max(existing) + 1 if existing else 1
     target_dir = runs_dir / str(run_idx)
     target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir.as_posix()
 
 
-def client_handler(client_sock, client_info, replay_queue):
+def client_handler(client_sock, client_info, replay_queue, config: TrainConfig):
     print(f"[Server] Worker connected from {client_info}")
     try:
         while True:
@@ -82,7 +79,13 @@ def client_handler(client_sock, client_info, replay_queue):
                 break
 
             msg_type = msg.get("type")
-            if msg_type == "req_version":
+            if msg_type == "req_config":
+                send_msg(
+                    client_sock,
+                    {"type": "config", "config": config.to_dict()},
+                )
+
+            elif msg_type == "req_version":
                 weights_ready_event.wait(timeout=60.0)
                 with weights_lock:
                     send_msg(
@@ -127,13 +130,13 @@ def client_handler(client_sock, client_info, replay_queue):
         client_sock.close()
 
 
-def accept_loop(server_sock, conn_type_label, replay_queue):
+def accept_loop(server_sock, conn_type_label, replay_queue, config: TrainConfig):
     try:
         while True:
             client_sock, client_info = server_sock.accept()
             threading.Thread(
                 target=client_handler,
-                args=(client_sock, client_info, replay_queue),
+                args=(client_sock, client_info, replay_queue, config),
                 daemon=True,
             ).start()
     except Exception as e:
@@ -152,10 +155,11 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
         max_feat_dim=config.max_feat_dim,
     ).to(device)
 
-    os.makedirs(config.run_dir, exist_ok=True)
-    losses_bin_path = os.path.join(config.run_dir, "losses.bin")
-    costs_bin_path = os.path.join(config.run_dir, "costs.bin")
-    model_filepath = Path(config.run_dir) / "model.safetensors"
+    run_dir_path = Path(config.run_dir)
+    run_dir_path.mkdir(parents=True, exist_ok=True)
+    losses_bin_path = run_dir_path / "losses.bin"
+    costs_bin_path = run_dir_path / "costs.bin"
+    model_filepath = run_dir_path / "model.safetensors"
     pack_fmt = "<If"
 
     if model_filepath.exists():
@@ -171,10 +175,10 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     buffer = UnifiedReplayBuffer(maxlen=config.replay_buffer_size)
 
     batches_processed = 0
-    if os.path.exists(losses_bin_path) and os.path.getsize(losses_bin_path) >= 8:
+    if losses_bin_path.exists() and losses_bin_path.stat().st_size >= 8:
         try:
             with open(losses_bin_path, "rb") as f_bin:
-                f_bin.seek(-8, os.SEEK_END)
+                f_bin.seek(-8, 2)
                 last_idx, _ = struct.unpack(pack_fmt, f_bin.read(8))
                 batches_processed = int(last_idx)
             print(f"[Learner] Resuming loss logging at batch {batches_processed}")
@@ -189,10 +193,10 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
     save_file(cpu_state_dict, model_filepath)
 
     cost_count = 0
-    if os.path.exists(costs_bin_path) and os.path.getsize(costs_bin_path) >= 8:
+    if costs_bin_path.exists() and costs_bin_path.stat().st_size >= 8:
         try:
             with open(costs_bin_path, "rb") as f_bin:
-                f_bin.seek(-8, os.SEEK_END)
+                f_bin.seek(-8, 2)
                 last_idx, _ = struct.unpack(pack_fmt, f_bin.read(8))
                 cost_count = int(last_idx)
             print(f"[Learner] Resuming cost logging at count {cost_count}")
@@ -219,7 +223,6 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             continue
 
         raw_batch = buffer.sample_batch(config.batch_size)
-
         groups = defaultdict(list)
         for item in raw_batch:
             groups[item["prefix_key"]].append(item)
@@ -378,18 +381,13 @@ def main():
         tensor_graphs.set_num_threads(args.threads)
 
     run_dir = setup_run_dir(run_dir=args.run_dir, resume_latest=args.resume)
-
     config_file = Path(run_dir) / "config.json"
-    if config_file.exists():
-        try:
-            with open(config_file, "r") as f:
-                saved_config = json.load(f)
-            config = TrainConfig(**saved_config)
-            print(f"[Server] Loaded existing run configuration from {config_file}")
-        except Exception as e:
-            print(f"[Server] Could not load existing config ({e}), creating default.")
-            config = TrainConfig()
-    else:
+
+    try:
+        config = TrainConfig.load(config_file)
+        print(f"[Server] Loaded existing run configuration from {config_file}")
+    except FileNotFoundError as e:
+        print(f"[Server] Could not load existing config ({e}), creating default.")
         config = TrainConfig()
 
     config.run_dir = run_dir
@@ -409,8 +407,7 @@ def main():
     config.nhead = args.nhead
     config.num_layers = args.num_layers
 
-    with open(os.path.join(config.run_dir, "config.json"), "w") as f:
-        json.dump(dataclasses.asdict(config), f, indent=4)
+    config.save(config_file)
 
     replay_queue = queue.Queue()
     learner_thread = threading.Thread(
@@ -422,7 +419,7 @@ def main():
     tcp_sock = create_server_socket(config.host, config.port, use_bluetooth=False)
     server_sockets.append(tcp_sock)
     tcp_thread = threading.Thread(
-        target=accept_loop, args=(tcp_sock, "TCP/IP", replay_queue), daemon=True
+        target=accept_loop, args=(tcp_sock, "TCP/IP", replay_queue, config), daemon=True
     )
     tcp_thread.start()
 
@@ -436,7 +433,7 @@ def main():
             server_sockets.append(bt_sock)
             bt_thread = threading.Thread(
                 target=accept_loop,
-                args=(bt_sock, "Bluetooth RFCOMM", replay_queue),
+                args=(bt_sock, "Bluetooth RFCOMM", replay_queue, config),
                 daemon=True,
             )
             bt_thread.start()

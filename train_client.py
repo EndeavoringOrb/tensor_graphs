@@ -30,7 +30,9 @@ from train_shared import (
 )
 
 
-def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
+def inference_worker(
+    config: TrainConfig, req_queue, resp_queues, weights_event, run_dir
+):
     torch.set_num_threads(1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Inference Server] Started on {device}")
@@ -46,11 +48,11 @@ def inference_worker(config, req_queue, resp_queues, weights_event, run_dir):
     prefix_cache_kv = {}
     prefix_cache_v = {}
     current_version = 0
-    weights_path = os.path.join(run_dir, "client_weights.pt")
+    weights_path = Path(run_dir) / "client_weights.pt"
 
     while True:
         if weights_event.is_set():
-            if os.path.exists(weights_path):
+            if weights_path.exists():
                 try:
                     loaded = torch.load(
                         weights_path, map_location="cpu", weights_only=True
@@ -180,7 +182,7 @@ def client_worker(
     real_stdout_fd = os.dup(1)
     real_stdout = os.fdopen(real_stdout_fd, "w", buffering=1)
 
-    log_path = f"client_worker_{rank}.log"
+    log_path = Path(f"client_worker_{rank}.log")
     f_log = open(log_path, "w", encoding="utf-8")
     sys.stdout.flush()
     sys.stderr.flush()
@@ -246,7 +248,7 @@ def client_worker(
         mcts_tree = {}
         last_delegate = None
 
-        for sim in range(config.num_simulations):
+        for _ in range(config.num_simulations):
             delegate = ActorDelegate(
                 agent=None,
                 req_queue=req_queue,
@@ -316,11 +318,20 @@ def client_worker(
 
 def main():
     parser = argparse.ArgumentParser(description="AlphaZero TensorGraph Worker Client")
+    # Network Args
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Server address")
     parser.add_argument("--port", type=int, default=5000, help="Server port")
     parser.add_argument(
         "-bt", "--use-bluetooth", action="store_true", help="Use Bluetooth RFCOMM"
     )
+    parser.add_argument(
+        "--bt-address", type=str, default=None, help="Bluetooth host MAC"
+    )
+    parser.add_argument(
+        "--bt-port", type=int, default=None, help="Bluetooth RFCOMM channel"
+    )
+
+    # Worker Performance Args
     parser.add_argument(
         "--workers",
         type=int,
@@ -333,64 +344,136 @@ def main():
         default=1,
         help="Number of C++ threads per worker process (default: 1)",
     )
+
+    # Simulation & Model Overrides (default=None so server config is used unless explicitly specified)
     parser.add_argument(
-        "--simulations", type=int, default=10, help="MCTS simulations per episode"
+        "--simulations", type=int, default=None, help="MCTS simulations per episode"
     )
-    parser.add_argument(
-        "--graph-source", type=str, default="model", choices=["model", "random"]
-    )
-    parser.add_argument("--model", type=str, default="gemma-3-270m", help="Model name")
-    parser.add_argument("--model-path", type=str, default="models/google/gemma-3-270m")
-    parser.add_argument("--random-min-nodes", type=int, default=10)
-    parser.add_argument("--random-max-nodes", type=int, default=30)
-    parser.add_argument("--random-dim", type=int, default=128)
-    parser.add_argument("--random-seq-len", type=int, default=64)
-    parser.add_argument("--random-seed", type=int, default=None)
-    parser.add_argument("--resample-graph-every", type=int, default=0)
-    parser.add_argument("--compile-decode-buckets", action="store_true")
-    parser.add_argument("--log-lost-calls", action="store_true", dest="log_cost_calls")
-    parser.add_argument("--c-puct", type=float, default=1.25)
-    parser.add_argument("--base-noise", type=float, default=0.25)
-    parser.add_argument("--min-noise", type=float, default=0.01)
-    parser.add_argument("--decay-episodes", type=int, default=500)
-    parser.add_argument("--depth-gamma", type=float, default=0.7)
     parser.add_argument(
         "--level-sims",
         nargs="+",
         type=int,
-        default=[1, 1, 1, 1],
+        default=None,
         help="Simulations per level: [num_extract, num_dispatch, num_bufferize, num_malloc]",
     )
+    parser.add_argument(
+        "--graph-source", type=str, default=None, choices=["model", "random"]
+    )
+    parser.add_argument("--model", type=str, default=None, help="Model name")
+    parser.add_argument("--model-path", type=str, default=None, help="Model path")
+    parser.add_argument("--random-min-nodes", type=int, default=None)
+    parser.add_argument("--random-max-nodes", type=int, default=None)
+    parser.add_argument("--random-dim", type=int, default=None)
+    parser.add_argument("--random-seq-len", type=int, default=None)
+    parser.add_argument("--random-seed", type=int, default=None)
+    parser.add_argument("--resample-graph-every", type=int, default=None)
+    parser.add_argument("--compile-decode-buckets", action="store_true", default=None)
+    parser.add_argument(
+        "--log-lost-calls", action="store_true", dest="log_cost_calls", default=None
+    )
+    parser.add_argument("--c-puct", type=float, default=None)
+    parser.add_argument("--base-noise", type=float, default=None)
+    parser.add_argument("--min-noise", type=float, default=None)
+    parser.add_argument("--decay-episodes", type=int, default=None)
+    parser.add_argument("--depth-gamma", type=float, default=None)
+
+    # Architecture Overrides
+    parser.add_argument("--d-model", type=int, default=None)
+    parser.add_argument("--nhead", type=int, default=None)
+    parser.add_argument("--num-layers", type=int, default=None)
 
     args = parser.parse_args()
 
-    config = TrainConfig()
-    config.host = args.host
-    config.port = args.port
-    config.use_bluetooth = args.use_bluetooth
-    config.workers = 1 if args.log_cost_calls else args.workers
-    config.cpp_threads = args.cpp_threads
-    config.num_simulations = args.simulations
-    config.graph_source = args.graph_source
-    config.model_name = args.model
-    config.model_path = args.model_path
-    config.random_min_nodes = args.random_min_nodes
-    config.random_max_nodes = args.random_max_nodes
-    config.random_hidden_dim = args.random_dim
-    config.random_seq_len = args.random_seq_len
-    config.random_seed = args.random_seed
-    config.resample_graph_every = args.resample_graph_every
-    config.compile_decode_buckets = args.compile_decode_buckets
-    config.log_cost_calls = args.log_cost_calls
-    config.c_puct = args.c_puct
-    config.base_noise = args.base_noise
-    config.min_noise = args.min_noise
-    config.decay_episodes = args.decay_episodes
-    config.depth_gamma = args.depth_gamma
-    config.level_simulations = args.level_sims
+    net_config = TrainConfig()
+    net_config.host = args.host
+    net_config.port = args.port
+    net_config.use_bluetooth = args.use_bluetooth
+    if args.bt_address is not None:
+        net_config.bt_host_address = args.bt_address
+    if args.bt_port is not None:
+        net_config.bt_port = args.bt_port
 
-    if config.host and ":" in config.host and len(config.host.split(":")) == 6:
-        config.use_bluetooth = True
+    if (
+        net_config.host
+        and ":" in net_config.host
+        and len(net_config.host.split(":")) == 6
+    ):
+        net_config.use_bluetooth = True
+
+    conn_type = "Bluetooth" if net_config.use_bluetooth else "TCP/IP"
+    print(
+        f"[Client] Connecting to {net_config.host}:{net_config.port} ({conn_type})..."
+    )
+    client_sock = create_client_socket(net_config)
+    sock_lock = threading.Lock()
+
+    # Query server for base TrainConfig
+    print("[Client] Querying base training configuration from server...")
+    with sock_lock:
+        send_msg(client_sock, {"type": "req_config"})
+        resp = recv_msg(client_sock)
+
+    if resp and resp.get("type") == "config" and resp.get("config"):
+        config = TrainConfig.from_dict(resp["config"])
+        print("[Client] Synced base TrainConfig from server.")
+    else:
+        print("[Client] Server did not provide config; falling back to local defaults.")
+        config = TrainConfig()
+
+    # Overlay network & worker settings
+    config.host = net_config.host
+    config.port = net_config.port
+    config.use_bluetooth = net_config.use_bluetooth
+    config.bt_host_address = net_config.bt_host_address
+    config.bt_port = net_config.bt_port
+    config.workers = (
+        1 if (args.log_cost_calls or config.log_cost_calls) else args.workers
+    )
+    config.cpp_threads = args.cpp_threads
+
+    # Overlay any explicitly supplied CLI overrides on top of the server config
+    if args.simulations is not None:
+        config.num_simulations = args.simulations
+    if args.level_sims is not None:
+        config.level_simulations = args.level_sims
+    if args.graph_source is not None:
+        config.graph_source = args.graph_source
+    if args.model is not None:
+        config.model_name = args.model
+    if args.model_path is not None:
+        config.model_path = args.model_path
+    if args.random_min_nodes is not None:
+        config.random_min_nodes = args.random_min_nodes
+    if args.random_max_nodes is not None:
+        config.random_max_nodes = args.random_max_nodes
+    if args.random_dim is not None:
+        config.random_hidden_dim = args.random_dim
+    if args.random_seq_len is not None:
+        config.random_seq_len = args.random_seq_len
+    if args.random_seed is not None:
+        config.random_seed = args.random_seed
+    if args.resample_graph_every is not None:
+        config.resample_graph_every = args.resample_graph_every
+    if args.compile_decode_buckets is not None:
+        config.compile_decode_buckets = args.compile_decode_buckets
+    if args.log_cost_calls is not None:
+        config.log_cost_calls = args.log_cost_calls
+    if args.c_puct is not None:
+        config.c_puct = args.c_puct
+    if args.base_noise is not None:
+        config.base_noise = args.base_noise
+    if args.min_noise is not None:
+        config.min_noise = args.min_noise
+    if args.decay_episodes is not None:
+        config.decay_episodes = args.decay_episodes
+    if args.depth_gamma is not None:
+        config.depth_gamma = args.depth_gamma
+    if args.d_model is not None:
+        config.d_model = args.d_model
+    if args.nhead is not None:
+        config.nhead = args.nhead
+    if args.num_layers is not None:
+        config.num_layers = args.num_layers
 
     if config.graph_source == "model":
         try:
@@ -409,12 +492,14 @@ def main():
         except Exception as e:
             print(f"[Client] Note: Proceeding assuming local model files exist ({e}).")
 
-    conn_type = "Bluetooth" if config.use_bluetooth else "TCP/IP"
     print("=========================================================")
     print(f" Starting {config.workers} Client Worker Process(es)")
     print(f" C++ Threads / Worker: {config.cpp_threads}")
     print(f" Target Server: {config.host}:{config.port} ({conn_type})")
     print(f" Graph Source: {config.graph_source.upper()}")
+    print(
+        f" Transformer Model: d_model={config.d_model}, nhead={config.nhead}, layers={config.num_layers}"
+    )
     print("=========================================================")
 
     req_queue = mp.Queue()
@@ -422,6 +507,9 @@ def main():
     traj_queue = mp.Queue()
     weights_event = mp.Event()
     shared_version = mp.Value("i", 0)
+
+    runs_dir = Path("runs")
+    runs_dir.mkdir(parents=True, exist_ok=True)
 
     inf_process = mp.Process(
         target=inference_worker,
@@ -445,17 +533,13 @@ def main():
         p.start()
         processes.append(p)
 
-    client_sock = create_client_socket(config)
-    sock_lock = threading.Lock()
-
     current_version = -1
     episodes_completed = 0
     episodes_lock = threading.Lock()
 
     def weight_sync_thread():
         nonlocal current_version, episodes_completed
-        os.makedirs("runs", exist_ok=True)
-        weights_path = os.path.join("runs", "client_weights.pt")
+        weights_path = runs_dir / "client_weights.pt"
         while True:
             try:
                 with sock_lock:
