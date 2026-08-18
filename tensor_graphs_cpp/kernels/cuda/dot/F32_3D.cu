@@ -62,6 +62,7 @@ inline bool matchDotF32_3D_CUDA(const std::vector<TensorNode> &inputs, const Ten
  */
 void runDotF32_3D_CUDA(const KernelContext &ctx)
 {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *A = static_cast<const float *>(ctx.inputs[0]);
     const float *B = static_cast<const float *>(ctx.inputs[1]);
     float *Out = static_cast<float *>(ctx.outputs[0]);
@@ -76,7 +77,7 @@ void runDotF32_3D_CUDA(const KernelContext &ctx)
                 (uint32_t)((M + threads.y - 1) / threads.y),
                 (uint32_t)B_count);
 
-    dot_f32_3d_kernel<<<blocks, threads>>>(A, B, Out, B_count, M, K, N);
+    dot_f32_3d_kernel<<<blocks, threads, 0, stream>>>(A, B, Out, B_count, M, K, N);
 
     // Check for launch errors
     cudaError_t err = cudaGetLastError();

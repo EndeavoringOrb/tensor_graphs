@@ -90,6 +90,7 @@ inline bool matchHcPost_CUDA(const std::vector<TensorNode> &inputs, const Tensor
 
 inline void runHcPost_CUDA(const KernelContext &ctx)
 {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *X = static_cast<const float *>(ctx.inputs[0]);
     const float *Residual = static_cast<const float *>(ctx.inputs[1]);
     const float *Post = static_cast<const float *>(ctx.inputs[2]);
@@ -110,7 +111,7 @@ inline void runHcPost_CUDA(const KernelContext &ctx)
     int blockSize = 256;
     int numBlocks = (total_elements + blockSize - 1) / blockSize;
 
-    hc_post_f32_cuda_kernel<<<numBlocks, blockSize>>>(X, Residual, Post, Comb, Out, S, M, D, total_elements);
+    hc_post_f32_cuda_kernel<<<numBlocks, blockSize, 0, stream>>>(X, Residual, Post, Comb, Out, S, M, D, total_elements);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)

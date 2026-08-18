@@ -48,6 +48,7 @@ inline bool matchScatterF32_CUDA_ND(const std::vector<TensorNode> &inputs, const
 }
 
 inline void runScatterF32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *target = static_cast<const float *>(ctx.inputs[0]);
     const float *updates = static_cast<const float *>(ctx.inputs[1]);
     const int32_t *starts = static_cast<const int32_t *>(ctx.inputs[2]);
@@ -59,7 +60,10 @@ inline void runScatterF32_CUDA_ND(const KernelContext &ctx) {
     uint64_t n_target = countElements(out_shape);
 
     if (target != Out && n_target > 0) {
-        cudaMemcpy(Out, target, n_target * sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaError_t copyErr = cudaMemcpyAsync(Out, target, n_target * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+        if (copyErr != cudaSuccess) {
+            Error::throw_err("cudaMemcpyAsync failed in Scatter_F32_CUDA_ND: " + std::string(cudaGetErrorString(copyErr)));
+        }
     }
 
     uint64_t n_updates = countElements(upd_shape);
@@ -78,7 +82,7 @@ inline void runScatterF32_CUDA_ND(const KernelContext &ctx) {
     int blockSize = 256;
     int numBlocks = (n_updates + blockSize - 1) / blockSize;
 
-    ScatterCUDA::scatter_f32_nd_kernel<<<numBlocks, blockSize>>>(updates, Out, n_updates, p);
+    ScatterCUDA::scatter_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(updates, Out, n_updates, p);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

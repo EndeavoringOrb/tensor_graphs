@@ -50,6 +50,7 @@ inline bool matchIm2ColF32_CUDA_ND(const std::vector<TensorNode> &inputs, const 
 }
 
 inline void runIm2ColF32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *img = static_cast<const float *>(ctx.inputs[0]);
     int32_t kernel_size = *static_cast<const int32_t *>(ctx.inputs[1]);
     int32_t stride = *static_cast<const int32_t *>(ctx.inputs[2]);
@@ -70,7 +71,7 @@ inline void runIm2ColF32_CUDA_ND(const KernelContext &ctx) {
 
     int blockSize = 256;
     int numBlocks = (total_threads + blockSize - 1) / blockSize;
-    im2col_f32_nd_kernel<<<numBlocks, blockSize>>>(img, col, N, C, H, W, kernel_size, stride, padding, H_out, W_out);
+    im2col_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(img, col, N, C, H, W, kernel_size, stride, padding, H_out, W_out);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

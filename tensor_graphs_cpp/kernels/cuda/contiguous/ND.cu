@@ -83,6 +83,7 @@ inline bool matchContiguous_CUDA_ND(const std::vector<TensorNode> &inputs, const
  */
 inline void runContiguous_CUDA_ND(const KernelContext &ctx)
 {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const uint8_t *src = static_cast<const uint8_t *>(ctx.inputs[0]);
     uint8_t *dst = static_cast<uint8_t *>(ctx.outputs[0]);
 
@@ -103,7 +104,7 @@ inline void runContiguous_CUDA_ND(const KernelContext &ctx)
     int blockSize = 256;
     uint32_t gridSize = (uint32_t)((numElements + blockSize - 1) / blockSize);
 
-    ContiguousCUDA::contiguous_kernel<<<gridSize, blockSize>>>(src, dst, numElements, elemSize, p);
+    ContiguousCUDA::contiguous_kernel<<<gridSize, blockSize, 0, stream>>>(src, dst, numElements, elemSize, p);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)

@@ -18,6 +18,7 @@ inline bool matchArangeI32_CUDA_ND(const std::vector<TensorNode> &inputs, const 
 }
 
 inline void runArangeI32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     int32_t start = *static_cast<const int32_t *>(ctx.inputs[0]);
     int32_t step = *static_cast<const int32_t *>(ctx.inputs[2]);
     int32_t *Out = static_cast<int32_t *>(ctx.outputs[0]);
@@ -28,7 +29,7 @@ inline void runArangeI32_CUDA_ND(const KernelContext &ctx) {
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
 
-    arange_i32_nd_kernel<<<numBlocks, blockSize>>>(start, step, Out, n);
+    arange_i32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(start, step, Out, n);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

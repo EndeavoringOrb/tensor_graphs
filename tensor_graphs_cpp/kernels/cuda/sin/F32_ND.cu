@@ -19,6 +19,7 @@ inline bool matchSinF32_CUDA_ND(const std::vector<TensorNode> &inputs, const Ten
 }
 
 inline void runSinF32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *A = static_cast<const float *>(ctx.inputs[0]);
     float *Out = static_cast<float *>(ctx.outputs[0]);
 
@@ -28,7 +29,7 @@ inline void runSinF32_CUDA_ND(const KernelContext &ctx) {
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
 
-    sin_f32_nd_kernel<<<numBlocks, blockSize>>>(A, Out, n);
+    sin_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(A, Out, n);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

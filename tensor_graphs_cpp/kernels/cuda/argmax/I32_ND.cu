@@ -46,6 +46,7 @@ inline bool matchArgmaxI32_CUDA_ND(const std::vector<TensorNode> &inputs, const 
 }
 
 inline void runArgmaxI32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *in = static_cast<const float *>(ctx.inputs[0]);
     int32_t axis = *static_cast<const int32_t *>(ctx.inputs[1]);
     int32_t k = *static_cast<const int32_t *>(ctx.inputs[2]);
@@ -65,7 +66,7 @@ inline void runArgmaxI32_CUDA_ND(const KernelContext &ctx) {
     int blockSize = 256;
     int numBlocks = (total + blockSize - 1) / blockSize;
 
-    argmax_i32_nd_kernel<<<numBlocks, blockSize>>>(in, Out, outer, mid, inner, k);
+    argmax_i32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(in, Out, outer, mid, inner, k);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

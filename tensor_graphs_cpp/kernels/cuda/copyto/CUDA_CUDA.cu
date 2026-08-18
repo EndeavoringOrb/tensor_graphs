@@ -25,7 +25,7 @@ inline void run_copy_cuda_cuda(const KernelContext &ctx)
     uint64_t num_elements = countElements(outView);
     uint64_t bytes = num_elements * getDTypeSize(outView.dtype);
 
-    cudaStream_t stream = reinterpret_cast<cudaStream_t>(!ctx.cuda_streams.empty() ? ctx.cuda_streams[0] : nullptr);
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
 
     cudaError_t err = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDefault, stream);
     if (err != cudaSuccess)

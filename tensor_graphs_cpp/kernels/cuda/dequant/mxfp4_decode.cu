@@ -94,6 +94,7 @@ inline bool matchFusedMXFP4_CUDA(const std::vector<TensorNode> &inputs, const Te
 // Kernel Runner
 // ---------------------------------------------------------------------------
 inline void runFusedMXFP4_CUDA(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const uint8_t *packed_weights = static_cast<const uint8_t *>(ctx.inputs[0]);
     const float *scales           = static_cast<const float *>(ctx.inputs[1]);
     float *out                    = static_cast<float *>(ctx.outputs[0]);
@@ -110,7 +111,7 @@ inline void runFusedMXFP4_CUDA(const KernelContext &ctx) {
     int blockSize = 256;
     int numBlocks = (int)((total_bytes + blockSize - 1) / blockSize);
 
-    MXFP4CUDA::fused_mxfp4_dequant_kernel<<<numBlocks, blockSize>>>(
+    MXFP4CUDA::fused_mxfp4_dequant_kernel<<<numBlocks, blockSize, 0, stream>>>(
         packed_weights, scales, out, out_d, in_d
     );
 

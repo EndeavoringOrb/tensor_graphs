@@ -376,6 +376,23 @@ struct PreparedKernel
     KernelContext ctx;
     StorageFiles sf;
 
+#ifdef TG_USE_CUDA
+    // Dedicated stream for benchmark/test runs (bypasses the Executor, which normally
+    // provides per-engine streams via KernelContext::cuda_streams).
+    cudaStream_t benchStream = nullptr;
+#endif
+
+    ~PreparedKernel()
+    {
+#ifdef TG_USE_CUDA
+        if (benchStream)
+        {
+            cudaStreamDestroy(benchStream);
+            benchStream = nullptr;
+        }
+#endif
+    }
+
     void prepare(const KernelEntry &kernel, const Record &r,
                  const std::vector<std::vector<uint8_t>> *explicitInputData = nullptr)
     {
@@ -551,6 +568,45 @@ struct PreparedKernel
         {
             ctx.cl_outputs.push_back(outputBuffers[idx].clMem);
         }
+
+#ifdef TG_USE_CUDA
+        // Benchmarking/testing environments bypass the Executor, so provide a valid CUDA
+        // stream here to ensure ctx.cuda_stream() does not throw an out-of-bounds error
+        // when CUDA kernels are run directly through PreparedKernel.
+        {
+            uint32_t cudaDevIdx = 0;
+            bool hasCuda = (r.output_mem_space.type == HandleType::CUDA);
+            if (hasCuda)
+                cudaDevIdx = r.output_mem_space.idx;
+            if (!hasCuda)
+            {
+                for (const auto &ms : r.input_mem_spaces)
+                {
+                    if (ms.type == HandleType::CUDA)
+                    {
+                        hasCuda = true;
+                        cudaDevIdx = ms.idx;
+                        break;
+                    }
+                }
+            }
+
+            if (hasCuda)
+            {
+                cudaSetDevice(cudaDevIdx);
+                if (!benchStream)
+                {
+                    cudaError_t err = cudaStreamCreateWithFlags(&benchStream, cudaStreamNonBlocking);
+                    if (err != cudaSuccess)
+                    {
+                        Error::throw_err("cudaStreamCreateWithFlags failed in PreparedKernel::prepare: " +
+                                         std::string(cudaGetErrorString(err)));
+                    }
+                }
+                ctx.cuda_streams.push_back(reinterpret_cast<void *>(benchStream));
+            }
+        }
+#endif
     }
 
     void updateStorageContext(const KernelEntry &kernel, const Record &r, int runIdx)

@@ -97,6 +97,7 @@ inline bool matchRMSNorm_F32_CUDA_ND(const std::vector<TensorNode>& inputs,
 // ---------------------------------------------------------------------------
 inline void runRMSNorm_F32_CUDA_ND(const KernelContext& ctx)
 {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float* x      = static_cast<const float*>(ctx.inputs[0]);
     const float* weight = static_cast<const float*>(ctx.inputs[1]);
     float* out          = static_cast<float*>(ctx.outputs[0]);
@@ -124,7 +125,7 @@ inline void runRMSNorm_F32_CUDA_ND(const KernelContext& ctx)
     // Shared memory size: blockSize floats
     size_t shmem = blockSize * sizeof(float);
 
-    rmsnorm_f32_nd_kernel<<<gridSize, blockSize, shmem>>>(
+    rmsnorm_f32_nd_kernel<<<gridSize, blockSize, shmem, stream>>>(
         x, weight, out, dim0, seq_len, dim_size, eps
     );
 

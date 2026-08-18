@@ -19,6 +19,7 @@ inline bool matchCastBool_I32_CUDA_ND(const std::vector<TensorNode> &inputs, con
 }
 
 inline void runCastBool_I32_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const bool *A = static_cast<const bool *>(ctx.inputs[0]);
     int32_t *Out = static_cast<int32_t *>(ctx.outputs[0]);
 
@@ -28,7 +29,7 @@ inline void runCastBool_I32_CUDA_ND(const KernelContext &ctx) {
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
 
-    cast_bool_i32_nd_kernel<<<numBlocks, blockSize>>>(A, Out, n);
+    cast_bool_i32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(A, Out, n);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

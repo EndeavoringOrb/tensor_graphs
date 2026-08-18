@@ -19,6 +19,7 @@ inline bool matchNotBool_CUDA_ND(const std::vector<TensorNode> &inputs, const Te
 }
 
 inline void runNotBool_CUDA_ND(const KernelContext &ctx) {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const bool *A = static_cast<const bool *>(ctx.inputs[0]);
     bool *Out = static_cast<bool *>(ctx.outputs[0]);
 
@@ -28,7 +29,7 @@ inline void runNotBool_CUDA_ND(const KernelContext &ctx) {
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
 
-    not_bool_nd_kernel<<<numBlocks, blockSize>>>(A, Out, n);
+    not_bool_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(A, Out, n);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

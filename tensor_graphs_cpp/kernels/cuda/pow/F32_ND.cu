@@ -24,6 +24,7 @@ inline bool matchPowF32_CUDA_ND(const std::vector<TensorNode> &inputs, const Ten
 
 inline void runPowF32_CUDA_ND(const KernelContext &ctx)
 {
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(ctx.cuda_stream());
     const float *A = static_cast<const float *>(ctx.inputs[0]);
     const float *B = static_cast<const float *>(ctx.inputs[1]);
     float *Out = static_cast<float *>(ctx.outputs[0]);
@@ -35,7 +36,7 @@ inline void runPowF32_CUDA_ND(const KernelContext &ctx)
     int blockSize = 256;
     int numBlocks = (n + blockSize - 1) / blockSize;
 
-    pow_f32_nd_kernel<<<numBlocks, blockSize>>>(A, B, Out, n);
+    pow_f32_nd_kernel<<<numBlocks, blockSize, 0, stream>>>(A, B, Out, n);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
