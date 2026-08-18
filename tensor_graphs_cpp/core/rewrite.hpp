@@ -21,12 +21,23 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
     if (src == dst)
         return {{src}};
 
+    const auto &all_spaces = System::get().getAvailableMemSpaces();
     std::unordered_map<MemSpace, std::vector<MemSpace>> adj;
-    for (const auto &[uid, k] : KernelRegistry::get().getAllKernels())
+
+    for (const auto &s1 : all_spaces)
     {
-        if (k.opType == OpType::COPY_TO && k.input_mem_spaces.size() == 1)
+        for (const auto &s2 : all_spaces)
         {
-            adj[k.input_mem_spaces[0]].push_back(k.output_mem_space);
+            if (s1 == s2)
+                continue;
+            TensorNode dummyIn = node;
+            TensorNode dummyOut = node;
+            auto refs = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", {dummyIn}, dummyOut, false, s2,
+                                                                  {s1}, engines, false, false, true, true);
+            if (!refs.empty())
+            {
+                adj[s1].push_back(s2);
+            }
         }
     }
 
@@ -49,19 +60,11 @@ inline std::vector<std::vector<MemSpace>> findMemSpacePaths(MemSpace src, MemSpa
         {
             if (visited.find(next) == visited.end())
             {
-                TensorNode dummyIn = node;
-                TensorNode dummyOut = node;
-                auto refs = KernelRegistry::get().findMatchingKernels(OpType::COPY_TO, "", {dummyIn}, dummyOut, false,
-                                                                      next, {curr}, engines, false, false, true, true);
-
-                if (!refs.empty())
-                {
-                    visited.insert(next);
-                    current_path.push_back(next);
-                    dfs(next);
-                    current_path.pop_back();
-                    visited.erase(next);
-                }
+                visited.insert(next);
+                current_path.push_back(next);
+                dfs(next);
+                current_path.pop_back();
+                visited.erase(next);
             }
         }
     };
@@ -233,8 +236,12 @@ inline EClassId addOpToEGraph(EGraph &egraph, OpType op, const std::vector<EClas
         for (KernelId uid : matches)
         {
             const auto &kernel = KernelRegistry::get().getKernel(uid);
+            std::vector<Engine> actual_engines;
+            kernel.matches(inNodes, outNode, mem_space, input_mem_spaces, {}, false, false, true, true,
+                           &actual_engines);
+
             ENode n(uid, op, kernel.opName, children, shape, kernel.is_view ? strides : calcContiguousStrides(shape),
-                    dtype, mem_space, kernel.engines);
+                    dtype, mem_space, actual_engines);
 
             cls = egraph.addENode(cls, n);
         }
@@ -447,31 +454,48 @@ struct FusionRule : public Rule
 
             bool ignoreInputMemSpaces = (pattern.rootOpType != OpType::COPY_TO);
 
-            std::vector<KernelId> kernelMatches = KernelRegistry::get().findMatchingKernelsByPattern(
-                pattern.graph, pattern.rootId, inputNodes, outputNode, false, matchedClass.mem_space, {}, {}, true,
-                ignoreInputMemSpaces, true, true);
+            std::vector<MemSpace> candidateSpaces = {matchedClass.mem_space};
+            for (const auto &avail_ms : System::get().getAvailableMemSpaces())
+            {
+                if (avail_ms.type != HandleType::STORAGE && !(avail_ms == matchedClass.mem_space))
+                {
+                    candidateSpaces.push_back(avail_ms);
+                }
+            }
+
+            for (const auto &target_ms : candidateSpaces)
+            {
+                std::vector<KernelId> kernelMatches = KernelRegistry::get().findMatchingKernelsByPattern(
+                    pattern.graph, pattern.rootId, inputNodes, outputNode, false, target_ms, {}, {}, true,
+                    ignoreInputMemSpaces, true, true);
 
             for (KernelId uid : kernelMatches) // TODO: only add the fastest one?
-            {
-                const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
-                addFusedNode(ctx, kernel, kernel.output_mem_space, inputs, ENodeId{eNodeIdx});
+                {
+                    const KernelEntry &kernel = KernelRegistry::get().getKernel(uid);
+                    std::vector<Engine> mapped_engines;
+                    std::vector<MemSpace> mapped_input_spaces;
+                    if (kernel.matches(inputNodes, outputNode, target_ms, {}, {}, false, true, true, true,
+                                       &mapped_engines, &mapped_input_spaces))
+                    {
+                        addFusedNode(ctx, kernel, target_ms, mapped_engines, mapped_input_spaces, inputs,
+                                     ENodeId{eNodeIdx});
+                    }
+                }
             }
         }
     }
 
     void addFusedNode(RuleCtx &ctx, const KernelEntry &kernel, MemSpace target_mem_space,
+                      const std::vector<Engine> &target_engines, const std::vector<MemSpace> &expected_input_mem_spaces,
                       const std::vector<EClassId> &child_ids, ENodeId eNodeIdx) const
     {
         EGraph &egraph = ctx.egraph;
         std::vector<EClassId> adapted_children;
         if (child_ids.size() < kernel.min_num_inputs || child_ids.size() > kernel.max_num_inputs)
         {
-            Error::throw_err("[addFusedNode] child_ids.size() < kernel.min_num_inputs || "
-                             "child_ids.size() > kernel.max_num_inputs");
+            Error::throw_err("[addFusedNode] input count mismatch");
         }
 
-        // Pre-validate that all children can be routed to the required memory
-        // spaces
         std::vector<std::vector<std::vector<MemSpace>>> child_mem_paths(child_ids.size());
         std::vector<bool> child_need_contig(child_ids.size(), false);
         std::vector<bool> child_need_copy(child_ids.size(), false);
@@ -481,22 +505,14 @@ struct FusionRule : public Rule
             EClassId pid = child_ids[i];
             const EClass parent = egraph.getEClass(egraph.findConst(pid));
 
-            uint64_t ruleIdx = i;
-            if (kernel.min_num_inputs != kernel.max_num_inputs)
-            {
-                ruleIdx = std::min(i, static_cast<uint64_t>(kernel.min_num_inputs > 0 ? kernel.min_num_inputs - 1 : 0));
-            }
-
-            MemSpace expectedMemSpace = {1, HandleType::CPP};
-            if (!kernel.input_mem_spaces.empty() && ruleIdx < kernel.input_mem_spaces.size())
-            {
-                expectedMemSpace = kernel.input_mem_spaces[ruleIdx];
-            }
+            MemSpace expectedMemSpace =
+                (i < expected_input_mem_spaces.size()) ? expected_input_mem_spaces[i] : target_mem_space;
 
             bool foundMemSpace = (parent.mem_space == expectedMemSpace);
-
             bool needCopy = !foundMemSpace;
             bool needContig = false;
+            uint64_t ruleIdx = std::min(
+                i, static_cast<uint64_t>(kernel.requiresContiguous.empty() ? 0 : kernel.requiresContiguous.size() - 1));
             if (ruleIdx < kernel.requiresContiguous.size())
             {
                 needContig = (kernel.requiresContiguous[ruleIdx] || needCopy) && !isContiguous(parent);
@@ -517,17 +533,14 @@ struct FusionRule : public Rule
                 dummyNode.setShape(parent.shape);
                 dummyNode.strides = parent.strides;
 
-                child_mem_paths[i] = findMemSpacePaths(parent.mem_space, expectedMemSpace, dummyNode, kernel.engines);
+                child_mem_paths[i] = findMemSpacePaths(parent.mem_space, expectedMemSpace, dummyNode, target_engines);
                 if (child_mem_paths[i].empty())
                 {
-                    return; // Cannot satisfy memory constraints, abort adding this fused
-                            // node
+                    return;
                 }
             }
         }
 
-        // We make a COPY to prevent dangling references since addOpToEGraph pushes
-        // to egraph.enodes
         const ENode oldENode = egraph.getENode(eNodeIdx);
         EClassId e_class_id = egraph.getENodeEClass(eNodeIdx);
 
@@ -582,18 +595,11 @@ struct FusionRule : public Rule
             adapted_children.push_back(currentPid);
         }
 
-        std::vector<uint64_t> strides;
-        if (kernel.is_view)
-        {
-            strides = oldENode.getStrides();
-        }
-        else
-        {
-            strides = calcContiguousStrides(oldENode.getShape());
-        }
+        std::vector<uint64_t> strides =
+            kernel.is_view ? oldENode.getStrides() : calcContiguousStrides(oldENode.getShape());
 
         ENode enode(kernel.uid, kernel.opType, kernel.opName, adapted_children, oldENode.getShape(), strides,
-                    oldENode.getDType(), target_mem_space, kernel.engines);
+                    oldENode.getDType(), target_mem_space, target_engines);
 
         MemSpace originalMemSpace = egraph.getEClass(egraph.findConst(e_class_id)).mem_space;
         if (target_mem_space == originalMemSpace)

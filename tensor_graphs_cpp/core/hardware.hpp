@@ -1,10 +1,23 @@
 #pragma once
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "core/common/thread_pool.hpp"
 #include "core/types.hpp"
+
+#if defined(TG_OS_WINDOWS)
+#include <windows.h>
+#elif defined(TG_OS_LINUX)
+#include <unistd.h>
+#elif defined(TG_OS_MACOS)
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#endif
 
 #ifdef TG_USE_CUDA
 #include <cuda_runtime.h>
@@ -63,6 +76,7 @@ struct HardwareCaps
     bool is_adreno = false;
     std::string hw_tag;
     uint64_t num_threads = 1;
+    uint32_t num_cuda_devices = 0;
 
     static HardwareCaps &get()
     {
@@ -89,13 +103,17 @@ struct HardwareCaps
         if (cudaGetDeviceCount(&deviceCount) == cudaSuccess && deviceCount > 0)
         {
             has_cuda = true;
-            int isIntegrated = 0;
-            cudaDeviceGetAttribute(&isIntegrated, cudaDevAttrIntegrated, 0);
-            int canMapHostMemory = 0;
-            cudaDeviceGetAttribute(&canMapHostMemory, cudaDevAttrCanMapHostMemory, 0);
-            if (isIntegrated && canMapHostMemory)
+            num_cuda_devices = static_cast<uint32_t>(deviceCount);
+            for (int dev = 0; dev < deviceCount; ++dev)
             {
-                has_unified_memory = true;
+                int isIntegrated = 0;
+                cudaDeviceGetAttribute(&isIntegrated, cudaDevAttrIntegrated, dev);
+                int canMapHostMemory = 0;
+                cudaDeviceGetAttribute(&canMapHostMemory, cudaDevAttrCanMapHostMemory, dev);
+                if (isIntegrated && canMapHostMemory)
+                {
+                    has_unified_memory = true;
+                }
             }
         }
 #endif
@@ -164,6 +182,146 @@ struct HardwareCaps
         if (has_unified_memory)
             hw_tag += "_UM";
 
-        std::cout << "[Hardware] Probed: " << hw_tag << " (Threads: " << num_threads << ")" << std::endl;
+        std::cout << "[Hardware] Probed: " << hw_tag << " (Threads: " << num_threads
+                  << ", CUDA GPUs: " << num_cuda_devices << ")" << std::endl;
+    }
+};
+
+struct System
+{
+    HardwareCaps caps;
+    std::vector<Engine> engines;
+    std::vector<MemSpace> mem_spaces;
+    std::unordered_map<MemSpace, uint64_t> default_buffer_sizes;
+
+    static System &get()
+    {
+        static System instance;
+        static bool initialized = false;
+        if (!initialized)
+        {
+            instance.detect();
+            initialized = true;
+        }
+        return instance;
+    }
+
+    const std::unordered_map<MemSpace, uint64_t> &getBufferSizes() const
+    {
+        return default_buffer_sizes;
+    }
+
+    const std::vector<Engine> &getAvailableEngines() const
+    {
+        return engines;
+    }
+
+    const std::vector<MemSpace> &getAvailableMemSpaces() const
+    {
+        return mem_spaces;
+    }
+
+    uint32_t getNumCudaDevices() const
+    {
+        return caps.num_cuda_devices;
+    }
+
+  private:
+    void detect()
+    {
+        caps = HardwareCaps::get();
+        default_buffer_sizes.clear();
+        engines.clear();
+        mem_spaces.clear();
+
+        // 1. Storage default
+        MemSpace storage{0, HandleType::STORAGE};
+        default_buffer_sizes[storage] = 0;
+        mem_spaces.push_back(storage);
+
+        // 2. Host RAM Detection
+        uint64_t total_ram = 16ULL * 1024 * 1024 * 1024;
+#if defined(TG_OS_WINDOWS)
+        MEMORYSTATUSEX memInfo;
+        memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+        if (GlobalMemoryStatusEx(&memInfo))
+        {
+            total_ram = memInfo.ullTotalPhys;
+        }
+#elif defined(TG_OS_LINUX)
+        uint64_t pages = sysconf(_SC_PHYS_PAGES);
+        uint64_t page_size = sysconf(_SC_PAGE_SIZE);
+        if (pages > 0 && page_size > 0)
+        {
+            total_ram = pages * page_size;
+        }
+#elif defined(TG_OS_MACOS)
+        int64_t mac_mem = 0;
+        size_t len = sizeof(mac_mem);
+        if (sysctlbyname("hw.memsize", &mac_mem, &len, nullptr, 0) == 0 && mac_mem > 0)
+        {
+            total_ram = static_cast<uint64_t>(mac_mem);
+        }
+#endif
+        uint64_t cpu_buffer_size = std::max<uint64_t>((uint64_t)(total_ram * 0.75), 4ULL * 1024 * 1024 * 1024);
+
+        MemSpace cpu_ms0{0, HandleType::CPP};
+        MemSpace cpu_ms1{1, HandleType::CPP};
+        default_buffer_sizes[cpu_ms0] = cpu_buffer_size;
+        default_buffer_sizes[cpu_ms1] = cpu_buffer_size;
+        mem_spaces.push_back(cpu_ms0);
+        mem_spaces.push_back(cpu_ms1);
+
+        engines.push_back(Engine{0, EngineType::CPU, {cpu_ms0, cpu_ms1}});
+
+        // 3. CUDA GPUs Detection
+#ifdef TG_USE_CUDA
+        if (caps.has_cuda && caps.num_cuda_devices > 0)
+        {
+            for (uint32_t dev = 0; dev < caps.num_cuda_devices; ++dev)
+            {
+                cudaSetDevice(dev);
+                size_t free_mem = 0, total_mem = 0;
+                cudaMemGetInfo(&free_mem, &total_mem);
+                uint64_t vram_size =
+                    (total_mem > 0) ? static_cast<uint64_t>(total_mem * 0.90) : 8ULL * 1024 * 1024 * 1024;
+
+                MemSpace cuda_ms{dev, HandleType::CUDA};
+                default_buffer_sizes[cuda_ms] = vram_size;
+                mem_spaces.push_back(cuda_ms);
+
+                std::unordered_set<MemSpace> supported = {cuda_ms, cpu_ms0, cpu_ms1};
+                engines.push_back(Engine{dev, EngineType::CUDA_GPU, supported});
+
+                // Enable P2P access across GPUs
+                for (uint32_t peer_dev = 0; peer_dev < caps.num_cuda_devices; ++peer_dev)
+                {
+                    if (peer_dev != dev)
+                    {
+                        int canAccess = 0;
+                        cudaDeviceCanAccessPeer(&canAccess, dev, peer_dev);
+                        if (canAccess)
+                        {
+                            cudaDeviceEnablePeerAccess(peer_dev, 0);
+                            cudaGetLastError(); // Clear error state if already enabled
+                        }
+                    }
+                }
+            }
+        }
+#endif
+
+        // 4. OpenCL Detection
+#ifdef TG_USE_OPENCL
+        if (caps.has_opencl)
+        {
+            MemSpace cl_ms{1, HandleType::OPENCL};
+            default_buffer_sizes[cl_ms] = 1ULL * 1024 * 1024 * 1024;
+            mem_spaces.push_back(cl_ms);
+            engines.push_back(Engine{0, EngineType::QUALCOMM_IGPU, {cl_ms, cpu_ms0, cpu_ms1}});
+        }
+#endif
+        std::cout << "[System] Initialized with " << mem_spaces.size() << " MemSpaces and " << engines.size()
+                  << " Engines.\n";
     }
 };

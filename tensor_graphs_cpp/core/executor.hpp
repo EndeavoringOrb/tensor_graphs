@@ -26,15 +26,12 @@ class Executor
 #endif
         ProgressTimer timer(nInst, "running", disableTimer);
 
-        // Restore bucket-local EGraph constants into the scratchpad
         std::unordered_set<EClassId> restored_constants;
         for (const auto &inst : compiled.instructions)
         {
             for (size_t i = 0; i < inst.children.size(); ++i)
             {
                 EClassId child = inst.children[i];
-
-                // If it has no LogicalId but exists in staging, it's an EGraph-generated constant
                 if (!compiled.has_logical_id(child) && compiled.constantStaging.count(child))
                 {
                     if (restored_constants.insert(child).second)
@@ -52,14 +49,30 @@ class Executor
         for (uint64_t idx = 0; idx < nInst; ++idx)
         {
             const OpInstruction &inst = compiled.instructions[idx];
-
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
             std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
-            EngineType current_engine = kernel.engines.empty() ? EngineType::CPU : kernel.engines[0].type;
+
+            Engine current_engine = kernel.engines.empty() ? Engine{0, EngineType::CPU} : kernel.engines[0];
+            if (inst.outBuffer.mem_space.type == HandleType::CUDA)
+            {
+                current_engine = Engine{inst.outBuffer.mem_space.idx, EngineType::CUDA_GPU};
+            }
+            else if (inst.outBuffer.mem_space.type == HandleType::CPP)
+            {
+                current_engine = Engine{inst.outBuffer.mem_space.idx, EngineType::CPU};
+            }
 
             sync.syncBefore(inst, current_engine);
 
             KernelContext ctx;
+
+#ifdef TG_USE_CUDA
+            if (current_engine.type == EngineType::CUDA_GPU)
+            {
+                cudaSetDevice(current_engine.idx);
+                ctx.cuda_stream = reinterpret_cast<void *>(sync.getCudaStream(current_engine.idx));
+            }
+#endif
 
             for (uint64_t i = 0; i < inst.children.size(); ++i)
             {
@@ -89,12 +102,6 @@ class Executor
             }
             outBufObj->setupOutput(ctx, outView, logical_id);
 
-#ifdef DEBUG
-            Debug::checkValues(ctx.inputs, ctx.inViews,
-                               "(inputs) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
-                                   toString(kernel));
-#endif
-
             bool issued_work = false;
             if (!kernel.is_view && kernel.run)
             {
@@ -104,24 +111,24 @@ class Executor
 
             sync.markExecuted(inst, current_engine, issued_work);
 
-#ifdef DEBUG
-            sync.syncAll();
-
-            std::vector<const void *> c_outputs(ctx.outputs.begin(), ctx.outputs.end());
-            Debug::checkValues(c_outputs, ctx.outViews, ctx.inputs, ctx.inViews, kernel,
-                               "(output) inst # " + std::to_string(idx) + " " + toString(inst) + "\n" +
-                                   toString(kernel));
-#endif
-
             if (debugCallback)
             {
+                sync.syncEngine(current_engine);
                 if (outBufObj->mem_space.type == HandleType::CPP)
                 {
                     debugCallback(logical_id, kernel_name, ctx, ctx.outputs[0]);
                 }
+#ifdef TG_USE_CUDA
+                else if (outBufObj->mem_space.type == HandleType::CUDA)
+                {
+                    std::vector<uint8_t> host_copy(countElements(outView) * getDTypeSize(outView.dtype));
+                    cudaSetDevice(outBufObj->mem_space.idx);
+                    cudaMemcpy(host_copy.data(), ctx.outputs[0], host_copy.size(), cudaMemcpyDeviceToHost);
+                    debugCallback(logical_id, kernel_name, ctx, host_copy.data());
+                }
+#endif
             }
 
-            // Cleanup Context
             for (const ParallelBuffer &inBuf : inst.inBuffers)
             {
                 memManager.getBuffer(inBuf.mem_space)->cleanupContext(ctx);
@@ -131,7 +138,6 @@ class Executor
             timer.tick();
         }
 
-        // Final synchronization to ensure all pending work is completed before returning to Python/User
         sync.syncAll();
     }
 };

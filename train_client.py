@@ -31,9 +31,17 @@ from train_shared import (
 
 
 def inference_worker(
-    config: TrainConfig, req_queue, resp_queues, weights_event, run_dir
+    config: TrainConfig,
+    req_queue,
+    resp_queues,
+    weights_event,
+    run_dir,
+    device_str: str | None = None,
 ):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device_str:
+        device = torch.device(device_str)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Inference Server] Started on {device}")
 
     agent = AlphaZeroTransformer(
@@ -172,10 +180,18 @@ def client_worker(
     resp_queue,
     traj_queue,
     shared_version,
+    device_str: str | None = None,
 ):
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     tensor_graphs.set_num_threads(config.cpp_threads)
+
+    if device_str and "cuda:" in device_str:
+        try:
+            dev_idx = int(device_str.split(":")[-1])
+            torch.cuda.set_device(dev_idx)
+        except Exception:
+            pass
 
     real_stdout_fd = os.dup(1)
     real_stdout = os.fdopen(real_stdout_fd, "w", buffering=1)
@@ -319,6 +335,12 @@ def main():
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Server address")
     parser.add_argument("--port", type=int, default=5000, help="Server port")
     parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="PyTorch compute device for client inference worker (e.g. cuda:0, cuda:1, cpu)",
+    )
+    parser.add_argument(
         "-bt", "--use-bluetooth", action="store_true", help="Use Bluetooth RFCOMM"
     )
     parser.add_argument(
@@ -327,7 +349,6 @@ def main():
     parser.add_argument(
         "--bt-port", type=int, default=None, help="Bluetooth RFCOMM channel"
     )
-
     parser.add_argument(
         "--workers",
         type=int,
@@ -373,6 +394,12 @@ def main():
     parser.add_argument("--d-model", type=int, default=None)
     parser.add_argument("--nhead", type=int, default=None)
     parser.add_argument("--num-layers", type=int, default=None)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="PyTorch compute device for client inference worker (e.g. cuda:0, cuda:1, cpu)",
+    )
 
     args = parser.parse_args()
 
@@ -464,26 +491,16 @@ def main():
     if args.num_layers is not None:
         config.num_layers = args.num_layers
 
-    if config.graph_source == "model":
-        try:
-            from utils.download_hf_meta import download_model_meta
-
-            p = Path(config.model_path)
-            if p.is_file() or p.suffix == ".safetensors":
-                p = p.parent
-            parts = p.parts
-            if parts and parts[0] == "models":
-                parts = parts[1:]
-            repo_id = "/".join(parts) if parts else config.model_name
-
-            print(f"[Client] Ensuring model files for '{repo_id}' are downloaded...")
-            download_model_meta(repo_id, download_other_files=False)
-        except Exception as e:
-            print(f"[Client] Note: Proceeding assuming local model files exist ({e}).")
+    target_device = (
+        args.device
+        if args.device is not None
+        else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
 
     print("=========================================================")
     print(f" Starting {config.workers} Client Worker Process(es)")
     print(f" C++ Threads / Worker: {config.cpp_threads}")
+    print(f" Inference Device: {target_device}")
     print(f" Target Server: {config.host}:{config.port} ({conn_type})")
     print(f" Graph Source: {config.graph_source.upper()}")
     print(
@@ -500,9 +517,15 @@ def main():
     runs_dir = Path("runs")
     runs_dir.mkdir(parents=True, exist_ok=True)
 
+    target_device = (
+        args.device
+        if args.device is not None
+        else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+
     inf_process = mp.Process(
         target=inference_worker,
-        args=(config, req_queue, resp_queues, weights_event, "runs"),
+        args=(config, req_queue, resp_queues, weights_event, "runs", target_device),
     )
     inf_process.start()
 
