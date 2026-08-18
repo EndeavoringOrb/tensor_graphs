@@ -220,7 +220,8 @@ enum class EngineType : uint32_t
 {
     CPU,
     QUALCOMM_IGPU,
-    CUDA_GPU
+    CUDA_GPU,
+    CUDA_DMA
 };
 
 struct MemSpace
@@ -1140,6 +1141,8 @@ inline std::string toString(EngineType engine)
         return "CUDA_GPU";
     case EngineType::QUALCOMM_IGPU:
         return "QUALCOMM_IGPU";
+    case EngineType::CUDA_DMA:
+        return "CUDA_DMA";
     default:
         return "UNKNOWN_ENGINE";
     }
@@ -1648,22 +1651,33 @@ struct KernelContext
     std::vector<int> fd;
     std::vector<cl_mem> cl_inputs;
     std::vector<cl_mem> cl_outputs;
+    std::vector<void *> cuda_streams;
 
-    KernelContext()
-    {
-    }
+    KernelContext() = default;
+
     KernelContext(const std::vector<const void *> &_inputs, const std::vector<void *> &_outputs,
-                  const std::vector<TensorView> &_inViews, const std::vector<TensorView> &_outViews)
-        : inputs(_inputs), outputs(_outputs), inViews(_inViews), outViews(_outViews)
+                  const std::vector<TensorView> &_inViews, const std::vector<TensorView> &_outViews,
+                  const std::vector<void *> &_cuda_streams = {})
+        : inputs(_inputs), outputs(_outputs), inViews(_inViews), outViews(_outViews), cuda_streams(_cuda_streams)
     {
-        for (int i = 0; i < inputs.size(); i++)
+        for (size_t i = 0; i < inputs.size(); i++)
         {
             fd.push_back(-1);
             cl_inputs.push_back(nullptr);
         }
-        for (int i = 0; i < outputs.size(); i++)
+        for (size_t i = 0; i < outputs.size(); i++)
         {
             cl_outputs.push_back(nullptr);
         }
+    }
+
+    void *cuda_stream(size_t idx = 0) const
+    {
+        if (idx >= cuda_streams.size())
+        {
+            Error::throw_err("KernelContext::cuda_stream index out of bounds: requested " +
+                             std::to_string(idx) + ", but size is " + std::to_string(cuda_streams.size()));
+        }
+        return cuda_streams[idx];
     }
 };

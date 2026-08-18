@@ -246,6 +246,125 @@ struct CudaBuffer : public DeviceBuffer
 };
 #endif
 
+
+#ifdef TG_USE_OPENCL
+struct OpenCLBuffer : public DeviceBuffer
+{
+    cl_mem arena_ptr_cl_mem = nullptr;
+
+    OpenCLBuffer(MemSpace ms, uint64_t size) : DeviceBuffer(ms, size)
+    {
+    }
+    ~OpenCLBuffer() override
+    {
+        freeArena();
+    }
+    void init() override
+    {
+        OpenCLState::get().init();
+        cl_context ctx = OpenCLState::get().context;
+        cl_int err;
+        arena_ptr_cl_mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeBytes, nullptr, &err);
+        if (err != CL_SUCCESS)
+            Error::throw_err("clCreateBuffer failed");
+    }
+    void freeArena() override
+    {
+        if (arena_ptr_cl_mem)
+        {
+            clReleaseMemObject(arena_ptr_cl_mem);
+            arena_ptr_cl_mem = nullptr;
+        }
+    }
+    void write(uint64_t offset, const void *data, uint64_t size) override
+    {
+        Error::throw_err("writeInput is not supported on OpenCLBuffer");
+    }
+    void setupInput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
+    {
+        TensorView v = view;
+        ctx.inViews.push_back(v);
+        ctx.inputs.push_back(nullptr);
+        ctx.fd.push_back(-1);
+
+        uint64_t size = countElements(view) * getDTypeSize(view.dtype);
+        if (size == 0)
+            size = 1;
+
+        cl_mem buf = nullptr;
+        for (uint64_t i = 0; i < ctx.cl_inputs.size(); i++)
+        {
+            if (ctx.inViews[i].offset == v.offset && ctx.cl_inputs[i] != nullptr)
+            {
+                buf = ctx.cl_inputs[i];
+                clRetainMemObject(buf);
+                break;
+            }
+        }
+        if (!buf)
+        {
+            cl_buffer_region region;
+            region.origin = v.offset;
+            region.size = size;
+            cl_int err;
+            buf = clCreateSubBuffer(arena_ptr_cl_mem, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &err);
+            if (err != CL_SUCCESS)
+                Error::throw_err("clCreateSubBuffer failed");
+        }
+        ctx.cl_inputs.push_back(buf);
+    }
+    void setupOutput(KernelContext &ctx, const TensorView &view, LogicalId logicalId) override
+    {
+        TensorView v = view;
+        ctx.outViews.push_back(v);
+        ctx.outputs.push_back(nullptr);
+
+        uint64_t size = countElements(view) * getDTypeSize(view.dtype);
+        if (size == 0)
+            size = 1;
+
+        cl_mem buf = nullptr;
+        for (uint64_t i = 0; i < ctx.cl_inputs.size(); i++)
+        {
+            if (ctx.inViews[i].offset == v.offset && ctx.cl_inputs[i] != nullptr)
+            {
+                buf = ctx.cl_inputs[i];
+                clRetainMemObject(buf);
+                break;
+            }
+        }
+        if (!buf)
+        {
+            cl_buffer_region region;
+            region.origin = v.offset;
+            region.size = size;
+            cl_int err;
+            buf = clCreateSubBuffer(arena_ptr_cl_mem, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &region, &err);
+            if (err != CL_SUCCESS)
+                Error::throw_err("clCreateSubBuffer failed");
+        }
+        ctx.cl_outputs.push_back(buf);
+    }
+    void cleanupContext(KernelContext &ctx) override
+    {
+        for (cl_mem sub : ctx.cl_inputs)
+        {
+            if (sub)
+                clReleaseMemObject(sub);
+        }
+        for (cl_mem sub : ctx.cl_outputs)
+        {
+            if (sub)
+                clReleaseMemObject(sub);
+        }
+    }
+    uint8_t *getBasePtr() override
+    {
+        return nullptr;
+    }
+};
+#endif // TG_USE_OPENCL
+
 struct MemoryManager
 {
     std::unordered_map<MemSpace, std::unique_ptr<DeviceBuffer>> buffers;

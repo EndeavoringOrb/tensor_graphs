@@ -193,18 +193,18 @@ struct KernelEntry
         {
             if (localToActualEngine.find(local_eng) == localToActualEngine.end())
             {
-                if (local_eng.type == EngineType::CUDA_GPU)
+                if (local_eng.type == EngineType::CUDA_GPU || local_eng.type == EngineType::CUDA_DMA)
                 {
                     MemSpace local_cuda_ms{local_eng.idx, HandleType::CUDA};
                     auto it = localToActualMem.find(local_cuda_ms);
                     if (it != localToActualMem.end())
                     {
-                        Engine actual_eng{it->second.idx, EngineType::CUDA_GPU, {it->second}};
+                        Engine actual_eng{it->second.idx, local_eng.type, {it->second}};
                         reconcileEngine(local_eng, actual_eng);
                     }
                     else if (!ignore_output_mem_space && output_mem_space.type == HandleType::CUDA)
                     {
-                        Engine actual_eng{output_mem_space.idx, EngineType::CUDA_GPU, {output_mem_space}};
+                        Engine actual_eng{output_mem_space.idx, local_eng.type, {output_mem_space}};
                         reconcileEngine(local_eng, actual_eng);
                     }
                 }
@@ -237,11 +237,11 @@ struct KernelEntry
                 {
                     out_mapped_engines->push_back(it->second);
                 }
-                else if (local_eng.type == EngineType::CUDA_GPU && !ignore_output_mem_space &&
+                else if ((local_eng.type == EngineType::CUDA_GPU || local_eng.type == EngineType::CUDA_DMA) && !ignore_output_mem_space &&
                          output_mem_space.type == HandleType::CUDA)
                 {
                     out_mapped_engines->push_back(
-                        Engine{output_mem_space.idx, EngineType::CUDA_GPU, {output_mem_space}});
+                        Engine{output_mem_space.idx, local_eng.type, {output_mem_space}});
                 }
                 else
                 {

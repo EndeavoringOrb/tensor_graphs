@@ -52,25 +52,51 @@ class Executor
             const KernelEntry &kernel = KernelRegistry::get().getKernel(inst.kernel_id);
             std::string kernel_name = kernel.opName.empty() ? toString(kernel.opType) : kernel.opName;
 
-            Engine current_engine = kernel.engines.empty() ? Engine{0, EngineType::CPU} : kernel.engines[0];
-            if (inst.outBuffer.mem_space.type == HandleType::CUDA)
+            // Dynamically resolve actual engines mapped for this instruction
+            std::vector<TensorNode> dummyInputs(inst.children.size());
+            std::vector<MemSpace> in_mem_spaces(inst.children.size());
+            for (size_t i = 0; i < inst.children.size(); ++i)
             {
-                current_engine = Engine{inst.outBuffer.mem_space.idx, EngineType::CUDA_GPU};
+                const auto &view = compiled.nodeViews.at(inst.children[i]);
+                dummyInputs[i].setShape(view.getShape());
+                dummyInputs[i].strides = view.strides;
+                dummyInputs[i].dtype = view.dtype;
+                in_mem_spaces[i] = inst.inBuffers[i].mem_space;
             }
-            else if (inst.outBuffer.mem_space.type == HandleType::CPP)
+            TensorNode dummyOutput;
+            const auto &outView = compiled.nodeViews.at(inst.eclass_id);
+            dummyOutput.setShape(outView.getShape());
+            dummyOutput.strides = outView.strides;
+            dummyOutput.dtype = outView.dtype;
+
+            std::vector<Engine> inst_engines;
+            kernel.matches(dummyInputs, dummyOutput, inst.outBuffer.mem_space, in_mem_spaces, {}, false, false, true, true, &inst_engines);
+            if (inst_engines.empty())
             {
-                current_engine = Engine{inst.outBuffer.mem_space.idx, EngineType::CPU};
+                if (inst.outBuffer.mem_space.type == HandleType::CUDA)
+                    inst_engines.push_back(Engine{inst.outBuffer.mem_space.idx, EngineType::CUDA_GPU});
+                else
+                    inst_engines.push_back(Engine{0, EngineType::CPU});
             }
 
-            sync.syncBefore(inst, current_engine);
+            const Engine &primary_engine = inst_engines[0];
+
+            sync.syncBefore(inst, inst_engines);
 
             KernelContext ctx;
 
 #ifdef TG_USE_CUDA
-            if (current_engine.type == EngineType::CUDA_GPU)
+            for (const Engine &eng : inst_engines)
             {
-                cudaSetDevice(current_engine.idx);
-                ctx.cuda_stream = reinterpret_cast<void *>(sync.getCudaStream(current_engine.idx));
+                if (eng.type == EngineType::CUDA_GPU || eng.type == EngineType::CUDA_DMA)
+                {
+                    cudaSetDevice(eng.idx);
+                    ctx.cuda_streams.push_back(reinterpret_cast<void *>(sync.getCudaStream(eng)));
+                }
+            }
+            if (!inst_engines.empty() && (primary_engine.type == EngineType::CUDA_GPU || primary_engine.type == EngineType::CUDA_DMA))
+            {
+                cudaSetDevice(primary_engine.idx);
             }
 #endif
 
@@ -90,7 +116,6 @@ class Executor
                 inBufObj->setupInput(ctx, inView, logical_id);
             }
 
-            const TensorView &outView = compiled.nodeViews.at(inst.eclass_id);
             DeviceBuffer *outBufObj = memManager.getBuffer(inst.outBuffer.mem_space);
             if (!outBufObj)
                 Error::throw_err("Output DeviceBuffer not found");
@@ -109,11 +134,11 @@ class Executor
                 issued_work = true;
             }
 
-            sync.markExecuted(inst, current_engine, issued_work);
+            sync.markExecuted(inst, inst_engines, issued_work);
 
             if (debugCallback)
             {
-                sync.syncEngine(current_engine);
+                sync.syncEngines(inst_engines);
                 if (outBufObj->mem_space.type == HandleType::CPP)
                 {
                     debugCallback(logical_id, kernel_name, ctx, ctx.outputs[0]);

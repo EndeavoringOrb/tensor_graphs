@@ -291,7 +291,19 @@ struct System
                 mem_spaces.push_back(cuda_ms);
 
                 std::unordered_set<MemSpace> supported = {cuda_ms, cpu_ms0, cpu_ms1};
+                for (uint32_t peer_dev = 0; peer_dev < caps.num_cuda_devices; ++peer_dev)
+                {
+                    if (peer_dev != dev)
+                    {
+                        supported.insert(MemSpace{peer_dev, HandleType::CUDA});
+                    }
+                }
+
+                // 1. Compute Engine for SM kernel execution (math/fusions)
                 engines.push_back(Engine{dev, EngineType::CUDA_GPU, supported});
+
+                // 2. Dedicated DMA Engine for async Host<->Device and Peer-to-Peer copies
+                engines.push_back(Engine{dev, EngineType::CUDA_DMA, supported});
 
                 // Enable P2P access across GPUs
                 for (uint32_t peer_dev = 0; peer_dev < caps.num_cuda_devices; ++peer_dev)
