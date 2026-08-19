@@ -1,4 +1,9 @@
 #pragma once
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <algorithm>
 #include <iostream>
 #include <string>
@@ -12,6 +17,12 @@
 
 #if defined(TG_OS_WINDOWS)
 #include <windows.h>
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 #elif defined(TG_OS_LINUX)
 #include <unistd.h>
 #elif defined(TG_OS_MACOS)

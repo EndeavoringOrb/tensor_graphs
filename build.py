@@ -886,6 +886,8 @@ class Toolchain:
             "-std=c++20",
             f"-DTG_LOG_LEVEL={self.config.log_level_val}",
         ]
+        if self.platform.is_windows:
+            flags.append("-DNOMINMAX")
 
         if self.config.use_opencl:
             flags.append("-DTG_USE_OPENCL")
@@ -994,6 +996,8 @@ class Toolchain:
 
         if not self.platform.is_windows:
             flags.extend(["-Xcompiler", "-fPIC"])
+        else:
+            flags.append("-DNOMINMAX")
 
         if self.config.debug:
             flags.extend(["-g", "-G", "-O0", "-DDEBUG"])

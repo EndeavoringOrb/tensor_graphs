@@ -1,5 +1,9 @@
 #pragma once
-#pragma once
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #ifdef TG_USE_OPENCL
 #include <CL/cl.h>
 #else
@@ -31,6 +35,14 @@ typedef uint32_t cl_uint;
 #include <vector>
 
 #include "core/serialization.hpp"
+
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
 using json = nlohmann::json;
 
 // TODO: split up into types/tensor_node.hpp, types/...
