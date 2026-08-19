@@ -4,7 +4,7 @@ import random
 import struct
 import threading
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from pathlib import Path
 
 import tensor_graphs
@@ -32,14 +32,39 @@ weights_ready_event = threading.Event()
 
 class UnifiedReplayBuffer:
     def __init__(self, maxlen: int):
-        self.buffer = deque(maxlen=maxlen)
+        self.maxlen = maxlen
+        self.buffer: list[dict] = []
         self.prefix_table: dict[int, PrefixData] = {}
 
     def extend_payload(self, payload: dict):
         if "prefixes" in payload:
             self.prefix_table.update(payload["prefixes"])
         if "transitions" in payload:
-            self.buffer.extend(payload["transitions"])
+            for item in payload["transitions"]:
+                if "loss" not in item:
+                    item["loss"] = None
+                self.buffer.append(item)
+            self._evict_excess()
+
+    def _evict_excess(self):
+        if len(self.buffer) > self.maxlen:
+            num_to_evict = len(self.buffer) - self.maxlen
+            # Sorting key: (has_no_loss, loss_value)
+            # (0, loss_value): items with loss, sorted ascending by lowest loss.
+            # (1, 0.0): items with no loss (None), preserved over items with loss.
+            self.buffer.sort(
+                key=lambda x: (
+                    (1, 0.0) if x.get("loss") is None else (0, float(x["loss"]))
+                )
+            )
+            # Evict the N items with the lowest loss
+            self.buffer = self.buffer[num_to_evict:]
+
+            # Clean up unreferenced prefixes
+            used_keys = {item["prefix_key"] for item in self.buffer}
+            self.prefix_table = {
+                k: v for k, v in self.prefix_table.items() if k in used_keys
+            }
 
     def sample_batch(self, batch_size: int):
         return random.sample(self.buffer, batch_size)
@@ -288,15 +313,23 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
             loss_matrix = torch.where(
                 padded_pis > 0, padded_pis * log_probs, torch.zeros_like(log_probs)
             )
-            p_loss = -loss_matrix.sum(dim=1).mean()
+            per_item_p_loss = -loss_matrix.sum(dim=1)
+            p_loss = per_item_p_loss.mean()
 
             zs = torch.tensor(
                 [it["z"] for it in items], dtype=torch.float32, device=device
             )
-            v_loss = F.mse_loss(v_pred.float().expand_as(zs), zs, reduction="mean")
+            v_preds = v_pred.float().view(-1).expand_as(zs)
+            per_item_v_loss = (v_preds - zs) ** 2
+            v_loss = per_item_v_loss.mean()
 
             group_loss = p_loss + v_loss
             group_loss.backward()
+
+            # Record per-item loss scores into the replay buffer elements
+            per_item_loss = (per_item_p_loss + per_item_v_loss).detach().cpu().tolist()
+            for it, l_val in zip(items, per_item_loss):
+                it["loss"] = float(l_val)
 
             total_loss += float(group_loss.detach().item()) * B_g
             n_transitions += B_g
@@ -339,7 +372,10 @@ def main():
         help="Listen on Bluetooth RFCOMM",
     )
     parser.add_argument(
-        "--bt-address", type=str, default="AC:F2:3C:A7:F7:EC", help="Bluetooth host MAC"
+        "--bt-address",
+        type=str,
+        default="AC:F2:3C:A7:F7:EC",
+        help="Bluetooth host MAC",
     )
     parser.add_argument(
         "--bt-port", type=int, default=4, help="Bluetooth RFCOMM channel"
