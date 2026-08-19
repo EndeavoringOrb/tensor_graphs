@@ -1,12 +1,12 @@
 import argparse
 import queue
-import random
 import struct
 import threading
 import time
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 import tensor_graphs
 import torch
 import torch.nn.functional as F
@@ -31,10 +31,13 @@ weights_ready_event = threading.Event()
 
 
 class UnifiedReplayBuffer:
-    def __init__(self, maxlen: int):
+    def __init__(self, maxlen: int, alpha: float = 0.6, eps: float = 1e-4):
         self.maxlen = maxlen
+        self.alpha = alpha
+        self.eps = eps
         self.buffer: list[dict] = []
         self.prefix_table: dict[int, PrefixData] = {}
+        self.max_priority = 1.0
 
     def extend_payload(self, payload: dict):
         if "prefixes" in payload:
@@ -67,7 +70,33 @@ class UnifiedReplayBuffer:
             }
 
     def sample_batch(self, batch_size: int):
-        return random.sample(self.buffer, batch_size)
+        n = len(self.buffer)
+        if n == 0:
+            return []
+        batch_size = min(batch_size, n)
+
+        # Compute PER sampling probabilities
+        priorities = np.empty(n, dtype=np.float64)
+        for idx, item in enumerate(self.buffer):
+            loss = item.get("loss")
+            if loss is None:
+                priorities[idx] = self.max_priority
+            else:
+                priorities[idx] = float(loss) + self.eps
+
+        scaled_priorities = priorities**self.alpha
+        total_p = scaled_priorities.sum()
+        if total_p <= 0 or np.isnan(total_p):
+            probs = np.ones(n, dtype=np.float64) / n
+        else:
+            probs = scaled_priorities / total_p
+
+        indices = np.random.choice(n, size=batch_size, replace=False, p=probs)
+        return [self.buffer[i] for i in indices]
+
+    def update_priority(self, loss_val: float):
+        if loss_val > self.max_priority:
+            self.max_priority = float(loss_val)
 
     def __len__(self):
         return len(self.buffer)
@@ -320,16 +349,19 @@ def learner_process(config: TrainConfig, replay_queue: queue.Queue):
                 [it["z"] for it in items], dtype=torch.float32, device=device
             )
             v_preds = v_pred.float().view(-1).expand_as(zs)
-            per_item_v_loss = (v_preds - zs) ** 2
+
+            # Smooth L1 / Huber loss provides robust gradients against outlier reward targets
+            per_item_v_loss = F.smooth_l1_loss(v_preds, zs, reduction="none")
             v_loss = per_item_v_loss.mean()
 
             group_loss = p_loss + v_loss
             group_loss.backward()
 
-            # Record per-item loss scores into the replay buffer elements
+            # Record per-item loss and update PER priority
             per_item_loss = (per_item_p_loss + per_item_v_loss).detach().cpu().tolist()
             for it, l_val in zip(items, per_item_loss):
                 it["loss"] = float(l_val)
+                buffer.update_priority(float(l_val))
 
             total_loss += float(group_loss.detach().item()) * B_g
             n_transitions += B_g
@@ -400,7 +432,7 @@ def main():
     parser.add_argument("--base-noise", type=float, default=0.25)
     parser.add_argument("--min-noise", type=float, default=0.01)
     parser.add_argument("--decay-episodes", type=int, default=500)
-    parser.add_argument("--depth-gamma", type=float, default=0.7)
+    parser.add_argument("--depth-gamma", type=float, default=0.99)
     parser.add_argument(
         "--threads",
         type=int,

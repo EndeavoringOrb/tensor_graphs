@@ -54,7 +54,7 @@ class TrainConfig:
     base_noise: float = 0.25
     min_noise: float = 0.01
     decay_episodes: int = 500
-    depth_gamma: float = 0.7
+    depth_gamma: float = 0.99
 
     # Networking Config
     host: str = "127.0.0.1"
@@ -320,6 +320,8 @@ class TrajectoryCodec:
         mcts_tree: dict,
         best_Z: float,
         prefix_registry: dict[int, PrefixData],
+        tau: float = 1.25,
+        blend_k: float = 2.0,
     ) -> dict:
         referenced_prefixes = {}
         transitions = []
@@ -330,15 +332,31 @@ class TrajectoryCodec:
                 referenced_prefixes[pkey] = prefix_registry[pkey]
 
             counts = node_data["N"]
-            total_counts = counts.sum()
-            pi = counts / total_counts if total_counts > 0 else node_data["P"]
+            total_counts = float(counts.sum())
+            prior_p = node_data["P"]
+
+            if total_counts > 0:
+                # Target temperature softening to avoid extreme one-hot targets on low sim counts
+                smoothed_counts = np.power(counts, 1.0 / max(1e-4, tau))
+                sum_smoothed = smoothed_counts.sum()
+                smoothed_pi = (
+                    smoothed_counts / sum_smoothed
+                    if sum_smoothed > 0
+                    else prior_p.copy()
+                )
+
+                # Prior blending: smoothly interpolate between prior and MCTS policy
+                blend_weight = total_counts / (total_counts + blend_k)
+                pi = blend_weight * smoothed_pi + (1.0 - blend_weight) * prior_p
+            else:
+                pi = prior_p.copy()
 
             transitions.append(
                 {
                     "prefix_key": pkey,
                     "action_features": node_data["action_features"],
                     "phase_id": node_data.get("phase_id", 0),
-                    "pis": pi,
+                    "pis": pi.astype(np.float32),
                     "z": best_Z,
                 }
             )
@@ -650,8 +668,11 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
             effective_noise = self.episode_noise * (self.depth_gamma**current_depth)
 
             if effective_noise > 0.001:
+                # Dynamically scale alpha inversely with sqrt(|A|)
+                num_a = len(scores)
+                dirichlet_alpha = max(0.01, 1.0 / math.sqrt(max(1, num_a)))
                 noise = (
-                    torch.distributions.Dirichlet(torch.full((len(scores),), 0.3))
+                    torch.distributions.Dirichlet(torch.full((num_a,), dirichlet_alpha))
                     .sample()
                     .numpy()
                 )
@@ -677,9 +698,22 @@ class ActorDelegate(tensor_graphs.SearchDelegate):
 
         N_s = N_sa.sum()
         Q_sa = np.where(N_sa > 0, W_sa / np.maximum(N_sa, 1.0), v_s)
+
+        # Min-Max Q-value normalization so Q matches the U exploration scale
+        visited_mask = N_sa > 0
+        if np.any(visited_mask):
+            min_q = min(float(v_s), float(np.min(Q_sa[visited_mask])))
+            max_q = max(float(v_s), float(np.max(Q_sa[visited_mask])))
+            if max_q > min_q:
+                Q_norm = (Q_sa - min_q) / (max_q - min_q)
+            else:
+                Q_norm = np.full_like(Q_sa, 0.5)
+        else:
+            Q_norm = np.zeros_like(Q_sa)
+
         U_sa = self.c_puct * P_sa * (math.sqrt(max(1.0, float(N_s))) / (1.0 + N_sa))
 
-        puct_scores = Q_sa + U_sa
+        puct_scores = Q_norm + U_sa
         order = np.argsort(-puct_scores).tolist()
 
         self.active_stack.append((state_key, order[0]))

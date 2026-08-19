@@ -7,6 +7,7 @@
 #ifdef TG_USE_OPENCL
 #include <CL/cl.h>
 #else
+typedef void *cl_platform_id;
 typedef void *cl_mem;
 typedef void *cl_context;
 typedef void *cl_command_queue;

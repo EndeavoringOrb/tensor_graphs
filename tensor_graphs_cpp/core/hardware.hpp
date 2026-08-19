@@ -14,6 +14,7 @@
 
 #include "core/common/thread_pool.hpp"
 #include "core/types.hpp"
+#include "core/logging.hpp"
 
 #if defined(TG_OS_WINDOWS)
 #include <windows.h>
@@ -78,6 +79,102 @@ inline void queryOpenCLDeviceLimits(cl_device_id device)
 }
 #endif
 
+struct OpenCLState
+{
+    cl_platform_id platform = nullptr;
+    cl_device_id device = nullptr;
+    cl_context context = nullptr;
+    cl_command_queue queue = nullptr;
+    std::string device_name;
+    std::string platform_name;
+    std::string platform_vendor;
+    bool initialized = false;
+
+    static OpenCLState &get()
+    {
+        static OpenCLState instance;
+        return instance;
+    }
+
+    void init()
+    {
+#ifdef TG_USE_OPENCL
+        if (initialized)
+            return;
+
+        cl_uint numPlatforms = 0;
+        if (clGetPlatformIDs(0, nullptr, &numPlatforms) != CL_SUCCESS || numPlatforms == 0)
+            return;
+
+        std::vector<cl_platform_id> platforms(numPlatforms);
+        clGetPlatformIDs(numPlatforms, platforms.data(), nullptr);
+
+        cl_device_id selectedDevice = nullptr;
+        cl_platform_id selectedPlatform = nullptr;
+        std::string selectedPlatName;
+        std::string selectedPlatVendor;
+        bool foundNative = false;
+
+        for (auto plat : platforms)
+        {
+            char pName[256] = {0};
+            char pVendor[256] = {0};
+            clGetPlatformInfo(plat, CL_PLATFORM_NAME, sizeof(pName), pName, nullptr);
+            clGetPlatformInfo(plat, CL_PLATFORM_VENDOR, sizeof(pVendor), pVendor, nullptr);
+
+            std::string platNameStr(pName);
+            std::string platVendStr(pVendor);
+
+            bool isCompatibilityLayer = (platNameStr.find("OpenCLOn12") != std::string::npos ||
+                                         platVendStr.find("Microsoft") != std::string::npos);
+
+            cl_uint numDevices = 0;
+            if (clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices) == CL_SUCCESS && numDevices > 0)
+            {
+                std::vector<cl_device_id> devices(numDevices);
+                clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, numDevices, devices.data(), nullptr);
+
+                // Prioritize native vendor platforms over compatibility layers
+                if (!selectedDevice || (!isCompatibilityLayer && !foundNative))
+                {
+                    selectedDevice = devices[0];
+                    selectedPlatform = plat;
+                    selectedPlatName = platNameStr;
+                    selectedPlatVendor = platVendStr;
+                    if (!isCompatibilityLayer)
+                    {
+                        foundNative = true;
+                    }
+                }
+            }
+        }
+
+        if (selectedDevice)
+        {
+            device = selectedDevice;
+            platform = selectedPlatform;
+            platform_name = selectedPlatName;
+            platform_vendor = selectedPlatVendor;
+
+            char devName[256] = {0};
+            clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(devName), devName, nullptr);
+            device_name = std::string(devName);
+
+            cl_int err;
+            context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
+            if (err == CL_SUCCESS && context)
+            {
+                queue = clCreateCommandQueueWithProperties(context, device, nullptr, &err);
+                if (err == CL_SUCCESS && queue)
+                {
+                    initialized = true;
+                }
+            }
+        }
+#endif
+    }
+};
+
 struct HardwareCaps
 {
     bool has_unified_memory = false;
@@ -101,7 +198,7 @@ struct HardwareCaps
         return instance;
     }
 
-  private:
+private:
     void probe()
     {
 #if defined(TG_HAS_NEON)
@@ -130,41 +227,17 @@ struct HardwareCaps
 #endif
 
 #ifdef TG_USE_OPENCL
-        cl_uint numPlatforms = 0;
-        if (clGetPlatformIDs(0, nullptr, &numPlatforms) == CL_SUCCESS && numPlatforms > 0)
+        auto &cl_state = OpenCLState::get();
+        cl_state.init();
+        if (cl_state.initialized && cl_state.device)
         {
-            std::vector<cl_platform_id> platforms(numPlatforms);
-            clGetPlatformIDs(numPlatforms, platforms.data(), nullptr);
+            has_opencl = true;
+            queryOpenCLDeviceLimits(cl_state.device);
 
-            for (auto platform : platforms)
+            if (cl_state.device_name.find("Adreno") != std::string::npos)
             {
-                char platformName[256] = {0};
-                char platformVendor[256] = {0};
-                clGetPlatformInfo(platform, CL_PLATFORM_NAME, sizeof(platformName), platformName, nullptr);
-                clGetPlatformInfo(platform, CL_PLATFORM_VENDOR, sizeof(platformVendor), platformVendor, nullptr);
-
-                cl_uint numDevices = 0;
-                if (clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices) == CL_SUCCESS &&
-                    numDevices > 0)
-                {
-                    std::vector<cl_device_id> devices(numDevices);
-                    clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, numDevices, devices.data(), nullptr);
-
-                    for (auto device : devices)
-                    {
-                        queryOpenCLDeviceLimits(device);
-                        char deviceName[256];
-                        clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(deviceName), deviceName, nullptr);
-                        std::string name(deviceName);
-
-                        has_opencl = true;
-                        if (name.find("Adreno") != std::string::npos)
-                        {
-                            is_adreno = true;
-                            has_unified_memory = true;
-                        }
-                    }
-                }
+                is_adreno = true;
+                has_unified_memory = true;
             }
         }
 #endif
@@ -237,7 +310,7 @@ struct System
         return caps.num_cuda_devices;
     }
 
-  private:
+private:
     void detect()
     {
         caps = HardwareCaps::get();
@@ -276,14 +349,11 @@ struct System
 #endif
         uint64_t cpu_buffer_size = std::max<uint64_t>((uint64_t)(total_ram * 0.75), 4ULL * 1024 * 1024 * 1024);
 
-        MemSpace cpu_ms0{0, HandleType::CPP};
-        MemSpace cpu_ms1{1, HandleType::CPP};
-        default_buffer_sizes[cpu_ms0] = cpu_buffer_size;
-        default_buffer_sizes[cpu_ms1] = cpu_buffer_size;
-        mem_spaces.push_back(cpu_ms0);
-        mem_spaces.push_back(cpu_ms1);
+        MemSpace cpu_ms{1, HandleType::CPP};
+        default_buffer_sizes[cpu_ms] = cpu_buffer_size;
+        mem_spaces.push_back(cpu_ms);
 
-        engines.push_back(Engine{0, EngineType::CPU, {cpu_ms0, cpu_ms1}});
+        engines.push_back(Engine{0, EngineType::CPU, {cpu_ms}});
 
         // 3. CUDA GPUs Detection
 #ifdef TG_USE_CUDA
@@ -301,35 +371,19 @@ struct System
                 default_buffer_sizes[cuda_ms] = vram_size;
                 mem_spaces.push_back(cuda_ms);
 
-                std::unordered_set<MemSpace> supported = {cuda_ms, cpu_ms0, cpu_ms1};
+                // 1. Compute Engine (SMs) operates strictly on device VRAM
+                engines.push_back(Engine{dev, EngineType::CUDA_GPU, {cuda_ms}});
+
+                // 2. DMA Engine handles Host <-> Device and P2P transfers
+                std::unordered_set<MemSpace> dma_supported = {cuda_ms, cpu_ms};
                 for (uint32_t peer_dev = 0; peer_dev < caps.num_cuda_devices; ++peer_dev)
                 {
                     if (peer_dev != dev)
                     {
-                        supported.insert(MemSpace{peer_dev, HandleType::CUDA});
+                        dma_supported.insert(MemSpace{peer_dev, HandleType::CUDA});
                     }
                 }
-
-                // 1. Compute Engine for SM kernel execution (math/fusions)
-                engines.push_back(Engine{dev, EngineType::CUDA_GPU, supported});
-
-                // 2. Dedicated DMA Engine for async Host<->Device and Peer-to-Peer copies
-                engines.push_back(Engine{dev, EngineType::CUDA_DMA, supported});
-
-                // Enable P2P access across GPUs
-                for (uint32_t peer_dev = 0; peer_dev < caps.num_cuda_devices; ++peer_dev)
-                {
-                    if (peer_dev != dev)
-                    {
-                        int canAccess = 0;
-                        cudaDeviceCanAccessPeer(&canAccess, dev, peer_dev);
-                        if (canAccess)
-                        {
-                            cudaDeviceEnablePeerAccess(peer_dev, 0);
-                            cudaGetLastError(); // Clear error state if already enabled
-                        }
-                    }
-                }
+                engines.push_back(Engine{dev, EngineType::CUDA_DMA, dma_supported});
             }
         }
 #endif
@@ -341,10 +395,18 @@ struct System
             MemSpace cl_ms{1, HandleType::OPENCL};
             default_buffer_sizes[cl_ms] = 1ULL * 1024 * 1024 * 1024;
             mem_spaces.push_back(cl_ms);
-            engines.push_back(Engine{0, EngineType::QUALCOMM_IGPU, {cl_ms, cpu_ms0, cpu_ms1}});
+
+            // OpenCL GPU compute engine operates strictly on cl_ms
+            engines.push_back(Engine{0, EngineType::QUALCOMM_IGPU, {cl_ms}});
         }
 #endif
         std::cout << "[System] Initialized with " << mem_spaces.size() << " MemSpaces and " << engines.size()
                   << " Engines.\n";
+        for (auto &mem_space : mem_spaces) {
+            LOG(L_INFO) << "  " << mem_space;
+        }
+        for (auto &engine : engines) {
+            LOG(L_INFO) << "  " << engine;
+        }
     }
 };

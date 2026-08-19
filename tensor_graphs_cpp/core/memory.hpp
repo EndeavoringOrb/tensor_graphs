@@ -16,54 +16,6 @@
 #include <cuda_runtime.h>
 #endif
 
-struct OpenCLState
-{
-    cl_context context = nullptr;
-    cl_command_queue queue = nullptr;
-    cl_device_id device = nullptr;
-    bool initialized = false;
-
-    void init()
-    {
-#ifdef TG_USE_OPENCL
-        if (initialized)
-            return;
-        cl_uint numPlatforms = 0;
-        clGetPlatformIDs(0, nullptr, &numPlatforms);
-        if (numPlatforms == 0)
-            return;
-        std::vector<cl_platform_id> platforms(numPlatforms);
-        clGetPlatformIDs(numPlatforms, platforms.data(), nullptr);
-
-        for (auto plat : platforms)
-        {
-            cl_uint numDevices = 0;
-            clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, 0, nullptr, &numDevices);
-            if (numDevices > 0)
-            {
-                std::vector<cl_device_id> devices(numDevices);
-                clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, numDevices, devices.data(), nullptr);
-                device = devices[0];
-                break;
-            }
-        }
-        if (device)
-        {
-            cl_int err;
-            context = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
-            queue = clCreateCommandQueueWithProperties(context, device, nullptr, &err);
-            initialized = true;
-        }
-#endif
-    }
-
-    static OpenCLState &get()
-    {
-        static OpenCLState instance;
-        return instance;
-    }
-};
-
 struct DeviceBuffer;
 
 struct DeviceBuffer

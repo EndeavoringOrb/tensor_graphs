@@ -384,7 +384,7 @@ def main():
     parser.add_argument("--resample-graph-every", type=int, default=None)
     parser.add_argument("--compile-decode-buckets", action="store_true", default=None)
     parser.add_argument(
-        "--log-lost-calls", action="store_true", dest="log_cost_calls", default=None
+        "--log-cost-calls", action="store_true", default=None
     )
     parser.add_argument("--c-puct", type=float, default=None)
     parser.add_argument("--base-noise", type=float, default=None)
@@ -394,12 +394,6 @@ def main():
     parser.add_argument("--d-model", type=int, default=None)
     parser.add_argument("--nhead", type=int, default=None)
     parser.add_argument("--num-layers", type=int, default=None)
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="PyTorch compute device for client inference worker (e.g. cuda:0, cuda:1, cpu)",
-    )
 
     args = parser.parse_args()
 

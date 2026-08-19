@@ -210,7 +210,7 @@ struct KernelEntry
                 }
                 else if (local_eng.type == EngineType::CPU)
                 {
-                    Engine actual_eng{0, EngineType::CPU, {MemSpace{0, HandleType::CPP}}};
+                    Engine actual_eng{0, EngineType::CPU, {MemSpace{1, HandleType::CPP}}};
                     reconcileEngine(local_eng, actual_eng);
                 }
                 else if (local_eng.type == EngineType::QUALCOMM_IGPU)
@@ -254,7 +254,7 @@ struct KernelEntry
                     out_mapped_engines->push_back(
                         Engine{output_mem_space.idx, EngineType::CUDA_GPU, {output_mem_space}});
                 else
-                    out_mapped_engines->push_back(Engine{0, EngineType::CPU, {MemSpace{0, HandleType::CPP}}});
+                    out_mapped_engines->push_back(Engine{0, EngineType::CPU, {MemSpace{1, HandleType::CPP}}});
             }
         }
 
